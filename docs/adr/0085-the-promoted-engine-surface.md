@@ -12,7 +12,8 @@
 - **Written with implementation contact, as ADR-0084 §4 requires.** Every
   signature, field and type below was read off `orchestration/engine.py`,
   `runner.py`, `questions.py`, `loop.py`, `observation.py` and `conversations.py`
-  at `main` @ `e1e4070`, not derived from the ADRs. Where the corpus and the tree
+  at `main` @ `4d6aa7c`, not derived from the ADRs. **Every line citation below is
+  grounded at that commit** and was re-checked against it symbol by symbol. Where the corpus and the tree
   disagree, §11 says so and says which one this ADR follows.
 - **No implementation lands with it.** No `src/`, no `tests/`. It ratifies what
   `core/protocols.py` and `core/types.py` will contain; the triad — Protocol +
@@ -100,7 +101,7 @@ ADR-0077 §6 divides the inspection surface in as many words:
 > adjusted confidence; the single-belief view renders the surviving citations as
 > readable evidence and the lost ones as tombstones.
 
-`Engine._project` (`engine.py:2169`) serves both — `_beliefs` calls it per record
+`Engine._project` (`engine.py:2254`) serves both — `_beliefs` calls it per record
 and `_belief` calls it once — and it resolves each citation's *content* for both,
 so every belief on a fifty-row page carries the full text of every episode behind
 it. Two ratified ADRs ask the listing for a count; the code delivers the corpus.
@@ -372,7 +373,7 @@ surface:
 > **Both filters are materialised before the implementation's first `await`.** A
 > caller that mutates the sequence it passed cannot change which page it gets.
 
-`Engine.beliefs` does this at `engine.py:1314-1315`, snapshotting both to tuples
+`Engine.beliefs` does this at `engine.py:1329-1330`, snapshotting both to tuples
 before creating the tracked task; a wire client does it by construction, having
 serialised the arguments before sending. The clause exists so the conformance
 suite can prove it of *both*, rather than it being an accident of how one of them
@@ -783,11 +784,11 @@ spelling and type" here.
 
 **It is required, and that is checkable rather than aspirational.** A
 `StepOutcome` is constructed at exactly two sites, and both hold the id already:
-`_converse` has `first.id` where `first = turn.plan.steps[0]` (`engine.py:1981`,
-`:1995`), and `_resume` has `parked.step_id` (`engine.py:2068`, `:2075`). There is
+`_converse` has `first.id` where `first = turn.plan.steps[0]` (`engine.py:2066`,
+`:2080`), and `_resume` has `parked.step_id` (`engine.py:2153`, `:2160`). There is
 no path on which a `StepOutcome` exists and the step it is about does not — a turn
 whose plan had no step returns `TurnOutcome(step=None)` and constructs no
-`StepOutcome` at all (`engine.py:1974-1980`). So an optional field would be an
+`StepOutcome` at all (`engine.py:2059-2065`). So an optional field would be an
 optionality nothing in the tree can produce, and every client would carry a `None`
 branch it can never reach.
 
@@ -1090,7 +1091,7 @@ presenting a token the server cannot resolve "yields one specific, typed refusal
 an unknown-continuation error — and never a generic failure, and never a denial",
 covering both a hub restart and eviction under
 `max_outstanding_confirmations`. `Engine._resume` raises a bare `PlanningError`
-today (`engine.py:2061`), which is indistinguishable from four other planning
+today (`engine.py:2146`), which is indistinguishable from four other planning
 faults. Subclassing `PlanningError` rather than `AssistantError` directly is
 deliberate: every existing `Raises: PlanningError` contract on this surface stays
 true, and a caller that already handles it keeps working, while a caller that
@@ -1236,7 +1237,7 @@ named because the general rule is only checkable against a known set:
 | `UnresolvedEvidenceError` | `unresolved_ids: tuple[str, ...]` |
 
 `UnresolvedEvidenceError` is the one this ADR did not invent — it already carries
-`unresolved_ids` (`core/errors.py:179-190`), it is declared by `answer` (§9), and
+`unresolved_ids` (`core/errors.py:232-242`), it is declared by `answer` (§9), and
 its ids are the whole content of the refusal. Every other type in §9's vocabulary
 defines no `__init__` and therefore carries a message and nothing else, so it
 sends no `details` at all. `OversizedValueError`'s three attributes are fixed here
@@ -1318,10 +1319,10 @@ a later reader will otherwise find the same discrepancy and wonder which won.
 - **`Engine.observe(conversation_id)` positional.** Becomes keyword-only, §2. No
   ADR fixed it; ADR-0077 §10's `observe` signature is the `Observer` Protocol's,
   a different method.
-- **A bare `PlanningError` for an unresolvable token (`engine.py:2061`).** ADR-0084
+- **A bare `PlanningError` for an unresolvable token (`engine.py:2146`).** ADR-0084
   §7 requires a distinct typed refusal; §9 names it.
 - **`Engine._project` resolves citation *content* on the listing path
-  (`engine.py:2169`).** ADR-0077 §6 gives the listing existence and counts and
+  (`engine.py:2254`).** ADR-0077 §6 gives the listing existence and counts and
   gives content to the single-belief view alone. **Here this ADR follows the
   ADRs and not the tree** (§4a), and the reversal of direction is the point of
   listing it separately.
