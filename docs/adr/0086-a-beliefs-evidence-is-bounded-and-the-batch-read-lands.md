@@ -128,8 +128,9 @@ single listing holding the memory store's lock several thousand times.
 MAX_EVIDENCE_CITATIONS = 64
 ```
 
-and no record this system writes carries more than that many citations in
-`provenance.evidence`. The same bound governs `FeedbackEvent.evidence`, which is
+and no record this system **installs** carries more than that many citations in
+`provenance.evidence` — "install" in ADR-0081 §1's sense, which §2 defines the
+scope with and which exempts a write that only retires an existing record. The same bound governs `FeedbackEvent.evidence`, which is
 copied straight into a `Provenance` (`RuleBasedFeedbackProcessor._to_record`,
 `learning/processor.py`) and would otherwise fail at a construction the caller
 cannot see.
@@ -692,8 +693,8 @@ The triad and its consumers, in the order golden rule 5 fixes.
      §2 applies it to *every* install, so an oversized `ACCEPT`,
      `STORE_TEMPORARY` and `SUPERSEDE` proposal each assert the retained suffix
      **and** the proposal's own displacement count — a writer that truncated
-     these without incrementing `evidence_elided` would satisfy "no stored record
-     exceeds the bound" and every `REINFORCE` clause above while silently
+     these without incrementing `evidence_elided` would satisfy "no installed
+     record exceeds the bound" and every `REINFORCE` clause above while silently
      dropping provenance, which is the one outcome §4 exists to prevent. For
      `SUPERSEDE` the case asserts both halves of §3's ruling: the proposal's own
      count is recorded, and the *target's* is not inherited.
