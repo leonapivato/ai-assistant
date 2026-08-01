@@ -39,6 +39,15 @@ imports:
 test *args:
     uv run pytest "$@"
 
+# What the ADRs cite, checked against the repository (ADR-0088 §6). Tier 1 — an
+# ADR file or an issue number that does not exist — exits non-zero; Tier 2 —
+# unresolved code citations and liveness disagreements — is reported and never
+# fails, and a non-empty Tier 2 list is expected (ADR-0088 §3). Tier 1 also runs
+# inside `just test`, so this recipe is the *report*, not the gate. Extra args
+# pass through, e.g. `just citations --no-tracker`.
+citations *args:
+    uv run python scripts/check_citations.py "$@"
+
 # Advisory dependency vulnerability audit
 audit:
     uv run pip-audit
