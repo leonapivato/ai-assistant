@@ -21,6 +21,7 @@ the composition root would.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from itertools import count
 from typing import TYPE_CHECKING
 
 import pytest
@@ -54,7 +55,7 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Sequence
 
     from ai_assistant.core.protocols import AssistantEngine
     from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
@@ -82,6 +83,18 @@ class _NoStepPlanner:
     ) -> ActionPlan:
         """Return an empty plan for the goal."""
         return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
+
+
+def _counter(prefix: str) -> Callable[[], str]:
+    """Ids that differ per call.
+
+    A fixed factory would make a second turn reuse the first turn's goal id with a
+    different statement, which the plan store refuses on purpose: rewriting a goal's
+    identity would make every plan already recorded against it describe an objective
+    the user never set.
+    """
+    numbers = count(1)
+    return lambda: f"{prefix}-{next(numbers)}"
 
 
 def _wire(*, max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES) -> Engine:
@@ -113,7 +126,7 @@ def _wire(*, max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES) -> Engine:
         planner=_NoStepPlanner(),
         feedback=FakeFeedbackProcessor(),
         now=lambda: AT,
-        id_factory=lambda: "g-1",
+        id_factory=_counter("g"),
     )
     runner = StepRunner(
         plans=plans,
@@ -122,7 +135,7 @@ def _wire(*, max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES) -> Engine:
         trail=trail,
         executor=StepExecutor(plans=plans, registry=invoker, invoker=invoker, now=lambda: AT),
         now=lambda: AT,
-        id_factory=lambda: "d-1",
+        id_factory=_counter("d"),
     )
     return Engine(
         loop=loop,
@@ -133,7 +146,7 @@ def _wire(*, max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES) -> Engine:
         conversations=conversations,
         observation=observation,
         questions=questions,
-        id_factory=lambda: "tok-1",
+        id_factory=_counter("tok"),
         max_payload_bytes=max_payload_bytes,
     )
 

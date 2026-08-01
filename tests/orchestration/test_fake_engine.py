@@ -34,7 +34,6 @@ from ai_assistant.core.types import (
     MemoryKind,
     QuestionState,
 )
-from ai_assistant.orchestration.payloads import identifier
 from ai_assistant.testing import FakeAssistantEngine
 
 if TYPE_CHECKING:
@@ -160,11 +159,11 @@ async def test_the_materialisation_clause_catches_a_lazy_filter() -> None:
 
 
 class _UnlimitedEngine(FakeAssistantEngine):
-    """An engine that returns an oversized result — the §8c violation."""
+    """An engine that measures its arguments and never its results — the §8c gap."""
 
-    async def belief(self, record_id: Identifier) -> Belief | None:
+    def _checked[T](self, result: T, method: str) -> T:
         """Skip the result check the contract requires of every implementation."""
-        return self.beliefs_held.get(identifier(record_id, name="record_id"))
+        return result
 
 
 async def test_the_size_clause_catches_an_unchecked_result() -> None:
@@ -174,15 +173,23 @@ async def test_the_size_clause_catches_an_unchecked_result() -> None:
     silently less capable than the engine it stands in for; this is the half that
     would otherwise go unnoticed, because an oversized result is only visible to
     whoever tried to send it.
-    """
-    conforming = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
-    conforming.hold("r", content="y" * (_TINY_LIMIT * 4))
-    with pytest.raises(OversizedValueError):
-        await conforming.belief("r")
 
-    unchecked = _UnlimitedEngine(max_payload_bytes=_TINY_LIMIT)
-    unchecked.hold("r", content="y" * (_TINY_LIMIT * 4))
-    assert await unchecked.belief("r") is not None  # nothing refused it
+    **This is the scenario the suite runs**, down to the listing call whose request
+    payload is twelve bytes — so what it demonstrates is that the suite's case is
+    load-bearing rather than incidentally passing. An earlier draft asserted the
+    same clause with an oversized *event*, which both implementations refused on
+    the argument object before any result existed: an engine with no result check
+    at all passed it.
+    """
+
+    async def _page(engine: FakeAssistantEngine) -> object:
+        for index in range(6):
+            engine.hold(f"rec-{index}", content=f"the office is in Boston, building {index}")
+        return await engine.beliefs()
+
+    with pytest.raises(OversizedValueError):
+        await _page(FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT))
+    assert await _page(_UnlimitedEngine(max_payload_bytes=_TINY_LIMIT))  # nothing refused it
 
 
 class _PermissiveEngine(FakeAssistantEngine):

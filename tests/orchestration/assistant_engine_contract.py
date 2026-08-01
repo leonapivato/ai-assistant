@@ -59,11 +59,13 @@ from ai_assistant.core.errors import (
     AssistantError,
     OversizedValueError,
     UnknownContinuationError,
+    UnknownConversationError,
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.protocols import AssistantEngine
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    AnswerKind,
     BeliefBand,
     BeliefSummary,
     ContinuationToken,
@@ -78,10 +80,16 @@ if TYPE_CHECKING:
 #: A generous per-turn budget: nothing in this suite is about a deadline.
 _PATIENT = timedelta(seconds=30)
 
-#: A limit small enough that an ordinary payload crosses it, and large enough that
-#: a blank-identifier or page-argument refusal still fires first. Every one of
-#: those refusals is local and precedes measurement, so the two never race.
-_TINY_LIMIT = 64
+#: A limit large enough that an ordinary ``learn`` call — argument *and* result —
+#: fits inside it, and small enough that a handful of stored beliefs does not.
+#:
+#: **Both halves matter.** Too small and every call is refused on its arguments,
+#: which is how a suite ends up "testing" result enforcement with a case that never
+#: reaches a result: with a 64-byte limit a ``learn`` whose event carries any
+#: content at all is refused before the write, so an implementation that had removed
+#: its result check entirely would still pass. At 512 the argument object of every
+#: setup call is comfortably inside the bound and only the *page* crosses it.
+_TINY_LIMIT = 512
 
 
 def _feedback(content: str) -> FeedbackEvent:
@@ -298,13 +306,34 @@ class AssistantEngineContract(ABC):
         in for in one direction and less in the other: the in-process engine would
         hand a caller a value the wire client provably cannot deliver.
 
-        The belief is stored through a call small enough to be admitted and read
-        back through one that is not, so the refusal is unambiguously about the
-        result rather than about the argument that produced it.
+        **The argument object here is twelve bytes**, so nothing but the result can
+        trip the limit: the page is built from beliefs each stored through a
+        ``learn`` the bound comfortably admits, and then a listing whose whole
+        request payload is ``{"offset":0}`` grows past it. An implementation that
+        measured only its arguments passes every other case in this class and fails
+        this one, which is the whole reason it is written this way round.
+
+        ``field`` is ``None`` because a listing result is a bare JSON array with no
+        member to name — ADR-0085 §9 says that case is reachable rather than
+        defensive, and this is where it is reached.
         """
-        content = "y" * (_TINY_LIMIT * 4)
-        with pytest.raises(OversizedValueError):
-            await tiny_engine.learn(_feedback(content))
+        for index in range(6):
+            await tiny_engine.learn(_feedback(f"the office is in Boston, building {index}"))
+        with pytest.raises(OversizedValueError) as caught:
+            await tiny_engine.beliefs()
+        assert caught.value.limit == _TINY_LIMIT
+        assert caught.value.size > _TINY_LIMIT
+        assert caught.value.field is None
+
+    async def test_a_result_that_fits_is_returned(self, tiny_engine: AssistantEngine) -> None:
+        """The discriminating half of the case above.
+
+        One stored belief lists comfortably inside the bound, so the refusal above
+        is about the page's size and not about ``beliefs()`` being refused
+        unconditionally.
+        """
+        await tiny_engine.learn(_feedback("the office is in Boston"))
+        assert len(await tiny_engine.beliefs()) == 1
 
     async def test_a_payload_inside_the_limit_is_admitted(
         self, tiny_engine: AssistantEngine
@@ -367,6 +396,55 @@ class AssistantEngineContract(ABC):
         assert summary.evidence_count == detail.evidence_count
         assert summary.lost_evidence == detail.lost_evidence
         assert summary.unsupported == detail.unsupported
+
+    # --- ADR-0074 §1: an unknown conversation is refused, never started -----
+
+    async def test_an_unknown_conversation_is_refused_rather_than_started(
+        self, engine: AssistantEngine
+    ) -> None:
+        """ADR-0074 §1: refused, **not silently started**.
+
+        Silently starting one turns a typo or a stale copy-paste into "my
+        conversation vanished" and lands the user's continuation somewhere they
+        cannot find. It is asserted of every implementation because a stand-in that
+        started one instead would let a client's tests pass over the exact path the
+        engine refuses — which is the substitutability this Protocol exists for,
+        failing in the direction nobody looks.
+        """
+        with pytest.raises(UnknownConversationError):
+            await engine.converse("hello", timeout=_PATIENT, conversation_id="no-such-id")
+        with pytest.raises(UnknownConversationError):
+            await engine.observe(conversation_id="no-such-id")
+
+    async def test_a_turn_with_no_conversation_named_runs_in_one_it_minted(
+        self, engine: AssistantEngine
+    ) -> None:
+        """The other side of the same rule: passing no id starts a conversation.
+
+        Every turn runs under one and the outcome reports which (ADR-0074 §2),
+        because a stateless client cannot keep it otherwise.
+        """
+        outcome = await engine.converse("hello", timeout=_PATIENT)
+        assert outcome.conversation_id is not None
+        continued = await engine.converse(
+            "and again", timeout=_PATIENT, conversation_id=outcome.conversation_id
+        )
+        assert continued.conversation_id == outcome.conversation_id
+
+    # --- ADR-0078 §8: only an open question is answerable --------------------
+
+    async def test_a_question_that_is_not_open_answers_not_open(
+        self, engine: AssistantEngine
+    ) -> None:
+        """Rendering a non-open answer as anything else would claim a write.
+
+        "That question is not open — absent, lapsed, already being answered, or
+        already answered. Nothing was written." An id naming nothing is the case
+        every implementation can be held to without seeding a queue.
+        """
+        outcome = await engine.answer("no-such-question", accept=True)
+        assert outcome.kind is AnswerKind.NOT_OPEN
+        assert outcome.record_id is None
 
     # --- ADR-0084 §7: an unresolvable token is its own refusal --------------
 

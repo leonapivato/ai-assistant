@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     QueuedQuestion,
     QueueOutcome,
     StepOutcome,
+    TurnOutcome,
 )
 
 AT = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
@@ -254,3 +255,40 @@ def _summary(*, evidence_count: int = 0, lost_evidence: int = 0) -> BeliefSummar
         evidence_count=evidence_count,
         lost_evidence=lost_evidence,
     )
+
+
+class TestWhatIsDeliberatelyNotConstrained:
+    """Two shapes ADR-0085 §4b rules **stay prose**, asserted so they stay that way.
+
+    §4b is explicit that "every other ``None`` when… in these docstrings stays
+    prose, because it describes *when* a value is absent rather than constraining
+    which combinations exist… and a validator cannot check a fact about how the
+    value was produced." Both cases below read like missing invariants and are
+    not; a later reader's instinct is to add them, and a test is what records that
+    the omission was decided rather than overlooked.
+    """
+
+    def test_a_re_deferral_need_not_name_a_successor_or_a_refusal(self) -> None:
+        """§4b constrains ``successor``/``successor_refused`` in **one** direction.
+
+        The table says they "are set **only when** ``kind`` is ``REDEFERRED``" — not
+        that a re-deferral must set one. Requiring exactly one would encode
+        ``successor_refused``'s own condition, which is a fact about *how* the
+        outcome was produced ("only where the parent was destroyed mid-apply, since
+        an exempt admission never consults the cap"), and no validator can check
+        that. It would also be this lane authoring a `core` constraint no ADR
+        ratified, which is what golden rule 5 and ADR-0015 §5 exist to prevent.
+        """
+        outcome = AnswerOutcome(kind=AnswerKind.REDEFERRED, question_id="q-1")
+        assert outcome.successor is None
+        assert outcome.successor_refused is False
+
+    def test_a_recovered_resume_may_carry_no_turn(self) -> None:
+        """``TurnOutcome.turn`` is ``None`` on a resume driven from a recovered park.
+
+        Context and retrieved memories are ephemeral and were never persisted, so a
+        fabricated :class:`~ai_assistant.core.types.TurnResult` would misrepresent
+        what the turn saw (ADR-0052 §3). The step — the resolution — is what a
+        resume is for, and is what carries the answer.
+        """
+        assert TurnOutcome(turn=None).turn is None

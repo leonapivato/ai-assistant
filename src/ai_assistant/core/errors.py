@@ -121,11 +121,19 @@ class IncompatibleStateError(AssistantError):
             expected: What this build requires of the state.
             found: What was actually on disk.
             operator_action: What a human must do before a restart can succeed.
+
+        Raises:
+            ValueError: If the message or any of the three has no UTF-8 encoding.
+                :class:`AssistantError` validates the message; the structured state
+                is validated here, because only this type knows which of its
+                arguments are text (ADR-0085 §9's rule is over *every* string an
+                error carries, not over the two that happen to be declared
+                failures of a Protocol method).
         """
         super().__init__(message)
-        self.expected = expected
-        self.found = found
-        self.operator_action = operator_action
+        self.expected = encodable_text(expected)
+        self.found = encodable_text(found)
+        self.operator_action = encodable_text(operator_action)
 
 
 class ModelError(AssistantError):
