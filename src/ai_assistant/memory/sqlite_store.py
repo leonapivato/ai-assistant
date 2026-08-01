@@ -25,7 +25,11 @@ import sqlite_vec
 from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
+from ai_assistant.core.errors import (
+    IncompatibleStateError,
+    MemoryStoreConflictError,
+    MemoryStoreError,
+)
 from ai_assistant.core.types import MemoryRecord, MemoryWriteMode, band_of
 
 if TYPE_CHECKING:
@@ -197,8 +201,13 @@ class SqliteMemoryStore:
                 a naive or indeterminate reading can be caught (ADR-0026 §7).
 
         Raises:
-            MemoryStoreError: If the store was previously built with a different
-                embedding model or dimension.
+            IncompatibleStateError: If the store was previously built with a
+                different embedding model or dimension. A **deployment** fault
+                rather than a store fault (ADR-0083 §6): every stored vector is in
+                a foreign space, so serving would be silently wrong, and no
+                restart clears it until a human re-embeds or reconfigures.
+            MemoryStoreError: If the database cannot be opened or its schema
+                cannot be created — the faults that may clear on their own.
         """
         self._embedder = embedder
         self._clock = checked_clock(now, owner="SqliteMemoryStore")
@@ -243,8 +252,12 @@ class SqliteMemoryStore:
                 f"USING vec0(embedding float[{self._embedder.dimensions}] distance_metric=cosine)"
             )
             conn.commit()
-        except MemoryStoreError:
-            conn.close()  # never leak the connection when opening fails
+        except MemoryStoreError, IncompatibleStateError:
+            # Never leak the connection when opening fails. `IncompatibleStateError`
+            # is listed alongside rather than covered by it: ADR-0083 §6 puts it
+            # *outside* the store-error family on purpose, so it would otherwise
+            # fall past every handler here and leave this connection open.
+            conn.close()
             raise
         except (sqlite3.Error, OSError) as exc:
             conn.close()
@@ -354,11 +367,27 @@ class SqliteMemoryStore:
             return
         for key, value in want.items():
             if existing.get(key) != value:
+                # ADR-0083 §6. The refusal is right and is kept exactly as it was —
+                # every stored vector is in a different space, so `search` would rank
+                # on nonsense and report nothing wrong. Only its **class** changes,
+                # and only because a resident process has to tell "this deployment
+                # cannot serve this store" from "this disk is broken" without
+                # matching on this message string. What is detected, and when, is
+                # unchanged, so ADR-0024 §2 stays true and no migration contract is
+                # created here.
                 msg = (
                     f"store was built with {key}={existing.get(key)!r}, "
                     f"but this embedder has {value!r}; re-embedding is required"
                 )
-                raise MemoryStoreError(msg)
+                raise IncompatibleStateError(
+                    msg,
+                    expected=f"{key}={value!r}",
+                    found=f"{key}={existing.get(key)!r}",
+                    operator_action=(
+                        f"re-embed the store at {self._path} against this embedder, or "
+                        f"configure the embedder it was built with"
+                    ),
+                )
 
     def _restrict_permissions(self) -> None:
         """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).

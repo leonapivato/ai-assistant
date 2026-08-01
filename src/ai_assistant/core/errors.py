@@ -21,6 +21,59 @@ class ConfigurationError(AssistantError):
     """Configuration is missing or invalid (e.g. a required secret is unset)."""
 
 
+class IncompatibleStateError(AssistantError):
+    """Persisted state this build cannot serve **correctly** (ADR-0083 §6).
+
+    Raised by a store **at open**, and only when serving the state on disk would
+    be *silently wrong* — answers a caller cannot tell from correct ones. It is
+    deliberately **not** "this state is unfamiliar": state written by a different
+    build that this one can still serve correctly is served, not refused
+    (ADR-0064 §3 is the standing example, and §6 keeps it).
+
+    **It is `AssistantError`-derived and not a store error, and that placement is
+    the decision.** The first instance is :class:`SqliteMemoryStore`'s embedder
+    mismatch, which refused correctly but as a ``MemoryStoreError`` — a subsystem
+    error from below the disk line, so an entry point could not tell "this
+    deployment cannot serve this store" from "this disk is broken" without
+    matching on a message string. A resident hub must tell them apart: one is a
+    deployment fault a human has to clear (exit ``78``, the supervisor stays
+    down), the other may clear on its own (exit ``1``, the supervisor restarts).
+    Raising a distinct class is what makes the mapping a type check rather than a
+    string match.
+
+    Nothing about *what* is detected, or *when*, changes with this class — so
+    ADR-0024 §2's "owes no new migration contract" stays true, and automating the
+    remedy remains ADR-0006 §4's and leg 7's.
+
+    Attributes:
+        expected: What this build requires of the state, as operator-readable
+            text.
+        found: What was actually on disk.
+        operator_action: What a human must do before a restart can succeed. The
+            hub prints this before exiting ``78`` (ADR-0083 §5), which is how "if
+            the hub is not running, the reason is legible" is discharged for this
+            class of fault.
+
+    All three are operational text and carry **no Tier 0/1 content** (ADR-0004
+    §5): they name settings keys, paths, model identifiers and dimensions —
+    never memory content and never a conversation.
+    """
+
+    def __init__(self, message: str, *, expected: str, found: str, operator_action: str) -> None:
+        """Record the mismatch and the remedy alongside the message.
+
+        Args:
+            message: The one-line summary, as any other error carries.
+            expected: What this build requires of the state.
+            found: What was actually on disk.
+            operator_action: What a human must do before a restart can succeed.
+        """
+        super().__init__(message)
+        self.expected = expected
+        self.found = found
+        self.operator_action = operator_action
+
+
 class ModelError(AssistantError):
     """A language-model provider failed or returned an unusable response.
 
