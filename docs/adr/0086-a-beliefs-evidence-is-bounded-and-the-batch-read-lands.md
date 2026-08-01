@@ -80,9 +80,11 @@ engine it stands in for — and then records the residual honestly:
 > unreachable.
 
 **This ADR is what turns "unreachable in practice" into "unreachable by
-contract."** §7 states exactly how far that goes and where it stops, because
-"unreachable" is a claim about an arithmetic and the arithmetic has a second
-factor this ADR does not own.
+contract" — for the citation *count*, which is the factor that grows.** §7 states
+exactly how far that goes and where it stops, because "unreachable" is a claim
+about an arithmetic and the arithmetic has a second factor this ADR does not own.
+ADR-0084 §4's prerequisite therefore has two gates and this ADR closes the first;
+the second is already ratified elsewhere and merely unimplemented (§7, #552).
 
 ### The read amplification is contract-mandated, not an implementation choice
 
@@ -273,11 +275,30 @@ So `Provenance` gains one field:
 evidence_elided: int = Field(default=0, ge=0, description=...)
 ```
 
-> **The count of citations the bound has displaced over this record's history.**
-> It is a count and never an id: keeping the ids would defeat the bound, since
-> the ids are the payload. On a fold the surviving value is
+> **The number of displacements this record's history has performed**, and
+> therefore an **upper bound** on the number of distinct citations it no longer
+> carries. It is a count and never an id: keeping the ids would defeat the
+> bound, since the ids are the payload. On a fold the surviving value is
 > `target.evidence_elided + incoming.evidence_elided + (citations displaced by
 > this fold)`.
+
+**It is a bound and not an equality, and that is a decision rather than an
+oversight.** Two cases make an exact count unobtainable, and both are reachable:
+
+- **A displaced citation is re-cited.** A record that displaced episode *x*
+  counts one elision; a later proposal citing *x* re-admits it to the retained
+  tuple, and the record now both carries *x* and counts it as elided. Reachable
+  today with no producer doing anything unusual.
+- **Two independently elided histories are folded.** Each side counted the same
+  displaced episode, and the sum counts it twice.
+
+Making the count exact requires knowing *which* ids were displaced — which is the
+payload §1 exists to stop carrying, and it would grow without bound in the field
+whose growth is the whole problem. So the count is defined as what can be
+recorded honestly. This is the same trade ADR-0077 §6 made when it ruled that the
+tombstone "deliberately does not say what it was": where an exact answer costs
+the thing the mechanism is for, the mechanism says less rather than saying
+something false.
 
 **It is additive with a default**, so a stored record written before this ADR
 deserialises with `evidence_elided=0` and nothing migrates. Every `Goal` carries
@@ -294,11 +315,15 @@ their data was lost when it was not.
 **What follows for the surfaces**, decided here rather than left to be
 discovered:
 
-- **The citation count ADR-0073 §4 requires is the total, `len(evidence) +
-  evidence_elided`.** Reporting only the retained tuple's length would make the
-  bound understate a belief's support — the same dishonesty as a silent drop,
-  arriving from the other direction. The surface says how many citations stand
-  behind the belief, then how many of those it can show.
+- **The citation count ADR-0073 §4 requires is conveyed as a floor plus a
+  ceiling** — `len(evidence)` citations are shown, and *up to* `evidence_elided`
+  further episodes have supported this belief and are no longer carried.
+  Reporting only the retained tuple's length would make the bound understate a
+  belief's support — the same dishonesty as a silent drop, arriving from the
+  other direction. Reporting `len(evidence) + evidence_elided` as an exact
+  *total* would overstate it in the two collision cases above, which is the same
+  dishonesty in the first direction. A floor plus an explicit ceiling is the
+  honest shape and is what the surface conveys.
 - **Presented confidence does not move.** ADR-0077 §6's degradation is a function
   of the stored confidence and how many citations still *resolve*; an elided
   citation is not unresolved, and the belief did not lose support — the record
@@ -307,7 +332,9 @@ discovered:
 - **`export` carries `evidence_elided` as stored**, with the retained ids, for
   ADR-0007 §3's reason that "an export is the user's data as held, not a
   rendering of it" (ADR-0077 §6). An export that showed 64 citations with no
-  note that 900 were displaced would misdescribe the record it is exporting.
+  note that 900 were displaced would misdescribe the record it is exporting. It
+  carries the stored number, not a rendering of it, so the bound's imprecision
+  travels with the field rather than being resolved in the artifact.
 - **`MemoryStore.search` and `list_beliefs` stay confidence-neutral and
   order-neutral.** Nothing here is a ranking input, for the same reason ADR-0077
   §6 gives: "a number computed at presentation cannot reorder a store it never
@@ -419,6 +446,10 @@ result is bounded by an argument the caller enumerated. Adding a ceiling would
 mean picking a number that both shipped callers' own bounds must stay under,
 which couples `MAX_EVIDENCE_CITATIONS` and the conversation history tail to a
 third figure and creates a load-time-undetectable conflict the day either moves.
+A backend with a per-statement limit of its own — SQLite's bound-parameter cap is
+the one in hand — meets this by chunking behind the single snapshot §8 requires,
+not by refusing: an implementation limit is not a contract limit, and this
+Protocol does not let one become one.
 
 **It does not replace `get`.** A single read stays a single read; a caller with
 one id does not build a one-element sequence to unwrap a one-element mapping.
@@ -464,13 +495,28 @@ it does not need.
 rather than contents, the largest evidence payload in any frame is one belief's
 64 citations, and §1's bound and §3's ceiling are coherent by a wide margin. With
 the listing carrying contents, they are not provably coherent for any bound this
-ADR could pick, because the unbounded factor is the one it does not own. **The
-fix is on the presentation path and belongs to the surface ADR (#281) and the
-client lane, not here** — this ADR is fenced to the memory contract and will not
-reach into `orchestration` to take it. It is filed, and §11 reports it to the
-surface ADR's lane as an input, because a promoted `Belief` DTO that carries
-resolved content on the listing path would bake the over-delivery into contract
-surface where it is expensive to withdraw.
+ADR could pick, because the unbounded factor is the one it does not own.
+
+**Which means ADR-0084 §4's prerequisite has two gates, and this ADR closes
+one.** That is stated plainly rather than folded into a claim of discharge,
+because a client lane that read this ADR as closing the whole thing would ship
+against a `beliefs()` response that can still exceed the frame. The two gates:
+
+1. **Growth — closed here.** No belief's citation count can exceed 64, whatever
+   the system does or how long it runs. §1 through §4.
+2. **The listing's payload — not closed here, and not an open design question
+   either.** It is already decided: ADR-0073 §4 and ADR-0077 §6 both give the
+   listing counts rather than contents, and `Engine._project` does not honour
+   that. So this is an implementation diverging from two ratified ADRs, filed as
+   **#552**, and not a decision anyone still owes.
+
+**The fix belongs to the surface ADR (#281) and the client lane, not here** —
+this ADR is fenced to the memory contract and will not reach into `orchestration`
+to take it, and the second half of #552 (how a listing `Belief` expresses "counts,
+no content") *is* the DTO shape #281 owns. §11 hands it over as an input rather
+than as a courtesy: a promoted `Belief` that carries resolved content on the
+listing path bakes the over-delivery into contract surface, where withdrawing it
+becomes a Protocol change instead of an edit.
 
 ### 8. What the implementing lane owes
 
@@ -493,19 +539,30 @@ The triad and its consumers, in the order golden rule 5 fixes.
      `evidence_elided` by exactly the number displaced; a `REINFORCE` whose union
      fits retains both records' evidence unchanged and leaves `evidence_elided`
      alone; a `SUPERSEDE` carries neither the target's evidence nor its elision
-     count.
+     count. **Both collision cases §4 names are exercised** — folding two records
+     that each already elided the same episode, and re-citing an episode a record
+     previously displaced — pinning the recurrence as stated, so the suite
+     asserts the count it defines rather than an exactness the field does not
+     claim.
    - `FakeMemoryStore` and `FakeMemoryWriter` grow the behaviour, not a stub.
 4. **`memory/ingest.py`** — `_merge` truncates before constructing `Provenance`,
    so the constructor's validators still run on the value that is stored
    (ADR-0026 §2's hazard: the surrounding `model_copy(update=...)` skips them).
-5. **`memory/sqlite_store.py`** — `get_many` as one statement with an `IN` clause
-   under one lock and one clock reading, not a loop over `_get_sync`. A loop
-   would pass every conformance clause in §6 and buy none of the thing the method
-   exists for.
+5. **`memory/sqlite_store.py`** — `get_many` under **one lock acquisition and one
+   clock reading**, not a loop over `_get_sync`. A loop of singles would pass
+   every conformance clause in §6 and buy none of the thing the method exists
+   for. The obligation is the single snapshot, **not a single SQL statement**:
+   SQLite caps bound parameters per statement (`SQLITE_MAX_VARIABLE_NUMBER`,
+   32,766 on current builds and 999 on older ones), so an `IN` clause must be
+   chunked to that limit — inside the one lock, against the one clock reading, so
+   the chunking is invisible in the result. Mandating one statement would put a
+   caller-reachable "too many SQL variables" failure inside a method §6 promises
+   never refuses on size.
 6. **The presentation path** — `Engine._project` calls `get_many` once per belief
-   instead of `get` per citation, and the count it renders is
-   `len(evidence) + evidence_elided` (§4). The listing-carries-content question
-   (§7) is **not** this lane's; it is filed.
+   instead of `get` per citation, and what it renders is §4's floor-plus-bound
+   (`len(evidence)` shown, up to `evidence_elided` further episodes no longer
+   carried) rather than an exact total. The listing-carries-content question
+   (§7) is **not** this lane's and stays open behind it: **#552**.
 
 ### 9. Explicitly declined
 
@@ -537,9 +594,12 @@ The triad and its consumers, in the order golden rule 5 fixes.
 
 ### 10. What this ADR does not decide
 
-- **Whether the belief *listing* carries resolved evidence content.** §7. It is
-  the surface ADR's (#281) and the client lane's, and it is filed with the
-  arithmetic that makes it urgent.
+- **Whether the belief *listing* carries resolved evidence content**, and how a
+  listing `Belief` expresses counts without it. §7, filed as **#552**. The first
+  half is not undecided — ADR-0073 §4 and ADR-0077 §6 already give the listing
+  counts rather than contents — but the DTO shape that expresses it is the
+  surface ADR's (#281), and §7's arithmetic is why it is urgent rather than
+  tidy.
 - **The exact rendering of an elision.** §4 fixes what is conveyed — the total
   count, the showable count, and that the difference is capacity rather than loss
   — and leaves the words to the surface, exactly as ADR-0077 §6 left the
@@ -623,10 +683,16 @@ with, or after, this ADR's ratification.
 
 ## Consequences
 
-- **The unreadable-by-accumulation belief becomes unreachable by contract**, and
-  ADR-0084 §4's named prerequisite for the client lane is discharged for the half
-  that is a memory-contract problem. §7 states the half that is not, with the
-  arithmetic, so nobody has to rediscover it.
+- **The unreadable-by-accumulation belief becomes unreachable by contract.** A
+  belief's citation count can no longer grow, at all, however long the system
+  runs.
+- **ADR-0084 §4's prerequisite is *not* thereby fully discharged, and §7 says so
+  in as many words.** Its second gate — a `beliefs()` page that carries the
+  content of every citation of every belief on it — is an implementation
+  diverging from ADR-0073 §4 and ADR-0077 §6, filed as **#552**, and the client
+  lane needs both closed rather than one. Recording that difference is the same
+  discipline ADR-0084 §4 applied to itself when it refused to call the problem
+  solved by picking a big number.
 - **A belief's warrant stops being a function of how long the system has run.**
   Sixty-four citations is what any belief can show, and the count of what it
   cannot show is on the record.
