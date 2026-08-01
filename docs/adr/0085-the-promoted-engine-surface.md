@@ -1141,9 +1141,34 @@ wants ADR-0084 §7's specific remedy — call `pending_confirmations()` and re-m
 can now catch the thing that has that remedy.
 
 **`OversizedValueError(AssistantError)`.** §8's typed refusal. It carries the
-limit, the payload's measured size, and the name of the largest argument or field
-contributing to it, because ADR-0084 §4 requires the limit and the field and
-because "too large" without a number is not actionable.
+limit, the payload's measured size, and the name of the largest contributing
+member — because ADR-0084 §4 requires the limit and the field, and because "too
+large" without a number is not actionable.
+
+**"Largest" has to be a rule, not a judgement, and this is the one place §10a's
+round-trip makes that bite.** `details` is reconstructed on the far side and must
+match, so two implementations that named different members for the same payload
+would break the reconstruction contract this section just established. Left as
+prose, "largest contributing field" does not determine an answer: it says nothing
+about nesting, and nothing about ties. So:
+
+> **`field` names the top-level member of the payload whose own canonical
+> encoding (ADR-0087 §2) is longest, ties broken by the member name's bytes in
+> ascending order. It is `null` where the payload has no named members** — a
+> `forget` result is a bare `true`, and a `beliefs` result is a bare array.
+
+**Top-level only, and no path syntax**, which is the restraint that keeps this
+from becoming a second specification. A path language would need its own grammar,
+its own escaping for member names containing separators, and its own review — for
+a value whose whole job is to make an error message actionable. Naming
+`utterance` or `evidence` is what a caller needs to act; naming
+`proposals[3].evidence[7].content` is not enough better to be worth a grammar.
+
+**ADR-0084 §4's "the field that exceeded it" is honoured rather than reinterpreted
+loosely.** Under §8c's payload-level bound no single field *exceeds* the limit —
+the payload does — so the faithful reading is the field that contributed most to
+exceeding it, which is what this rule names. Where the payload is a bare value
+there is no field to name and `null` says so, rather than inventing one.
 
 **`OversizedValueError` is declared by *every* method, and is therefore stated
 once here rather than repeated in fifteen rows.** §8c's bound applies to every
@@ -1448,9 +1473,13 @@ a later reader will otherwise find the same discrepancy and wonder which won.
 - **"Around nineteen methods" (ADR-0084 §5, and its Consequences).** The surface
   is fifteen after lifecycle is removed. This ADR follows the tree. §5's argument
   does not rest on the figure.
-- **"Three of those live in `orchestration`" (ADR-0084 §4).** Twenty-three types
-  promote and five of them are unnamed there. This ADR follows the walk; §4
-  assigned the complete graph here precisely so that it would.
+- **"Three of those live in `orchestration`" (ADR-0084 §4).** **Twenty-three
+  existing `orchestration` types relocate**, five of them unnamed there, and
+  `BeliefSummary` is **new** (§4a) — twenty-four promoted types in total. The two
+  numbers count different things and both appear in this ADR, so they are
+  distinguished here rather than left to collide: §4's tables and §5's walk are
+  over the twenty-four, and the triad implements that set. This ADR follows the
+  walk; §4 assigned the complete graph here precisely so that it would.
 - **`pending_confirmations() -> list[Confirmation]` (ADR-0052 §2).** Becomes a
   tuple, §3b, under ADR-0052's own delegation of "the exact set" to this ADR.
 - **`Engine.observe(conversation_id)` positional.** Becomes keyword-only, §2. No
