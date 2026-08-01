@@ -909,10 +909,36 @@ value — one inserting whitespace after `,` and `:`, one escaping non-ASCII as
 `\uXXXX` — and a limit whose measurement differs between the two implementations
 is not one limit. So:
 
-> **The canonical encoding is the byte string pydantic's `model_dump_json()`
-> produces for the payload**, at the pydantic version the environment pins. That
-> byte string is what §8c measures and what §10 puts on the wire — one definition
-> serving both, so an implementation measures the bytes it is about to send.
+> **The canonical encoding is the byte string
+> `TypeAdapter(T).dump_json(value, exclude_unset=True)` produces**, at the
+> pydantic version the environment pins. That byte string is what §8c measures and
+> what §10 puts on the wire — one definition serving both, so an implementation
+> measures the bytes it is about to send.
+
+**`TypeAdapter` rather than `model_dump_json()`, because two of the three payload
+classes are not models.** A request payload is an object of arguments and a
+`forget` result is a bare `true`; neither has a `model_dump_json()` to call, and
+wrapping a `bool` in an ordinary model yields `{"root":true}` where a `RootModel`
+yields `true` — two byte strings for one response, which is the divergence this
+section exists to remove. `TypeAdapter` is pydantic's entry point for *any*
+annotated type, it agrees byte-for-byte with `model_dump_json()` where both apply,
+and it gives `true`, `null` and `[…]` their bare forms.
+
+**`T` is fixed per payload class**, so nothing is left to an implementation's
+choice of adapter:
+
+| Payload | `T` |
+| --- | --- |
+| **result** | the method's declared return annotation (§3) |
+| **request** | a model whose fields are the method's parameters, carrying their declared annotations and defaults, with `extra="forbid"` |
+| **error** | the error model of §10a — `code`, `message`, optional `details`, optional `reduced` |
+
+**`exclude_unset=True` is what makes §10's omission rule a byte fact rather than an
+intention.** An argument the caller did not pass is *unset*, not `None`, so it
+does not appear — which is what lets the receiver apply its own declared default
+(§3a) instead of being handed a `null` it would have to distinguish from a
+deliberate one. Without the flag the same call encodes `"conversation_id":null`
+and measures twenty-four bytes longer.
 
 **The encoder is the definition, and a property list is the description — that
 way round, deliberately.** Three review rounds each found one more corner where a
@@ -1190,16 +1216,18 @@ forms" here. It follows mechanically from §3's own rules once the signatures ar
 fixed, so it is stated compactly rather than method by method:
 
 - **A request payload** is a JSON object whose members are the call's arguments,
-  named exactly as the Python parameters are, with omitted optional arguments
-  omitted rather than sent as `null` — so the receiver applies its own declared
-  default (§3a) and the two implementations cannot disagree about what "not
-  passed" means. The method name is the envelope's `method` member (§8a), not a
-  payload member.
+  named exactly as the Python parameters are, encoded through §8c's request `T`
+  with `exclude_unset=True` — so an omitted optional argument is absent rather
+  than `null`, the receiver applies its own declared default (§3a), and the two
+  implementations cannot disagree about what "not passed" means. The method name
+  is the envelope's `method` member (§8a), not a payload member.
 - **Argument scalars** take pydantic's JSON-mode form for their type: `timeout`
   is an ISO-8601 duration string, a `bool` is a JSON boolean, an `Identifier` is a
   string, and `bands`/`kinds` are JSON arrays of their enum values.
-- **A result payload** is the promoted model serialised through pydantic's JSON
-  mode; `null` where the method returns an optional (`belief`, `conversation`); a
+- **A result payload** is the value serialised through §8c's result `T` — the
+  method's own return annotation, so the shape follows the signature rather than a
+  second declaration: `null` where the method returns an optional (`belief`,
+  `conversation`); a
   JSON array where it returns a tuple (`beliefs` — of `BeliefSummary`, §4a —
   `questions`,
   `interrupted_questions`, `recent_conversations`, `pending_confirmations`); and a
@@ -1520,6 +1548,12 @@ move to `Accepted` triggers nothing.
 - **Leave the measurement as "pydantic JSON mode".** Rejected in §8c for the
   opposite reason: JSON mode names a *value shape*, not a byte string, so it does
   not determine a length at all.
+- **Name `model_dump_json()` as the entry point.** Rejected in §8c: a request
+  payload is an object of arguments and a `forget` result is a bare `true`, and
+  neither is a model — so the entry point would be undefined for two of the three
+  payload classes, and wrapping a scalar to reach it yields `{"root":true}` or
+  `true` depending on the wrapper chosen. `TypeAdapter` covers every annotated
+  type and agrees with `model_dump_json()` where both apply.
 - **State only that identifier arguments must be non-blank, leaving stripping to
   the implementation.** Rejected in §3c: `_non_blank` strips as well as rejects,
   so a wire client deserialising through `Identifier` and an in-process engine
