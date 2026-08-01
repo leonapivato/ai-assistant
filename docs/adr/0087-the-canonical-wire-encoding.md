@@ -396,12 +396,38 @@ the header says so and §7 names who owns the affected figures.)
 | `bool` | `true` / `false` |
 | `None` | `null` |
 | `int` | decimal, no sign for zero, no exponent, no width bound of this ADR's (below) |
-| `float` | CPython's `float.__repr__` — the shortest decimal that round-trips, with a decimal point or an exponent always present, and an exponent of at least two digits (`1e-07`, `1e+16`) |
+| `float` | the grammar below — **not** "whatever `repr` does" |
 | `str` / `Identifier` | §2b, on the *validated* value: `Identifier` strips, so `" x "` and `"x"` are one value and one encoding |
 | `StrEnum` | the member's `value` as a string — `Disposition.EXECUTED` is `"executed"` |
 | `UtcInstant` | §2d |
 | `timedelta` | §2e |
 | `FrozenJsonMapping` / `FrozenJsonValue` | its thawed JSON value, encoded by these same rules — so a nested mapping's keys sort too |
+
+**The float grammar, stated without naming an implementation.** An earlier draft
+of this rule said "CPython's `float.__repr__`", which is the objection §1 raises
+against naming pydantic, turned on this ADR's own text: a `repr` is an
+implementation's behaviour, `pyproject.toml` admits any Python `>=3.14`, and
+ADR-0084 §3 freezes this representation permanently. Two conforming interpreters
+could then write one value two ways.
+
+> Let the value be finite and let **D** be the shortest string of decimal digits,
+> with no leading and no trailing zero, that round-trips — the unique such string
+> — and let **decpt** be the integer with `value = ±0.D × 10^decpt`.
+>
+> - **Fixed-point when `-4 < decpt ≤ 16`**, with at least one digit on each side
+>   of the point: `0.0001`, `0.1`, `1.0`, `1000000000000000.0`.
+> - **Exponential otherwise**: the first digit, then a point and the remaining
+>   digits *only if there are any*, then `e`, the exponent's sign, and
+>   `decpt − 1` in **at least two digits**: `1e-05`, `1e+16`, `1.5e+300`.
+> - **Zero is `0.0`**, and negative zero is `-0.0` (§4a).
+> - A negative value is a leading `-` followed by the encoding of its magnitude.
+
+**Verified rather than asserted**: this grammar reproduces CPython 3.14.6's
+`repr` on every case in §5b, on both notation thresholds, on the subnormal
+extremes, and on **350,000 pseudo-random doubles** drawn from raw 64-bit
+patterns, with no mismatch. So an implementation may call `repr` today and
+conform; what is *ratified* is the grammar, and §5b's vectors are what would
+catch an interpreter that stopped agreeing with it.
 
 **A non-finite float has no encoding and the encoder raises.** Neither of the two
 things a library does by default is acceptable: `json.dumps` emits the non-JSON
@@ -568,8 +594,9 @@ unchanged.**
 > sequences of the same length, pairwise the same; mappings with the same key
 > set, pairwise the same. It is deliberately **not** Python's `==`.
 >
-> **The encoding therefore normalises nothing.** Where two Python objects differ
-> in anything a caller can observe, their bytes differ too.
+> **The encoding therefore normalises nothing**: it never maps two values that
+> this relation distinguishes, **and that can occupy the same position**, onto one
+> spelling. The qualifier is load-bearing and §4b explains it.
 
 #### 4a. Why `==` is the wrong relation, in two measured cases that answer alike
 
@@ -649,6 +676,33 @@ wire; nothing in the pipeline turns it into `True`. Two implementations handed
 the same datum produce the same bytes. What Python `==` was reporting was two
 *different* data that happen to compare equal, which is a fact about `==` and not
 about the encoding.
+
+#### 4b. What "normalises nothing" does *not* claim
+
+**It does not claim that bytes determine a value.** §2c spells a `StrEnum` as its
+member value and a `timedelta` as an ISO-8601 string, so `Disposition.EXECUTED`
+and the string `"executed"` share a spelling, as do `timedelta(seconds=30)` and
+`"PT30S"`. A rule saying "values that differ observably always differ in bytes"
+would be false, and an earlier draft of §4 said exactly that.
+
+**They are not counterexamples, because the colliding values cannot occupy the
+same position**, and that is what makes the qualified rule both true and
+sufficient:
+
+- **A schema-typed field admits one type.** A field declared `Disposition` never
+  holds a bare `str`; a field declared `timedelta` never holds one either — hand
+  it `"PT30S"` and validation *makes* it a `timedelta`, so there is one value at
+  that position, not two.
+- **`FrozenJson` — the one position that admits an arbitrary value — has six arms
+  and neither of the colliding types is among them.** `str | int | float | bool |
+  None | Sequence | Mapping` admits no `timedelta`: measured, a `timedelta` is
+  **refused** by the validator. A `StrEnum` *is* a `str` subclass, so it is
+  admitted — and validation coerces it to `str`, so what the encoder sees is the
+  string, and again there is one value at that position rather than two.
+
+So within any position the encoding is injective on §4's relation, which is
+exactly what §4a's schema-directed decoding needs and no more than this ADR can
+honestly claim.
 
 **Why it arises only here.** Every other field on the promoted surface has a
 declared type, so validation fixes the Python type before the encoder sees the
