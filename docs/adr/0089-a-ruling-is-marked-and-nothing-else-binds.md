@@ -51,7 +51,8 @@ correctly.
 ADR-0088's Consequences found this and called it "the one this ADR is confident
 about". **#597 attributes it to #596, and #596 is a different defect** — two
 symbol citations, `ClassifiedToolError` and `UserProfile`, that resolve nowhere.
-No issue tracks the `testing/store.py` case. It is filed with this change.
+No issue tracked the `testing/store.py` case; it is filed with this change as
+**#602**.
 
 It is also, on inspection, **not an instance of this ADR's problem at all**. It
 is a wrong citation inside a ruling, which is ADR-0088 §2(b)'s subject and is
@@ -281,7 +282,7 @@ resolve two marked clauses that contradict each other, and it does not stop an
 author marking the wrong sentence. Those are reading and review, exactly as
 ADR-0088 §2 concedes for a citation that resolves to the wrong object.
 
-### 4. A marked ADR is bounded by its own marks; an unmarked one is read as it is today
+### 4. A marked ADR is bounded by its marks; an unmarked one reads as it does today
 
 > **Normative.** An ADR is *marked* when it carries at least one normative
 > clause, and unmarked otherwise. An unmarked ADR is read exactly as it is read
@@ -448,10 +449,12 @@ else.
   implementation"). It touches no Protocol and no `core` type and decides no
   contract surface, so **adversarial is the required set** — the same reading
   ADR-0082 §5 and ADR-0088 §8 recorded for themselves.
-- **This ADR is its own worked example.** It states **ten** normative clauses
-  occupying **29 of its 567 physical lines**, and both figures are verifiable by
-  anyone with `grep` — which is the property ADR-0088's "~25 in ~880" does not
-  have, and the difference is the whole point.
+- **This ADR is its own worked example.** It states **ten** normative clauses,
+  occupying fewer than thirty of its physical lines. Both figures are
+  recomputable from the file by anyone with `grep`, at any commit — which is the
+  property ADR-0088's "~25 in ~880" does not have, and the difference is the
+  whole point. They are deliberately not pinned to an exact total here: a count
+  that must be maintained by hand is the positional citation ADR-0088 §5 refuses.
 
 ### 9. Explicitly declined
 
@@ -548,13 +551,15 @@ else.
 
 **Follow-on.**
 
-- **`docs/adr/template.md` owes §2's mark** in its Decision guidance, and
-  **`CONTRIBUTING.md` owes §1's test and §3's rule**. Both filed as issues; neither
-  written here (§8). The `CONTRIBUTING.md` edit rides naturally with #595, which
-  already owes it ADR-0088's citation forms.
-- **ADR-0045's `testing/store.py` citation has no issue and gets one.** #597
-  attributes it to #596; #596 is `ClassifiedToolError` and `UserProfile`. It is an
-  ADR-0088 §2(b) Tier 2 defect, not this ADR's.
+- **`docs/adr/template.md` owes §2's mark** in its Decision guidance (**#600**),
+  and **`CONTRIBUTING.md` owes §1's test, §3's rule and §4's reviewer obligation**
+  (**#601**). Neither is written here (§8). #601 rides naturally with #595, which
+  already owes `CONTRIBUTING.md` ADR-0088's citation forms — one lane, one
+  section, both ADRs.
+- **ADR-0045's `testing/store.py` citation had no issue and now has one
+  (#602).** #597 attributes it to #596; #596 is `ClassifiedToolError` and
+  `UserProfile`. It is an ADR-0088 §1 b1 citation, so #588's checker reports it
+  at Tier 2 and never fails on it — not this ADR's defect and not this ADR's fix.
 - **#597 is the tracking issue and stays open.** This ADR is its third step. The
   fourth — putting ruleset content into a `memory` lane's brief and observing
   whether the lane still opens the ADRs — is unaffected by anything here and can
