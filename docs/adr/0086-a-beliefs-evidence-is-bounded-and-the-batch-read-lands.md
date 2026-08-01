@@ -551,7 +551,15 @@ The triad and its consumers, in the order golden rule 5 fixes.
      that each already elided the same episode, and re-citing an episode a record
      previously displaced — pinning the recurrence as stated, so the suite
      asserts the count it defines rather than an exactness the field does not
-     claim.
+     claim. **And the bound is exercised on the rulings that are not folds**:
+     §2 applies it to *every* write, so an oversized `ACCEPT`,
+     `STORE_TEMPORARY` and `SUPERSEDE` proposal each assert the retained suffix
+     **and** the proposal's own displacement count — a writer that truncated
+     these without incrementing `evidence_elided` would satisfy "no stored record
+     exceeds the bound" and every `REINFORCE` clause above while silently
+     dropping provenance, which is the one outcome §4 exists to prevent. For
+     `SUPERSEDE` the case asserts both halves of §3's ruling: the proposal's own
+     count is recorded, and the *target's* is not inherited.
    - `FakeMemoryStore` and `FakeMemoryWriter` grow the behaviour, not a stub.
 4. **`memory/ingest.py`** — `_merge` truncates before constructing `Provenance`,
    so the constructor's validators still run on the value that is stored
