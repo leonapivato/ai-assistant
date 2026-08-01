@@ -12,7 +12,7 @@
 - **Written with implementation contact, as ADR-0084 §4 requires.** Every
   signature, field and type below was read off `orchestration/engine.py`,
   `runner.py`, `questions.py`, `loop.py`, `observation.py` and `conversations.py`
-  at `main` @ `89e0cfe`, not derived from the ADRs. **Every line citation below is
+  at `main` @ `0abdb3f`, not derived from the ADRs. **Every line citation below is
   grounded at that commit** and was re-checked against it symbol by symbol. Where the corpus and the tree
   disagree, §11b says so and says which one this ADR follows.
 - **No implementation lands with it.** No `src/`, no `tests/`. It ratifies what
@@ -917,8 +917,39 @@ disagreements at the boundary. What this ADR fixes is the **limit**; what
 ADR-0087 fixes is the **encoding** the limit is measured on.
 
 > **The measurement is taken on the payload's canonical wire encoding, which
-> ADR-0087 ratifies with normative test vectors.** ADR-0087 is `Proposed`; §11a
-> says what it settles.
+> ADR-0087 ratifies with normative test vectors.** §11a says what it settles.
+
+ADR-0087 §6 states the same sentence from its own side — "the one thing the
+surface ADR needs from this one is that the limit it declares is measured on the
+canonical encoding ratified here" — and rules that saying it "decides nothing
+about sequence, so stating it costs that ADR no amendment record". §12 relies on
+that reading rather than on mine.
+
+**The duration form moves bytes, and every figure in §8 was re-checked against
+it.** ADR-0087 §2e refuses ISO-8601's nominal `Y` and writes whole days instead,
+so a canonical duration is **up to three bytes wider** than the library's form —
+proved there, attained at `timedelta(days=1095)` (`"P3Y"` → `"P1095D"`), and
+taken here as given. Checked against each figure this section derives, and
+**none moves**:
+
+| Figure | Carries a duration? | Effect |
+| --- | --- | --- |
+| §8b's 110-byte envelope worst case | no — `kind`, `id`, `method`, punctuation | none |
+| §8d's connect payloads and the 1024 floor | no — a version, a build identifier, a flag, a frame size | none |
+| §8f's belief-page worst case | no — `BeliefSummary` and `Belief` carry instants, not durations | none |
+
+**The one duration on this surface is `timeout`**, a request argument on
+`converse` and `resume` (§3). That is checkable rather than asserted: `core` has
+four `timedelta` fields — `MemoryDecision.ttl`, `DeferredProposal.retention`, and
+`ToolDefinition`'s `idempotency_window` and `latency` — and §5's walk reaches
+none of them, because the promoted DTOs flatten what they project from rather
+than carrying it. No **result** payload can hold a duration at all. And no figure
+here is derived from an estimated request width — requests are bounded by §8c's
+limit itself. So the +3 is
+invisible to §8's arithmetic. It is recorded because ADR-0087 §2e says a reserve
+or floor derived from a worst-case payload width "must be derived from §2's
+forms", and the honest way to discharge that is to show the check rather than to
+assert the conclusion.
 
 **Why it is a separate ADR rather than a section here**, in the order the reasons
 bind:
@@ -1179,9 +1210,11 @@ fixed, so it is stated compactly rather than method by method:
   means. That distinction is semantic and is fixed here; the bytes that express it
   are §8c's deferral. The method name is the envelope's `method` member (§8a), not
   a payload member.
-- **Argument scalars** take pydantic's JSON-mode form for their type: `timeout`
-  is an ISO-8601 duration string, a `bool` is a JSON boolean, an `Identifier` is a
-  string, and `bands`/`kinds` are JSON arrays of their enum values.
+- **Argument scalars** take **ADR-0087 §2's** form for their type — not the
+  library's, which ADR-0087 partially supersedes ADR-0084 §3 on: `timeout` is an
+  ISO-8601 duration under §2e (whole days, never a nominal `Y`), a `bool` is a
+  JSON boolean, an `Identifier` is a string, and `bands`/`kinds` are JSON arrays
+  of their enum values.
 - **A result payload** takes the shape of the method's own declared return
   annotation, so it follows the signature rather than a second declaration:
   `null` where the method returns an optional (`belief`, `conversation`); a JSON
@@ -1241,7 +1274,7 @@ hand, and it would go stale the first time a structured error is added. So:
 
 > An `AssistantError` subtype that carries structured state declares it as
 > **public attributes whose names match its constructor's keyword parameters**,
-> and `details` is exactly those attributes serialised in pydantic JSON mode. A
+> and `details` is exactly those attributes serialised under ADR-0087 §2. A
 > client reconstructs by calling the named type with the message positionally and
 > the `details` members as keyword arguments.
 >
@@ -1361,9 +1394,10 @@ Named so the reference in §8c resolves to a decision rather than to a silence.
 > (`hub_max_frame_bytes - 512`, §8c), that it covers all three payload classes,
 > and that it is measured on that encoding.
 
-**What ADR-0087 has to settle**, listed because each is a place two encoders can
-differ at the boundary and each was found by review here rather than by
-inspection — so the list is evidence rather than a guess:
+**What ADR-0087 settles**, listed because each is a place two encoders can differ
+at the boundary and each was found by review *here* rather than by inspection —
+so the list is the evidence this ADR contributed, and every entry is now answered
+in ratified text:
 
 - insignificant whitespace, and the `,` / `:` separators;
 - string escaping — `/` versus `\/`, the two-character control forms versus
@@ -1381,18 +1415,30 @@ inspection — so the list is evidence rather than a guess:
   question: two equal values must encode identically, or the same page lands on
   opposite sides of the limit depending on which implementation built it.
 
-**This ADR does not pre-judge any of them**, and says so rather than leaving it to
-be inferred: the list is the problem statement ADR-0087 inherits, not a set of
-answers it is expected to reach. Where it and ADR-0087 could be read as
-disagreeing, ADR-0087 governs the encoding and this ADR governs the limit.
+**This ADR pre-judged none of them**, and the list above is the problem statement
+ADR-0087 inherited rather than a set of answers it was expected to reach — which
+is why two of its rulings went the other way from the draft this ADR once
+carried. Its §2e refuses the nominal `Y` outright, where the withdrawn draft here
+would have taken whatever the library emitted; and its §2e range constraints
+close a single-valuedness gap that draft never noticed. **Where this ADR and
+ADR-0087 could be read as disagreeing, ADR-0087 governs the encoding and this ADR
+governs the limit.**
 
 **This ADR says nothing about where ADR-0087 sits in the work, and the omission
 is the decision.** A position in a sequence is a fact about the ADR that occupies
-it, so **ADR-0087 states its own**, and the ADR-0082 §1 record that goes with it
-is ADR-0087's. Placing it from here would have made ADR-0084 §5's enumeration
-false *in this document* and made this the amending change (§12). This ADR
-neither adds a step nor moves one: it is ADR-0084 §5's step 2 whatever else
-lands.
+it, so **ADR-0087 states its own** — its §6 places itself at ADR-0084 §5's step
+**2b**, before the triad, on the ground that the triad ships the canonical fake
+and so is where a second implementation is first held to §4's limit. The
+ADR-0082 §1 record goes with it: ADR-0084's `Status` line now names both §5's
+enumeration and §3's payload-encoding rule. Placing it from here would have made
+§5's enumeration false *in this document* and made this the amending change
+(§12).
+
+**ADR-0087 §6 also declines to order itself against this ADR**, and that is worth
+recording because it is the reason neither document has to mention the other's
+position: "the relative order of this ADR and the surface ADR is deliberately not
+fixed… neither is a prerequisite of the other". Both are contract changes before
+the triad. This ADR is ADR-0084 §5's step 2 whatever else lands.
 
 #### 11b. Where the corpus and the tree disagree, and which this ADR follows
 
@@ -1476,15 +1522,21 @@ move to `Accepted` triggers nothing.
   split, where the tree has one that cannot. An ADR whose text you have to
   contradict to implement is amended; one whose text you have to be *able* to
   implement is served.
-- **ADR-0084 §5's four-change sequence — no record owed, because this ADR does
-  not decide the sequence.** Stated rather than left silent, because the silence
-  is what invites the question. This ADR *cites* ADR-0087 for the encoding (§8c)
-  and says nothing about where it lands (§11a). Citing an ADR is not sequencing
-  one: ADR-0070 §1 puts a record where the falsifying decision is, and the
-  decision that would falsify §5's enumeration is ADR-0087's insertion into it —
-  a fact about ADR-0087, made wherever ADR-0087 states it. Under this ADR alone,
-  §5's four changes stand and the triad still follows step 2. **The obligation
-  travels with ADR-0087**, whose lane owns it.
+- **ADR-0084 §5's sequence, and §3's payload-encoding rule — no record owed here,
+  and both are already recorded elsewhere.** Stated rather than left silent,
+  because the silence is what invites the question. This ADR *cites* ADR-0087 for
+  the encoding (§8c) and says nothing about where it lands (§11a); citing an ADR
+  is not sequencing one. ADR-0070 §1 puts a record where the falsifying decision
+  is, and both falsifying decisions are ADR-0087's — its §6 inserts the step, its
+  §2 replaces the encoding rule — so **ADR-0084's `Status` line already carries
+  the partial-supersession record naming both clauses**, written by ADR-0087's own
+  change. ADR-0087 §6 reaches the same conclusion from its side about the one
+  sentence this ADR does state: the limit being measured on the encoding ratified
+  there "decides nothing about sequence, so stating it costs that ADR no amendment
+  record."
+- **ADR-0087.** No record owed in either direction. This ADR cites it and depends
+  on it for the encoding; it depends on this one for nothing (its §6), and neither
+  fixes the other's position.
 - **ADR-0086.** No record, and no dependency in either direction. Its §7 hands
   the DTO shape here explicitly and takes no position on it; §8f states the
   relationship and declines to lean on an unratified ADR.
