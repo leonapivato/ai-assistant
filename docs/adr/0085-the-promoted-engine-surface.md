@@ -395,6 +395,11 @@ Every type below moves to `core/types.py` as a frozen pydantic model or a
 frozen (§9 covers the mechanism and what changes with it). Fields are listed in
 declaration order; a trailing `= …` is the default.
 
+**`str` in these tables means `WireText`** (§4c) — every string this surface
+carries must have a UTF-8 encoding. It is written `str` below for readability and
+stated once here rather than repeated thirty times, which is the same choice §4c
+makes for the same reason.
+
 **Group A — the turn surface (from `orchestration/engine.py`)**
 
 | Type | Fields |
@@ -599,6 +604,54 @@ the wire.
 - **`route` stays `str | None`**, not `Identifier | None`. It is a model route
   label whose shape belongs to `models/`, and a `core` model is not the place to
   start constraining it.
+
+#### 4c. Every string this surface carries is encodable, and that is a type
+
+**ADR-0087 §9 hands this here by name**, and it is the one hole a ratified
+encoding leaves in a surface that predates it: "§2 gives two values no encoding —
+a lone surrogate `str` (§2b) and a non-finite `float` (§2c) — and §7 fixes that
+the type is where each must be refused, before measurement… **the refusal belongs
+on the type, and the promoted types are the surface ADR's.**"
+
+**The float half is already closed, and checking rather than assuming is the
+point.** Every `float` on this surface is a confidence — `Belief.confidence`,
+`BeliefSummary.confidence`, `ObservedProposal.confidence` — and §4 gives all three
+`ge=0.0, le=1.0`. NaN fails both comparisons and the infinities fail one, so the
+bounds already refuse exactly the values ADR-0087 §2c has no form for. Nothing is
+added here for floats; it is recorded so a reader does not go looking for it.
+
+**The string half is open, and left open it is a divergence.** A Python `str` may
+hold a lone surrogate. Nothing in the tree stops `converse(utterance="\ud800")`,
+the in-process engine has no reason to encode it, and the wire client must — so
+one implementation accepts the call and the other raises at the socket.
+
+> **Every string the promoted surface can carry is `WireText`** — a `core`
+> annotated `str` that refuses a value with no UTF-8 encoding. That is every
+> `str` and `str | None` field of a promoted type, every `str` argument
+> (`utterance`), the `message` and any string inside `details` of an error
+> payload (§10a), and every `Identifier`, which composes the same check.
+
+**This is emphatically not a size rule, and putting it in §8 would have hidden
+it.** A payload can be far inside §8c's limit and still have no canonical
+encoding at all — a lone surrogate is one character. So no size test, however
+carefully written, would catch it, and an implementation is free to measure
+however it likes precisely because validity is settled before measurement begins.
+That is why ADR-0087 §7 puts the refusal on the type and why this section sits in
+§4 rather than §8.
+
+**It validates by running the encoder, not by enumerating what can fail**, which
+is `FrozenJson`'s method and the reason ADR-0087 §9 points at it: the surrogate
+and big-integer cases are exactly the ones an enumeration missed (#121, #127). A
+rule stated over "every string" rather than over a list of fields is the same
+discipline one level up — §8d declines to bound the handshake member by member and
+§10a declines to name each error's `details` — and a field list here would rot the
+first time a promoted type gains a `str`.
+
+**The refusal is `ValueError`, at construction or before any I/O**, so it needs no
+new error type and no new declaration: `UnicodeEncodeError` **is** a `ValueError`,
+and §3c and §9 already declare `ValueError` on every method that takes text. What
+§4c adds is that both implementations raise it for the same inputs at the same
+point, rather than one of them discovering it at the socket.
 
 ### 5. The complete transitive closure, and the boundary it stops at
 
@@ -985,10 +1038,11 @@ about the ADR that occupies it; asserting it here would be this document decidin
 something about another one, and ADR-0084 §5's own enumeration is what it would
 be deciding against. §12 records why that leaves no amendment owed here.
 
-**A forward reference to a `Proposed` ADR is normal, and the precedent is this
-ADR itself.** ADR-0084 §5 named "the surface ADR (#281's scope)" before that ADR
-existed, and §4 and §11 both defer to it by name. Citing a decision that is
-dispatched and drafted is a reference, not a dangling one.
+**Citing another ADR for a decision it owns is ordinary, and the precedent is
+this ADR itself.** ADR-0084 §5 named "the surface ADR (#281's scope)" before that
+ADR existed, and §4 and §11 both defer to it by name. ADR-0087 is `Accepted` and
+in the corpus, so the reference here resolves to ratified text rather than to an
+expectation.
 
 **A `core`-owned codec is the obvious alternative and ADR-0084 §6 forecloses it.**
 That ADR places "the envelope, the framing, the codec, the error mapping, and the
@@ -1601,10 +1655,11 @@ move to `Accepted` triggers nothing.
   reduction (§8, §10a), the disposition-is-not-the-outcome rule (§7), and an
   error type's structured state round-tripping through its own constructor, with
   `details_elided` set where it could not (§10a). Each is
-  written as a testable sentence for that reason. **Five more are expressed by the
-  types themselves** — §4b's cross-field validators — and one more by a return
-  type alone (§4a), which is the cheapest of the lot: it needs no clause and no
-  test, because the wrong response cannot be constructed.
+  written as a testable sentence for that reason. **Six more are expressed by the
+  types themselves** — §4b's five cross-field validators and §4c's encodable-text
+  refinement — and one more by a return type alone (§4a), which is the cheapest of
+  the lot: it needs no clause and no test, because the wrong response cannot be
+  constructed.
 - **What becomes harder: every one of these fields now costs an ADR to change.**
   ADR-0084 §4 anticipated it — "changing a field that was free to change in
   `orchestration` now costs an ADR" — and the figure is twenty-four types' worth
