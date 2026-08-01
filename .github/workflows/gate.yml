@@ -58,4 +58,28 @@ jobs:
         run: uv run lint-imports
 
       - name: Tests
+        # `GH_TOKEN` is here for one test: ADR-0088 §6's Tier 1 includes "a
+        # tracker citation naming an issue number that does not exist", and
+        # `tests/scripts/test_adr_citations_corpus.py` can only ask GitHub that
+        # question with a token. Without one the checker treats the citations as
+        # unevaluable and passes them silently (§6), and the test skips — so this
+        # is what makes half of Tier 1 actually run, rather than what makes it
+        # pass. It is the workflow's own read-only token; nothing here writes.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: uv run pytest
+
+      # Not a sixth gate step: Tier 2 never fails a change (ADR-0088 §3), and
+      # Tier 1 already runs inside `Tests` above. This publishes the standing
+      # Tier 2 list — unresolved code citations and liveness disagreements — to
+      # the run's summary page, which is the answer to §Consequences' "Tier 2
+      # needs someone to read it. A report nobody reads is worse than no report,
+      # because it looks like coverage." `--report-only` keeps a Tier 1 finding
+      # from failing this step twice.
+      - name: ADR citation report (Tier 2, advisory)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          uv run python scripts/check_citations.py \
+            --report-only --summary "$GITHUB_STEP_SUMMARY"
