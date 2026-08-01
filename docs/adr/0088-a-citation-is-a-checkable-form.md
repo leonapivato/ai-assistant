@@ -1,6 +1,6 @@
 # 88. A citation is a checkable form: what an ADR may cite, and what "resolves" means
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-01
 - **This ADR supersedes nothing.** It supplies the rule ADR-0070 §4 reserved for
   "any liveness-classifying consumer added later", and it constrains the
@@ -501,9 +501,9 @@ ADR says does not control."
 naming ADR.** ADR-0074's "ADR-0076 §9's obligation set" names ADR-0074's §9 — the
 collision recorded in Context, which the script written for this ADR walked into
 twice on its first run. **No mechanical rule separates the two**, because the
-distinction lives in the surrounding prose. That is precisely why §6 puts section
-resolution in Tier 2: the ambiguity is unresolvable, so the result is reported
-and never failed, and a correct document is never blocked by it.
+distinction lives in the surrounding prose. That is precisely why §6 does not
+check section references at all — neither failing nor reporting them — and why §9
+declines to invent a form that would.
 
 ### 5. A citation carries no line number
 
@@ -664,11 +664,13 @@ that a `docs/adr/**` change is no longer gated by five steps that cannot see it.
   ADR-0070 §5 is the precedent for an ADR directing that correction. It is filed
   as an issue rather than written here because this lane's fence is one file
   (Consequences).
-- **This ADR's `Status`.** It ships `Proposed` and is reviewed while `Proposed`,
-  then flipped to `Accepted` before merge (ADR-0015 §5; `CONTRIBUTING.md`,
-  "Contract ADRs land before their implementation"). It touches no Protocol and
-  no `core` type and decides no contract surface, so **adversarial is the required
-  set** — the same reading ADR-0082 §5 recorded for itself.
+- **This ADR's `Status`.** It shipped `Proposed` and was reviewed while
+  `Proposed` — so a finding could still change the decision, which it did, seven
+  times — then flipped to `Accepted` before merge (ADR-0015 §5;
+  `CONTRIBUTING.md`, "Contract ADRs land before their implementation"). It
+  touches no Protocol and no `core` type and decides no contract surface, so
+  **adversarial is the required set** — the same reading ADR-0082 §5 recorded for
+  itself.
 
 ### 9. Explicitly declined
 
@@ -792,10 +794,13 @@ that a `docs/adr/**` change is no longer gated by five steps that cannot see it.
   guidance, under ADR-0070 §5's precedent. Filed as an issue; not written here
   (§8).
 - **#588 is the implementation issue and survives; #579 is reconciled into it.**
-  They are one defect class seen at two radii. #588's three checks are §§2 and 4
-  of this ADR, corrected in three places: symbol resolution must read `tests/` as
-  well as `src/`, it does not catch #586's first half, and its exemption is keyed
-  to ADR status rather than an allowlist. #579's distinctive half — quotation
+  They are one defect class seen at two radii. #588's three checks became §§2
+  and 4 of this ADR, and all three came back weaker than proposed: symbol
+  resolution must read `tests/` and `scripts/` as well as `src/`, it does not
+  catch #586's first half, and — §3 — **no unresolved code citation may fail at
+  all**, whatever the citing ADR's status, because an append-only corpus
+  correctly cites what the tree does not hold. #588's cited-section liveness
+  check is not built either: §6 leaves section references unchecked. #579's distinctive half — quotation
   verification, and propagation into `src/` docstrings — is **declined here** (§7,
   §9) and its concern is met obliquely: §1's citable forms and §5's greppable
   symbols are what #579 itself proposed as the better instrument ("Cite
