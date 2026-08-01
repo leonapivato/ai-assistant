@@ -132,8 +132,9 @@ _LINK_REFERENCE_RE = re.compile(r"(?<=\]:)[ \t]*\S+")
 #: **Excluded as a span, and it has to be**: the obvious rule, "a ``#NNN``
 #: preceded by a quote is not a citation", is refuted by the corpus, which
 #: quotes seven of them (``"#54 stays …"``). What separates the two is the
-#: ``attribute=`` before the quote, not the quote.
-_HTML_ATTRIBUTE_RE = re.compile(r"""[\w:.-]+\s*=\s*("[^"\n]*"|'[^'\n]*')""")
+#: ``attribute=`` before the quote, not the quote — so the value is matched
+#: quoted either way and unquoted too, since ``<a href=#123>`` is valid HTML.
+_HTML_ATTRIBUTE_RE = re.compile(r"""[\w:.-]+\s*=\s*("[^"\n]*"|'[^'\n]*'|[^\s"'>`]+)""")
 
 #: **The one case the pattern above cannot decide: a ``/`` before the ``#``.**
 #: It is how the corpus joins citations — ``#313/#314``, ``#66/#83/#93``, 14
