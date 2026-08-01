@@ -201,16 +201,19 @@ step 4) is rewriting anyway.
 
 ### 3. The fifteen signatures
 
-Written as they appear on the Protocol. `Identifier` and `UtcInstant` are
-`core/types.py`'s existing annotated aliases (a non-blank `str`, a tz-aware
-`datetime`); `DEFAULT_PAGE_SIZE` is §3a below.
+Written as they appear on the Protocol, **verbatim rather than abbreviated** —
+this block is what an implementation is generated from, so unlike §4's tables it
+spells every annotation out. `Identifier` and `UtcInstant` are `core/types.py`'s
+existing annotated aliases (a non-blank `str`, a tz-aware `datetime`);
+`WireText` is §4c's encodable `str`, and `utterance` is the only bare-text
+argument on the surface; `DEFAULT_PAGE_SIZE` is §3a below.
 
 ```python
 class AssistantEngine(Protocol):
     # The two turn calls (ADR-0042 §3)
     async def converse(
         self,
-        utterance: str,
+        utterance: WireText,
         *,
         timeout: timedelta,
         conversation_id: Identifier | None = None,
@@ -398,7 +401,9 @@ declaration order; a trailing `= …` is the default.
 **`str` in these tables means `WireText`** (§4c) — every string this surface
 carries must have a UTF-8 encoding. It is written `str` below for readability and
 stated once here rather than repeated thirty times, which is the same choice §4c
-makes for the same reason.
+makes for the same reason. **The abbreviation is confined to these tables**: §3's
+Protocol block spells `WireText` out, because that block is what an implementation
+is generated from and a reader of it may never reach this line.
 
 **Group A — the turn surface (from `orchestration/engine.py`)**
 
