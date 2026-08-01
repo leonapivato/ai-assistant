@@ -45,7 +45,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import MemoryRecord, MemoryWriteMode, band_of
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import Embedder
@@ -70,6 +70,10 @@ _RESULT_OVERFETCH = 8
 # This subsumes the wider signed-64-bit bind range the crash was first theorised
 # against — 4096 is the lower, operative ceiling, reached at ``limit > 512``.
 _VEC_KNN_MAX_K = 4096
+#: Bound parameters ``get_many``'s statement spends on something other than an id
+#: — the two read-time comparisons against ``now`` — and therefore the headroom
+#: its chunk size must leave under ``SQLITE_MAX_VARIABLE_NUMBER``.
+_GET_MANY_FIXED_PARAMS = 2
 _OWNER_ONLY = 0o600
 #: The sidecars SQLite may keep beside a database file. Each holds the same pages
 #: the database does, so ADR-0004 §4 reaches them too. SQLite copies the database
@@ -760,6 +764,72 @@ class SqliteMemoryStore:
             (record_id, now, now),
         ).fetchone()
         return None if row is None else row[0]
+
+    async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+        """Return the readable records among ``record_ids``, keyed by id (ADR-0086 §6).
+
+        **One lock acquisition, one clock reading and one read transaction**, never
+        a loop over :meth:`_get_sync`. That is this store's way of meeting the
+        Protocol's snapshot guarantee rather than the guarantee itself — a loop of
+        singles would satisfy a clock-consistency test and buy none of the thing
+        this method exists for, since it would take the lock and hop a worker
+        thread once per id.
+
+        ``record_ids`` is deduplicated on the first executed line, before the
+        lock, so the observation is taken ahead of the first ``await``
+        (ADR-0065) and a duplicate costs nothing downstream. An empty argument is
+        answered without a round trip.
+        """
+        wanted = tuple(dict.fromkeys(record_ids))
+        if not wanted:
+            return {}
+        async with self._lock:
+            now = self._now()
+            rows = await _run_to_completion(self._get_many_sync, wanted, _to_micros(now))
+        # The `valid_from` end is checked on the decoded record, exactly as `get`
+        # checks it, against the same single reading — so no two entries in one
+        # result can disagree about when "now" was (ADR-0045 §6, §9).
+        return {
+            record.id: record
+            for record in (self._decode(data) for data in rows)
+            if record.validity.live_at(now)
+        }
+
+    def _get_many_sync(self, record_ids: Sequence[str], now: int) -> list[str]:
+        """Read every named row, chunked to fit one statement, in one transaction.
+
+        SQLite caps bound parameters per statement (``SQLITE_MAX_VARIABLE_NUMBER``
+        — 32,766 on current builds, 999 on older ones), so an ``IN`` clause over an
+        argument the contract refuses to cap has to be chunked. The chunks run
+        **inside one deferred transaction**, and that is what makes the chunking
+        invisible: the ``asyncio.Lock`` serialises coroutines on *this store
+        instance* and does nothing about the file, so chunked without one this
+        method would read ``a`` in chunk 1, let another process retire ``a`` and
+        install ``b``, read ``b`` in chunk 2, and return a pair of values that never
+        coexisted — the snapshot violated by the very mechanism introduced to keep
+        the promise that this method never refuses on size (ADR-0086 §8).
+
+        The limit is read from the connection rather than assumed, so a build with
+        a lower cap chunks smaller instead of failing on "too many SQL variables",
+        and a test can narrow it to exercise the boundary for real.
+
+        Only the *placeholders* are interpolated; every value is bound, so the
+        assembled text carries no caller data.
+        """
+        room = self._conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - _GET_MANY_FIXED_PARAMS
+        chunk = max(room, 1)
+        base = (
+            "SELECT data FROM records "
+            "WHERE (expires_at IS NULL OR expires_at > ?) "
+            "AND (valid_until IS NULL OR valid_until > ?)"
+        )
+        rows: list[str] = []
+        with self._transaction("read memories in a batch", immediate=False) as conn:
+            for start in range(0, len(record_ids), chunk):
+                ids = record_ids[start : start + chunk]
+                sql = base + f" AND id IN ({', '.join('?' * len(ids))})"
+                rows.extend(row[0] for row in conn.execute(sql, [now, now, *ids]))
+        return rows
 
     async def search(
         self,

@@ -126,6 +126,7 @@ from pydantic import ValidationError
 from ai_assistant.core.errors import MemoryStoreError, UnresolvedEvidenceError
 from ai_assistant.core.protocols import MemoryWriter
 from ai_assistant.core.types import (
+    MAX_EVIDENCE_CITATIONS,
     DataTier,
     EpisodicMemory,
     MemoryDecision,
@@ -389,13 +390,14 @@ def _hostile_typed_id() -> str:
     return _HostileTyped()  # type: ignore[return-value]  # deliberately not a str
 
 
-def _preference(
+def _preference(  # noqa: PLR0913 — one keyword per provenance axis a case may vary
     record_id: str,
     content: str = _CONTENT,
     *,
     confidence: float = 0.6,
     source: MemorySource = MemorySource.OBSERVED,
     evidence: tuple[str, ...] = (),
+    evidence_elided: int = 0,
 ) -> MemoryRecord:
     # USER_ASSERTED is pinned to full confidence by `Provenance`, so honour that
     # here rather than build a record the domain forbids.
@@ -410,8 +412,25 @@ def _preference(
             confidence=confidence,
             last_updated=_WHEN,
             evidence=evidence,
+            evidence_elided=evidence_elided,
         ),
     )
+
+
+def _episode_ids(count: int, *, prefix: str) -> tuple[str, ...]:
+    """``count`` citation ids, in accumulation order (ADR-0086 §3)."""
+    return tuple(f"{prefix}-{index:03d}" for index in range(count))
+
+
+async def _plant_episodes(store: MemoryStore, record_ids: Sequence[str]) -> None:
+    """Plant one episode per id, so a ``DERIVED`` proposal citing them all resolves.
+
+    ADR-0077 §5 refuses a derived proposal citing a record the store does not
+    hold, so an evidence-bound case has to plant what it cites — otherwise it
+    would be exercising that refusal rather than the bound.
+    """
+    for record_id in record_ids:
+        await store.add(_episodic(record_id, f"the exchange {record_id} records"))
 
 
 def _proposal(record: MemoryRecord) -> MemoryUpdateProposal:
@@ -971,6 +990,240 @@ class MemoryWriterContract:
         assert stored == proposed.model_copy(update={"id": "corrected"})
         # The proposal's own id is discarded, never written at.
         assert await store.get("new") is None
+
+    # --- the evidence bound and the elision (ADR-0086 §2-§4) ------------------
+    # The bound is a **writer** obligation and deliberately not a ``Provenance``
+    # validator, so this is where it is pinned: a validator would run on
+    # deserialisation too and make an already-stored over-long belief unreadable,
+    # which is the read-path failure ADR-0086 §2 exists to prevent. Every case
+    # below constructs a record above the bound and expects it to be constructible,
+    # storable and readable — so a suite that passed against a ``max_length`` on
+    # the type is not a suite these cases can pass.
+    #
+    # The scope is an **install** in ADR-0081 §1's sense. The retirement case below
+    # is the other half of that and is not decoration: without it the rule would
+    # forbid writing a legacy over-bound target back with its window narrowed,
+    # which is the only way ``SUPERSEDE`` can retire one at all.
+
+    @pytest.mark.parametrize(
+        "kind", [MemoryDecisionKind.ACCEPT, MemoryDecisionKind.STORE_TEMPORARY], ids=str
+    )
+    async def test_a_non_fold_install_bounds_its_evidence_and_carries_the_count(
+        self, make_writer: WriterFactory, kind: MemoryDecisionKind
+    ) -> None:
+        """§2 applies to *every* install, not only to a fold — and §4's recurrence with it.
+
+        The proposal already carries a **non-zero** ``evidence_elided``, which is
+        what makes this case load-bearing: a writer that stored its own
+        displacement alone would pass every zero-valued variant while discarding a
+        history ``export`` is supposed to carry. The retained subset is the
+        **suffix**, so a writer keeping the *oldest* citations fails on identity
+        rather than on count.
+        """
+        cited = _episode_ids(MAX_EVIDENCE_CITATIONS + 3, prefix="acc")
+        store = FakeMemoryStore(now=_long_ago)
+        await _plant_episodes(store, cited)
+        writer = make_writer(store, FakeMemoryPolicy(kind))
+
+        result = await writer.ingest(
+            _proposal(_preference("new", evidence=cited, evidence_elided=5))
+        )
+
+        assert result.record_id == "new"
+        stored = await store.get("new")
+        assert stored is not None
+        assert stored.provenance.evidence == cited[3:], (
+            "an install kept something other than the most recently accumulated "
+            "MAX_EVIDENCE_CITATIONS citations (ADR-0086 §3)"
+        )
+        assert len(stored.provenance.evidence) == MAX_EVIDENCE_CITATIONS
+        assert stored.provenance.evidence_elided == 5 + 3, (
+            "the install did not apply §4's recurrence in its one-source form: the "
+            "count is the proposal's own plus what this install displaced, never "
+            "the displacement alone"
+        )
+
+    async def test_supersede_bounds_its_correction_and_never_inherits_the_targets_count(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """A ``SUPERSEDE`` installs, so it is bounded; it draws from **one** source.
+
+        Both halves of §3's ruling in one case: the correction carries the
+        proposal's own ``evidence_elided`` plus its own displacement, and the
+        *target's* count is **not** inherited even though the target's id survives
+        — ADR-0040 §5a has a supersession carry nothing of the target across, and a
+        writer that summed the two would attach the overturned belief's history to
+        the record that overturns it.
+        """
+        cited = _episode_ids(MAX_EVIDENCE_CITATIONS + 2, prefix="sup")
+        store = FakeMemoryStore(now=_after_close)
+        await _plant_episodes(store, cited)
+        await store.add(
+            _preference(
+                "existing",
+                "prefers concise emails, an older note",
+                source=MemorySource.INFERRED,
+                evidence=("t-ev",),
+                evidence_elided=7,
+            )
+        )
+        writer = make_writer(
+            store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=_scripted("corrected")
+        )
+
+        result = await writer.ingest(
+            _proposal(_preference("new", evidence=cited, evidence_elided=1))
+        )
+
+        assert result.record_id == "corrected"
+        stored = await store.get("corrected")
+        assert stored is not None
+        assert stored.provenance.evidence == cited[2:]
+        assert stored.provenance.evidence_elided == 1 + 2, (
+            "the correction inherited a count from the target it retired, or lost "
+            "the proposal's own (ADR-0086 §4)"
+        )
+        assert "t-ev" not in stored.provenance.evidence
+
+    async def test_retiring_a_legacy_over_bound_record_leaves_it_whole(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """A write that merely **retires** is not an install, so it is exempt (§2).
+
+        Reachable on any store that predates ADR-0086 — four disjoint observation
+        batches of 20 is 80 — and the rule has to admit it, or the only way to obey
+        would be to truncate a record on its way *off* the read path. That is the
+        eager rewrite ADR-0077 §6 refused, and it would make ``export`` report a
+        narrower warrant than the belief actually had.
+
+        Distinct from the oversized *proposal* case above: here it is the
+        **target** that is over the bound, and it is retired rather than installed.
+        """
+        legacy = _episode_ids(MAX_EVIDENCE_CITATIONS + 16, prefix="legacy")
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await store.add(
+            _preference(
+                "existing",
+                "prefers concise emails, an older note",
+                source=MemorySource.INFERRED,
+                evidence=legacy,
+                evidence_elided=2,
+            )
+        )
+        writer = make_writer(
+            store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=_scripted("corrected")
+        )
+
+        await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
+
+        retained = {record.id: record for record in await store.export()}
+        assert retained["existing"].validity.valid_until is not None  # it really was retired
+        assert retained["existing"].provenance.evidence == legacy, (
+            "a retirement truncated the record it was only supposed to close the "
+            "window on — the eager rewrite ADR-0086 §2 refuses"
+        )
+        assert retained["existing"].provenance.evidence_elided == 2
+
+    async def test_a_reinforce_over_the_bound_keeps_the_newest_and_counts_the_rest(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§3's fold rule: the **last** ``MAX_EVIDENCE_CITATIONS`` of the union.
+
+        Recency, because the union deduplicates by id so every citation has weight
+        exactly one and "most reinforcing" does not exist to be selected. The
+        target's citations lead the union, so a writer keeping the oldest returns a
+        disjoint tuple and fails on identity rather than on length.
+
+        §4's recurrence in its two-source form: both records' counts are summed,
+        then the displacement is added.
+        """
+        target_evidence = _episode_ids(40, prefix="told")
+        incoming = _episode_ids(40, prefix="new")
+        store = FakeMemoryStore(now=_long_ago)
+        await _plant_episodes(store, incoming)
+        await store.add(_preference("existing", evidence=target_evidence, evidence_elided=3))
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
+
+        result = await writer.ingest(
+            _proposal(_preference("new", evidence=incoming, evidence_elided=4))
+        )
+
+        assert result.record_id == "existing"
+        stored = await store.get("existing")
+        assert stored is not None
+        union = (*target_evidence, *incoming)
+        displaced = len(union) - MAX_EVIDENCE_CITATIONS
+        assert stored.provenance.evidence == union[displaced:], (
+            "the fold retained something other than the most recently accumulated "
+            "citations of the union (ADR-0086 §3)"
+        )
+        assert stored.provenance.evidence_elided == 3 + 4 + displaced
+
+    async def test_a_reinforce_that_fits_still_sums_both_elision_counts(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§4's recurrence covers **every** install, not only the ones that displace.
+
+        A fold whose union fits displaces nothing, and a writer could satisfy every
+        clause above by leaving the target's count alone. It must not: the count is
+        a sum over the records the install draws content from, so an incoming
+        record carrying a history of its own has it carried across too. ``4`` is
+        neither operand, which is what makes the assertion discriminating.
+
+        This is also §4's second collision case, made concrete: both sides may have
+        displaced the *same* episode, and the sum then counts it twice. The field is
+        defined as an **upper bound** precisely so that is correct rather than a
+        defect — an exact count would need the displaced ids back, which is the
+        payload the bound exists to stop carrying.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        await _cite(store)
+        await store.add(_preference("existing", evidence=("t-ev",), evidence_elided=1))
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
+
+        result = await writer.ingest(
+            _proposal(_preference("new", evidence=(_CITED,), evidence_elided=3))
+        )
+
+        assert result.record_id == "existing"
+        stored = await store.get("existing")
+        assert stored is not None
+        assert set(stored.provenance.evidence) == {"t-ev", _CITED}  # nothing displaced
+        assert stored.provenance.evidence_elided == 1 + 3, (
+            "a fold that displaced nothing dropped one of its sources' elision "
+            "counts, so a history export is supposed to carry was lost"
+        )
+
+    async def test_a_re_cited_displaced_episode_is_carried_and_still_counted(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§4's first collision case: the count is an upper bound, never a total.
+
+        A record that displaced episode *x* counts one elision; a later proposal
+        citing *x* re-admits it to the retained tuple, and the record now both
+        **carries** *x* and **counts** it as elided. Reachable with no producer
+        doing anything unusual, and pinned so the suite asserts the count §4
+        defines rather than an exactness the field does not claim — a writer that
+        "corrected" the count by decrementing on a re-citation fails here.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        displaced_once = "displaced-episode"
+        await _plant_episodes(store, [displaced_once])
+        # The target's history: it already displaced `displaced_once` and no longer
+        # carries it, which is exactly the state a fold over the bound leaves.
+        await store.add(_preference("existing", evidence=("kept",), evidence_elided=1))
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
+
+        await writer.ingest(_proposal(_preference("new", evidence=(displaced_once,))))
+
+        stored = await store.get("existing")
+        assert stored is not None
+        assert displaced_once in stored.provenance.evidence, "the re-citation was not admitted"
+        assert stored.provenance.evidence_elided == 1, (
+            "the count moved on a re-citation; it is a count of displacements "
+            "performed, not of citations currently missing (ADR-0086 §4)"
+        )
 
     @pytest.mark.parametrize(
         "proposal_window",

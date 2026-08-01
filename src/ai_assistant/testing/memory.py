@@ -38,7 +38,7 @@ from ai_assistant.core.types import MemoryWriteMode, band_of
 from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import BeliefBand, MemoryKind, MemoryRecord, MemoryWrite
@@ -237,6 +237,34 @@ class FakeMemoryStore:
             # fields like provenance and validity — matching the persistent store
             # (ADR-0007).
             return record.model_copy(deep=True)
+
+    async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+        """Return the readable records among ``record_ids``, keyed by id (ADR-0086 §6).
+
+        One snapshot for the batch: ``record_ids`` is materialised on the first
+        executed line — before the resource is entered, which is where ADR-0065
+        puts the observation — and the clock is read **once**, so every id is
+        judged against a single instant. A missing, expired or not-live id is an
+        omission from the mapping, never an error and never a ``None`` value.
+
+        Routed through the modelled resource like every other method, so the
+        cancellation clause has a real subject here too (ADR-0060, #397).
+        """
+        wanted = dict.fromkeys(record_ids)
+        if not wanted:
+            # No round trip for an empty argument, so the fake reaches its modelled
+            # resource exactly where the persistent store reaches its lock — a fake
+            # that queued behind a held resource where the real store would not
+            # would certify a consumer the real store never blocks (ADR-0026 §7).
+            return {}
+        async with self._resource.held():
+            now = self._now_utc()
+            return {
+                record_id: record.model_copy(deep=True)
+                for record_id in wanted
+                if (record := self._records.get(record_id)) is not None
+                and self._is_readable(record, now)
+            }
 
     async def search(
         self,

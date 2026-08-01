@@ -585,6 +585,109 @@ async def test_a_persist_holds_off_a_deletion_in_another_process(tmp_path: Path)
         reopened.close()
 
 
+#: How long the parent holds a ``get_many`` chunk boundary open once the child has
+#: been signalled — a *bound* on how long the competing write is given to land, not
+#: a synchronisation primitive. Comfortably more than an unblocked ``add`` needs and
+#: comfortably under ``sqlite3.connect``'s 5.0 s default busy timeout, so the child
+#: waits the parent's read transaction out rather than giving up.
+_INTERLEAVE_HOLD_SECONDS = 1.0
+#: ``SQLITE_LIMIT_VARIABLE_NUMBER`` narrowed to leave room for exactly one id
+#: beside ``get_many``'s two ``now`` parameters, so a two-id call really is two
+#: statements and there is a chunk boundary to interleave at. The production limit
+#: is 32,766, which no test could reach by volume — and narrowing the *real* knob
+#: exercises the real chunking path rather than a stubbed one.
+_ONE_ID_PER_STATEMENT = 3
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the child's hold assumes POSIX scheduling")
+async def test_get_many_is_one_snapshot_across_its_chunks(tmp_path: Path) -> None:
+    """The chunked batch read is one snapshot of the *store*, not only of the clock.
+
+    ``get_many`` carries no size cap (ADR-0086 §6), so an ``IN`` clause has to be
+    chunked to SQLite's bound-parameter limit. The ``asyncio.Lock`` does not make
+    that safe: it serialises coroutines on **this store instance** and does nothing
+    about the file. Chunked without a read transaction, this call reads ``a`` in
+    chunk 1, another process revises ``b``, chunk 2 reads ``b``, and the result
+    pairs values that never coexisted — §6's snapshot violated by the very
+    mechanism introduced to keep its promise never to refuse on size.
+
+    Only this store has chunks to interleave between, which is why the case lives
+    here and not in the shared suite (ADR-0086 §8): the shared suite asserts the
+    observable snapshot and stops, because a conforming store may answer in one
+    request, one statement or one in-memory snapshot and has no portable boundary
+    to inject at.
+
+    Deliberately the condition **ADR-0083 §12 says makes the asymmetry urgent
+    again** — exclusivity relaxed, two processes over one ``memory.db`` — driven
+    the way this module's other cross-process case is: the child announces itself,
+    the parent releases it from inside the window, so the collision is *attempted*
+    on every run.
+    """
+    db = tmp_path / "memory.db"
+    child_path = Path(__file__).parent / "_get_many_snapshot_child.py"
+    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8))
+    # A blocking ``Popen`` rather than an asyncio subprocess: the go-signal is sent
+    # from the worker thread ``_run_to_completion`` dispatched to, and an
+    # ``asyncio.StreamWriter`` is not safe to touch from off the loop. A real OS
+    # pipe is, so the reads that *do* happen on the loop go through ``to_thread``.
+    process = await asyncio.to_thread(
+        subprocess.Popen,  # spawned off the loop, like this module's other child
+        [sys.executable, str(child_path), str(db)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    assert process.stdin is not None
+    stdin = process.stdin
+    stdout = process.stdout
+    try:
+        await store.add(_semantic("a", "a as the parent seeded it"))
+        await store.add(_semantic("b", "b as the parent seeded it"))
+        # The child opens its store *before* the window, so what contends inside it
+        # is the write under test and not the child's own `_setup`.
+        announcement = await asyncio.wait_for(
+            asyncio.to_thread(stdout.readline), timeout=_GATE_SECONDS * 6
+        )
+        assert announcement.strip() == b"ready", "the child never opened its store"
+
+        store._conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, _ONE_ID_PER_STATEMENT)
+        seen = 0
+
+        def release_the_writer_between_chunks(statement: str) -> None:
+            # Fires as each statement *starts*, so acting on the second SELECT puts
+            # the competing write after chunk 1 has already read `a` and before
+            # chunk 2 reads `b` — the boundary, and nowhere else.
+            nonlocal seen
+            if not statement.lstrip().upper().startswith("SELECT DATA FROM RECORDS"):
+                return
+            seen += 1
+            if seen != 2:
+                return
+            stdin.write(b"go\n")
+            stdin.flush()
+            # This runs on the worker thread `_run_to_completion` dispatched to, so
+            # blocking it holds the chunk boundary open without stalling the loop.
+            time.sleep(_INTERLEAVE_HOLD_SECONDS)
+
+        store._conn.set_trace_callback(release_the_writer_between_chunks)
+        try:
+            batch = await store.get_many(["a", "b"])
+        finally:
+            store._conn.set_trace_callback(None)
+    finally:
+        store.close()
+
+    _, stderr = await asyncio.to_thread(process.communicate)
+    assert process.returncode == 0, f"the child's write failed: {stderr.decode()}"
+    assert seen >= 2, "the read was not chunked, so nothing was interleaved and this proves nothing"
+    assert batch["a"].content == "a as the parent seeded it"
+    assert batch["b"].content == "b as the parent seeded it", (
+        "the batch returned an old 'a' beside a revision of 'b' that landed after "
+        "it — two values that never coexisted, so the chunks were not one snapshot"
+    )
+
+
 async def test_embedder_exception_is_wrapped_as_store_error(
     make_store: Callable[..., SqliteMemoryStore],
 ) -> None:
@@ -1520,13 +1623,13 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
         would let the mutation land past every read, observe one coherent version,
         and certify the bug.
 
-        **Three of the four operations suspend on the embedder and the fourth does
-        not**, which is why the widened hook takes the operation's name (#436).
+        **Three of the five operations suspend on the embedder and two do not**,
+        which is why the widened hook takes the operation's name (#436).
         ``add``, ``write_atomic`` and ``search`` all embed before they touch the
         connection, so the injected ``Embedder`` is their first ``await``.
-        ``list_beliefs`` embeds nothing: its first ``await`` is ``async with
-        self._lock``, so the lever there is the lock itself, wrapped so one
-        acquisition can be held at the door. Suspending it anywhere later — inside
+        ``list_beliefs`` and ``get_many`` embed nothing: the first ``await`` of each
+        is ``async with self._lock``, so the lever there is the lock itself, wrapped
+        so one acquisition can be held at the door. Suspending it anywhere later — inside
         ``_list_beliefs_sync``, say — would put the mutation past the point a
         non-conforming implementation would have read ``bands``, which is the
         entry-side mistake ADR-0065 §3 warns about, in mirror image.
@@ -1543,7 +1646,7 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
         lock = _GatedLock(store._lock)
 
         def arm(operation: str) -> SuspendedCall:
-            if operation == "list_beliefs":
+            if operation in {"list_beliefs", "get_many"}:
                 # Installed only when it is needed, so every other case runs on the
                 # store's own lock. `_lock` is typed `asyncio.Lock`; this stands in
                 # for one and is only ever entered through `async with`.

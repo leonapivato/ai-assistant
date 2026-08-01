@@ -107,7 +107,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from ai_assistant.core.types import DEFAULT_PAGE_SIZE
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from datetime import datetime, timedelta
 
     from ai_assistant.core.types import (
@@ -286,10 +286,17 @@ class MemoryStore(Protocol):
     same store-level predicate, so "what do you believe about me" and "what do you
     retrieve" can never answer differently about a record's liveness.
 
+    Reads come in three shapes and none of them may disagree with another about a
+    record's liveness. :meth:`get` and :meth:`get_many` answer the same question
+    about one id and about many; :meth:`search` is *retrieval* and :meth:`get_many`
+    is neither — it resolves ids the caller already holds, in one snapshot, so a
+    batch is internally consistent where a loop of singles is not (ADR-0086 §6).
+
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060). How :meth:`add` and :meth:`write_atomic` observe the records they
-    are handed, and how :meth:`list_beliefs` observes its ``bands`` and ``kinds``
-    filters, is governed by this module's input-observation clause (ADR-0065).
+    are handed, how :meth:`get_many` observes its ``record_ids``, and how
+    :meth:`list_beliefs` observes its ``bands`` and ``kinds`` filters, is governed
+    by this module's input-observation clause (ADR-0065).
     """
 
     async def add(self, record: MemoryRecord) -> str:
@@ -332,6 +339,78 @@ class MemoryStore(Protocol):
         now** — a closed ``valid_until`` (``valid_until <= now``) or a not-yet-open
         ``valid_from`` (``valid_from > now``); both ends of the window are enforced
         (ADR-0045 §6).
+        """
+        ...
+
+    async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+        """Return the readable records among ``record_ids``, keyed by id (ADR-0086 §6).
+
+        The batch form of :meth:`get`, landed because two contract-mandated
+        callers resolve *k* ids at a time — a conversation resume's history tail
+        (ADR-0074 §5) and belief presentation, which ADR-0073 §4 and ADR-0077 §6
+        oblige to resolve every citation of every belief on a page. At
+        ``list_beliefs``' default page of 50 and
+        :data:`~ai_assistant.core.types.MAX_EVIDENCE_CITATIONS` citations each
+        that is 3,200 single reads for one screen, each one a lock acquisition on
+        the shipped store; this makes it 50. ADR-0074 §5 declined it and named the
+        hub as where to revisit — that trigger did **not** fire, and this lands on
+        the argument the deferral actually turned on rather than on the one it
+        named (ADR-0086 §6 partially supersedes ADR-0074 §5).
+
+        **It never disagrees with ``get``.** For every id, this returns the record
+        :meth:`get` would return, or omits it exactly where :meth:`get` would
+        return ``None`` — absent, expired, or not live at now, both ends of the
+        window enforced (ADR-0007, ADR-0045 §6). An id that does not resolve is
+        **simply missing from the mapping**; it is never an error and never a
+        ``None`` value. A second read that answered differently about a record's
+        liveness is the failure this Protocol's docstring already forbids between
+        ``search`` and ``list_beliefs``; a third read gets the same rule.
+
+        **One read-time snapshot for the whole batch.** Every id in a call is
+        judged against **one instant**, and against **one state of the store**: the
+        result is exactly what this store would return for those ids at some single
+        point in time, so no two entries can disagree about when "now" was or about
+        what was stored then. This is a real guarantee and not book-keeping —
+        resolving 64 citations through 64 ``get``s judges them against 64 instants,
+        so a citation can expire mid-resolution and a belief's rendered count
+        disagree with its own tombstones. **The guarantee is the snapshot, not any
+        mechanism for obtaining one**: a lock and one clock reading is how the
+        shipped SQLite store meets it, a transactional or remote store may meet it
+        with no lock at all, and naming a mechanism here would put one concrete
+        store's synchronisation into a contract every consumer depends on.
+
+        **A mapping, not a sequence**, because the caller's question is *which* ids
+        resolved — that is the lost count and the tombstone placement — and a
+        positional result would make every caller re-derive the correspondence.
+        Duplicate ids collapse, so the mapping never has more entries than the
+        argument has distinct ids. Records are detached snapshots, like every other
+        ``MemoryStore`` read.
+
+        **There is deliberately no size cap on the argument** (ADR-0086 §6). This
+        is not the unbounded read ADR-0021 §4 warns of: every record it returns had
+        to be named, so the result is bounded by an argument the caller enumerated.
+        A backend with a per-statement limit of its own meets that by chunking
+        *behind* the single snapshot above, never by refusing — an implementation
+        limit is not a contract limit, and this Protocol does not let one become
+        one.
+
+        How this call observes ``record_ids`` is governed by this module's
+        input-observation clause (ADR-0065), exactly as ``write_atomic``'s
+        ``Sequence`` argument is.
+
+        Args:
+            record_ids: The ids to resolve. An **empty sequence returns an empty
+                mapping** and requires no round trip: asking for nothing is a
+                question with an answer, in the same words ``list_beliefs``'
+                ``limit=0`` and ``write_atomic``'s empty batch already use.
+
+        Returns:
+            A mapping from id to record, holding an entry for exactly those ids
+            :meth:`get` would answer with a record.
+
+        Raises:
+            MemoryStoreError: If the store cannot be read, or a stored record is
+                corrupt.
         """
         ...
 
@@ -657,6 +736,48 @@ class MemoryWriter(Protocol):
         the stored records and their windows, not about what a later read returns,
         which ADR-0045 §6's read-time predicate decides at the reader's own clock
         (ADR-0080 §3).
+
+        **No writer *installs* a record whose ``provenance.evidence`` exceeds
+        :data:`~ai_assistant.core.types.MAX_EVIDENCE_CITATIONS`** (ADR-0086 §2).
+        Where the record it would install does, it installs the retained subset
+        and records the count of what it did not. The bound lives here and not on
+        :class:`~ai_assistant.core.types.Provenance` because a validator would run
+        on deserialisation too and make an *already-stored* over-long belief
+        unreadable; the type admits a longer tuple, and a record already stored
+        with one stays readable.
+
+        - **"Install" is ADR-0081 §1's sense**, reused rather than redefined: a
+          write installs when it stores the proposal's content at an id — an
+          ``ACCEPT`` or ``STORE_TEMPORARY`` at the proposed record's id, a
+          ``REINFORCE`` at its fold target, a ``SUPERSEDE``'s correction at the id
+          it mints. **A write that merely *retires* is not an install** and carries
+          the record as it stands, so a ``SUPERSEDE`` whose target is a legacy
+          over-bound record retires it with its tuple and its ``evidence_elided``
+          untouched. Truncating on the way *off* the read path would be an eager
+          rewrite, which is the failure this bound is placed here to avoid.
+        - **A ``REINFORCE`` whose union would exceed the bound retains the last
+          ``MAX_EVIDENCE_CITATIONS`` of the deduplicated union** — recency, because
+          the union deduplicates by id so every citation has weight exactly one and
+          "most reinforcing" does not exist to be selected, while the oldest
+          citations are the ones likeliest to have expired already (ADR-0086 §3).
+          ``SUPERSEDE`` is untouched by this: ADR-0040 §5a has it carry nothing of
+          the target across, so there is no union to bound.
+        - **The elision is recorded, never silent** (ADR-0086 §4). The installed
+          record's ``evidence_elided`` is the **sum of the counts on every record
+          the install draws content from, plus the citations this install
+          displaces** — one recurrence over every install, so a ``REINFORCE`` sums
+          both records' counts even when the union fits and a proposal that already
+          carried a count never has it reset. A ``SUPERSEDE`` draws from the
+          proposal alone; the target's count is not inherited, even though the
+          target's id survives.
+
+        The scope is a :class:`~ai_assistant.core.types.MemoryRecord` install.
+        :class:`~ai_assistant.core.types.Goal` carries a ``Provenance`` too and
+        does not cross this seam; ADR-0077 §11 assigns that to the lane adding an
+        inferred-goal producer.
+        :class:`~ai_assistant.core.types.FeedbackEvent` is likewise unbounded and
+        needs no rule of its own: a proposal derived from one crosses this seam
+        like any other, and is bounded and counted here.
 
         Args:
             proposal: The candidate memory and why it was proposed. Its

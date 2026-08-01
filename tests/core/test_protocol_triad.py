@@ -612,7 +612,7 @@ class _ARealMemoryStore:
     add = clear = delete = export = get = list_beliefs = purge_expired = search = staticmethod(
         lambda *a: None
     )
-    write_atomic = staticmethod(lambda *a: None)
+    get_many = write_atomic = staticmethod(lambda *a: None)
 
 
 class _DecoyFixture:

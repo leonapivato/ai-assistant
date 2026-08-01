@@ -9,6 +9,7 @@ import pytest
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
+    MAX_EVIDENCE_CITATIONS,
     TERMINAL_DEFERRAL_STATES,
     BeliefBand,
     CurrentContext,
@@ -152,6 +153,80 @@ def test_the_two_confidence_rules_do_not_overlap() -> None:
             continue  # neither rule binds it
         with pytest.raises(ValidationError):
             Provenance(source=source, confidence=forbidden, last_updated=_WHEN)
+
+
+# --- the evidence bound is not on this type (ADR-0086 §1, §2) ----------------
+
+
+def test_provenance_admits_more_citations_than_the_bound() -> None:
+    """The bound is a ``MemoryWriter`` obligation, and this is the other half of it.
+
+    A ``max_length=MAX_EVIDENCE_CITATIONS`` on ``evidence`` is the obvious
+    implementation and is the wrong one: a pydantic validator runs on
+    *deserialisation* as well as on construction, and ``SqliteMemoryStore``
+    reconstructs every record through the model on every read. A deployment
+    running since ADR-0077's observer shipped may already hold a belief above the
+    bound — four disjoint batches of 20 is 80 — and on the day such a validator
+    landed, ``get``, ``list_beliefs`` and ``export`` would all start failing on it.
+    "A belief that becomes unreadable through any implementation" is the sentence
+    ADR-0084 §4 asked ADR-0086 to make false.
+
+    So this case fails the moment anyone adds that ``max_length``, which no
+    assertion about a *writer's* output can do — a writer that truncates correctly
+    satisfies its whole suite whether or not the type also refuses.
+    """
+    over_bound = tuple(f"ev-{index:03d}" for index in range(MAX_EVIDENCE_CITATIONS + 16))
+
+    prov = Provenance(
+        source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN, evidence=over_bound
+    )
+
+    assert prov.evidence == over_bound
+    # And it survives a round trip through the serialised form, which is the path
+    # a stored record actually takes back out of a store.
+    assert Provenance.model_validate_json(prov.model_dump_json()).evidence == over_bound
+
+
+def test_a_feedback_event_is_not_bounded_either() -> None:
+    """ADR-0086 §1 says so explicitly, and the reason is the placement.
+
+    A ``FeedbackEvent`` carrying more ids than the bound is constructible, and
+    ``RuleBasedFeedbackProcessor`` copies all of them into the record it proposes.
+    Nothing there is stored: the proposal crosses ``MemoryWriter``, which installs
+    the retained subset and records the elision like any other. A second
+    enforcement point at the feedback boundary would put one rule in two places to
+    drift.
+    """
+    over_bound = tuple(f"ev-{index:03d}" for index in range(MAX_EVIDENCE_CITATIONS + 1))
+
+    event = FeedbackEvent(
+        kind=FeedbackKind.CORRECTION,
+        memory_kind=MemoryKind.SEMANTIC,
+        content="the office is in Boston",
+        evidence=over_bound,
+        created_at=_WHEN,
+    )
+
+    assert event.evidence == over_bound
+
+
+def test_provenance_defaults_to_having_elided_nothing() -> None:
+    """Additive with a default, so a record stored before ADR-0086 deserialises at 0.
+
+    Nothing migrates, and every ``Goal`` carries one too — always zero, since the
+    bound is scoped to ``MemoryRecord`` installs and nothing accumulates on the
+    goal path (ADR-0086 §1, §4).
+    """
+    prov = Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN)
+
+    assert prov.evidence_elided == 0
+    with pytest.raises(ValidationError):  # a count, so never negative
+        Provenance(
+            source=MemorySource.OBSERVED,
+            confidence=0.6,
+            last_updated=_WHEN,
+            evidence_elided=-1,
+        )
 
 
 # --- what one observation produced (ADR-0077 §9) -----------------------------

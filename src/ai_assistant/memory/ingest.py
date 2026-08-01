@@ -28,6 +28,7 @@ from ai_assistant.core.errors import (
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.types import (
+    MAX_EVIDENCE_CITATIONS,
     BeliefBand,
     DataTier,
     MemoryDecisionKind,
@@ -42,7 +43,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
@@ -686,6 +687,60 @@ def _supersede(incoming: MemoryRecord, new_id: str) -> MemoryRecord:
     return incoming.model_copy(update={"id": new_id, "validity": Validity()})
 
 
+def _bounded_evidence(evidence: Sequence[str], *, elided: int) -> tuple[tuple[str, ...], int]:
+    """ADR-0086 §3's retention rule and §4's recurrence, in one place.
+
+    Keeps the **last** :data:`MAX_EVIDENCE_CITATIONS` entries — the tuple is
+    ordered oldest-accumulated first, so the oldest are the ones displaced. Recency
+    rather than "most reinforcing" because the union deduplicates by id, so every
+    citation carries weight exactly one and there is no ranking to select on;
+    meanwhile the oldest citations are precisely those likeliest to have expired
+    already (ADR-0074 §7), and retaining them would spend a bounded budget on the
+    residue and leave "why do you believe that?" unanswerable.
+
+    Args:
+        evidence: The citations the install would carry, oldest first.
+        elided: The sum of ``evidence_elided`` over every record this install
+            draws content from — two for a fold, one for every other ruling.
+
+    Returns:
+        The retained citations, and the elision count to store: ``elided`` plus
+        the number this install displaced. Never an exact total of what the record
+        no longer carries, and deliberately so (ADR-0086 §4).
+    """
+    displaced = max(len(evidence) - MAX_EVIDENCE_CITATIONS, 0)
+    return tuple(evidence[displaced:]), elided + displaced
+
+
+def _installed(record: MemoryRecord) -> MemoryRecord:
+    """``record`` with its evidence brought under the bound (ADR-0086 §2).
+
+    Applied at **every install** and at no retirement, which is the whole of the
+    rule's scope. "Install" is ADR-0081 §1's sense, the one :func:`_installed_at`
+    already implements: a write installs when it stores the proposal's content at
+    an id. A retirement writes an *existing* record back with only its window
+    narrowed (:func:`_close_window`), asserts nothing new about the warrant, and
+    is therefore exempt — a legacy over-bound target is retired intact rather than
+    truncated on its way *off* the read path, which would be the eager rewrite
+    ADR-0077 §6 refused and the read-path failure ADR-0086 §2 exists to avoid.
+
+    A no-op — the same object, not a copy — for anything already under the bound,
+    which is every record any shipped producer authors and every fold
+    :func:`_merge` has already bounded. Where it does bite it rebuilds
+    :class:`Provenance` through ``model_validate`` rather than
+    ``model_copy(update=...)``, so the type's own validators run on the value that
+    is stored (ADR-0026 §2's hazard).
+    """
+    provenance = record.provenance
+    retained, elided = _bounded_evidence(provenance.evidence, elided=provenance.evidence_elided)
+    if elided == provenance.evidence_elided:
+        return record
+    bounded = Provenance.model_validate(
+        provenance.model_dump() | {"evidence": retained, "evidence_elided": elided}
+    )
+    return record.model_copy(update={"provenance": bounded})
+
+
 def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     """Fold ``incoming`` into ``target``, keeping the target's id.
 
@@ -696,11 +751,27 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     assume the two records *agree*. Only a ``REINFORCE`` ruling reaches this
     function (ADR-0040 §3): a contradiction is a ``SUPERSEDE``, which
     :meth:`MemoryIngestor._apply` routes to :func:`_supersede` instead.
+
+    **The union is bounded here, before the ``Provenance`` is constructed**, so
+    the constructor's validators run on the value that is stored — the surrounding
+    ``model_copy(update=...)`` skips them (ADR-0026 §2). ADR-0040 §5a's "retains
+    **both** records' evidence" holds up to :data:`MAX_EVIDENCE_CITATIONS` and is
+    partially superseded beyond it (ADR-0086 §3, §11): the oldest are displaced and
+    counted. The fold is the one install drawing from **two** sources, so both
+    records' ``evidence_elided`` are summed — including when the union fits and
+    nothing is displaced, since an incoming record carrying a count of its own
+    would otherwise have that history dropped (ADR-0086 §4).
     """
+    union = tuple(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence]))
+    evidence, elided = _bounded_evidence(
+        union,
+        elided=target.provenance.evidence_elided + incoming.provenance.evidence_elided,
+    )
     provenance = Provenance(
         source=incoming.provenance.source,
         confidence=max(target.provenance.confidence, incoming.provenance.confidence),
-        evidence=tuple(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence])),
+        evidence=evidence,
+        evidence_elided=elided,
         last_updated=incoming.provenance.last_updated,
     )
     return incoming.model_copy(update={"id": target.id, "provenance": provenance})
@@ -1017,12 +1088,19 @@ class MemoryIngestor:
         resolved: tuple[str, ...],
     ) -> str | None:
         proposed = proposal.proposed
+        # Every arm below that *installs* passes its record through `_installed`
+        # (ADR-0086 §2), which is what makes the bound a property of the seam
+        # rather than of one ruling: a later ruling that installs cannot acquire an
+        # unbounded write by forgetting to opt in. It is a no-op on a `_merge`
+        # result, which has already applied the same rule to the union it formed.
         match decision.kind:
             case MemoryDecisionKind.ACCEPT:
-                return await self._store.add(proposed)
+                return await self._store.add(_installed(proposed))
             case MemoryDecisionKind.STORE_TEMPORARY:
                 expires_at = self._expiry(decision.ttl)
-                return await self._store.add(proposed.model_copy(update={"expires_at": expires_at}))
+                return await self._store.add(
+                    _installed(proposed.model_copy(update={"expires_at": expires_at}))
+                )
             case MemoryDecisionKind.REINFORCE | MemoryDecisionKind.SUPERSEDE:
                 target = next((c for c in conflicts if c.id == decision.target_id), None)
                 if target is None:
@@ -1042,7 +1120,7 @@ class MemoryIngestor:
                         _retirement_set(target, conflicts, proposal=proposal, resolved=resolved),
                         proposed,
                     )
-                return await self._store.add(_merge(target, proposed))
+                return await self._store.add(_installed(_merge(target, proposed)))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
 
@@ -1146,13 +1224,20 @@ class MemoryIngestor:
                     f"minted id {new_id!r} names a superseded target; re-minting"
                 )
                 continue
+            # The retirements are **not** bounded: `_close_window` writes an
+            # existing record back with only its window narrowed, which ADR-0081 §1
+            # calls a retirement rather than an install, so a legacy over-bound
+            # target goes back with its tuple and its count untouched (ADR-0086 §2).
+            # The correction *is* an install, and carries the proposal's own count
+            # — never the target's, which ADR-0040 §5a keeps off the record that
+            # overturns it (ADR-0086 §4).
             batch = [
                 MemoryWrite(record=closed_target, mode=MemoryWriteMode.UPSERT)
                 for closed_target in closed
             ]
             batch.append(
                 MemoryWrite(
-                    record=_supersede(proposed, new_id),
+                    record=_installed(_supersede(proposed, new_id)),
                     mode=MemoryWriteMode.INSERT_IF_ABSENT,
                 )
             )
