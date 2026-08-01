@@ -35,11 +35,12 @@ rule cannot silently reopen the gap.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Annotated, Any, TypeAliasType, get_args, get_origin, get_type_hints
 
 import pytest
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError, create_model
 
 from ai_assistant.core import types as core_types
 from ai_assistant.core.types import (
@@ -125,6 +126,51 @@ def bare_str_fields(model: type[BaseModel]) -> list[str]:
     ]
 
 
+def _holds_text(value: object) -> bool:
+    """Whether ``value`` contains a ``str`` anywhere, key or element, at any depth."""
+    if isinstance(value, str):
+        return True
+    if isinstance(value, Mapping):
+        return any(_holds_text(key) or _holds_text(item) for key, item in value.items())
+    if isinstance(value, tuple | list | set | frozenset):
+        return any(_holds_text(item) for item in value)
+    return False
+
+
+def unvalidated_text_defaults(model: type[BaseModel]) -> list[str]:
+    """Names of ``model``'s text fields whose default escapes validation.
+
+    **The annotation check alone is not enough**, and this is the second,
+    independent path. Pydantic does not validate a field *default* unless
+    ``validate_default`` is set, so ``content: EncodableText = "\\ud800"``
+    constructs an instance holding unencodable text while
+    :func:`bare_str_fields` reports the field perfectly guarded — the same hole
+    ``test_instant_coverage.py`` closes for :data:`UtcInstant`, and it is a hole
+    in the *gate* rather than in the tree: no such default exists today.
+
+    A ``default_factory`` is flagged unconditionally, because what it will
+    produce cannot be read off the declaration. A **literal** default is judged
+    on the value: one that contains no ``str`` at any depth can smuggle nothing
+    past validation, which is why the ``= None`` and ``= ()`` defaults
+    ``core/types.py`` actually uses need no exemption entry. That is a stricter
+    test than the instant module's — it looks at the value rather than only at
+    the default policy — and it is what keeps this check free of an exemption
+    list, exactly as the annotation check is.
+    """
+    hints = get_type_hints(model, include_extras=True)
+    flagged = []
+    for name, field in model.model_fields.items():
+        if not _str_leaves(hints.get(name), guarded=False):
+            continue  # not a text field at all
+        if field.validate_default:
+            continue
+        opaque_factory = field.default_factory is not None
+        literal_text = not field.is_required() and _holds_text(field.default)
+        if opaque_factory or literal_text:
+            flagged.append(name)
+    return flagged
+
+
 def _core_type_models() -> list[type[BaseModel]]:
     """Every pydantic model declared in ``ai_assistant.core.types``."""
     found: dict[str, type[BaseModel]] = {}
@@ -181,6 +227,113 @@ def test_no_core_str_field_is_exempt() -> None:
         (model.__name__, name) for model in _core_type_models() for name in bare_str_fields(model)
     }
     assert bare == set()
+
+
+@pytest.mark.parametrize("model", _core_type_models(), ids=lambda model: model.__name__)
+def test_no_core_text_field_has_an_unvalidated_default(model: type[BaseModel]) -> None:
+    """The annotation is not the only way text reaches a field (see the helper)."""
+    offenders = set(unvalidated_text_defaults(model))
+    assert not offenders, f"{model.__name__} has unvalidated text default(s) {sorted(offenders)}"
+
+
+def test_no_core_text_default_is_exempt() -> None:
+    """The second path's whole-module statement, matching the first's."""
+    unvalidated = {
+        (model.__name__, name)
+        for model in _core_type_models()
+        for name in unvalidated_text_defaults(model)
+    }
+    assert unvalidated == set()
+
+
+# --- negative fixtures: each path must catch its omission independently ------
+# Either check can regress while the other stays green, and a combined fixture
+# would not say which one failed.
+
+
+def test_the_bare_annotation_check_catches_an_omission() -> None:
+    """Path one, on its own: a field typed ``str`` rather than :data:`EncodableText`."""
+
+    class _Omission(BaseModel):
+        guarded: EncodableText
+        forgotten: str
+        optional_forgotten: str | None = None
+        in_a_tuple: tuple[str, ...] = ()
+
+    assert bare_str_fields(_Omission) == ["forgotten", "optional_forgotten", "in_a_tuple"]
+
+
+def test_the_default_check_catches_a_literal_text_default() -> None:
+    r"""Path two, on its own: pydantic skips validating a default.
+
+    The last assertion is the point — the unencodable value really does reach the
+    attribute, so this is a hole rather than a theoretical one.
+    """
+
+    class _LiteralDefault(BaseModel):
+        text: EncodableText = SURROGATE
+
+    assert unvalidated_text_defaults(_LiteralDefault) == ["text"]
+    assert bare_str_fields(_LiteralDefault) == []  # the other path stays green
+    assert _LiteralDefault().text == SURROGATE  # it really does slip through
+
+
+def test_the_default_check_catches_a_text_default_inside_a_container() -> None:
+    """A tuple default is the shape the record graph's collection fields use."""
+
+    class _ContainerDefault(BaseModel):
+        texts: tuple[EncodableText, ...] = (SURROGATE,)
+
+    assert unvalidated_text_defaults(_ContainerDefault) == ["texts"]
+    assert _ContainerDefault().texts == (SURROGATE,)
+
+
+def test_the_default_check_catches_a_default_factory() -> None:
+    """Path two again, by the other default policy — ``default_factory``."""
+
+    class _FactoryDefault(BaseModel):
+        text: EncodableText = Field(default_factory=lambda: SURROGATE)
+
+    assert unvalidated_text_defaults(_FactoryDefault) == ["text"]
+    assert bare_str_fields(_FactoryDefault) == []
+
+
+def test_a_validated_default_passes_both_checks() -> None:
+    """The escape hatch works, and it really does validate."""
+
+    class _Validated(BaseModel):
+        text: EncodableText = Field(default="fine", validate_default=True)
+
+    assert unvalidated_text_defaults(_Validated) == []
+    assert bare_str_fields(_Validated) == []
+    assert _Validated().text == "fine"
+
+    class _ValidatedBad(BaseModel):
+        text: EncodableText = Field(default=SURROGATE, validate_default=True)
+
+    with pytest.raises(ValidationError, match="UTF-8"):
+        _ValidatedBad()
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        pytest.param((EncodableText | None, None), id="a None default"),
+        pytest.param((tuple[EncodableText, ...], ()), id="an empty tuple default"),
+    ],
+)
+def test_a_textless_default_is_not_flagged(field: tuple[Any, Any]) -> None:
+    """The two shapes ``core/types.py`` actually uses, and why there is no exemption list.
+
+    Neither default holds a ``str``, so neither can carry an unencodable value
+    past validation. Flagging them would have forced an exemption entry for
+    fifteen fields, and an exemption list is the thing this module is built to
+    avoid.
+    """
+    annotation, default = field
+    model = create_model("_Textless", value=(annotation, default))
+    assert unvalidated_text_defaults(model) == []
+    assert bare_str_fields(model) == []
 
 
 # --- the divergence itself, pinned on the sites issue #565 names -------------
