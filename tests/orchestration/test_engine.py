@@ -73,6 +73,7 @@ from ai_assistant.orchestration import (
     learn_outcome,
     presented_confidence,
 )
+from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, DrainPhase
 from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.testing import (
     FakeActionPolicy,
@@ -1290,6 +1291,203 @@ async def test_a_drain_with_nothing_in_flight_closes_at_once() -> None:
     await asyncio.wait_for(harness.engine.aclose(), timeout=5)
 
     assert closed.is_set()
+
+
+async def test_the_drain_records_which_phase_it_ended_in() -> None:
+    """The engine says how it shut down, so the hub can report it (#559).
+
+    ADR-0083 §4 leaves phase B's await **unbounded**, which is why "which phase" is
+    the field an operator reads first: it is also "was this bounded at all". The
+    engine is the only layer that can answer — the hub sees one ``aclose()`` — so it
+    records the answer as it goes.
+
+    Its companion below asserts the other direction, because a property that only
+    ever reports the happy value is indistinguishable from a constant. A drain that
+    quiesced must **not** claim work was cancelled, and vice versa. They are two
+    tests rather than one only because narrowing a property across two ``is``
+    assertions makes the second unreachable to the type checker.
+    """
+    harness = Harness(drain_timeout=timedelta(seconds=30))
+    # Read into locals rather than asserted on the property twice: narrowing the
+    # member expression would make the second comparison unreachable to mypy while
+    # leaving the test just as true.
+    before = harness.engine.drain_phase
+
+    await harness.engine.aclose()
+    after = harness.engine.drain_phase
+
+    assert before is DrainPhase.NOT_RUN
+    assert after is DrainPhase.QUIESCED
+
+
+async def test_a_drain_that_spent_its_budget_says_work_was_cancelled() -> None:
+    """The other direction of the phase report (#559), and the one that matters.
+
+    Phase B is the only case where in-flight work was actively cancelled and the only
+    one whose tail ADR-0083 §4 leaves unbounded, so an operator watching a hub that
+    has not exited yet is asking precisely this question.
+    """
+    planner = _NeverFinishing()
+    harness = Harness(planner=planner, drain_timeout=timedelta(milliseconds=20))
+    call = asyncio.ensure_future(harness.engine.converse("hello", timeout=PATIENT))
+    await planner.entered.wait()
+
+    await harness.engine.aclose()
+
+    assert harness.engine.drain_phase is DrainPhase.CANCELLED
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+
+# --- the maintenance surface (ADR-0083 §8) -----------------------------
+
+
+def _counting_purges(harness: Harness, *, records: int, questions: int) -> dict[str, int]:
+    """Replace both stores' sweeps with counters, on the very instances wired in.
+
+    The *semantics* of each sweep — which rows are past their deadline, and the two
+    anchors ADR-0078 §2 gives the deferral queue — belong to the stores and are held
+    to their Protocols by the shared conformance suites. What is unproven anywhere
+    else, and is the whole of ADR-0078 §10 item 8, is that **one** façade operation
+    reaches **both** of them and reports each count as its own. Distinct return
+    values are what make the second half checkable: equal ones would pass for an
+    implementation that swept one store twice.
+    """
+    calls = {"records": 0, "questions": 0}
+
+    async def purge_memory() -> int:
+        calls["records"] += 1
+        return records
+
+    async def purge_questions() -> int:
+        calls["questions"] += 1
+        return questions
+
+    harness.memory.purge_expired = purge_memory  # type: ignore[method-assign]
+    harness.deferrals.purge = purge_questions  # type: ignore[method-assign]
+    return calls
+
+
+async def test_the_purge_sweeps_both_tier_one_stores_and_reports_each_count() -> None:
+    """ADR-0083 §8's maintenance surface, and ADR-0078 §10 item 8 taken literally.
+
+    One façade operation over **two** stores, because the deferral queue's purge "is
+    wired wherever ``purge_expired`` is wired and inherits the same fate", and
+    "inventing a second sweeping mechanism for one store would be the thing that has
+    to be undone at leg 5". A version that swept only memory would satisfy the name
+    and leave ADR-0078 §1's exposure cap unkept for exactly the rows that hold the
+    user's own words.
+    """
+    harness = Harness()
+    calls = _counting_purges(harness, records=3, questions=2)
+
+    report = await harness.engine.purge_expired()
+
+    assert (report.records, report.questions) == (3, 2)
+    assert calls == {"records": 1, "questions": 1}
+
+
+async def test_the_purge_reaches_the_same_deferral_queue_the_question_surface_answers() -> None:
+    """One queue, or the sweep reclaims rows nobody can see (ADR-0078 §1, §3).
+
+    A composition-root single-instance obligation no type can state, of the same
+    shape as ``plans`` and ``trail``. Wired to a second queue, ``purge_expired``
+    would report a cap kept while the rows the user's own questions live in kept
+    growing.
+    """
+    harness = Harness()
+
+    assert harness.engine._deferrals is harness.deferrals
+    assert harness.engine._deferrals is harness.questions._deferrals
+    assert harness.engine._deferrals is harness.writes._deferrals
+
+
+async def test_the_purge_is_drained_before_shutdown_closes_resources() -> None:
+    """It is a public method, so it is tracked — which is what closes §8's race.
+
+    ADR-0083 §8's whole argument for a scheduler living *above* the composition root
+    rests on this: "``Engine._tracked`` wraps every public method, so a job whose
+    body is ``engine.<operation>()`` has its underlying store work in ``_inflight``
+    already, and the drain waits for it exactly as it waits for a ``converse``."
+    Untracked, the sweep would be a store call racing the ``close()`` that follows.
+
+    **The closer records what it saw**, rather than the test merely looking at a
+    moment: a bare "not closed yet" assertion after one loop turn passes for an
+    untracked sweep too, because the drain task has not been scheduled by then. The
+    only claim that holds regardless of how many turns elapse is the closer's own —
+    *was the sweep still gated when I ran?*
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    closed = asyncio.Event()
+    closed_while_sweeping = False
+
+    async def close() -> None:
+        nonlocal closed_while_sweeping
+        closed_while_sweeping = not release.is_set()
+        closed.set()
+
+    async def gated_purge() -> int:
+        entered.set()
+        await release.wait()
+        return 0
+
+    harness = Harness(closers=(close,))
+    harness.memory.purge_expired = gated_purge  # type: ignore[method-assign]
+
+    sweeping = asyncio.ensure_future(harness.engine.purge_expired())
+    await entered.wait()
+    closing = asyncio.ensure_future(harness.engine.aclose())
+    # Several turns, so the drain task is scheduled and runs as far as it can. An
+    # untracked sweep would let it reach the closers here.
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert not closed.is_set(), "a resource was closed while a sweep was still running"
+    release.set()
+    await sweeping
+    await closing
+    assert closed.is_set()
+    assert closed_while_sweeping is False
+
+
+async def test_the_purge_is_refused_once_shutdown_has_begun() -> None:
+    """The refusal the scheduler reads as *stop* rather than as a job failure (§8).
+
+    Its message is the shared constant, so the scheduler's recognition of it cannot
+    drift from what is raised here — two spellings of one message is a seam that
+    fails silently, leaving the scheduler retrying against an engine that will never
+    accept work again.
+    """
+    harness = Harness()
+    await harness.engine.aclose()
+
+    with pytest.raises(RuntimeError) as raised:
+        await harness.engine.purge_expired()
+
+    assert str(raised.value) == ENGINE_SHUTTING_DOWN
+
+
+async def test_a_failing_memory_sweep_does_not_reach_the_deferral_sweep() -> None:
+    """Nothing sequences the two, so a half-done sweep must not report success.
+
+    The next tick simply re-runs both — a missed sweep is never a correctness bug
+    (ADR-0007 §2) — and swallowing the first failure to reach the second would claim
+    a sweep that half happened. The scheduler logs the failure and retries (§7).
+    """
+    harness = Harness()
+    calls = _counting_purges(harness, records=0, questions=0)
+
+    async def refuses() -> int:
+        msg = "the memory store is unreadable"
+        raise MemoryStoreError(msg)
+
+    harness.memory.purge_expired = refuses  # type: ignore[method-assign]
+
+    with pytest.raises(MemoryStoreError):
+        await harness.engine.purge_expired()
+
+    assert calls["questions"] == 0
 
 
 async def test_a_colliding_handle_factory_still_yields_distinct_tokens() -> None:

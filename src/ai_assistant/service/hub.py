@@ -1,4 +1,4 @@
-"""The resident process: start it, keep it, stop it (ADR-0083 §§1, 3-6, 10).
+"""The resident process: start it, keep it, stop it (ADR-0083 §§1, 3-6, 8, 10).
 
 **The hub is a single, long-lived, foreground process.** It does not fork, does
 not daemonise, and writes its log to standard output. Exactly one instance runs
@@ -12,15 +12,26 @@ one thing deliberately not hard-coded. ADR-0083 §3 states a contract (S1-S7) th
 a supervisor satisfies (D1-D4); systemd is named there as *a* realisation of it
 and nothing here depends on systemd.
 
-**Two things this process does not have yet, both by sequencing rather than
-oversight.** The scheduler (ADR-0083 §§7-9) runs inside this process but is a
-lane behind this one; the positions it occupies in startup and shutdown are
-marked below, and are load-bearing rather than decorative — ADR-0083 §8 requires
-the scheduler to be **stopped and joined before** ``Engine.aclose()``, so that
-ordering is expressed here even while the thing being ordered is absent. The
-transport (ADR-0084) is likewise a later lane: until it lands, readiness is
-signalled by the structured log event alone, which ADR-0083 §3 names as one of
-the two observables and which needs no supervisor-specific protocol.
+**The scheduler runs inside this process** (:mod:`ai_assistant.service.scheduler`),
+and where it sits in the sequence is load-bearing rather than decorative: ADR-0083
+§8 requires it to be **stopped and joined before** ``Engine.aclose()``, because
+that ordering is what leaves the engine's drain with nothing of the scheduler's
+left to wait for.
+
+**One thing this process does not have yet, by sequencing rather than oversight.**
+The transport (ADR-0084) is a later lane: until it lands, readiness is signalled by
+the structured log event alone, which ADR-0083 §3 names as one of the two
+observables and which needs no supervisor-specific protocol.
+
+**Both ends of the lifecycle are legible, and the symmetry is the point** (#559).
+A hub that will not start says why, to stderr and the log (§5, §6). A hub that is
+stopping now says how it stopped: ``hub_scheduler_stopped`` when the join
+completes, and ``hub_shutdown_completed`` carrying the exit code, which of §4's two
+phases the drain ended in, and how long each part took. Without that last event the
+four states an operator most needs to tell apart — phase A still within budget,
+phase B awaiting after a cancellation, phase B blocked on something that will never
+finish, and already finished — all look identical: silence after
+``hub_shutdown_requested``.
 """
 
 from __future__ import annotations
@@ -31,6 +42,7 @@ import signal
 import sys
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
@@ -40,15 +52,18 @@ from ai_assistant.app import build_engine, ensure_model_credentials
 from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.logging import configure_logging
+from ai_assistant.orchestration.engine import DrainPhase
 from ai_assistant.service import datadir
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART, classify
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
+from ai_assistant.service.scheduler import Scheduler, jobs_for
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
     from ai_assistant.core.config import Settings
+    from ai_assistant.orchestration.engine import Engine
 
 _log = structlog.get_logger(__name__)
 
@@ -76,6 +91,38 @@ _STOP_SIGNALS: Final = (signal.SIGTERM, signal.SIGINT)
 #: documented as doing nothing". Installing a handler that logs is what makes the
 #: difference observable rather than asserted.
 _IGNORED_SIGNALS: Final = (signal.SIGHUP,)
+
+
+@dataclass(slots=True)
+class _ShutdownRecord:
+    """What the shutdown sequence did, so its completion can be reported (#559).
+
+    A record rather than a return value because the two halves of the answer are
+    produced in different places: how the drain went is known inside
+    :func:`_start_and_run`'s ``finally``, and the **exit code** is known only in
+    :func:`serve`, which is the one place a failure is classified (ADR-0083 §5).
+    Threading a mutable record down is what lets one event carry both without
+    duplicating the classification or the timing.
+
+    ``reached`` distinguishes "the shutdown sequence ran" from "startup failed
+    before there was anything to shut down". A hub that never built an engine has
+    no drain to report and says so by staying silent — the startup fault is the
+    event that matters there, and inventing a completion event for it would be the
+    "crash loop wearing a diagnosis" §5 warns about, in miniature.
+    """
+
+    #: Whether the shutdown sequence was entered at all.
+    reached: bool = False
+    #: The jobs that were armed when the stop arrived.
+    jobs: tuple[str, ...] = ()
+    #: How long stopping and joining the scheduler took (ADR-0083 §8).
+    scheduler_join_seconds: float | None = None
+    #: How long ``Engine.aclose()`` took — phases A and B together (§4).
+    drain_seconds: float | None = None
+    #: Which of §4's two phases the drain ended in.
+    phase: DrainPhase = DrainPhase.NOT_RUN
+    #: The whole shutdown, join and drain together.
+    elapsed_seconds: float | None = None
 
 
 def main() -> int:
@@ -119,6 +166,13 @@ async def serve(settings: Settings) -> int:
     §5's "the boundary is a test, not a list" from decaying into a list scattered
     across the sequence.
 
+    **It is also where the shutdown's completion is reported** (#559), for the same
+    reason: the exit code is decided here, and an event that could not name the code
+    would leave an operator with the one question they asked. So the timings and the
+    phase come up from :func:`_start_and_run` in a record and are logged once the
+    code is known — including on the path where shutdown itself failed, which is
+    exactly the case where knowing whether work had been cancelled matters most.
+
     Args:
         settings: Loaded application settings.
 
@@ -126,16 +180,57 @@ async def serve(settings: Settings) -> int:
         The process exit code.
     """
     stop = asyncio.Event()
+    shutdown = _ShutdownRecord()
     with _signal_handlers(stop):
         try:
-            return await _start_and_run(settings, stop)
+            code = await _start_and_run(settings, stop, shutdown)
         except Exception as exc:
             code, action = classify(exc)
             _report_fault(exc, action=action, code=code)
-            return code
+    _report_shutdown(shutdown, code=code)
+    return code
 
 
-async def _start_and_run(settings: Settings, stop: asyncio.Event) -> int:
+def _report_shutdown(shutdown: _ShutdownRecord, *, code: int) -> None:
+    """Record that the drain finished, how long it took, and how it ended (#559).
+
+    The counterpart to ``hub_shutdown_requested``, and the event whose absence made
+    four states indistinguishable: phase A still within budget, phase B awaiting
+    after a cancellation, phase B blocked on something that will never finish, and
+    already finished. All four look identical when the last line in the log is the
+    request.
+
+    ``drain_phase`` is the one an operator reads first. ADR-0083 §4 leaves phase B's
+    await **unbounded** on purpose — bounding it would mean abandoning a store call
+    whose worker thread still holds a connection the next statement closes — so
+    "which phase" is also "was this bounded". The budget it was measured against
+    rides along, because a drain time means little without it.
+
+    The transition *into* phase B already has its own event: ``Engine._drain`` logs
+    ``shutdown_drain_budget_exceeded`` at the moment it cancels, which is the point
+    a deployment's stop timeout is being spent. This event is the other half — what
+    that spending bought.
+
+    Operational text only (ADR-0004 §5): job names, durations, an exit code.
+
+    Args:
+        shutdown: What the shutdown sequence did.
+        code: The process exit code, known only once startup faults are classified.
+    """
+    if not shutdown.reached:
+        return
+    _log.info(
+        "hub_shutdown_completed",
+        exit_code=code,
+        drain_phase=shutdown.phase.value,
+        drain_seconds=shutdown.drain_seconds,
+        scheduler_join_seconds=shutdown.scheduler_join_seconds,
+        elapsed_seconds=shutdown.elapsed_seconds,
+        jobs=list(shutdown.jobs),
+    )
+
+
+async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _ShutdownRecord) -> int:
     """ADR-0083 §3's startup sequence, then serve until stopped, then §4's shutdown.
 
     In order, and **no step begins before the previous one has succeeded** — which
@@ -150,6 +245,8 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event) -> int:
     Args:
         settings: Loaded application settings.
         stop: Set by a stop signal; awaited once the hub is serving.
+        shutdown: Filled in as the shutdown sequence runs, for :func:`serve` to
+            report once the exit code is known (#559).
 
     Returns:
         The process exit code.
@@ -180,6 +277,10 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event) -> int:
         # command that needs no model must not start requiring a key.
         ensure_model_credentials(settings)
         engine = build_engine(settings, data_dir=data_dir)
+        # Built before the ``try`` so the ``finally`` can always join it, including
+        # on a stop that arrives between here and step 5. An unstarted scheduler's
+        # ``aclose`` is a no-op, which is what makes that unconditional join safe.
+        scheduler = Scheduler(jobs_for(engine, settings))
         try:
             if stop.is_set():
                 return EXIT_OK
@@ -190,9 +291,11 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event) -> int:
             # after *every* crash rather than at the next command a user types.
             await engine.start()
 
-            # Step 5 is where the scheduler starts (ADR-0083 §7, §8). It is a lane
-            # behind this one; until it lands the enabled job set is empty, which
-            # is what the readiness event below reports.
+            # Step 5. Start the scheduler (ADR-0083 §7, §8). After step 4 so its
+            # first conversation-sweep tick cannot race the startup sweep it
+            # duplicates, and before readiness so the job list the event reports is
+            # a list of jobs that are actually armed.
+            scheduler.start()
 
             # Step 6. Begin accepting requests, and only then signal readiness.
             # The transport is ADR-0084's lane, so there is no door yet and this
@@ -207,24 +310,73 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event) -> int:
                 "hub_ready",
                 pid=os.getpid(),
                 data_dir=str(data_dir),
-                jobs=[],
+                jobs=list(scheduler.job_names),
             )
             await stop.wait()
         finally:
-            # ADR-0083 §8: service shutdown stops and joins the scheduler
-            # **before** calling `Engine.aclose()`, so that after the join no job
-            # is in flight and the engine's drain has nothing of the scheduler's
-            # left to wait for. The scheduler's own loop is the one thing
-            # `Engine._tracked` does not cover — every *job* is a public engine
-            # call and is therefore in `_inflight` already. That join belongs on
-            # this line, above the close.
-            #
-            # Phase A and phase B of the drain are the engine's (§4): it owns the
-            # tracked set, so bounding and cancelling it can only be done there.
-            await engine.aclose()
+            await _shut_down(engine, scheduler, shutdown, budget=settings.shutdown_drain_seconds)
     finally:
         lock.release()
     return EXIT_OK
+
+
+async def _shut_down(
+    engine: Engine,
+    scheduler: Scheduler,
+    record: _ShutdownRecord,
+    *,
+    budget: timedelta,
+) -> None:
+    """ADR-0083 §4's shutdown, in §8's order, recording what it did (#559).
+
+    **The order is the mechanism, not a preference.** §8:
+
+        Service shutdown stops and joins the scheduler *before* calling
+        ``Engine.aclose()``.
+
+    After that join no job is in flight, so the engine's drain has nothing of the
+    scheduler's left to wait for. The scheduler's own loop is the one thing
+    ``Engine._tracked`` does not cover — every *job* is a public engine call and is
+    therefore in ``_inflight`` already, drained exactly as a ``converse`` is.
+
+    Phase A and phase B are the engine's (§4): it owns the tracked set, so bounding
+    and cancelling can only be done there. What this function adds is the account of
+    it, because an unbounded phase B with no observability is a hub whose only
+    remaining signal is that it has not exited yet.
+
+    **Every part is timed, and the timing survives a failure.** If ``aclose`` raises
+    — a closer that could not release its connection — the drain is still recorded
+    before the exception leaves, so the completion event :func:`serve` logs
+    afterwards is about the shutdown that actually happened rather than about the
+    one that was planned.
+
+    Args:
+        engine: The façade to drain and close.
+        scheduler: The loop to stop and join first. Never started is fine.
+        record: Filled in as each part completes.
+        budget: Phase A's configured budget, reported so a drain time can be read
+            against the figure it was measured against.
+    """
+    record.reached = True
+    record.jobs = scheduler.job_names
+    began = time.monotonic()
+    try:
+        await scheduler.aclose()
+        record.scheduler_join_seconds = round(time.monotonic() - began, 3)
+        _log.info(
+            "hub_scheduler_stopped",
+            jobs=list(record.jobs),
+            elapsed_seconds=record.scheduler_join_seconds,
+            drain_budget_seconds=budget.total_seconds(),
+        )
+        drain_began = time.monotonic()
+        try:
+            await engine.aclose()
+        finally:
+            record.drain_seconds = round(time.monotonic() - drain_began, 3)
+            record.phase = engine.drain_phase
+    finally:
+        record.elapsed_seconds = round(time.monotonic() - began, 3)
 
 
 async def _acquire_instance_lock(lock: InstanceLock, data_dir: Path) -> bool:

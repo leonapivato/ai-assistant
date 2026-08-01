@@ -36,8 +36,15 @@ a conversation's episodes, has the injected ``Observer`` propose what they justi
 believing, and puts each proposal through the same write path ``learn`` uses —
 returning an
 :class:`~ai_assistant.orchestration.observation.ObservationReport`. It is
-deliberately explicit: nothing triggers it but a caller, which today is the CLI
-and later is leg 5's scheduler, unchanged.
+deliberately explicit: nothing triggers it but a caller — the CLI, or the hub's
+scheduler as a second caller of the same operation, unchanged and **disabled by
+default** until the observation cursor lands (ADR-0083 §7, §13).
+
+Beside those sits the **maintenance surface** ADR-0083 §8 adds for that scheduler:
+:meth:`Engine.start`'s sweeps, :meth:`Engine.purge_expired`, and
+:attr:`Engine.drain_phase`. New *concrete* surface on this class rather than
+``core`` contract surface — the scheduler holds this object from inside the hub,
+not the ``AssistantEngine`` Protocol a client sees.
 
 **Scope today.** ``respond`` "still ends at the plan" and the multi-step
 plan-driving stage — ordering, dependencies and cancellation across a plan's
@@ -1042,15 +1049,21 @@ class Engine:
         """Distil beliefs from a conversation's recent turns (ADR-0077 §8).
 
         The accumulation leg, and an **explicit operation**: it is not wired into
-        the turn, nothing polls it, and no background task runs it. Four reasons,
-        in the order they bind (ADR-0077 §8): nothing is waiting on an observation
-        while a turn is, and a one-shot process has no "after the answer" to hide
-        the round trip in; the roadmap sequences leg 4's soundness work against
-        volume, and a per-turn trigger *is* volume on the day it merges; the first
-        producer that sends accumulated history to a model should not run without
-        the user knowing; and leg 5's scheduler becomes a second caller of this
-        same operation, so cadence becomes configuration rather than a contract
-        change.
+        the turn, and nothing runs it on a timer unless a deployment asks. Four
+        reasons, in the order they bind (ADR-0077 §8): nothing is waiting on an
+        observation while a turn is, and a one-shot process has no "after the
+        answer" to hide the round trip in; the roadmap sequences leg 4's soundness
+        work against volume, and a per-turn trigger *is* volume on the day it
+        merges; the first producer that sends accumulated history to a model should
+        not run without the user knowing; and the hub's scheduler becomes a second
+        caller of this same operation, so cadence becomes configuration rather than
+        a contract change.
+
+        That last one has landed, and it changed nothing here: the scheduler's
+        observation job ships **disabled** (``Settings.observation_interval`` is
+        ``None`` by default), because without a durable cursor a periodic run
+        re-reads the same recent window and spends a model call each time while
+        never reaching the turns the window has already passed (ADR-0083 §7, §13).
 
         Delegates to the
         :class:`~ai_assistant.orchestration.observation.ObservationStage`, which
