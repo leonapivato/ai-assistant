@@ -8,8 +8,10 @@ translate the result (and any failure) back into our own types.
 
 It also owns the one question about a model spec that cannot be answered
 anywhere else: whether the vendor it names is actually importable
-(:func:`ensure_vendor_available`, ADR-0062 §2). Answering it means reaching
-pydantic-ai's provider registry, which only this layer may do.
+(:func:`ensure_vendor_available`, ADR-0062 §2), and whether the deployment holds a
+credential for it (:func:`ensure_credential_available`, issue #530). Answering
+either means reaching pydantic-ai's provider registry, which only this layer may
+do.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from pydantic_ai.exceptions import (
     ModelAPIError,
     ModelHTTPError,
     UnexpectedModelBehavior,
+    UserError,
 )
 from pydantic_ai.messages import (
     ModelRequest,
@@ -31,7 +34,7 @@ from pydantic_ai.messages import (
     TextPart,
     UserPromptPart,
 )
-from pydantic_ai.providers import infer_provider_class
+from pydantic_ai.providers import infer_provider, infer_provider_class
 
 from ai_assistant.core.errors import (
     ConfigurationError,
@@ -147,6 +150,78 @@ def ensure_vendor_available(spec: str) -> None:
         # Well-formed (ADR-0062 §1 checked that) but naming a vendor pydantic-ai
         # has never heard of — a typo, or a provider from a different release.
         msg = f"model spec {spec!r} names an unknown provider {provider_name!r}: {exc}"
+        raise ConfigurationError(msg) from exc
+
+
+def ensure_credential_available(spec: str) -> None:
+    """Fail now if ``spec``'s vendor holds no credential (issue #530).
+
+    The sibling of :func:`ensure_vendor_available`, answering the next question
+    along: that function asks whether the vendor's *package* is importable, and
+    a "yes" is explicitly not a promise that a completion will resolve — its own
+    docstring lists "whether the deployment holds that vendor's API key" as a
+    late failure, "the boundary ADR-0062 §2 drew rather than an oversight".
+
+    **What moved the boundary is the process model, not a new opinion about
+    credentials.** For a one-shot CLI, late is correct: the failure lands on the
+    command that needed a key and the commands that did not are not blocked by
+    its absence (#530 is explicit that nothing here is a defect in the shipped
+    application). For a resident hub it inverts. ADR-0083 §3 signals readiness
+    last and §5/§6 make a fault that cannot clear a stay-down exit, on the
+    owner's ruling that "if the hub is not running, there is a reason, and the
+    reason is legible". A hub with no credential would start, signal ready, look
+    healthy to every supervisor and monitor, and fail hours later on a user's
+    first real request. So the hub asks this at startup; **nothing else does**,
+    which is why this is a separate function rather than a line inside its
+    sibling or inside ``build_engine``.
+
+    **It is a presence check and never a validity check, and the line is
+    ADR-0083 §3's**: "nothing in startup may block indefinitely on a network".
+    :func:`~pydantic_ai.providers.infer_provider` *constructs* the vendor
+    provider — which is what reads the credential out of the environment, and is
+    exactly what :func:`ensure_vendor_available` avoids doing for that reason —
+    but it performs no completion and no round trip, so startup stays local-only
+    and the supervisor's start timeout keeps its meaning. A key that is present
+    but revoked, wrong or rate-limited therefore still fails at request time, as
+    a :class:`~ai_assistant.core.errors.ModelAuthError` carrying a completion-time
+    routing disposition. Promising more than presence would mean egress on every
+    boot, against ADR-0004's residency posture and §3's clause alike.
+
+    **Call it after :func:`ensure_vendor_available`, not instead of it.** This
+    presumes the vendor resolved: an uninstalled package surfaces here as a bare
+    ``ImportError`` with a worse message than its sibling's.
+
+    Args:
+        spec: A pydantic-ai ``"provider:model"`` spec, e.g.
+            ``"anthropic:claude-opus-4-8"``.
+
+    Raises:
+        ConfigurationError: If the deployment holds no credential for ``spec``'s
+            vendor. The same class its sibling raises, and for the same reason —
+            there is nothing to try again, so a ``ModelError``'s ``retryable``
+            and ``routable`` would be meaningless on it. It is also what lets the
+            hub map this to a stay-down exit through one type check, since every
+            other startup misconfiguration already arrives as this class.
+    """
+    provider_name, _ = models.parse_model_id(spec)
+    if provider_name is None:
+        msg = (
+            f"model spec {spec!r} names no provider; expected pydantic-ai's "
+            f"'provider:model' form, e.g. 'anthropic:claude-opus-4-8'"
+        )
+        raise ConfigurationError(msg)
+
+    try:
+        infer_provider(provider_name)
+    except UserError as exc:
+        # pydantic-ai's own message names the exact variable to set — the whole
+        # value of asking it rather than keeping a per-vendor table of variable
+        # names outside `models/`, which would go stale silently. Quoted rather
+        # than paraphrased, as the sibling quotes its own.
+        msg = (
+            f"model spec {spec!r} names provider {provider_name!r}, for which this "
+            f"deployment holds no credential: {exc}"
+        )
         raise ConfigurationError(msg) from exc
 
 

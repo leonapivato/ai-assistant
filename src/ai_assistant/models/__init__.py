@@ -16,7 +16,11 @@ needed.
 from __future__ import annotations
 
 from ai_assistant.models.embeddings import HashingEmbedder
-from ai_assistant.models.provider import PydanticAIProvider, ensure_vendor_available
+from ai_assistant.models.provider import (
+    PydanticAIProvider,
+    ensure_credential_available,
+    ensure_vendor_available,
+)
 from ai_assistant.models.retry import RetryingProvider
 from ai_assistant.models.routing import Route, RoutingProvider
 
@@ -26,5 +30,6 @@ __all__ = [
     "RetryingProvider",
     "Route",
     "RoutingProvider",
+    "ensure_credential_available",
     "ensure_vendor_available",
 ]
