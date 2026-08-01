@@ -848,11 +848,19 @@ several of them, without anyone having to notice.
 #### 8c. The declared limit is on the whole payload, not on one value
 
 > **The contract limit is `hub_max_frame_bytes - 512`, applied to the whole
-> serialised **payload** — for a call, the request's argument object as §10
-> encodes it; for a return, the result value as §10 encodes it — measured as the
-> byte length of that payload's canonical UTF-8 JSON encoding, which is pinned
-> below.** Every implementation enforces it, on arguments before dispatch and on
-> results before return.
+> serialised **payload**, measured as the byte length of that payload's canonical
+> UTF-8 JSON encoding, which is pinned below.** There are **three** payload
+> classes and the limit covers all of them: for a call, the request's argument
+> object as §10 encodes it; for a return, the result value as §10 encodes it; and
+> for a failure, the error payload as §10a encodes it. Every implementation
+> enforces it, on arguments before dispatch, on results before return, and on
+> errors before they are sent.
+
+**The error payload is the third class and it is the one with no room to fail**,
+which is why §10a gives it a reduction rule of its own rather than the refusal the
+other two get. An oversized argument or result raises `OversizedValueError` — but
+an oversized *error* has nowhere to raise to, because the thing that would carry
+the refusal is the frame that does not fit. §10a closes that.
 
 **Bounding the payload rather than each value is the correction that makes the
 arithmetic true, and it is worth stating why the per-value form fails.** A
@@ -1217,6 +1225,40 @@ type does not accept, or missing one its constructor requires, fails the same wa
 — closed, rather than raising a half-populated exception whose empty field a
 caller would read as "no ids were unresolved".
 
+**An error payload is bounded like every other, and its overflow has a fixed
+reduction rather than a refusal.** §8c's limit covers the error payload, and
+`UnresolvedEvidenceError.unresolved_ids` is an unbounded tuple — so a refusal
+citing enough unresolved records is a *typed error that cannot be sent*. Answering
+that with `OversizedValueError` is not available and the reason is worth stating:
+the response to a failed error delivery would itself be an error frame, so the
+rule would recurse, and it would mislabel — the value the caller sent was not
+oversized, the diagnosis of it was. So:
+
+> **If an error payload exceeds the limit, `details` is dropped in its entirety
+> and `message` is truncated so the payload fits, and the payload carries the
+> reserved member `reduced: true`.** This is always satisfiable: §8d's floor
+> leaves room for a code, the member names and a non-empty message at the
+> smallest legal `hub_max_frame_bytes`.
+
+**A client that receives `reduced: true` does not reconstruct the declared
+exception.** It raises a transport-level failure naming the code and saying the
+hub's refusal could not be delivered intact. Constructing the typed exception
+anyway is the tempting answer and it is the dangerous one: `unresolved_ids`
+defaults to `()`, so a fabricated `UnresolvedEvidenceError` would tell a caller
+that **nothing** was unresolved at the exact moment that too much was — the
+half-populated exception this section already refuses, arriving through the size
+path instead of the schema path. A caller that loses the typed refusal has lost
+information; a caller handed an inverted one has been misled, and only the second
+is a defect.
+
+**Truncating the message is acceptable where truncating a payload is not**, and
+the distinction is ADR-0073 §4's. Its no-silent-truncation rule protects a
+*citation rendered as evidence* — a warrant a user is judging. An error message is
+a diagnostic string, it is not evidence for anything, and `reduced: true` makes
+the shortening explicit rather than silent. Nothing about the user's data is
+dropped: the ids that would have travelled in `details` are still in the hub's
+own state and its logs.
+
 **`ValueError` is deliberately absent from this vocabulary**, and its absence is a
 property of §9 rather than an omission here. Every `ValueError` the surface
 declares — a malformed page argument, a blank identifier — is refused **locally,
@@ -1335,7 +1377,8 @@ move to `Accepted` triggers nothing.
   suite is the only thing that can hold an implementation to them: the page-size
   default (§3a), pre-`await` materialisation of the filters (§3d), local refusal
   of malformed page arguments and blank identifiers (§3c, §9), the size limit in
-  both directions (§8), the disposition-is-not-the-outcome rule (§7), and an
+  both directions and across all three payload classes with the error payload's
+  reduction (§8, §10a), the disposition-is-not-the-outcome rule (§7), and an
   error type's structured state round-tripping through its own constructor
   (§10a). Each is
   written as a testable sentence for that reason. **Five more are expressed by the
@@ -1477,6 +1520,20 @@ move to `Accepted` triggers nothing.
   class name and the public attributes are the schema, so there is nothing to
   drift; the two structured types are listed as a check on the rule, not as its
   source.
+- **Answer an oversized error payload with `OversizedValueError`, as an oversized
+  argument or result is answered.** Rejected in §10a: the response to a failed
+  error delivery is itself an error frame, so the rule recurses, and it mislabels
+  — what was too large was the diagnosis, not the value the caller sent.
+- **Reconstruct the declared exception from a reduced error payload anyway, so
+  the caller still gets a typed refusal.** Rejected in §10a: `unresolved_ids`
+  defaults to `()`, so the caller would be told nothing was unresolved at the
+  moment too much was. Losing a typed refusal costs information; an inverted one
+  misleads.
+- **Bound `UnresolvedEvidenceError.unresolved_ids` in this ADR so the error
+  always fits.** Rejected: bounding an unbounded citation sequence is #473's
+  question and another lane's, and taking it here to solve a transport problem
+  would decide a memory-contract matter as a side effect. The reduction rule
+  needs no bound and holds whatever that lane decides.
 - **Let a client widen an unrecognised error code to the nearest ancestor it
   knows.** Rejected in §10a: it manufactures a typed refusal the server never
   sent, and ADR-0084 §3's exact version match means an unknown code is a bug
