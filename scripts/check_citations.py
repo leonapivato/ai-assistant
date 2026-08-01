@@ -111,10 +111,20 @@ _DECISION_RE = re.compile(r"\bADR-(\d{4})\b")
 #: **The exclusions are narrow on purpose, and were measured against the corpus
 #: rather than reasoned about.** A parenthesised citation in prose — "the fix
 #: (#123) landed" — stays selected, which is why this names ``](`` instead of
-#: dropping everything inside brackets. A leading ``/`` was tried and reverted:
-#: it reads like a URL fragment and is in fact how the corpus joins citations,
-#: ``#313/#314`` and ``#66/#83/#93``, 14 times.
+#: dropping everything inside brackets.
+#:
+#: A leading ``/`` was tried and reverted. It reads like a URL fragment, and it
+#: is *also* how the corpus joins citations — ``#313/#314``, ``#66/#83/#93``,
+#: 14 occurrences the exclusion silently dropped. The two are separated by
+#: excising the URL rather than by inspecting the character before the ``#``:
+#: ``_URL_RE`` below removes ``https://…/#123`` from the line, and what is left
+#: of ``#313/#314`` is still two citations.
 _TRACKER_RE = re.compile(r"(?<![\w#])(?<!\]\()#(\d{1,6})(?![\w#])")
+
+#: A URL, blanked out of a line before tracker citations are read from it. A
+#: ``#NNN`` inside one is a fragment identifier, and on Tier 1 mistaking one for
+#: an issue number fails a change over an anchor.
+_URL_RE = re.compile(r"<?\b[a-z][a-z0-9+.-]*://[^\s<>()\[\]]*>?", re.IGNORECASE)
 
 #: An inline code span. Longest run of backticks first, so ``` ``a `b` c`` ```
 #: is read as one span rather than two. Spans do not cross a line here: a
@@ -454,7 +464,11 @@ def extract_citations(path: str, text: str, top_names: frozenset[str]) -> list[C
     for lineno, line in iter_prose_lines(text):
         for match in _DECISION_RE.finditer(line):
             found.append(Citation("decision", match.group(0), path, lineno))
-        for match in _TRACKER_RE.finditer(line):
+        # A URL is excised before trackers are read, so its fragment is not an
+        # issue number. Blanked to the same width rather than removed, so a
+        # citation elsewhere on the line is unaffected.
+        outside_urls = _URL_RE.sub(lambda m: " " * len(m.group(0)), line)
+        for match in _TRACKER_RE.finditer(outside_urls):
             found.append(Citation("tracker", match.group(0), path, lineno))
         for content in _iter_code_spans(line):
             classified = classify_code_span(content, top_names)
