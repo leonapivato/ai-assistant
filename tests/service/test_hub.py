@@ -185,7 +185,7 @@ async def test_the_data_directory_is_created_and_handed_to_the_composition_root(
 
     assert code == EXIT_OK
     assert settings.data_dir.is_dir()
-    assert wired["build"] == [settings.data_dir.expanduser().resolve()]
+    assert wired["build"] == [settings.data_dir]
 
 
 async def test_the_lock_is_held_before_any_store_is_opened(
@@ -254,7 +254,7 @@ async def test_the_readiness_event_names_the_pid_the_directory_and_the_job_set(
 
     ready = _only(captured, "hub_ready")
     assert ready["pid"] == os.getpid()
-    assert ready["data_dir"] == str(settings.data_dir.expanduser().resolve())
+    assert ready["data_dir"] == str(settings.data_dir)
     assert ready["jobs"] == []
 
 
@@ -340,7 +340,7 @@ async def test_the_engine_is_closed_and_the_lock_released_on_a_clean_stop(
     code = await hub.serve(settings)
 
     assert (code, engine.closed) == (EXIT_OK, 1)
-    successor = InstanceLock(settings.data_dir.expanduser().resolve() / LOCK_FILENAME)
+    successor = InstanceLock(settings.data_dir / LOCK_FILENAME)
     assert successor.acquire()
     successor.release()
 
@@ -383,7 +383,7 @@ async def test_a_contended_lock_is_restartable_and_opens_no_store(
     can outlast any retry window, and refusing to restart there leaves **no** hub
     running after the outgoing one exits cleanly, with nothing wrong to fix.
     """
-    data_dir = settings.data_dir.expanduser().resolve()
+    data_dir = settings.data_dir
     data_dir.mkdir(parents=True)
     holder = InstanceLock(data_dir / LOCK_FILENAME)
     assert holder.acquire()
@@ -401,7 +401,7 @@ async def test_the_contention_diagnostic_names_the_directory_and_the_lock(
     settings: Settings, wired: dict[str, list[Any]]
 ) -> None:
     """§1 requires both, and requires the pid to be a hint rather than a promise."""
-    data_dir = settings.data_dir.expanduser().resolve()
+    data_dir = settings.data_dir
     data_dir.mkdir(parents=True)
     holder = InstanceLock(data_dir / LOCK_FILENAME)
     assert holder.acquire()
@@ -529,7 +529,7 @@ async def test_the_lock_is_released_when_startup_fails(
 
     await hub.serve(settings)
 
-    successor = InstanceLock(settings.data_dir.expanduser().resolve() / LOCK_FILENAME)
+    successor = InstanceLock(settings.data_dir / LOCK_FILENAME)
     assert successor.acquire()
     successor.release()
 
@@ -556,6 +556,33 @@ async def test_an_unwritable_data_directory_stays_down(
 
     assert code == EXIT_DEPLOYMENT
     assert wired["build"] == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root satisfies every ownership check")
+async def test_a_world_writable_data_directory_stays_down_before_the_lock(
+    settings: Settings, tmp_path: Path, wired: dict[str, list[Any]]
+) -> None:
+    """ADR-0084 §1's directory conditions, wired into step 2 and exiting 78.
+
+    Order is the substance: the refusal has to land **before** the lock is taken
+    and before any store is opened, because both of those create files in the
+    directory whose safety is in question. A hub that validated afterwards would
+    have written the lock — and, later, the socket — into a directory another
+    local user can replace entries in.
+    """
+    exposed = tmp_path / "exposed"
+    exposed.mkdir()
+    exposed.chmod(0o777)
+    unsafe = Settings(data_dir=exposed)
+
+    try:
+        code = await hub.serve(unsafe)
+    finally:
+        exposed.chmod(0o700)
+
+    assert code == EXIT_DEPLOYMENT
+    assert wired["build"] == []
+    assert not (exposed / LOCK_FILENAME).exists()
 
 
 async def test_a_transient_filesystem_fault_still_comes_back(
