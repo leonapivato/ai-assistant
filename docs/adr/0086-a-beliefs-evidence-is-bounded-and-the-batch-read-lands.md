@@ -359,15 +359,32 @@ their data was lost when it was not.
 **What follows for the surfaces**, decided here rather than left to be
 discovered:
 
-- **The citation count ADR-0073 §4 requires is conveyed as a floor plus a
-  ceiling** — `len(evidence)` citations are shown, and *up to* `evidence_elided`
-  further episodes have supported this belief and are no longer carried.
-  Reporting only the retained tuple's length would make the bound understate a
-  belief's support — the same dishonesty as a silent drop, arriving from the
-  other direction. Reporting `len(evidence) + evidence_elided` as an exact
-  *total* would overstate it in the two collision cases above, which is the same
-  dishonesty in the first direction. A floor plus an explicit ceiling is the
-  honest shape and is what the surface conveys.
+- **The record carries it, and `export` carries it out.** This is the obligation
+  this ADR sets, and it is deliberately set on the *record* rather than on the
+  inspection DTOs. `MemoryStore.export` returns `MemoryRecord`s whole (ADR-0007
+  §3), so a user's own data as held includes how many citations the bound
+  displaced. That is what makes the truncation non-silent, which is all
+  ADR-0073 §4 and ADR-0084 §4 require of it.
+- **Where a count *is* rendered, the honest shape is a floor plus a ceiling** —
+  `len(evidence)` citations shown, and *up to* `evidence_elided` further episodes
+  supported this belief and are no longer carried. Reporting only the retained
+  tuple's length understates the support; reporting `len(evidence) +
+  evidence_elided` as an exact *total* overstates it in the two collision cases
+  above. Neither end is available, so the shape is a floor with an explicit
+  ceiling.
+- **And as the promoted surface stands, that count does not reach the inspection
+  DTOs at all — stated rather than assumed away.** ADR-0085 §4a ratified
+  `BeliefSummary` with `evidence_count` and `lost_evidence` as fields and `Belief`
+  "unchanged … its counts stay derived" from the resolved tuple. Neither type has
+  anywhere to put an elision, so a renderer holding either cannot distinguish 64
+  citations with nothing displaced from 64 with a thousand displaced. **Whether
+  they should grow a field is ADR-0085's to decide, not this ADR's** — the DTOs
+  are its contract surface, and reaching into them from here is the widening §7
+  already declined once. It is filed as **#568**, and the precedent is good: #552
+  was filed from this lane on exactly this boundary and ADR-0085 §4a is the answer
+  that came back. Until it is taken, the disclosure lives on the record and in `export`, and
+  no surface misreports — it is silent about a quantity it does not hold, which is
+  a gap in reach, not a false statement.
 - **Presented confidence does not move.** ADR-0077 §6's degradation is a function
   of the stored confidence and how many citations still *resolve*; an elided
   citation is not unresolved, and the belief did not lose support — the record
@@ -582,8 +599,26 @@ and the hand-off is recorded from both sides.
 "each removes one factor of the same product". That independence is what makes the
 pair sound: this ADR was ratified after ADR-0085 and could have leaned on it;
 ADR-0085 was written while this one was `Proposed` and correctly refused to lean
-on an unratified ADR. Both stand alone, and together the product `beliefs ×
-citations × content` has no unbounded factor left.
+on an unratified ADR. Both stand alone.
+
+**What that does *not* mean, and the over-claim is worth refusing explicitly:
+`content` is still unbounded, and the two gates do not add up to a bounded
+payload.** Of the product `beliefs × citations × content`, ADR-0085 §4a removed
+the first factor and §1 bounds the second. **The third has no contract bound and
+this ADR does not give it one.** A belief citing a single 20 MiB episode carries
+one citation, satisfies §1 with 63 to spare, and still produces a `Belief` that
+ADR-0085 §8c refuses. The 256 KiB in the table above is the threshold at which
+that refusal fires — it is a property of the limit, not a constraint anything
+enforces on an episode.
+
+**What is eliminated is *growth*, which is the whole of what #473 and ADR-0084 §4
+asked for.** The failure mode they name is a belief that becomes unreadable
+because the system worked correctly on it for long enough; that is now impossible,
+because the only factor that grew with time is capped. A belief that is oversized
+because one cited episode is enormous is a different fact: it is not monotone in
+time, it does not arrive by accumulation, and it already has a declared answer —
+ADR-0085 §8e's `OversizedValueError` naming `Belief.evidence`, "a sentence a user
+can read and act on". That residual is retained here, not closed.
 
 ### 8. What the implementing lane owes
 
@@ -615,9 +650,11 @@ The triad and its consumers, in the order golden rule 5 fixes.
      `REINFORCE` whose union would exceed it retains the **last**
      `MAX_EVIDENCE_CITATIONS` of the deduplicated union and increments
      `evidence_elided` by exactly the number displaced; a `REINFORCE` whose union
-     fits retains both records' evidence unchanged and leaves `evidence_elided`
-     alone; a `SUPERSEDE` carries neither the target's evidence nor its elision
-     count. **Both collision cases §4 names are exercised** — folding two records
+     **fits** retains both records' evidence unchanged and still applies §4's
+     recurrence with **zero** displacement — so it stores
+     `target.evidence_elided + incoming.evidence_elided`, which is not the
+     target's value whenever the incoming record carries one of its own; a
+     `SUPERSEDE` carries neither the target's evidence nor its elision count. **Both collision cases §4 names are exercised** — folding two records
      that each already elided the same episode, and re-citing an episode a record
      previously displaced — pinning the recurrence as stated, so the suite
      asserts the count it defines rather than an exactness the field does not
@@ -687,8 +724,12 @@ The triad and its consumers, in the order golden rule 5 fixes.
   `lost_evidence` as fields and no `evidence` field at all. Recorded here because
   §7's arithmetic depends on it and a reader should not have to rediscover which
   ADR closed which factor.
-- **The exact rendering of an elision.** §4 fixes what is conveyed — the total
-  count, the showable count, and that the difference is capacity rather than loss
+- **Whether the inspection DTOs grow a field for the elision**, and its
+  rendering. §4, filed as **#568**. `Belief` and `BeliefSummary` are ADR-0085's
+  contract surface and neither can carry the count today; the disclosure lives on
+  the record and in `export` until that lane rules. §4 fixes what would be
+  conveyed — the showable count, the ceiling on what is not, and that the
+  difference is capacity rather than loss
   — and leaves the words to the surface, exactly as ADR-0077 §6 left the
   tombstone's.
 - **Whether an evidence tuple should be *pruned* by relevance or age rather than
@@ -810,12 +851,17 @@ than changing a past one" and which must stay trivial for exactly that reason.
 - **The unreadable-by-accumulation belief becomes unreachable by contract.** A
   belief's citation count can no longer grow, at all, however long the system
   runs.
-- **ADR-0084 §4's prerequisite is discharged, by this ADR and ADR-0085 §4a
-  together.** Its second gate — a `beliefs()` page carrying the content of every
-  citation of every belief on it — closed when ADR-0085 §4a gave the listing
-  `BeliefSummary`, out of **#552** filed from this lane. Neither ADR leans on the
-  other (ADR-0085 §8f); each removed one factor of `beliefs × citations ×
-  content`, and no unbounded factor is left. The client lane's gate is clear.
+- **ADR-0084 §4's prerequisite — a belief made unreadable by *growth* — is
+  discharged, by this ADR and ADR-0085 §4a together.** Its second gate, a
+  `beliefs()` page carrying the content of every citation of every belief on it,
+  closed when ADR-0085 §4a gave the listing `BeliefSummary`, out of **#552** filed
+  from this lane. Neither ADR leans on the other (ADR-0085 §8f); each removed one
+  factor of `beliefs × citations × content`.
+- **`content` stays unbounded, and the residual is retained rather than closed.**
+  One enormous cited episode still produces an oversized result, refused by
+  ADR-0085 §8c as §8e's `OversizedValueError`. That failure is not reached by
+  accumulation and is not what #473 was about, but a reader should not take §7 for
+  a proof that every `Belief` fits.
 - **A belief's warrant stops being a function of how long the system has run.**
   Sixty-four citations is what any belief can show, and the count of what it
   cannot show is on the record.
