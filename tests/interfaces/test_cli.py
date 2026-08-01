@@ -25,49 +25,50 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     ActionPlan,
-    BeliefBand,
-    CostBasis,
-    DataTier,
-    FeedbackEvent,
-    FeedbackKind,
-    Idempotency,
-    MemoryKind,
-    MemorySource,
-    PlanStep,
-    Reversibility,
-    RiskLevel,
-    ToolCost,
-    ToolDefinition,
-)
-from ai_assistant.interfaces import cli
-from ai_assistant.orchestration import (
     AnswerKind,
     AnswerOutcome,
     Belief,
+    BeliefBand,
+    BeliefSummary,
     Confirmation,
     ContinuationToken,
-    ConversationLifecycle,
+    CostBasis,
+    DataTier,
     Disposition,
-    Engine,
     Evidence,
+    FeedbackEvent,
+    FeedbackKind,
+    Idempotency,
     IngestSummary,
     LearnDecision,
-    LearningLoop,
     LearnOutcome,
-    MemoryWriteStage,
+    MemoryKind,
+    MemorySource,
     ObservationReport,
-    ObservationStage,
     ObservedProposal,
+    PlanStep,
     Question,
-    QuestionStage,
     QuestionState,
     QueuedQuestion,
     QueueOutcome,
     Retirement,
+    Reversibility,
+    RiskLevel,
+    SuccessorLink,
+    ToolCost,
+    ToolDefinition,
+    TurnOutcome,
+)
+from ai_assistant.interfaces import cli
+from ai_assistant.orchestration import (
+    ConversationLifecycle,
+    Engine,
+    LearningLoop,
+    MemoryWriteStage,
+    ObservationStage,
+    QuestionStage,
     StepExecutor,
     StepRunner,
-    SuccessorLink,
-    TurnOutcome,
 )
 from ai_assistant.testing import (
     FakeActionPolicy,
@@ -239,7 +240,7 @@ def test_confirmation_render_neutralises_control_sequences_and_markup(output: St
         tool_description="Send an email.",
         parameters={"body": "wipe\x1b[2Jscreen and [red]shout[/red]"},
         reason="this discloses data off-device",
-        token=ContinuationToken("tok"),
+        token=ContinuationToken(handle="tok"),
     )
     cli._render_confirmation(confirmation)
     rendered = output.getvalue()
@@ -625,8 +626,14 @@ def test_render_learn_lists_each_ruling_with_its_reason(output: StringIO) -> Non
     """Each proposal renders a one-line confirmation naming the ruling and its reason."""
     outcome = LearnOutcome(
         results=(
-            IngestSummary(LearnDecision.REINFORCED, "r1", "matches an existing memory"),
-            IngestSummary(LearnDecision.SUPERSEDED, "r2", "overturns a prior belief"),
+            IngestSummary(
+                decision=LearnDecision.REINFORCED,
+                record_id="r1",
+                reason="matches an existing memory",
+            ),
+            IngestSummary(
+                decision=LearnDecision.SUPERSEDED, record_id="r2", reason="overturns a prior belief"
+            ),
         )
     )
     cli._render_learn(outcome)
@@ -662,9 +669,9 @@ def test_render_learn_points_a_queued_deferral_at_the_question_it_parked(
     outcome = LearnOutcome(
         results=(
             IngestSummary(
-                LearnDecision.DEFERRED,
-                None,
-                "conflicts with a prior assertion",
+                decision=LearnDecision.DEFERRED,
+                record_id=None,
+                reason="conflicts with a prior assertion",
                 queued=QueuedQuestion(
                     outcome=QueueOutcome.QUEUED,
                     question_id="q-7",
@@ -697,9 +704,9 @@ def test_render_learn_keeps_the_non_answerable_line_for_a_secret_tier_deferral(
     outcome = LearnOutcome(
         results=(
             IngestSummary(
-                LearnDecision.DEFERRED,
-                None,
-                "secret-tier data requires explicit user confirmation",
+                decision=LearnDecision.DEFERRED,
+                record_id=None,
+                reason="secret-tier data requires explicit user confirmation",
                 queued=QueuedQuestion(outcome=QueueOutcome.NOT_QUEUABLE),
             ),
         )
@@ -732,9 +739,9 @@ def test_render_learn_says_which_question_stands_in_the_way_and_in_what_state(
     outcome = LearnOutcome(
         results=(
             IngestSummary(
-                LearnDecision.DEFERRED,
-                None,
-                "conflicts with a prior assertion",
+                decision=LearnDecision.DEFERRED,
+                record_id=None,
+                reason="conflicts with a prior assertion",
                 queued=QueuedQuestion(
                     outcome=QueueOutcome.ALREADY_ASKED,
                     question_id="q-3",
@@ -762,9 +769,9 @@ def test_render_learn_reports_a_full_queue_rather_than_saying_nothing(
     outcome = LearnOutcome(
         results=(
             IngestSummary(
-                LearnDecision.DEFERRED,
-                None,
-                "conflicts with a prior assertion",
+                decision=LearnDecision.DEFERRED,
+                record_id=None,
+                reason="conflicts with a prior assertion",
                 queued=QueuedQuestion(outcome=QueueOutcome.QUEUE_FULL),
             ),
         )
@@ -778,7 +785,13 @@ def test_render_learn_reports_a_full_queue_rather_than_saying_nothing(
 def test_render_learn_neutralises_a_reason_for_the_terminal(output: StringIO) -> None:
     """A reason carrying control bytes or markup is neutralised on render (§4)."""
     outcome = LearnOutcome(
-        results=(IngestSummary(LearnDecision.STORED, "r1", "wipe\x1b[2J and [red]shout[/red]"),)
+        results=(
+            IngestSummary(
+                decision=LearnDecision.STORED,
+                record_id="r1",
+                reason="wipe\x1b[2J and [red]shout[/red]",
+            ),
+        )
     )
     cli._render_learn(outcome)
     rendered = output.getvalue()
@@ -826,6 +839,35 @@ def _belief(  # noqa: PLR0913 — one knob per field a Belief carries; that is t
         content=content,
         confidence=confidence,
         evidence=evidence,
+        last_updated=AT,
+        valid_until=valid_until,
+    )
+
+
+def _summary(  # noqa: PLR0913 — one knob per field a BeliefSummary carries; that is the point
+    band: BeliefBand = BeliefBand.ASSERTED,
+    *,
+    belief_id: str = "rec-1",
+    content: str = "the office is in Boston",
+    confidence: float = 1.0,
+    evidence_count: int = 0,
+    lost_evidence: int = 0,
+    valid_until: datetime | None = None,
+) -> BeliefSummary:
+    """One listing row, as the façade hands it to the adapter (ADR-0085 §4a).
+
+    The counts are **fields** here rather than derived, because the listing type
+    carries no citations to derive them from — which is what makes it impossible
+    for a page to ship an episode's text.
+    """
+    return BeliefSummary(
+        id=belief_id,
+        band=band,
+        kind=MemoryKind.SEMANTIC,
+        content=content,
+        confidence=confidence,
+        evidence_count=evidence_count,
+        lost_evidence=lost_evidence,
         last_updated=AT,
         valid_until=valid_until,
     )
@@ -954,7 +996,7 @@ def test_render_beliefs_offers_the_next_page_without_claiming_a_total(
     output: StringIO,
 ) -> None:
     """A full page names the offset that would fetch the next; no count is shown (§7)."""
-    cli._render_beliefs((_belief(belief_id="a"), _belief(belief_id="b")), limit=2, offset=4)
+    cli._render_beliefs((_summary(belief_id="a"), _summary(belief_id="b")), limit=2, offset=4)
     rendered = _flat(output.getvalue())
     assert "--offset 6" in rendered
     assert "there may be more" in rendered
@@ -962,7 +1004,7 @@ def test_render_beliefs_offers_the_next_page_without_claiming_a_total(
 
 def test_render_beliefs_does_not_offer_a_next_page_for_a_short_one(output: StringIO) -> None:
     """A page shorter than the limit is the end of the enumeration."""
-    cli._render_beliefs((_belief(),), limit=50, offset=0)
+    cli._render_beliefs((_summary(),), limit=50, offset=0)
     assert "--offset" not in output.getvalue()
 
 
@@ -1801,8 +1843,8 @@ def test_the_listing_reports_lost_support_as_a_count_and_a_lowered_confidence(
     Printing every citation for a fifty-belief page would bury the listing; what the
     user needs there is that support has gone and that the confidence reflects it.
     """
-    cli._render_belief(
-        _belief(BeliefBand.DERIVED, confidence=0.35, evidence=(_cited("they said so")[0], _GONE))
+    cli._render_belief_summary(
+        _summary(BeliefBand.DERIVED, confidence=0.35, evidence_count=2, lost_evidence=1)
     )
     rendered = _flat(output.getvalue())
     assert "2 piece(s) of evidence" in rendered
@@ -1825,8 +1867,7 @@ def test_the_single_belief_view_shows_surviving_evidence_and_tombstones_the_rest
             BeliefBand.DERIVED,
             confidence=0.35,
             evidence=(_cited("they asked for metric units")[0], _GONE),
-        ),
-        evidence=True,
+        )
     )
     rendered = _flat(output.getvalue())
     assert "they asked for metric units" in rendered
@@ -1892,7 +1933,11 @@ async def test_an_observed_belief_reads_back_with_the_episodes_behind_it(
         assert page[0].lost_evidence == 0
         assert page[0].unsupported is False
 
-        cli._render_belief(page[0], evidence=True)
+        # The listing carries no citations at all (ADR-0085 §4a), so the warrant
+        # comes from the single-belief view — which is the split being exercised.
+        detail = await engine.belief(page[0].id)
+        assert detail is not None
+        cli._render_belief(detail)
     finally:
         await engine.aclose()
 

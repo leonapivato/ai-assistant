@@ -25,21 +25,32 @@ capability, has an ``ActionPolicy`` rule on it, records the
 audit trail's own copy of that decision — or disposes of the step without
 running it, saying durably why.
 
-``Engine`` is the concrete façade an interface adapter drives (ADR-0042 §1): it
-composes the stage objects behind ``converse``, ``resume`` and ``aclose``, and
-returns its own ``orchestration``-level result DTOs — ``TurnOutcome``,
-``StepOutcome``, ``Confirmation`` — plus an opaque ``ContinuationToken``. It is a
-concrete class, deliberately **not** a ``core`` Protocol.
+``Engine`` is the concrete class that **satisfies** ``core.protocols``'s
+``AssistantEngine`` (ADR-0084 §5, ADR-0085 §1). ADR-0042 §1 declined a Protocol
+because there was one engine and one class of consumer, and named its own revisit
+trigger — a second implementation; a client satisfying the same surface over a
+local transport is that implementation, so the surface is now a contract and the
+twenty-four result types it names live in ``core.types``. Import them from there:
+this package exports the engine, the stages, and its own internal DTOs, and no
+longer re-exports a promoted type under a second name.
 
-The façade also carries the **belief inspection surface** (ADR-0073 §7):
-``beliefs`` enumerates what the assistant holds, ``belief`` reads the one a
-deletion is about to destroy, and ``forget`` destroys it — each returning or
-naming a ``Belief``, the ``orchestration`` DTO in which a record's *band* is
-computed, once, before any adapter sees it. Its citations are resolved **lazily,
-here**, into readable ``Evidence`` or an explicit tombstone, and its stated
-confidence is the one lost support has already lowered
-(``presented_confidence``) — never the stored number, which nothing on this path
-ever writes (ADR-0077 §6).
+``Engine`` keeps ``start()`` and ``aclose()``, which are deliberately **not** on
+the Protocol (ADR-0083 §8): lifecycle belongs to the concrete object the
+composition root builds, and a client that could call ``aclose()`` could shut down
+the hub from a spoke. A Protocol constrains what an implementation must have, not
+what it may not, so the class stays substitutable with both.
+
+The façade carries the **belief inspection surface** (ADR-0073 §7): ``beliefs``
+enumerates what the assistant holds as ``BeliefSummary`` — counts, never citation
+contents (ADR-0085 §4a) — ``belief`` reads the one a deletion is about to destroy
+as a ``Belief`` with its citations resolved, and ``forget`` destroys it. Both
+projections apply ``band_of`` here, once, before any adapter sees a record
+(``belief_from_record``, ``belief_summary_from_record``), and both state the
+confidence lost support has already lowered (``presented_confidence``) rather than
+the stored number, which nothing on this path ever writes (ADR-0077 §6).
+
+``payloads`` holds the surface's payload rules: ADR-0087's canonical encoding, and
+the contract limit ADR-0084 §4 makes every implementation enforce.
 
 ``ConversationLifecycle`` is the **capture/lifecycle stage** (ADR-0074 §9): the
 one layer holding both durable stores, and therefore the owner of every sequence
@@ -74,81 +85,62 @@ never have been its job (ADR-0077 §1).
 from ai_assistant.orchestration.conversations import (
     AssembledHistory,
     CaptureReport,
-    ConversationDigest,
     ConversationLifecycle,
     DataExport,
 )
 from ai_assistant.orchestration.engine import (
-    Belief,
-    Confirmation,
-    ContinuationToken,
-    ConversationSummary,
     Engine,
-    Evidence,
-    IngestSummary,
-    LearnDecision,
-    LearnOutcome,
-    QueuedQuestion,
-    QueueOutcome,
-    StepOutcome,
-    TurnOutcome,
+    belief_from_record,
+    belief_summary_from_record,
+    conversation_summary,
+    learn_decision,
+    learn_outcome,
     presented_confidence,
+    queued_question,
 )
 from ai_assistant.orchestration.executor import StepExecutor
-from ai_assistant.orchestration.loop import LearningLoop, TurnResult
+from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.observation import (
-    ObservationReport,
     ObservationStage,
-    ObservedProposal,
+    observed_ruled,
+    observed_unsupported,
 )
-from ai_assistant.orchestration.questions import (
-    AnswerKind,
-    AnswerOutcome,
-    Question,
-    QuestionStage,
-    QuestionState,
-    Retirement,
-    SuccessorLink,
+from ai_assistant.orchestration.payloads import (
+    DEFAULT_MAX_PAYLOAD_BYTES,
+    ENVELOPE_RESERVE_BYTES,
+    MIN_FRAME_BYTES,
+    canonical_payload,
 )
-from ai_assistant.orchestration.runner import Disposition, StepDisposition, StepRunner
+from ai_assistant.orchestration.questions import QuestionStage, question_state
+from ai_assistant.orchestration.runner import StepDisposition, StepRunner
 from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
 
 __all__ = [
-    "AnswerKind",
-    "AnswerOutcome",
+    "DEFAULT_MAX_PAYLOAD_BYTES",
+    "ENVELOPE_RESERVE_BYTES",
+    "MIN_FRAME_BYTES",
     "AssembledHistory",
-    "Belief",
     "CaptureReport",
-    "Confirmation",
-    "ContinuationToken",
-    "ConversationDigest",
     "ConversationLifecycle",
-    "ConversationSummary",
     "DataExport",
-    "Disposition",
     "Engine",
-    "Evidence",
-    "IngestSummary",
-    "LearnDecision",
-    "LearnOutcome",
     "LearningLoop",
     "MemoryWriteStage",
-    "ObservationReport",
     "ObservationStage",
-    "ObservedProposal",
-    "Question",
     "QuestionStage",
-    "QuestionState",
-    "QueueOutcome",
-    "QueuedQuestion",
-    "Retirement",
     "StepDisposition",
     "StepExecutor",
-    "StepOutcome",
     "StepRunner",
-    "SuccessorLink",
-    "TurnOutcome",
-    "TurnResult",
     "WriteOutcome",
+    "belief_from_record",
+    "belief_summary_from_record",
+    "canonical_payload",
+    "conversation_summary",
+    "learn_decision",
+    "learn_outcome",
+    "observed_ruled",
+    "observed_unsupported",
     "presented_confidence",
+    "question_state",
+    "queued_question",
 ]

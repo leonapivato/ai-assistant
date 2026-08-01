@@ -67,11 +67,14 @@ from ai_assistant.app import build_engine
 from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import AssistantError
 from ai_assistant.core.logging import configure_logging
-from ai_assistant.core.types import BeliefBand, FeedbackEvent, FeedbackKind, MemoryKind
-from ai_assistant.orchestration import (
+from ai_assistant.core.types import (
     AnswerKind,
+    BeliefBand,
     Disposition,
+    FeedbackEvent,
+    FeedbackKind,
     LearnDecision,
+    MemoryKind,
     QuestionState,
     QueueOutcome,
 )
@@ -79,13 +82,13 @@ from ai_assistant.orchestration import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ai_assistant.orchestration import (
+    from ai_assistant.core.types import (
         AnswerOutcome,
         Belief,
+        BeliefSummary,
         Confirmation,
         ConversationDigest,
         ConversationSummary,
-        Engine,
         IngestSummary,
         LearnOutcome,
         ObservationReport,
@@ -94,6 +97,7 @@ if TYPE_CHECKING:
         QueuedQuestion,
         TurnOutcome,
     )
+    from ai_assistant.orchestration import Engine
 
 app = typer.Typer(
     name="assistant",
@@ -1150,7 +1154,7 @@ async def _drive_observe(engine: Engine, conversation_id: str | None) -> int:
     mapped to a non-zero exit code.
     """
     try:
-        report = await engine.observe(conversation_id)
+        report = await engine.observe(conversation_id=conversation_id)
     except AssistantError as exc:
         _render_error(exc)
         return _EXIT_ERROR
@@ -1906,7 +1910,7 @@ def _when(instant: datetime) -> str:
     return instant.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
-def _why(belief: Belief) -> str:
+def _why(belief: Belief | BeliefSummary) -> str:
     """Why this belief is held — band-dependent (ADR-0073 §4).
 
     Total over :class:`~ai_assistant.core.types.BeliefBand` and mechanically so: the
@@ -1984,8 +1988,32 @@ def _forget_warning(band: BeliefBand) -> str:
             assert_never(band)
 
 
-def _render_belief(belief: Belief, *, evidence: bool = False) -> None:
-    """Render one belief with everything ADR-0073 §4 requires it to convey.
+def _render_belief_summary(summary: BeliefSummary) -> None:
+    """Render one row of the **listing** (ADR-0077 §6, ADR-0085 §4a).
+
+    The listing "resolves *existence* and renders the count, the lost count, and the
+    adjusted confidence"; the citations themselves belong to the single-belief view.
+    The split used to be a ``evidence=False`` argument this module chose to pass —
+    now it is the *type*: a :class:`~ai_assistant.core.types.BeliefSummary` carries
+    no citations, so this renderer could not print one if it tried, and the engine
+    could not have shipped one for it to print.
+    """
+    _render_belief_fields(summary)
+
+
+def _render_belief(belief: Belief) -> None:
+    """Render the **single-belief** view: the same fields, plus the warrant.
+
+    Printing every citation for a fifty-belief page would bury the listing it is
+    part of; printing none of them where the user is about to destroy the belief
+    would hide the warrant they are judging.
+    """
+    _render_belief_fields(belief)
+    _render_evidence(belief)
+
+
+def _render_belief_fields(belief: Belief | BeliefSummary) -> None:
+    """Render what ADR-0073 §4 requires **both** views to convey.
 
     The band leads the row and is never left to be implied by position; confidence,
     kind, the canonical content, why it is held, when the assistant last revised it
@@ -1998,17 +2026,12 @@ def _render_belief(belief: Belief, *, evidence: bool = False) -> None:
     number is not carried here at all, which is what stops two surfaces quoting
     different figures for one belief.
 
-    ``evidence`` selects ADR-0077 §6's split between the two views. The **listing**
-    resolves existence and renders the counts and the adjusted confidence — the
-    ``Why`` line carries both — while the **single-belief view** renders the
-    surviving citations as readable evidence and the lost ones as tombstones.
-    Printing every citation for a fifty-belief page would bury the listing it is part
-    of; printing none of them where the user is about to destroy the belief would
-    hide the warrant they are judging.
+    The ``Why`` line reads only the counts, which both types carry — which is why
+    the two views share this renderer rather than one of them needing its own.
 
-    Engine-supplied text — the content, the id, a citation's content — is neutralised
-    for this terminal like any other (``_safe``, ADR-0042 §4). The band and kind are
-    this system's own closed vocabularies, not carried data.
+    Engine-supplied text — the content and the id — is neutralised for this
+    terminal like any other (``_safe``, ADR-0042 §4). The band and kind are this
+    system's own closed vocabularies, not carried data.
     """
     console.print(
         f"\n  [bold cyan]{belief.band.value}[/] · {belief.kind.value} · "
@@ -2016,8 +2039,6 @@ def _render_belief(belief: Belief, *, evidence: bool = False) -> None:
     )
     console.print(f"  {_safe(belief.content)}")
     console.print(f"  [dim]Why:[/] {_why(belief)}")
-    if evidence:
-        _render_evidence(belief)
     console.print(f"  [dim]Last revised:[/] {_when(belief.last_updated)}")
     if belief.valid_until is not None:
         console.print(f"  [dim]Believed until:[/] {_when(belief.valid_until)}")
@@ -2044,7 +2065,7 @@ def _render_evidence(belief: Belief) -> None:
             console.print(f"    - {_safe(item.content)}")
 
 
-def _render_beliefs(page: tuple[Belief, ...], *, limit: int, offset: int) -> None:
+def _render_beliefs(page: tuple[BeliefSummary, ...], *, limit: int, offset: int) -> None:
     """Render one page of beliefs (ADR-0073 §7).
 
     **No total is shown**, and none is available to show: "is there more" is answered
@@ -2055,8 +2076,8 @@ def _render_beliefs(page: tuple[Belief, ...], *, limit: int, offset: int) -> Non
         console.print("[dim]No live belief matches.[/]")
         return
     console.print(f"[bold]{len(page)} belief(s)[/], most recently revised first.")
-    for belief in page:
-        _render_belief(belief)
+    for summary in page:
+        _render_belief_summary(summary)
     if limit and len(page) == limit:
         console.print(
             f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]"
@@ -2079,7 +2100,7 @@ def _render_forget_prompt(belief: Belief) -> None:
        offering both a correction and a deletion owes (ADR-0073 §6).
     """
     console.print("\n[bold yellow]About to forget this belief[/]")
-    _render_belief(belief, evidence=True)
+    _render_belief(belief)
     console.print(f"\n  [yellow]{_forget_warning(belief.band)}[/]")
     console.print(
         "  This destroys the record: nothing of it is kept, not even in an export. "

@@ -23,6 +23,7 @@ from ai_assistant.core.types import (
     ActionPlan,
     CostBasis,
     DataTier,
+    Disposition,
     Idempotency,
     PlanStep,
     Reversibility,
@@ -34,7 +35,6 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration import (
     ConversationLifecycle,
-    Disposition,
     Engine,
     MemoryWriteStage,
     ObservationStage,

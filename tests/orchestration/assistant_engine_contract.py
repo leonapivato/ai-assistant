@@ -1,0 +1,521 @@
+"""Shared conformance suite for the AssistantEngine Protocol.
+
+Every ``AssistantEngine`` implementation must pass this suite (CONTRIBUTING,
+"Protocol conformance suites"). A concrete test subclasses
+:class:`AssistantEngineContract` and overrides the two fixtures.
+
+**This suite is why the Protocol is worth having.** ADR-0084 §4 promotes the
+engine surface so that a client over a transport and the in-process engine are
+substitutable, and it names six clauses that *no type expresses* — ADR-0085's
+Consequences list them. Every one of them is a way two implementations could
+answer the same call differently while both looking correct, so each is asserted
+here rather than left to each implementation's own tests:
+
+1. **The page-size default is normative** (§3a). A default in a ``Protocol``
+   signature binds nobody; a client defaulting to 100 against an engine defaulting
+   to 50 returns a different page for one call.
+2. **Every identifier argument is validated *and normalised* before any I/O**
+   (§3c). The normalisation is the load-bearing half: without it ``belief(" x ")``
+   answers ``None`` in-process and finds the record over a wire client that
+   deserialises through ``Identifier``.
+3. **The two filters are materialised before the first ``await``** (§3d).
+4. **A malformed page argument and a blank identifier are refused locally** (§9),
+   so neither implementation is silently more permissive.
+5. **The size limit is enforced in both directions** (§8c) — an oversized result
+   coming back is refused exactly as an oversized argument going in.
+6. **An error type's structured state round-trips through its own constructor**
+   (§10a), with ``details_elided`` marking a reconstruction that lost it.
+
+Two shapes the *types* enforce are asserted too, because a suite that only tested
+prose would leave a reader unsure whether the guarantee exists: the listing
+returns :class:`~ai_assistant.core.types.BeliefSummary` and therefore cannot ship
+a citation's content (§4a), and every enumeration returns a tuple (§3b).
+
+**Lifecycle is deliberately not asserted.** ``start`` and ``aclose`` are not on
+the Protocol (ADR-0084 §5, ADR-0083 §8) — a client that could call ``aclose()``
+could shut down the hub from a spoke — so an implementation without a lifecycle
+conforms, and this suite must never reach for one.
+
+**``RuntimeError`` on a shutting-down engine is likewise not required** (ADR-0085
+§1): it is a property of one object's lifecycle rather than of the contract, and a
+client never observes it.
+
+Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
+``Test``-prefixed subclass, never the abstract base directly.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+from abc import ABC, abstractmethod
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
+
+import pytest
+
+from ai_assistant.core import errors as error_module
+from ai_assistant.core.errors import (
+    AssistantError,
+    OversizedValueError,
+    UnknownContinuationError,
+    UnresolvedEvidenceError,
+)
+from ai_assistant.core.protocols import AssistantEngine
+from ai_assistant.core.types import (
+    DEFAULT_PAGE_SIZE,
+    BeliefBand,
+    BeliefSummary,
+    ContinuationToken,
+    FeedbackEvent,
+    FeedbackKind,
+    MemoryKind,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+#: A generous per-turn budget: nothing in this suite is about a deadline.
+_PATIENT = timedelta(seconds=30)
+
+#: A limit small enough that an ordinary payload crosses it, and large enough that
+#: a blank-identifier or page-argument refusal still fires first. Every one of
+#: those refusals is local and precedes measurement, so the two never race.
+_TINY_LIMIT = 64
+
+
+def _feedback(content: str) -> FeedbackEvent:
+    """One piece of feedback, as an adapter hands it over."""
+    return FeedbackEvent(
+        kind=FeedbackKind.CORRECTION,
+        memory_kind=MemoryKind.SEMANTIC,
+        content=content,
+        created_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
+    )
+
+
+class AssistantEngineContract(ABC):
+    """What every ``AssistantEngine`` implementation must do."""
+
+    @pytest.fixture
+    @abstractmethod
+    def engine(self) -> AssistantEngine:
+        """The subject, at its ordinary contract limit."""
+
+    @pytest.fixture
+    @abstractmethod
+    def tiny_engine(self) -> AssistantEngine:
+        """The same implementation, with the contract limit set to :data:`_TINY_LIMIT`.
+
+        A separate subject rather than a knob on the first, because the limit is a
+        construction-time property of an implementation — a deployment's frame size
+        — and not something a caller changes mid-flight.
+        """
+
+    # --- the shape of the surface -----------------------------------------
+
+    def test_it_satisfies_the_protocol(self, engine: AssistantEngine) -> None:
+        """Structurally, at runtime — not merely by a type checker's reading."""
+        assert isinstance(engine, AssistantEngine)
+
+    def test_lifecycle_is_not_part_of_the_contract(self, engine: AssistantEngine) -> None:
+        """ADR-0083 §8: an implementation without a lifecycle conforms.
+
+        Asserted over the **Protocol** rather than over the subject, because a
+        concrete engine may legitimately keep both methods — a Protocol constrains
+        what an implementation must have, not what it may not. What must stay true
+        is that nothing here obliges a client to have them, since a client that
+        could call ``aclose()`` could shut down the hub from a spoke.
+        """
+        surface = {name for name in dir(AssistantEngine) if not name.startswith("_")}
+        assert "start" not in surface
+        assert "aclose" not in surface
+
+    async def test_every_enumeration_returns_a_tuple(self, engine: AssistantEngine) -> None:
+        """ADR-0085 §3b: a caller that mutated a returned page changed nothing.
+
+        ``pending_confirmations`` is the one this pins: it returned a ``list``
+        before, and a fifteen-method surface with one method returning a mutable
+        page is a wart a spoke author has to remember.
+        """
+        assert isinstance(await engine.beliefs(), tuple)
+        assert isinstance(await engine.questions(), tuple)
+        assert isinstance(await engine.interrupted_questions(), tuple)
+        assert isinstance(await engine.recent_conversations(), tuple)
+        assert isinstance(await engine.pending_confirmations(), tuple)
+
+    # --- clause 1: the page-size default is normative (§3a) ----------------
+
+    @pytest.mark.parametrize(
+        "method",
+        ["beliefs", "questions", "interrupted_questions", "recent_conversations"],
+    )
+    def test_the_page_size_default_is_the_declared_one(
+        self, engine: AssistantEngine, method: str
+    ) -> None:
+        """All four paging signatures default to ``DEFAULT_PAGE_SIZE``.
+
+        Read off the signature rather than by counting a page, because the property
+        is about what "not passed" *means*: an implementation whose own default were
+        100 would return a different page for the same call, which is the divergence
+        the limit was moved into the contract to prevent, arriving one field over.
+        """
+        parameter = inspect.signature(getattr(engine, method)).parameters["limit"]
+        assert parameter.default == DEFAULT_PAGE_SIZE
+
+    async def test_calling_without_a_limit_behaves_as_though_the_default_was_passed(
+        self, engine: AssistantEngine
+    ) -> None:
+        """The clause itself, not merely the signature that advertises it."""
+        assert await engine.beliefs() == await engine.beliefs(limit=DEFAULT_PAGE_SIZE)
+        assert await engine.questions() == await engine.questions(limit=DEFAULT_PAGE_SIZE)
+        assert await engine.interrupted_questions() == await engine.interrupted_questions(
+            limit=DEFAULT_PAGE_SIZE
+        )
+        assert await engine.recent_conversations() == await engine.recent_conversations(
+            limit=DEFAULT_PAGE_SIZE
+        )
+
+    # --- clause 2 and 4: identifiers (§3c, §9) -----------------------------
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\t"])
+    @pytest.mark.parametrize(
+        "call",
+        [
+            "belief",
+            "forget",
+            "forget_question",
+            "conversation",
+            "forget_conversation",
+        ],
+    )
+    async def test_a_blank_identifier_is_refused_locally(
+        self, engine: AssistantEngine, call: str, blank: str
+    ) -> None:
+        """A blank id satisfies "an id is present" while identifying nothing.
+
+        ``ValueError`` and deliberately not an
+        :class:`~ai_assistant.core.errors.AssistantError`: it is a caller
+        programming error rather than a condition of the system. Refused *before any
+        I/O*, so a wire client refuses the same values without a round trip.
+        """
+        with pytest.raises(ValueError, match=r"\w"):
+            await getattr(engine, call)(blank)
+
+    async def test_a_blank_identifier_is_refused_on_the_keyword_selectors(
+        self, engine: AssistantEngine
+    ) -> None:
+        """The two methods whose identifier is a keyword-only selector."""
+        with pytest.raises(ValueError, match=r"\w"):
+            await engine.converse("hello", timeout=_PATIENT, conversation_id="  ")
+        with pytest.raises(ValueError, match=r"\w"):
+            await engine.observe(conversation_id="  ")
+        with pytest.raises(ValueError, match=r"\w"):
+            await engine.answer("  ", accept=True)
+
+    async def test_an_identifier_is_stripped_before_it_is_used(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§3c's load-bearing half: the *normalisation*, not only the refusal.
+
+        A rule that said "reject blank" would leave stripping optional, and optional
+        normalisation on an **identity** argument is worse than none: it makes the
+        answer to ``belief(" rec-1 ")`` a property of which implementation you are
+        holding. A wire client deserialising its arguments through ``Identifier``
+        would find the record; an in-process engine handed the raw ``str`` would
+        look up ``" rec-1 "`` and answer ``None``.
+        """
+        outcome = await engine.learn(_feedback("the office is in Boston"))
+        record_id = outcome.results[0].record_id
+        assert record_id is not None
+        assert await engine.belief(f"  {record_id}  ") is not None
+
+    @pytest.mark.parametrize("bad", [-1, 2**63])
+    @pytest.mark.parametrize("argument", ["limit", "offset"])
+    @pytest.mark.parametrize(
+        "method", ["beliefs", "questions", "interrupted_questions", "recent_conversations"]
+    )
+    async def test_a_malformed_page_argument_is_refused_locally(
+        self, engine: AssistantEngine, method: str, argument: str, bad: int
+    ) -> None:
+        """Refused rather than clamped (ADR-0073 §2), and before any I/O (§9)."""
+        with pytest.raises(ValueError, match=r"\w"):
+            await getattr(engine, method)(**{argument: bad})
+
+    # --- clause 3: the filters are materialised (§3d) ----------------------
+
+    async def test_the_filters_are_materialised_before_the_first_await(
+        self, engine: AssistantEngine
+    ) -> None:
+        """A caller that mutates the sequence mid-call cannot change its page (§3d).
+
+        **The mutation has to land after the call has begun**, and getting that
+        window right is the whole of the test. ADR-0065 is explicit that the
+        boundary is "the coroutine's **first executed line**, not the call
+        expression": calling an ``async def`` only builds a coroutine, so a
+        mutation made between construction and the first ``await`` is captured
+        whole and is *not* a tear — no invocation-time capture is claimed. So the
+        call is scheduled and given a turn of the loop before the list is cleared,
+        which puts the mutation squarely in the window §3d protects.
+
+        An implementation that read ``bands`` after suspending would see the
+        emptied list and return an empty page. :func:`page_after_mutating_the_filter`
+        is shared with ``test_fake_engine``'s discrimination case, which runs it
+        against a deliberately lazy subject and watches this assertion fail.
+        """
+        await engine.learn(_feedback("the office is in Boston"))
+        page, control = await page_after_mutating_the_filter(engine)
+        assert page == control
+
+    async def test_an_empty_filter_selects_nothing_and_none_selects_everything(
+        self, engine: AssistantEngine
+    ) -> None:
+        """ADR-0073 §2: ``None`` and empty are different answers, not one.
+
+        The pair matters because a client serialising a ``None`` filter as an empty
+        JSON array would turn "every band" into "no band" — a silently empty page
+        for a call that asked for everything.
+        """
+        await engine.learn(_feedback("the office is in Boston"))
+        assert await engine.beliefs(bands=[]) == ()
+        assert await engine.beliefs(kinds=[]) == ()
+        assert await engine.beliefs(bands=None, kinds=None) != ()
+
+    # --- clause 5: the size limit, in both directions (§8c) ----------------
+
+    async def test_an_oversized_argument_is_refused(self, tiny_engine: AssistantEngine) -> None:
+        """The *going in* direction: refused before dispatch, with the number."""
+        with pytest.raises(OversizedValueError) as caught:
+            await tiny_engine.converse("x" * (_TINY_LIMIT * 4), timeout=_PATIENT)
+        assert caught.value.limit == _TINY_LIMIT
+        assert caught.value.size > _TINY_LIMIT
+        assert caught.value.field == "utterance"
+
+    async def test_an_oversized_result_is_refused(self, tiny_engine: AssistantEngine) -> None:
+        """The *coming back* direction, which is the one ADR-0084 §4 insisted on.
+
+        Without it a client is silently **more** capable than the engine it stands
+        in for in one direction and less in the other: the in-process engine would
+        hand a caller a value the wire client provably cannot deliver.
+
+        The belief is stored through a call small enough to be admitted and read
+        back through one that is not, so the refusal is unambiguously about the
+        result rather than about the argument that produced it.
+        """
+        content = "y" * (_TINY_LIMIT * 4)
+        with pytest.raises(OversizedValueError):
+            await tiny_engine.learn(_feedback(content))
+
+    async def test_a_payload_inside_the_limit_is_admitted(
+        self, tiny_engine: AssistantEngine
+    ) -> None:
+        """The limit refuses what it must and nothing else — the discriminating half.
+
+        Without this, an implementation that refused *every* call would pass the two
+        assertions above.
+        """
+        assert await tiny_engine.beliefs() == ()
+        assert await tiny_engine.forget("no-such-record") is False
+
+    async def test_the_refusal_names_the_limit_and_the_measured_size(
+        self, tiny_engine: AssistantEngine
+    ) -> None:
+        """ADR-0085 §9: "too large" without a number is not actionable."""
+        with pytest.raises(OversizedValueError) as caught:
+            await tiny_engine.belief("z" * (_TINY_LIMIT * 4))
+        assert caught.value.limit == _TINY_LIMIT
+        assert caught.value.size == pytest.approx(caught.value.size)
+        assert caught.value.field == "record_id"
+
+    # --- §4a: the listing cannot ship the corpus ---------------------------
+
+    async def test_the_listing_returns_summaries_and_carries_no_citation(
+        self, engine: AssistantEngine
+    ) -> None:
+        """ADR-0077 §6's split, made structural (§4a).
+
+        The listing "resolves *existence* and renders the count, the lost count, and
+        the adjusted confidence"; the single-belief view "renders the surviving
+        citations as readable evidence". This is the shape where the wrong behaviour
+        is **unrepresentable** rather than merely detectable: a
+        :class:`~ai_assistant.core.types.BeliefSummary` has nowhere to put a
+        citation's content, so a conforming listing cannot over-deliver.
+        """
+        await engine.learn(_feedback("the office is in Boston"))
+        page = await engine.beliefs()
+        assert page
+        for summary in page:
+            assert isinstance(summary, BeliefSummary)
+            assert not hasattr(summary, "evidence")
+
+    async def test_the_same_three_names_read_alike_on_both_belief_types(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§4a's table: only the *category* of two of them changes, never the answer.
+
+        That is what keeps a renderer from needing two code paths, and it is the
+        reason ``unsupported`` stays derived on both — a field there would put a
+        value on the wire a client can compute exactly, so one implementation could
+        send it and another omit it, and the same call would measure two sizes.
+        """
+        outcome = await engine.learn(_feedback("the office is in Boston"))
+        record_id = outcome.results[0].record_id
+        assert record_id is not None
+        summary = next(one for one in await engine.beliefs() if one.id == record_id)
+        detail = await engine.belief(record_id)
+        assert detail is not None
+        assert summary.evidence_count == detail.evidence_count
+        assert summary.lost_evidence == detail.lost_evidence
+        assert summary.unsupported == detail.unsupported
+
+    # --- ADR-0084 §7: an unresolvable token is its own refusal --------------
+
+    async def test_an_unknown_continuation_is_its_own_typed_refusal(
+        self, engine: AssistantEngine
+    ) -> None:
+        """Never a generic failure, and **never a denial** (ADR-0084 §7).
+
+        An unresolvable token means nobody ruled on the action;
+        :class:`~ai_assistant.core.errors.PermissionDeniedError` means somebody did
+        and said no. Reporting one as the other tells a user their action was
+        refused when it was merely forgotten — and the remedy differs: this one is
+        answered by ``pending_confirmations()`` and a fresh token.
+        """
+        with pytest.raises(UnknownContinuationError):
+            await engine.resume(
+                ContinuationToken(handle="not-a-real-handle"), approved=True, timeout=_PATIENT
+            )
+
+    # --- forgetting something absent is not an error ------------------------
+
+    async def test_forgetting_what_is_not_held_reports_false_rather_than_raising(
+        self, engine: AssistantEngine
+    ) -> None:
+        """The user's intent — "let this not be held" — is already satisfied."""
+        assert await engine.forget("no-such-record") is False
+        assert await engine.forget_question("no-such-question") is False
+        assert await engine.forget_conversation("no-such-conversation") is False
+
+    async def test_reading_what_is_not_held_answers_none(self, engine: AssistantEngine) -> None:
+        """An optional getter answers ``None``; it does not invent a record."""
+        assert await engine.belief("no-such-record") is None
+        assert await engine.conversation("no-such-conversation") is None
+
+    # --- clause 6: an error's structured state survives (§10a) --------------
+
+    def test_every_error_s_structured_state_round_trips_through_its_constructor(self) -> None:
+        """ADR-0085 §10a, over **every** subtype rather than over a list of two.
+
+        The wire reconstructs a declared failure "by calling the named type with the
+        message positionally and the ``details`` members as keyword arguments", and
+        ``details`` is "the exception's public attributes whose names match its
+        constructor's keyword parameters". An attribute the constructor will not
+        accept back under the same name breaks reconstruction, and nothing else
+        would catch it.
+
+        Walked rather than enumerated: ADR-0085 §4c's own lesson is that a field
+        list rots and a rule survives, and a table of error types here would go
+        stale the first time a structured error is added.
+        """
+        for name, kind in vars(error_module).items():
+            if not (isinstance(kind, type) and issubclass(kind, AssistantError)):
+                continue
+            initialiser = kind.__init__
+            if initialiser is AssistantError.__init__ or initialiser is object.__init__:
+                continue  # carries a message and nothing else, so it sends no details
+            parameters = [
+                parameter
+                for parameter in inspect.signature(initialiser).parameters.values()
+                if parameter.name not in {"self", "message"}
+            ]
+            sample = {parameter.name: _sample_for(parameter.name) for parameter in parameters}
+            original = kind("the failure", **sample)
+            details = {
+                attribute: getattr(original, attribute)
+                for attribute in sample
+                if attribute != "details_elided"
+            }
+            rebuilt = kind("the failure", **details)
+            for attribute in details:
+                assert getattr(rebuilt, attribute) == getattr(original, attribute), (
+                    f"{name}.{attribute} does not survive its own constructor"
+                )
+
+    def test_details_elided_is_false_on_every_in_process_raise(self) -> None:
+        """ADR-0085 §10a: nothing elides in-process, so the marker is never set.
+
+        It exists so a client whose reconstruction lost an exception's structured
+        state can say so: ``unresolved_ids`` defaults to ``()``, so a reconstructed
+        :class:`~ai_assistant.core.errors.UnresolvedEvidenceError` **without** the
+        flag would tell a caller that nothing was unresolved at the exact moment
+        that too much was.
+        """
+        assert UnresolvedEvidenceError("gone", ["a", "b"]).details_elided is False
+        assert OversizedValueError("too big", limit=1, size=2, field=None).details_elided is False
+        elided = UnresolvedEvidenceError("gone")
+        elided.details_elided = True
+        assert elided.unresolved_ids == ()
+        assert elided.details_elided is True
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda: AssistantError("bad \ud800"),
+            lambda: UnresolvedEvidenceError("bad \ud800"),
+            lambda: UnresolvedEvidenceError("fine", ["\ud800"]),
+            lambda: OversizedValueError("fine", limit=1, size=2, field="\ud800"),
+        ],
+    )
+    def test_an_error_carrying_unencodable_text_is_refused(
+        self, build: Callable[[], AssistantError]
+    ) -> None:
+        """ADR-0085 §9: ``core/errors.py`` is outside #566's coverage guard.
+
+        The guard in ``tests/core/test_text_encodability_coverage.py`` is scoped to
+        ``core.types`` deliberately, so nothing mechanical enforces this one — it is
+        a clause this suite carries. It matters because §10a's reduction cannot
+        rescue it: the reduction *measures* a payload, and measuring means encoding,
+        so an unencodable message fails **before** the rule that was supposed to
+        handle an oversized error, and the declared exception reaches a caller as an
+        undeclared transport failure.
+        """
+        with pytest.raises(ValueError, match="UTF-8 encoding"):
+            build()
+
+
+async def page_after_mutating_the_filter(
+    engine: AssistantEngine,
+) -> tuple[tuple[BeliefSummary, ...], tuple[BeliefSummary, ...]]:
+    """Run ``beliefs`` while emptying the list it was handed, and page it again.
+
+    Shared with the discrimination case in ``test_fake_engine``, which is what
+    makes the assertion above evidence rather than a tautology: a scenario nobody
+    has watched fail is a scenario that agrees with whatever it is run against.
+
+    Returns:
+        The page from the mutated call, and the page the same filter yields when
+        nothing touches it.
+    """
+    every_band = [BeliefBand.ASSERTED, BeliefBand.DERIVED, BeliefBand.ATTESTED]
+    bands = list(every_band)
+    running = asyncio.ensure_future(engine.beliefs(bands=bands))
+    # One turn of the loop, so the call has reached its first suspension (or run to
+    # completion) before the list is emptied — the window ADR-0065 §3d is about.
+    await asyncio.sleep(0)
+    bands.clear()
+    page = await running
+    return page, await engine.beliefs(bands=every_band)
+
+
+def _sample_for(parameter: str) -> object:
+    """A plausible value for one structured-state parameter, by its declared shape.
+
+    Deliberately shallow: what the round-trip test needs is *a* value the
+    constructor accepts, not a realistic one. A parameter this does not know is
+    given a string, which is what every operator-facing field on the hierarchy is.
+    """
+    if parameter in {"limit", "size"}:
+        return 1
+    if parameter.endswith("_ids"):
+        return ("a", "b")
+    return "text"
