@@ -15,8 +15,8 @@
   is defined in bytes.
 - **It ratifies the bytes and nothing else.** No method, no field, no type, no
   setting, no figure, no limit. §2's member ordering is length-preserving and
-  §4(ii)'s zero normalisation shortens one value by one byte, so nothing here
-  widens a payload or moves a ceiling ADR-0084 §3 sets.
+  §4 normalises nothing, so no value's encoding is shorter or longer than the
+  faithful spelling of what it is, and no ceiling ADR-0084 §3 sets moves.
 - **Written with implementation contact.** Every byte string in §5 was produced
   by running the encoding against `pydantic 2.13.4` / `pydantic-core 2.46.4` on
   CPython 3.14.6, over the shapes the tree carries at `main` @ `89e0cfe` and the
@@ -145,7 +145,8 @@ weaker one, and the gap matters enough to separate them:
 
 The two come apart on real cases in this tree. Reordering an object's members
 changes bytes and not length, so it violates byte-determinism alone. Emitting
-`-0.0` for a value equal to `0.0` violates both — it is four bytes against three.
+`-0.0` where a value compares equal to `0.0` violates both — four bytes against
+three — though §4a concludes those are two values rather than one.
 A specification that only demanded size-determinism would leave the first case
 open, and the first case is the one that makes a *test* impossible: a normative
 vector is a byte string, so nothing can be pinned by vector unless bytes are
@@ -449,14 +450,17 @@ the ratified bytes.
 | 2 | duration ≥ 365 days | `"P1Y"` (pydantic) | `"P365D"` | §2e — a nominal component on a permanently frozen codec |
 | 3 | non-finite float | `null` (pydantic) / `NaN`, `Infinity` (`json.dumps`) | raise | §2c — one is silent corruption, the other is not JSON |
 
-**Negative zero is deliberately not a fourth row.** `-0.0 == 0.0` is true and
-they encode differently (`-0.0`, four bytes; `0.0`, three), which violates both
-determinism properties. But it is not a case where the library is *wrong* —
-`-0.0` is the faithful spelling of the value it was handed. It is a case where
-two *equal* values reach the encoder, which is §4's subject, and §4 disposes of
-it there as a normalisation rather than here as a correction. The distinction is
-worth keeping: §3 is about the encoder disagreeing with this ADR, §4 is about
-the value space disagreeing with itself.
+**Negative zero is not a fourth row, and an earlier draft of this ADR got that
+wrong in an instructive way.** `-0.0 == 0.0` is true and the two encode
+differently — `-0.0` at four bytes, `0.0` at three — which looks like the value
+space disagreeing with itself, and the draft "fixed" it by normalising the sign
+away. That was a mistake, and §4a says why: `-0.0` is the *faithful* spelling of
+the value handed to the encoder, the sign is observable
+(`math.copysign(1.0, x)`), and it survives into a promoted `FrozenJsonMapping`
+where no schema constrains it. Normalising made the wire lose a bit the
+in-process engine keeps, which is ADR-0084 §4's divergence rather than a
+canonicalisation. **The library is right here and this ADR ratifies it
+unchanged.**
 
 ### 4. Byte-determinism, over the equivalence that keeps one datum one type
 
@@ -464,15 +468,24 @@ the value space disagreeing with itself.
 > then `encode(a) == encode(b)`.** A value's bytes depend on what it is, never on
 > how it was constructed.
 >
-> **"The same value" is structural equality *with matching types*, applied
-> recursively**: equal scalars of the same Python type; sequences of the same
-> length, pairwise the same; mappings with the same key set, pairwise the same.
-> It is deliberately **not** Python's `==`.
+> **"The same value" is *indistinguishability*, applied recursively**: scalars of
+> the same Python type that no operation on that type can tell apart — for a
+> `float`, equal **and** of the same sign, so `-0.0` and `0.0` are two values;
+> sequences of the same length, pairwise the same; mappings with the same key
+> set, pairwise the same. It is deliberately **not** Python's `==`.
+>
+> **The encoding therefore normalises nothing.** Where two Python objects differ
+> in anything a caller can observe, their bytes differ too.
 
-#### 4a. Why the equivalence has to be type-aware, and why `==` is the wrong one
+#### 4a. Why `==` is the wrong relation, in two measured cases that answer alike
 
-Python's `==` identifies values across the three JSON scalar types that the
-encoding must keep apart. Measured on a promoted `FrozenJsonMapping` field:
+Python's `==` identifies values the encoding must keep apart, and it does so in
+two independent ways. Both are measured on a promoted `FrozenJsonMapping` field —
+`Confirmation.parameters`, which ADR-0084 §4 names among the types that promote —
+and that holder is where they bite, because it is untyped by construction so no
+schema constrains what enters it.
+
+**Across scalar types:**
 
 | `parameters` | Encoded | Python `==` to `{"x": 1}`? |
 | --- | --- | --- |
@@ -480,12 +493,27 @@ encoding must keep apart. Measured on a promoted `FrozenJsonMapping` field:
 | `{"x": True}` | `{"x":true}` | **yes** (`1 == True`) |
 | `{"x": 1.0}` | `{"x":1.0}` | **yes** |
 
-Under Python `==` the rule above would be false for values on the promoted
-surface today, and no amount of sorting or normalising would rescue it: `1`,
-`true` and `1.0` are three distinct JSON texts and collapsing them would destroy
-information rather than canonicalise it. So `==` is not a defect the encoding
-must work around — **it is the wrong equivalence relation for this property**,
-and stating the property over it was an error in an earlier draft of this ADR.
+**Within one scalar type**, on the sign of zero:
+
+| `parameters` | Encoded | Python `==` to `{"x": 0.0}`? | `math.copysign(1.0, x)` |
+| --- | --- | --- | --- |
+| `{"x": 0.0}` | `{"x":0.0}` | — | `1.0` |
+| `{"x": -0.0}` | `{"x":-0.0}` | **yes** | `-1.0` |
+
+**Both cases have the same answer, and it is not to normalise.** `1`, `true`,
+`1.0`, `0.0` and `-0.0` are five distinct JSON texts, each of which decodes back
+to the Python object it came from; collapsing any of them would destroy
+information rather than canonicalise it. Signed zero makes the point sharpest: a
+`Confirmation` is a tool's parameters rendered for the user's consent, the sign of
+a zero is observable with one call to `math.copysign`, and `_deep_freeze`
+preserves it — so an implementation that normalised it would hand a wire client
+different data from the one the in-process engine returns, which is precisely
+ADR-0084 §4's divergence, committed in the name of preventing it.
+
+So `==` is not a defect the encoding must work around — **it is the wrong
+equivalence relation for this property.** An earlier draft of this ADR stated the
+rule over `==` and then patched the consequences by normalising signed zero;
+both halves of that are withdrawn, and the relation above replaces them.
 
 **The right one is the equivalence under which one datum keeps one type from end
 to end**, and the three JSON scalar types are exactly where Python's `==` loses
@@ -530,7 +558,7 @@ about the encoding.
 
 **Why it arises only here.** Every other field on the promoted surface has a
 declared type, so validation fixes the Python type before the encoder sees the
-value — an `int` handed to a `float` field is a `float` afterwards — §4(iii).
+value — an `int` handed to a `float` field is a `float` afterwards — §4(ii).
 `FrozenJson` is the one holder that is deliberately untyped, being a JSON value
 of any shape, and it is therefore the only place two Python types can occupy one
 field. The rule is stated over the general equivalence anyway, because a later
@@ -562,32 +590,29 @@ outputs, both `FrozenJson` holders in `core/types.py`. §2a's sort closes all
 three at once, and would close any further holder the transitive closure turns
 out to reach, because the rule is over the type and not over an enumerated field.
 
-**(ii) Negative zero.** A `float` field bounded `ge=0.0` — a confidence, which
-ADR-0084 §4 names `Belief` as carrying — admits `-0.0`, because `-0.0 >= 0.0` is
-true. So:
-
-> **A `float` equal to zero encodes as `0.0`.** The sign of zero is not carried.
-
-Nothing on the promoted surface distinguishes the two — no field's meaning turns
-on the sign of a zero magnitude — so normalising loses no information, and
-carrying it would make one value two encodings of different lengths.
-
-**(iii) Anything the type already normalises is *not* a violation, and saying so
+**(ii) Anything the type already normalises is *not* a violation, and saying so
 bounds the list.** `Identifier` strips on validation, `UtcInstant` converts to
 UTC on validation, `timedelta` normalises on construction, and pydantic coerces
 an `int` handed to a `float` field to `1.0`. In each case two "differently
 constructed" values are one value by the time the encoder runs, so the encoder
-has nothing to do. The rule this leaves for a reviewer checking (i)-(iii) is
-complete: **construction-dependence can only survive validation where the type's
-`__eq__` ignores something its iteration order or its representation exposes** —
-which in this tree is the mapping, and the float's sign of zero.
+has nothing to do.
+
+**And the list is one item long rather than three, which is the point.** Once the
+equivalence is indistinguishability (§4a) rather than `==`, the scalar cases stop
+being violations to repair and become *values to spell faithfully*, which §2c
+already does. What is left is the genuine one: **a construction difference
+survives validation only where the type's own `__eq__` ignores something the
+encoder can see** — and in this tree that is exactly one thing, `FrozenDict`
+comparing as a `dict` while iterating in insertion order. §2a closes it. A
+reviewer checking this section's completeness has one predicate to apply rather
+than an enumeration to trust.
 
 ### 5. The normative vectors
 
 **Every byte string below is normative.** A conforming encoder reproduces it
 exactly. They were generated by running §2's encoding on `pydantic 2.13.4` /
 `pydantic-core 2.46.4` / CPython 3.14.6; the rows the library does not produce
-are marked, and are the two §3 corrects and §4(ii)'s normalisation.
+are marked, and are exactly the three §3 corrects.
 
 **Every vector carries its own input**, so each is checkable against this
 document alone. §5a–§5d are over Python and JSON types and depend on no field
@@ -627,7 +652,7 @@ U+007F and U+2028 rows fix that the escaping stops at U+0020 and does not resume
 | Input | Encoded | Bytes |
 | --- | --- | --- |
 | `0.0` | `0.0` | 3 |
-| `-0.0` | `0.0` — **normalised, §4(ii)** | 3 |
+| `-0.0` | `-0.0` — **not normalised, §4a** | 4 |
 | `1.0` | `1.0` | 3 |
 | `0.1` | `0.1` | 3 |
 | `0.1 + 0.2` | `0.30000000000000004` | 19 |
@@ -640,15 +665,24 @@ U+007F and U+2028 rows fix that the escaping stops at U+0020 and does not resume
 | `2**63` | `9223372036854775808` | 19 |
 | `inf`, `nan` | **no encoding — the encoder raises** | — |
 
-**The type-aware triple**, inside a `FrozenJsonMapping` where all three are
-reachable and Python's `==` identifies them (§4a). These three vectors are the
-witness that the equivalence in §4 is type-aware and not `==`:
+**The five `==`-equal values that must stay apart**, taken inside a
+`FrozenJsonMapping` because that is the promoted holder where all of them are
+reachable and unconstrained by any schema (§4a). These are the witness that §4's
+equivalence is indistinguishability and not `==`, and that the encoding
+normalises nothing:
 
 | `parameters` | Encoded | Bytes | decodes back as |
 | --- | --- | --- | --- |
 | `{"x": 1}` (`int`) | `{"x":1}` | 7 | `int` |
 | `{"x": True}` (`bool`) | `{"x":true}` | 10 | `bool` |
 | `{"x": 1.0}` (`float`) | `{"x":1.0}` | 9 | `float` |
+| `{"x": 0.0}` | `{"x":0.0}` | 9 | `float`, `copysign` `+1.0` |
+| `{"x": -0.0}` | `{"x":-0.0}` | 10 | `float`, `copysign` `-1.0` |
+
+The last two are the nested-holder witness that signed zero survives to the wire
+and back: `-0.0` enters a promoted `FrozenJsonMapping` with nothing to constrain
+it, `_deep_freeze` preserves it, and it returns with its sign — so a wire client
+and the in-process engine hand a caller the same value.
 
 The `1e-4`/`1e-5` and `1e15`/`1e16` pairs are the two thresholds where the
 exponent form begins, and the `1e-05`/`1e-07` rows fix the two-digit exponent
@@ -668,7 +702,7 @@ Shown as the encoding of `{"d": <instant>}` so the member framing is visible.
 | `…12:00:00.100000+00:00` | `{"d":"2026-08-01T12:00:00.100000Z"}` | 35 |
 | `…12:00:00.000001+00:00` | `{"d":"2026-08-01T12:00:00.000001Z"}` | 35 |
 
-Rows 1 and 2 are the §4(iii) witness: the type normalised, so the encoder did not
+Rows 1 and 2 are the §4(ii) witness: the type normalised, so the encoder did not
 have to. Rows 3–5 fix six digits with trailing zeros kept.
 
 #### 5d. Durations
@@ -768,7 +802,7 @@ They are not documentation. Each one is a line of a conformance test the wire
 lane writes: encode the input, compare to the byte string, compare the length.
 Together they discriminate the encoding from every near-miss measured while
 writing this ADR — `model_dump_json()`, `json.dumps` without `sort_keys`,
-`ensure_ascii=True`, a trimmed fractional second, a `-0.0` passed through, and a
+`ensure_ascii=True`, a trimmed fractional second, a `-0.0` normalised away, and a
 duration with a year component. A test suite that passes all of §5 and none of
 those is what "one canonical encoding" means operationally.
 
@@ -1067,8 +1101,8 @@ that still stands.
   the wire lane inherits, this change discharges early — a debt discharged before
   the debtor expected is discharged — and what its text would need is one
   sentence saying the limit is measured on the canonical encoding ratified here.
-  **No figure of its moves**: §2's ordering is length-preserving and §4(ii)
-  shortens one value, so any reserve, floor or ceiling it computes stands.
+  **No figure of its moves**: §2's ordering is length-preserving and §4
+  normalises nothing, so any reserve, floor or ceiling it computes stands.
 - **ADR-0021.** §2 uses §1's canonical form as the form it is, for a second
   consumer. Applying a rule at its stated scope is the rule being used rather
   than changed, and ADR-0084 §3 asked for exactly this reuse by name. Nothing
@@ -1133,7 +1167,7 @@ that still stands.
   reason it did not is gone.
 - **The wire lane inherits a specification and a test suite, not a design task.**
   §5's vectors are the assertions; §2 is the docstring. What is left is an
-  encoder, a duration serialiser (§2e), a zero normalisation (§4(ii)) and a sort.
+  encoder, a duration serialiser (§2e) and a sort.
 - **A `model_dump_json()` shortcut will not pass.** Three of §3's rows and one of
   §4's are places the obvious one-liner produces the wrong bytes. That is a cost
   — the wire lane writes ~20 lines it hoped not to — and it is the cost of the
