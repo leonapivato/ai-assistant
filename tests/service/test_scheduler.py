@@ -28,6 +28,7 @@ test is what fails, not the machine's mood.
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -150,6 +151,37 @@ def test_a_job_refuses_a_non_positive_interval(bad: timedelta) -> None:
     """
     with pytest.raises(ValueError, match="strictly positive interval"):
         _job("bad", _nothing, every=bad)
+
+
+def test_an_interval_that_is_not_exactly_a_timedelta_is_refused() -> None:
+    """A positivity check alone cannot make ADR-0083 §7's "finite" true.
+
+    ``timedelta`` is subclassable, and a subclass whose ``total_seconds()`` returns
+    ``nan`` clears every comparison a positivity guard can make — ``nan <= 0`` is
+    ``False``. It then poisons the due instant it is added to, so ``due > now`` and
+    ``delay > 0`` are both ``False`` and the loop spins without ever sleeping: the
+    SQLite hot loop §7 refuses zero intervals to prevent, arrived at by a route no
+    zero-check covers.
+
+    A *native* ``timedelta`` cannot hold a non-finite value, so the exact-type
+    requirement is what makes "finite" true — the same argument, in the same words,
+    that ``core.config``'s ``_only_a_duration`` already makes with
+    ``type(value) is timedelta``.
+
+    The lie is asserted as well as the refusal, so this stays a test about a
+    *bypass* rather than about a type annotation.
+    """
+
+    class _Lying(timedelta):
+        def total_seconds(self) -> float:
+            return math.nan
+
+    lying = _Lying(hours=1)
+    assert math.isnan(lying.total_seconds())
+    assert not lying.total_seconds() <= 0  # what a positivity-only guard would see
+
+    with pytest.raises(TypeError, match="exactly a timedelta"):
+        _job("spinner", _nothing, every=lying)
 
 
 def test_two_jobs_may_not_share_a_name() -> None:
