@@ -265,6 +265,30 @@ class AssistantEngineContract(ABC):
         with pytest.raises(ValueError, match=r"\w"):
             await getattr(engine, method)(**{argument: bad})
 
+    @pytest.mark.parametrize("bad", [1.5, True, "1", None])
+    @pytest.mark.parametrize("argument", ["limit", "offset"])
+    @pytest.mark.parametrize(
+        "method", ["beliefs", "questions", "interrupted_questions", "recent_conversations"]
+    )
+    async def test_a_page_argument_that_is_not_an_integer_is_refused_locally(
+        self, engine: AssistantEngine, method: str, argument: str, bad: object
+    ) -> None:
+        """The type, checked before the range and before any I/O.
+
+        ``0 <= 1.5 < 2**63`` is *true*, so a range check alone lets a float through
+        to the store, where it fails inside slice arithmetic — after I/O has begun,
+        as a ``TypeError`` from somewhere the caller cannot place, and differently
+        per implementation. ``True`` is worse: it is an ``int``, so it would be
+        accepted and silently mean a page size of one, which is a wrong answer
+        rather than a refusal.
+
+        A wire client decoding a JSON ``1.5`` for ``limit`` meets the same value,
+        which is why this is a contract clause and not one implementation's input
+        hygiene.
+        """
+        with pytest.raises(TypeError, match=r"\w"):
+            await getattr(engine, method)(**{argument: bad})
+
     # --- clause 3: the filters are materialised (§3d) ----------------------
 
     async def test_the_filters_are_materialised_before_the_first_await(

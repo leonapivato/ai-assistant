@@ -2036,6 +2036,34 @@ class Engine:
         contract. ADR-0087 §7 permits "any cheaper test that refuses exactly the same
         set", and this is not one — it is the definition, which is the right thing
         for the implementation the conformance suite measures the others against.
+
+        **On a mutating call this runs after the work has committed, and the effect
+        stands.** A ``converse`` that ran a tool, persisted its execution and
+        captured the exchange, and only then produced a
+        :class:`~ai_assistant.core.types.TurnOutcome` too large to carry, raises here
+        with all of that already durable. That is not an ordering this lane chose and
+        it is not one it can fix: no measurement of a *result* can precede producing
+        it, and a wire client meets the identical situation one frame further out —
+        the hub runs the turn and then cannot send what came back.
+
+        **ADR-0085 §8e names this residual and declines to design around it.** The
+        unbounded factor is ``Belief.evidence`` under `REINFORCE` (#473), which
+        ADR-0084 §11 makes a prerequisite of the *client* lane rather than of this
+        one, and §8e records that until that bound lands "the bad state is
+        unreachable rather than provably unreachable". What the contract adds is that
+        the failure arrives as a typed error naming the limit, the measured size and
+        the largest contributing member — "a sentence a user can read and act on,
+        rather than a frame that will not send".
+
+        **Nothing is lost, and where to look for it is the part worth stating.** The
+        effect is durable and inspectable by exactly the reads this surface already
+        offers: the conversation was captured, so ``conversation`` and
+        ``recent_conversations`` show it; anything memory folded is on ``beliefs``;
+        the execution state is in the plan store. The caller cannot *re-derive* the
+        outcome value, and that gap is tracked in #570 rather than closed here,
+        because closing it means either bounding the result before the work (which is
+        #473's) or adding a recovery method to a `core` Protocol, which no ADR
+        ratifies and this lane may not author.
         """
         check_payload(
             result, max_bytes=self._max_payload_bytes, subject=f"the result of {method}()"

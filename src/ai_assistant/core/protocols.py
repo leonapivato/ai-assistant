@@ -2952,6 +2952,13 @@ class AssistantEngine(Protocol):
        stands in for: an oversized ``Belief.evidence`` coming back is refused
        exactly as an oversized utterance going in (ADR-0084 §4, ADR-0085 §8).
 
+       **On a mutating call the result is measured after the work has committed**,
+       because no measurement of a result can precede producing it — and a wire
+       client meets the same situation one frame further out. The effect stands and
+       is readable through the surface's own reads; ADR-0085 §8e names this residual
+       and declines to design around it, since the unbounded factor is #473's and
+       ADR-0084 §11 makes that the client lane's prerequisite. Tracked in #570.
+
     :class:`~ai_assistant.core.errors.OversizedValueError` is therefore declared by
     **every** method below and is not repeated in fifteen ``Raises`` blocks. No
     method is provably inside the bound: :data:`~ai_assistant.core.types.Identifier`
