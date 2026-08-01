@@ -662,9 +662,13 @@ The triad and its consumers, in the order golden rule 5 fixes.
    - `MemoryStore`: `get_many` never disagrees with `get` on any id, on all three
      read-time outcomes; duplicates collapse; an empty argument returns an empty
      mapping; a missing id is an omission and not an error; **the batch is one
-     read-time snapshot** — no two entries in a result may reflect different
-     instants, which is observable at the boundary against a controlled clock and
-     says nothing about how any store obtains it. **And it observes
+     snapshot** — of the clock *and* of the stored state. Two cases, because one
+     of them is easy to write and insufficient: no two entries may reflect
+     different **instants**, tested against a controlled clock; and no result may
+     mix **states**, tested by mutating the store between the reads a chunked
+     implementation makes — which is the only case that catches the chunking §8
+     requires. Both are observable at the boundary and neither says how a store
+     obtains the snapshot. **And it observes
      `record_ids` before its first await** — the ADR-0065 clause §6 binds it to,
      which needs its own suspended-call case because none of the clauses above
      mutates the sequence mid-call and an implementation that took its lock first
@@ -702,17 +706,31 @@ The triad and its consumers, in the order golden rule 5 fixes.
 4. **`memory/ingest.py`** — `_merge` truncates before constructing `Provenance`,
    so the constructor's validators still run on the value that is stored
    (ADR-0026 §2's hazard: the surrounding `model_copy(update=...)` skips them).
-5. **`memory/sqlite_store.py`** — `get_many` under **one lock acquisition and one
-   clock reading**, not a loop over `_get_sync`. That is this store's way of
-   meeting §6's snapshot guarantee, not the guarantee itself; a loop of singles
-   would pass every conformance clause in §6 and buy none of the thing the method
-   exists for. It is equally **not a single SQL statement**:
+5. **`memory/sqlite_store.py`** — `get_many` under **one lock acquisition, one
+   clock reading, and one read transaction**, not a loop over `_get_sync`. That
+   is this store's way of meeting §6's snapshot guarantee, not the guarantee
+   itself; a loop of singles would pass a clock-consistency test and buy none of
+   the thing the method exists for. It is equally **not a single SQL statement**:
    SQLite caps bound parameters per statement (`SQLITE_MAX_VARIABLE_NUMBER`,
    32,766 on current builds and 999 on older ones), so an `IN` clause must be
    chunked to that limit — inside the one lock, against the one clock reading, so
    the chunking is invisible in the result. Mandating one statement would put a
    caller-reachable "too many SQL variables" failure inside a method §6 promises
    never refuses on size.
+
+   **The read transaction is what makes chunking safe, and the `asyncio.Lock` is
+   not.** The lock serialises coroutines on *this* store instance; it does nothing
+   about the file. This module's own header is explicit that the discipline which
+   makes a sequence atomic "against a second *process* on the same file" is the
+   transaction, not the lock — which is why #562 gave every mutation a
+   `BEGIN IMMEDIATE`. Chunked without one, `get_many` reads chunk 1, another
+   process retires `a` and installs `b`, chunk 2 reads `b`, and the result pairs
+   an old `a` with a new `b` — two values that never coexisted. That is §6's
+   snapshot violated by the very mechanism introduced to satisfy its no-size-cap
+   promise. ADR-0083 §12 notes exclusivity makes a second writer absent in the
+   reference deployment and names its relaxation as the condition that makes this
+   urgent again; the transaction costs nothing and does not depend on that
+   holding.
 6. **The presentation path** — `Engine._project` calls `get_many` once per belief
    instead of `get` per citation. **That is the whole of what this lane owes
    there**, and the limit is deliberate: `Engine._project` builds the DTOs
