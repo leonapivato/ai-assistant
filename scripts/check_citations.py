@@ -170,6 +170,12 @@ _QUALIFIED_PAIR = 2
 #: continuation rule is markdown's own and is lifted from
 #: ``scripts/project_status.py``: a following line belongs to the bullet when it
 #: is indented to the bullet's content column.
+#:
+#: **Its indent stays permissive where the record's below does not**, and the
+#: asymmetry is the point rather than an oversight: the two fail in opposite
+#: directions. A ``Status`` this failed to find yields an empty supersessor set
+#: and therefore a *report* — the dangerous outcome — where a record this fails
+#: to find yields silence, which §6 calls benign.
 _STATUS_RE = re.compile(
     r"^(?P<indent>[ \t]*)-[ \t]*Status:[ \t]*(?P<value>.+(?:\n(?P=indent)(?:\t|[ \t]{2,})\S.*)*)",
     re.IGNORECASE | re.MULTILINE,
@@ -178,11 +184,23 @@ _STATUS_RE = re.compile(
 #: The reverse supersession record (ADR-0088 §4), read with the same wrapping
 #: rule as ``Status``. ADR-0088 ratifies this header line as "the canonical
 #: machine-readable form" of a supersession.
+#:
+#: **A header *field*, so no indent at all.** Whether ``  - Supersedes: …`` is a
+#: top-level item with two cosmetic spaces or an item nested under the ``Status``
+#: bullet above it is decided by what precedes it, so no indent-tolerant pattern
+#: settles it — and an ADR explaining the rule hangs exactly such an item under
+#: its own ``Status``. §6 decides the tie: a record missed is silence, which is
+#: benign, where a nested item read as a field declares a supersession nobody
+#: wrote. All nine records on `main` sit at column zero.
 _SUPERSEDES_RE = re.compile(
-    r"^(?P<indent>[ \t]*)-[ \t]*(?P<kind>Partially\s+supersedes|Supersedes):[ \t]*"
-    r"(?P<value>.+(?:\n(?P=indent)(?:\t|[ \t]{2,})\S.*)*)",
+    r"^-[ \t]*(?P<kind>Partially\s+supersedes|Supersedes):[ \t]*"
+    r"(?P<value>.+(?:\n(?:\t|[ \t]{2,})\S.*)*)",
     re.IGNORECASE | re.MULTILINE,
 )
+
+#: An HTML comment. Excluded from the header for the reason a fence is (§1):
+#: a commented-out record is display. ``docs/adr/template.md`` carries one.
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
 #: ADR-0070 §4's canonical supersession vocabulary, matched case-insensitively —
 #: which ADR-0088 §4 records as required rather than incidental: the token leads
@@ -682,12 +700,14 @@ def header(text: str) -> str:
     the boundary did not recognise would put the whole body back in scope — and
     the body is where an illustrative bullet lives.
 
-    Fenced lines are blanked rather than dropped — §1's exclusion is general, so
-    a fenced example inside the header is display too — and one blank line per
-    fenced line keeps the newline count intact, so a match's line number is
-    still the line number in the file.
+    Fenced lines and HTML comments are blanked rather than dropped — §1's
+    exclusion is general, so a fenced or commented-out example inside the header
+    is display too, and ``docs/adr/template.md`` carries exactly such a comment.
+    Blanking keeps the newline count intact, so a match's line number is still
+    the line number in the file.
     """
-    kept = dict(iter_prose_lines(text))
+    blanked = _HTML_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    kept = dict(iter_prose_lines(blanked))
     lines = [kept.get(number, "") for number in range(1, len(text.splitlines()) + 1)]
     for index, line in enumerate(lines):
         if _HEADING_2_RE.match(line):
