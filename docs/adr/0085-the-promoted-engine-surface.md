@@ -249,7 +249,8 @@ in two `orchestration` modules would leave the Protocol's stated defaults with n
 public name to refer to.
 
 **So one public constant, `DEFAULT_PAGE_SIZE: Final[int] = 50`, lives in
-`core/types.py`**, and all five paging signatures default to it.
+`core/types.py`**, and all four paging signatures default to it —
+`beliefs`, `questions`, `interrupted_questions` and `recent_conversations`.
 
 **And the default is normative, not decorative.** A default written in a
 `Protocol` method signature binds nobody: each implementation writes its own, and
@@ -261,7 +262,7 @@ clause is:
 > An implementation that is called without `limit` behaves as though
 > `DEFAULT_PAGE_SIZE` had been passed.
 
-The conformance suite asserts it on all five methods.
+The conformance suite asserts it on all four.
 
 #### 3b. `pending_confirmations` returns a tuple
 
@@ -506,9 +507,10 @@ its declared type, stop at anything already in `core`, and never follow a method
 Three categories stay in `orchestration`, and the first is the one that would
 have broken the build.
 
-**(a) Projection helpers stay behind, because they name types the closure does
-not reach.** Four classmethods and two module functions construct these DTOs
-today:
+**(a) Projection helpers stay behind, because one of them names a type the
+closure does not reach.** All six classmethods and two module functions that
+construct these DTOs today, enumerated so the triad lane does not have to find
+them:
 
 | Helper | Today | Names |
 | --- | --- | --- |
@@ -516,6 +518,8 @@ today:
 | `QueuedQuestion.from_admission` | `engine.py:354` | `core.types.DeferralAdmission` |
 | `Belief.from_record` | `engine.py:707` | `core.types.MemoryRecord` |
 | `ConversationSummary.from_record` | `engine.py:768` | `core.types.Conversation` |
+| `ObservedProposal.ruled` | `observation.py:231` | `core.types.MemoryUpdateProposal`, `core.types.MemoryIngestResult` |
+| `ObservedProposal.unsupported` | `observation.py:247` | `core.types.MemoryUpdateProposal` |
 | `learn_decision` | `engine.py:487` | `core.types.MemoryDecisionKind` |
 | `question_state` | `questions.py:126` | `core.types.DeferralState` |
 
@@ -529,7 +533,7 @@ counted as a field.
 > projection helper becomes a module-level function in the `orchestration` module
 > that owns the projection, and none of them is part of the Protocol.
 
-The other five would have been safe to carry, and they move anyway, for two
+The other seven would have been safe to carry, and they move anyway, for two
 reasons: a rule with exceptions is a rule the triad lane has to re-derive, and a
 projection from a `core` record into a `core` DTO belongs to the layer that
 *decides* the projection. `Belief.from_record` is where `band_of` is applied
@@ -541,11 +545,22 @@ rather than convenient: the walk follows declared field types and never follows 
 method (§5).
 
 **(b) Derived predicates stay as plain properties on the promoted models, and are
-not `computed_field`.** Six exist — `IngestSummary.stored`, `LearnOutcome.stored`,
-`Evidence.lost`, `Belief.evidence_count`, `Belief.lost_evidence`,
-`Belief.unsupported`, plus `ObservedProposal.stored` and
-`ObservationReport.stored` — and every one is a pure function of fields the model
-already carries.
+not `computed_field`.** **Eleven exist**, and the list is normative — a triad
+implementation that carried a subset would leave the CLI reading an attribute
+that is not there:
+
+| Model | Properties |
+| --- | --- |
+| `IngestSummary` | `stored` |
+| `LearnOutcome` | `stored` |
+| `Evidence` | `lost` |
+| `Belief` | `evidence_count`, `lost_evidence`, `unsupported` |
+| `ObservedProposal` | `stored`, `evidence_count`, `inspectable` |
+| `ObservationReport` | `stored`, `discarded` |
+
+Every one is a pure function of fields the model already carries — verified
+individually, and it is what makes the non-serialisation rule below safe rather
+than merely tidy.
 
 > They stay as `@property`, so they are **not serialised**. A client
 > reconstructing a promoted model from JSON recomputes them from the same fields
@@ -654,14 +669,28 @@ The slack is deliberate and is the reason a computed figure is not used: a later
 protocol version may add a member to the envelope (ADR-0084 §3 permits it), and a
 reserve derived from today's exact worst case would silently become wrong the day
 it does, converting a schema addition into an off-by-a-few-bytes frame overflow at
-the ceiling. 512 buys four such additions without anyone having to notice.
+the ceiling. 512 leaves 402 bytes of headroom for such additions, which is
+several of them, without anyone having to notice.
 
-#### 8c. The declared limit, and what it is measured on
+#### 8c. The declared limit is on the whole payload, not on one value
 
-> **The contract limit on any single argument or result value is
-> `hub_max_frame_bytes - 512`, measured as the byte length of that value's
-> pydantic JSON-mode serialisation.** Every implementation enforces it, on
-> arguments before dispatch and on results before return.
+> **The contract limit is `hub_max_frame_bytes - 512`, applied to the whole
+> serialised **payload** — for a call, the request's argument object as §10
+> encodes it; for a return, the result value as §10 encodes it — measured as the
+> byte length of its pydantic JSON-mode serialisation.** Every implementation
+> enforces it, on arguments before dispatch and on results before return.
+
+**Bounding the payload rather than each value is the correction that makes the
+arithmetic true, and it is worth stating why the per-value form fails.** A
+request payload is a JSON object carrying *every* argument: bound `utterance`
+alone at `hub_max_frame_bytes - 512` and a `converse` call at exactly that bound
+still adds `{"utterance":…,"timeout":"PT30S"}`'s member names, punctuation and the
+timeout itself — so a payload every one of whose arguments the contract admits
+overflows the frame anyway. The client would then have to refuse an input the
+contract admitted, or send a frame the server refuses on its prefix: precisely
+the divergence ADR-0084 §4 moved the limit into the contract to prevent, one
+level up from where it was being watched. A whole-payload bound has no such gap,
+because what it measures is the thing the length prefix counts.
 
 The measure is the serialisation because that is what ADR-0084 §3's length prefix
 counts, and a limit measured on anything else — a character count, a Python
@@ -669,20 +698,34 @@ object size — would be a number the two implementations compute differently fo
 the same value. A directory named in a non-ASCII script spends more of the budget
 than it looks like it does, and so does an utterance.
 
-**Subtracting the reserve is the load-bearing arithmetic.** Set the contract limit
-equal to `hub_max_frame_bytes` and a value at exactly the limit passes the
-contract and overflows the frame by the envelope's own bytes — the in-process
-engine accepting what the client provably cannot send, which is the divergence §4
-exists to prevent, arriving from the side nobody was watching. With the
-subtraction, a value the contract admits always fits a frame, and the in-process
-engine enforces the identical number by reading the same setting.
+**Subtracting the reserve is the other half of the arithmetic.** Set the contract
+limit equal to `hub_max_frame_bytes` and a payload at exactly the limit overflows
+the frame by the envelope's own bytes. With the subtraction, a payload the
+contract admits always fits a frame, and the in-process engine enforces the
+identical number by reading the same setting.
+
+**The in-process engine pays a measurement it did not pay before, and the
+contract fixes the answer rather than the method.** It has no payload to
+serialise for its own sake, so enforcing the bound means encoding one. That cost
+is ADR-0084 §4's, not this ADR's — "every implementation enforces it, the
+in-process engine included" — but the clause is written so the cost is avoidable
+where it cannot bind:
+
+> What the contract fixes is **which payloads are refused**, not how the refusal
+> is computed. An implementation may use any cheaper test that refuses exactly
+> the same set — for instance skipping the encoding entirely when a conservative
+> upper bound proves the payload is inside the limit.
 
 **The in-process engine reads `Settings.hub_max_frame_bytes` directly.** It has no
 handshake to be told the value by; the client is told it by the connect reply
 (ADR-0084 §3) and enforces the number it was told. Same number, two routes to it.
 
-**An oversized value raises `OversizedValueError(AssistantError)`, naming the
-limit and the field that exceeded it** (§9). On the client this fires *locally*,
+**An oversized payload raises `OversizedValueError(AssistantError)`, naming the
+limit, the measured size, and the largest argument or field contributing to it**
+(§9) — which is ADR-0084 §4's "naming the limit and the field that exceeded it"
+under a payload-level bound, and is the actionable half: "your request is 17 MiB
+against a 16 MiB limit, mostly `utterance`" tells a user what to do, and a bare
+total does not. On the client this fires *locally*,
 before a byte is sent, which is ADR-0084 §3's stated behaviour for an oversized
 argument — "not as a connection that closes mid-request".
 
@@ -737,17 +780,18 @@ wants ADR-0084 §7's specific remedy — call `pending_confirmations()` and re-m
 can now catch the thing that has that remedy.
 
 **`OversizedValueError(AssistantError)`.** §8's typed refusal. It carries the
-limit and the name of the field or argument that exceeded it, because ADR-0084 §4
-requires exactly that and because "too large" without a number is not actionable.
+limit, the payload's measured size, and the name of the largest argument or field
+contributing to it, because ADR-0084 §4 requires the limit and the field and
+because "too large" without a number is not actionable.
 
 **The per-method declared failures:**
 
 | Method | Declares |
 | --- | --- |
-| `converse` | `UnknownConversationError`, `PlanningError`, `ContextError`, `AuditError`, `ToolBindingError`, `OversizedValueError` |
+| `converse` | `ValueError`, `UnknownConversationError`, `PlanningError`, `ContextError`, `AuditError`, `ToolBindingError`, `OversizedValueError` |
 | `resume` | `UnknownContinuationError`, `PermissionDeniedError`, `AuditError`, `ToolBindingError`, `OversizedValueError` |
 | `learn` | `MemoryStoreError`, `OversizedValueError` |
-| `observe` | `UnknownConversationError`, `ConversationStoreError`, `MemoryStoreError`, `ModelError`, `OversizedValueError` |
+| `observe` | `ValueError`, `UnknownConversationError`, `ConversationStoreError`, `MemoryStoreError`, `ModelError`, `OversizedValueError` |
 | `beliefs`, `belief` | `MemoryStoreError`, `ValueError`, `OversizedValueError` |
 | `forget` | `MemoryStoreError`, `ValueError` |
 | `questions`, `interrupted_questions` | `DeferralStoreError`, `MemoryStoreError`, `ValueError`, `OversizedValueError` |
@@ -796,7 +840,7 @@ fixed, so it is stated compactly rather than method by method:
   mode; `null` where the method returns an optional (`belief`, `conversation`); a
   JSON array where it returns a tuple (`beliefs`, `questions`,
   `interrupted_questions`, `recent_conversations`, `pending_confirmations`); and a
-  JSON boolean for the four methods returning `bool` (`forget`,
+  JSON boolean for the three methods returning `bool` (`forget`,
   `forget_question`, `forget_conversation`, and no other).
 - **Every promoted `StrEnum` serialises as its member value**, which is why §4
   keeps the `StrEnum` base: `Disposition.EXECUTED` is `"executed"` on the wire
