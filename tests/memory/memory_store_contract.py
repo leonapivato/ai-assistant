@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
     StoreFactory = Callable[[Callable[[], datetime]], MemoryStore]
 from ai_assistant.core.types import (
+    MAX_EVIDENCE_CITATIONS,
     BeliefBand,
     MemoryKind,
     MemoryRecord,
@@ -746,6 +747,174 @@ class MemoryStoreContract:
         results = await store.search("coffee")
 
         assert {r.id for r in results} == {"c0", "c1", "c2"}
+
+    # --- the batch read: get_many (ADR-0086 §6) -------------------------------
+    # One case per obligation. The suite asserts the **observable snapshot** and
+    # stops there, deliberately: a conforming store may answer in one remote
+    # request, one statement or one in-memory snapshot, so it has no per-chunk
+    # boundary a portable test could inject a mutation at, and a case that raced a
+    # writer against an in-flight call would be nondeterministic where it was not
+    # simply testing SQLite. Demanding that boundary would also make one store's
+    # chunking a universal obligation — the mechanism §6 says the contract is
+    # explicitly *not*. ``SqliteMemoryStore``'s own suite carries the interleaving
+    # case, where both the chunk boundary and the competing writer are controllable
+    # and the result is deterministic (ADR-0086 §8).
+
+    async def test_get_many_never_disagrees_with_get(self, store: MemoryStore) -> None:
+        """The whole of §6's first obligation, over every read-time outcome.
+
+        Asserted as an **equality against ``get``** rather than against a
+        hand-written expectation, so the case cannot drift from the predicate it is
+        about: whatever ``get`` decides for an id, ``get_many`` decides the same,
+        and an id ``get`` answers ``None`` for is *omitted* rather than mapped to
+        ``None``. All four outcomes a caller can reach are in the one call —
+        readable, absent, expired, window-closed and not-yet-open — because a store
+        that applied only some of its filters to the batch would pass a case that
+        used one of them.
+        """
+        await store.add(_semantic("live", "alpha"))
+        await store.add(_semantic("gone", "alpha", expires_at=_LONG_AGO))
+        await store.add(_semantic("retired", "alpha", validity=Validity(valid_until=_LONG_AGO)))
+        await store.add(_semantic("early", "alpha", validity=Validity(valid_from=_FAR_FUTURE)))
+        asked = ["live", "gone", "retired", "early", "never-stored"]
+
+        batch = await store.get_many(asked)
+
+        singles = {}
+        for record_id in asked:
+            single = await store.get(record_id)
+            if single is not None:
+                singles[record_id] = single
+        assert set(batch) == set(singles), (
+            "get_many and get disagree about which ids are readable, so two reads of "
+            "the same store answer differently about a record's liveness"
+        )
+        assert set(batch) == {"live"}, "the fixtures did not exercise every read-time outcome"
+        assert batch["live"].id == "live"
+        # An omission, never a `None` value: the mapping has no key at all for the
+        # four ids `get` answered `None` for.
+        assert all(value is not None for value in batch.values())
+
+    async def test_get_many_of_nothing_is_an_empty_mapping(self, store: MemoryStore) -> None:
+        """Asking for nothing is a question with an answer (§6).
+
+        The same words ``list_beliefs``' ``limit=0`` and ``write_atomic``'s empty
+        batch already use. Seeded first, so an implementation that ignored its
+        argument and returned everything would fail rather than return ``{}`` for
+        an empty store either way.
+        """
+        await store.add(_semantic("stored", "alpha"))
+
+        assert await store.get_many([]) == {}
+
+    async def test_get_many_collapses_duplicate_ids(self, store: MemoryStore) -> None:
+        """A mapping, so duplicates collapse and never multiply the result (§6).
+
+        The count is what carries this: a mapping cannot hold one key twice, so the
+        assertion that would fail on a store returning a positional result is the
+        one about *length* relative to the argument's.
+        """
+        await store.add(_semantic("dup", "alpha"))
+        await store.add(_semantic("other", "alpha"))
+
+        batch = await store.get_many(["dup", "dup", "other", "dup"])
+
+        assert set(batch) == {"dup", "other"}
+        assert len(batch) < len(["dup", "dup", "other", "dup"])
+
+    async def test_get_many_returns_detached_snapshots(self, store: MemoryStore) -> None:
+        """Records are detached snapshots, like every other ``MemoryStore`` read (§6).
+
+        Frozen under ADR-0068, so the property is asserted the way
+        ``test_stored_records_cannot_be_mutated_by_the_caller`` asserts it for
+        ``get``: the returned object refuses mutation, and the stored record is
+        unaffected either way.
+        """
+        await store.add(_semantic("snap", "alpha", validity=Validity(valid_until=_FAR_FUTURE)))
+
+        batch = await store.get_many(["snap"])
+
+        with pytest.raises(ValidationError):
+            batch["snap"].validity.valid_until = _LONG_AGO
+        assert await store.get("snap") is not None
+
+    async def test_get_many_judges_every_id_against_one_clock_reading(
+        self, store_factory: StoreFactory
+    ) -> None:
+        """§6's snapshot clause, on the axis a portable test can reach.
+
+        The point of the batch: resolving *k* citations through *k* ``get``s judges
+        them against *k* instants, so one can expire mid-resolution and a belief's
+        rendered count disagree with its own tombstones. Every record here falls due
+        after the first reading and before the second, so a store re-reading an
+        advancing clock per id retires everything after the first and this fails —
+        which is exactly the loop-of-singles implementation §6 forbids, seen from
+        outside. The clause about the *stored state* is the other half of the same
+        snapshot and is pinned where a chunk boundary exists to interleave at
+        (``tests/memory/test_sqlite_store.py``, ADR-0086 §8).
+        """
+        step = timedelta(hours=1)
+        state = {"now": _STORE_NOW}
+
+        def advancing() -> datetime:
+            reading = state["now"]
+            state["now"] = reading + step
+            return reading
+
+        store = store_factory(advancing)
+        deadline = _STORE_NOW + step // 2
+        wanted = [f"b{i}" for i in range(3)]
+        for record_id in wanted:
+            await store.add(_semantic(record_id, "alpha", validity=Validity(valid_until=deadline)))
+
+        batch = await store.get_many(wanted)
+
+        assert set(batch) == set(wanted), (
+            "the batch judged its ids against more than one instant, so two entries "
+            "in one result disagree about when 'now' was"
+        )
+
+    async def test_a_record_over_the_evidence_bound_stays_readable(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0086 §2's residue, pinned on the read path where it would be broken.
+
+        The bound is a ``MemoryWriter`` obligation and deliberately **not** a
+        ``Provenance`` validator, and this is the property that placement buys: a
+        deployment that accumulated a belief above the bound before the rule landed
+        keeps it, readable, through **every** read. A store decoding through the
+        model — which the persistent one does on every read — would start failing
+        on exactly those records the day a ``max_length`` appeared, so this is the
+        case a validator-based implementation cannot pass however correctly its
+        writer truncates.
+
+        Every read is exercised, because they decode by different paths and a bound
+        on the type would break them one at a time.
+        """
+        over_bound = tuple(f"legacy-ev-{index:03d}" for index in range(MAX_EVIDENCE_CITATIONS + 16))
+        legacy = SemanticMemory(
+            id="legacy",
+            content="a belief accumulated before the bound landed",
+            fact="a belief accumulated before the bound landed",
+            provenance=Provenance(
+                source=MemorySource.OBSERVED,
+                confidence=0.6,
+                last_updated=_REVISED,
+                evidence=over_bound,
+                evidence_elided=3,
+            ),
+        )
+
+        await store.add(legacy)
+
+        got = await store.get("legacy")
+        assert got is not None
+        assert got.provenance.evidence == over_bound
+        assert got.provenance.evidence_elided == 3
+        assert set(await store.get_many(["legacy"])) == {"legacy"}
+        assert "legacy" in {record.id for record in await store.list_beliefs()}
+        assert "legacy" in {record.id for record in await store.export()}
+        assert "legacy" in {record.id for record in await store.search("accumulated")}
 
     # --- band-scoped enumeration: list_beliefs (ADR-0073 §2) ------------------
     # One clause per obligation in ADR-0073 §2, as §8 requires. Two of them are
@@ -1593,3 +1762,34 @@ class MemoryStoreContract:
             listed = {record.id for record in await call}
 
             assert listed == {"obs-list-kept"}, _LATE_FILTER
+
+    async def test_get_many_observes_its_record_ids_before_its_first_await(
+        self, store: MemoryStore
+    ) -> None:
+        """``core.protocols``' input clause, on ``get_many``'s ``record_ids`` (ADR-0086 §8).
+
+        A second ``Sequence`` argument on this Protocol, so it gets the case
+        ``write_atomic``'s already has, or the clause is declared and unenforced.
+        It needs its own: none of ``get_many``'s other obligations mutates the
+        sequence mid-call, so an implementation that took its lock first and
+        materialised the argument afterwards would satisfy every one of them — the
+        snapshot, the agreement with ``get``, the collapsed duplicates — while
+        answering a later version of the caller's input. Growing the caller's own
+        list while the call is suspended must not widen the mapping.
+
+        The second id is stored and readable, so the filter is the only thing
+        keeping it out and a late read is the only way it can appear.
+        """
+        async with self._observation_subject(store, vacuous=self.reads_without_suspending) as (
+            subject,
+            arm,
+        ):
+            await subject.add(_semantic("obs-batch-asked", "zeta"))
+            await subject.add(_semantic("obs-batch-added", "zeta"))
+            record_ids = ["obs-batch-asked"]
+            gate = None if arm is None else arm("get_many")
+            async with held_at_its_first_await(gate, subject.get_many(record_ids)) as call:
+                record_ids.append("obs-batch-added")  # grow the caller's own list mid-flight
+            resolved = set(await call)
+
+            assert resolved == {"obs-batch-asked"}, _LATE_FILTER

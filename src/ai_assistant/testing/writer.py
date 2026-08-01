@@ -39,6 +39,7 @@ from ai_assistant.core.errors import (
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.types import (
+    MAX_EVIDENCE_CITATIONS,
     BeliefBand,
     DataTier,
     MemoryDecisionKind,
@@ -53,7 +54,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
@@ -281,12 +282,17 @@ class FakeMemoryWriter:
         resolved: tuple[str, ...],
     ) -> str | None:
         proposed = proposal.proposed
+        # Every installing arm passes through `_installed` (ADR-0086 §2), so the
+        # bound is a property of the seam rather than of one ruling. A no-op on a
+        # `_merge` result, which has already bounded the union it formed.
         match decision.kind:
             case MemoryDecisionKind.ACCEPT:
-                return await self._store.add(proposed)
+                return await self._store.add(_installed(proposed))
             case MemoryDecisionKind.STORE_TEMPORARY:
                 return await self._store.add(
-                    proposed.model_copy(update={"expires_at": self._expiry(decision.ttl)})
+                    _installed(
+                        proposed.model_copy(update={"expires_at": self._expiry(decision.ttl)})
+                    )
                 )
             case MemoryDecisionKind.REINFORCE | MemoryDecisionKind.SUPERSEDE:
                 target = next((c for c in conflicts if c.id == decision.target_id), None)
@@ -299,7 +305,7 @@ class FakeMemoryWriter:
                         _retirement_set(target, conflicts, proposal=proposal, resolved=resolved),
                         proposed,
                     )
-                return await self._store.add(_merge(target, proposed))
+                return await self._store.add(_installed(_merge(target, proposed)))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
 
@@ -354,13 +360,17 @@ class FakeMemoryWriter:
                     f"minted id {new_id!r} names a superseded target; re-minting"
                 )
                 continue
+            # The retirements are **not** bounded — a window-close is a retirement,
+            # not an install, so a legacy over-bound target goes back whole
+            # (ADR-0086 §2). The correction is an install and carries the
+            # proposal's own count, never the target's (ADR-0086 §4).
             batch = [
                 MemoryWrite(record=closed_target, mode=MemoryWriteMode.UPSERT)
                 for closed_target in closed
             ]
             batch.append(
                 MemoryWrite(
-                    record=_supersede(proposed, new_id),
+                    record=_installed(_supersede(proposed, new_id)),
                     mode=MemoryWriteMode.INSERT_IF_ABSENT,
                 )
             )
@@ -748,18 +758,73 @@ def _supersede(incoming: MemoryRecord, new_id: str) -> MemoryRecord:
     return incoming.model_copy(update={"id": new_id, "validity": Validity()})
 
 
+def _bounded_evidence(evidence: Sequence[str], *, elided: int) -> tuple[tuple[str, ...], int]:
+    """ADR-0086 §3's retention rule and §4's recurrence, in one place.
+
+    Duplicated from ``MemoryIngestor`` rather than shared, exactly as this module's
+    other contract helpers are: ``ai_assistant.testing`` may not import a subsystem
+    (golden rule 1). A fake looser than the contract would certify consumers a real
+    writer rejects (ADR-0026 §7), and this rule is contract.
+
+    Keeps the **last** :data:`MAX_EVIDENCE_CITATIONS` entries — the tuple is
+    ordered oldest-accumulated first, so the oldest are displaced — and returns the
+    elision count to store: the sum over the install's sources, plus what it
+    displaced. An upper bound, never a total (ADR-0086 §4).
+    """
+    displaced = max(len(evidence) - MAX_EVIDENCE_CITATIONS, 0)
+    return tuple(evidence[displaced:]), elided + displaced
+
+
+def _installed(record: MemoryRecord) -> MemoryRecord:
+    """``record`` with its evidence brought under the bound (ADR-0086 §2).
+
+    Applied at **every install** and at no retirement — ADR-0081 §1's distinction,
+    the one :func:`_installed_at` already implements. A ``SUPERSEDE`` whose target
+    is a legacy over-bound record retires it through :func:`_close_window` with its
+    tuple and its ``evidence_elided`` untouched, because a retirement asserts
+    nothing new about the warrant and truncating there would make a stored record
+    unreadable on its way off the read path.
+
+    A no-op for anything already under the bound. Where it bites it rebuilds
+    :class:`Provenance` through ``model_validate``, so the type's validators run on
+    the value that is stored rather than being skipped by ``model_copy(update=...)``
+    (ADR-0026 §2).
+    """
+    provenance = record.provenance
+    retained, elided = _bounded_evidence(provenance.evidence, elided=provenance.evidence_elided)
+    if elided == provenance.evidence_elided:
+        return record
+    bounded = Provenance.model_validate(
+        provenance.model_dump() | {"evidence": retained, "evidence_elided": elided}
+    )
+    return record.model_copy(update={"provenance": bounded})
+
+
 def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     """Fold ``incoming`` into ``target``, keeping the target's id.
 
     A minimal fold — newer content wins, confidence taken as the maximum. Only
     the evidence half is contract (ADR-0040 §5a): a ``REINFORCE`` retains
-    **both** records' ``evidence``. How content and confidence combine is
-    `memory`'s own rule, which the conformance suite deliberately does not pin.
+    **both** records' ``evidence``, **up to** :data:`MAX_EVIDENCE_CITATIONS`,
+    beyond which the oldest are displaced and counted (ADR-0086 §3, partially
+    superseding §5a). How content and confidence combine is `memory`'s own rule,
+    which the conformance suite deliberately does not pin.
+
+    The union is bounded before the ``Provenance`` is constructed, so its
+    validators run on the value stored. The fold is the one install drawing from
+    **two** sources, so both records' ``evidence_elided`` are summed — even when
+    the union fits and nothing is displaced (ADR-0086 §4).
     """
+    union = tuple(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence]))
+    evidence, elided = _bounded_evidence(
+        union,
+        elided=target.provenance.evidence_elided + incoming.provenance.evidence_elided,
+    )
     provenance = Provenance(
         source=incoming.provenance.source,
         confidence=max(target.provenance.confidence, incoming.provenance.confidence),
-        evidence=tuple(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence])),
+        evidence=evidence,
+        evidence_elided=elided,
         last_updated=incoming.provenance.last_updated,
     )
     return incoming.model_copy(update={"id": target.id, "provenance": provenance})

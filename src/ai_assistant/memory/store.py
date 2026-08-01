@@ -22,7 +22,7 @@ from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
 from ai_assistant.core.types import MemoryWriteMode, band_of
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import BeliefBand, MemoryKind, MemoryRecord, MemoryWrite
@@ -203,6 +203,34 @@ class InMemoryMemoryStore:
         # Deep copy so callers cannot mutate stored state — including nested fields
         # like validity — matching the persistent store.
         return record.model_copy(deep=True)
+
+    async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+        """Return the readable records among ``record_ids``, keyed by id (ADR-0086 §6).
+
+        The snapshot is free here and is taken anyway: a dict lookup cannot
+        interleave with a write on this loop, but the clock can be read more than
+        once, so ``now`` is sampled **once** for the whole batch and every id is
+        judged against it — the same reading :meth:`search` and
+        :meth:`list_beliefs` take, and the reason a loop of :meth:`get` calls is
+        not an implementation of this method.
+
+        The argument is materialised on the first executed line, before anything
+        else, so a caller mutating its own sequence cannot widen or narrow the
+        answer (ADR-0065).
+        """
+        wanted = dict.fromkeys(record_ids)
+        if not wanted:
+            # Answered without reading the clock at all, matching the persistent
+            # store's "no round trip": an empty argument must not be the one call
+            # that surfaces a bad clock as ``MemoryStoreError``.
+            return {}
+        now = self._now_utc()  # one reading for the whole batch, never one per id
+        return {
+            record_id: record.model_copy(deep=True)
+            for record_id in wanted
+            if (record := self._records.get(record_id)) is not None
+            and self._is_readable(record, now)
+        }
 
     async def search(
         self,
