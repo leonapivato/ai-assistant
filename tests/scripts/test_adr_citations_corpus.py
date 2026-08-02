@@ -33,26 +33,6 @@ import pytest
 _ROOT = Path(__file__).parents[2]
 _SCRIPT = _ROOT / "scripts" / "check_citations.py"
 
-#: The one Tier 1 finding `main` carries today, and it is a finding about
-#: **ADR-0088 rather than about ADR-0067**. ADR-0067 writes "31 further ADRs,
-#: ADR-0036 through ADR-0066, no ADR-0035 having been issued" — a correct
-#: sentence about a number that was never issued, in §1(a)'s canonical form and
-#: outside any fence. §6's Tier 1 rests on "ADRs are append-only so a file is
-#: never deleted", which covers a *deleted* target and silently assumes every
-#: cited number was issued; ADR-0088 states twice that the corpus passes today
-#: ("0035 is absent, and nothing cites it"), and both statements are false.
-#:
-#: It is pinned rather than excused inside the checker, which stays a faithful
-#: reading of §6 and reports it. Pinning keeps the gate green on a defect this
-#: lane may not fix — `docs/adr/**` is another lane's — while leaving the check
-#: live: a *new* dangling ADR citation changes this set and fails. Correcting
-#: the corpus, or amending §6, also fails it, which is the point — whoever does
-#: that deletes this pin. Tracked in the issue named below.
-_KNOWN_TIER_1 = (("docs/adr/0067-retire-the-changelog.md", "ADR-0035"),)
-
-#: The issue carrying the ADR-0088 §6 / ADR-0067 question above.
-_TRACKING_ISSUE = "#603"
-
 
 @cache
 def _report(*args: str) -> dict[str, object]:
@@ -82,14 +62,30 @@ def _tier_1(report: dict[str, object], kind: str) -> list[tuple[str, str]]:
 
 
 def test_no_adr_cites_a_decision_that_does_not_exist() -> None:
-    """Tier 1: an ADR file is never deleted, so a citation naming a missing one is a defect."""
+    """Tier 1: an ADR file is never deleted, so a citation naming a missing one is a defect.
+
+    **The expected set is empty, and it is asserted empty rather than pinned.**
+    It was pinned to one entry until ADR-0090: ADR-0067 writes "31 further ADRs,
+    ADR-0036 through ADR-0066, no ADR-0035 having been issued" — a correct
+    sentence, in §1(a)'s canonical form and outside any fence, about a number
+    that was assigned and never written. §6's Tier 1 rests on "ADRs are
+    append-only so a file is never deleted", which covers a *deleted* target and
+    silently assumes every cited number was issued. ADR-0090 §1 supplies the
+    missing case and the checker now passes a citation into a **gap** silently,
+    so the pin has nothing left to hold and §2 deletes it here.
+
+    What the exemption does *not* cover is asserted where it can be, against
+    constructed corpora rather than this one: ``test_check_citations.py`` pins
+    that a number above the maximum, one below the minimum and an ``NNNN`` of
+    ``0000`` each still fail. This module keeps the other half of the guard — a
+    new dangling citation in the real corpus fails right here.
+    """
     report = _report("--no-tracker")
 
-    found = sorted(_tier_1(report, "decision"))
-
-    assert found == sorted(_KNOWN_TIER_1), (
-        "A decision citation names an ADR file that does not exist (ADR-0088 §6, Tier 1). "
-        f"If you corrected the corpus or amended §6, delete the pin above and {_TRACKING_ISSUE}."
+    assert _tier_1(report, "decision") == [], (
+        "A decision citation names an ADR file that does not exist, and its number is not "
+        "in a gap enclosed by the issued set (ADR-0088 §6 Tier 1, as ADR-0090 §1 narrows it). "
+        "Fix the citation: a number outside the issued range is one nobody has issued."
     )
 
 
