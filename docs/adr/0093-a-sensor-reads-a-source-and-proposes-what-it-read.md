@@ -1,0 +1,618 @@
+# 93. A sensor reads a source and proposes what it read; the clock bounds the read, so nothing needs a cursor
+
+- Status: Proposed
+- Date: 2026-08-02
+- **Decides a `core` contract and implements none of it.** Golden rule 5 and
+  ADR-0015 §5 put a contract ADR in its own PR, merged before anything implements
+  against it. The Protocol, its shared conformance suite and its canonical fake in
+  `ai_assistant.testing` ship together as one later lane (`CONTRIBUTING.md` →
+  "Adding a Protocol"). **Because this ADR decides a Protocol and a `core` type,
+  its required review set is adversarial *and* architecture**, even though the PR
+  carrying it is prose only — the reading ADR-0090 §5 and ADR-0091's header each
+  recorded in the opposite direction, for ADRs that decided no surface. It is a
+  substantive contract ADR, so it is **reviewed while `Proposed` and ratified
+  only after** (`CONTRIBUTING.md` → "Contract ADRs land before their
+  implementation"), which is what leaves a finding able to change the decision.
+- **Depends on ADR-0092, and says so as a gate rather than as a note.** ADR-0073 §4
+  makes carrying the reporting source's identity and its report time a
+  precondition of leg 6's first `EXTERNAL` producer shipping. That vehicle is
+  ADR-0092's to decide, together with imported-record identity and whether a user
+  assertion may override an attested belief. §9 states what this seam needs from
+  it and what it refuses to assume in the meantime.
+- **Amends no earlier ADR and supersedes none**, and §12 applies ADR-0070 §1's
+  test and ADR-0082 §1's record rule clause by clause to show why — including to
+  the three places where the opposite reading is available: ADR-0008 §2's internal
+  seam, ADR-0075 §2's exemption boundary, and ADR-0083 §7's job table.
+
+## Context
+
+### What leg 6 needs, and the three questions it cannot start without
+
+Leg 6 builds the first read-only ingestion source. The project owner's ruling
+scoping it is that the first source is a **local `.ics` calendar file** read from
+disk. That ruling is doing more work than it looks like: it removes the network
+hop, so ADR-0017 §1's rule — user data may leave the device only from `models/` or
+a designated `tools/` seam — is not engaged, and §3's fourteen conditions on
+designating that seam are not this wave's to spend. ADR-0084 already settled the
+reasoning for the symmetric case: "A loopback listener moves bytes between two
+processes on one machine; it engages neither clause." Reading a file the user
+already has engages them less.
+
+What is left is three questions, and none of them has an answer in the corpus:
+
+1. **What a read-only source *is* as a contract** — what it contributes to the
+   situational context, what it proposes into memory, and on whose authority.
+2. **What drives it**, given that the hub now has a scheduler and that the one
+   job on that scheduler which needed durable state ships disabled for want of it.
+3. **How it is configured and enabled.**
+
+### What already exists, and what each of those pieces refuses to be stretched into
+
+**A context seam that is deliberately not a contract.** ADR-0008 §2 put
+`ContextProvider` in `core/protocols.py` and kept the composable-source seam —
+`ContextSource`, in `context/sources.py` — *inside* `context/`, "ensuring the only
+data that crosses a subsystem boundary is the typed `CurrentContext`". Its
+contribution is a `Mapping[str, object]`, explicitly "an implementation detail of
+`context/`". That seam is the right way to add a facet and the wrong way to reach
+memory: a `ContextSource` that also proposed beliefs would put a `MemoryWriter` in
+the subsystem ADR-0008 §4 defines as advisory and non-durable.
+
+**A write path that already has the shape a sensor needs, and a named refusal to
+extend it.** ADR-0028's propose/dispose/persist path routes every belief through
+`MemoryWriter.ingest` and a `MemoryPolicy`. ADR-0075 §2 exempted exactly one
+producer from it — deterministic capture of a turn this system conducted — and
+named this wave in the exclusion list: "**Any future capture source** — a sensor
+(leg 6), or the buffered ambient capture #441 sketches. Each may argue for the
+same exemption on the same grounds when it exists; none inherits it here, because
+none is deterministic recording of an exchange this system itself conducted and
+can vouch for."
+
+**A producer whose shape is the closest available precedent.** ADR-0077 §1 built
+the observer as "episodes in, proposals out": it "holds no store handle, and that
+is the scope limit rather than a rule about it", and selection "belongs to
+`orchestration`, the one place that legitimately holds both stores by injection".
+Everything about that shape transfers except its input.
+
+**A scheduler, and the one job on it that could not be enabled.** ADR-0083 §7 runs
+jobs from a table of names, intervals and next-due instants, each job "a public
+`Engine` call" (§8), each interval a `Settings` field. Observation is on that
+table and ships **disabled**, for a reason §7 states exactly: "without a cursor, a
+periodic run re-reads the same recent window and spends a model call each time,
+and it cannot reach the turns the window has already passed. Enabling it on a
+timer before the cursor exists buys repeated cost and no new coverage." The cursor
+itself is deferred by ADR-0083 §13 because it is "**new durable state**, so it is
+itself subject to §6's upgrade-with-state discipline".
+
+The question this ADR has to answer, and cannot answer by analogy, is whether a
+sensor inherits that problem. It does not, and §5 is where the difference is
+argued rather than asserted — because the answer decides whether leg 6's first
+source ships enabled or ships as a switch nobody can safely flip.
+
+### An honest statement of what this ADR is not allowed to settle
+
+Three things adjacent to every section below belong to other decisions, and are
+named here so that their absence reads as a boundary rather than an oversight.
+§11 states each as a deferral with the condition that would fire it.
+
+- **A revocable permission-grant model.** `ActionPolicy` governs *actions*, not
+  *sources*: "you may read my calendar" has nowhere to live today. §7 decides
+  configuration and enablement, which is a different and weaker thing, and says so
+  in as many words rather than letting a `Settings` field pass for consent.
+- **What a context facet carries.** Whether a facet gains an as-of instant and
+  provenance is a `core/types.py` decision sequenced after this one. §3 is built
+  so that this ADR does not have to guess it.
+- **ADR-0092's half**: the reporting source's identity and report time as they sit
+  on a stored record, imported-record identity, and the override of an attested
+  belief.
+
+## Decision
+
+We will add a `Sensor` contract in `core`: a read-only producer that reads one
+source, returns one bounded reading, and proposes what it read through the gate
+that already exists.
+
+### 1. A sensor reads a source and returns a reading; it holds no store and writes nothing
+
+> **Normative.** A `Sensor` takes no store handle, no writer, no policy and no
+> engine. It reads its own source and returns a reading. It may not write to any
+> store, may not read a belief, and may not decide the fate of anything it
+> proposes.
+
+This is ADR-0077 §1's rule with the input changed, and it is taken for the reason
+that ADR gave rather than by imitation: a producer that held a store would make
+the scope of ingestion "a property of the producer's code rather than of a
+ratified seam, and every later reviewer would have to re-derive it by reading an
+implementation. Here it is a type."
+
+> **Normative.** Every belief a sensor's reading proposes reaches memory through
+> `MemoryWriter.ingest` and the `MemoryPolicy` behind it. A sensor inherits no
+> part of ADR-0075's capture exemption.
+
+ADR-0075 §2 already reserved the argument for this wave rather than granting it,
+and this ADR declines to make it. The grounds it would have to be made on are not
+available: a calendar entry is not "deterministic recording of an exchange this
+system itself conducted and can vouch for" — it is a third party's report, which
+is the definition of the `ATTESTED` band (ADR-0072 §2, `BeliefBand.ATTESTED`:
+"A source the user connected reported it"). A band whose whole standing is that
+someone else said it is the last band that should reach the store unmediated.
+
+> **Normative.** Selecting when a sensor runs, and ingesting what it returns, are
+> `orchestration`'s. A sensor is never its own caller.
+
+### 2. Where a sensor lives: a new top-level `sensors/` package
+
+> **Normative.** Concrete sensors live in a new top-level `ai_assistant/sensors/`
+> package. It may import `core` and nothing else in `ai_assistant`; no subsystem
+> may import it. The `lint-imports` contract expressing that is the implementing
+> lane's.
+
+Placement is decided here rather than left to the lane because it is an
+architecture boundary with a mechanical contract behind it (`CLAUDE.md`, golden
+rules 1 and 2), and ADR-0083 §8 set the precedent by placing `service/` in a
+lifecycle ADR for the same reason. Each of the four existing homes was tested and
+each fails on something specific:
+
+- **`context/`** is advisory and non-durable by ADR-0008 §4's design. A source
+  living there would have to hold a `MemoryWriter` to reach memory, which makes
+  the advisory subsystem a belief producer and breaks the property ADR-0008 §2
+  bought by keeping `ContextSource` internal.
+- **`memory/`** owns the store and the gate. A producer that lives beside the
+  policy ruling on it is the arrangement ADR-0028's propose/dispose split exists
+  to prevent, and it is why the observer is in `learning/` and not here.
+- **`learning/`** is model-backed distillation — feedback and episodes into
+  beliefs. A sensor infers nothing: it reads a file and reports what the file
+  says. Putting a non-inferring reader there would blur the one line ADR-0075 §2
+  draws by *what the producer does* — record, or infer.
+- **`tools/`** owns definitions, the registry, and the undesignated egress seam of
+  ADR-0017 §1. A sensor is not invoked by a plan and transmits nothing; filing it
+  there would put a reader inside the package whose network posture is governed by
+  fourteen unmet conditions, and invite exactly the confusion §11 is at pains to
+  avoid when a networked source eventually exists.
+
+### 3. One read, two consumers; the facet half is deferred additively rather than guessed
+
+A sensor's reading has two legitimate consumers: the situational context, and
+memory. They are not two reads.
+
+> **Normative.** A sensor performs one read per run and returns one reading. The
+> context facet and the memory proposals derived from a run are derived from that
+> same reading. Nothing may read the source a second time to build the facet.
+
+Two reads at two instants would let the facet and the beliefs written in the same
+run disagree about the same source, and the disagreement would be invisible: both
+would be internally consistent and there would be no artefact recording that they
+came from different moments.
+
+> **Normative.** `SensorReading` is a `core/types.py` pydantic model. Its
+> **proposal half is decided here**: the sensor's Tier 2 identity, the instant the
+> source itself reports the reading as of, the instant this system performed the
+> read, and the proposals. Its **facet half is deferred** and lands as an
+> **optional** field when the context-facet decision is made; a reading that
+> predates that field stays valid.
+
+This is ADR-0008 §1's own additive pattern applied one level up. That section
+built `CurrentContext` so "a producer that predates a facet stays valid: an absent
+facet is `None`", and the same shape means this ADR does not have to guess what a
+facet carries in order to give the sensor a return type. The alternative — a
+Protocol returning a bare sequence of proposals — makes the facet's arrival a
+signature change, and a signature change is a breaking `core` change owing its own
+ADR (golden rule 5), bought purely to avoid naming a model now.
+
+> **Normative.** The facet path is `context/`'s existing internal seam. A
+> `ContextSource` in `context/` holds a `Sensor` and contributes from its reading.
+> A `Sensor` is not itself a `ContextSource`.
+
+ADR-0008 §2's rule that only `CurrentContext` crosses the boundary is left exactly
+as ratified: the sensor's typed reading crosses into `context/`, and `context/`'s
+untyped `Mapping` contribution stays inside it.
+
+> **Normative.** The `context/` adapter is **optional** in ADR-0026 §4's sense: it
+> carries no `required` marker, so a sensor fault leaves the facet absent and the
+> rest of the context assembled.
+
+That is ADR-0008 §4 applied without amendment — "A failing **optional** source
+(future: a calendar API outage) is **skipped**, leaving its facet `None`" — and it
+is the clause that ADR names a calendar in.
+
+### 4. What a sensor may propose: attested beliefs, never an episode, and never an absence
+
+> **Normative.** A sensor proposes records in the `ATTESTED` band. It may not
+> propose an `EpisodicMemory`.
+
+The corpus anticipates ingested episodes — ADR-0077 §8 notes that "a sensor's
+episodes belong to no conversation, and reaching them needs a second selection
+rule in the stage, not a different `Observer`" — but anticipating is not
+authorising, and the two ratified clauses that bear on it point the other way and
+leave no path through:
+
+- ADR-0075 §2 declines the capture exemption to a sensor, so an ingested episode
+  would have to go through the gate; and
+- ADR-0075 §4 demonstrates, against the code rather than from first principles,
+  that the gate is **destructive** to an episode: `MemoryIngestor._detect_conflicts`
+  is kind-scoped, `DefaultMemoryPolicy.decide` rules `REINFORCE` on the first
+  conflict, and `_merge` returns "the **new turn stored at the older turn's id**".
+
+An ingested episode therefore has neither a gate it can survive nor an exemption
+it can claim. Manufacturing one here would mean arguing an exemption for a record
+of an event this system did *not* witness — a strictly larger claim than the one
+ADR-0075 made for a turn it did — and doing it inside an ADR about a seam. It is
+deferred by name in §11.
+
+> **Normative.** A sensor never proposes the absence, cancellation or retraction
+> of anything. An entry missing from a later reading is not evidence that the
+> entry was withdrawn.
+
+This is the safety rule the whole seam turns on, and it is a consequence of §5's
+bound rather than an independent preference: a bounded read, a truncated file, a
+permission error and a genuinely deleted entry are **indistinguishable from the
+reading**. A producer allowed to propose absence would retract the user's beliefs
+on the strength of a failed read, and the failure would look exactly like success.
+Retracting an attested belief when its source stops reporting it is real work and
+is deferred in §11, where it belongs beside ADR-0092's override mechanism.
+
+> **Normative.** A sensor's proposals carry a `rationale` naming the source, and
+> a `sensitivity` chosen for what the source holds rather than defaulted.
+
+`MemoryUpdateProposal.sensitivity` defaults to `DataTier.PERSONAL`, which is
+correct for a calendar and must not be assumed correct for the next source. A
+reading that touches Tier 0 material is the one case the propose path already
+refuses to queue as a question (`MemoryUpdateProposal._secret_data_carries_no_confirmation`),
+and a producer that defaults its way past that classification is the failure
+ADR-0004 §1's tiering exists to prevent.
+
+### 5. The read is bounded by the clock and configuration — which is exactly why there is no cursor
+
+> **Normative.** A sensor's read is bounded. The bound is declared by the sensor,
+> its figures are `Settings` fields with named defaults, and a figure outside its
+> range is refused at load rather than at the first run.
+
+Every read in this system is bounded (ADR-0021 §4, ADR-0073 §2), and ADR-0074 §9.3
+already ruled that the defaults are named rather than left to the implementation,
+because "a 'bounded default' with no figure is two conforming stores handing the
+same continuation different history". ADR-0077 §1 applied both to
+`observation_batch_size`, including the reason the refusal belongs at load: "A
+setting the store read would refuse must fail at load, not at the first
+observation".
+
+> **Normative.** A sensor's bound is a function of the clock, its configuration
+> and the source's own content, and of nothing else. It may not be derived from
+> durable state recording what previous runs read.
+
+**This is the clause that removes the cursor, and it is the substantive finding of
+this ADR.** ADR-0083 §7 ships observation disabled because "without a cursor, a
+periodic run re-reads the same recent window and spends a model call each time,
+and it cannot reach the turns the window has already passed". Both halves of that
+are properties of *observation*, not of periodicity, and neither transfers:
+
+- **The coverage failure does not arise.** Observation's window is the tail of a
+  conversation log that grows forever, so a turn that falls out of the tail is
+  unreachable by any future run: nothing but a cursor can get back to it. A
+  clock-relative window over a calendar is not like that. The window *moves with
+  the clock*, so every run's window is recomputed from scratch and an entry inside
+  it is read whether or not any previous run read it. There is no accumulating
+  backlog for a cursor to track.
+- **The cost failure is a different order.** Observation spends a model call per
+  run (ADR-0077 §3). A sensor reads a file and parses it. Re-reading is not free,
+  but it is not the thing §7 declined to spend.
+
+> **Normative.** The `Sensor` contract carries no cursor and no durable
+> per-source state, and a conforming sensor may not introduce one. A source that
+> cannot be re-read in full within its bound — an append-only feed, a paginated
+> API, a mailbox — is out of this contract's scope and owes its own decision.
+
+That last sentence is the honest boundary rather than a hedge. The no-cursor
+result is bought by re-readability, so it must not be inherited by a source that
+does not have it, and the condition is stated so a later lane cannot reach it by
+adding a source rather than by amending a rule. A cursor would also be new durable
+state under ADR-0083 §6's upgrade-with-state discipline — the reason ADR-0083 §13
+declined to decide the observation cursor inside a lifecycle ADR — and the same
+reason applies here with the same force.
+
+> **Normative.** Re-reading is safe only if re-proposing is idempotent at the
+> gate. A sensor may not be enabled on a schedule until ADR-0092's imported-record
+> identity makes a re-proposed entry fold rather than duplicate.
+
+This is the sensor's version of ADR-0077 §8's "re-observation is safe by
+construction", and the difference is that the observer's safety came free from the
+gate folding a repeat into a `REINFORCE`, while a sensor's turns on what identity
+an imported record carries — which is ADR-0092's, not this ADR's. §9 states it as
+a gate.
+
+**Two costs are accepted and named, because a bound always has them.** An entry
+that falls outside the window before any run reads it is never proposed; and an
+entry inside the window is re-read every run, moving `provenance.last_updated`
+and therefore the inspection sort key (ADR-0073 §2) exactly as ADR-0077 §8 accepted
+for re-observation. The first is the price of not carrying a cursor and is
+correct for a calendar, where an entry outside the window is not a belief this
+system should be forming. The second is a true statement about us and is what
+ADR-0092's report-time field exists to keep from being mistaken for a statement
+about the source (ADR-0073 §4).
+
+### 6. Driving: a scheduler job that is an `Engine` call, and it may ship enabled
+
+> **Normative.** A sensor is driven by a job on ADR-0083 §7's scheduler. The job's
+> body is a public `Engine` call and holds no store, no sensor and no subsystem
+> import, exactly as ADR-0083 §8 requires of every job.
+
+ADR-0083 §7 is explicitly built to be extended this way — it describes a job
+arriving "on this list by configuration, which is the shape §8 is built for" — so
+adding one uses the mechanism rather than changing it (§12 applies the test).
+`Engine` grows an ingestion operation for the job to call: new concrete surface in
+`orchestration`, not `core` contract surface, on ADR-0083 §8's precedent that "the
+`Engine` therefore grows a maintenance surface".
+
+> **Normative.** Nothing about a sensor is wired into a turn. There is no
+> per-request read and no ambient trigger.
+
+ADR-0077 §8's first reason binds unchanged: "Nothing is waiting on it, and a turn
+is." A file read is cheaper than a model call, but the facet is advisory (ADR-0008
+§4) and a source fault must not reach a request the user is waiting on.
+
+> **Normative.** A sensor's job may ship enabled once §9's gate is discharged. The
+> reason observation ships disabled is specific to observation and does not
+> transfer.
+
+Stating this is the point of §5. Left unstated, the next lane reads "the
+observation job ships disabled" as the house posture for scheduled ingestion and
+ships a switch nobody can safely flip — which is the same mistake ADR-0083 §7 was
+careful *not* to make when it named the disabled default's reason instead of
+assuming it. Enablement is still configuration and still defaults to off, for the
+different reason §7 gives.
+
+> **Normative.** A failing sensor job never takes the process down. It is logged
+> with its class and retried at its next due instant.
+
+ADR-0083 §7 unchanged, and it is a stronger fit here than for the jobs that clause
+was written for: a sensor's source is a file the system does not own, so
+unreadability is an ordinary state of the world rather than a defect.
+
+### 7. Configuration and enablement — and configuration is not consent
+
+> **Normative.** Leg 6 configures exactly one source, by explicit `Settings`
+> fields. There is no source registry and no list-valued source configuration.
+
+The precedent is ADR-0083 §7's own: `retention_purge_interval`,
+`conversation_sweep_interval` and `observation_interval` are three flat fields,
+not a table. A registry is a schema decision with a validation story, and one
+source does not buy it. Revisit at the third source, which is also roughly when
+§11's grant question stops being deferrable.
+
+> **Normative.** A sensor's interval follows ADR-0083 §7's convention exactly:
+> a `timedelta` refused at load unless finite and strictly positive, with
+> **disabled spelled `None`, never `0`**.
+
+The reason is ADR-0083 §7's and applies without modification: the scheduler re-arms
+from completion, so an interval of zero makes the job due again the instant it
+finishes, and "off" and "as fast as possible" look identical in a config file.
+
+> **Normative.** Every sensor ships **disabled by default**, and the reason is
+> that nothing may read a user's personal files because a default said so — not
+> that anything technical is missing.
+
+Naming the reason is what stops the default flipping the day the technical
+obstacle clears. It also places the default correctly relative to the grant
+question: a fresh install that read a calendar unasked would be making the grant
+decision by omission, which is the one way it must not be made.
+
+> **Normative.** A sensor's configured location is validated for **shape** at
+> load — for a filesystem source, that the path is absolute — and for
+> **existence and readability** at run time, where it degrades under §6 rather
+> than refusing to start.
+
+The split follows what each thing is a property of. `Settings` already refuses a
+non-absolute `data_dir` at load, and ADR-0008 §4 puts a malformed timezone at
+startup "not a request-time failure", because both are properties of the
+configuration. A file's existence is a property of the world at an instant: a hub
+that refused to start because a calendar file was on an unmounted volume would
+turn an advisory source into a boot dependency, which is precisely the coupling
+ADR-0008 §4 declined for the whole context subsystem.
+
+> **Normative.** A sensor's identity is a configured, stable Tier 2 name. It may
+> never be derived from the source's location or contents, and a path, filename,
+> address or account identifier may not be used as one.
+
+This is `ContextSource.name`'s obligation, and it is stricter here rather than
+merely inherited, because a sensor's identity has a second consumer. That
+docstring already requires the name be Tier 2 "and must stay that way… A source
+that wraps personal data names *itself* (`"calendar"`), never the data it holds".
+For a sensor the identity is also what ADR-0073 §4's gate carries onto a stored
+belief and renders back to the user — so a path used as an identity would put a
+home directory and a filename into `Provenance`, into every export, and into every
+log line, in a system whose ADR-0004 §5 rule is that logs never contain Tier 1
+data. It is stated as its own clause because "used for logging" has been read as
+licence before (ADR-0055), and here it would be read as licence twice over.
+
+> **Normative.** Configuration is not a grant, and no surface may present it as
+> one. A `Settings` field cannot be revoked by the user through the assistant,
+> cannot be scoped, and leaves no audit record.
+
+The grant model is deferred (§11). What is decided here is that the deferral is
+not quietly discharged by the configuration this section adds — which is exactly
+what would happen if leg 6's exit test ("from a source the user granted") were
+read as satisfied by an operator having set a path.
+
+### 8. Failure has two postures, because the reading has two consumers
+
+There is no single answer, and the two are already ratified in different places:
+
+- **On the facet side, advisory.** ADR-0008 §4: an optional source's failure is
+  skipped, the facet is `None`, assembly returns the rest. §3's adapter is
+  optional, so this needs no new rule.
+- **On the ingestion side, retried.** ADR-0083 §7: logged with its class, retried
+  at the next due instant, never a process exit.
+
+> **Normative.** A partial or failed read proposes nothing rather than proposing
+> what it managed to read.
+
+This is §4's absence rule reached from the other direction and it is worth its own
+clause: a half-parsed calendar is not a smaller calendar. Proposing from a partial
+read would write beliefs whose bound is the failure's shape, and nothing about the
+stored record would say so.
+
+### 9. The dependency on ADR-0092, stated as a gate
+
+ADR-0073 §4 puts a precondition on this wave in as many words: "The gate is on leg
+6's first `EXTERNAL` producer: carrying **both** the reporting source's identity
+and its report time is a precondition of it shipping, and whether that needs
+`Provenance` to grow fields is a `core` decision for that lane — with a producer
+in hand — not one to guess here."
+
+> **Normative.** This ADR does not discharge ADR-0073 §4's gate and does not
+> decide the vehicle. `SensorReading` is where the identity and the source's
+> as-of instant enter the system (§3); how they reach a stored belief is
+> ADR-0092's.
+
+> **Normative.** No sensor may be enabled on a schedule until ADR-0092 has decided
+> imported-record identity. Until then §5's idempotence premise is unestablished,
+> and a periodic re-read is a duplicate generator rather than a refresh.
+
+The two are separate gates on purpose. The first is about what a stored belief can
+honestly say; the second is about what happens when the same entry is proposed
+twice. A lane could discharge one and believe it had discharged both.
+
+> **Normative.** This ADR decides nothing about whether a user assertion may
+> override an attested belief. Where a sensor's re-read would restore a value the
+> user corrected, the governing rule is ADR-0092's, and this seam conforms to
+> whatever it ratifies.
+
+ADR-0038 §2a's exclusion of `EXTERNAL` from supersession is mechanical — it turns
+on an external record's id being "the integrating system's idempotency key" — and
+this wave is the first time it has a live case. That makes it ADR-0092's to move,
+and it makes pre-empting it here particularly cheap-looking and particularly
+wrong: the mechanism and the identity decision are the same decision.
+
+### 10. The contract surface owed, and what the triad lane owes
+
+**New surface in `core` — a breaking change (golden rule 5):**
+
+- **`core/protocols.py`** gains **one** Protocol, `Sensor`, owing: a stable Tier 2
+  identity, and a bounded read of its own source returning one `SensorReading`. It
+  is named for its product role as every Protocol here is (`Planner`, `Observer`,
+  `MemoryPolicy`).
+- **`core/types.py`** gains `SensorReading`, with §3's decided half and §3's
+  deferred optional facet field absent for now.
+
+**What the triad lane owes, as one change (`CONTRIBUTING.md` → "Adding a
+Protocol"):** the Protocol, a shared conformance suite exercising the clauses
+above that are checkable against any conforming implementation — the bound is
+refused out of range rather than clamped, a partial read proposes nothing, no
+proposal is `EPISODIC`, no proposal states an absence — and a canonical fake in
+`ai_assistant.testing`. ADR-0077 §1's posture on an out-of-range argument carries:
+"out of range is a `ValueError`, not a clamp".
+
+**What later lanes owe, and this ADR does not:** the concrete `.ics` sensor in
+`sensors/`, the `context/` adapter and the facet, the `orchestration` ingestion
+stage, the `Engine` operation, the scheduler job and its `Settings` fields, and
+the `lint-imports` contract pinning §2.
+
+### 11. Deferred, by name, each with the condition that fires it
+
+- **A revocable permission-grant model.** `ActionPolicy` governs actions, not
+  sources. Fires when a second source exists or when leg 6's exit test is
+  evaluated against its own wording; §7's last clause exists so nothing reads
+  configuration as having discharged it in the meantime.
+- **What a context facet carries** — an as-of instant and provenance. §3 is
+  additive precisely so this ADR does not decide it. Fires with the facet.
+- **Whether an ingested record may ever be an `EpisodicMemory`.** §4 declines it
+  for leg 6. Fires when something wants a timeline rather than beliefs; it needs
+  an ADR arguing a capture exemption for an event this system did not witness,
+  which is a larger claim than ADR-0075 §2 made and must be made on its own.
+- **Retracting an attested belief when its source stops reporting it.** §4 forbids
+  proposing absence, which makes this real work rather than a special case. Fires
+  with ADR-0092's override mechanism, whose id discipline it shares.
+- **A source that cannot be re-read in full** — a feed, a paginated API, a
+  mailbox — and therefore the cursor. §5 scopes this contract to re-readable
+  sources; ADR-0083 §13's upgrade-with-state discipline governs whoever takes it.
+- **A networked source.** ADR-0017 §1 governs data leaving the device and §3's
+  fourteen conditions govern designating the `tools/` seam. A remote calendar
+  transmits a credential and a request, so it engages §1 and cannot be reached by
+  changing a path to a URL — the same sentence ADR-0084 wrote about its own
+  transport, for the same reason.
+- **A source registry.** §7 revisits at the third source.
+- **#545's model in full** — expectations, the ledger, and met/not-met/unknown.
+  That issue is a proposal carrying its own do-not-implement header, and leg 6
+  builds one channel rather than the model. Its three prerequisites are what has
+  near-term force, and this ADR touches the third and depends on the second.
+
+### 12. This ADR classified under ADR-0070 §1 and ADR-0082 §1
+
+ADR-0082 §1 requires the judgement to be made in the later ADR's text. It is made
+here, clause by clause, and the answer is that **no earlier ADR's status line
+changes**. The three places where the opposite reading is available:
+
+- **ADR-0008 §2** keeps the `ContextSource` seam inside `context/`. §3 adds a
+  *different* Protocol in `core` and has a `context/` adapter hold it, so the rule
+  that only `CurrentContext` crosses the boundary is left exactly as ratified. No
+  clause is changed; a new one is added beside it. Not an amendment.
+- **ADR-0075 §2** listed a sensor among the producers that do *not* inherit the
+  capture exemption and said each "may argue for the same exemption on the same
+  grounds when it exists". §1 and §4 decline to argue it. Agreeing with a ratified
+  clause is not amending it.
+- **ADR-0083 §7's job table.** §6 adds a job. §7's own text describes a job
+  arriving "on this list by configuration, which is the shape §8 is built for", so
+  the table enumerates what shipped rather than closing the set. Using a mechanism
+  as specified is not amending it. This is the ADR-0083 §15 pattern — examining a
+  clause and finding it unmet — applied to three clauses at once.
+
+ADR-0073 §4's gate is *bound to* rather than discharged (§9); ADR-0038 §2a is
+untouched and belongs to ADR-0092; ADR-0017 §1 and §3 are examined in Context and
+found not to engage.
+
+## Consequences
+
+- **Leg 6 has a contract to implement against**, and the triad that follows is one
+  lane rather than a Protocol plus an argument about what it means.
+- **The no-cursor result is the load-bearing one.** A clock-relative bound makes
+  scheduled ingestion honest without new durable state, which is what lets leg 6's
+  source do the thing ADR-0083 §7 could not let observation do. It is bought by
+  re-readability, and §5 names that so the next source cannot inherit it silently.
+- **Two gates now sit visibly between this seam and a running sensor** (§9), both
+  ADR-0092's. That is the intended shape: the contract can merge, and nothing can
+  ship against it that would put an unattributable or duplicating belief in the
+  store.
+- **The `ATTESTED` band gets its first producer's shape**, and the band's whole
+  premise — someone else's word, stale in ways we cannot detect (ADR-0072 §5) — is
+  now expressed as rules rather than as a name: propose only, never write; never
+  state an absence; never propose from a partial read.
+- **What gets harder:** a second source that is not a re-readable file needs its
+  own decision rather than a new class, and an ingested timeline needs an ADR
+  rather than a field. Both are deliberate — each would otherwise be reached by an
+  implementation choice, and each is a larger claim than it looks.
+- **A gap stays open and is now visible**: configuration is not consent, and leg
+  6's exit test speaks of a source the user *granted*. §7's last clause makes that
+  a stated debt rather than a sentence nobody re-reads.
+- **Revisit when** a source arrives that cannot be re-read in full, when a third
+  source makes flat configuration unwieldy, or when something needs the timeline
+  §4 declines to write.
+
+## Alternatives considered
+
+- **Make a sensor a `ContextSource` and nothing more.** Smallest possible change,
+  and it fails on reach: `ContextSource.contribute` returns a `Mapping[str, object]`
+  that ADR-0008 §2 confines to `context/`, so the memory half would have no path
+  out of the subsystem, and giving `context/` a `MemoryWriter` to fix that makes
+  the advisory subsystem a belief producer.
+- **Two Protocols — one for the facet, one for the proposals.** Rejected in §3:
+  two reads at two instants, and a facet that can disagree with the beliefs
+  written in the same run, with nothing recording that they came from different
+  moments.
+- **Give the sensor a durable cursor now, mirroring what observation is waiting
+  for.** Rejected because the symmetry is false (§5), and because a cursor is new
+  durable state under ADR-0083 §6 — it would owe the upgrade decision ADR-0083 §13
+  declined to bury inside another ADR, and it would buy nothing over a
+  clock-relative window.
+- **Let a sensor write episodes directly under a capture exemption.** This is what
+  #545's model wants and what ADR-0077 §8 anticipates. Rejected in §4: ADR-0075 §2
+  reserved the argument rather than granting it, ADR-0075 §4 shows the gate would
+  corrupt an episode that went through it, and the exemption would have to be
+  argued for an event this system did not witness. It is deferred rather than
+  refused.
+- **Let a re-read retract what it no longer sees**, so a cancelled meeting stops
+  being believed. Rejected in §4 as the seam's single most dangerous move: a
+  bounded read, a truncated file and a permission error are indistinguishable from
+  a deletion, so this trades a stale belief for silent destruction of the user's
+  data on a failed read. Deferred to a decision that can tell those cases apart.
+- **Defer the whole sensor contract until the grant model exists.** Rejected: the
+  grant model is a next-wave decision of its own, and blocking a read-only local
+  file behind it would stall leg 6 on a question that a single-user machine with
+  an operator-set path does not yet pose. §7 makes the debt explicit instead.
