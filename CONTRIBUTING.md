@@ -555,10 +555,13 @@ either resolves or does not.
 
 What the corpus actually cites is owned by a check, not by this document:
 `tests/scripts/test_adr_citations_corpus.py` runs ADR-0088 §6's Tier 1 inside
-`pytest`, so a citation naming an ADR file or an issue number that does not
-exist fails the gate like any other test. `just citations` prints the whole
-report; its Tier 2 half is advisory and never fails, because an append-only
-corpus correctly cites what the tree no longer contains (ADR-0088 §3).
+`pytest`, so a citation naming an ADR file that does not exist fails the gate
+like any other test. Tier 1's tracker half needs `gh` to answer GitHub; where it
+cannot, the citation is unevaluable and passes silently rather than failing,
+which is §6's rule that a miss is benign and a false report is not.
+`just citations` prints the whole report; its Tier 2 half is advisory and never
+fails, because an append-only corpus correctly cites what the tree no longer
+contains (ADR-0088 §3).
 
 **Mark every normative clause**, in the form `docs/adr/template.md` carries
 (ADR-0089 §2). A clause is normative when **a reader could disobey it** — it
@@ -574,10 +577,13 @@ nothing, and a clause has to carry its own scope, conditions and exceptions —
 where the surrounding argument is what establishes that an obligation exists, or
 how far it reaches, the marking is not finished.
 
-Which regime an ADR is in is a `grep`, not a judgement: it is marked when it
-carries the token, and an unmarked ADR binds as prose exactly as the corpus
-always has (§4). That default is deliberate — marking nothing degrades to the
-status quo rather than to a defect — and it moves the risk onto review.
+Which regime an ADR is in is mechanical, not a judgement: it is marked when it
+carries at least one well-formed clause and unmarked otherwise, and an unmarked
+ADR binds as prose exactly as the corpus always has (§4). Mechanical is not a
+bare search for the token — one that is indented, not preceded by a blank line,
+or sitting inside a fence is not a mark and does not switch the regime (§2).
+That default is deliberate: a near-mark and a marked-nothing ADR both degrade to
+the status quo rather than to a defect, which moves the risk onto review.
 **Reviewing a marked ADR, check that every obligation the document intends sits
 inside a mark.** Nothing mechanical finds an under-marked ADR, and under §3
 whatever was left outside the marks is simply discarded.
