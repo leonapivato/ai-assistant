@@ -496,8 +496,10 @@ cannot be reached by letting the detector emit meaning.
 
 > **Normative.** Where a peer's submission is derived from source material the
 > peer holds, the peer submits the source material and may not substitute a lossy,
-> model-dependent derivation of it. A peer may not destroy the material a
-> submission was derived from before the hub has acquired it.
+> model-dependent derivation of it.
+
+> **Normative.** A peer may not destroy the material a submission was derived from
+> before the hub has acquired it or the attempt has terminally resolved (§8).
 
 For an audio-shaped peer this means the promoted slice, not a transcript made at
 the edge. The clause is stated over derivations rather than over audio because the
@@ -556,9 +558,22 @@ ADR-0017 §1 is engaged identically. §10 keeps the remote hop where it is.
 > the submitted material **durably** and within this section's bounds. Material it
 > cannot so hold is refused, not acknowledged.
 
-> **Normative.** A peer retains submitted material until that acknowledgement and
-> nothing after it. An unacknowledged submission leaves the material with the peer,
-> which may retry it.
+> **Normative.** A peer retains submitted material until the attempt resolves,
+> and nothing after it. An attempt resolves when the hub acknowledges it, or when
+> it resolves terminally under the clauses below.
+
+> **Normative.** A refusal is **terminal** when no retry of the same material
+> could succeed — it exceeds the window's bounds, or takes a form the hub does not
+> accept. A terminal refusal ends the custody attempt: the peer removes the
+> material, and §7's prohibition on destroying it does not survive the refusal.
+
+> **Normative.** Every other failure to acknowledge is **retryable** and leaves
+> the material with the peer. A peer's retry window is itself bounded, its figure
+> is the producer's ADR's, and its expiry resolves the attempt terminally.
+
+> **Normative.** A terminal resolution is reported and never silent. No surface
+> may present material that was refused or abandoned as though it had been
+> retained.
 
 > **Normative.** The window is bounded by **both** a duration and a size, and a
 > bound is enforced by refusing rather than by truncating or by silently
@@ -579,6 +594,26 @@ precede the custody: the hub says "I have it" only when it does, which also make
 a hub that is out of window capacity refuse at the door rather than accept and
 silently drop. This is §5's refuse-don't-downgrade posture and ADR-0093 §5's
 refuse-don't-truncate posture arriving on the same seam from a third direction.
+
+**A refusal must be able to *end* the attempt, and an earlier draft had only the
+retryable half.** With acknowledgement as the sole release point, a submission the
+hub can never accept — a slice over the window's size bound — put the peer in a
+state with no exit: §7 forbade destroying it before acquisition, acquisition could
+never happen, and retrying could not change the answer. Held forever, it also
+breaks §9's bound on ephemeral state, so the peer had no conforming move
+available. Adversarial review found it on the third round, and it is the
+characteristic failure of a custody rule written from the success path: the
+question a two-party handoff has to answer is not only "when is it safe to let
+go", it is "when is it *over*". Terminal resolution is that answer, and the
+retry window's own bound is what stops "the hub is down" from becoming the same
+trap by a slower route.
+
+**Reported rather than silent, because the user asked for this capture.** A
+promotion is a user-visible act; a refusal that vanishes leaves them believing
+something was kept. That is ADR-0084's ruling 4 — "If the hub is not running,
+there is a reason, and the reason must be legible" — applied to the case where the
+hub is running and declining. What the report looks like is a surface decision and
+is not made here.
 
 **The residual is a duplicate, and it is named rather than closed.** A lost
 acknowledgement — the hub persisted and then died before replying — leaves the
@@ -625,10 +660,24 @@ nobody wrote it down.
 *Scope: the attachment.*
 
 > **Normative.** A peer may hold ephemeral state, bounded in size and in age, and
-> destroyed continuously rather than at a checkpoint. It is never authoritative:
-> nothing the hub does may depend on it, it is not part of the peer's released
-> set until a promotion places a slice there (§3), and it survives no
-> acknowledgement.
+> destroyed continuously rather than at a checkpoint.
+
+> **Normative.** Ephemeral state is never authoritative: nothing the hub does may
+> depend on it, and it is not part of the peer's released set until a promotion
+> places a slice there (§3).
+
+> **Normative.** Material a promotion has released is held under §8 rather than
+> under this section: it is bounded by the resolution of its submission attempt,
+> not by the buffer's age bound, and it is destroyed when that attempt resolves.
+
+**The two hold-times are separate, and stating that is what keeps the two sections
+from contradicting each other.** The buffer's bound is an age: nothing sits in it
+longer than the window, whether or not anything ever reads it. A released slice
+has left that regime — it is awaiting a two-party handoff whose duration is not
+the peer's to fix — so it is bounded by §8's resolution instead. Both are bounds;
+they are bounds on different things, and collapsing them would either make a
+promotion expire mid-transfer or let an unresolved submission sit at the edge
+forever.
 
 **The useful reframing is that this is not "state at the edge" at all.** A rolling
 buffer is **a bounded backward read window, materialised in advance because the
@@ -696,8 +745,14 @@ resident-hub shape and `VISION.md` §8 are both built to prevent.
   ADR-0013's router, ADR-0062's fallback naming and ADR-0061's agnosticism testing
   reach it, or whether an edge detector is a different class of thing. Fires with
   the first peer that ships one. §6 fixes only that its output may not be meaning.
-- **The retention figures** (§8). Fires with the deciding ADR of the first
-  producer that retains anything, which names them under ADR-0093 §5's discipline.
+- **The figures** (§8) — the verification window's duration and size, the buffer's
+  age and size bounds (§9), and the peer's retry window. Fires with the deciding
+  ADR of the first producer that needs any of them, which names them under
+  ADR-0093 §5's discipline: named, refused at load, enforced by refusing. What is
+  decided here is which dimensions must be bounded, not by how much.
+- **What a terminal resolution is reported *as*** (§8) — a surface question,
+  sequenced with the rest of the capture surface. §8 fixes only that it is not
+  silent.
 - **Whether ambient capture may write an `EpisodicMemory`, and on what
   exemption.** ADR-0075 §2 named "the buffered ambient capture #441 sketches" in
   its exclusion list and reserved the argument rather than granting it; ADR-0093 §4
