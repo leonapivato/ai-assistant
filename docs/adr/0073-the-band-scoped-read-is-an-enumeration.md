@@ -2,6 +2,40 @@
 
 - Status: Partially superseded by ADR-0084 (the placement of the `Belief`, `TurnOutcome` and `IngestSummary` DTOs as `orchestration` dataclasses outside contract surface)
 - Date: 2026-07-27
+- Note (2026-08-02): **§4's `ATTESTED` gate now has an answer to its `core`
+  question. The gate itself is not discharged.** §4 rules that an attested belief's
+  complete answer "names **what reported it, and when that source said so**",
+  records that "**Neither half is carried by any field today**", and defers one
+  question outright: "whether that needs `Provenance` to grow fields is a `core`
+  decision for that lane — with a producer in hand — not one to guess here."
+  [ADR-0092](0092-an-attested-belief-names-its-source-and-a-user-assertion-retires-it.md)
+  is that lane. Its §1 answers the deferred question — `Provenance` grows one
+  optional `Attestation` value object carrying `reported_by` and `reported_at`,
+  present **if and only if** the belief's band is `ATTESTED`, enforced by a model
+  validator rather than by producer convention — and its §3 pins that `reported_at`
+  is the *source's* clock, never ours, which is what §4's floor forbids substituting.
+
+  **The gate stays live, and a reader should not take this note as closing it.** §4
+  makes carrying both halves "a precondition of [leg 6's first `EXTERNAL`
+  producer] shipping", and no producer has shipped: ADR-0092 is a contract ADR that
+  changes no code (golden rule 5, ADR-0015 §5). What changes is that the
+  precondition now has a **checkable form** — a field the type refuses to omit —
+  instead of an open `core` question, so the day the gate fires it is a gate a lane
+  can pass rather than a decision it must first make. §4's floor is likewise
+  untouched: a surface must still convey the band, must still not present an
+  attested belief as the user's word or as our inference, and must still not offer
+  our revision time as the source's.
+
+  **Nothing else here moves.** §4's `DERIVED` gate and its floor, §§1, 2, 3, 5, 6
+  and 7, and ADR-0084's partial supersession of the `Belief` DTO's placement are all
+  untouched; ADR-0092 decides what a record *carries*, not what the enumeration
+  renders or where its DTO lives. Under
+  [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §1 a
+  record is owed — a reader holding only ADR-0073 would otherwise still believe the
+  `core` decision is theirs to make — and under its §2 this line's leading
+  `Partially superseded by` token puts that record in this note rather than on
+  `Status`. Appended dated note per ADR-0070 §1; no ratified text is rewritten.
+  Refs #625.
 - Partially superseded: 2026-07-31 by ADR-0084 — **one sentence about where the
   `Belief` DTO lives is now false; nothing this ADR decided about what it carries
   changes.** ADR-0084 §5 finds ADR-0042 §1's revisit trigger fired and promotes

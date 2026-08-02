@@ -1,8 +1,55 @@
 # 38. A user assertion supersedes a conflicting inference
 
-- Status: Accepted, §1b discharged by ADR-0040; §2a's `EXTERNAL` refusal narrowed to
-  `REINFORCE` by ADR-0045
+- Status: Partially superseded by ADR-0092 (§2a's policy-side exclusion of `EXTERNAL` from the supersedable set)
 - Date: 2026-07-22
+- Partially superseded: 2026-08-02 by ADR-0092 — **§2a's exclusion of `EXTERNAL`
+  from the supersedable set is reversed; everything §2a gave as its *reason* was
+  already spent.** §2a excluded `EXTERNAL` "for a mechanical reason rather than a
+  philosophical one" — supersession kept the target's id, an external record's id
+  is the integrating system's idempotency key, and the next routine sync's upsert
+  restored the imported value over the user's correction. ADR-0045 §4 removed that
+  ground at the writer floor (a `SUPERSEDE` now writes its correction at a
+  freshly-minted id) and the note directly below records the narrowing it made
+  here; what it deliberately left standing was the **policy-side** half, since
+  `DefaultMemoryPolicy`'s own supersedable set was "a policy-lane choice this ADR
+  only makes *safe*, not one it makes" (ADR-0045 §5, §7, §10).
+  [ADR-0092](0092-an-attested-belief-names-its-source-and-a-user-assertion-retires-it.md)
+  §4 is that lane, with leg 6's first `EXTERNAL` producer in hand: the class a user
+  assertion may retire becomes `{OBSERVED, INFERRED, EXTERNAL}`, and ADR-0092 §6
+  supplies the id discipline §2a's closing paragraph said a proper resolution would
+  need ("either an id discipline that keeps a superseding correction off the
+  external key, or the validity window of issue #112" — in the event, both).
+
+  **What stands.** §2a's *shape* is untouched and is the reason ADR-0092 §4 keeps
+  it: the rule still "tests membership … **not** `is not USER_ASSERTED`", so "a
+  `MemorySource` added later is not silently enrolled in a destructive rule by
+  omission". §2a's other refusal — **any** fold onto a `USER_ASSERTED` target,
+  whatever the proposal's source — is untouched, as is its "keyed on the
+  **records**" argument for it, and as is §2a's ingestor-enforced `EXTERNAL`
+  `REINFORCE` refusal, which ADR-0092 §5 keeps by splitting the constant that
+  carries it rather than widening it. §§1, 1a, 1b, 2, 3, 4, 5 and 6 all stand, and
+  §2a's verified reproduction stands as history — of a defect now fixed, which is
+  what this line records for the first time. This is ADR-0070 §1's Status edit plus
+  an appended dated note; no ratified text is rewritten and ADR-0092 lands in the
+  same change, so this line never names an ADR that does not exist. Refs #625.
+
+  **The two amendment qualifiers move off `Status` in the same edit, and nothing
+  is lost.** The line carried:
+
+  ```text
+  Accepted, §1b discharged by ADR-0040; §2a's `EXTERNAL` refusal narrowed to `REINFORCE` by ADR-0045
+  ```
+
+  [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §2
+  rules that when a line takes the leading `Partially superseded by` token, any
+  qualifier already on it moves to the dated note in the same change — so that
+  ADR-0070 §4's invariant holds, and every `ADR-NNNN` after the leading token is a
+  supersession target. Both records stand in full below and neither is touched:
+  the ADR-0045 narrowing in the `Amended: 2026-07-23` note directly following, and
+  the ADR-0040 discharge in the `Amended: 2026-07-22` note and in §1b's own in-text
+  block. This is a re-rendering, not a deletion — ADR-0080 §8's operation as
+  ADR-0082 §2 generalised it. It also retires one of the five grandfathered
+  multi-line `Status` fields ADR-0070 §4 names.
 - Amended: 2026-07-23 by ADR-0045 — §2a's **ingestor-enforced** `EXTERNAL` refusal
   is **lifted for `SUPERSEDE` only**. §2a refused a `USER_ASSERTED` proposal folded
   onto an `EXTERNAL` target because supersession inherited the target's id — the

@@ -2,6 +2,54 @@
 
 - Status: Partially superseded by ADR-0080 (§4's window-close instruction for a target carrying a producer-set bounded window)
 - Date: 2026-07-22
+- Note (2026-08-02): **§5/§7/§10's deferred policy choice is taken, §10's identity
+  residual is decided, and §7 understated one of the two limits it recorded.**
+  Nothing this ADR *decided* moves; the note is owed because two of its sentences
+  stop being true of the tree and one was not true of the tree when written.
+
+  **The deferral is discharged, not overturned.** §5, §7 and §10 each left "whether
+  `DefaultMemoryPolicy` adopts `EXTERNAL` supersession" to a policy lane — "a
+  policy-lane choice this ADR makes safe", filed alongside #244 and #245 — and §10
+  separately filed "identity-aware re-sync so a superseded `EXTERNAL` record does
+  not resurrect".
+  [ADR-0092](0092-an-attested-belief-names-its-source-and-a-user-assertion-retires-it.md)
+  is that lane, with leg 6's first `EXTERNAL` producer in hand: its §4 widens the
+  retirement class to `{OBSERVED, INFERRED, EXTERNAL}` and its §6 rules that an
+  imported record's `MemoryRecord.id` is minted by the producer and is never the
+  source's own key. §7's "the shipped default policy does not yet adopt it (§5):
+  with `_SUPERSEDABLE` unchanged it still `ACCEPT`s the correction *beside* the
+  `EXTERNAL` record" is the sentence that stops being true, and §5's "The shipped
+  policy's `_SUPERSEDABLE` set is deliberately *not* widened **here**" stays true
+  of this ADR exactly as written.
+
+  **§7's second honest limit is real but understated, and ADR-0092 §Context
+  corrects it on the merits.** §7 says that when similarity misses the correction
+  the re-sync "may see no conflict, `ACCEPT`, and make the stale external belief
+  live again **alongside** the surviving correction. That is again the two-live-records
+  shape, not destruction — no user data is lost." The similarity half is right. What
+  it does not account for is what that `ACCEPT` *writes*: `MemoryIngestor._apply`'s
+  `ACCEPT` arm calls `store.add` on the proposed record, and `MemoryStore.add` is
+  documented as an upsert in which "`id` is the caller's idempotency key" — so while
+  an external record's id **is** the source's key, a re-sync proposing at the retired
+  record's own id lands *on top of it*, replacing a record whose
+  `validity.valid_until` was closed with one whose window is open by default. The
+  retired belief is not merely restated: the **retirement** is erased, and with it
+  the on-disk evidence §6 guarantees `export` will keep. So the residual on that
+  path was a loss of the audit trail this ADR exists to create, not only a duplicate.
+  ADR-0092 §6 closes it by removing the coupling — an import never arrives at an id
+  the store already holds, so it cannot address a retired record at all — and ADR-0092
+  §7 states the narrower claim that survives: the two-live-records residual remains
+  on a similarity miss; the destruction of the retirement does not.
+
+  **Everything else stands**, and §4's fresh-id supersession is what made ADR-0092
+  §4 safe to rule at all. §1's staging, §2's `Validity` object and its placement,
+  §3, §4 (as amended by ADR-0080 in the note below), §5's two conformance rewrites
+  and its clause 1, §6's read semantics, §8's atomicity floor, §9's migration and
+  §10's other deferrals are untouched. Under
+  [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §1 a
+  record is owed here; under its §2 this line's leading `Partially superseded by`
+  token means the record is this note and **not** a `Status` qualifier. Appended
+  dated note per ADR-0070 §1; no ratified text below is rewritten. Refs #625.
 - Note (2026-07-30): **The ADR-0078 amendment moves off the `Status` line to the
   note below; nothing about it changes.** The line carried "§5 clause 1 amended
   by ADR-0078" beside its leading partial-supersession token.
