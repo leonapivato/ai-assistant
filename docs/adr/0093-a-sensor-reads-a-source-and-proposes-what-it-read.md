@@ -493,9 +493,11 @@ ADR-0008 §4 declined for the whole context subsystem.
 > the cap plus one byte is consumed, and exceeding it raises under §8. It may not
 > be enforced by a size check performed before the read.
 
-> **Normative.** Filesystem work — resolving the path, opening it, and reading it —
-> **never runs on the event loop.** It runs on a worker the **sensor owns**, never
-> on the event loop's default executor, and the sensor awaits that worker.
+> **Normative.** **The whole of a read runs off the event loop** — resolving the
+> path, opening it, reading it, parsing it, and expanding recurrences alike. It
+> runs on a worker the **sensor owns**, never on the event loop's default executor,
+> and the sensor awaits that worker. Nothing `read()` does that is bounded by §5's
+> figures may run on the loop.
 
 > **Normative.** A sensor worker is **terminable at process exit**: neither
 > service shutdown nor interpreter shutdown may join it, and a read blocked
@@ -533,7 +535,18 @@ that holds for jobs that *finish late* and not at all for one that never finishe
 A hung sensor read takes the retention purge and the conversation sweep down with
 it, indefinitely, and every one of them looks merely slow.
 
-**`O_NONBLOCK` closes the FIFO case and closes nothing else, which is why the two
+**The clause covers the whole read and not just its I/O, and an earlier draft said
+"filesystem work".** That version left the loop exposed to the other bounded thing
+this ADR permits: §7b's budget allows 100,000 occurrence expansions, and an 8 MiB
+calendar within every stated cap can require them. Run on the loop after the worker
+returns, that CPU work starves the serial scheduler exactly as a blocked syscall
+does — and worse for the deadline, because the timer callback cannot fire while the
+loop is occupied, so `read()` overruns `calendar_read_timeout` and then *returns
+successfully* instead of raising. A deadline that cannot be observed is not a
+deadline. Putting the whole read on the worker is also the simpler rule: there is
+no boundary inside `read()` for a reader to get wrong.
+
+**`O_NONBLOCK` closes the FIFO case and closes nothing else, which is why the
 clauses above exist.** The flag is a no-op for a regular file, and nothing about
 being a regular file makes an operation return: a path on a stalled NFS or FUSE
 mount — `/mnt/sshfs/calendar.ics` — stays a perfectly ordinary regular file while
@@ -962,8 +975,9 @@ nor the raw cause message reaches a log — a path that is a **writer-less FIFO*
 fails rather than hangs, a source that grows past `calendar_max_bytes` after it is
 opened, a long-duration recurrence whose seek anchor underflows, a floating
 entry at each of an ambiguous and a nonexistent local time, a **regular file whose
-read is suspended** — asserting the deadline fires, the event loop stayed
-responsive, and a second read is refused while the worker is outstanding — and the
+read is suspended**, and separately a **parse or expansion made to run long** —
+each asserting the deadline fires, the event loop stayed responsive throughout, and
+a second read is refused while the worker is outstanding — and the
 same suspended worker **cancelled from outside**, asserting `CancelledError`
 propagates unchanged, a second read is still refused while the worker lives, and
 reads resume once it is released — and, **in a subprocess**, a hub shut down while a read is
