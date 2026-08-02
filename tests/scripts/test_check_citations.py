@@ -325,6 +325,12 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         "See https://example.test/foo(bar)#123 for detail.",
         "See the [section](/docs/(a)#123) too.",
         'See the [guide](/g "see #123").',
+        'See the [guide](/g(foo) "#123").',
+        "See the [guide](/g(foo) (#123)).",
+        "See the [guide](/g 'x)#123').",
+        '[guide]: /g "#123"',
+        '[guide]: /g(foo) "#123"',
+        "[guide]: /g (#123)",
         "See <a href = '#123'>section</a>.",
         "The path docs/adr/(draft)#123 is not a citation.",
     ],
@@ -356,6 +362,12 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         "bare-url-with-parens",
         "relative-paren-destination",
         "link-title",
+        "numeric-title-after-a-paren-destination",
+        "paren-delimited-numeric-title",
+        "quoted-title-carrying-a-paren",
+        "reference-definition-numeric-title",
+        "reference-definition-paren-destination-and-title",
+        "reference-definition-paren-title",
         "spaced-html-attribute",
         "paren-in-a-path",
     ],
@@ -422,19 +434,24 @@ def test_a_tracker_citation_in_prose_is_still_selected(tmp_path: Path, line: str
     [
         "The pre-#2 situation is different.",
         "See <details><summary>#2</summary> for detail.",
+        "An unclosed [guide](/g(foo and #2 after it.",
     ],
-    ids=["hyphenated-compound", "between-html-tags"],
+    ids=["hyphenated-compound", "between-html-tags", "after-an-unclosed-destination"],
 )
 def test_a_citation_in_an_unrecognised_context_is_passed_silently(
     tmp_path: Path, line: str
 ) -> None:
     """The measured cost of stating the citation positively, pinned so it is visible.
 
-    These *are* tracker citations and the checker no longer selects them, because
-    the run before the ``#`` is neither an opening-delimiter run nor a ``#NNN/``
-    join. ADR-0088 §6 ranks that miss benign where the false report it buys — a
-    Tier 1 failure over a link destination (#605) — is not. One instance exists
-    in the corpus today, ADR-0059's ``pre-#242``, on a number that resolves.
+    These *are* tracker citations and the checker no longer selects them. The
+    first two lose on the context rule — the run before the ``#`` is neither an
+    opening-delimiter run nor a ``#NNN/`` join. The third loses on the span rule:
+    a ``](`` whose ``)`` never arrives blanks the rest of the line, because a
+    target the scanner cannot delimit is one it must not half-cover.
+
+    ADR-0088 §6 ranks that miss benign where the false report it buys — a Tier 1
+    failure over a link destination (#605) — is not. One instance exists in the
+    corpus today, ADR-0059's ``pre-#242``, on a number that resolves.
 
     Widening the delimiter set to recover one of these is a legitimate change;
     doing it by re-enumerating the syntaxes a ``#`` can hide in is the search
