@@ -3,8 +3,8 @@
 - Status: Accepted
 - Date: 2026-08-01
 - Partially supersedes: ADR-0088 — §6's Tier 1 rule for a decision citation
-  naming an absent ADR file, as it applies to a number that lies in a gap below
-  the highest issued number. The rest of §6 stands: the tracker half of Tier 1,
+  naming an absent ADR file, as it applies to a number that lies in a gap
+  enclosed by the issued set. The rest of §6 stands: the tracker half of Tier 1,
   Tier 2, the silence on section numbers, the asymmetric failure handling and the
   input-set rules are untouched, and §3's rule that no code citation may fail is
   not reached. **No code changes with it** and no `core` surface is touched. §2
@@ -63,11 +63,11 @@ reasoning across.
 
 ### The corpus has exactly one gap, and it is measurable
 
-Every number from 1 to the highest present in `docs/adr/` is present except 0035.
-That is not an assumption about the corpus's tidiness: it is read off the
-filenames, and the set it produces is what §1 below keys the rule to. One gap, one
-citation into it, and a rule that is decided by arithmetic over a directory
-listing rather than by reading any prose.
+The numbers present in `docs/adr/` run from 0001 to the highest issued with one
+number missing, 0035. That is not an assumption about the corpus's tidiness: it
+is read off the filenames, and the set it produces is what §1 below keys the rule
+to. One gap, one citation into it, and a rule decided by arithmetic over a
+directory listing rather than by reading any prose.
 
 ### Three sentences of ADR-0088 are false, and one is a mislabelled measurement
 
@@ -121,31 +121,48 @@ than leaving the next lane to discover it from a red gate.
 
 ## Decision
 
-### 1. A decision citation into a gap below the highest issued number passes silently
+### 1. A decision citation into a gap in the issued set passes silently
 
 > **Normative.** Under ADR-0088 §6, Tier 1 passes a decision citation silently
-> when its `NNNN` is absent from the issued set and is less than that set's
-> maximum. The issued set is every `NNNN` for which a file `docs/adr/NNNN-*.md`
-> exists, read from the tree and from nothing else. Such a citation is neither
-> failed nor reported. Every other decision citation that does not resolve under
-> ADR-0088 §2(a) still fails Tier 1, including one whose `NNNN` is greater than
-> that maximum.
+> when its `NNNN` lies in a **gap**: absent from the issued set, and strictly
+> between that set's minimum and its maximum. The issued set is every `NNNN` for
+> which a file `docs/adr/NNNN-*.md` exists, read from the tree and from nothing
+> else; a set holding fewer than two numbers has no gap and exempts nothing. A
+> citation in a gap is neither failed nor reported. Every other decision citation
+> that does not resolve under ADR-0088 §2(a) still fails Tier 1 — including an
+> `NNNN` of `0000`, any `NNNN` below the minimum, and any above the maximum.
 
 **This is §6's own boundary applied to a case §6 misclassified.** §6 sets the
 tier boundary at "whether a legitimate non-resolving case exists", and a citation
 to a never-issued number is exactly such a case — legitimate, correct, and
 non-resolving. What keeps it out of Tier 2 as well is that the tier boundary has a
 second half: Tier 2 holds cases with "a legitimate class no mechanical test
-separates from a defect". Here a mechanical test does separate them. Below the
-maximum and absent is a gap; at or above it is a number nobody has issued yet.
-Nothing about that reads prose or infers intent, which is what §6 requires of
-anything the checker does.
+separates from a defect". Here a mechanical test does separate them. Absent from
+the set but enclosed by it is a gap; anything outside the enclosure is a number
+nobody has issued. Nothing about that reads prose or infers intent, which is what
+§6 requires of anything the checker does.
+
+**The bound is two-sided, and the lower half is not decoration.** An earlier
+draft of this clause exempted anything absent and below the maximum, which
+silently exempts an `NNNN` of `0000` — a well-formed four-digit citation under
+ADR-0088 §1(a), absent, below the maximum, and an entirely plausible typo for
+ADR-0001.
+Adversarial review found it on the first round. It is recorded rather than
+quietly fixed for the reason ADR-0089 §2 recorded its own equivalent: this is the
+**first ADR authored under ADR-0089**, its marked clause is the one span of the
+document that obligates anything, and the defect was inside it. That is evidence
+for §3's demand that a clause carry its own scope and conditions, not against it
+— the looser draft's prose said "gap" while its clause said something wider, and
+under ADR-0089 §3 the clause would have governed. Defining a gap as *enclosed by
+the issued set* rather than *below its maximum* is what makes the two agree, and
+it settles the degenerate cases (an empty or single-element set) by construction
+rather than by a special case.
 
 **The residual is where Tier 1 keeps its value, and it is most of it.** The
 overwhelmingly likely dangling citation is a typo or a stale forward reference,
-and both land above the issued maximum far more often than inside a one-number
-gap. A citation to a number that has not been assigned yet — the ADR someone
-expects to write, or a mistyped digit that overshoots — still fails, which is the
+and both land outside the enclosure far more often than inside a one-number gap.
+A citation to a number that has not been assigned yet — the ADR someone expects
+to write, or a mistyped digit that overshoots — still fails, which is the
 regression guard §6 wanted and the thing #588 asked for.
 
 **The width of the exemption is the width of the gap set, and today that is one
@@ -189,8 +206,9 @@ have to move together.
   cannot be reserved and skipped, so §6's second premise holds for it exactly as
   written. Tier 2, the section-reference silence, the asymmetric failure
   handling and the input-set rules all stand as ratified.
-- **Where the check runs.** §6 left that open and `tests/scripts/test_adr_citations_corpus.py`
-  answered it for Tier 1; neither is reopened here.
+- **Where the check runs.** §6 left that open and
+  `tests/scripts/test_adr_citations_corpus.py` answered it for Tier 1; neither is
+  reopened here.
 - **What `CONTRIBUTING.md` says about the pin.** Its "Cite in form, and mark what
   binds" section describes the pinned set, and that description stops being
   accurate when §2's change lands. Correcting it belongs to that lane and is
@@ -303,8 +321,9 @@ have to move together.
 
 - **A typo that lands inside the gap passes silently, forever.** Someone who
   means 0034 and writes 0035 gets no finding. That is one number wide today and
-  it is the price of the rule; it is also the reason §1 keeps every number above
-  the issued maximum failing, since that is where a typo more often lands.
+  it is the price of the rule; it is also the reason §1 keeps every number
+  outside the issued set's enclosure failing, since that is where a typo more
+  often lands — an `NNNN` of `0000` and one of `0091` both still fail today.
 - **Every future gap widens the silent window by one number.** The rule scales
   with the corpus's tidiness rather than bounding it, and §3 deliberately declines
   to legislate assignment. **Revisit this ADR** if the gap set stops being a

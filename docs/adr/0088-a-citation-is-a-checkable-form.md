@@ -1,6 +1,6 @@
 # 88. A citation is a checkable form: what an ADR may cite, and what "resolves" means
 
-- Status: Partially superseded by ADR-0090 (§6's Tier 1 rule that a decision citation naming an absent ADR file always fails, as it applies to a number lying in a gap below the highest issued number)
+- Status: Partially superseded by ADR-0090 (§6's Tier 1 rule that a decision citation naming an absent ADR file always fails, as it applies to a number lying in a gap enclosed by the issued set)
 - Date: 2026-08-01
 - **This ADR supersedes nothing.** It supplies the rule ADR-0070 §4 reserved for
   "any liveness-classifying consumer added later", and it constrains the
@@ -25,10 +25,11 @@
   corpus correctly cites what is not in the tree.
 
   **Replaced**, one clause of §6: the Tier 1 rule for a decision citation naming
-  an absent ADR file, *only* as it applies to a number that is absent from the
-  issued set and below that set's maximum. ADR-0090 §1 passes such a citation
-  silently; every other non-resolving decision citation still fails Tier 1,
-  including one above the issued maximum. The rest of §6 stands whole — the
+  an absent ADR file, *only* as it applies to a number lying in a **gap** —
+  absent from the issued set, and strictly between that set's minimum and its
+  maximum. ADR-0090 §1 passes such a citation silently; every other
+  non-resolving decision citation still fails Tier 1, including an `NNNN` of
+  `0000` and any number outside that enclosure. The rest of §6 stands whole — the
   tracker half of Tier 1, Tier 2, the silence on section references, the
   asymmetry rule and the input-set rules — and §3 is not reached.
 
@@ -47,11 +48,11 @@
   `ADR-NNNN §K` references**, and §6 and Consequences reuse it as the count of
   *decision citations* — a wider population, since §1(a) makes the `§K`
   optional. Measured at `123bdbc`, `scripts/check_citations.py` reports 5,885
-  decision citations, of which 3,515 carry a `§K`. Context's own sentence about `ADR-NNNN §K`
-  references — "**None** points at a missing ADR file" — is **not** among the
-  errors: the citation that fails is written bare, with no `§K`, so it is
-  outside that sentence's population. The measurement was right about what it
-  measured. Refs #603, ADR-0090 §4.
+  decision citations, of which 3,515 carry a `§K`. Context's own sentence about
+  `ADR-NNNN §K` references — "**None** points at a missing ADR file" — is
+  **not** among the errors: the citation that fails is written bare, with no
+  `§K`, so it is outside that sentence's population. The measurement was right
+  about what it measured. Refs #603, ADR-0090 §4.
 
 ## Context
 
