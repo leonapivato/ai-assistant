@@ -1,6 +1,6 @@
 # 86. A belief's evidence is bounded, the elision is on the record, and the batch read lands
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0091 (§4's clause that two renderings of an elision and a tombstone must both exist)
 - Date: 2026-07-31
 - **This is a contract change.** §1–§4 bound `Provenance.evidence` and add one
   field to it — a `core` type both `memory` and `planning` construct (ADR-0068
@@ -30,6 +30,62 @@
   ADR-0087 §2b's bytes rather than on ADR-0084 §3, and §7's second gate is closed
   by ADR-0085 §4a — which came out of **#552**, filed from this lane. No decision
   of this ADR moved; what moved is which authority each claim rests on.
+- Partially superseded: 2026-08-02 by ADR-0091 — **§4 requires two renderings to
+  exist while §4 and §10 both rule that no surface this ADR owns renders either.**
+  §4's paragraph on why an elision is not a tombstone closes "The renderings must
+  differ, and both must exist, because conflating them would tell the user their
+  data was lost when it was not." Two sentences of this ADR say the opposite: §4's
+  third surfaces bullet ratifies that the count "does not reach the inspection
+  DTOs at all" and that a surface silent about it "is silent about a quantity it
+  does not hold, which is a gap in reach, not a false statement"; and §10 puts
+  the rendering outside this ADR entirely, "filed as **#568**". Reported as #606
+  item 1 and flagged independently by two readers.
+
+  **Replaced**, one clause of §4: the requirement that two renderings exist.
+  ADR-0091 §1 rules that nothing is obliged to render `evidence_elided` — that
+  stays #568's, as §10 already left it — and keeps the constraint as a
+  conditional one: a surface that renders both an ADR-0077 §6 tombstone and an
+  elision count renders them so a reader can tell the two apart. The rest of §4
+  stands whole: the field, its recurrence over every install, the record-level
+  obligation, the floor-plus-ceiling shape of a count that *is* rendered, the
+  confidence-neutrality rule, and `export`'s carriage of the stored number.
+
+  **Amended**, four items, recorded here and not rewritten (ADR-0070 §1; the
+  record is this note alone, because the `Status` line now carries a leading
+  supersession token — ADR-0082 §2). ADR-0091 §2 through §5 apply ADR-0070 §1's
+  test to each and none of them moves a decision:
+
+  1. **§2's pointer to §3** (#606 item 2). §2's "it installs the retained subset
+     §3 specifies" points at §3 entire, including "**Where there is no fold there
+     is no accumulation order** … the retained subset is a suffix of an order that
+     carries nothing". §3's heading names the case §3 principally argues; it does
+     not bound what §3 rules, and §8 item 3 already pins the non-fold subset in
+     the conformance suite as "the retained suffix". The rule for an oversized
+     `ACCEPT`, `STORE_TEMPORARY` or `SUPERSEDE` install is unchanged.
+  2. **§8 item 6's named symbol** (#586 item 1). The presentation-path migration
+     lands at `Engine._resolved_citations`, which both `Engine._project` and
+     `Engine._summarise` call. `Engine._project` alone is the single-belief view
+     and cannot deliver §6's 3,200-to-50 reduction, which is a claim about the
+     listing page. Item 6's own next clause names both ADR-0085 §4a DTOs —
+     "**neither** of which can carry `evidence_elided`" — and only
+     `Engine._summarise` builds the second, so the sentence's scope was never one
+     method. **"That is the whole of what this lane owes there" is untouched and
+     still bounds the *rendering*** — its own colon-clause reads "so this lane
+     renders no elision and changes no field" — which is why this is an
+     amendment: the instruction is spent (PR #582 migrated the right site,
+     closing #575), and Consequences' "**The listing's worst case drops from
+     3,200 store reads to 50**" already decided the outcome.
+  3. **§6's `ConversationService`** (#586 item 2). The class is
+     `ConversationLifecycle`, in the module §6 names correctly and under the name
+     §8 item 7 uses. Nothing about the two-callers argument or the resume path's
+     obligations changes.
+  4. **Nothing is owed for §4's elided `description=`** (#606 item 3), and it is
+     recorded so a later reader need not re-derive it. The description's content
+     is the block quote directly beneath that sketch, ratified and complete, and
+     §8 item 1 assigns where it goes; what is absent is a literal `Field` string,
+     which no ADR in this corpus fixes for any field. ADR-0091 §5.
+
+  Refs #586, #606, ADR-0091 §1–§5.
 
 ## Context
 
