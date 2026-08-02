@@ -27,7 +27,13 @@ Two tiers, per §6:
 
 - **Tier 1 may fail** — and holds exactly two things, a decision citation naming
   an ADR file that does not exist and a tracker citation naming an issue number
-  that does not exist. Neither has a legitimate non-resolving case.
+  that does not exist. §6 put both there on the ground that neither has a
+  legitimate non-resolving case; ADR-0090 §1 found the one the first half has and
+  exempts it. A number in a **gap** — absent from the issued set but strictly
+  enclosed by it — was assigned and never written, so an ADR cites it correctly
+  and forever, and such a citation is neither failed nor reported. Nothing wider
+  is exempt, in either half: a number outside the enclosure is one nobody has
+  issued, which is where a typo and a stale forward reference land.
 - **Tier 2 is reported and never fails** — unresolved b1/b2 code citations (§3:
   an append-only corpus correctly cites what the tree does not contain) and
   liveness disagreements (§4).
@@ -1049,6 +1055,64 @@ def load_adrs(root: Path) -> dict[int, tuple[str, str]]:
     return adrs
 
 
+@dataclass(frozen=True)
+class DecisionTargets:
+    """Every number a decision citation may name without failing Tier 1.
+
+    Two sets rather than their union, because only one of them is a resolution.
+    A citation into a gap does not resolve to anything; ADR-0090 §1 exempts it
+    anyway, and keeping the two apart is what lets a reader check the exemption
+    against §1 without reconstructing it from a fused set.
+
+    Attributes:
+        issued: Every ``NNNN`` for which ``docs/adr/NNNN-*.md`` exists.
+        gaps: Every number absent from ``issued`` but strictly between its
+            minimum and its maximum.
+    """
+
+    issued: frozenset[int]
+    gaps: frozenset[int]
+
+    def resolves(self, number: int) -> bool:
+        """Whether ``ADR-NNNN`` passes Tier 1 — the file exists, or the number is a gap."""
+        return number in self.issued or number in self.gaps
+
+
+def build_decision_targets(issued: Iterable[int]) -> DecisionTargets:
+    """Split the issued ADR numbers into what exists and what ADR-0090 §1 exempts.
+
+    A **gap** is a number *absent from the issued set and strictly between that
+    set's minimum and its maximum*. ADR-0015 §5 assigns a number when work is
+    handed out, so a lane that is never dispatched leaves a number assigned and
+    unwritten; an ADR then names it correctly and permanently, which is the
+    legitimate non-resolving case ADR-0088 §6 assumed away.
+
+    **The bound is two-sided and the lower half is not decoration.** "Absent and
+    below the maximum" would exempt an ``NNNN`` of all zeros — well-formed under
+    ADR-0088 §1(a), and an entirely plausible typo for the first ADR. Enclosure
+    also settles the degenerate sets by construction rather than by a special
+    case: a set of one number has an empty interior, so it exempts nothing, and
+    the guard below exists only because ``min`` has nothing to return on an empty
+    one.
+
+    Args:
+        issued: Every ``NNNN`` for which ``docs/adr/NNNN-*.md`` exists. §1 reads
+            the set "from the tree and from nothing else", so this takes what
+            :func:`load_adrs` found and never a list written down anywhere.
+
+    Returns:
+        The two sets, recomputed on every run. That is why §1 needs no allowlist
+        file — ADR-0088 §9 declined one because it "decays exactly when it
+        matters", and a set derived from a directory listing cannot decay.
+    """
+    numbers = frozenset(issued)
+    if not numbers:
+        return DecisionTargets(issued=numbers, gaps=frozenset())
+    return DecisionTargets(
+        issued=numbers, gaps=frozenset(range(min(numbers) + 1, max(numbers))) - numbers
+    )
+
+
 def _adr_documents(root: Path) -> list[tuple[str, str]]:
     """Return every document under ``docs/adr`` — the template included.
 
@@ -1079,6 +1143,7 @@ def check(root: Path, *, tracker_numbers: Iterable[int] | None) -> Report:
         The whole report, Tier 1 findings first.
     """
     adrs = load_adrs(root)
+    targets = build_decision_targets(adrs)
     known_trackers = None if tracker_numbers is None else frozenset(tracker_numbers)
     definitions = build_definition_index(root)
     top_names = top_level_names(root)
@@ -1089,7 +1154,7 @@ def check(root: Path, *, tracker_numbers: Iterable[int] | None) -> Report:
     for path, text in _adr_documents(root):
         for citation in extract_citations(path, text, top_names):
             counts[citation.kind] = counts.get(citation.kind, 0) + 1
-            finding = _judge(citation, adrs, known_trackers, definitions, root)
+            finding = _judge(citation, targets, known_trackers, definitions, root)
             if finding is not None:
                 findings.append(finding)
 
@@ -1131,7 +1196,7 @@ def _finding(citation: Citation, tier: int, detail: str) -> Finding:
 
 def _judge(
     citation: Citation,
-    adrs: dict[int, tuple[str, str]],
+    targets: DecisionTargets,
     known_trackers: frozenset[int] | None,
     definitions: DefinitionIndex,
     root: Path,
@@ -1139,7 +1204,7 @@ def _judge(
     """Return the finding one citation earns, or ``None`` if it is silent."""
     match citation.kind:
         case "decision":
-            return _judge_decision(citation, adrs)
+            return _judge_decision(citation, targets)
         case "tracker":
             return _judge_tracker(citation, known_trackers)
         case "module-path":
@@ -1150,10 +1215,18 @@ def _judge(
             return None
 
 
-def _judge_decision(citation: Citation, adrs: dict[int, tuple[str, str]]) -> Finding | None:
-    """Tier 1: an ADR file is never deleted, so a missing one is always a defect."""
+def _judge_decision(citation: Citation, targets: DecisionTargets) -> Finding | None:
+    """Tier 1: an ADR file is never deleted, so a missing one is a defect — unless it is a gap.
+
+    ADR-0088 §6 failed every absent target on the ground that "ADRs are
+    append-only so a file is never deleted". That premise is true and covers a
+    *deleted* file; the conclusion needs a second one — that every cited number
+    was **issued** — which no rule supplies. ADR-0090 §1 partially supersedes §6
+    for exactly the citations the missing premise covers, and
+    :func:`build_decision_targets` is the whole of its condition.
+    """
     number = int(citation.text.removeprefix("ADR-"))
-    if number in adrs:
+    if targets.resolves(number):
         return None
     return _finding(citation, _TIER_FAILING, f"no docs/adr/{number:04d}-*.md exists")
 

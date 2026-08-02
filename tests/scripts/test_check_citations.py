@@ -188,6 +188,104 @@ def test_a_placeholder_that_is_not_four_digits_is_not_a_citation(tmp_path: Path)
 
 
 # --------------------------------------------------------------------------- #
+# ADR-0090 §1 — a number in a gap enclosed by the issued set is exempt, and
+# nothing outside that enclosure is. The exemption is one narrow hole in the
+# tier that may fail a change, so both edges are pinned, not just the hole.
+# --------------------------------------------------------------------------- #
+
+_GAPPED = {"0002-two.md": "# 2. Two\n", "0004-four.md": "# 4. Four\n"}
+"""An issued set of {2, 4}: minimum 2, maximum 4, and 3 is the one gap."""
+
+
+def test_a_citation_into_a_gap_passes_silently(tmp_path: Path) -> None:
+    """The case ADR-0090 exists for: a number assigned to a lane that never wrote it.
+
+    Silently is the whole claim — neither failed nor reported (§1), so the exit
+    code is clean *and* nothing lands in either tier. Reporting it instead was
+    considered and declined: a correct citation reported on every run forever
+    costs the same trust §6's asymmetry rule prices.
+    """
+    _make_repo(tmp_path, {**_GAPPED, "0002-two.md": "# 2. Two\n\nNo ADR-0003 was issued.\n"})
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["findings"] == []
+
+
+def test_a_citation_above_the_issued_maximum_still_fails(tmp_path: Path) -> None:
+    """The residual §1 keeps, and the common case: a stale forward reference."""
+    _make_repo(tmp_path, {**_GAPPED, "0002-two.md": "# 2. Two\n\nSee ADR-0005.\n"})
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.returncode == 1
+    assert _citations(json.loads(result.stdout), "decision") == ["ADR-0005"]
+
+
+def test_a_citation_below_the_issued_minimum_still_fails(tmp_path: Path) -> None:
+    """Absent and inside no enclosure. The bound is two-sided (§1)."""
+    _make_repo(tmp_path, {**_GAPPED, "0002-two.md": "# 2. Two\n\nSee ADR-0001.\n"})
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.returncode == 1
+    assert _citations(json.loads(result.stdout), "decision") == ["ADR-0001"]
+
+
+def test_the_zero_citation_fails_though_it_is_absent_and_below_the_maximum(
+    tmp_path: Path,
+) -> None:
+    """The finding adversarial review put on ADR-0090's own first round.
+
+    An earlier draft of §1 exempted anything absent and below the maximum. That
+    silently exempts a four-digit citation of all zeros — well-formed under
+    ADR-0088 §1(a), and an entirely plausible typo for the first ADR. Defining
+    the gap by *enclosure* is what closes it, so this asserts the closure rather
+    than the prose around it.
+    """
+    _make_repo(tmp_path, {**_GAPPED, "0002-two.md": "# 2. Two\n\nSee ADR-0000.\n"})
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.returncode == 1
+    assert _citations(json.loads(result.stdout), "decision") == ["ADR-0000"]
+
+
+def test_a_single_issued_adr_encloses_nothing(tmp_path: Path) -> None:
+    """A set of fewer than two numbers has no gap and exempts nothing (ADR-0090 §1).
+
+    Settled by construction rather than by a special case: a one-element set has
+    an empty interior, so neighbours on both sides fail like any other absence.
+    """
+    body = "# 2. Two\n\nNeither ADR-0001 nor ADR-0003 is here.\n"
+    _make_repo(tmp_path, {"0002-two.md": body})
+
+    result = _run(tmp_path, "--no-tracker")
+
+    assert result.returncode == 1
+    assert sorted(_citations(json.loads(result.stdout), "decision")) == ["ADR-0001", "ADR-0003"]
+
+
+def test_the_issued_set_is_read_from_the_tree_and_widens_with_it(tmp_path: Path) -> None:
+    """§1 keys the rule to a directory listing, so the exemption needs no allowlist.
+
+    The same citation is a defect under one tree and correct under another, and
+    nothing but the tree decides which. ADR-0088 §9 declined a hand-maintained
+    list because it "decays exactly when it matters"; a set recomputed per run
+    cannot, and this is that property asserted rather than asserted about.
+    """
+    body = "# 2. Two\n\nSee ADR-0003.\n"
+    _make_repo(tmp_path, {"0002-two.md": body})
+
+    assert _citations(_report(tmp_path, "--no-tracker"), "decision") == ["ADR-0003"]
+
+    _write(tmp_path / "docs" / "adr" / "0004-four.md", "# 4. Four\n")
+
+    assert _findings(_report(tmp_path, "--no-tracker"), "decision") == []
+
+
+# --------------------------------------------------------------------------- #
 # §6 — a section number is not checked at all, in either tier
 # --------------------------------------------------------------------------- #
 
