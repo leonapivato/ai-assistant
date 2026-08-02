@@ -42,21 +42,33 @@
 
 ### One microphone breaks a split the corpus has been drawing without stating
 
-The project has two names for a thing attached to the hub. A **spoke** is a
-client of the local API (ADR-0084): it dials in, sends what the user typed, and
-holds nothing. A **sensor** is a read-only producer (ADR-0093): it reads a source
-the hub asks it to read, and proposes what it read. The two are treated as
-different kinds of thing, and nothing has ever forced the question, because the
-one spoke that exists is a CLI and the one sensor that is specified reads a file
-on the same disk.
+The project has two names for a thing that feeds the hub, and they differ on two
+axes at once, which is why they have been mistaken for a single split.
 
-Ambient capture — the rolling-buffer design #441 records — is the case where the
-split stops working. One microphone on one connection carries both halves at
-once: when the user says "assistant, capture that", the same device is a spoke
-delivering an addressed instruction *and* the producer of overheard material that
-nobody addressed to us. Asking whether that device "is a spoke or a sensor" has no
-answer, and the question is not academic, because the two names carry different
-rules about what may reach the store and on whose authority.
+A **spoke** is a client of the local API (ADR-0084): it lives in **its own
+process**, dials in, sends what the user typed, and holds nothing. A **sensor** is
+a read-only producer (ADR-0093): it lives **inside the hub** — §2 puts concrete
+sensors in `ai_assistant/sensors/` and §1 gives them no caller of their own — and
+it reads a source and proposes what it read. So one is out-of-process and
+addressed; the other is in-process and unaddressed. Nothing has ever forced the
+question, because the one spoke that exists is a CLI and the one sensor that is
+specified reads a file on the same disk.
+
+Ambient capture — the rolling-buffer design #441 records — is **out-of-process and
+unaddressed at once**, and that is the combination the corpus has no name for. A
+microphone is on a device, so it is on the far side of a process boundary like a
+spoke; and it produces material nobody addressed to us, like a sensor. Worse, one
+connection carries both halves: when the user says "assistant, capture that", the
+same device delivers an addressed instruction *and* the overheard material around
+it.
+
+**Neither existing set of rules reaches it, and this is a gap rather than an
+ambiguity.** ADR-0093 §5 fences a non-re-readable source out of the `Sensor`
+contract in as many words, and a sensor is in-process besides, so an ambient
+producer is not one on two independent grounds. ADR-0084's rules are written for a
+client relaying what a user typed, and say nothing about a producer. A lane
+building ambient capture today would find both ADRs declining jurisdiction and no
+third one accepting it.
 
 ### What the corpus actually says about the two, read rather than remembered
 
@@ -83,10 +95,14 @@ something held it. §7a's whole configuration model is a path and an interval,
 which does not describe a device that speaks first. So a capture peer is not a
 `Sensor` under ADR-0093, and cannot become one by implementing the Protocol.
 
-**Which leaves ambient capture inheriting neither set of rules.** That is the gap
-this ADR fills, and it is why the answer is not "add a third name": a third name
-would leave the same question open for the fourth thing. The rules have to attach
-to what an attachment *does*.
+**So the gap is real, and the answer is not "add a third name".** A third name
+leaves the same question open for the fourth kind of attachment, and it puts the
+rules back where a later lane escapes them by not matching one. What this ADR does
+instead is fix the boundary at the **process edge** — where the hub's guarantees
+stop being enforceable by the hub — and attach rules to what an attachment across
+that edge *does*. An in-process producer stays entirely ADR-0093's; §1 says so as
+a marked clause, because the alternative reading would require the calendar sensor
+a queued lane is about to build to grow a transport.
 
 ### The band is assigned by the door today, and that is the fact §5 turns on
 
@@ -153,14 +169,19 @@ states each with the condition that fires it.
 
 ## Decision
 
-We will treat every attachment to the hub as **one kind of thing — an edge
-peer — and attach rules to what it does rather than to what it is called.**
+We will treat every attachment that reaches the hub across a process boundary as
+**one kind of thing — an edge peer — and attach rules to what it does rather than
+to what it is called.**
 
-### 1. One kind of attachment, and the rules attach to capabilities
+### 1. One kind of attachment, and it is bounded by the process boundary
 
-> **Normative.** There is one kind of edge attachment. "Spoke" and "sensor" are
-> descriptions of which capabilities an attachment exercises, and no rule in this
-> corpus may be conditioned on which of those words is applied to a peer.
+> **Normative.** An **edge peer** is an attachment that reaches the hub across a
+> process boundary, over the local API of ADR-0084. There is one kind of it, and
+> no rule may be conditioned on which profile name — "spoke", "sensor", or a later
+> one — is applied to a peer.
+
+> **Normative.** A producer running inside the hub is **not** an edge peer. In
+> particular a `Sensor` (ADR-0093) is not one, and no clause of this ADR binds it.
 
 > **Normative.** An attachment exercises some combination of three capabilities:
 > **push** — the edge sends content to the hub unsolicited; **doorbell** — the
@@ -184,10 +205,32 @@ same shape — a device that may not distil is not permitted to distil on its se
 channel, and a bound on ephemeral state that reset per capability would bound
 nothing.
 
-The CLI is push-only. A calendar file is pull-only, and gains a doorbell the day
-something watches it for changes. A capture peer exercises all three: it pushes
-what a trigger promoted, it may ring when a detector fires, and the hub fetches
-the promoted slice. The profiles are useful vocabulary and they are not types.
+The CLI is push-only. A capture peer is the case that needs all three: it pushes
+what a promotion released, it may ring when a detector fires, and the hub fetches
+the promoted slice rather than being handed it. The profiles are useful vocabulary
+and they are not types.
+
+**Pull has no instance today, and the honest statement is that it is named
+because the *wrong* shape of it is unrecoverable, not because something needs
+it.** §2's ruling is entirely about pull, and its whole value is that it forbids
+the reading which puts a listening socket on an edge device. Naming the capability
+is what gives that ruling a subject; a capability this ADR declined to name is one
+a later lane introduces together with its transport, which is the order in which
+the expensive answer gets chosen by default.
+
+**An in-process `Sensor` is not an edge peer, and nothing in this ADR reaches
+it.** ADR-0093 §1 gives a sensor no caller of its own — "Selecting when a sensor
+runs, and ingesting what it returns, are `orchestration`'s" — and §2 places
+concrete sensors in `ai_assistant/sensors/`, inside the hub. There is no
+connection to establish, no released set to declare and no handshake, so §2 and §3
+have nothing to bind. **A calendar file read from local disk is therefore not a
+"pull peer", and an earlier draft of this section called it one.** That draft
+would have required the ADR-0093 sensor a queued lane is about to build to acquire
+a transport it has no reason to have — a decision change to ADR-0093 dressed as an
+illustration. Adversarial review found it on the second round. The error is worth
+recording because it is the one this taxonomy invites: a capability vocabulary
+reads as though it must classify everything in sight, and the fence is a **process
+boundary**, not a role.
 
 **This decides less than it looks like, which is the point.** It does not name a
 descriptor, an enrolment record or a field; §10 defers all three. What it does is
@@ -282,12 +325,15 @@ attached the attestation to `Provenance` under an if-and-only-if validator: "a
 precondition that a producer can satisfy by remembering is one it can fail by
 forgetting, and the failure is silent".
 
-The two concrete shapes make the difference legible. A calendar peer releases the
-whole file, at any time — the released set is large and static, and a pull for it
-is ordinary. A capture peer's rolling buffer is **never** in the released set
-(§9), so nothing reaches it in either direction: a hub asking for "the last thirty
-seconds" receives a refusal rather than audio, and a peer cannot push it either.
-Only a promoted slice is releasable.
+The capture shape is what makes the rule concrete, and it is the shape the rule
+was written against. A capture peer's rolling buffer is **never** in its released
+set (§9), so nothing reaches it in either direction: a hub asking for "the last
+thirty seconds" receives a refusal rather than audio, and the peer cannot push it
+either. Only a promoted slice is releasable. Note that a peer whose released set
+is large and static — a process that holds a document and offers all of it, at any
+time — satisfies these clauses trivially, which is the correct outcome: the gate
+is not a bound on how much may be released, it is a bound on the hub reaching past
+what was.
 
 > **Normative.** What may cause a release is **not decided here**. A peer may not
 > read this section as authorising any particular promotion, and in particular
@@ -502,9 +548,17 @@ ADR-0017 §1 is engaged identically. §10 keeps the remote hop where it is.
 
 > **Normative.** Material a peer submits under §7 is retained by the hub only for
 > a bounded verification window, during which the user may read what was made of
-> it and correct it, and is destroyed when the window closes. The peer retains
-> nothing after the hub acknowledges the submission. Raw source material is never
-> an episode.
+> it and correct it, and it is destroyed when the window closes.
+
+> **Normative.** Raw source material is never an episode.
+
+> **Normative.** The hub acknowledges a submission only once it holds the whole of
+> the submitted material **durably** and within this section's bounds. Material it
+> cannot so hold is refused, not acknowledged.
+
+> **Normative.** A peer retains submitted material until that acknowledgement and
+> nothing after it. An unacknowledged submission leaves the material with the peer,
+> which may retry it.
 
 > **Normative.** The window is bounded by **both** a duration and a size, and a
 > bound is enforced by refusing rather than by truncating or by silently
@@ -512,6 +566,28 @@ ADR-0017 §1 is engaged identically. §10 keeps the remote hop where it is.
 
 > **Normative.** The figures are named in the deciding ADR of the producer that
 > needs them, refused at load rather than at first use, and are not named here.
+
+**What an acknowledgement asserts is stated because an earlier draft left it to
+be assumed, and the gap was fatal to §7.** That draft said only that the peer
+"retains nothing after the hub acknowledges", which permits a hub to receive a
+slice into memory, acknowledge it, and then crash before persisting anything. The
+peer destroys its copy on the acknowledgement, and the only re-readable artifact
+in the pipeline — the thing §7 spends a section refusing to let the edge destroy —
+is gone, to a fault neither party observes. Adversarial review found it on the
+second round. An acknowledgement is a **transfer of custody**, so it may not
+precede the custody: the hub says "I have it" only when it does, which also makes
+a hub that is out of window capacity refuse at the door rather than accept and
+silently drop. This is §5's refuse-don't-downgrade posture and ADR-0093 §5's
+refuse-don't-truncate posture arriving on the same seam from a third direction.
+
+**The residual is a duplicate, and it is named rather than closed.** A lost
+acknowledgement — the hub persisted and then died before replying — leaves the
+peer holding material it will retry, so the same slice can arrive twice. That is
+duplication and not loss, which is the trade ADR-0092 §7 already ruled acceptable
+for a re-proposing producer on the same grounds: both copies are visible, neither
+destroys anything. De-duplicating submitted media is the producer's ADR's, not
+this one's; it needs an identity scheme, and minting one here would decide surface
+§10 defers.
 
 **Two dimensions rather than one, and this is ADR-0093 §7a's byte-cap argument
 transposed.** §7a separates `calendar_max_bytes` from `calendar_max_entries`
@@ -667,15 +743,27 @@ places where the opposite reading is available are argued rather than asserted.
   identically before and after. **Not an amendment.** The strain is on
   `VISION.md` §8's broader sentence, which is not an ADR and is deferred to
   #441's amendment (§10) rather than reinterpreted here.
-- **ADR-0093's `Sensor` contract.** Collapsing sensors into one taxonomy looks
-  like it should amend it. It does not, because §5's fence has already placed a
-  stream outside the contract: "A source that cannot be re-read in full within its
-  bound … is out of this contract's scope and **owes its own decision**." This ADR
-  is that decision, arriving where that clause anticipated it. Nothing above
-  changes what a `Sensor` is, what it may propose, how it is bounded or how it is
-  driven; a calendar sensor conforming to ADR-0093 conforms unchanged, and a
-  reader holding only ADR-0093 acts identically. §1's capability vocabulary
-  describes it from outside without constraining it. **Not an amendment.**
+- **ADR-0093's `Sensor` contract.** A taxonomy that used the word "sensor" looks
+  like it should amend it, and **an earlier draft did amend it without saying
+  so** — by calling a locally-read calendar file a "pull peer", which would have
+  required a `Sensor` to establish a connection (§2) and declare a released set
+  (§3), neither of which an in-process object can do. That is a decision change to
+  ADR-0093 §1 and §2 arriving inside an illustration, and it is exactly what
+  ADR-0082 §1 means by "**The test controls, not the label**". Adversarial review
+  found it on the second round. **It is repaired by narrowing rather than by
+  recording an amendment**, because narrowing is what was intended: §1 now fixes
+  the process boundary as this ADR's outer edge and states as a marked clause that
+  a `Sensor` is not an edge peer.
+
+  On the corrected text, **no amendment is owed on two independent grounds.** No
+  clause of this ADR binds an in-process producer at all, so nothing of ADR-0093's
+  can be narrowed by one. And §5's fence had already placed a stream outside the
+  contract — "A source that cannot be re-read in full within its bound … is out of
+  this contract's scope and **owes its own decision**" — so this ADR is the
+  decision that clause anticipated rather than an encroachment on it. Nothing
+  above changes what a `Sensor` is, what it may propose, how it is bounded or how
+  it is driven; a calendar sensor conforming to ADR-0093 conforms unchanged, and a
+  reader holding only ADR-0093 acts identically. **Not an amendment.**
 - **ADR-0092 §3's `reported_by`, and whether a hub-minted peer identity would
   touch it.** §3 rules that `reported_by` "identifies the connected source
   *instance*, not the vendor" and must be "stable across syncs", and ADR-0093 §7
