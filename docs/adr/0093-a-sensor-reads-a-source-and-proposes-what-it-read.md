@@ -672,10 +672,26 @@ An exception is also what ADR-0008 §4's degradation path is already built to
 catch: the optional adapter of §3 skips a *failing* source and leaves its facet
 `None`, which is a different rendering from a facet that is present and empty.
 
-There is deliberately **no new error class** (§10). A sensor's failures are its
-source's — a missing file, a permission denial, a malformed document — and the
-seam's contract is that they surface rather than that they are re-typed. Both
-consumers catch by the rule above, not by the class.
+> **Normative.** A read that cannot complete raises `SensorError`, an
+> `AssistantError` (§10), with the underlying failure preserved as its `__cause__`.
+> A sensor may not let a source-level exception — an `OSError`, a parser's own
+> class — cross the seam unwrapped.
+
+**An earlier draft ruled the opposite — "no new error class" — and it was wrong on
+a standard the corpus states plainly.** `CONTRIBUTING.md` requires that a
+subsystem "raise only from the `AssistantError` hierarchy (`core/errors.py`)", and
+every seam here already has one: `MemoryStoreError`, `ContextError`,
+`ConversationStoreError`, `DeferralStoreError`. Letting a `PermissionError` or a
+parser's exception out of `read()` would make both consumers catch by *implementation*
+— the `context/` adapter and the scheduler job would each need to know which
+exceptions each sensor's parser can throw — and the alternative to that knowledge
+is a bare `except Exception`, which swallows programming errors as degraded
+sources. That is the failure the hierarchy exists to prevent, and it is worse here
+than usual because §8's whole point is that a failure must be *distinguishable*.
+
+Preserving `__cause__` is what keeps the wrapping from destroying the diagnosis:
+ADR-0083 §7 logs a failed job "with its class", and a missing file, a permission
+denial and a malformed document are three different operator actions.
 
 ### 9. The dependency on ADR-0092, stated as a gate
 
@@ -777,11 +793,17 @@ wrong: the mechanism and the identity decision are the same decision.
   `UtcInstant` and `EncodableText` are the existing `core` aliases; no new
   primitive is owed. `MemoryUpdateProposal` already exists, which is why the cost
   is one type rather than a family.
-- **Nothing else.** No new error class: a sensor's failures are its source's — a
-  missing file, a permission denial, a malformed document — and §8 rules that they
-  surface rather than that they are re-typed at the seam. No change to
-  `MemoryWriter.ingest`, whose semantics §1 relies on exactly as ratified.
-  `Provenance` is **not** touched here — that is ADR-0092's (§9).
+- **`core/errors.py`** gains **one** class, `SensorError(AssistantError)`, raised
+  by §8 when a read cannot complete, carrying the underlying failure as its
+  `__cause__`. One class and not a family: a missing file, a permission denial and
+  a malformed document are the *same* fact to both consumers — the source could not
+  be read — and they differ only in what an operator should do, which is what the
+  cause and the log line carry. `ContextError` is not reused: it is reserved for
+  "programmer/wiring bugs the assembler should not paper over" (ADR-0008 §4), and a
+  calendar file that is absent is neither.
+- **Nothing else.** No change to `MemoryWriter.ingest`, whose semantics §1 relies
+  on exactly as ratified. `Provenance` is **not** touched here — that is
+  ADR-0092's (§9).
 
 An illustrative signature, in ADR-0073 §1's and ADR-0077 §9's form — the semantics
 above are the contract, the spelling is the lane's:
@@ -813,15 +835,19 @@ Protocol"):**
      source is `BeliefBand.ATTESTED` (§4).
    - **An empty `proposals` tuple is a valid, successful reading** and every
      clause above holds on it (§8).
+   - **A read that cannot complete raises `SensorError`** — checkable generically
+     against the canonical fake scripted to fail, and the clause that makes the
+     leak this suite would otherwise miss detectable at all.
    - Input observation (ADR-0065) and cancellation (ADR-0060), as every seam owes.
 3. **The canonical fake in `ai_assistant.testing`**, scriptable to return a
-   reading with proposals, an empty reading, and a *raising* read — the three
-   states §8 distinguishes, so a consumer can test its own degradation path. That
+   reading with proposals, an empty reading, and a read raising `SensorError` —
+   the three states §8 distinguishes, so a consumer can test its own degradation path. That
    third capability is the gap ADR-0022 §Consequences filed against
    `FakeMemoryStore` as #105, not repeated here.
 
 **Four rulings above are deliberately *not* suite clauses, and putting them there
-would be the error.** The test is whether a clause is decidable from `name` and
+would be the error.** (§8's `SensorError` type *is* one, above; what is not is the
+provenance of the failure that reaches it.) The test is whether a clause is decidable from `name` and
 one `read()` return value, which is the whole of what a conforming `Sensor` is:
 
 - **§5's bound refused at construction.** `Sensor` specifies no constructor and no
@@ -831,9 +857,11 @@ one `read()` return value, which is the whole of what a conforming `Sensor` is:
   only because `observe` *takes* the batch whose size the bound governs. It is a
   concrete sensor's test and a `Settings` test, and stating that here is what stops
   an implementation-specific rule from wearing the Protocol's authority.
-- **§8's raise on an incomplete read.** A suite cannot make an arbitrary
-  implementation's source fail. The canonical fake is scriptable to raise so
-  *consumers* are testable; the obligation itself is the concrete sensor's.
+- **That a *real* source failure is what raises.** A suite cannot make an
+  arbitrary implementation's source fail, so it can pin the *type* (above) but not
+  that the type is reached from a missing, unreadable or malformed source. Those
+  three cases are the concrete sensor's tests, and they are named so the lane
+  writes all three rather than the one that is easiest to provoke.
 - **§4's "never proposes an absence."** A statement about what a producer declines
   to emit; nothing in a return value exhibits it.
 - **§3's "neither consumer derives its answer from the other's reading."** A
