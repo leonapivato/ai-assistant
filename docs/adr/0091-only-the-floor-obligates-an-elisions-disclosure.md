@@ -9,13 +9,15 @@
   confidence-neutrality rule and `export`'s carriage of the stored number are all
   untouched, and no other section of ADR-0086 is replaced.
 - **ADR-0073 §4's floor is untouched, and it is the obligation that survives
-  here.** §1's release is scoped to ADR-0086 §4's authority and to nothing else.
-  The floor binds the inspection surface on its own, ADR-0086 §11 already ruled it
-  "*satisfied* here, not narrowed", and a citation the bound displaced is inside
-  it — so a belief that has displaced one is owed a disclosure by ADR-0073 and not
-  by this ADR. Argued in Context and in §1, and deliberately **not** marked: it
-  adds no obligation, and §1's second paragraph says why marking a restatement of
-  it would cost a partial supersession of ADR-0073 §4 for no gain.
+  here.** §1's release is bounded by ADR-0086 §4's authority and reaches no other
+  ADR. The floor binds the inspection surface on its own, ADR-0086 §11 already
+  ruled it "*satisfied* here, not narrowed", and a citation the bound displaced is
+  inside it. That reach is argued in Context and deliberately **not** marked: it
+  adds no obligation this ADR makes, and marking a restatement of it would owe
+  ADR-0073 §4 a partial supersession for a rule that is correct as ratified
+  (ADR-0089 §5). **Whether ADR-0086 §10's deferral of "its rendering" reaches that
+  floor is left open and filed as #624**, because settling it against §10 means
+  superseding a section neither #586 nor #606 reported.
 - **Four further defects are amendments, not supersessions**, and are recorded in
   ADR-0086's appended dated note rather than on its `Status` line, which now
   carries a leading supersession token (ADR-0082 §2). §2 through §5 classify each
@@ -227,26 +229,47 @@ exception that matters; the second keeps what it does.
 
 > **Normative.** ADR-0086 §4 obligates no surface, no lane and no later ADR to
 > render `Provenance.evidence_elided`, and no lane owes a rendering on §4's
-> authority. **This releases nothing ADR-0073 §4 requires**: that floor binds the
-> inspection surface independently of ADR-0086, a citation the bound displaced is
-> inside it, and a belief that has displaced one is therefore owed a disclosure —
-> by ADR-0073 §4, in ADR-0086 §4's floor-plus-ceiling shape, and in whatever form
-> #568 gives it. This clause replaces nothing else in §4: the field, its
-> recurrence over every install, the record-level obligation, `export`'s carriage
-> of the stored number and the confidence-neutrality rule are untouched.
+> authority. **This release is bounded by §4's authority and reaches no other
+> ADR**: in particular it neither narrows nor restates ADR-0073 §4's floor, which
+> binds the inspection surface on its own and which this ADR leaves exactly as it
+> stands. This clause replaces nothing else in §4: the field, its recurrence over
+> every install, the record-level obligation, `export`'s carriage of the stored
+> number and the confidence-neutrality rule are untouched.
 
-**The floor's own reach is argued in Context and it is deliberately *not* marked,
-which is the distinction ADR-0089 §3 exists to make.** A clause is marked because
-it obligates; ADR-0073 §4's floor already obligates, on its own authority, and
+**The clause bounds this ADR's release and imposes no disclosure of its own, and
+the distinction is the whole of what ADR-0089 §3 is for.** Adversarial review
+found the first draft of it marking both — it bounded the release *and* stated
+that a belief which has displaced a citation is owed a disclosure — while the
+paragraph beneath it said the floor was "deliberately not marked". That is one
+obligation written twice at two widths inside the section correcting exactly
+that defect, and it is recorded rather than quietly fixed for the reason ADR-0089
+§2 and ADR-0090 §1 each recorded their own: the drift is a property of the form,
+not of any author's care, and both of the two ADRs written under ADR-0089 have
+now produced an instance of it inside their own marked clause.
+
+**Why the floor's reach is argued and not marked.** A clause is marked because it
+obligates; ADR-0073 §4's floor already obligates, on its own authority, and
 ADR-0073 is an unmarked ADR that binds as prose exactly as the ratified corpus
-does (ADR-0089 §4). Restating it here as a marked clause would add nothing a lane
-owes — and it would cost something: ADR-0089 §5 names one legal route by which an
-old rule enters the marked regime, "restate an earlier ADR's rule as its own
-marked clause **and partially supersede the earlier one for that scope**", so the
-mark would owe ADR-0073 §4 a supersession for a rule that is correct as ratified,
-and would leave one obligation stated in two live documents to drift. What *is*
-marked is the boundary of this ADR's own release, inside the clause that makes it,
-because that is the sentence a reader could otherwise read too widely.
+does (ADR-0089 §4). Marking a restatement of it would add nothing a lane owes and
+would cost two things: ADR-0089 §5 names one legal route by which an old rule
+enters the marked regime — "restate an earlier ADR's rule as its own marked clause
+**and partially supersede the earlier one for that scope**" — so the mark would owe
+ADR-0073 §4 a supersession for a rule that is correct as ratified; and it would
+put one obligation in two live documents to drift. Under ADR-0089 §3 the argument
+in Context does precisely the job unmarked text is for: it determines what this
+clause *means* when it says the release reaches no other ADR.
+
+**What that leaves open is named rather than assumed away, and it is #624.**
+ADR-0073 §4 requires the surface to convey how many citations stand behind a
+`DERIVED` belief; ADR-0086 §10 defers "**Whether the inspection DTOs grow a field
+for the elision**, and its rendering" to #568. Once a belief displaces a citation
+those two point in different directions, and which governs turns on whether §10
+deferred the *form* of the disclosure or the obligation itself — the second
+reading making ADR-0086 §10 a narrowing of ADR-0073 §4 that owes it a record
+ADR-0086 never wrote, and contradicting §11's own "not narrowed". **This ADR does
+not settle it**, because settling it against §10 means partially superseding a
+section of ADR-0086 that neither #586 nor #606 reported and that this lane was
+not read for. §6 records the deferral and #624 carries it.
 
 > **Normative.** Where one surface renders both a lost citation under ADR-0077
 > §6's tombstone and a count of elided citations from
@@ -291,24 +314,23 @@ direction is the opposite of a relaxation.
   reading created ran towards *doing* something: it invited a lane to put a count
   onto `Belief` or `BeliefSummary`, which ADR-0085 owns and which ADR-0086 §4
   and §10 both declined to reach into.
-- **What survives is the whole of the user-facing protection**, and it survives
-  on a firmer footing. ADR-0073 §4's floor requires the surface to convey how many
-  citations stand behind a `DERIVED` belief and never to drop one silently; on
-  the first displacement the retained count stops answering that, and the
-  disclosure is owed. A user is not told their data was lost when it was merely
-  no longer referenced (the second clause), and a user is not shown a narrower
-  warrant than the belief has (the floor).
+- **What survives is the whole of the user-facing protection**, and none of it
+  rested on the sentence being replaced. ADR-0073 §4's floor requires the surface
+  to convey how many citations stand behind a `DERIVED` belief and never to drop
+  one silently; §1's clause is bounded so that it releases nothing of it. A user
+  is not told their data was lost when it was merely no longer referenced (the
+  second clause), and a user is not shown a narrower warrant than the belief has
+  (the floor, on its own authority, subject to #624).
 - **What is unchanged today** is what the product renders. No shipped belief has
   displaced a citation, because the bound is ADR-0086 §1's and nothing predating
   it could displace; while `evidence_elided` is zero the retained count *is* how
   many stand behind the belief, and the floor is met by what already ships.
-- **What #568 inherits** is therefore a deadline rather than a blank slate: not
-  "should the DTOs grow a field", but "the floor is unmet for any belief whose
-  `evidence_elided` is above zero, and the surface has to convey it before one
-  exists". That is the shape ADR-0073 §4 already uses for its own two gates —
-  "due with the first producer … as a precondition of that producer shipping" —
-  and it is why this ADR files the finding onto #568 rather than leaving the lane
-  to rediscover it.
+- **What #568 inherits** is therefore a live floor and a named fork rather than a
+  blank slate: ADR-0073 §4 requires the surface to convey how many citations stand
+  behind the belief, a displaced citation is inside that, and whether ADR-0086
+  §10's deferral reaches it is #624's to settle. The finding is recorded on #568
+  so the lane meets it in its own issue rather than rediscovering it from four
+  ADRs.
 
 ### 2. §2's pointer reaches §3 whole, and §3's heading is not its scope
 
@@ -417,10 +439,17 @@ the dated note says so rather than staying silent.
 - **How an inspection surface conveys the elision, and on which type.** Whether
   `Belief` or `BeliefSummary` grows a field, whether the listing reports it some
   other way, and in what words, is **#568**'s against ADR-0085's contract
-  surface, which is not this ADR's to reach into. What is *not* left open is
-  whether the surface conveys it at all once a belief has displaced a citation:
-  ADR-0073 §4's floor decided that before either ADR existed, and Context shows
-  it reaches the case.
+  surface, which is not this ADR's to reach into.
+- **Whether ADR-0086 §10's deferral of "its rendering" reaches ADR-0073 §4's
+  floor — filed as #624.** Context establishes that the floor reaches a displaced
+  citation; §10 defers the rendering to #568; once a belief displaces, the two
+  point in different directions. Resolving it against §10 is a partial
+  supersession of a section neither #586 nor #606 reported and this lane was not
+  read for, and resolving it the other way is a ruling that ADR-0086 §11's "not
+  narrowed" already implies but does not state. **§1's clause is written so that
+  neither answer depends on it**: it releases only what §4 obligated, so ADR-0073
+  §4 and ADR-0086 §10 stand in exactly the relation they stood in before this
+  ADR. Naming the fork is what this ADR owes; deciding it is #624's.
 - **When the first displacement happens.** It is reachable — ADR-0086 §2 says a
   deployment may already hold a belief above the bound, whose next `REINFORCE`
   displaces — and nothing here predicts it or schedules #568 against a date.
@@ -525,16 +554,17 @@ the dated note says so rather than staying silent.
   acts identically before and after, which is ADR-0070 §1's test and ADR-0082 §1's
   condition for owing nothing.
 
-  **The one clause a reviewer should test this against is ADR-0086 §10's
-  "whether".** §10 defers "**Whether the inspection DTOs grow a field for the
-  elision**, and its rendering" to #568, and this ADR says the surface must
-  convey the elision once one exists — which sharpens a "whether" towards a
-  "when". It is not a decision change, because the two questions are different:
-  §10 defers *which type carries it and in what words*, which stays open in full,
-  and ADR-0073 §4 had already decided *that the surface conveys the count*, which
-  §10 never claimed to reopen and §11 expressly left standing. A reviewer who
-  reads §10 as having deferred the obligation itself has a clause to name, and
-  the answer would be that ADR-0086 owes ADR-0073 §4 a record it did not write.
+  **An earlier draft owed a record here and no longer does, which is worth the
+  three lines.** That draft marked the disclosure itself — "a belief that has
+  displaced one is therefore owed a disclosure" — and adversarial review raised
+  it as a `blocker` on the ground that it narrows ADR-0086 §10's deferral of "its
+  rendering" while the supersession scope names only §4. **The finding was
+  correct**, and the fix is not to widen the scope but to stop the clause
+  obligating what it was never this ADR's to obligate: §1 now bounds the release
+  and imposes nothing, so §10 and ADR-0073 §4 stand in the relation they stood in
+  before. The tension between them is real, predates both this ADR and ADR-0086's
+  ratification, and is filed as **#624** rather than settled from inside a lane
+  scoped to five reported defects.
 - **ADR-0085 — nothing owed *from this ADR*.** `Belief` and `BeliefSummary` are
   its contract surface and neither gains nor loses a field here; §1 returns the
   form of the disclosure to #568 rather than deciding it. `BeliefSummary`'s
@@ -584,12 +614,10 @@ the dated note says so rather than staying silent.
   tombstone distinguishes them, in §4's floor-plus-ceiling shape. That is four
   sentences where the document previously offered a standing requirement and two
   ratified denials of it.
-- **#568 inherits a condition instead of an open question.** The lane that
-  decides how the surface carries the count is not answering a question ADR-0086
-  already answered in the affirmative, is not blocked by one, and is not free to
-  answer "never": ADR-0073 §4's floor is unmet for any belief whose
-  `Provenance.evidence_elided` is above zero, and that is a test a lane can run
-  rather than a judgement it has to make.
+- **#568 stops being a question ADR-0086 had already answered.** The lane that
+  decides how the surface carries the count is not answering one ADR-0086
+  answered in the affirmative and is not blocked by one; what it meets instead is
+  ADR-0073 §4's floor and #624's fork, both stated where it will look.
 - **A ratified floor is written down as reaching a case that postdates it**,
   against three texts that already read it that way, so the next lane does not
   re-derive it from ADR-0073, ADR-0077 §6 and two sections of ADR-0086.
@@ -621,13 +649,19 @@ the dated note says so rather than staying silent.
   whole of what this lane owes there" was a spent instruction is a reading, made
   here on quoted text and reviewable against it (ADR-0082 §1), and a reviewer who
   reads either the other way has a clause to name.
-- **The elision has acquired a deadline nobody has scheduled.** ADR-0073 §4's
-  floor is met today and stops being met on the first displacement, which is
-  reachable on the next `REINFORCE` of a belief a deployment already holds above
-  the bound (ADR-0086 §2). #568 is where that lands, and until it does the corpus
-  carries a live obligation with no dated trigger and no gate that fires — which
-  is a worse position than a decided rendering and a better one than a floor
-  silently lapsed.
+- **The corpus carries a named fork it has not settled.** ADR-0073 §4's floor is
+  met today and stops being met on the first displacement — reachable on the next
+  `REINFORCE` of a belief a deployment already holds above the bound (ADR-0086
+  §2) — while ADR-0086 §10 defers the rendering to a lane that has not ruled.
+  **#624** holds it, with no dated trigger and no gate that fires. That is a
+  worse position than a settled reading and a much better one than a floor
+  lapsing unmentioned, which is what a narrower fix to §1 would have produced.
+- **This ADR's own marked clause drifted from the prose beside it on the first
+  round**, and had to be narrowed after adversarial review raised it as a
+  `blocker` (§1, §8). Both of the two ADRs written under ADR-0089 have now done
+  this inside their own marks — ADR-0090 §1's gap definition and this clause's
+  scope — which is evidence for ADR-0089 §3's demand that a clause carry its own
+  scope and against any expectation that marking makes the drift stop happening.
 - **`BeliefSummary.evidence_count` documents itself in the floor's words.** "How
   many citations stand behind it, resolved or not" is ADR-0073 §4's phrase, and
   the shipped value is the retained count; the two coincide only while nothing
