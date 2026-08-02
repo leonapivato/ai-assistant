@@ -1,6 +1,6 @@
 # 88. A citation is a checkable form: what an ADR may cite, and what "resolves" means
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0090 (§6's Tier 1 rule that a decision citation naming an absent ADR file always fails, as it applies to a number lying in a gap below the highest issued number)
 - Date: 2026-08-01
 - **This ADR supersedes nothing.** It supplies the rule ADR-0070 §4 reserved for
   "any liveness-classifying consumer added later", and it constrains the
@@ -10,6 +10,48 @@
   earlier ADR, and §8 classifies every one of them. **No code changes with it**
   and no `core` surface is touched, so nothing here is behavioural until the
   check of §6 is built.
+- Partially superseded: 2026-08-01 by ADR-0090 — **§6's Tier 1 fails a correct
+  document, and three sentences of this ADR asserting that it does not are
+  false.** ADR-0067 writes, in §1(a)'s canonical form, in prose and outside any
+  fence, that a number between the two it ranges over was never issued. That
+  number has no ADR file, because it was assigned and never written, so §6's
+  Tier 1 reports it — and the sentence reporting it is correct. §6's premise,
+  "ADRs are append-only so a file is never deleted", covers a *deleted* target
+  and silently assumes every cited number was *issued*, which no rule in the
+  corpus supplies (ADR-0015 §5 assigns a number at dispatch, and an abandoned
+  assignment leaves a gap). Firing on it is the "false report" §6's own
+  asymmetric failure handling calls the one dangerous outcome, and it is the
+  shape §3 already conceded on the other side of the corpus — an append-only
+  corpus correctly cites what is not in the tree.
+
+  **Replaced**, one clause of §6: the Tier 1 rule for a decision citation naming
+  an absent ADR file, *only* as it applies to a number that is absent from the
+  issued set and below that set's maximum. ADR-0090 §1 passes such a citation
+  silently; every other non-resolving decision citation still fails Tier 1,
+  including one above the issued maximum. The rest of §6 stands whole — the
+  tracker half of Tier 1, Tier 2, the silence on section references, the
+  asymmetry rule and the input-set rules — and §3 is not reached.
+
+  **Amended**, three stale phrases, recorded here and not rewritten (ADR-0070
+  §1; the record is this note alone, because the `Status` line now carries a
+  leading supersession token — ADR-0082 §2):
+
+  1. Context's "0035 is absent, and nothing cites it". ADR-0067 cites it.
+  2. §6's "The corpus's 3,387 decision citations pass today, so this is a
+     regression guard rather than a backlog". One does not pass.
+  3. Consequences' "It passes today, so it guards against regression rather than
+     presenting a backlog" and "3,387 decision citations, zero dangling files,
+     zero real section misses".
+
+  The figure carries a smaller error of its own. **3,387 is Context's count of
+  `ADR-NNNN §K` references**, and §6 and Consequences reuse it as the count of
+  *decision citations* — a wider population, since §1(a) makes the `§K`
+  optional. Measured at `123bdbc`, `scripts/check_citations.py` reports 5,885
+  decision citations, of which 3,515 carry a `§K`. Context's own sentence about `ADR-NNNN §K`
+  references — "**None** points at a missing ADR file" — is **not** among the
+  errors: the citation that fails is written bare, with no `§K`, so it is
+  outside that sentence's population. The measurement was right about what it
+  measured. Refs #603, ADR-0090 §4.
 
 ## Context
 
