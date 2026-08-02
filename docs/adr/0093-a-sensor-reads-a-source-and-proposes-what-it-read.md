@@ -205,8 +205,8 @@ the other, which is what the reading's own instants are for.
 
 > **Normative.** `SensorReading` is a frozen `core/types.py` pydantic model. Its
 > **proposal half is decided here** (§10): the sensor's Tier 2 identity, the
-> instant the source itself reports the reading as of, the instant this system
-> performed the read, and the proposals. Its **facet half is deferred** and lands
+> instant this system performed the read, any reading-wide instant the source
+> itself declares, and the proposals. Its **facet half is deferred** and lands
 > as an **optional** field when the context-facet decision is made; a reading that
 > predates that field stays valid.
 
@@ -306,7 +306,21 @@ because "a 'bounded default' with no figure is two conforming stores handing the
 same continuation different history". ADR-0077 §1 applied both to
 `observation_batch_size`, including the reason the refusal belongs at load: "A
 setting the store read would refuse must fail at load, not at the first
-observation".
+observation". **The figures for this wave's one sensor are therefore named in §7a
+rather than left to its lane** — that rule cannot be invoked here and satisfied
+elsewhere.
+
+> **Normative.** A bound is enforced by **refusing**, never by truncating. A read
+> whose source exceeds any of its bounds raises under §8 rather than returning the
+> part that fitted.
+
+Truncation is the failure ADR-0077 §1 named for the equivalent case — "a silent
+truncation disables half the work while the caller keeps reporting health, and the
+episodes the caller believed were observed were never read" — and here it is worse
+by one step, because §4 forbids proposing an absence: a truncated reading is
+indistinguishable from a source that simply has fewer entries, and a consumer
+cannot tell which it holds. Widening the cap or narrowing the window is a
+deployment's decision; making it silently is nobody's.
 
 > **Normative.** A sensor's bound is a function of the clock, its configuration
 > and the source's own content, and of nothing else. It may not be derived from
@@ -471,6 +485,53 @@ not quietly discharged by the configuration this section adds — which is exact
 what would happen if leg 6's exit test ("from a source the user granted") were
 read as satisfied by an operator having set a path.
 
+#### 7a. The calendar sensor's figures, named here rather than left to its lane
+
+§5 invokes ADR-0074 §9.3's rule that a bounded default with no figure is two
+conforming implementations diverging while each believes it conforms, so the
+figures are named. Six fields, and the reason each exists rather than only its
+value — because the *dimensions* are the decision and the numbers are revisable:
+
+| Field | Default | Range | What it bounds |
+| --- | --- | --- | --- |
+| `calendar_sensor_path` | `None` | absolute path | the source; `None` is disabled |
+| `calendar_sensor_interval` | `None` | `> 0` | the cadence; `None` is disabled (§7) |
+| `calendar_window_past` | 1 day | `>= 0` | how far back the clock-relative window reaches |
+| `calendar_window_future` | 7 days | `> 0` | how far forward it reaches |
+| `calendar_max_entries` | 500 | `[1, 2**63)` | entries in the window, and so proposals |
+| `calendar_max_bytes` | 8 MiB | `> 0` | the source read **before** parsing |
+
+Four of them are decisions rather than figures pulled from the air:
+
+- **The window is two fields, not one.** A calendar's usefulness is asymmetric:
+  the future is what the assistant needs to know about, and the past is only
+  wanted at all so that "this morning" is still in view. One symmetric horizon
+  would have to be sized for the future and would then drag a week of history
+  along with it. The defaults are deliberately small, following ADR-0077 §1's
+  posture on `observation_batch_size` — "a handful of exchanges, not a month of
+  transcript" — and for the same reason: this is Tier 1 data being read and
+  proposed, and a bound nobody argued is a payload nobody measured.
+- **`calendar_window_past` may be zero and `calendar_window_future` may not.** A
+  deployment that wants only what is ahead is coherent; one that wants a window of
+  zero width has configured a sensor that reads nothing while reporting health,
+  which is exactly what ADR-0077 §1 refused for a zero batch.
+- **`calendar_max_bytes` is separate from `calendar_max_entries`, and it is the
+  one that must exist.** An entry cap can only be applied *after* parsing, so a
+  cap on entries alone lets a 2 GiB `.ics` file be fully parsed before anything
+  refuses it — the bound applied one step too late to bound the work. The byte cap
+  is checked against the source before parsing begins. This is the same ordering
+  ADR-0017 §3 requires of a credential read ("otherwise an implementation reads
+  it, then checks, then stops"), applied to a parse.
+- **Both caps refuse rather than truncate** (§5), so exceeding either raises under
+  §8. A deployment with a genuinely larger calendar widens the cap or narrows the
+  window, and does so knowingly.
+
+**These figures belong to the calendar sensor, not to the `Sensor` contract.** What
+the contract obligates is §5: bounded, named, refused at load, derived from the
+clock and configuration alone, and enforced by refusing. A second sensor names its
+own dimensions — a mailbox's would not be a time window — and inherits the
+obligation, not the table.
+
 ### 8. Failure has two postures, because the reading has two consumers
 
 There is no single answer, and the two are already ratified in different places:
@@ -525,9 +586,10 @@ and its report time is a precondition of it shipping, and whether that needs
 in hand — not one to guess here."
 
 > **Normative.** This ADR does not discharge ADR-0073 §4's gate and does not
-> decide the vehicle. `SensorReading` is where the identity and the source's
-> as-of instant enter the system (§3); how they reach a stored belief is
-> ADR-0092's.
+> decide the vehicle. `SensorReading` is where the source's identity, our read
+> instant, and any reading-wide as-of the source declares enter the system (§3,
+> §10); how any of them reaches a stored belief — and where a *per-entry* report
+> time lives — is ADR-0092's.
 
 > **Normative.** No sensor may be enabled on a schedule until ADR-0092 has decided
 > imported-record identity. Until then §5's idempotence premise is unestablished,
@@ -573,13 +635,40 @@ wrong: the mechanism and the identity decision are the same decision.
   - `source: EncodableText` — the reading's Tier 2 identity, equal to the
     producing sensor's `name`. Carried on the reading rather than left to the
     caller so the value that reaches ADR-0092's vehicle is the producer's own.
-  - `as_of: UtcInstant` — the instant **the source itself** reports the reading as
-    of. This is the half of ADR-0073 §4's pair that no field carries today.
-  - `read_at: UtcInstant` — the instant **this system** performed the read. Named
-    separately and never merged with `as_of`, because collapsing them is the exact
-    defect ADR-0073 §4 describes: "a record synced on Tuesday from a calendar that
-    said so on Monday renders 'Tuesday', which is a true statement about us and a
-    false one about the source."
+  - `read_at: UtcInstant` — the instant **this system** performed the read. Always
+    present, because it is always knowable and always true: it is our own clock.
+  - `as_of: UtcInstant | None` — the instant **the source declares for the reading
+    as a whole**, where the source declares one, and `None` where it does not.
+    Never merged with `read_at`, because collapsing them is the exact defect
+    ADR-0073 §4 describes: "a record synced on Tuesday from a calendar that said so
+    on Monday renders 'Tuesday', which is a true statement about us and a false one
+    about the source."
+
+  **`as_of` is optional, and that is a decision rather than laxity.** A local
+  `.ics` file declares no reading-level as-of: the format's report times are
+  per-`VEVENT` (`DTSTAMP`, `LAST-MODIFIED`), and the file's mtime is a fact about
+  our filesystem rather than a claim the source made. So the only two values a
+  required field could take for the first source are a filesystem observation —
+  which collapses the very distinction ADR-0073 §4 draws — or one entry's stamp
+  applied to all of them, which is false for every other entry. A source that
+  *does* declare one (a feed's `Last-Modified`, a sync API's server instant) has an
+  honest home for it, and an empty reading is unaffected either way.
+
+  > **Normative.** `as_of` carries only an instant the source itself declares for
+  > the whole reading. It may never be filled from the filesystem, from the clock,
+  > or from one entry's stamp applied to the rest.
+
+  > **Normative.** Per-proposal report time is **not** decided here and is not
+  > foreclosed here. Where a source's report time is per-entry, it belongs on the
+  > proposal, by the vehicle ADR-0092 ratifies (§9), and a sensor sets it when
+  > constructing the proposal.
+
+  This is the boundary between the two lanes taken seriously rather than
+  approximately. An earlier draft made `as_of` required at the reading level, which
+  would have decided the *granularity* of ADR-0073 §4's report time — reading-wide
+  — inside the seam ADR, leaving the lane that owns that gate unable to recover a
+  per-entry time this contract never carried. Deciding a neighbouring lane's
+  question by choosing a field's cardinality is the quietest way to decide it.
   - `proposals: tuple[MemoryUpdateProposal, ...]` — possibly empty, which under §8
     means the source had nothing to propose within the bound and is a successful
     answer. A failed read raises and constructs no reading at all.
@@ -616,7 +705,8 @@ Protocol"):**
    which are the ones expressible without a source. Each maps to a ruling above:
    - `name` is stable across calls and non-empty (§7).
    - `read()` returns a reading whose `source` equals `name` (§10).
-   - `read_at` is tz-aware and `as_of` is tz-aware; neither is naive (ADR-0026 §1).
+   - `read_at` is tz-aware; `as_of`, where present, is tz-aware. Neither is ever
+     naive (ADR-0026 §1).
    - **No proposal is `EPISODIC`** (§4) — the clause that keeps §4's refusal a
      property of the seam rather than of one implementation.
    - **Every proposal is in the `ATTESTED` band**, i.e. `band_of` its provenance
