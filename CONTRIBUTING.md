@@ -537,6 +537,51 @@ before you know the contract.
 - Comments explain **why**, not what. No commented-out code.
 - Record every non-obvious decision as an ADR (`docs/adr/`, see the template).
 
+### Cite in form, and mark what binds
+
+Two decisions govern ADR *text* — ADR-0088 and ADR-0089, which hold the
+evidence and the rejected alternatives. Both are **forward-only**: nothing
+ratified is rewritten to satisfy either, so an older ADR that does not follow
+them is a record, not a defect to fix.
+
+**Cite in one of ADR-0088 §1's three forms** — a decision, a code, or a tracker
+citation. §1 defines each and §2 says what each must resolve to; read them there
+rather than from memory, because a reference not written in one of those forms
+is prose, and nothing resolves it. **A code citation carries no line number**
+(§5): name the enclosing symbol, and quote the line where the position matters.
+That one is worth remembering for its reason — a line number stays well-formed
+after the edit that invalidates it, so it fails *silently*, where a symbol name
+either resolves or does not.
+
+What the corpus actually cites is owned by a check, not by this document:
+`tests/scripts/test_adr_citations_corpus.py` runs ADR-0088 §6's Tier 1 inside
+`pytest`, so a citation naming an ADR file or an issue number that does not
+exist fails the gate like any other test. `just citations` prints the whole
+report; its Tier 2 half is advisory and never fails, because an append-only
+corpus correctly cites what the tree no longer contains (ADR-0088 §3).
+
+**Mark every normative clause**, in the form `docs/adr/template.md` carries
+(ADR-0089 §2). A clause is normative when **a reader could disobey it** — it
+constrains what an implementation, a lane, or a later ADR may do. A measurement,
+an argument, a worked example, or a classification of the change being made is
+not, however load-bearing it is: the test is conduct, not weight, and a refusal
+to allow something is a rule like any other (ADR-0089 §1).
+
+**In a marked ADR the marked clauses are the whole of what it obligates** (§3).
+Unmarked text is read to determine what a marked clause *means*; it never
+supplies an obligation. So a rule stated only in the prose beside a mark binds
+nothing, and a clause has to carry its own scope, conditions and exceptions —
+where the surrounding argument is what establishes that an obligation exists, or
+how far it reaches, the marking is not finished.
+
+Which regime an ADR is in is a `grep`, not a judgement: it is marked when it
+carries the token, and an unmarked ADR binds as prose exactly as the corpus
+always has (§4). That default is deliberate — marking nothing degrades to the
+status quo rather than to a defect — and it moves the risk onto review.
+**Reviewing a marked ADR, check that every obligation the document intends sits
+inside a mark.** Nothing mechanical finds an under-marked ADR, and under §3
+whatever was left outside the marks is simply discarded.
+
 ### No state claims in living documents
 
 Ratified in ADR-0019, which holds the evidence and the rejected alternative.

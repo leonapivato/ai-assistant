@@ -23,6 +23,31 @@ worth recording. Neutral — describe the situation, not the answer.>
 <The decision, stated in the active voice: "We will ...". Be specific enough
 that someone can act on it without asking follow-ups.>
 
+<!-- Mark every ruling. A clause is normative when a reader could disobey it —
+it constrains what an implementation, a lane, or a later ADR may do. A
+measurement, an argument, a worked example, or a classification of this change
+is not, however load-bearing it is (ADR-0089 §1). The form is a block quote at
+column 0, preceded by a blank line, containing no fenced block, stating one
+obligation — a passage stating two separable obligations is two clauses (§2):
+
+`> **Normative.** <one obligation, with its scope, conditions and exceptions.>`
+
+To *show* a mark rather than make one — quoting another ADR's ruling, exhibiting
+the form — put it inside a fenced block: a `**Normative.**` line inside a fence
+is display, not a mark (§2).
+
+Mark every obligation you mean to impose, because the marks are the whole of
+them: in a marked ADR, unmarked text is read to determine what a marked clause
+*means* and never supplies an obligation, so a rule stated only in the prose
+beside a mark binds nothing (§3). An ADR that marks nothing is unmarked and
+binds as prose, exactly as the ratified corpus does — marking is forward-only,
+and nothing already ratified is marked (§5).
+
+Cite in ADR-0088 §1's three forms, never with a line number (ADR-0088 §5):
+name the symbol, and quote the line where the position matters.
+`CONTRIBUTING.md` → "Cite in form, and mark what binds" states both decisions
+for a reader who is not reading these ADRs. -->
+
 ## Consequences
 
 <What becomes easier and what becomes harder as a result. Include follow-on work
