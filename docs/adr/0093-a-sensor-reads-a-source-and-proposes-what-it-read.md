@@ -20,10 +20,14 @@
   precondition of leg 6's first `EXTERNAL` producer shipping. That vehicle is
   ADR-0092's to decide, together with imported-record identity and whether a user
   assertion may override an attested belief. **ADR-0092 was the other half of the
-  same dispatched wave and has merged ahead of this one**, so §9's two gates are
-  now stated against a ratified decision rather than an expected one — and §5 and
-  §9 say what it actually delivered, which is narrower than this ADR assumed while
-  it was pending. Collapsing those questions into a guess here was exactly what
+  same dispatched wave and has merged ahead of this one**, so §9's boundaries are
+  stated against text that is in the corpus rather than against an expected one —
+  and §5 and §9 say what it actually delivered, which is narrower than this ADR
+  assumed while it was pending. **It stands `Proposed` on `main`**: its
+  ratification flip is owed and is its own lane's, and this ADR does not present it
+  as ratified. Binding to its rulings meanwhile is sound on the corpus's own terms
+  — `CONTRIBUTING.md` → "Trivial ADR edits" defines that flip as recording a
+  ratification rather than deciding one, so it moves no clause §9 relies on. Collapsing those questions into a guess here was exactly what
   ADR-0073 §4 forbade when it said the decision is "for that lane — with a producer
   in hand — not one to guess here".
 - **Amends no earlier ADR and supersedes none**, and §12 applies ADR-0070 §1's
@@ -220,7 +224,9 @@ ADR (golden rule 5), bought purely to avoid naming a model now.
 
 > **Normative.** The facet path is `context/`'s existing internal seam. A
 > `ContextSource` in `context/` holds a `Sensor` and contributes from its reading.
-> A `Sensor` is not itself a `ContextSource`.
+> A `Sensor` is not itself a `ContextSource`. This says what the path **is**; §7a
+> says it is not wired until the facet exists as an optional `CurrentContext`
+> field, which is another ADR's.
 
 **ADR-0008 §2's boundary is satisfied rather than stretched, and the opposite
 reading is available enough to be worth refuting.** §2's sentence — the internal
@@ -579,8 +585,8 @@ value — because the *dimensions* are the decision and the numbers are revisabl
 | --- | --- | --- | --- |
 | `calendar_sensor_path` | `None` | absolute path | the source; `None` is disabled |
 | `calendar_sensor_interval` | `None` | `> 0` | the cadence; `None` is disabled (§7) |
-| `calendar_window_past` | 1 day | `>= 0` | how far back the clock-relative window reaches |
-| `calendar_window_future` | 7 days | `> 0` | how far forward it reaches |
+| `calendar_window_past` | 1 day | `[0, 3650 days]` | how far back the clock-relative window reaches |
+| `calendar_window_future` | 7 days | `(0, 3650 days]` | how far forward it reaches |
 | `calendar_max_entries` | 500 | `[1, 2**63)` | entries in the window, and so proposals |
 | `calendar_max_bytes` | 8 MiB | `> 0` | the source read **before** parsing |
 | `calendar_max_expansion` | 100,000 | `[1, 2**63)` | occurrences considered across the whole read (§7b) |
@@ -597,13 +603,18 @@ product is four states of which one is incoherent:
 | `..._path` | `..._interval` | Meaning |
 | --- | --- | --- |
 | `None` | `None` | Fully disabled. **The default.** |
-| set | `None` | **Facet only**: the context adapter reads at assembly time; nothing is proposed and no job is armed. |
+| set | `None` | **Facet only** — the shape the facet path takes, and **not reachable until the facet lands** (below). |
 | set | set | Both paths live, subject to §9's two gates. |
 | `None` | set | Incoherent — refused at load. |
 
 > **Normative.** A configuration with a sensor interval set and that sensor's
-> source location unset is refused at load with a `ConfigurationError`. A
-> location with no interval is **valid** and enables the facet path alone.
+> source location unset is refused at load with a `ConfigurationError`.
+
+> **Normative.** The facet-only state is **reserved, not enabled**. Until an ADR
+> adds the calendar facet as an optional `CurrentContext` field, a source location
+> with no interval configures a source that **nothing reads**: no adapter is
+> registered and no file is opened. A lane may not ship the adapter before that
+> field exists.
 
 The refusal follows this section's own posture — a figure the runtime would refuse
 must fail at load — and the alternative outcomes are all worse and all silently
@@ -611,12 +622,22 @@ different: a scheduler that omits the requested job reports health while running
 nothing, one that arms it re-runs a failing job forever, and one that treats it as
 a source fault turns a configuration mistake into an infinite retry.
 
-**Facet-only is a real deployment, not a degenerate one**, and it is what makes
-§9's gate configurable rather than all-or-nothing. Until ADR-0092 lands, no sensor
-may be enabled *on a schedule* — but the facet writes nothing, proposes nothing and
-touches no record, so neither of §9's gates reaches it. A deployment can therefore
-have a live calendar facet before the attested band has its vehicle, which is
-exactly the sequencing this wave was split to allow.
+**An earlier draft called facet-only "a real deployment, not a degenerate one" and
+said a deployment could have a live calendar facet today. That was wrong, and the
+error is worth recording because it is the kind a matrix invites.** Naming four
+states made the second one *look* live, and nothing in §7a checked whether the
+thing it enables exists. It does not: ADR-0008 §1 requires a facet to arrive as an
+**optional `CurrentContext` field** added by its own ADR, `CurrentContext` has no
+calendar field, and §11 defers that decision out of this lane by the dispatch's
+fence and by ADR-0092 §10's matching sequencing. An adapter shipped today could
+only read the user's calendar and contribute an empty mapping — I/O on personal
+data in exchange for nothing, which is the worst available trade and precisely what
+§7's disabled-by-default clause exists to prevent.
+
+So the state is **reserved**: §3's design says what the facet path will be, and §7a
+says it is not wired until there is a field to contribute to. The sequencing this
+wave was split to allow is still real, just one step longer than the draft claimed
+— the facet ADR is the step, and it is named in §11 rather than assumed.
 
 Five of the seven are decisions rather than figures pulled from the air:
 
@@ -632,6 +653,13 @@ Five of the seven are decisions rather than figures pulled from the air:
   deployment that wants only what is ahead is coherent; one that wants a window of
   zero width has configured a sensor that reads nothing while reporting health,
   which is exactly what ADR-0077 §1 refused for a zero batch.
+- **Both are bounded *above*, and the ceiling is not decoration.** `> 0` alone
+  admits `timedelta.max`, for which `read_at + calendar_window_future` is not a
+  representable instant — so a figure that passes a load-time range check produces
+  an `OverflowError` on the first run, escaping §8's two outcomes entirely and
+  reaching the scheduler as neither a source failure nor a cancellation. Ten years
+  is far past any calendar anyone reads and far short of the representable limit,
+  which is the whole requirement of the number.
 - **`calendar_max_bytes` is separate from `calendar_max_entries`, and it is the
   one that must exist.** An entry cap can only be applied *after* parsing, so a
   cap on entries alone lets a 2 GiB `.ics` file be fully parsed before anything
@@ -671,6 +699,21 @@ future run — the window moves forward and the event's start recedes — so it 
 permanently unreachable. That is exactly the coverage failure §5 argues a sensor
 does not have, reintroduced by a filter choice rather than by a missing cursor, and
 it fails hardest on the entry the facet most wants: the meeting happening now.
+
+> **Normative.** The window's endpoints **saturate** at the representable bounds:
+> where `read_at + calendar_window_future` is not representable the upper edge is
+> the maximum representable instant, and likewise the lower edge at the minimum.
+> Endpoint arithmetic never raises.
+
+The bounded figures above make an overflow unreachable from configuration alone,
+but not from configuration *and* a clock: a conforming ADR-0026 reading close
+enough to the representable maximum overflows even the seven-day default, and a
+sensor is not entitled to assume where in time the clock sits. Saturation is total
+where a check is conditional, and it loses nothing — there is no entry beyond the
+maximum representable instant to exclude, so the clamped window and the ideal one
+select the same set. It is deliberately **not** a refusal: a clock that near the
+limit is a wiring problem the sensor neither causes nor can diagnose, and turning
+it into a `SensorError` would report a source fault against a source that is fine.
 
 > **Normative.** Both intervals are **half-open**. The window is
 > `[read_at - calendar_window_past, read_at + calendar_window_future)` and an
@@ -894,6 +937,15 @@ in hand — not one to guess here." **ADR-0092 is that lane and it has answered.
 This section is therefore a boundary rather than a wait, and it records what the
 answer was — including the half that came back narrower than this ADR expected.
 
+**ADR-0092 has merged and stands `Proposed`; this ADR treats its text as the
+corpus's and its status as its own lane's to finish.** The distinction is kept
+rather than glossed, because §9 leans on three of its rulings. What makes leaning
+safe is not optimism: `CONTRIBUTING.md` → "Trivial ADR edits" and ADR-0070 §1 both
+class the `Proposed` → `Accepted` flip as an edit that alters no decision, so the
+clauses cited below are as stable now as they will be after it. Were ADR-0092
+instead to *change* at ratification, that would be a decision change owing its own
+supersession, and this section would be owed a matching one.
+
 > **Normative.** This ADR does not discharge ADR-0073 §4's gate and does not own
 > the vehicle. `SensorReading` is where the source's identity, our read instant,
 > and any reading-wide as-of the source declares enter the system (§3, §10). How
@@ -934,8 +986,10 @@ retirement ever happened". Minting removes the destruction and leaves the
 duplicate.
 
 **Neither boundary reaches the facet path**, which writes nothing, proposes nothing
-and touches no record. §7a's facet-only state is therefore reachable today, and
-that is the point of both being about *ingestion* rather than about the sensor.
+and touches no record — so when the facet lands it is gated by neither. That is the
+point of both being about *ingestion* rather than about the sensor. It does **not**
+make the facet reachable today: §7a reserves that state behind the `CurrentContext`
+field this lane does not own.
 
 > **Normative.** This ADR decides nothing about whether a user assertion may
 > override an attested belief. ADR-0092 §4 rules that it may — `EXTERNAL` joins the
@@ -1122,8 +1176,12 @@ the `lint-imports` contract pinning §2.
   sources. Fires when a second source exists or when leg 6's exit test is
   evaluated against its own wording; §7's last clause exists so nothing reads
   configuration as having discharged it in the meantime.
-- **What a context facet carries** — an as-of instant and provenance. §3 is
-  additive precisely so this ADR does not decide it. Fires with the facet.
+- **What a context facet carries** — an as-of instant and provenance — **and the
+  optional `CurrentContext` field itself.** §3 is additive precisely so this ADR
+  does not decide it, and §7a reserves the facet-only enablement state until it
+  exists: an adapter has nothing legal to contribute before there is a field to
+  contribute to (ADR-0008 §1). It is the next step in this leg's sequence rather
+  than a distant one, and ADR-0092 §10 sequences it the same way.
 - **Whether an ingested record may ever be an `EpisodicMemory`.** §4 declines it
   for leg 6. Fires when something wants a timeline rather than beliefs; it needs
   an ADR arguing a capture exemption for an event this system did not witness,
