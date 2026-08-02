@@ -84,6 +84,56 @@
   an existing shape to a contract and changes no memory semantics.
 - Amends on ratification: ADR-0022 §§4, 4a, 5. The edit is **not** made by this
   change — see §6 for its exact form and why it waits.
+- Note (2026-08-01): **§4a's tuning validator is qualified onto the wrong owner.
+  §3's and §4's conflict helper is not — it is this ADR's own deletion, correctly
+  named.** Both were reported together as defects (#604) and only one is; the
+  distinction is worth writing down because they look identical to a checker and
+  are opposite cases under
+  [ADR-0088](0088-a-citation-is-a-checkable-form.md) §3.
+
+  **The defect.** §4a writes the validator it relocates as
+
+  ```text
+  the conflict half of `LearningLoop._check_tuning`
+  ```
+
+  and `LearningLoop` has never carried a member of that name. `_check_tuning` was
+  module-level in `orchestration/loop.py` from the commit that introduced it,
+  beside `LearningLoop` and called from its constructor, and it is module-level
+  there still. (It is also not the `_check_tuning` in `testing/deferrals.py`,
+  which #604 identified; four modules define a private function of that name, and
+  the one §4a is about is the loop's own.) §3 names the very same function
+  correctly, unqualified — "`_check_tuning` validates them and nothing else reads
+  them" — so the ADR contradicts itself rather than the tree. **Nothing decided
+  changes and no reader acts differently**: §4a rules that
+  the conflict half of that validation moves to `MemoryIngestor.__init__` verbatim
+  in effect while `retrieval_limit`'s check stays with `retrieval_limit`, and that
+  ruling reads the same whether the source is a method or a module-level function
+  the constructor calls. `core/config.py` re-propagates the wrong qualification
+  into a `src/` docstring, which ADR-0088 §7 leaves outside every mechanical
+  check; #612 tracks that half.
+
+  **Not a defect.** §3 and §4 write
+
+  ```text
+  `LearningLoop._conflicts_for`
+  ```
+
+  which resolves nowhere today for the reason §4 gives on its own face: §4
+  **deletes** `_conflicts_for`, `_apply` and `_expiry` from `loop.py`, and it was
+  a method of `LearningLoop` when this ADR named it. That is ADR-0088 §3's class
+  2 exactly — "the ADR that removes something must name it" — so the citation is
+  correct, it is correctly unresolvable, and it stays on the §6 Tier 2 list
+  permanently. The `_conflicts_for` that does resolve, on a class in
+  `testing/writer.py`, is a different function on a different object and is not
+  what §3 is about.
+
+  Under [ADR-0070](0070-amendment-and-supersession-rules.md) §1 the correction is
+  an internal contradiction reconciled, so it is recorded as this appended dated
+  note and the ratified text below is **not** rewritten; it names no other ADR, so
+  no `Status` edit is owed
+  ([ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §1).
+  Refs #604.
 
 ## Context
 

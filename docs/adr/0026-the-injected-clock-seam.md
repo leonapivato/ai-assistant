@@ -19,6 +19,37 @@
   restate or reopen ADR-0023's field-side decision.
 - Amends on ratification: ADR-0008 §§4–5. The edit is **not** made by this
   change — see §6 for its exact form and why it waits.
+- Note (2026-08-01): **The SQLite epoch helper this ADR names twice was renamed
+  by a later, unrelated fix, so the symbol no longer resolves.** Context and §7
+  both reach for it — §7's "produces a float and never touches a `core` field" is
+  the clearest — and both write it as
+
+  ```text
+  `SqliteMemoryStore._now_epoch`
+  ```
+
+  The method was real and did produce a float when this ADR was written. It is
+  now `_now_micros` on the same class in `memory/sqlite_store.py`, renamed three
+  days later by a correctness fix that stores lifecycle epochs as integer
+  microseconds; what changed is the name and the unit, not the seam. **Nothing
+  decided changes and no reader acts differently.** §7 rules that *no* seam earns
+  an advisory exemption, and its reasoning holds of `_now_micros` exactly as it
+  held of the earlier name — the helper still produces a bare number that never
+  reaches a `core` field, which is the property §7 refuses to exempt — while
+  Context's converting-not-rejecting argument is about the comparison the helper
+  feeds, not about what it is called. Under
+  [ADR-0070](0070-amendment-and-supersession-rules.md) §1 this is a stale phrase
+  reconciled with a fact that postdates the ADR, so it is recorded as this
+  appended dated note and the ratified text below is **not** rewritten; it names
+  no other ADR, so no `Status` edit is owed
+  ([ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §1).
+  It is **not** one of
+  [ADR-0088](0088-a-citation-is-a-checkable-form.md) §3's three classes — the
+  symbol was not unbuilt, not deliberately removed by this ADR, and not a road
+  declined — which is what makes it a genuine defect rather than a §6 Tier 2
+  entry that stands forever. `core/clock.py` re-propagates the stale name into a
+  `src/` docstring, which ADR-0088 §7 leaves outside every mechanical check;
+  #612 tracks that half. Refs #604.
 
 ## Context
 

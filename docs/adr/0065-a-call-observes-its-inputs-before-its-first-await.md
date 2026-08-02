@@ -59,6 +59,39 @@
   ADR-0060 (the adjacent rule, deliberately a *different* axis — see §5),
   ADR-0028 §2.
 - Source: issue #348.
+- Note (2026-08-01): **§4's `FeedbackProcessor` row names the consumer of that
+  contract, not an implementation of it, and the symbol it writes has never
+  existed.** §4's survey of the seams that are "bound and already satisfied", and
+  the 2026-07-25 amendment's re-check of that survey, both write
+
+  ```text
+  `LearningLoop.process`
+  ```
+
+  `LearningLoop` (`orchestration/loop.py`) has two entry points, `respond` and
+  `learn`, and no `process` in any revision of the tree. It is a *consumer* of
+  `FeedbackProcessor` — it takes one by injection and calls
+  `FeedbackProcessor.process` — so it is the wrong object for a row about
+  implementations. The intended symbol is
+  `RuleBasedFeedbackProcessor.process` (`learning/processor.py`), the sole
+  `FeedbackProcessor` implementation outside `ai_assistant.testing`, and **the
+  claim §4 attaches to it is true of it**: it contains no `await` at all, so
+  §3's clause is vacuous for it, exactly as the row concludes. **Nothing decided
+  changes and no reader acts differently.** §3's enforcement scope is untouched
+  — it never turned on this row — and §4's disposition of `FeedbackProcessor`
+  (bound, satisfied, no conformance case, no issue) is unchanged, because the
+  ground for it was always the absence of a suspension point in the
+  implementation and that absence is real. The 2026-07-25 amendment's warning
+  stands too: it is the `ModelProvider` row that was false as to *substance*,
+  and this is a misnaming whose substance survives, which is why the two are
+  recorded differently. Under
+  [ADR-0070](0070-amendment-and-supersession-rules.md) §1 this is a stale phrase
+  reconciled with the tree, so it is recorded as this appended dated note and
+  neither the ratified §4 nor the 2026-07-25 section is rewritten; it names no
+  other ADR, so no `Status` edit is owed
+  ([ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §1,
+  which records this ADR's own `Status` qualifier as the grandfathered
+  pre-ADR-0070 shape and not the going-forward form). Refs #604.
 
 ## Context
 

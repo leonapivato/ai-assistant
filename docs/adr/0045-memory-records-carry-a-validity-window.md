@@ -149,6 +149,34 @@
   (§7). None of these edits is made by this change — ADR-0001 keeps ADRs
   append-only, so each travels with the implementation PR it describes; their exact
   form is in §Consequences.
+- Note (2026-08-01): **Consequences names a module the fake store has never lived
+  in.** The bullet enumerating the files the implementing change touches reads
+
+  ```text
+  - `testing/writer.py`, `testing/store.py` — `FakeMemoryWriter` grows the new
+    supersession shape; the fake store grows window filtering.
+  ```
+
+  There is no such module under `testing/`, and there never has been one in the
+  history of the tree. The fake store is `FakeMemoryStore`, in
+  `testing/memory.py`, where it has lived since the canonical fakes package
+  landed four days before this ADR was written — and where
+  [ADR-0026](0026-the-injected-clock-seam.md) names it correctly, so one ADR gets
+  it right and this one does not. The window filtering the bullet promises did
+  land, in that file. **Nothing decided changes and no reader acts differently**:
+  the bullet is an inventory of what an implementing lane touches, not a ruling,
+  and §4's window-close instruction, §5's fold clauses and §6's conformance
+  obligations are untouched by which file the fake is read out of. Under
+  [ADR-0070](0070-amendment-and-supersession-rules.md) §1 this is a stale phrase
+  reconciled with the tree, so it is recorded as this appended dated note and the
+  ratified text below is **not** rewritten; it names no other ADR, so no `Status`
+  edit is owed under
+  [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §1 —
+  and §2 of that ADR forbids one on this line in any case, which is why the
+  2026-07-30 note above exists. It is an
+  [ADR-0088](0088-a-citation-is-a-checkable-form.md) §1 b1 citation, and until
+  this note landed its §6 Tier 2 line was the whole record of the defect. Refs
+  #602.
 
 ## Context
 
