@@ -461,9 +461,22 @@ that refused to start because a calendar file was on an unmounted volume would
 turn an advisory source into a boot dependency, which is precisely the coupling
 ADR-0008 §4 declined for the whole context subsystem.
 
-> **Normative.** A sensor's identity is a configured, stable Tier 2 name. It may
-> never be derived from the source's location or contents, and a path, filename,
-> address or account identifier may not be used as one.
+> **Normative.** A sensor's identity is **declared by the sensor** and is not a
+> configurable value. It is a stable Tier 2 name, never derived from the source's
+> location or contents; a path, filename, address or account identifier may not be
+> used as one. The calendar sensor's identity is `"calendar"`.
+
+**Declared rather than configured, and an earlier draft had this wrong.** It said
+"configured", which §7a's table then failed to provide a field for — the
+inconsistency adversarial review found. Resolving it by *adding* the setting is the
+worse of the two repairs, and the reason is this section's own rule: the identity
+lands in `Provenance`, in every export and in every log line, which is the one
+place ADR-0004 §5 forbids Tier 1 data. A free-text setting is precisely the
+mechanism by which a user would put their email address or a path there, and no
+validator can tell a chosen label from a personal one. A declared constant cannot
+carry personal data at all, which is a property rather than a rule. Revisit when a
+second instance of one source type exists and needs distinguishing — the same
+point at which §7's registry deferral fires.
 
 This is `ContextSource.name`'s obligation, and it is stricter here rather than
 merely inherited, because a sensor's identity has a second consumer. That
@@ -501,7 +514,11 @@ value — because the *dimensions* are the decision and the numbers are revisabl
 | `calendar_max_entries` | 500 | `[1, 2**63)` | entries in the window, and so proposals |
 | `calendar_max_bytes` | 8 MiB | `> 0` | the source read **before** parsing |
 
-Four of them are decisions rather than figures pulled from the air:
+**The sensor's identity is deliberately not in that table.** It is declared, not
+configured, for the reason given above this subsection: a free-text setting is how
+a path or an address would reach `Provenance` and the logs.
+
+Four of the six are decisions rather than figures pulled from the air:
 
 - **The window is two fields, not one.** A calendar's usefulness is asymmetric:
   the future is what the assistant needs to know about, and the past is only
@@ -531,6 +548,56 @@ the contract obligates is §5: bounded, named, refused at load, derived from the
 clock and configuration alone, and enforced by refusing. A second sensor names its
 own dimensions — a mailbox's would not be a time window — and inherits the
 obligation, not the table.
+
+#### 7b. Three `.ics` semantics that §5's argument depends on
+
+A window and a cap do not define themselves, and adversarial review demonstrated
+that two implementations can satisfy §7a's table exactly and still disagree. Three
+of those disagreements are not the sensor lane's to settle, because **§5's
+no-cursor result is false under the wrong choice** — which makes them this ADR's.
+
+> **Normative.** An entry is in the window when its interval **overlaps** the
+> window. Membership is never decided on the start instant alone.
+
+This is the one that would have broken the ADR. Under start-instant membership, an
+event that began before the window and is still running is excluded by *every*
+future run — the window moves forward and the event's start recedes — so it is
+permanently unreachable. That is exactly the coverage failure §5 argues a sensor
+does not have, reintroduced by a filter choice rather than by a missing cursor, and
+it fails hardest on the entry the facet most wants: the meeting happening now.
+
+> **Normative.** A recurring entry is counted and proposed as its **occurrences
+> within the window**, not as the one component that generates them.
+
+`calendar_max_entries` exists to bound work and payload, and both scale with
+occurrences. A single `VEVENT` carrying `RRULE:FREQ=SECONDLY` is a few dozen bytes
+— so `calendar_max_bytes` does not catch it — and expands to hundreds of thousands
+of occurrences in the default window. A cap counting components would accept it
+while the sensor built the tuple the cap exists to bound.
+
+> **Normative.** An entry whose times are floating or date-only is localised in the
+> configured `Settings.timezone`, the same value ADR-0008 §5 gives the temporal
+> context. A sensor may not invent a second timezone source.
+
+Two components resolving "today" against different zones is the class of defect
+ADR-0026 exists to prevent, arriving through data rather than through a clock.
+
+**What remains the concrete sensor lane's**, with a marked obligation attached:
+
+> **Normative.** An entry a parseable source contains but the sensor cannot
+> interpret is **skipped**, not raised on. A source that cannot be parsed at all
+> raises under §8.
+
+The distinction is between a read that *completed with gaps* and one that *could
+not complete*, and it is ADR-0074 §5's rule carried unchanged — "an id that does
+not resolve is **skipped, not an error**" — which ADR-0077 §8 applied with "A short
+batch is the honest consequence of a gap". Skipping proposes nothing about the
+skipped entry, so §4's absence rule is respected rather than strained. Everything
+else about the format — which properties map to a proposal's content, exotic
+`RRULE` and `EXDATE` forms, `RECURRENCE-ID` overrides — is the lane's, and it owes
+deterministic tests for each boundary above: an event spanning the window's start,
+one spanning its end, an all-day entry at both edges, a recurrence expanding past
+the cap, and an uninterpretable entry among valid ones.
 
 ### 8. Failure has two postures, because the reading has two consumers
 
