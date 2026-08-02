@@ -481,13 +481,40 @@ There is no single answer, and the two are already ratified in different places:
 - **On the ingestion side, retried.** ADR-0083 §7: logged with its class, retried
   at the next due instant, never a process exit.
 
-> **Normative.** A partial or failed read proposes nothing rather than proposing
-> what it managed to read.
+> **Normative.** A read either completes within its bound and returns a
+> `SensorReading`, or **raises**. A read that cannot complete may not return what
+> it managed to gather.
 
 This is §4's absence rule reached from the other direction and it is worth its own
 clause: a half-parsed calendar is not a smaller calendar. Proposing from a partial
 read would write beliefs whose bound is the failure's shape, and nothing about the
 stored record would say so.
+
+> **Normative.** A `SensorReading` whose `proposals` tuple is empty is a
+> **successful** reading, and means the source had nothing to propose within the
+> bound. It is not a failure signal and no caller may treat it as one.
+
+**Raising rather than returning an empty reading on failure is the decision here,
+and the alternative was tried and is wrong.** If a failed read returned an empty
+reading, the two states would be indistinguishable at the seam — and both consumers
+need to tell them apart, in opposite directions:
+
+- The **scheduled job** would report success on every failure. ADR-0083 §7's whole
+  failure posture — "logged with its class… and the job is retried at its next due
+  instant" — needs a failure to observe, and an empty reading gives it none. A
+  sensor whose file was unreadable for a week would look healthy for a week.
+- The **facet** would present "your calendar is clear" when the truth is "we could
+  not read your calendar". That is the same class of falsehood §4's absence rule
+  forbids, arriving through the other consumer.
+
+An exception is also what ADR-0008 §4's degradation path is already built to
+catch: the optional adapter of §3 skips a *failing* source and leaves its facet
+`None`, which is a different rendering from a facet that is present and empty.
+
+There is deliberately **no new error class** (§10). A sensor's failures are its
+source's — a missing file, a permission denial, a malformed document — and the
+seam's contract is that they surface rather than that they are re-typed. Both
+consumers catch by the rule above, not by the class.
 
 ### 9. The dependency on ADR-0092, stated as a gate
 
@@ -553,17 +580,19 @@ wrong: the mechanism and the identity decision are the same decision.
     defect ADR-0073 §4 describes: "a record synced on Tuesday from a calendar that
     said so on Monday renders 'Tuesday', which is a true statement about us and a
     false one about the source."
-  - `proposals: tuple[MemoryUpdateProposal, ...]` — possibly empty (§8: a partial
-    or failed read proposes nothing, and an empty reading is a valid one).
+  - `proposals: tuple[MemoryUpdateProposal, ...]` — possibly empty, which under §8
+    means the source had nothing to propose within the bound and is a successful
+    answer. A failed read raises and constructs no reading at all.
   - the **facet field, absent for now**, landing as an optional field under §3.
 
   `UtcInstant` and `EncodableText` are the existing `core` aliases; no new
   primitive is owed. `MemoryUpdateProposal` already exists, which is why the cost
   is one type rather than a family.
-- **Nothing else.** No new error class: a sensor's failures are its source's, and
-  §6 and §8 make them degradation rather than exceptions crossing the seam. No
-  change to `MemoryWriter.ingest`, whose semantics §1 relies on exactly as
-  ratified. `Provenance` is **not** touched here — that is ADR-0092's (§9).
+- **Nothing else.** No new error class: a sensor's failures are its source's — a
+  missing file, a permission denial, a malformed document — and §8 rules that they
+  surface rather than that they are re-typed at the seam. No change to
+  `MemoryWriter.ingest`, whose semantics §1 relies on exactly as ratified.
+  `Provenance` is **not** touched here — that is ADR-0092's (§9).
 
 An illustrative signature, in ADR-0073 §1's and ADR-0077 §9's form — the semantics
 above are the contract, the spelling is the lane's:
@@ -592,26 +621,36 @@ Protocol"):**
      property of the seam rather than of one implementation.
    - **Every proposal is in the `ATTESTED` band**, i.e. `band_of` its provenance
      source is `BeliefBand.ATTESTED` (§4).
-   - **A configured bound outside its range is refused at construction with a
-     `ValueError`, not clamped** (§5) — ADR-0077 §1's posture, and the case an
-     implementation that silently clamps passes every other clause on this list.
-   - **A read that cannot complete returns no proposals rather than partial ones**
-     (§8), scriptable on the canonical fake so a consumer can test its own
-     degradation path — the gap ADR-0022 §Consequences filed against
-     `FakeMemoryStore` as #105, not repeated here.
+   - **An empty `proposals` tuple is a valid, successful reading** and every
+     clause above holds on it (§8).
    - Input observation (ADR-0065) and cancellation (ADR-0060), as every seam owes.
 3. **The canonical fake in `ai_assistant.testing`**, scriptable to return a
-   reading with proposals, an empty reading, and a failing read — the three states
-   §8 distinguishes.
+   reading with proposals, an empty reading, and a *raising* read — the three
+   states §8 distinguishes, so a consumer can test its own degradation path. That
+   third capability is the gap ADR-0022 §Consequences filed against
+   `FakeMemoryStore` as #105, not repeated here.
 
-**Two rulings above are deliberately *not* suite clauses, and putting them there
-would be the error.** §4's "never proposes an absence" and §3's "neither consumer
-derives its answer from the other's reading" are statements about what a producer
-*declines to emit* and about how a *caller* wires two paths. Neither is observable
-from one `read()` return value, so a suite clause asserting them would either pass
-vacuously or test the fake. They belong to the concrete sensor's own tests and to
-the wiring lane's, and they are named here so the triad lane does not read their
-absence from the suite as their absence from the contract.
+**Four rulings above are deliberately *not* suite clauses, and putting them there
+would be the error.** The test is whether a clause is decidable from `name` and
+one `read()` return value, which is the whole of what a conforming `Sensor` is:
+
+- **§5's bound refused at construction.** `Sensor` specifies no constructor and no
+  configuration surface — `read()` takes no arguments precisely so a caller cannot
+  widen the bound (§10) — so a generic suite has nothing to over-supply. This is
+  where the shape differs from ADR-0077 §9, whose equivalent clause was testable
+  only because `observe` *takes* the batch whose size the bound governs. It is a
+  concrete sensor's test and a `Settings` test, and stating that here is what stops
+  an implementation-specific rule from wearing the Protocol's authority.
+- **§8's raise on an incomplete read.** A suite cannot make an arbitrary
+  implementation's source fail. The canonical fake is scriptable to raise so
+  *consumers* are testable; the obligation itself is the concrete sensor's.
+- **§4's "never proposes an absence."** A statement about what a producer declines
+  to emit; nothing in a return value exhibits it.
+- **§3's "neither consumer derives its answer from the other's reading."** A
+  statement about how a *caller* wires two paths.
+
+Each is named here so the triad lane does not read its absence from the suite as
+its absence from the contract.
 
 **What later lanes owe, and this ADR does not:** the concrete `.ics` sensor in
 `sensors/`, the `context/` adapter and the facet, the `orchestration` ingestion
@@ -695,7 +734,8 @@ found not to engage.
 - **The `ATTESTED` band gets its first producer's shape**, and the band's whole
   premise — someone else's word, stale in ways we cannot detect (ADR-0072 §5) — is
   now expressed as rules rather than as a name: propose only, never write; never
-  state an absence; never propose from a partial read.
+  state an absence; and fail loudly rather than return a partial reading that
+  reads as an empty one.
 - **What gets harder:** a second source that is not a re-readable file needs its
   own decision rather than a new class, and an ingested timeline needs an ADR
   rather than a field. Both are deliberate — each would otherwise be reached by an
