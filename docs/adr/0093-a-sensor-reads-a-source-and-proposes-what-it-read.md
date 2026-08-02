@@ -885,6 +885,13 @@ while the sensor built the tuple the cap exists to bound.
 > every later one**, and where it is also cancelled it removes them. A removed or
 > replaced occurrence is never counted and never proposed.
 
+> **Normative.** Overrides compose deterministically. For a given occurrence, the
+> governing override is the **single-instance** one naming it if there is one;
+> otherwise the `RANGE=THISANDFUTURE` override with the **greatest
+> `RECURRENCE-ID` at or before** that occurrence; otherwise the master. Two
+> overrides of the same form sharing a `RECURRENCE-ID` are uninterpretable and
+> fall to the clause below.
+
 > **Normative.** An override whose form a sensor cannot interpret **suppresses the
 > occurrences it could affect** rather than leaving them to the master. Where the
 > affected extent is itself unknown, the whole series is suppressed.
@@ -901,6 +908,19 @@ for those occurrences are known to be untrustworthy and nothing else is. That is
 the same fail-closed posture §5 takes on a source too expensive to read, applied to
 one too complex to read, and it is deliberately stated over *forms* rather than
 over the two this round happened to enumerate.
+
+**Composition needs its own rule because "replaces every later occurrence" is not
+a function when two range overrides overlap.** A daily 09:00 master with a
+`THISANDFUTURE` at 3 August moving later occurrences to 10:00, and another at
+5 August moving them to 11:00, leaves 5 August onward claimed by both — and an
+implementation obeying only the replacement clause may emit either time, or both.
+Last-writer-wins by `RECURRENCE-ID` is the reading that matches what the overrides
+*mean*: each is a correction made at a point in the series, so the most recent
+correction at or before an occurrence is the one still standing. Single-instance
+beats range for the occurrence it names, because it is the more specific statement
+about that occurrence. The tie case is genuinely contradictory rather than merely
+unspecified — two corrections of equal specificity at the same point — so it fails
+closed rather than picking one.
 
 **The cancelled-component rule is stated over components rather than over
 overrides, and an earlier draft covered only overrides.** That version left the
@@ -1056,7 +1076,11 @@ a non-cancelled override, asserting it replaces rather than duplicates its
 occurrence, a `RANGE=THISANDFUTURE` override both shifted and cancelled —
 asserting later occurrences follow it rather than the master — an override of an
 uninterpretable form, asserting the occurrences it could have affected are
-suppressed rather than proposed from the master — and the
+suppressed rather than proposed from the master, **two overlapping
+`THISANDFUTURE` overrides**, asserting the later one governs from its own
+`RECURRENCE-ID` onward and the earlier one governs between them, and a
+single-instance override falling inside a range override's extent, asserting the
+single-instance one wins for its occurrence alone — and the
 same suspended worker **cancelled from outside**, asserting `CancelledError`
 propagates unchanged, a second read is still refused while the worker lives, and
 reads resume once it is released — and, **in a subprocess**, a hub shut down while a read is
