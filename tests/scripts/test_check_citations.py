@@ -328,6 +328,9 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         'See the [guide](/g(foo) "#123").',
         "See the [guide](/g(foo) (#123)).",
         "See the [guide](/g 'x)#123').",
+        'See the [guide](/g "x) #123").',
+        'See the [guide](/g "a\\"b) #123").',
+        "See the [guide](/g\\) #123).",
         '[guide]: /g "#123"',
         '[guide]: /g(foo) "#123"',
         "[guide]: /g (#123)",
@@ -365,6 +368,9 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         "numeric-title-after-a-paren-destination",
         "paren-delimited-numeric-title",
         "quoted-title-carrying-a-paren",
+        "space-before-a-number-in-a-quoted-title",
+        "escaped-quote-inside-a-title",
+        "escaped-paren-in-a-destination",
         "reference-definition-numeric-title",
         "reference-definition-paren-destination-and-title",
         "reference-definition-paren-title",
@@ -435,8 +441,14 @@ def test_a_tracker_citation_in_prose_is_still_selected(tmp_path: Path, line: str
         "The pre-#2 situation is different.",
         "See <details><summary>#2</summary> for detail.",
         "An unclosed [guide](/g(foo and #2 after it.",
+        "See the [guide](/it's fine) and #2.",
     ],
-    ids=["hyphenated-compound", "between-html-tags", "after-an-unclosed-destination"],
+    ids=[
+        "hyphenated-compound",
+        "between-html-tags",
+        "after-an-unclosed-destination",
+        "after-an-unclosed-quote",
+    ],
 )
 def test_a_citation_in_an_unrecognised_context_is_passed_silently(
     tmp_path: Path, line: str
@@ -445,9 +457,10 @@ def test_a_citation_in_an_unrecognised_context_is_passed_silently(
 
     These *are* tracker citations and the checker no longer selects them. The
     first two lose on the context rule — the run before the ``#`` is neither an
-    opening-delimiter run nor a ``#NNN/`` join. The third loses on the span rule:
-    a ``](`` whose ``)`` never arrives blanks the rest of the line, because a
-    target the scanner cannot delimit is one it must not half-cover.
+    opening-delimiter run nor a ``#NNN/`` join. The last two lose on the span
+    rule: a ``](`` the scanner cannot delimit — no closing ``)``, or a quote
+    that never closes — blanks the rest of the line, because a target it cannot
+    delimit is one it must not half-cover.
 
     ADR-0088 §6 ranks that miss benign where the false report it buys — a Tier 1
     failure over a link destination (#605) — is not. One instance exists in the
