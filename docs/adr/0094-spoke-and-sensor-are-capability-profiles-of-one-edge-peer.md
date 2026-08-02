@@ -761,9 +761,7 @@ resident-hub shape and `VISION.md` §8 are both built to prevent.
   descriptor, a band-ceiling field, a peer identity, a released-set
   representation. Fires when a **second** peer exists: one peer cannot show which
   of these differ per peer, and ADR-0073 §4's "with a producer in hand" is the
-  standing this ADR does not have. Nothing above may be implemented by adding a
-  field; the surface owes its own ADR, and under golden rule 5 it merges before
-  anything implements against it.
+  standing this ADR does not have. §10a marks what that costs a later lane.
 - **How pull rides the connection** (§2). ADR-0084 §3's connection is serial and
   cannot express a hub-initiated request; the correlation id is what makes the
   extension additive, and ADR-0084 §11 and ADR-0042 §5 already hold the deferral.
@@ -797,30 +795,9 @@ resident-hub shape and `VISION.md` §8 are both built to prevent.
   failure on both sides, and this ADR has neither the transport (deferred above),
   a peer state model (surface, deferred above), nor a producer.** Fires with the
   first peer that submits material it holds — plausibly the same decision as the
-  transport. The lane that takes it inherits three constraints, every one of them
-  an adversarial finding against a draft of §8 that tried to decide it:
-
-  1. an acknowledgement may not precede durable hub custody, or the peer destroys
-     its copy on a promise the hub cannot keep;
-  2. every attempt must be able to resolve **terminally**, not only succeed, or a
-     submission the hub can never accept traps the material forever;
-  3. the pending set must be bounded **in aggregate** — count and bytes — and not
-     only per submission (ADR-0093 §7b's argument).
-
-  All three exist to protect §7, which is the clause that does not move, and a
-  resolution rule meeting fewer than all three does not satisfy it.
-
-  **And it inherits one question rather than a constraint**, because the two are
-  not the same thing and conflating them would decide it by omission. A peer that
-  **crashes** mid-attempt loses an unresolved submission to a fault; §7's clause
-  governs what a peer does and not what it survives, so nothing here requires the
-  material to come back. Requiring it would mean durable storage at the edge,
-  which reverses §9 and reaches `VISION.md` §8 — neither of which this lane may
-  decide. **So the custody lane owes an explicit answer to "must an unresolved
-  submission survive a peer restart, and at what cost to §9?", and may not reach
-  one by silence.** Architecture review of this ADR raised the box that the
-  alternative wording created; the repair is that the question is named as a
-  question.
+  transport. **The conditions it inherits are marked in §10a**, because ADR-0089
+  §3 makes marked clauses the whole of a marked ADR's obligations and a clause
+  cannot live inside a list item (§2).
 - **Whether ambient capture may write an `EpisodicMemory`, and on what
   exemption.** ADR-0075 §2 named "the buffered ambient capture #441 sketches" in
   its exclusion list and reserved the argument rather than granting it; ADR-0093 §4
@@ -843,7 +820,8 @@ resident-hub shape and `VISION.md` §8 are both built to prevent.
   are *designed so that a remote peer would not force a redesign*, and that is the
   whole of what they buy — the same distinction ADR-0084's Consequences draw
   between "one bind away on the wire" and "one ratified decision away in fact".
-  §7's closing paragraph is why a transcript does not shortcut it.
+  §7's closing paragraph is why a transcript does not shortcut it, and §10a marks
+  the refusal so it is an obligation rather than a reassurance.
 - **`VISION.md`'s sensor-spectrum amendment** — the ephemeral buffer,
   consent-per-capture, and graduated trigger autonomy, and with it §8's
   "stateless client" sentence (§9). Owed; #441 holds it. **Its trigger is tightened
@@ -854,6 +832,45 @@ resident-hub shape and `VISION.md` §8 are both built to prevent.
   the point where something depends on it is how a living document and the corpus
   drift apart (ADR-0019). Architecture review raised the sequencing; this ADR
   cannot write the amendment — the fence — but it can state when it comes due.
+
+#### 10a. What the deferrals bind, marked
+
+Three of the deferrals above constrain the lanes that take them, and a deferral
+that constrains nothing is a lane's blank cheque. They are gathered here because
+ADR-0089 §2 puts a clause at column 0 and §3 makes the marks the whole of the
+obligation — stated inside §10's list they would have bound nothing, which
+adversarial review demonstrated by exhibiting a conforming producer that omits the
+aggregate bound. Each restates a finding against a draft of §8 that tried to
+decide the protocol; the arguments are in §8 and are not repeated.
+
+> **Normative.** An ADR deciding the custody handoff may not let an
+> acknowledgement precede the hub's durable custody of the submitted material.
+
+> **Normative.** An ADR deciding the custody handoff gives every submission
+> attempt a terminal outcome reachable in finite time.
+
+> **Normative.** An ADR deciding the custody handoff bounds a peer's unresolved
+> submissions **in aggregate**, by count and by total bytes, and not per
+> submission alone.
+
+> **Normative.** An ADR deciding the custody handoff states explicitly whether an
+> unresolved submission survives a peer restart, and at what cost to §9. It may
+> not settle that question by silence.
+
+> **Normative.** No rule of this ADR may be implemented by adding a field to
+> `core`. The surface expressing any of them owes its own ADR, merged before
+> anything implements against it (golden rule 5).
+
+> **Normative.** Nothing in this ADR authorises a peer that is not on this
+> machine. ADR-0017 §1 and §3 and ADR-0084 §1 and §11 are untouched, and §2's
+> connection direction and §7's re-derivability rule are not permission to cross a
+> device boundary.
+
+The first three exist to protect §7, which is the clause that does not move, and a
+custody rule meeting fewer than all three does not satisfy it. The fourth is a
+question rather than an answer for the reason §8 gives: its only satisfying
+mechanism is durable edge storage, and binding it would decide that by
+implication.
 
 ### 11. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
