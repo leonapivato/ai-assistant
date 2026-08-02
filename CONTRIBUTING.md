@@ -555,12 +555,17 @@ either resolves or does not.
 
 What the corpus actually cites is owned by a check, not by this document:
 `tests/scripts/test_adr_citations_corpus.py` runs ADR-0088 §6's Tier 1 inside
-`pytest`, so a *new* citation naming an ADR file that does not exist fails the
-gate like any other test. It pins the Tier 1 findings the corpus already
-carries, so what fails it is a change to that set — which is also how correcting
-one gets noticed. Tier 1's tracker half needs `gh` to answer GitHub; where it
-cannot, the citation is unevaluable and passes silently rather than failing,
-which is §6's rule that a miss is benign and a false report is not.
+`pytest`, so a citation naming an ADR file that does not exist fails the gate
+like any other test. One case is exempt: a number in a **gap** the issued set
+encloses was assigned and never written, so an ADR cites it correctly and it is
+neither failed nor reported. **ADR-0090 §1 defines which numbers those are —
+read it there rather than inferring the boundary**, because the enclosure is
+bounded on both sides and a number outside it is one nobody has issued. That
+residual is where the check keeps its value: a typo and a stale forward
+reference both land outside far more often than inside a gap, and both still
+fail. Tier 1's tracker half needs `gh` to answer GitHub; where it cannot, the
+citation is unevaluable and passes silently rather than failing, which is §6's
+rule that a miss is benign and a false report is not.
 `just citations` prints the whole report; its Tier 2 half is advisory and never
 fails, because an append-only corpus correctly cites what the tree no longer
 contains (ADR-0088 §3).
