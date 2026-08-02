@@ -825,9 +825,9 @@ resident-hub shape and `VISION.md` §8 are both built to prevent.
 - **`VISION.md`'s sensor-spectrum amendment** — the ephemeral buffer,
   consent-per-capture, and graduated trigger autonomy, and with it §8's
   "stateless client" sentence (§9). Owed; #441 holds it. **Its trigger is tightened
-  here**: #441's standing condition is "a real sensor", and the sharper one is that
-  the amendment is ratified **before the first producer that relies on §9's
-  permission ships**, not merely before some sensor exists. §9 permits edge state
+  here**, and marked in §10a: #441's standing condition is "a real sensor", and the
+  sharper one is that the amendment is ratified **before the first producer that
+  relies on §9's permission ships**, not merely before some sensor exists. §9 permits edge state
   now and the Vision sentence forbids it in general terms; leaving that open past
   the point where something depends on it is how a living document and the corpus
   drift apart (ADR-0019). Architecture review raised the sequencing; this ADR
@@ -835,7 +835,7 @@ resident-hub shape and `VISION.md` §8 are both built to prevent.
 
 #### 10a. What the deferrals bind, marked
 
-Three of the deferrals above constrain the lanes that take them, and a deferral
+Several of the deferrals above constrain the lanes that take them, and a deferral
 that constrains nothing is a lane's blank cheque. They are gathered here because
 ADR-0089 §2 puts a clause at column 0 and §3 makes the marks the whole of the
 obligation — stated inside §10's list they would have bound nothing, which
@@ -865,6 +865,9 @@ decide the protocol; the arguments are in §8 and are not repeated.
 > machine. ADR-0017 §1 and §3 and ADR-0084 §1 and §11 are untouched, and §2's
 > connection direction and §7's re-derivability rule are not permission to cross a
 > device boundary.
+
+> **Normative.** No producer relying on §9's permission to hold ephemeral edge
+> state ships before `VISION.md`'s sensor-spectrum amendment is ratified (#441).
 
 The first three exist to protect §7, which is the clause that does not move, and a
 custody rule meeting fewer than all three does not satisfy it. The fourth is a
