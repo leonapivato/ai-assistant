@@ -571,9 +571,17 @@ ADR-0017 §1 is engaged identically. §10 keeps the remote hop where it is.
 > the material with the peer. A peer's retry window is itself bounded, its figure
 > is the producer's ADR's, and its expiry resolves the attempt terminally.
 
-> **Normative.** A terminal resolution is reported and never silent. No surface
-> may present material that was refused or abandoned as though it had been
-> retained.
+> **Normative.** A peer's unresolved submissions are bounded **in aggregate**, by
+> count and by total bytes, and not only one at a time. The figures are the
+> producer's ADR's.
+
+> **Normative.** When that aggregate budget is full, a further promotion is
+> **refused** at the edge. A pending submission is never evicted, discarded or
+> truncated to make room for a newer one.
+
+> **Normative.** A terminal resolution, and a promotion refused for want of
+> budget, are reported and never silent. No surface may present material that was
+> refused or abandoned as though it had been retained.
 
 > **Normative.** The window is bounded by **both** a duration and a size, and a
 > bound is enforced by refusing rather than by truncating or by silently
@@ -607,6 +615,26 @@ question a two-party handoff has to answer is not only "when is it safe to let
 go", it is "when is it *over*". Terminal resolution is that answer, and the
 retry window's own bound is what stops "the hub is down" from becoming the same
 trap by a slower route.
+
+**The aggregate budget is ADR-0093 §7b's argument transposed, and a per-submission
+bound was tried first and does not hold.** §7b made `calendar_max_expansion` a
+source-wide accumulator rather than a per-component one, and gave the reason
+exactly: "A budget that resets per component bounds each piece of the work and not
+the work, which is the failure a bound exists to exclude." The same thing happens
+here one level up. Bounding each submission's size and each submission's retry
+window leaves the *number* of unresolved submissions free, so a hub that is
+unreachable while a peer keeps promoting accumulates pending media until the
+device fills — every submission individually conforming, the aggregate unbounded.
+Adversarial review found it on the fourth round, in the section the previous
+round's fix had just written.
+
+**Refusing the new promotion rather than evicting an old one, and the direction
+matters.** Eviction destroys a capture the user asked for, silently and at a
+moment they are not looking; refusal fails at the instant they act, which is the
+only moment the failure is legible. It is also the same posture every other bound
+in this ADR and in ADR-0093 §5 takes — refuse, never truncate — and taking a
+different one here would mean the aggregate bound is the one place where exceeding
+a limit destroys data instead of reporting it.
 
 **Reported rather than silent, because the user asked for this capture.** A
 promotion is a user-visible act; a refusal that vanishes leaves them believing
@@ -746,7 +774,8 @@ resident-hub shape and `VISION.md` §8 are both built to prevent.
   reach it, or whether an edge detector is a different class of thing. Fires with
   the first peer that ships one. §6 fixes only that its output may not be meaning.
 - **The figures** (§8) — the verification window's duration and size, the buffer's
-  age and size bounds (§9), and the peer's retry window. Fires with the deciding
+  age and size bounds (§9), the peer's retry window, and the aggregate bound on
+  its unresolved submissions. Fires with the deciding
   ADR of the first producer that needs any of them, which names them under
   ADR-0093 §5's discipline: named, refused at load, enforced by refusing. What is
   decided here is which dimensions must be bounded, not by how much.
