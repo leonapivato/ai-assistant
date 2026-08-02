@@ -498,9 +498,13 @@ ADR-0008 §4 declined for the whole context subsystem.
 > worker.
 
 > **Normative.** A sensor owns a **deadline** on its own read,
-> `calendar_read_timeout` (§7a). On expiry it raises `SensorError` under §8. While
-> a worker abandoned at a deadline is still outstanding, the sensor **refuses a new
-> read** with `SensorError` rather than starting a second one.
+> `calendar_read_timeout` (§7a). On expiry it raises `SensorError` under §8.
+
+> **Normative.** A sensor holds **at most one outstanding worker**. The
+> reservation is released when the *worker* completes, never when the coroutine
+> exits — so it survives a deadline expiry, an externally delivered cancellation,
+> and any other early return alike. While it is held, a new `read()` raises
+> `SensorError` immediately and starts nothing.
 
 **Neither clause is defensive hygiene; each closes a hole the other bounds cannot
 reach.** A path that is absolute and readable satisfies §7 exactly and may still be
@@ -530,16 +534,26 @@ classified into a return value — that is exactly what `ToolInvoker.invoke` doe
 expiry (ADR-0029 §4)". §8's carve-out for a cancellation delivered *from outside*
 is untouched: that one still propagates unchanged.
 
-**The refusal-while-outstanding clause is the honest half, and it is stated because
-the alternative is a lie.** A thread blocked in a stalled syscall cannot be killed,
-so the deadline abandons it — and ADR-0060 requires that a resource be "still held
+**The one-worker clause is the honest half, and it is stated because the
+alternative is a lie.** A thread blocked in a stalled syscall cannot be killed, so
+the deadline abandons it — and ADR-0060 requires that a resource be "still held
 exclusively by work the method started", never "left held with nothing running that
 will release it". One abandoned worker per sensor, with no second read started
 behind it, is the strongest form of that available when the kernel will not give
 the thread back: the count is bounded at one, the sensor keeps reporting the fault
 on every tick, and a mount that recovers releases the worker. What must not happen
-is a scheduler that quietly accumulates one stuck thread per interval forever,
-which is what a bare deadline without this clause produces.
+is a scheduler that quietly accumulates one stuck thread per interval forever.
+
+**The reservation is keyed to the worker and not to the deadline, and an earlier
+draft keyed it to the deadline.** That version left the accumulation reachable by
+the shorter route: a read of a stalled mount cancelled *from outside* before its ten
+seconds elapse must, under §8 and ADR-0060, re-raise `CancelledError` promptly — and
+the worker is still in the syscall when it does. A guard released on "the coroutine
+exited" therefore clears while the thread is alive, and the next tick starts a
+second one, which is exactly the unbounded growth the clause exists to forbid,
+arriving through the one exit path ADR-0060 makes mandatory. Keying on the worker
+makes every exit path — return, deadline, cancellation — release the reservation at
+the same moment, which is the only moment at which releasing it is true.
 
 **The non-blocking open is load-bearing, and an earlier draft that checked the
 descriptor after an ordinary open did not work.** On POSIX, opening a FIFO for
@@ -905,7 +919,10 @@ fails rather than hangs, a source that grows past `calendar_max_bytes` after it 
 opened, a long-duration recurrence whose seek anchor underflows, a floating
 entry at each of an ambiguous and a nonexistent local time, a **regular file whose
 read is suspended** — asserting the deadline fires, the event loop stayed
-responsive, and a second read is refused while the worker is outstanding.
+responsive, and a second read is refused while the worker is outstanding — and the
+same suspended worker **cancelled from outside**, asserting `CancelledError`
+propagates unchanged, a second read is still refused while the worker lives, and
+reads resume once it is released.
 
 ### 8. Failure has two postures, because the reading has two consumers
 
