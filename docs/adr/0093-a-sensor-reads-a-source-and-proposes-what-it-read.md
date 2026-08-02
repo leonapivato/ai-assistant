@@ -679,7 +679,10 @@ also the only order under which the cap bounds anything: interpreting 501 entrie
 to discover that 500 survive is precisely the work a cap is for.
 
 > **Normative.** A recurrence is expanded by **seeking to the window**, never by
-> enumerating from `DTSTART` and discarding what precedes it. Where a rule's form
+> enumerating from `DTSTART` and discarding what precedes it. The seek's lower
+> bound is `window_start - D`, where `D` is the occurrence duration the component
+> declares — never `window_start` itself. A component that overrides an occurrence
+> is seeked on its own duration. Where a rule's form
 > does not admit a seek, expansion is bounded by `calendar_max_expansion` — a
 > **source-wide** budget of occurrences considered across every component of one
 > read, default 100,000, range `[1, 2**63)`, refused at load — and a read that
@@ -695,6 +698,18 @@ seek is the right answer for the rules that admit one, and the second bound is
 belt and braces for those that do not — fail-closed, in the same posture §5 takes
 everywhere else: a source too expensive to read is refused, not silently trimmed.
 The two together are what make "bounded" a property rather than an intention.
+
+**The seek is anchored a duration early, and anchoring it at `window_start` would
+have reintroduced the defect this subsection opens by forbidding.** A yearly event
+with `DTSTART` in 2020 and a multi-year duration has occurrences that are running
+*through* a 2026 window; a seek to the first occurrence at or after `window_start`
+lands in 2027 and skips every one of them. That is the start-instant membership
+rule of the first clause above, defeated one level down by the optimisation added
+to satisfy the second — and it fails on exactly the same entries, permanently,
+because the window moves forward each run and the occurrence's start recedes.
+Backing the anchor off by the declared duration is the smallest bound that cannot
+miss an overlapping predecessor, since an occurrence starting before
+`window_start - D` has already ended by `window_start`.
 
 **The budget is source-wide rather than per component, and a per-component version
 was tried and does not hold.** Under a per-component cap, an 8 MiB file can carry
@@ -732,7 +747,8 @@ exactly at the upper, a zero-duration entry on each edge, an all-day entry at bo
 edges, a recurrence expanding past the cap, an uninterpretable entry among valid
 ones, a source whose in-window occurrences are entirely uninterpretable and over
 the cap, an old high-frequency recurrence whose expansion must reach the window
-without walking to it, **many** individually-cheap non-seekable recurrences with no
+without walking to it, a long-duration recurrence whose occurrence began years
+before the window and is still running inside it, **many** individually-cheap non-seekable recurrences with no
 in-window occurrence between them, a missing configured path whose scheduled
 failure is asserted **not** to put that path in the log line, a malformed source
 whose parser failure quotes a distinctive event title — asserting neither the title
