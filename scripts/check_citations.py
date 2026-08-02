@@ -117,10 +117,17 @@ _TRACKER_RE = re.compile(r"(?<![\w#])#(\d{1,6})(?![\w#])")
 #: found one more: ``](#123)``, ``https://…/#123``, ``//host/docs/#123``,
 #: ``](/docs/#123)``, ``](#2/#3)``, ``[x]: #123``, ``<a href="#123">``,
 #: ``<a href=#123>``. #605 found the ninth — a destination carrying balanced
-#: parentheses, where the span exclusion below stops at the first ``)`` and
-#: leaves ``#123`` behind. ADR-0088 §6 supplies the closing move rather than a
-#: tenth patch: "a citation the checker cannot evaluate … is **passed
-#: silently**". So this states the *citation* and passes everything else.
+#: parentheses, where the old span exclusion stopped at the first ``)`` and left
+#: ``#123`` behind. ADR-0088 §6 supplies the closing move rather than a tenth
+#: patch: "a citation the checker cannot evaluate … is **passed silently**". So
+#: this states the *citation* and passes everything else.
+#:
+#: **What is left to the span exclusions is one closed question, not the open
+#: one.** ``_mask_link_targets`` and ``_LINK_REFERENCE_RE`` cover a single
+#: markdown construct each — a construct with a grammar, so covering it is a
+#: matter of getting that grammar right rather than of finding a tenth syntax.
+#: They are what stops a ``#NNN`` inside a link **title** reaching this rule,
+#: where a bare quote *is* a citation context and would select it.
 #:
 #: A ``#NNN`` is a citation when the run of non-space text before it on the line
 #: is an **opening-delimiter run**, optionally followed by other citations joined
@@ -145,28 +152,23 @@ _TRACKER_RE = re.compile(r"(?<![\w#])#(\d{1,6})(?![\w#])")
 #: where a false report is not.
 _CITATION_CONTEXT_RE = re.compile(r"""(?:^|[ \t])[(\["'*`]*(?:#\d{1,6}/)*\Z""")
 
-#: A markdown inline link's **destination**, blanked before trackers are read.
-#: With the context rule above this is a *narrowing*, no longer the guarantee: it
-#: removes a ``#NNN`` the rule would otherwise accept, such as one inside a link
-#: **title** — ``[x](/a "see #123")``, where the run before the ``#`` is empty.
-#: Its own truncation on a balanced-paren destination (#605) is no longer
-#: dangerous, because context is read from the unmasked line.
-#:
-#: A parenthesised citation in prose — "the fix (#123) landed" — carries no
-#: closing bracket before it and stays selected.
-_LINK_DESTINATION_RE = re.compile(r"\]\([^)\n]*\)")
+#: Where a markdown **inline link's target** opens: ``](``. What it closes at is
+#: counted rather than matched — see ``_mask_link_targets``.
+_LINK_TARGET_OPEN = "]("
 
-#: The destination of a **reference-style** link definition, ``[label]: dest``.
-#: Markdown's other way of writing a destination, and the same rule applies to
-#: it: nothing in a destination is a citation. The label is left alone, so a
+#: The **whole tail** of a reference-style link definition, ``[label]: dest``.
+#: Markdown's other way of writing a target, and the same rule applies to it:
+#: nothing in a target is a citation. To the end of the line, because a
+#: definition's title is part of it and nothing else may follow on the line —
+#: ``[a]: /g "#999"`` is a title, not a citation. The label is left alone, so a
 #: definition labelled ``[#588]`` still reads as one.
-_LINK_REFERENCE_RE = re.compile(r"(?<=\]:)[ \t]*\S+")
+_LINK_REFERENCE_RE = re.compile(r"(?<=\]:)[^\n]*")
 
 #: An HTML attribute value — ``<a href="#123">`` — markdown's third way of
-#: writing a destination, since raw HTML is valid markdown. A narrowing like the
-#: destination above: the context rule already rejects ``href="#123"`` (the run
-#: carries ``href=``), and this additionally covers a value held off from its
-#: ``=`` by spaces, where the run would be a bare quote.
+#: writing a target, since raw HTML is valid markdown. The context rule already
+#: rejects ``href="#123"`` on its own (the run carries ``href=``); this covers
+#: the case that rule cannot, a value held off from its ``=`` by spaces, where
+#: the run left over is a bare quote.
 #:
 #: The obvious rule — "a ``#NNN`` preceded by a quote is not a citation" — is
 #: refuted by the corpus, which quotes seven of them (``"#54 stays …"``), so the
@@ -496,6 +498,56 @@ def _as_dotted_symbol(content: str, top_names: frozenset[str]) -> tuple[str, str
     return ("dotted-symbol", content)
 
 
+def _mask_link_targets(line: str) -> str:
+    """Blank every inline link **target** on one line — destination and title.
+
+    The companion to ``_CITATION_CONTEXT_RE``, and the division of labour is the
+    point. The context rule answers the *open* question — which of the endless
+    shapes a ``#`` can sit in is a citation — by stating the citation instead.
+    This answers the one *closed* question left over: a ``](…)`` is a single
+    markdown construct with a grammar, so covering it is a matter of getting that
+    construct right, not of enumerating a tenth syntax.
+
+    So the span is found by **counting parentheses**, not by matching to the
+    first ``)``. The pattern this replaces stopped early on ``](/g(foo) "#999")``
+    and left ``"#999")`` behind — and that residue's context is a bare quote,
+    which *is* a citation context, so a **link title becomes a Tier 1 failure**
+    even after the mask has run. Balanced
+    destinations are CommonMark's own rule, to arbitrary depth (#605), and a
+    title is inside the same parentheses, so one counter covers both.
+
+    **Unbalanced fails closed**: a ``](`` whose ``)`` never arrives blanks the
+    rest of the line. That direction is ADR-0088 §6's — over-blanking costs
+    misses, which are benign, where leaving a fragment of a target in play costs
+    the false report that is not.
+
+    Args:
+        line: One line of prose.
+
+    Returns:
+        The line with each target blanked to spaces, same length — so every
+        offset into the result is still an offset into ``line``, which is what
+        lets the context rule read the real text.
+    """
+    out = list(line)
+    cursor = 0
+    while (start := line.find(_LINK_TARGET_OPEN, cursor)) >= 0:
+        depth = 0
+        index = start + 1  # the `(`
+        while index < len(line):
+            if line[index] == "(":
+                depth += 1
+            elif line[index] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            index += 1
+        end = index + 1 if depth == 0 else len(line)
+        out[start:end] = " " * (end - start)
+        cursor = end
+    return "".join(out)
+
+
 def _is_citation_context(prefix: str) -> bool:
     """Whether a ``#NNN`` following ``prefix`` on its line is a citation at all.
 
@@ -530,14 +582,14 @@ def extract_citations(path: str, text: str, top_names: frozenset[str]) -> list[C
     for lineno, line in iter_prose_lines(text):
         for match in _DECISION_RE.finditer(line):
             found.append(Citation("decision", match.group(0), path, lineno))
-        # Destinations — inline, reference-style and HTML-attribute — are blanked
+        # Link targets — reference-style, inline and HTML-attribute — are blanked
         # to the same width, so every offset into the blanked line is still an
         # offset into `line`. That is what lets the *shape* be found on the
         # blanked line while its *context* is judged on the real one, which is
         # the direction #605 turned around: a blank cannot manufacture the
         # space-preceded context a citation begins in.
-        outside_links = _LINK_DESTINATION_RE.sub(lambda m: " " * len(m.group(0)), line)
-        outside_links = _LINK_REFERENCE_RE.sub(lambda m: " " * len(m.group(0)), outside_links)
+        outside_links = _LINK_REFERENCE_RE.sub(lambda m: " " * len(m.group(0)), line)
+        outside_links = _mask_link_targets(outside_links)
         outside_links = _HTML_ATTRIBUTE_RE.sub(lambda m: " " * len(m.group(0)), outside_links)
         for match in _TRACKER_RE.finditer(outside_links):
             if not _is_citation_context(line[: match.start()]):
