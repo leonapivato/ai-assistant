@@ -222,7 +222,7 @@ syncs**, because §6 leaves it as the only durable handle the record keeps on wh
 it came from. It is rendered to the user and it survives into `export`, so it is
 not a place for a credential or a filesystem path that discloses more than the
 source's identity. Whether a human-facing display label is configured alongside it
-is the sensor-configuration lane's (ADR-0093) and is **not** this field; a surface
+is the sensor-seam lane's — the wave's other contract decision, tracked by #625 — and is **not** this field; a surface
 with no label falls back to `reported_by`.
 
 ### 4. A user assertion retires an attested belief: `EXTERNAL` joins the supersedable class
@@ -458,7 +458,7 @@ ADR's PR**, so no `Status` line ever names an ADR that does not exist (ADR-0070
 ### 9. What the implementing lanes owe
 
 Sequenced, because the first two collide on `core/types.py` with the lanes
-following ADR-0093 and must not run beside them.
+the sensor-seam lane and must not run beside them.
 
 - **`core/types.py`** — the `Attestation` model (both fields required,
   `reported_by` non-empty); `Provenance.attestation: Attestation | None = None`;
@@ -489,13 +489,14 @@ following ADR-0093 and must not run beside them.
   `reported_at` from what the source actually says (an `.ics` `DTSTAMP` or
   `LAST-MODIFIED` is the natural reading; the file's mtime is a fallback, and which
   is a producer decision, not a contract one). It **proposes** through the
-  `MemoryPolicy` gate and never writes — ADR-0093's ruling, cited here, not decided.
+  `MemoryPolicy` gate and never writes — the sensor-seam lane's ruling, cited here, not
+  decided.
 
 ### 10. What this ADR does not decide
 
 - **The sensor seam** — what a read-only source is as a contract, how the hub's
   scheduler drives it, its durable cursor, and how it is configured and enabled.
-  ADR-0093's, in full.
+  The sensor-seam lane's, in full (#625).
 - **The grant surface.** "You may read my calendar" still has nowhere to live:
   `ActionPolicy` governs *actions*, not *sources*. Leg 6's exit test says "from a
   source the user granted" and nothing records a grant. Its own decision, next
@@ -507,7 +508,7 @@ following ADR-0093 and must not run beside them.
   for two halves and not three, and the lookup it would serve is a `MemoryStore`
   read surface owing its own ADR. Filed.
 - **Context facets carrying an as-of timestamp and provenance.** Next wave,
-  `core/types.py`, sequenced behind ADR-0093.
+  `core/types.py`, sequenced behind the sensor seam.
 - **ADR-0072 §5's band precedence.** Its revisit trigger is a real sensor, not this
   contract (§8).
 - **Anything about a networked source.** ADR-0017 §1 and §3 are not engaged by a
