@@ -203,7 +203,26 @@ on that source's own clock**. It is not when we read the file, not when we wrote
 the record, and not a value we may substitute for. `last_updated` remains ours and
 keeps ADR-0045 §3's meaning exactly.
 
-Two consequences follow, and both are rulings rather than observations:
+**A source that supplies no report time cannot be attested — there is no
+fallback, and a local proxy is the failure this rule exists to prevent.** No
+substitute may be put in the field: not our clock, not the ingest instant, and in
+particular **not the file's mtime**, which is a property of the last local write
+and is changed by a copy, a restore or a `touch` while the source's claim stays
+where it was. Substituting one asserts a report time the source never made, which
+is precisely ADR-0073 §4's "a true statement about us and a false one about the
+source" — reintroduced under a different field name, and harder to spot because it
+is *nearly* right. Where the source genuinely says nothing about when it spoke, the
+producer has no attestation to make, and §1's validator then settles the outcome
+structurally rather than by discretion: no attestation means no `EXTERNAL`
+provenance, so the record is not proposed as an attested belief at all. The
+capability is bounded by what sources can actually say, which is the honest place
+for the boundary. In practice it rarely binds for the producer in hand — RFC 5545
+makes `DTSTAMP` mandatory on a `VEVENT`, so the `.ics` case has an answer by
+construction — but the rule is written for the source that does not, so a later
+producer meets it as a constraint instead of reaching for the nearest local
+timestamp.
+
+Two further consequences follow, and both are rulings rather than observations:
 
 - **`reported_at` earlier than `last_updated` is the normal case, not an
   anomaly.** It is the whole point: Monday's report, revised into the store on
@@ -485,10 +504,12 @@ the sensor-seam lane and must not run beside them.
   named here because it is the visible cost of choosing a required field over an
   optional one — a cost paid once, now, and unpayable later without a migration
   (§2).
-- **The producer lane** — mints its own ids (§6), fills `reported_by` stably and
-  `reported_at` from what the source actually says (an `.ics` `DTSTAMP` or
-  `LAST-MODIFIED` is the natural reading; the file's mtime is a fallback, and which
-  is a producer decision, not a contract one). It **proposes** through the
+- **The producer lane** — mints its own ids (§6), fills `reported_by` stably, and
+  fills `reported_at` **only** from what the source itself says: for `.ics`, a
+  `VEVENT`'s `DTSTAMP` (mandatory under RFC 5545) or its `LAST-MODIFIED`. Which of
+  the two is a producer decision; reaching outside them is not one, and the file's
+  mtime is specifically excluded (§3). An entry that supplies neither is not
+  proposed as an attested belief. It **proposes** through the
   `MemoryPolicy` gate and never writes — the sensor-seam lane's ruling, cited here, not
   decided.
 
@@ -545,10 +566,11 @@ the sensor-seam lane and must not run beside them.
 - **Revisit when** the first non-local source arrives (ADR-0017 §3's conditions
   become live and `reported_by` starts naming something across a boundary), when a
   producer wants identity by key rather than by similarity (§10's filed lookup),
-  or if `reported_at` proves to be a thing sources report so unreliably that the
-  required field is carrying a fiction — which would be an argument about the
-  producer, not about the contract, and is the one input this decision could not
-  get before shipping one.
+  or if real sources turn out to report *nothing* about when they spoke often
+  enough that §3's no-substitute rule keeps useful records out of the band
+  entirely — which would be an argument about what sources actually emit, not
+  about the contract, and is the one input this decision could not get before
+  shipping a producer.
 
 ## Alternatives considered
 
@@ -585,6 +607,16 @@ the sensor-seam lane and must not run beside them.
   surface with no consumer on a migration argument, ADR-0073 §4 asks for two halves,
   and §6's negative rule closes the hazard without it. If the duplication residual
   bites, the field arrives with the index that consumes it.
+- **Let a producer fall back to a local timestamp — the file's mtime — when the
+  source supplies no report time.** Rejected in §3, and it is the most tempting
+  wrong answer here because it keeps every record importable and looks like a
+  detail. An mtime is a property of the last local write: a copy, a restore or a
+  `touch` moves it while the source's claim does not. Putting it in `reported_at`
+  asserts a report the source never made, which is ADR-0073 §4's "true statement
+  about us and a false one about the source" wearing the field built to end it — a
+  worse outcome than today's, because today the gap is visible and a fallback would
+  make it plausible. The band being unreachable for a source that will not say when
+  it spoke is the correct outcome, not a limitation to engineer around.
 - **Refuse a `reported_at` in our future.** Rejected in §3: it invents a read-path
   failure over clock skew, which is the failure mode §2's admissibility test exists
   to keep this validator clear of.
