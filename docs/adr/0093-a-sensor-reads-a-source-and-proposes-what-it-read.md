@@ -493,6 +493,15 @@ ADR-0008 §4 declined for the whole context subsystem.
 > the cap plus one byte is consumed, and exceeding it raises under §8. It may not
 > be enforced by a size check performed before the read.
 
+> **Normative.** Filesystem work — resolving the path, opening it, and reading it —
+> **never runs on the event loop.** It runs on a worker, and the sensor awaits that
+> worker.
+
+> **Normative.** A sensor owns a **deadline** on its own read,
+> `calendar_read_timeout` (§7a). On expiry it raises `SensorError` under §8. While
+> a worker abandoned at a deadline is still outstanding, the sensor **refuses a new
+> read** with `SensorError` rather than starting a second one.
+
 **Neither clause is defensive hygiene; each closes a hole the other bounds cannot
 reach.** A path that is absolute and readable satisfies §7 exactly and may still be
 a FIFO — or a symlink to one — with no writer at the other end. Every bound then
@@ -503,6 +512,34 @@ explicit ground that "a missed or late tick is never a correctness bug" — reas
 that holds for jobs that *finish late* and not at all for one that never finishes.
 A hung sensor read takes the retention purge and the conversation sweep down with
 it, indefinitely, and every one of them looks merely slow.
+
+**`O_NONBLOCK` closes the FIFO case and closes nothing else, which is why the two
+clauses above exist.** The flag is a no-op for a regular file, and nothing about
+being a regular file makes an operation return: a path on a stalled NFS or FUSE
+mount — `/mnt/sshfs/calendar.ics` — stays a perfectly ordinary regular file while
+every syscall against it hangs, including the path resolution that precedes the
+`fstat` guard. Run on the event loop that starves the scheduler exactly as this
+section warns for a FIFO, and it breaches `CONTRIBUTING.md`'s "**Async for all
+I/O.** No blocking calls on async code paths" besides. A worker plus a deadline is
+what makes the hang the *sensor's* problem instead of the process's.
+
+**The deadline is the sensor's own, and the corpus already distinguishes that
+case.** `core/protocols.py`'s cancellation preamble allows a deadline "a method
+itself raises to enforce a deadline it owns" to be "its own control flow and may be
+classified into a return value — that is exactly what `ToolInvoker.invoke` does on
+expiry (ADR-0029 §4)". §8's carve-out for a cancellation delivered *from outside*
+is untouched: that one still propagates unchanged.
+
+**The refusal-while-outstanding clause is the honest half, and it is stated because
+the alternative is a lie.** A thread blocked in a stalled syscall cannot be killed,
+so the deadline abandons it — and ADR-0060 requires that a resource be "still held
+exclusively by work the method started", never "left held with nothing running that
+will release it". One abandoned worker per sensor, with no second read started
+behind it, is the strongest form of that available when the kernel will not give
+the thread back: the count is bounded at one, the sensor keeps reporting the fault
+on every tick, and a mount that recovers releases the worker. What must not happen
+is a scheduler that quietly accumulates one stuck thread per interval forever,
+which is what a bare deadline without this clause produces.
 
 **The non-blocking open is load-bearing, and an earlier draft that checked the
 descriptor after an ordinary open did not work.** On POSIX, opening a FIFO for
@@ -578,7 +615,7 @@ read as satisfied by an operator having set a path.
 
 §5 invokes ADR-0074 §9.3's rule that a bounded default with no figure is two
 conforming implementations diverging while each believes it conforms, so the
-figures are named. Seven fields, and the reason each exists rather than only its
+figures are named. Eight fields, and the reason each exists rather than only its
 value — because the *dimensions* are the decision and the numbers are revisable:
 
 | Field | Default | Range | What it bounds |
@@ -590,6 +627,7 @@ value — because the *dimensions* are the decision and the numbers are revisabl
 | `calendar_max_entries` | 500 | `[1, 2**63)` | entries in the window, and so proposals |
 | `calendar_max_bytes` | 8 MiB | `> 0` | the source read **before** parsing |
 | `calendar_max_expansion` | 100,000 | `[1, 2**63)` | occurrences considered across the whole read (§7b) |
+| `calendar_read_timeout` | 10 s | `> 0` | the sensor's deadline on its own read (§7) |
 
 **The sensor's identity is deliberately not in that table.** It is declared, not
 configured, for the reason given above this subsection: a free-text setting is how
@@ -639,7 +677,7 @@ says it is not wired until there is a field to contribute to. The sequencing thi
 wave was split to allow is still real, just one step longer than the draft claimed
 — the facet ADR is the step, and it is named in §11 rather than assumed.
 
-Five of the seven are decisions rather than figures pulled from the air:
+Five of the eight are decisions rather than figures pulled from the air:
 
 - **The window is two fields, not one.** A calendar's usefulness is asymmetric:
   the future is what the assistant needs to know about, and the past is only
@@ -864,8 +902,10 @@ failure is asserted **not** to put that path in the log line, a malformed source
 whose parser failure quotes a distinctive event title — asserting neither the title
 nor the raw cause message reaches a log — a path that is a **writer-less FIFO**, asserting the read
 fails rather than hangs, a source that grows past `calendar_max_bytes` after it is
-opened, a long-duration recurrence whose seek anchor underflows, and a floating
-entry at each of an ambiguous and a nonexistent local time.
+opened, a long-duration recurrence whose seek anchor underflows, a floating
+entry at each of an ambiguous and a nonexistent local time, a **regular file whose
+read is suspended** — asserting the deadline fires, the event loop stayed
+responsive, and a second read is refused while the worker is outstanding.
 
 ### 8. Failure has two postures, because the reading has two consumers
 
