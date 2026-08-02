@@ -33,7 +33,10 @@ Two tiers, per §6:
   enclosed by it — was assigned and never written, so an ADR cites it correctly
   and forever, and such a citation is neither failed nor reported. Nothing wider
   is exempt, in either half: a number outside the enclosure is one nobody has
-  issued, which is where a typo and a stale forward reference land.
+  issued, which is where a typo and a stale forward reference land. **The gap
+  set itself is printed**, because the exemption is otherwise wholly silent and
+  ADR-0090's Consequences asks its width to be watched — it widens by one with
+  every number ever skipped, and the report is the only place that shows.
 - **Tier 2 is reported and never fails** — unresolved b1/b2 code citations (§3:
   an append-only corpus correctly cites what the tree does not contain) and
   liveness disagreements (§4).
@@ -350,6 +353,11 @@ class Report:
         findings: Every finding, Tier 1 first.
         counts: How many citations of each kind were *selected* — the denominator
             a reader needs to judge the numerator.
+        gaps: Every number ADR-0090 §1 exempts from Tier 1, ascending. Carried
+            because §1's exemption is the one thing about this run that is
+            **silent by design** — a citation into a gap produces no finding, so
+            a widening window would otherwise produce no output at all, and
+            ADR-0090's Consequences asks that exact width to be watched.
         tracker_checked: Whether tracker citations could be resolved at all. When
             GitHub is unreachable they are unevaluable and pass silently (§6).
         notes: Anything the run could not do, for the reader.
@@ -357,6 +365,7 @@ class Report:
 
     findings: tuple[Finding, ...]
     counts: dict[str, int]
+    gaps: tuple[int, ...]
     tracker_checked: bool
     notes: tuple[str, ...]
 
@@ -375,6 +384,7 @@ class Report:
         return {
             "findings": [f.as_dict() for f in self.findings],
             "counts": dict(self.counts),
+            "gaps": list(self.gaps),
             "tracker_checked": self.tracker_checked,
             "notes": list(self.notes),
         }
@@ -1171,6 +1181,7 @@ def check(root: Path, *, tracker_numbers: Iterable[int] | None) -> Report:
     return Report(
         findings=tuple(findings),
         counts=counts,
+        gaps=tuple(sorted(targets.gaps)),
         tracker_checked=known_trackers is not None,
         notes=tuple(notes),
     )
@@ -1278,6 +1289,26 @@ _TIER2_HEADINGS = {
 }
 
 
+def _gap_numbers(gaps: tuple[int, ...], *, quote: str = "") -> str:
+    """Render the exempt numbers in ADR-0088 §1(a)'s four-digit form, or ``none``.
+
+    Named rather than counted. The count alone answers ADR-0090's revisit
+    signal, which is about the set's *width*; the numbers are what a reader
+    needs in order to act on it — to see which gap a new citation landed in, and
+    to catch the typo ADR-0090's Consequences prices ("someone who means 0034
+    and writes 0035 gets no finding"), which no count can surface. The list is
+    short for as long as the signal has not fired, and if it ever runs long that
+    is itself the thing to notice.
+
+    Args:
+        gaps: The exempt numbers, ascending.
+        quote: Wrapped around each number, for a medium that has code spans.
+    """
+    if not gaps:
+        return "none"
+    return ", ".join(f"{quote}{number:04d}{quote}" for number in gaps)
+
+
 def format_text(report: Report) -> str:
     """Render the report for a terminal."""
     lines: list[str] = []
@@ -1292,6 +1323,12 @@ def format_text(report: Report) -> str:
     lines.append(
         "Not checked, by ADR-0088 §6: bare backticked tokens (b3), section "
         "numbers, issue state, anything inside a fence."
+    )
+    lines.append(
+        f"Gaps in the issued ADR set ({len(report.gaps)}): {_gap_numbers(report.gaps)}. "
+        "A decision citation naming one is neither failed nor reported "
+        "(ADR-0090 §1) — revisit that ADR if this set stops being a handful of "
+        "numbers."
     )
     for note in report.notes:
         lines.append(f"note: {note}")
@@ -1328,6 +1365,15 @@ def format_markdown(report: Report) -> str:
         f"**{counts.get('dotted-symbol', 0)}** dotted-symbol (b2) citations. "
         "Bare tokens (b3), section numbers, issue state and fenced content are "
         "not checked."
+    )
+    lines.extend(
+        [
+            "",
+            f"Gaps in the issued ADR set (**{len(report.gaps)}**): "
+            f"{_gap_numbers(report.gaps, quote='`')}. A decision citation naming "
+            "one is neither failed nor reported (ADR-0090 §1) — revisit that ADR "
+            "if this set stops being a handful of numbers.",
+        ]
     )
     for note in report.notes:
         lines.extend(["", f"> {note}"])
