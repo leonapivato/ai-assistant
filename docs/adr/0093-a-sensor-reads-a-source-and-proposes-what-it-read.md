@@ -18,7 +18,14 @@
   precondition of leg 6's first `EXTERNAL` producer shipping. That vehicle is
   ADR-0092's to decide, together with imported-record identity and whether a user
   assertion may override an attested belief. §9 states what this seam needs from
-  it and what it refuses to assume in the meantime.
+  it and what it refuses to assume in the meantime. **ADR-0092 is the other half
+  of the same dispatched wave and merges ahead of this one**, so for as long as
+  this ADR is `Proposed` its number is a gap in the issued set rather than a
+  dangling reference — which ADR-0090 §1 rules is "neither failed nor reported".
+  This ADR is deliberately not written so as to be readable without it: §9's two
+  gates are the point, and collapsing them into a guess here is exactly what
+  ADR-0073 §4 forbade when it said the decision is "for that lane — with a
+  producer in hand — not one to guess here".
 - **Amends no earlier ADR and supersedes none**, and §12 applies ADR-0070 §1's
   test and ADR-0082 §1's record rule clause by clause to show why — including to
   the three places where the opposite reading is available: ADR-0008 §2's internal
@@ -169,25 +176,38 @@ each fails on something specific:
   fourteen unmet conditions, and invite exactly the confusion §11 is at pains to
   avoid when a networked source eventually exists.
 
-### 3. One read, two consumers; the facet half is deferred additively rather than guessed
+### 3. One reading type, two consumers, two cadences — and the facet half is deferred additively
 
 A sensor's reading has two legitimate consumers: the situational context, and
-memory. They are not two reads.
+memory. An earlier draft of this section ruled that they must share **one read**,
+so that the facet and the beliefs could never disagree. That was wrong, and the
+correction is worth recording rather than quietly making, because the wrong
+version looked tidier.
 
-> **Normative.** A sensor performs one read per run and returns one reading. The
-> context facet and the memory proposals derived from a run are derived from that
-> same reading. Nothing may read the source a second time to build the facet.
+The two consumers have **different cadences by ratified design**. ADR-0008 §5
+says `assemble()` "computes fresh each call — context is a point-in-time snapshot,
+not cached state", and ADR-0008 §4 makes the whole subsystem advisory. Ingestion,
+by contrast, is periodic (§6). Forcing one read to serve both leaves nowhere for a
+request-time facet to come from: it would have to be served from a snapshot the
+last scheduled run left behind, which is durable-ish cross-subsystem state that §5
+forbids, or from nothing at all.
 
-Two reads at two instants would let the facet and the beliefs written in the same
-run disagree about the same source, and the disagreement would be invisible: both
-would be internally consistent and there would be no artefact recording that they
-came from different moments.
+And the disagreement the single read was meant to prevent is not a defect. A facet
+read at 10:00 and a belief written from an 09:00 run *should* differ: the facet
+states the source's "right now" and the belief states what the source said when we
+last asked. What matters is not that they agree but that neither is mistaken for
+the other, which is what the reading's own instants are for.
 
-> **Normative.** `SensorReading` is a `core/types.py` pydantic model. Its
-> **proposal half is decided here**: the sensor's Tier 2 identity, the instant the
-> source itself reports the reading as of, the instant this system performed the
-> read, and the proposals. Its **facet half is deferred** and lands as an
-> **optional** field when the context-facet decision is made; a reading that
+> **Normative.** A sensor's two consumers read at their own cadence: the context
+> facet reads at assembly time, and ingestion reads on its schedule. Neither may
+> derive its answer from the other's reading, and neither may present a reading's
+> content without the instants that reading carries.
+
+> **Normative.** `SensorReading` is a frozen `core/types.py` pydantic model. Its
+> **proposal half is decided here** (§10): the sensor's Tier 2 identity, the
+> instant the source itself reports the reading as of, the instant this system
+> performed the read, and the proposals. Its **facet half is deferred** and lands
+> as an **optional** field when the context-facet decision is made; a reading that
 > predates that field stays valid.
 
 This is ADR-0008 §1's own additive pattern applied one level up. That section
@@ -202,9 +222,21 @@ ADR (golden rule 5), bought purely to avoid naming a model now.
 > `ContextSource` in `context/` holds a `Sensor` and contributes from its reading.
 > A `Sensor` is not itself a `ContextSource`.
 
-ADR-0008 §2's rule that only `CurrentContext` crosses the boundary is left exactly
-as ratified: the sensor's typed reading crosses into `context/`, and `context/`'s
-untyped `Mapping` contribution stays inside it.
+**ADR-0008 §2's boundary is satisfied rather than stretched, and the opposite
+reading is available enough to be worth refuting.** §2's sentence — the internal
+seam "ensur[es] the only data that crosses a subsystem boundary is the typed
+`CurrentContext`" — reads on its face as though nothing typed may enter `context/`
+either. It cannot mean that, and the sentence says why in its own next clause: the
+rule it is honouring is "that cross-boundary data is a `core` pydantic model
+(`CONTRIBUTING.md`)", and the property it is protecting is that "nothing
+**untyped** escapes the package". Both hold here. The scope is `context/`'s
+**output**: `CurrentContext` remains the only thing `context/` hands its
+consumers, and a source's `Mapping[str, object]` remains an implementation detail
+that never leaves. On the input side `context/` already takes `core` contracts —
+`ClockContextSource` is constructed with a `Clock` — and a `Sensor` returning a
+`core` pydantic model is that same arrangement with an I/O-bound source. This is
+the ADR-0083 §15 pattern of examining a clause and finding it unmet; §12 records
+that no amendment is owed.
 
 > **Normative.** The `context/` adapter is **optional** in ADR-0026 §4's sense: it
 > carries no `required` marker, so a sensor fault leaves the facet absent and the
@@ -212,7 +244,9 @@ untyped `Mapping` contribution stays inside it.
 
 That is ADR-0008 §4 applied without amendment — "A failing **optional** source
 (future: a calendar API outage) is **skipped**, leaving its facet `None`" — and it
-is the clause that ADR names a calendar in.
+is the clause that ADR names a calendar in. It is also why a request-time read is
+affordable: the one failure mode it introduces is the one ADR-0008 §4 already
+rules on, by name, for this exact source.
 
 ### 4. What a sensor may propose: attested beliefs, never an episode, and never an absence
 
@@ -341,12 +375,18 @@ adding one uses the mechanism rather than changing it (§12 applies the test).
 `orchestration`, not `core` contract surface, on ADR-0083 §8's precedent that "the
 `Engine` therefore grows a maintenance surface".
 
-> **Normative.** Nothing about a sensor is wired into a turn. There is no
-> per-request read and no ambient trigger.
+> **Normative.** **Ingestion** is never wired into a turn: no request-time run
+> proposes anything, and there is no ambient trigger. The facet read of §3 is
+> permitted at assembly time, must respect §5's bound, and proposes nothing.
 
-ADR-0077 §8's first reason binds unchanged: "Nothing is waiting on it, and a turn
-is." A file read is cheaper than a model call, but the facet is advisory (ADR-0008
-§4) and a source fault must not reach a request the user is waiting on.
+The line is drawn between the two halves rather than across the sensor, and
+ADR-0077 §8's first reason is what places it: "Nothing is waiting on it, and a
+turn is." Ingestion has a model-free but unbounded-in-consequence tail — a policy
+ruling, a write, possibly a parked question — and nobody is waiting for any of it.
+The facet is the opposite: the turn is *precisely* what is waiting for it, it is
+what ADR-0008 built `assemble()` to compute fresh each call, and ADR-0008 §2 made
+`contribute` async "because future sources (a calendar API) are I/O-bound". A
+source fault on that path is degradation, not a failed request (§3, §8).
 
 > **Normative.** A sensor's job may ship enabled once §9's gate is discharged. The
 > reason observation ships disabled is specific to observation and does not
@@ -485,20 +525,93 @@ wrong: the mechanism and the identity decision are the same decision.
 
 **New surface in `core` — a breaking change (golden rule 5):**
 
-- **`core/protocols.py`** gains **one** Protocol, `Sensor`, owing: a stable Tier 2
-  identity, and a bounded read of its own source returning one `SensorReading`. It
-  is named for its product role as every Protocol here is (`Planner`, `Observer`,
-  `MemoryPolicy`).
-- **`core/types.py`** gains `SensorReading`, with §3's decided half and §3's
-  deferred optional facet field absent for now.
+- **`core/protocols.py`** gains **one** Protocol, `Sensor`, `@runtime_checkable`
+  as the seams around it are, owing two members:
+  - a **`name` property**, `str` — the stable Tier 2 identity §7 governs. It is a
+    property rather than a constructor argument for `ContextSource.name`'s
+    reason: the assembler and the ingestion stage both log it, and a seam that
+    cannot be asked its own name forces every caller to carry one beside it.
+  - an **`async read` method** taking no arguments and returning one
+    `SensorReading`. It takes no arguments because §1 gives the sensor its own
+    source and §5 makes the bound the sensor's own configuration: a caller able
+    to widen the read is a caller able to defeat the bound, which is the property
+    ADR-0077 §1 bought by putting the maximum on the producer.
+
+  It is named for its product role, as every Protocol here is (`Planner`,
+  `Observer`, `MemoryPolicy`).
+- **`core/types.py`** gains **one** type, `SensorReading`: a frozen pydantic model
+  (ADR-0068) because it crosses a subsystem boundary (`CLAUDE.md`), following
+  `ObservationOutcome`'s precedent that a seam returning more than one fact
+  returns a named value rather than a tuple. Four fields, and the deferred fifth:
+  - `source: EncodableText` — the reading's Tier 2 identity, equal to the
+    producing sensor's `name`. Carried on the reading rather than left to the
+    caller so the value that reaches ADR-0092's vehicle is the producer's own.
+  - `as_of: UtcInstant` — the instant **the source itself** reports the reading as
+    of. This is the half of ADR-0073 §4's pair that no field carries today.
+  - `read_at: UtcInstant` — the instant **this system** performed the read. Named
+    separately and never merged with `as_of`, because collapsing them is the exact
+    defect ADR-0073 §4 describes: "a record synced on Tuesday from a calendar that
+    said so on Monday renders 'Tuesday', which is a true statement about us and a
+    false one about the source."
+  - `proposals: tuple[MemoryUpdateProposal, ...]` — possibly empty (§8: a partial
+    or failed read proposes nothing, and an empty reading is a valid one).
+  - the **facet field, absent for now**, landing as an optional field under §3.
+
+  `UtcInstant` and `EncodableText` are the existing `core` aliases; no new
+  primitive is owed. `MemoryUpdateProposal` already exists, which is why the cost
+  is one type rather than a family.
+- **Nothing else.** No new error class: a sensor's failures are its source's, and
+  §6 and §8 make them degradation rather than exceptions crossing the seam. No
+  change to `MemoryWriter.ingest`, whose semantics §1 relies on exactly as
+  ratified. `Provenance` is **not** touched here — that is ADR-0092's (§9).
+
+An illustrative signature, in ADR-0073 §1's and ADR-0077 §9's form — the semantics
+above are the contract, the spelling is the lane's:
+
+```python
+@runtime_checkable
+class Sensor(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    async def read(self) -> SensorReading: ...
+```
 
 **What the triad lane owes, as one change (`CONTRIBUTING.md` → "Adding a
-Protocol"):** the Protocol, a shared conformance suite exercising the clauses
-above that are checkable against any conforming implementation — the bound is
-refused out of range rather than clamped, a partial read proposes nothing, no
-proposal is `EPISODIC`, no proposal states an absence — and a canonical fake in
-`ai_assistant.testing`. ADR-0077 §1's posture on an out-of-range argument carries:
-"out of range is a `ValueError`, not a clamp".
+Protocol"):**
+
+1. The Protocol and `SensorReading`, with `read_at`/`as_of` documented as the two
+   distinct instants ADR-0073 §4 distinguishes, and `source` documented under §7's
+   Tier 2 obligation in the form `ContextSource.name`'s docstring already uses.
+2. **The shared conformance suite** — the clauses that bind **every** `Sensor`,
+   which are the ones expressible without a source. Each maps to a ruling above:
+   - `name` is stable across calls and non-empty (§7).
+   - `read()` returns a reading whose `source` equals `name` (§10).
+   - `read_at` is tz-aware and `as_of` is tz-aware; neither is naive (ADR-0026 §1).
+   - **No proposal is `EPISODIC`** (§4) — the clause that keeps §4's refusal a
+     property of the seam rather than of one implementation.
+   - **Every proposal is in the `ATTESTED` band**, i.e. `band_of` its provenance
+     source is `BeliefBand.ATTESTED` (§4).
+   - **A configured bound outside its range is refused at construction with a
+     `ValueError`, not clamped** (§5) — ADR-0077 §1's posture, and the case an
+     implementation that silently clamps passes every other clause on this list.
+   - **A read that cannot complete returns no proposals rather than partial ones**
+     (§8), scriptable on the canonical fake so a consumer can test its own
+     degradation path — the gap ADR-0022 §Consequences filed against
+     `FakeMemoryStore` as #105, not repeated here.
+   - Input observation (ADR-0065) and cancellation (ADR-0060), as every seam owes.
+3. **The canonical fake in `ai_assistant.testing`**, scriptable to return a
+   reading with proposals, an empty reading, and a failing read — the three states
+   §8 distinguishes.
+
+**Two rulings above are deliberately *not* suite clauses, and putting them there
+would be the error.** §4's "never proposes an absence" and §3's "neither consumer
+derives its answer from the other's reading" are statements about what a producer
+*declines to emit* and about how a *caller* wires two paths. Neither is observable
+from one `read()` return value, so a suite clause asserting them would either pass
+vacuously or test the fake. They belong to the concrete sensor's own tests and to
+the wiring lane's, and they are named here so the triad lane does not read their
+absence from the suite as their absence from the contract.
 
 **What later lanes owe, and this ADR does not:** the concrete `.ics` sensor in
 `sensors/`, the `context/` adapter and the facet, the `orchestration` ingestion
@@ -541,9 +654,18 @@ here, clause by clause, and the answer is that **no earlier ADR's status line
 changes**. The three places where the opposite reading is available:
 
 - **ADR-0008 §2** keeps the `ContextSource` seam inside `context/`. §3 adds a
-  *different* Protocol in `core` and has a `context/` adapter hold it, so the rule
-  that only `CurrentContext` crosses the boundary is left exactly as ratified. No
-  clause is changed; a new one is added beside it. Not an amendment.
+  *different* Protocol in `core` and has a `context/` adapter hold it. The
+  full argument is in §3: §2's sentence scopes `context/`'s **output**, its stated
+  purpose is that cross-boundary data be a `core` pydantic model and that nothing
+  untyped escape, and both hold — `context/` already takes `core` contracts as
+  inputs (`ClockContextSource` takes a `Clock`). A reader holding only ADR-0008
+  would act no differently after this ADR than before it, which is ADR-0070 §1's
+  test, unmet. No clause is changed; a new one is added beside it. Not an
+  amendment.
+- **ADR-0008 §5** says `assemble()` "computes fresh each call". §3's facet read is
+  that clause obeyed, not narrowed: a fresh call reads the source. §6 restricts
+  *ingestion* at request time, which ADR-0008 never granted and does not govern.
+  Not an amendment.
 - **ADR-0075 §2** listed a sensor among the producers that do *not* inherit the
   capture exemption and said each "may argue for the same exemption on the same
   grounds when it exists". §1 and §4 decline to argue it. Agreeing with a ratified
