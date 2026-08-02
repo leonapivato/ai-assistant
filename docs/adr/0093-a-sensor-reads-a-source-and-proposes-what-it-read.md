@@ -502,7 +502,7 @@ read as satisfied by an operator having set a path.
 
 §5 invokes ADR-0074 §9.3's rule that a bounded default with no figure is two
 conforming implementations diverging while each believes it conforms, so the
-figures are named. Six fields, and the reason each exists rather than only its
+figures are named. Seven fields, and the reason each exists rather than only its
 value — because the *dimensions* are the decision and the numbers are revisable:
 
 | Field | Default | Range | What it bounds |
@@ -513,6 +513,7 @@ value — because the *dimensions* are the decision and the numbers are revisabl
 | `calendar_window_future` | 7 days | `> 0` | how far forward it reaches |
 | `calendar_max_entries` | 500 | `[1, 2**63)` | entries in the window, and so proposals |
 | `calendar_max_bytes` | 8 MiB | `> 0` | the source read **before** parsing |
+| `calendar_max_expansion` | 10,000 | `[1, 2**63)` | occurrences considered per recurrence (§7b) |
 
 **The sensor's identity is deliberately not in that table.** It is declared, not
 configured, for the reason given above this subsection: a free-text setting is how
@@ -547,7 +548,7 @@ touches no record, so neither of §9's gates reaches it. A deployment can theref
 have a live calendar facet before the attested band has its vehicle, which is
 exactly the sequencing this wave was split to allow.
 
-Four of the six are decisions rather than figures pulled from the air:
+Five of the seven are decisions rather than figures pulled from the air:
 
 - **The window is two fields, not one.** A calendar's usefulness is asymmetric:
   the future is what the assistant needs to know about, and the past is only
@@ -568,7 +569,12 @@ Four of the six are decisions rather than figures pulled from the air:
   is checked against the source before parsing begins. This is the same ordering
   ADR-0017 §3 requires of a credential read ("otherwise an implementation reads
   it, then checks, then stops"), applied to a parse.
-- **Both caps refuse rather than truncate** (§5), so exceeding either raises under
+- **`calendar_max_expansion` bounds a *different* thing from the other two**, and
+  §7b argues why neither substitutes for it: it bounds the occurrences a recurrence
+  makes an implementation *consider*, which is unbounded by both the byte cap (the
+  component is tiny) and the entry cap (the cap counts what lands in the window,
+  not what is walked to reach it).
+- **All three caps refuse rather than truncate** (§5), so exceeding any raises under
   §8. A deployment with a genuinely larger calendar widens the cap or narrows the
   window, and does so knowingly.
 
@@ -634,6 +640,23 @@ a false "your calendar is clear", which is the failure §8 exists to prevent. It
 also the only order under which the cap bounds anything: interpreting 501 entries
 to discover that 500 survive is precisely the work a cap is for.
 
+> **Normative.** A recurrence is expanded by **seeking to the window**, never by
+> enumerating from `DTSTART` and discarding what precedes it. Where a rule's form
+> does not admit a seek, expansion is bounded by `calendar_max_expansion` —
+> occurrences *considered* per component, default 10,000, range `[1, 2**63)`,
+> refused at load — and a component exceeding it raises under §8.
+
+**An in-window cap does not bound the work of reaching the window, and this is the
+one hole a byte cap cannot cover.** A component reading
+`DTSTART:19700101T000000Z` with `RRULE:FREQ=SECONDLY` is a few dozen bytes and has
+roughly 1.8 billion occurrences before it reaches a window centred on today. Under
+`calendar_max_entries` alone a conforming implementation enumerates every one of
+them to discover which fall inside, and the read that §5 calls bounded hangs. The
+seek is the right answer for the rules that admit one, and the second bound is
+belt and braces for those that do not — fail-closed, in the same posture §5 takes
+everywhere else: a source too expensive to read is refused, not silently trimmed.
+The two together are what make "bounded" a property rather than an intention.
+
 > **Normative.** An entry whose times are floating or date-only is localised in the
 > configured `Settings.timezone`, the same value ADR-0008 §5 gives the temporal
 > context. A sensor may not invent a second timezone source.
@@ -658,8 +681,10 @@ deterministic tests for each boundary above: an event spanning the window's star
 one spanning its end, an event ending *exactly* at the lower edge and one starting
 exactly at the upper, a zero-duration entry on each edge, an all-day entry at both
 edges, a recurrence expanding past the cap, an uninterpretable entry among valid
-ones, and a source whose in-window occurrences are entirely uninterpretable and
-over the cap.
+   ones, a source whose in-window occurrences are entirely uninterpretable and over
+the cap, an old, high-frequency recurrence whose expansion must reach the window
+without walking to it, and a missing configured path whose scheduled failure is
+asserted **not** to put that path in the log line.
 
 ### 8. Failure has two postures, because the reading has two consumers
 
@@ -736,6 +761,25 @@ than usual because §8's whole point is that a failure must be *distinguishable*
 Preserving `__cause__` is what keeps the wrapping from destroying the diagnosis:
 ADR-0083 §7 logs a failed job "with its class", and a missing file, a permission
 denial and a malformed document are three different operator actions.
+
+> **Normative.** A `SensorError`'s **message is payload-free**: it carries the
+> sensor's declared identity and the failure's class, and never the source's
+> location, its contents, or any string derived from either. The cause is retained
+> on the exception; only its **class** may be logged, never its message.
+
+**Preserving the cause and logging it are different acts, and the obvious wrapper
+conflates them.** `raise SensorError(str(exc)) from exc` satisfies every word of
+the clause above it — and for a missing
+`/home/alice/Private/therapy.ics` the resulting message *is* that path, which the
+scheduler then writes to a log under ADR-0083 §7. That is Tier 1 data in an
+operational log, which ADR-0004 §5 forbids outright, arriving through the one
+mechanism §7 spent a whole clause keeping the identity out of. The path is exactly
+as sensitive as the identity — arguably more, since a filename is chosen by the
+user and a directory names them — so it gets the same treatment rather than a
+weaker one because it arrived inside an exception. `PermissionError` and
+`FileNotFoundError` are Tier 2 facts and are the useful half anyway: they tell an
+operator which action to take, and the operator already knows the path, because
+they configured it.
 
 ### 9. The dependency on ADR-0092, stated as a gate
 
