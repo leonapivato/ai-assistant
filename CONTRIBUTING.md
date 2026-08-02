@@ -555,8 +555,10 @@ either resolves or does not.
 
 What the corpus actually cites is owned by a check, not by this document:
 `tests/scripts/test_adr_citations_corpus.py` runs ADR-0088 §6's Tier 1 inside
-`pytest`, so a citation naming an ADR file that does not exist fails the gate
-like any other test. Tier 1's tracker half needs `gh` to answer GitHub; where it
+`pytest`, so a *new* citation naming an ADR file that does not exist fails the
+gate like any other test. It pins the Tier 1 findings the corpus already
+carries, so what fails it is a change to that set — which is also how correcting
+one gets noticed. Tier 1's tracker half needs `gh` to answer GitHub; where it
 cannot, the citation is unevaluable and passes silently rather than failing,
 which is §6's rule that a miss is benign and a false report is not.
 `just citations` prints the whole report; its Tier 2 half is advisory and never
