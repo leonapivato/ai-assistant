@@ -850,6 +850,19 @@ silently. Saturating the anchor is right for the reason it is right at the edges
 there is no instant before the minimum for a predecessor to have started at, so the
 clamped anchor and the ideal one reach the same occurrences.
 
+> **Normative.** `read_at` is read from the clock **once, before the source read
+> begins**, and every window edge, seek anchor, override resolution and membership
+> test in this read uses that one instant. A sensor may not re-read the clock
+> mid-read.
+
+Without this the anchor drifts across a read that §7 permits to run for
+`calendar_read_timeout`: a clock sampled at 10:00:00 and one sampled at 10:00:10
+put different entries at the window's edges, so two conforming sensors given the
+same source and the same configuration propose different sets — and the same sensor
+does, run twice. The bound is what makes the drift reachable rather than
+theoretical, which is why the clause belongs beside the bounds and not with the
+clock.
+
 > **Normative.** Both intervals are **half-open**. The window is
 > `[read_at - calendar_window_past, read_at + calendar_window_future)` and an
 > entry's interval is `[start, end)`. An entry with a non-zero duration overlaps
@@ -1299,7 +1312,9 @@ cheap-looking and wrong.
     producing sensor's `name`. Carried on the reading rather than left to the
     caller so the value that reaches ADR-0092's vehicle is the producer's own.
   - `read_at: UtcInstant` — the instant **this system** performed the read. Always
-    present, because it is always knowable and always true: it is our own clock.
+    present, because it is always knowable and always true: it is our own clock. It
+    is captured **once, before the read begins**, and is the single anchor every
+    window and recurrence decision uses (§7b).
   - `as_of: UtcInstant | None` — the instant **the source declares for the reading
     as a whole**, where the source declares one, and `None` where it does not.
     Never merged with `read_at`, because collapsing them is the exact defect
