@@ -921,7 +921,8 @@ ADR-0092 §10 and ADR-0093's Context both rest on it.
   point: the alternative is only observable once it is no longer reversible.
 - **A capture peer is now known to be expensive**, and honestly so. It owes source
   media rather than a transcript (§7), a bounded verification window with figures
-  it must name (§8), a custody protocol satisfying five stated constraints (§10),
+  it must name (§8), a custody protocol meeting three stated constraints and
+  answering the restart-survival question explicitly (§10),
   a detector whose governance is undecided (§6, §10), and it cannot ship remote
   (§10). Anyone reading this as encouragement is reading it wrong; what it removes
   is the cheap version that would have been unrecoverable.
