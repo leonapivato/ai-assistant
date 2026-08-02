@@ -874,10 +874,23 @@ occurrences. A single `VEVENT` carrying `RRULE:FREQ=SECONDLY` is a few dozen byt
 of occurrences in the default window. A cap counting components would accept it
 while the sensor built the tuple the cap exists to bound.
 
+> **Normative.** A component the source marks **cancelled contributes no
+> occurrences**, and this is decided before anything is counted or proposed. A
+> cancelled master contributes none at all; a cancelled `RECURRENCE-ID` override
+> removes the single occurrence it names.
+
 > **Normative.** A `RECURRENCE-ID` override is resolved **against its master's
-> expansion before anything is counted or proposed**: it replaces the occurrence it
-> names, and an override the source marks cancelled **removes** that occurrence
-> from the expansion. A removed occurrence is never counted and never proposed.
+> expansion before anything is counted or proposed**, and replaces the occurrence
+> it names. A removed or replaced occurrence is never counted and never proposed.
+
+**The cancelled-component rule is stated over components rather than over
+overrides, and an earlier draft covered only overrides.** That version left the
+plainer case open: a recurring `VEVENT` carrying `STATUS:CANCELLED` and no
+`RECURRENCE-ID` is a master, not an override, so nothing suppressed it and every
+in-window occurrence would have been counted and proposed — beliefs in a whole
+series of meetings the calendar marks off. Keying the rule on *what the source
+says about a component* rather than on which kind of component it is covers both,
+and covers whatever third shape the format has that neither of us enumerated.
 
 **Not emitting an occurrence the source says does not occur is not "proposing an
 absence", and the distinction is worth stating because §4's rule looks like it
@@ -1019,8 +1032,9 @@ occurrences each repeat a large content field, asserting the content budget refu
 before memory is spent, a master recurrence with an in-window **cancelled
 `RECURRENCE-ID` override** — asserting the occurrence is absent from the proposals,
 absent from the cap's count, and that nothing is proposed about its cancellation —
-and the same with a non-cancelled override, asserting it replaces rather than
-duplicates its occurrence — and the
+a **cancelled recurring master**, asserting it contributes no occurrences at all,
+and a non-cancelled override, asserting it replaces rather than duplicates its
+occurrence — and the
 same suspended worker **cancelled from outside**, asserting `CancelledError`
 propagates unchanged, a second read is still refused while the worker lives, and
 reads resume once it is released — and, **in a subprocess**, a hub shut down while a read is
