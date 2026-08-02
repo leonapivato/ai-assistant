@@ -80,6 +80,18 @@ An under-specified brief is the largest source of rework. Each one carries:
   stale tree is not evidence, and Codex reads the working tree for context, so a
   stale branch makes it report other lanes' merged work as regressions.
 
+**Say that the brief's factual claims are hypotheses.** Every file, symbol and
+line you name is something you believed when you wrote it, and a brief has
+already been wrong about exactly that — one named a symbol and a line the
+committed text did not contain, and the lane found out only because the brief
+separately asked for an unrelated sweep. A brief is more dangerous than a review
+finding: it arrives with your authority and is read before any skepticism exists,
+so a lane that treats "fix this citation" as an instruction rather than as a
+claim edits the wrong thing and reports success. `docs/review/guide.md` already
+tells a worker to treat findings as hypotheses; nothing says it of the brief, so
+write it in — **verify the brief's factual claims against the tree before acting
+on them, and report the ones that do not hold.**
+
 The report contract itself lives in `worker.md` — do not restate it in the brief.
 What the brief owes it is **completeness**: a worker treats a missing fence, or a
 missing ADR number where the change needs one, as a STOP rather than as
