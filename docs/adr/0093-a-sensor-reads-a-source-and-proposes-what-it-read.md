@@ -703,7 +703,9 @@ it fails hardest on the entry the facet most wants: the meeting happening now.
 > **Normative.** The window's endpoints **saturate** at the representable bounds:
 > where `read_at + calendar_window_future` is not representable the upper edge is
 > the maximum representable instant, and likewise the lower edge at the minimum.
-> Endpoint arithmetic never raises.
+> The same saturation governs **every instant these sections compute**, including
+> §7b's seek anchor `window_start - D` and any override's own anchor. None of this
+> arithmetic raises.
 
 The bounded figures above make an overflow unreachable from configuration alone,
 but not from configuration *and* a clock: a conforming ADR-0026 reading close
@@ -714,6 +716,16 @@ maximum representable instant to exclude, so the clamped window and the ideal on
 select the same set. It is deliberately **not** a refusal: a clock that near the
 limit is a wiring problem the sensor neither causes nor can diagnose, and turning
 it into a `SensorError` would report a source fault against a source that is fine.
+
+**It is stated over every computed instant rather than over the window's edges
+alone, because an earlier draft said the latter and §7b's seek anchor escaped it
+immediately.** A yearly event with a multi-millennium `DURATION` makes
+`window_start - D` underflow *before* the seek begins, leaving an implementation to
+raise a raw arithmetic error or skip an occurrence that genuinely overlaps —
+breaking §8's error contract or §7b's overlap rule respectively, and the second one
+silently. Saturating the anchor is right for the reason it is right at the edges:
+there is no instant before the minimum for a predecessor to have started at, so the
+clamped anchor and the ideal one reach the same occurrences.
 
 > **Normative.** Both intervals are **half-open**. The window is
 > `[read_at - calendar_window_past, read_at + calendar_window_future)` and an
@@ -804,6 +816,28 @@ bound.
 Two components resolving "today" against different zones is the class of defect
 ADR-0026 exists to prevent, arriving through data rather than through a clock.
 
+> **Normative.** A floating local time that a DST transition makes **ambiguous** or
+> **nonexistent** resolves at `fold=0`. Such an entry is never skipped for sitting
+> on a transition.
+
+Naming the zone does not pin the instant, and the gap is not theoretical: in
+`America/New_York` a floating `2026-11-01T01:30` is two distinct UTC instants and
+`2026-03-08T02:30` is none. Two implementations obeying the clause above therefore
+select different occurrences for one window and both conform, which is the
+divergence this subsection exists to close. RFC 5545 does not settle it — a
+floating time is under-specified *by the source*, so no reading recovers the
+author's intent — which makes the requirement **agreement rather than
+correctness**, and the cheapest available agreement is the platform default:
+`fold=0` names the earlier offset for an ambiguous time and resolves a nonexistent
+one through the pre-transition offset, deterministically in both directions with no
+special case.
+
+**Not skipping is the other half, and it is the half the user feels.** §7b skips an
+entry the sensor *cannot interpret*; a time on a transition is interpretable the
+moment a rule exists, and the entry is a real appointment someone holds. Skipping
+would drop an hour of a calendar twice a year, and §4 forbids the sensor from
+saying anything about the absence — so the loss would also be silent.
+
 **What remains the concrete sensor lane's**, with a marked obligation attached:
 
 > **Normative.** An entry a parseable source contains but the sensor cannot
@@ -829,8 +863,9 @@ in-window occurrence between them, a missing configured path whose scheduled
 failure is asserted **not** to put that path in the log line, a malformed source
 whose parser failure quotes a distinctive event title — asserting neither the title
 nor the raw cause message reaches a log — a path that is a **writer-less FIFO**, asserting the read
-fails rather than hangs, and a source that grows past `calendar_max_bytes` after it
-is opened.
+fails rather than hangs, a source that grows past `calendar_max_bytes` after it is
+opened, a long-duration recurrence whose seek anchor underflows, and a floating
+entry at each of an ambiguous and a nonexistent local time.
 
 ### 8. Failure has two postures, because the reading has two consumers
 
