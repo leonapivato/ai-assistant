@@ -187,14 +187,38 @@ runs on *deserialisation* as well as construction, so it "would take a belief a
 running deployment already holds … and make `get`, `list_beliefs` and `export`
 fail on it: a strictly new failure invented on the read path." It then gives the
 governing test outright: "The test is not 'is it a validator on a `core` type' but
-'does it refuse something that already worked'." This one refuses nothing that
-already worked, because **no `EXTERNAL` record has ever existed** — not in the
-store, not in `src/`, not in any export any deployment could hold. That is the
-same condition ADR-0072 §3 named when it declined `_derived_is_never_certain`
-("there is no producer yet that could violate the rule") and that ADR-0077's
-observer later met. Leg 6's producer meets it for this band, and it is the last
-moment at which it is met: after the first import lands, this validator would be a
-migration.
+'does it refuse something that already worked'."
+
+**What was actually verified, stated as narrowly as it was checked:** no module
+under `src/` constructs a `Provenance` with `source=MemorySource.EXTERNAL` — the
+only mention of the member anywhere in `src/` is the arm of `band_of` that maps it
+to `ATTESTED`. So **no code path this project ships can have persisted one**, and
+no store a deployment of this software holds can contain a record the validator
+would refuse on decode. That is the same condition ADR-0072 §3 named when it
+declined `_derived_is_never_certain` ("there is no producer yet that could violate
+the rule"), which ADR-0077's observer later met — and the validator that landed
+then went onto this same class, for the same band-keyed reason, at the same moment
+in that band's life. This is that precedent one band over.
+
+**Two things that verification does not cover, and neither is waved away.**
+`MemorySource.EXTERNAL` is a public `core` value that `Provenance` accepts today,
+so a *library* consumer constructing their own records could hold data this
+validator refuses; and roughly thirty-four test sites construct such records
+in-process (§9). The second is a code-edit cost, not a read-path failure on
+retained data, and §9 budgets it. The first is real but unreachable through
+anything this repository ships, and it is answered by enforcement rather than by
+assertion: **§9 makes a store scan a precondition of the validator landing** — the
+implementing lane confirms via `export` that the deployment holds no `EXTERNAL`
+record, and if one is found it stops rather than shipping a decode failure. That
+is ADR-0045 §4's "enforced not assumed" applied to this ADR's own premise, and it
+is the same discipline §6 declines to overclaim without.
+
+**And the timing is not incidental — it is the argument.** The choice is now or
+never: the first import makes the band permanently non-empty, after which this
+validator is a data migration rather than a rule, and the band whose entire warrant
+is someone else's would have acquired the ability to say nothing about whose. A
+deferral "until compatibility is established" is therefore not a smaller version of
+this decision; it is the decision not to make it.
 
 ### 3. `reported_at` is the source's clock, and it is never reconciled with ours
 
@@ -333,12 +357,38 @@ replace whatever already lives there. A source's key is an assertion about
 sameness *in the source's world*. Every failure in the §Context trace comes from
 letting the second one aim the first.
 
-**What this buys, stated exactly.** An incoming import never arrives at an id the
-store already holds, so **no import can overwrite any existing record** — retired
-or live. The §Context resurrection is therefore unreachable: a re-sync cannot
-erase a closed `validity` window, because it cannot address the record that
-carries one. It also closes, for this producer, the collision shape issue #472
-records for `ACCEPT`'s upsert generally.
+**What this buys, stated exactly — and it is a removal of aim, not a guarantee of
+absence.** What goes is the *systematic* route by which an import addresses a
+record the store already holds: the §Context resurrection is no longer reachable
+by construction, because a re-sync of the same calendar entry no longer computes
+the retired record's id and so cannot erase its closed `validity` window. The
+hazard was that the source's key **is** an address, aimed at the same record every
+sync, deterministically. Minting removes the aim.
+
+**It does not make a minted id provably absent, and this ADR does not claim it
+does.** ADR-0045 §4 settled the neighbouring case and settled it against the
+weaker reading: a probabilistic generator "makes a collision unlikely, not
+impossible", so the supersession applier writes with **insert-if-absent** under the
+atomic primitive and a bounded retry, because "the one id requirement is 'names no
+existing record,' **enforced not assumed**". The `ACCEPT` path has no such
+enforcement — it is a blind `store.add` upsert — so an import whose minted id
+collided would overwrite the colliding record, and a producer that ignored this
+section entirely would too. Both remain possible after this ruling.
+
+The difference is one of kind rather than degree, which is why the ruling is worth
+making anyway: with the source's key as the store's id the overwrite is *certain
+and repeated*, and it lands on precisely the record whose retirement carries the
+user's correction; with a minted id it is a `uuid4` collision against an unrelated
+record. **The residual is not import-specific.** It is exactly the `ACCEPT`-upsert
+shape issue #472 records — "whether a proposal arriving at the id of an existing
+record … should be refused rather than silently upserted" — which #472 also
+records is a `MemoryWriter` semantics widening owing its own ratified ADR (golden
+rule 5). This ADR therefore does not rule it: closing it here would be a contract
+change for one producer, of the general shape #472 already scopes, and §10 files
+it rather than half-doing it. What §9 does owe is the narrower discipline
+ADR-0045 §4 already established for a minted id — the producer's id factory is
+**guarded at its output** — so a malformed mint fails loudly instead of reaching
+the store.
 
 **What it does not buy, equally exactly.** It does not make the re-synced value
 disappear, and it does not guarantee one live record per calendar entry. §7 traces
@@ -484,6 +534,13 @@ the sensor-seam lane and must not run beside them.
   the iff validator (§1); `Provenance`'s class docstring gaining the rule beside
   the two band-keyed validators already there. `MemorySource`, `BeliefBand` and
   `band_of` are **untouched** — this adds no source and moves no band.
+  **Precondition on the validator landing**, per §2: the lane confirms through
+  `export` — which returns every retained record, window-closed ones included
+  (ADR-0045 §6) — that the deployment's store holds no `EXTERNAL` record. Finding
+  one falsifies §2's premise, and the lane **stops and reports** rather than
+  shipping a decode failure onto retained data. Expected to find none; run because
+  §2's admissibility rests on it and an unverified premise is the one thing a
+  read-path validator may not rest on.
 - **`memory/policy.py`** — the retirement class gains `EXTERNAL` (§4).
   `_rule_on_assertion` arm 2's docstring stops citing the deferral as its reason;
   arm 3's "with only `EXTERNAL` conflicts … the assertion lands beside them" is now
@@ -504,7 +561,10 @@ the sensor-seam lane and must not run beside them.
   named here because it is the visible cost of choosing a required field over an
   optional one — a cost paid once, now, and unpayable later without a migration
   (§2).
-- **The producer lane** — mints its own ids (§6), fills `reported_by` stably, and
+- **The producer lane** — mints its own ids (§6) through a factory **guarded at
+  its output** exactly as ADR-0045 §4 guards the applier's (a non-empty `str`, its
+  raising caught and re-raised as the writer's error), so a malformed mint fails
+  before the store rather than becoming a key. It fills `reported_by` stably, and
   fills `reported_at` **only** from what the source itself says: for `.ics`, a
   `VEVENT`'s `DTSTAMP` (mandatory under RFC 5545) or its `LAST-MODIFIED`. Which of
   the two is a producer decision; reaching outside them is not one, and the file's
@@ -522,6 +582,14 @@ the sensor-seam lane and must not run beside them.
   `ActionPolicy` governs *actions*, not *sources*. Leg 6's exit test says "from a
   source the user granted" and nothing records a grant. Its own decision, next
   wave.
+- **Whether `ACCEPT` should refuse a proposal arriving at an existing record's
+  id.** §6 removes the *systematic* route by which an import addresses a stored
+  record; it does not make a minted id provably absent, and the blind upsert behind
+  `ACCEPT` is what would. That is issue #472's open question in its own words, and
+  #472 also records that it is a `MemoryWriter` semantics widening owing its own
+  ratified ADR (golden rule 5) — general to every producer, not to this one. Ruling
+  it here would decide a contract for one caller. Filed, and named in §6 so the
+  residual is not mistaken for a claim.
 - **Carrying the source's own key on the record, and an index to resolve it.** §7's
   duplication residual is what it would close, and §6 is deliberately a *negative*
   rule — the source's key is not the store's key — rather than a third field. A
