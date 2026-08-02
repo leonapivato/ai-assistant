@@ -379,16 +379,28 @@ The difference is one of kind rather than degree, which is why the ruling is wor
 making anyway: with the source's key as the store's id the overwrite is *certain
 and repeated*, and it lands on precisely the record whose retirement carries the
 user's correction; with a minted id it is a `uuid4` collision against an unrelated
-record. **The residual is not import-specific.** It is exactly the `ACCEPT`-upsert
-shape issue #472 records — "whether a proposal arriving at the id of an existing
-record … should be refused rather than silently upserted" — which #472 also
-records is a `MemoryWriter` semantics widening owing its own ratified ADR (golden
-rule 5). This ADR therefore does not rule it: closing it here would be a contract
-change for one producer, of the general shape #472 already scopes, and §10 files
-it rather than half-doing it. What §9 does owe is the narrower discipline
-ADR-0045 §4 already established for a minted id — the producer's id factory is
-**guarded at its output** — so a malformed mint fails loudly instead of reaching
-the store.
+record. **The residual is not import-specific** — every minting producer already
+has it, since `ACCEPT` and `STORE_TEMPORARY` install at `proposed.id` through a
+blind upsert — so it is a pre-existing property this ADR neither creates nor
+closes, and §10 files it rather than half-ruling a contract for one caller.
+
+**And ADR-0081 §8 already named this fork, from the other side.** Deferring the
+question of a proposal arriving at a stored record's id, it names what would make
+the deferral urgent: "a producer that *derives* a record id from content rather
+than minting one — a content hash, or **an external system's key adopted as the
+id** — which is the only way a cross-kind collision stops being a bug and starts
+being a design. Until then no producer can collide." §6 is a ruling not to pull
+that trigger. The first `EXTERNAL` producer was the obvious candidate to adopt a
+foreign key as an id, and declining it keeps leg 6's producer inside the class
+ADR-0081 §8's deferral already assumes safe, with its owner (the `MemoryStore`
+write-semantics lane that takes #104's compare-and-swap) unchanged.
+
+What §9 does owe is the narrower discipline ADR-0045 §4 already established for a
+minted id — the producer's id factory is **guarded at its output** — so a
+malformed mint fails loudly instead of becoming a key. ADR-0081 §1's
+`_refuse_self_consuming_write` does not reach this case and is not being leaned
+on: it refuses a write landing at an id the proposal *cites*, and an attested
+record cites nothing.
 
 **What it does not buy, equally exactly.** It does not make the re-synced value
 disappear, and it does not guarantee one live record per calendar entry. §7 traces
@@ -582,20 +594,22 @@ the sensor-seam lane and must not run beside them.
   `ActionPolicy` governs *actions*, not *sources*. Leg 6's exit test says "from a
   source the user granted" and nothing records a grant. Its own decision, next
   wave.
-- **Whether `ACCEPT` should refuse a proposal arriving at an existing record's
+- **Whether `ACCEPT` should install insert-if-absent for a producer that mints its
   id.** §6 removes the *systematic* route by which an import addresses a stored
   record; it does not make a minted id provably absent, and the blind upsert behind
-  `ACCEPT` is what would. That is issue #472's open question in its own words, and
-  #472 also records that it is a `MemoryWriter` semantics widening owing its own
-  ratified ADR (golden rule 5) — general to every producer, not to this one. Ruling
-  it here would decide a contract for one caller. Filed, and named in §6 so the
-  residual is not mistaken for a claim.
+  `ACCEPT` is what would. The property is **pre-existing and general** — every
+  minting producer in the tree already has it, and ADR-0045 §4 enforced absence for
+  `SUPERSEDE` alone — so ruling it here would decide a contract for one caller.
+  Filed as issue #630, and named in §6 so the residual is never mistaken for a
+  claim. ADR-0081 §8's neighbouring deferral keeps its owner and its trigger; §6
+  declines to pull it.
 - **Carrying the source's own key on the record, and an index to resolve it.** §7's
   duplication residual is what it would close, and §6 is deliberately a *negative*
   rule — the source's key is not the store's key — rather than a third field. A
   field with no consumer is surface (ADR-0045 §1, ADR-0028 §7), ADR-0073 §4 asks
   for two halves and not three, and the lookup it would serve is a `MemoryStore`
-  read surface owing its own ADR. Filed.
+  read surface owing its own ADR. Filed as issue #631, which records the trigger:
+  the first observed duplicate from a rewritten entry.
 - **Context facets carrying an as-of timestamp and provenance.** Next wave,
   `core/types.py`, sequenced behind the sensor seam.
 - **ADR-0072 §5's band precedence.** Its revisit trigger is a real sensor, not this
