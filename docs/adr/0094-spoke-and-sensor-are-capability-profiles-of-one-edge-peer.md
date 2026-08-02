@@ -840,8 +840,16 @@ that constrains nothing is a lane's blank cheque. They are gathered here because
 ADR-0089 §2 puts a clause at column 0 and §3 makes the marks the whole of the
 obligation — stated inside §10's list they would have bound nothing, which
 adversarial review demonstrated by exhibiting a conforming producer that omits the
-aggregate bound. Each restates a finding against a draft of §8 that tried to
+aggregate bound. Most restate a finding against a draft of §8 that tried to
 decide the protocol; the arguments are in §8 and are not repeated.
+
+**The `core` clause forbids a lane acting without an ADR, not the ADR.** An
+earlier wording forbade implementing any rule here "by adding a field to `core`"
+full stop, which would have blocked the very surface §10 defers — a band-ceiling
+field and a peer identity are exactly what the second-peer contract may need.
+Architecture review caught it. What this ADR refuses is surface arriving *without*
+a decision, which is golden rule 5 rather than a new rule; whether the later
+contract needs a `core` field is that ADR's to answer, and it is expected to.
 
 > **Normative.** An ADR deciding the custody handoff may not let an
 > acknowledgement precede the hub's durable custody of the submitted material.
@@ -857,9 +865,9 @@ decide the protocol; the arguments are in §8 and are not repeated.
 > unresolved submission survives a peer restart, and at what cost to §9. It may
 > not settle that question by silence.
 
-> **Normative.** No rule of this ADR may be implemented by adding a field to
-> `core`. The surface expressing any of them owes its own ADR, merged before
-> anything implements against it (golden rule 5).
+> **Normative.** No lane may add `core` surface expressing a rule of this ADR
+> without an ADR deciding that surface, merged before anything implements against
+> it (golden rule 5).
 
 > **Normative.** Nothing in this ADR authorises a peer that is not on this
 > machine. ADR-0017 §1 and §3 and ADR-0084 §1 and §11 are untouched, and §2's
