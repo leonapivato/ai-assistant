@@ -499,7 +499,7 @@ def _as_dotted_symbol(content: str, top_names: frozenset[str]) -> tuple[str, str
 
 
 def _mask_link_targets(line: str) -> str:
-    """Blank every inline link **target** on one line — destination and title.
+    r"""Blank every inline link **target** on one line — destination and title.
 
     The companion to ``_CITATION_CONTEXT_RE``, and the division of labour is the
     point. The context rule answers the *open* question — which of the endless
@@ -508,18 +508,32 @@ def _mask_link_targets(line: str) -> str:
     markdown construct with a grammar, so covering it is a matter of getting that
     construct right, not of enumerating a tenth syntax.
 
-    So the span is found by **counting parentheses**, not by matching to the
-    first ``)``. The pattern this replaces stopped early on ``](/g(foo) "#999")``
-    and left ``"#999")`` behind — and that residue's context is a bare quote,
-    which *is* a citation context, so a **link title becomes a Tier 1 failure**
-    even after the mask has run. Balanced
-    destinations are CommonMark's own rule, to arbitrary depth (#605), and a
-    title is inside the same parentheses, so one counter covers both.
+    **Every ``)`` that closes the span is found by counting, and the grammar has
+    exactly three things that stop a ``)`` from counting.** Each one, left out,
+    ends the span early and leaves a residue whose context *is* a citation
+    context, so each is a Tier 1 false failure rather than a cosmetic gap:
 
-    **Unbalanced fails closed**: a ``](`` whose ``)`` never arrives blanks the
-    rest of the line. That direction is ADR-0088 §6's — over-blanking costs
-    misses, which are benign, where leaving a fragment of a target in play costs
-    the false report that is not.
+    - **Nesting.** A destination's parentheses balance to arbitrary depth, which
+      is CommonMark's own rule (#605). Matching to the first ``)`` leaves
+      ``#123`` out of ``](/g(foo)#123)``.
+    - **A title.** ``](/g "…")`` puts the title inside the same parentheses, so
+      one counter covers it — but only if the counter reaches it, which is why
+      nesting has to be right first. The residue of ``](/g(foo) "#999")`` is
+      ``"#999")``, a bare quote, which selects.
+    - **A ``)`` inside a title, and an escaped one.** ``](/g "x) #999")`` closes
+      on the title's own bracket and leaves `` #999")``, which is space-preceded
+      and selects; ``](/g\) #999)`` does the same through an escape. So a quote
+      suspends the count until it closes, and a backslash skips one character.
+
+    A ``<…>``-enclosed destination needs no fourth rule: its parentheses either
+    balance, and the count is right anyway, or they do not, and the span fails
+    closed below.
+
+    **Unbalanced fails closed**: a ``](`` whose ``)`` never arrives — or a quote
+    that never closes, such as the apostrophe in ``](/it's)`` — blanks the rest
+    of the line. That direction is ADR-0088 §6's: over-blanking costs misses,
+    which are benign, where leaving a fragment of a target in play costs the
+    false report that is not. It costs nothing on the corpus.
 
     Args:
         line: One line of prose.
@@ -533,16 +547,26 @@ def _mask_link_targets(line: str) -> str:
     cursor = 0
     while (start := line.find(_LINK_TARGET_OPEN, cursor)) >= 0:
         depth = 0
+        quote = ""
         index = start + 1  # the `(`
         while index < len(line):
-            if line[index] == "(":
+            char = line[index]
+            if char == "\\":
+                index += 2
+                continue
+            if quote:
+                quote = "" if char == quote else quote
+            elif char in "\"'":
+                quote = char
+            elif char == "(":
                 depth += 1
-            elif line[index] == ")":
+            elif char == ")":
                 depth -= 1
                 if depth == 0:
                     break
             index += 1
-        end = index + 1 if depth == 0 else len(line)
+        closed = index < len(line) and depth == 0
+        end = index + 1 if closed else len(line)
         out[start:end] = " " * (end - start)
         cursor = end
     return "".join(out)
