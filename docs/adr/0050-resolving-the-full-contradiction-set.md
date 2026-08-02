@@ -1,7 +1,44 @@
 # 50. Contradiction resolution retires the full conflict set, and defers assertion-vs-assertion
 
-- Status: Partially superseded by ADR-0079 (§1's over-limit surplus clause)
+- Status: Partially superseded by ADR-0079 (§1's over-limit surplus clause) and ADR-0092 (§1's `EXTERNAL` hold-out from the retirement widening)
 - Date: 2026-07-23
+- Partially superseded: 2026-08-02 by ADR-0092 — **§1's second hold-out goes; its
+  first stands, and so does everything §1 says about what "full" means.** §1
+  defines the retirement set extensionally — the named `target` plus "every other
+  detected conflict whose `provenance.source` is in `{OBSERVED, INFERRED}` (the
+  `_SUPERSEDABLE` allow-list)" — and holds `EXTERNAL` conflicts out of the widening
+  on a reason it names as temporary: "Whether the *default policy* adopts
+  `EXTERNAL` supersession is a separate, still-deferred choice (ADR-0045 §5/§7)."
+  [ADR-0092](0092-an-attested-belief-names-its-source-and-a-user-assertion-retires-it.md)
+  §4 takes that choice, with leg 6's first `EXTERNAL` producer in hand, so the
+  extension becomes `{OBSERVED, INFERRED, EXTERNAL}` and sibling `EXTERNAL`
+  conflicts are swept with the rest. Without that, §1's own honesty claim — "a
+  `SUPERSEDE` retires *every conflict it is shown*" — would stop being true the
+  moment a policy could name an attested target: the named one would be retired and
+  its siblings left live.
+
+  **What stands.** §1's `USER_ASSERTED` hold-out is untouched, for the reason §1
+  gives and ADR-0045 §5 clause 1 keeps — topical similarity may not retire a record
+  the user gave us — including ADR-0078 §5b's confirmation exception exactly as the
+  2026-07-29 note below records it. §1's clause that an `EXTERNAL` target a policy
+  *names explicitly* is retired regardless was already true and is now simply not
+  the only way an attested record is reached. §1's bounded-honesty paragraph, its
+  `conflict_limit` reasoning, its refusal to grow `target_id`, and §§2 and 3 all
+  stand; ADR-0079's partial supersession of §1's over-limit surplus clause is
+  untouched and its pair keeps its place on the line (ADR-0070 §4's accumulation
+  rule — two pairs, one physical line, each naming what its ADR replaced).
+
+  **ADR-0079 §3 needs no record of its own**, and the asymmetry is not an
+  oversight: §3 states the promoted `MemoryWriter` obligation *intensionally* —
+  "every other conflict in the set the policy ruled on **whose source is
+  supersedable**" — so widening what is supersedable leaves its sentence true
+  verbatim and no reader of it acts differently (ADR-0082 §1). §1 states the same
+  set *extensionally*, which is why this note exists and that one does not.
+
+  This is ADR-0070 §1's Status edit plus an appended dated note; no ratified text is
+  rewritten, and ADR-0092 lands in the same change so this line never names an ADR
+  that does not exist. Under ADR-0082 §2 no amendment qualifier joins the line.
+  Refs #625.
 - Note (2026-07-30): **The ADR-0078 amendment moves off the `Status` line to the
   note below; nothing about it changes.** The line carried "§1's `USER_ASSERTED`
   hold-out amended by ADR-0078" beside its leading partial-supersession token.
