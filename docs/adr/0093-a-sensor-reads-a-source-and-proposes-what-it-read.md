@@ -672,10 +672,25 @@ An exception is also what ADR-0008 §4's degradation path is already built to
 catch: the optional adapter of §3 skips a *failing* source and leaves its facet
 `None`, which is a different rendering from a facet that is present and empty.
 
-> **Normative.** A read that cannot complete raises `SensorError`, an
-> `AssistantError` (§10), with the underlying failure preserved as its `__cause__`.
-> A sensor may not let a source-level exception — an `OSError`, a parser's own
-> class — cross the seam unwrapped.
+> **Normative.** A read that cannot complete **because of its source** raises
+> `SensorError`, an `AssistantError` (§10), with the underlying failure preserved
+> as its `__cause__`. A sensor may not let a source-level exception — an
+> `OSError`, a parser's own class — cross the seam unwrapped.
+
+> **Normative.** A cancellation delivered from outside the call is **excepted from
+> the clause above**: it is delivered onward unchanged and is never converted into
+> a `SensorError`. `read()` is bound by `core/protocols.py`'s cancellation clause
+> and by ADR-0060 exactly as every other seam is.
+
+The carve-out is stated rather than left to the general rule because the wording it
+qualifies invites the mistake: a cancelled read has, in plain English, "not
+completed", and a sensor wrapping everything it catches would convert it. The
+preamble is unambiguous — "A cancellation delivered from outside the call is
+delivered onward, never absorbed… it never converts such a cancellation into a
+return value" — and a `SensorError` is a conversion of exactly that kind, with the
+additional harm that both consumers would treat a caller's own cancellation as a
+degraded source: the facet would degrade and the scheduler would log a source fault
+and re-arm, on a shutdown (ADR-0083 §4) that was working correctly.
 
 **An earlier draft ruled the opposite — "no new error class" — and it was wrong on
 a standard the corpus states plainly.** `CONTRIBUTING.md` requires that a
@@ -835,10 +850,15 @@ Protocol"):**
      source is `BeliefBand.ATTESTED` (§4).
    - **An empty `proposals` tuple is a valid, successful reading** and every
      clause above holds on it (§8).
-   - **A read that cannot complete raises `SensorError`** — checkable generically
-     against the canonical fake scripted to fail, and the clause that makes the
-     leak this suite would otherwise miss detectable at all.
-   - Input observation (ADR-0065) and cancellation (ADR-0060), as every seam owes.
+   - **A read that cannot complete for a source reason raises `SensorError`** —
+     checkable generically against the canonical fake scripted to fail, and the
+     clause that makes the leak this suite would otherwise miss detectable at all.
+   - Input observation (ADR-0065) and cancellation (ADR-0060), as every seam owes —
+     and cancellation here carries **one clause beyond the standard pair**: a
+     `read()` cancelled from outside while suspended re-raises `CancelledError`
+     unchanged and does **not** raise `SensorError` (§8). It is spelled out because
+     it is the one place a conforming-looking sensor could satisfy every other
+     clause on this list and still absorb a cancellation.
 3. **The canonical fake in `ai_assistant.testing`**, scriptable to return a
    reading with proposals, an empty reading, and a read raising `SensorError` —
    the three states §8 distinguishes, so a consumer can test its own degradation path. That
