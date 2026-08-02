@@ -880,8 +880,27 @@ while the sensor built the tuple the cap exists to bound.
 > removes the single occurrence it names.
 
 > **Normative.** A `RECURRENCE-ID` override is resolved **against its master's
-> expansion before anything is counted or proposed**, and replaces the occurrence
-> it names. A removed or replaced occurrence is never counted and never proposed.
+> expansion before anything is counted or proposed**. It replaces the occurrence it
+> names; where it carries `RANGE=THISANDFUTURE` it replaces that occurrence **and
+> every later one**, and where it is also cancelled it removes them. A removed or
+> replaced occurrence is never counted and never proposed.
+
+> **Normative.** An override whose form a sensor cannot interpret **suppresses the
+> occurrences it could affect** rather than leaving them to the master. Where the
+> affected extent is itself unknown, the whole series is suppressed.
+
+**The range form is named, and the unnamed forms fail closed.** An earlier draft
+said an override "replaces the occurrence it names", which is right for the common
+form and wrong for `RANGE=THISANDFUTURE`: for a daily 09:00 master with an in-window
+override moving 3 August to 10:00, that rule leaves 4–7 August proposed at a time
+the calendar no longer says. An override is a *correction*, so mis-scoping one does
+not merely omit information — it proposes stale information as current, which is
+worse than proposing nothing. Hence the second clause: an override the sensor
+cannot interpret suppresses what it might have changed, because the master's values
+for those occurrences are known to be untrustworthy and nothing else is. That is
+the same fail-closed posture §5 takes on a source too expensive to read, applied to
+one too complex to read, and it is deliberately stated over *forms* rather than
+over the two this round happened to enumerate.
 
 **The cancelled-component rule is stated over components rather than over
 overrides, and an earlier draft covered only overrides.** That version left the
@@ -1033,8 +1052,11 @@ before memory is spent, a master recurrence with an in-window **cancelled
 `RECURRENCE-ID` override** — asserting the occurrence is absent from the proposals,
 absent from the cap's count, and that nothing is proposed about its cancellation —
 a **cancelled recurring master**, asserting it contributes no occurrences at all,
-and a non-cancelled override, asserting it replaces rather than duplicates its
-occurrence — and the
+a non-cancelled override, asserting it replaces rather than duplicates its
+occurrence, a `RANGE=THISANDFUTURE` override both shifted and cancelled —
+asserting later occurrences follow it rather than the master — an override of an
+uninterpretable form, asserting the occurrences it could have affected are
+suppressed rather than proposed from the master — and the
 same suspended worker **cancelled from outside**, asserting `CancelledError`
 propagates unchanged, a second read is still refused while the worker lives, and
 reads resume once it is released — and, **in a subprocess**, a hub shut down while a read is
