@@ -518,6 +518,35 @@ value — because the *dimensions* are the decision and the numbers are revisabl
 configured, for the reason given above this subsection: a free-text setting is how
 a path or an address would reach `Provenance` and the logs.
 
+**The two nullable fields interact, so the four states are named rather than left
+to compose.** A path locates the source; an interval arms the scheduled ingestion
+job. They are separate because the two consumers of §3 are separate, and the
+product is four states of which one is incoherent:
+
+| `..._path` | `..._interval` | Meaning |
+| --- | --- | --- |
+| `None` | `None` | Fully disabled. **The default.** |
+| set | `None` | **Facet only**: the context adapter reads at assembly time; nothing is proposed and no job is armed. |
+| set | set | Both paths live, subject to §9's two gates. |
+| `None` | set | Incoherent — refused at load. |
+
+> **Normative.** A configuration with a sensor interval set and that sensor's
+> source location unset is refused at load with a `ConfigurationError`. A
+> location with no interval is **valid** and enables the facet path alone.
+
+The refusal follows this section's own posture — a figure the runtime would refuse
+must fail at load — and the alternative outcomes are all worse and all silently
+different: a scheduler that omits the requested job reports health while running
+nothing, one that arms it re-runs a failing job forever, and one that treats it as
+a source fault turns a configuration mistake into an infinite retry.
+
+**Facet-only is a real deployment, not a degenerate one**, and it is what makes
+§9's gate configurable rather than all-or-nothing. Until ADR-0092 lands, no sensor
+may be enabled *on a schedule* — but the facet writes nothing, proposes nothing and
+touches no record, so neither of §9's gates reaches it. A deployment can therefore
+have a live calendar facet before the attested band has its vehicle, which is
+exactly the sequencing this wave was split to allow.
+
 Four of the six are decisions rather than figures pulled from the air:
 
 - **The window is two fields, not one.** A calendar's usefulness is asymmetric:
@@ -725,6 +754,10 @@ in hand — not one to guess here."
 > **Normative.** No sensor may be enabled on a schedule until ADR-0092 has decided
 > imported-record identity. Until then §5's idempotence premise is unestablished,
 > and a periodic re-read is a duplicate generator rather than a refresh.
+
+**Neither gate reaches the facet path**, which writes nothing, proposes nothing and
+touches no record. §7a's facet-only state is therefore reachable today, and that is
+the point of both gates being about *ingestion* rather than about the sensor.
 
 The two are separate gates on purpose. The first is about what a stored belief can
 honestly say; the second is about what happens when the same entry is proposed
