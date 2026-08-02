@@ -1,6 +1,6 @@
 # 93. A sensor reads a source and proposes what it read; the clock bounds the read, so nothing needs a cursor
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-02
 - **Decides a `core` contract and implements none of it.** Golden rule 5 and
   ADR-0015 §5 put a contract ADR in its own PR, merged before anything implements
@@ -10,9 +10,11 @@
   its required review set is adversarial *and* architecture**, even though the PR
   carrying it is prose only — the reading ADR-0090 §5 and ADR-0091's header each
   recorded in the opposite direction, for ADRs that decided no surface. It is a
-  substantive contract ADR, so it is **reviewed while `Proposed` and ratified
+  substantive contract ADR, so it was **reviewed while `Proposed` and ratified
   only after** (`CONTRIBUTING.md` → "Contract ADRs land before their
-  implementation"), which is what leaves a finding able to change the decision.
+  implementation"), which is what left a finding able to change the decision — and
+  several did: §3's two cadences, §8's raise, §7a's enablement matrix and §7b's
+  three semantics all arrived through review rather than surviving it.
 - **Depends on ADR-0092, and says so as a gate rather than as a note.** ADR-0073 §4
   makes carrying the reporting source's identity and its report time a
   precondition of leg 6's first `EXTERNAL` producer shipping. That vehicle is
