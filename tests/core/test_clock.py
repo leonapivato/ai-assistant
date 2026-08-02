@@ -125,8 +125,9 @@ def test_an_aware_non_utc_reading_is_converted_not_merely_accepted() -> None:
     """ADR-0026 §2: converting, not merely rejecting.
 
     Every downstream comparison then sees UTC — including the ones no `core`
-    validator reaches, like ``SqliteMemoryStore._now_epoch``'s ``timestamp()``.
-    Conversion is information-preserving, so nothing is fabricated.
+    validator reaches, like the bare microsecond epoch
+    ``SqliteMemoryStore._now_micros`` derives from its reading. Conversion is
+    information-preserving, so nothing is fabricated.
     """
     berlin = datetime(2026, 7, 21, 14, tzinfo=ZoneInfo("Europe/Berlin"))
     reading = checked_clock(lambda: berlin, owner="Seam")()

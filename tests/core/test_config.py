@@ -823,11 +823,12 @@ def test_every_integer_setting_refuses_a_bool(name: str, value: bool) -> None:
     ``bool`` is an ``int`` subclass, and ``1`` satisfies every bound these fields
     carry — so without this the flag loads as a plausible value and nothing
     downstream can tell. The guards *below* settings already refuse it
-    (``ObservationStage._check_batch_size``, ``LearningLoop._check_tuning``,
-    ``Engine.__init__``, ``ModelBackedObserver._check_bound``), but ``Settings``
-    hands them an already-coerced integer, so on the settings path they can never
-    fire. This is the configuration layer stating the rule the four layers under
-    it already state (#471).
+    (``_check_batch_size`` in ``orchestration/observation.py``, ``_check_tuning``
+    in ``orchestration/loop.py``, ``Engine.__init__``, and ``_check_bound`` in
+    ``learning/observer.py``), but ``Settings`` hands them an already-coerced
+    integer, so on the settings path they can never fire. This is the
+    configuration layer stating the rule the four layers under it already state
+    (#471).
 
     The message is asserted, not just the refusal: ``False`` and ``True`` land on
     ``0`` and ``1``, which some of these fields' range bounds would reject anyway,
