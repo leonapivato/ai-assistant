@@ -115,6 +115,16 @@ def _citations(report: dict[str, object], kind: str) -> list[str]:
     return [str(f["citation"]) for f in _findings(report, kind)]
 
 
+def _rendered(root: Path, output_format: str, *args: str) -> str:
+    """Return the report in a human-readable format, for what a reader sees."""
+    argv = [sys.executable, str(_SCRIPT), "--root", str(root), "--format", output_format, *args]
+    result = subprocess.run(  # noqa: S603  # fixed argv, no shell
+        argv, capture_output=True, text=True, check=False
+    )
+    assert result.returncode in (0, 1), result.stderr
+    return result.stdout
+
+
 def _fake_gh(directory: Path, numbers: list[int]) -> dict[str, str]:
     """Put a ``gh`` on PATH that reports ``numbers`` and never touches the network."""
     script = directory / "gh"
@@ -283,6 +293,76 @@ def test_the_issued_set_is_read_from_the_tree_and_widens_with_it(tmp_path: Path)
     _write(tmp_path / "docs" / "adr" / "0004-four.md", "# 4. Four\n")
 
     assert _findings(_report(tmp_path, "--no-tracker"), "decision") == []
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0090 Consequences — the exemption is silent, so its *width* is reported
+#
+# "Every future gap widens the silent window by one number … Revisit this ADR if
+# the gap set stops being a handful of numbers." A citation into a gap produces
+# no finding by design, so nothing about a widening window reaches a reader
+# unless the set itself is printed. It is printed, and it is not asserted
+# against: §1 is deliberately self-widening, so a threshold would fail a correct
+# change (#614).
+# --------------------------------------------------------------------------- #
+
+_THREE_GAPS = {"0002-two.md": "# 2. Two\n", "0004-four.md": "# 4. Four\n", "0007-seven.md": "# 7\n"}
+"""An issued set of {2, 4, 7}: 3, 5 and 6 are gaps, and they are not adjacent."""
+
+
+def test_the_gap_set_is_reported_though_the_citations_into_it_are_not(tmp_path: Path) -> None:
+    """The two halves of ADR-0090 together: the citation is silent, the set is not.
+
+    Asserted on one run rather than two, because it is the *conjunction* that
+    #614 is about — a report that named the gaps while still failing the
+    citation, or one that stayed silent about both, would each pass one half.
+    """
+    _make_repo(tmp_path, {**_THREE_GAPS, "0002-two.md": "# 2. Two\n\nNo ADR-0005 was issued.\n"})
+
+    report = _report(tmp_path, "--no-tracker")
+
+    assert report["findings"] == []
+    assert report["gaps"] == [3, 5, 6]
+
+
+def test_the_text_report_names_the_gap_numbers_and_their_count(tmp_path: Path) -> None:
+    """Named, not merely counted: the count answers the signal, the numbers let a reader act.
+
+    ADR-0090's Consequences prices a typo landing inside the gap as passing
+    "silently, forever". A count cannot surface that; the numbers can, which is
+    why they are rendered in ADR-0088 §1(a)'s four-digit form — the form a
+    reader greps the corpus with.
+    """
+    _make_repo(tmp_path, _THREE_GAPS)
+
+    stdout = _rendered(tmp_path, "text", "--no-tracker")
+
+    assert "Gaps in the issued ADR set (3): 0003, 0005, 0006." in stdout
+    assert "revisit that ADR if this set stops being a handful of numbers" in stdout
+
+
+def test_the_markdown_report_names_the_gap_numbers(tmp_path: Path) -> None:
+    """CI publishes the markdown to the job summary, which is where the signal has a reader."""
+    _make_repo(tmp_path, _THREE_GAPS)
+
+    stdout = _rendered(tmp_path, "markdown", "--no-tracker")
+
+    assert "Gaps in the issued ADR set (**3**): `0003`, `0005`, `0006`." in stdout
+
+
+def test_a_corpus_with_no_gaps_says_so_rather_than_omitting_the_line(tmp_path: Path) -> None:
+    """The line is unconditional, so its absence never has to be interpreted.
+
+    A reader comparing two runs sees the width change in a fixed place; a line
+    that appeared only when non-empty would make "no gaps" and "the checker
+    stopped reporting them" the same output.
+    """
+    _make_repo(tmp_path, {"0002-two.md": "# 2. Two\n", "0003-three.md": "# 3. Three\n"})
+
+    report = _report(tmp_path, "--no-tracker")
+
+    assert report["gaps"] == []
+    assert "Gaps in the issued ADR set (0): none." in _rendered(tmp_path, "text", "--no-tracker")
 
 
 # --------------------------------------------------------------------------- #
