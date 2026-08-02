@@ -686,7 +686,7 @@ read as satisfied by an operator having set a path.
 
 §5 invokes ADR-0074 §9.3's rule that a bounded default with no figure is two
 conforming implementations diverging while each believes it conforms, so the
-figures are named. Eight fields, and the reason each exists rather than only its
+figures are named. Nine fields, and the reason each exists rather than only its
 value — because the *dimensions* are the decision and the numbers are revisable:
 
 | Field | Default | Range | What it bounds |
@@ -699,6 +699,7 @@ value — because the *dimensions* are the decision and the numbers are revisabl
 | `calendar_max_bytes` | 8 MiB | `> 0` | the source read **before** parsing |
 | `calendar_max_expansion` | 100,000 | `[1, 2**63)` | occurrences considered across the whole read (§7b) |
 | `calendar_read_timeout` | 10 s | `> 0` | the sensor's deadline on its own read (§7) |
+| `calendar_max_content_bytes` | 4 MiB | `> 0` | proposal content materialised across the whole read |
 
 **The sensor's identity is deliberately not in that table.** It is declared, not
 configured, for the reason given above this subsection: a free-text setting is how
@@ -748,7 +749,7 @@ says it is not wired until there is a field to contribute to. The sequencing thi
 wave was split to allow is still real, just one step longer than the draft claimed
 — the facet ADR is the step, and it is named in §11 rather than assumed.
 
-Five of the eight are decisions rather than figures pulled from the air:
+Six of the nine are decisions rather than figures pulled from the air:
 
 - **The window is two fields, not one.** A calendar's usefulness is asymmetric:
   the future is what the assistant needs to know about, and the past is only
@@ -782,7 +783,18 @@ Five of the eight are decisions rather than figures pulled from the air:
   pathological component is tiny) and the entry cap (that counts what lands in the
   window, not what is walked to reach it). It is spent across the whole read rather
   than per component, for the reason §7b gives.
-- **All three caps refuse rather than truncate** (§5), so exceeding any raises under
+- **`calendar_max_content_bytes` bounds the *output*, which none of the others
+  do.** `calendar_max_bytes` bounds what is read, `calendar_max_entries` how many
+  occurrences come back, and `calendar_max_expansion` the work of finding them —
+  and a source can satisfy all three while the proposals blow up. One recurrence
+  carrying a near-8 MiB field with exactly 500 in-window occurrences is inside every
+  other cap and materialises roughly 4 GiB, because an occurrence repeats its
+  component's content and nothing was counting bytes on the way out. The budget is
+  a single accumulator across the read, like `calendar_max_expansion`, and it is
+  checked **before** each proposal is materialised rather than after — the same
+  ordering as the byte cap, for the same reason: a check that runs after the
+  allocation has already paid for it.
+- **All four caps refuse rather than truncate** (§5), so exceeding any raises under
   §8. A deployment with a genuinely larger calendar widens the cap or narrows the
   window, and does so knowingly.
 
@@ -977,7 +989,9 @@ opened, a long-duration recurrence whose seek anchor underflows, a floating
 entry at each of an ambiguous and a nonexistent local time, a **regular file whose
 read is suspended**, and separately a **parse or expansion made to run long** —
 each asserting the deadline fires, the event loop stayed responsive throughout, and
-a second read is refused while the worker is outstanding — and the
+a second read is refused while the worker is outstanding — a recurrence whose
+occurrences each repeat a large content field, asserting the content budget refuses
+before memory is spent — and the
 same suspended worker **cancelled from outside**, asserting `CancelledError`
 propagates unchanged, a second read is still refused while the worker lives, and
 reads resume once it is released — and, **in a subprocess**, a hub shut down while a read is
