@@ -1,6 +1,6 @@
 # 92. An attested belief names its source and its report time; a user assertion retires it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-02
 - **This is a contract change.** §1 adds an `Attestation` value object and an
   `attestation` field to `Provenance` in `core/types.py`, with a band-keyed
@@ -9,7 +9,7 @@
   `MemoryWriter` conformance obligation since
   [ADR-0079](0079-a-correction-resolves-every-conflict-it-is-shown.md) §3, not one
   implementation's habit. Golden rule 5 therefore applies: this ADR ships as its
-  **own docs-only PR**, is reviewed while still `Proposed` so a finding can still
+  **own docs-only PR**, was reviewed while still `Proposed` so a finding could still
   change the decision, and is flipped to `Accepted` on merge (`CONTRIBUTING.md`,
   "Contract ADRs land before their implementation"; ADR-0015 §5). **No code changes
   with it.** The type, the policy, the applier and the producer are later lanes
