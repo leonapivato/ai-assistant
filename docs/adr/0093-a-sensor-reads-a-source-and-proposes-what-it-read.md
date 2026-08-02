@@ -461,6 +461,36 @@ that refused to start because a calendar file was on an unmounted volume would
 turn an advisory source into a boot dependency, which is precisely the coupling
 ADR-0008 §4 declined for the whole context subsystem.
 
+> **Normative.** A filesystem source is read only if the **opened descriptor** is a
+> regular file. The check is made on the descriptor after opening, never on the
+> path before it, and a source that is not a regular file raises `SensorError`
+> under §8.
+
+> **Normative.** `calendar_max_bytes` is enforced **on the read itself** — at most
+> the cap plus one byte is consumed, and exceeding it raises under §8. It may not
+> be enforced by a size check performed before the read.
+
+**Neither clause is defensive hygiene; each closes a hole the other bounds cannot
+reach.** A path that is absolute and readable satisfies §7 exactly and may still be
+a FIFO — or a symlink to one — with no writer at the other end. Opening it blocks
+before a single byte is available, so the byte cap, the entry cap and the expansion
+budget all sit behind a read that never returns. **On ADR-0083 §7's scheduler that
+is not one stalled job.** That loop is deliberately serial, and it accepts
+starvation on the explicit ground that "a missed or late tick is never a
+correctness bug" — reasoning that holds for jobs that *finish late* and not at all
+for one that never finishes. A hung sensor read takes the retention purge and the
+conversation sweep down with it, indefinitely, and every one of them looks merely
+slow. Checking the descriptor rather than the path is also what closes the swap
+between the two operations.
+
+The second clause is the same hazard in its ordinary form: a source checked for
+size and then read is a source that can grow or be replaced in between, so the cap
+describes a file that no longer exists by the time the bytes are consumed. Reading
+one byte past the cap and refusing is the form that cannot come apart, and it is
+the same ordering ADR-0017 §3 requires elsewhere — check where the operation
+happens, not before it, "otherwise an implementation reads it, then checks, then
+stops".
+
 > **Normative.** A sensor's identity is **declared by the sensor** and is not a
 > configurable value. It is a stable Tier 2 name, never derived from the source's
 > location or contents; a path, filename, address or account identifier may not be
@@ -697,9 +727,11 @@ ones, a source whose in-window occurrences are entirely uninterpretable and over
 the cap, an old high-frequency recurrence whose expansion must reach the window
 without walking to it, **many** individually-cheap non-seekable recurrences with no
 in-window occurrence between them, a missing configured path whose scheduled
-failure is asserted **not** to put that path in the log line, and a malformed
-source whose parser failure quotes a distinctive event title — asserting neither
-the title nor the raw cause message reaches a log.
+failure is asserted **not** to put that path in the log line, a malformed source
+whose parser failure quotes a distinctive event title — asserting neither the title
+nor the raw cause message reaches a log — a path that is a FIFO rather than a
+regular file, and a source that grows past `calendar_max_bytes` after it is
+opened.
 
 ### 8. Failure has two postures, because the reading has two consumers
 
