@@ -26,7 +26,8 @@
   each is a deferral in §10 rather than a decision.** The custody handoff is the
   instructive one: four consecutive adversarial rounds each found a hole in the
   previous round's fix, and §8 records the sequence and defers the protocol with
-  all four findings carried forward as constraints. The header says so because an
+  three of those findings carried forward as constraints and the fourth as a
+  question the custody lane may not answer by silence. The header says so because an
   ADR that quietly decides less than it set out to is worse than one that names
   what it declined — and because a document that had ratified that protocol would
   have been worse than either.
@@ -508,6 +509,23 @@ cannot be reached by letting the detector emit meaning.
 > before the hub durably holds it, or that admits an attempt with no terminal
 > outcome, does not satisfy this clause (§8, §10).
 
+> **Normative.** That clause governs what a peer **does**, not what it survives. A
+> peer that loses unresolved material to a crash has suffered a fault, not
+> destroyed it, and whether such material must survive a restart is **not decided
+> here** (§10).
+
+**The act-versus-fault line is drawn because the alternative reading boxes the
+custody lane, and architecture review found the box.** Read as a durability
+guarantee, the clause above would require an unresolved submission to survive a
+peer restart — which is durable storage at the edge, which reverses §9 and reaches
+`VISION.md` §8's "stateless client", which §10 defers and this lane may not touch.
+A constraint whose only satisfying mechanism a document forbids elsewhere is not a
+constraint; it is a decision made by omission, in the direction nobody argued. So
+the clause is scoped to conduct, where it is enforceable and where its whole
+purpose lies — a peer must not *choose* to drop the source — and the durability
+question goes to §10 as a question the custody lane must answer rather than as an
+answer it must reach.
+
 For an audio-shaped peer this means the promoted slice, not a transcript made at
 the edge. The clause is stated over derivations rather than over audio because the
 argument is not about audio.
@@ -611,7 +629,9 @@ document contains for where its own bar (header) actually falls:
    per-component-versus-source-wide argument, one level up.
 4. Bounding the pending set in aggregate still left a peer that **crashes**
    mid-attempt: the queue and the slice are in memory, so the attempt neither
-   retries nor terminally resolves, and the loss is silent.
+   retries nor terminally resolves, and the loss is silent. This one is not
+   carried as a constraint but as a question (§10), because its only satisfying
+   mechanism is durable edge storage — see §7's act-versus-fault clause.
 
 **Each of those fixes was correct, and the sequence is the finding.** A custody
 handoff is a two-party protocol over a lossy channel with independent failure on
@@ -755,7 +775,7 @@ resident-hub shape and `VISION.md` §8 are both built to prevent.
   failure on both sides, and this ADR has neither the transport (deferred above),
   a peer state model (surface, deferred above), nor a producer.** Fires with the
   first peer that submits material it holds — plausibly the same decision as the
-  transport. The lane that takes it inherits five constraints, every one of them
+  transport. The lane that takes it inherits three constraints, every one of them
   an adversarial finding against a draft of §8 that tried to decide it:
 
   1. an acknowledgement may not precede durable hub custody, or the peer destroys
@@ -763,11 +783,22 @@ resident-hub shape and `VISION.md` §8 are both built to prevent.
   2. every attempt must be able to resolve **terminally**, not only succeed, or a
      submission the hub can never accept traps the material forever;
   3. the pending set must be bounded **in aggregate** — count and bytes — and not
-     only per submission (ADR-0093 §7b's argument);
-  4. a peer restart may not silently lose an unresolved submission;
-  5. all four exist to protect §7, which is the clause that does not move.
+     only per submission (ADR-0093 §7b's argument).
 
-  A resolution rule satisfying fewer than five of those does not satisfy §7.
+  All three exist to protect §7, which is the clause that does not move, and a
+  resolution rule meeting fewer than all three does not satisfy it.
+
+  **And it inherits one question rather than a constraint**, because the two are
+  not the same thing and conflating them would decide it by omission. A peer that
+  **crashes** mid-attempt loses an unresolved submission to a fault; §7's clause
+  governs what a peer does and not what it survives, so nothing here requires the
+  material to come back. Requiring it would mean durable storage at the edge,
+  which reverses §9 and reaches `VISION.md` §8 — neither of which this lane may
+  decide. **So the custody lane owes an explicit answer to "must an unresolved
+  submission survive a peer restart, and at what cost to §9?", and may not reach
+  one by silence.** Architecture review of this ADR raised the box that the
+  alternative wording created; the repair is that the question is named as a
+  question.
 - **Whether ambient capture may write an `EpisodicMemory`, and on what
   exemption.** ADR-0075 §2 named "the buffered ambient capture #441 sketches" in
   its exclusion list and reserved the argument rather than granting it; ADR-0093 §4
@@ -793,8 +824,14 @@ resident-hub shape and `VISION.md` §8 are both built to prevent.
   §7's closing paragraph is why a transcript does not shortcut it.
 - **`VISION.md`'s sensor-spectrum amendment** — the ephemeral buffer,
   consent-per-capture, and graduated trigger autonomy, and with it §8's
-  "stateless client" sentence (§9). Owed; #441 holds it, and its condition is a
-  real sensor.
+  "stateless client" sentence (§9). Owed; #441 holds it. **Its trigger is tightened
+  here**: #441's standing condition is "a real sensor", and the sharper one is that
+  the amendment is ratified **before the first producer that relies on §9's
+  permission ships**, not merely before some sensor exists. §9 permits edge state
+  now and the Vision sentence forbids it in general terms; leaving that open past
+  the point where something depends on it is how a living document and the corpus
+  drift apart (ADR-0019). Architecture review raised the sequencing; this ADR
+  cannot write the amendment — the fence — but it can state when it comes due.
 
 ### 11. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -891,9 +928,9 @@ ADR-0092 §10 and ADR-0093's Context both rest on it.
 - **The custody handoff is a whole decision, and this ADR is the evidence.** Four
   adversarial rounds against §8 produced four correct fixes and a fifth open hole,
   which is what a two-party protocol costs when it is designed without a
-  transport, a state model or a producer. The findings are carried into §10 as
-  constraints, so the cost was not wasted — but the lane that takes it should
-  expect a decision, not a section.
+  transport, a state model or a producer. Three findings are carried into §10 as
+  constraints and the fourth as a question, so the cost was not wasted — but the
+  lane that takes it should expect a decision, not a section.
 - **What gets harder:** an edge that wants to do more than detect needs an ADR
   rather than a design choice, and a peer that wants the hub to reach further has
   to release more rather than be trusted more. Both are deliberate, and both are
