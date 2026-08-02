@@ -494,8 +494,12 @@ ADR-0008 §4 declined for the whole context subsystem.
 > be enforced by a size check performed before the read.
 
 > **Normative.** Filesystem work — resolving the path, opening it, and reading it —
-> **never runs on the event loop.** It runs on a worker, and the sensor awaits that
-> worker.
+> **never runs on the event loop.** It runs on a worker the **sensor owns**, never
+> on the event loop's default executor, and the sensor awaits that worker.
+
+> **Normative.** Process shutdown **abandons** an outstanding sensor worker rather
+> than joining it. No shutdown phase waits on one, and a stalled read may not delay
+> or prevent the hub exiting.
 
 > **Normative.** A sensor owns a **deadline** on its own read,
 > `calendar_read_timeout` (§7a). On expiry it raises `SensorError` under §8.
@@ -543,6 +547,34 @@ behind it, is the strongest form of that available when the kernel will not give
 the thread back: the count is bounded at one, the sensor keeps reporting the fault
 on every tick, and a mount that recovers releases the worker. What must not happen
 is a scheduler that quietly accumulates one stuck thread per interval forever.
+
+**The worker is the sensor's own and not the loop's, and that is a shutdown
+requirement rather than a stylistic one.** The hub runs as `asyncio.run(serve(settings))`
+(`src/ai_assistant/service/hub.py`), and `asyncio.run` shuts down the **default
+executor** before returning — which means *joining* its threads. A stalled read
+offloaded to the default executor therefore hangs the process at teardown, after
+the scheduler job has already failed and reported: shutdown looks like it is
+draining and is in fact waiting on a syscall that will never return, and the
+operator's only recourse is `SIGKILL`. That is precisely the outcome ADR-0083 §4
+builds a two-phase shutdown to avoid, reached around it rather than through it.
+
+**Abandoning the worker is safe, and it is safe for a reason specific to this
+seam.** ADR-0083 §4 bounds what it can and leaves unbounded only what must not be
+interrupted; a sensor read is neither. It holds no lock, opens no transaction,
+writes nothing, and its result is discarded the moment §8 raises — so there is no
+state to corrupt by walking away and nothing for a later run to reconcile. That is
+what makes it different from the engine drain ADR-0042 §2 protects, which waits
+because an interrupted write is a torn one. The thread ends when the kernel returns
+or when the process does.
+
+> **Normative.** `Sensor` gains **no lifecycle method**. There is no `close`, no
+> `aclose`, and nothing for a caller to await at shutdown.
+
+Adding one is the obvious move and it is the wrong one: the only thing a `close`
+could do about a thread blocked in an uninterruptible syscall is wait for it, which
+re-creates the hang this section just removed while making it look handled. A seam
+that cannot honour a lifecycle method should not carry one — and the abandonment
+rule above is what makes carrying one unnecessary rather than merely awkward.
 
 **The reservation is keyed to the worker and not to the deadline, and an earlier
 draft keyed it to the deadline.** That version left the accumulation reachable by
@@ -922,7 +954,9 @@ read is suspended** — asserting the deadline fires, the event loop stayed
 responsive, and a second read is refused while the worker is outstanding — and the
 same suspended worker **cancelled from outside**, asserting `CancelledError`
 propagates unchanged, a second read is still refused while the worker lives, and
-reads resume once it is released.
+reads resume once it is released — and a **service shutdown begun while a worker is
+still suspended**, asserting the process completes its shutdown and only then the
+worker is released.
 
 ### 8. Failure has two postures, because the reading has two consumers
 
