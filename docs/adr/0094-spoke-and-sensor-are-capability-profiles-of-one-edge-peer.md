@@ -505,14 +505,30 @@ cannot be reached by letting the detector emit meaning.
 > model-dependent derivation of it.
 
 > **Normative.** A peer may not destroy the material a submission was derived from
-> while that submission is unresolved. A custody rule that permits its destruction
-> before the hub durably holds it, or that admits an attempt with no terminal
-> outcome, does not satisfy this clause (§8, §10).
+> while that submission is unresolved.
+
+> **Normative.** A custody rule fails the clause above if it lets the material be
+> destroyed on the strength of an **acknowledgement** the hub makes before durably
+> holding it, or if it admits an attempt with no terminal outcome. Destroying the
+> material after an attempt has terminally failed **is** permitted, provided the
+> failure is reported and not silent; what the report says is §10's.
 
 > **Normative.** That clause governs what a peer **does**, not what it survives. A
 > peer that loses unresolved material to a crash has suffered a fault, not
 > destroyed it, and whether such material must survive a restart is **not decided
 > here** (§10).
+
+**The durability condition attaches to the acknowledgement and not to every exit,
+and an earlier draft attached it to both.** That version made deletion after a
+terminal refusal simultaneously required — §8 will not let a peer hold material
+forever — and forbidden, since the hub never durably holds material it refuses.
+Adversarial review found it after §8 was narrowed, which is where the defect came
+from: the terminal-failure exit moved out of §8 into §10's deferral and this
+clause was not re-read against its absence. The two exits are different acts. An
+acknowledgement is a *transfer*, so it may not precede the custody it asserts; a
+terminal failure is an *abandonment*, so what it owes is not custody but
+legibility — the user asked for this capture, and ADR-0084's ruling 4 is that a
+failure must be legible rather than silent.
 
 **The act-versus-fault line is drawn because the alternative reading boxes the
 custody lane, and architecture review found the box.** Read as a durability
