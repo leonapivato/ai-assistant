@@ -635,18 +635,24 @@ document contains for where its own bar (header) actually falls:
 
 **Each of those fixes was correct, and the sequence is the finding.** A custody
 handoff is a two-party protocol over a lossy channel with independent failure on
-both sides; the answer to (4) is either durable storage at the edge — which
-reverses §9, and reaches `VISION.md` §8's "stateless client", which this lane may
-not touch — or an accepted silent loss, which contradicts this section's own
-reporting rule. Deciding it needs the transport (§10), a peer state model (surface,
+both sides. Deciding it needs the transport (§10), a peer state model (surface,
 §10) and a producer, and this ADR has none of the three. **Continuing to decide it
 would be the exact failure the header sets out to avoid**: an ADR ratifying a
 protocol that has needed four corrections and is visibly owed a fifth.
 
-**So it is deferred with its constraints carried, which is stronger than deciding
-it badly and weaker than nothing.** §10 states the deferral, and every finding
-above survives as an obligation on the lane that takes it rather than as a lesson
-someone has to learn again.
+**Findings 1–3 are carried as constraints; finding 4 is carried as a question,
+and the asymmetry is deliberate.** The first three are satisfiable by any custody
+protocol and rule out specific broken ones, so binding them costs the later lane
+nothing it should have wanted. Finding 4 is different: the only mechanism that
+satisfies it is durable storage at the edge, which reverses §9 and reaches
+`VISION.md` §8's "stateless client" — neither of which this lane may decide. So
+binding it would decide durable edge state by implication, in the direction nobody
+argued, which is the failure §7's act-versus-fault clause exists to prevent. It is
+carried as a question the custody lane must answer explicitly instead.
+
+**Deferred with its findings carried is stronger than deciding it badly and weaker
+than nothing**, and that is the honest description. §10 states the deferral, and
+nothing above is left as a lesson someone has to learn again.
 
 **The duplicate a retry can produce is named here rather than left to the
 deferral**, because it is the one residual that is decidable without the protocol:
