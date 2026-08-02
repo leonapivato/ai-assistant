@@ -42,13 +42,30 @@
   item 1 and flagged independently by two readers.
 
   **Replaced**, one clause of §4: the requirement that two renderings exist.
-  ADR-0091 §1 rules that nothing is obliged to render `evidence_elided` — that
-  stays #568's, as §10 already left it — and keeps the constraint as a
-  conditional one: a surface that renders both an ADR-0077 §6 tombstone and an
-  elision count renders them so a reader can tell the two apart. The rest of §4
-  stands whole: the field, its recurrence over every install, the record-level
-  obligation, the floor-plus-ceiling shape of a count that *is* rendered, the
-  confidence-neutrality rule, and `export`'s carriage of the stored number.
+  ADR-0091 §1 rules that **§4** obliges no lane to render `evidence_elided` — the
+  form of the disclosure stays #568's, as §10 already left it — and keeps the
+  constraint as a conditional one: a surface that renders both an ADR-0077 §6
+  tombstone and an elision count renders them so a reader can tell the two apart.
+  The rest of §4 stands whole: the field, its recurrence over every install, the
+  record-level obligation, the floor-plus-ceiling shape of a count that *is*
+  rendered, the confidence-neutrality rule, and `export`'s carriage of the stored
+  number.
+
+  **What is *not* released is ADR-0073 §4's floor, and it is the obligation that
+  survives.** The release is scoped to this ADR's authority and to nothing else.
+  ADR-0073 §4 binds the inspection surface on its own — "the surface conveys …
+  how many citations stand behind it", and a dropped citation is "not silently
+  dropped" — and a displaced citation is inside it. §4 above says so itself when
+  it calls a traceless displacement "a *false* answer to the one question the
+  provenance display exists to answer"; ADR-0077 §6 glosses the same clause as
+  forbidding "a silent gap"; and §11 below ruled the floor "*satisfied* here, not
+  narrowed", which only parses if it reached the elision. §4's third surfaces
+  bullet is scoped to the interim it opens with — "**Until it is taken**" — and
+  its "silent about a quantity it does not hold" holds while no belief has
+  displaced, because the retained count is then the whole count. On the first
+  displacement it stops holding, the floor is unmet, and the disclosure is owed
+  by ADR-0073 rather than by this ADR. ADR-0091's Context and §1 argue it; #568
+  carries the surface work.
 
   **Amended**, four items, recorded here and not rewritten (ADR-0070 §1; the
   record is this note alone, because the `Status` line now carries a leading
