@@ -19,15 +19,13 @@
   makes carrying the reporting source's identity and its report time a
   precondition of leg 6's first `EXTERNAL` producer shipping. That vehicle is
   ADR-0092's to decide, together with imported-record identity and whether a user
-  assertion may override an attested belief. §9 states what this seam needs from
-  it and what it refuses to assume in the meantime. **ADR-0092 is the other half
-  of the same dispatched wave and merges ahead of this one**, so for as long as
-  this ADR is `Proposed` its number is a gap in the issued set rather than a
-  dangling reference — which ADR-0090 §1 rules is "neither failed nor reported".
-  This ADR is deliberately not written so as to be readable without it: §9's two
-  gates are the point, and collapsing them into a guess here is exactly what
-  ADR-0073 §4 forbade when it said the decision is "for that lane — with a
-  producer in hand — not one to guess here".
+  assertion may override an attested belief. **ADR-0092 was the other half of the
+  same dispatched wave and has merged ahead of this one**, so §9's two gates are
+  now stated against a ratified decision rather than an expected one — and §5 and
+  §9 say what it actually delivered, which is narrower than this ADR assumed while
+  it was pending. Collapsing those questions into a guess here was exactly what
+  ADR-0073 §4 forbade when it said the decision is "for that lane — with a producer
+  in hand — not one to guess here".
 - **Amends no earlier ADR and supersedes none**, and §12 applies ADR-0070 §1's
   test and ADR-0082 §1's record rule clause by clause to show why — including to
   the three places where the opposite reading is available: ADR-0008 §2's internal
@@ -358,15 +356,32 @@ state under ADR-0083 §6's upgrade-with-state discipline — the reason ADR-0083
 declined to decide the observation cursor inside a lifecycle ADR — and the same
 reason applies here with the same force.
 
-> **Normative.** Re-reading is safe only if re-proposing is idempotent at the
-> gate. A sensor may not be enabled on a schedule until ADR-0092's imported-record
-> identity makes a re-proposed entry fold rather than duplicate.
+> **Normative.** Re-reading is safe in the sense that matters — nothing the store
+> holds is destroyed by a re-read — and it is **not** free of duplicates. A sensor
+> mints its own id per record (ADR-0092 §6), so a re-proposed entry is folded by
+> *similarity* at the gate and not by identity, and an entry rewritten between
+> reads may land as a second live record.
 
 This is the sensor's version of ADR-0077 §8's "re-observation is safe by
-construction", and the difference is that the observer's safety came free from the
-gate folding a repeat into a `REINFORCE`, while a sensor's turns on what identity
-an imported record carries — which is ADR-0092's, not this ADR's. §9 states it as
-a gate.
+construction", and the honest difference is that the observer's safety came free —
+the gate folds a repeat into a `REINFORCE` — while a sensor's is now known to be
+partial. **ADR-0092 has since answered the question this clause was written
+against, and it answered it more narrowly than this ADR expected**, which is worth
+recording rather than smoothing over: an earlier draft made "a re-proposed entry
+folds rather than duplicates" a *precondition* of ever scheduling a sensor. ADR-0092
+§6 rules that an import "proposes each record at an id it mints, opaque to the
+source" and may never use the source's own key, and §7 spells out the consequence —
+"a small edit folds; a rewrite duplicates", filed as **#631** and explicitly *not*
+closed. Read literally, the old clause would therefore have gated scheduled
+ingestion on something ADR-0092 declines to provide, forbidding forever what it was
+written to sequence.
+
+The premise that survives is the one ADR-0092 §7 actually establishes, and it is
+enough: **the failure is duplication, not loss.** Two live records are both visible
+to ADR-0073 §1's enumeration with their bands, ADR-0072 §5 ranks `ASSERTED` above
+`ATTESTED` when assembling context, and the user can kill either (ADR-0073 §5).
+That is a materially different thing from the resurrection ADR-0038 §2a described,
+and it is what makes a periodic re-read tolerable rather than merely convenient.
 
 **Two costs are accepted and named, because a bound always has them.** An entry
 that falls outside the window before any run reads it is never proposed; and an
@@ -504,6 +519,22 @@ stops".
 > configurable value. It is a stable Tier 2 name, never derived from the source's
 > location or contents; a path, filename, address or account identifier may not be
 > used as one. The calendar sensor's identity is `"calendar"`.
+
+> **Normative.** No configurable display label is added this wave. A surface
+> renders `Attestation.reported_by`, which for the calendar sensor is its declared
+> identity.
+
+ADR-0092 §3 hands this lane exactly one question — "whether a human-facing display
+label is configured alongside it is the sensor-seam lane's… and is **not** this
+field; a surface with no label falls back to `reported_by`" — and the answer is no,
+for this wave. A label distinguishes *instances*, and §7 configures one source, so
+a label would have nothing to distinguish it from. It would be surface with no
+consumer, which is the rule ADR-0092 §10 invokes against its own candidate third
+field (ADR-0045 §1, ADR-0028 §7). ADR-0092 already supplies the fallback, so
+declining costs nothing and leaves the question live at the point where it acquires
+a subject: §11's registry deferral, when a second instance of one source type
+exists. Answering it rather than letting it sit unclaimed between two merged ADRs is
+the point of this clause.
 
 **Declared rather than configured, and an earlier draft had this wrong.** It said
 "configured", which §7a's table then failed to provide a field for — the
@@ -853,42 +884,68 @@ weaker one because it arrived inside an exception. `PermissionError` and
 operator which action to take, and the operator already knows the path, because
 they configured it.
 
-### 9. The dependency on ADR-0092, stated as a gate
+### 9. What ADR-0092 settled, and where this seam meets it
 
-ADR-0073 §4 puts a precondition on this wave in as many words: "The gate is on leg
+ADR-0073 §4 put a precondition on this wave in as many words: "The gate is on leg
 6's first `EXTERNAL` producer: carrying **both** the reporting source's identity
 and its report time is a precondition of it shipping, and whether that needs
 `Provenance` to grow fields is a `core` decision for that lane — with a producer
-in hand — not one to guess here."
+in hand — not one to guess here." **ADR-0092 is that lane and it has answered.**
+This section is therefore a boundary rather than a wait, and it records what the
+answer was — including the half that came back narrower than this ADR expected.
 
-> **Normative.** This ADR does not discharge ADR-0073 §4's gate and does not
-> decide the vehicle. `SensorReading` is where the source's identity, our read
-> instant, and any reading-wide as-of the source declares enter the system (§3,
-> §10); how any of them reaches a stored belief — and where a *per-entry* report
-> time lives — is ADR-0092's.
+> **Normative.** This ADR does not discharge ADR-0073 §4's gate and does not own
+> the vehicle. `SensorReading` is where the source's identity, our read instant,
+> and any reading-wide as-of the source declares enter the system (§3, §10). How
+> they reach a stored belief is ADR-0092 §1's `Attestation` on
+> `Provenance.attestation`, and the **per-entry** report time lives there, not on
+> the reading.
 
-> **Normative.** No sensor may be enabled on a schedule until ADR-0092 has decided
-> imported-record identity. Until then §5's idempotence premise is unestablished,
-> and a periodic re-read is a duplicate generator rather than a refresh.
+The two ADRs meet cleanly and independently, which is the useful evidence that the
+boundary was drawn in the right place. §10 below argues that a reading-wide `as_of`
+must never be filled from a file's mtime, because that is a fact about our
+filesystem rather than a claim the source made; ADR-0092 §3 rules the same
+prohibition from the other side — "**not the file's mtime**, which is a property of
+the last local write and is changed by a copy, a restore or a `touch`" — and
+supplies the per-entry answer this ADR declined to guess: RFC 5545 makes `DTSTAMP`
+mandatory on a `VEVENT`, so the calendar case has a true report time per
+occurrence. Neither lane read the other's draft.
 
-**Neither gate reaches the facet path**, which writes nothing, proposes nothing and
-touches no record. §7a's facet-only state is therefore reachable today, and that is
-the point of both gates being about *ingestion* rather than about the sensor.
+> **Normative.** ADR-0092 §6 settles imported-record identity: a sensor **mints its
+> own id** for every record it proposes and may never use the source's key — a
+> `VEVENT` `UID`, a row id, a URL — whether directly or namespaced.
 
-The two are separate gates on purpose. The first is about what a stored belief can
-honestly say; the second is about what happens when the same entry is proposed
-twice. A lane could discharge one and believe it had discharged both.
+> **Normative.** Scheduled ingestion is **not** gated on total idempotence, because
+> ADR-0092 §7 declines to provide it. What a sensor may rely on is that a re-read
+> destroys nothing; what it may not assume is that a re-proposed entry always
+> folds.
+
+**An earlier draft of this section gated scheduling on identity "making a
+re-proposed entry fold rather than duplicate", and that gate is now known to be
+unsatisfiable.** ADR-0092 §7 is explicit that identity is re-established by
+similarity, so "a small edit folds; a rewrite duplicates", and it files the
+residual as **#631** rather than closing it. A precondition written against an
+expected answer became, on the real one, a prohibition without an exit. It is
+replaced rather than quietly dropped, because the replacement is the substantive
+point: the residual is duplication, and ADR-0092 §7's comparison is the reason that
+is acceptable — under the source's key as the store's id the same similarity miss
+"upserts onto `m1`, and the store keeps two live records *and* no record that a
+retirement ever happened". Minting removes the destruction and leaves the
+duplicate.
+
+**Neither boundary reaches the facet path**, which writes nothing, proposes nothing
+and touches no record. §7a's facet-only state is therefore reachable today, and
+that is the point of both being about *ingestion* rather than about the sensor.
 
 > **Normative.** This ADR decides nothing about whether a user assertion may
-> override an attested belief. Where a sensor's re-read would restore a value the
-> user corrected, the governing rule is ADR-0092's, and this seam conforms to
-> whatever it ratifies.
+> override an attested belief. ADR-0092 §4 rules that it may — `EXTERNAL` joins the
+> supersedable class — and this seam conforms to that rather than restating it.
 
-ADR-0038 §2a's exclusion of `EXTERNAL` from supersession is mechanical — it turns
-on an external record's id being "the integrating system's idempotency key" — and
-this wave is the first time it has a live case. That makes it ADR-0092's to move,
-and it makes pre-empting it here particularly cheap-looking and particularly
-wrong: the mechanism and the identity decision are the same decision.
+ADR-0038 §2a's exclusion of `EXTERNAL` from supersession was mechanical: it turned
+on an external record's id being "the integrating system's idempotency key". That
+premise is exactly what ADR-0092 §6 removes, which is why the mechanism and the
+identity decision were one decision and why pre-empting either here would have been
+cheap-looking and wrong.
 
 ### 10. The contract surface owed, and what the triad lane owes
 
@@ -938,16 +995,20 @@ wrong: the mechanism and the identity decision are the same decision.
   > the whole reading. It may never be filled from the filesystem, from the clock,
   > or from one entry's stamp applied to the rest.
 
-  > **Normative.** Per-proposal report time is **not** decided here and is not
-  > foreclosed here. Where a source's report time is per-entry, it belongs on the
-  > proposal, by the vehicle ADR-0092 ratifies (§9), and a sensor sets it when
-  > constructing the proposal.
+  > **Normative.** Per-proposal report time is **not** decided here. Where a
+  > source's report time is per-entry — as a calendar's is — it belongs on the
+  > proposal, in ADR-0092 §1's `Attestation`, and a sensor sets it when
+  > constructing the proposal. For the calendar sensor that value is the
+  > occurrence's `DTSTAMP`, which RFC 5545 makes mandatory (ADR-0092 §3).
 
   This is the boundary between the two lanes taken seriously rather than
-  approximately. An earlier draft made `as_of` required at the reading level, which
-  would have decided the *granularity* of ADR-0073 §4's report time — reading-wide
-  — inside the seam ADR, leaving the lane that owns that gate unable to recover a
-  per-entry time this contract never carried. Deciding a neighbouring lane's
+  approximately, and the outcome is the evidence it was worth the care. An earlier
+  draft made `as_of` required at the reading level, which would have decided the
+  *granularity* of ADR-0073 §4's report time — reading-wide — inside the seam ADR,
+  leaving the lane that owns that gate unable to recover a per-entry time this
+  contract never carried. ADR-0092 §1 then chose per-record, and §3 chose
+  `DTSTAMP`; a required reading-level field would have been a contradiction to
+  reconcile instead of a slot to leave empty. Deciding a neighbouring lane's
   question by choosing a field's cardinality is the quietest way to decide it.
   - `proposals: tuple[MemoryUpdateProposal, ...]` — possibly empty, which under §8
     means the source had nothing to propose within the bound and is a successful
@@ -1078,7 +1139,14 @@ the `lint-imports` contract pinning §2.
   transmits a credential and a request, so it engages §1 and cannot be reached by
   changing a path to a URL — the same sentence ADR-0084 wrote about its own
   transport, for the same reason.
-- **A source registry.** §7 revisits at the third source.
+- **A source registry**, and with it a **configurable display label** (§7) and an
+  instance-distinguishing `reported_by`. §7 revisits at the third source; the label
+  acquires a subject at the second instance of one source type.
+- **Folding a rewritten entry into its predecessor.** ADR-0092 §7's residual, filed
+  as **#631**: identity is re-established by similarity, so a small edit folds and a
+  rewrite duplicates. §5 relies on the narrower guarantee — a re-read destroys
+  nothing — and does not assume this one. It fires on the first observed duplicate,
+  which is the trigger #631 records.
 - **#545's model in full** — expectations, the ledger, and met/not-met/unknown.
   That issue is a proposal carrying its own do-not-implement header, and leg 6
   builds one channel rather than the model. Its three prerequisites are what has
@@ -1113,9 +1181,18 @@ changes**. The three places where the opposite reading is available:
   as specified is not amending it. This is the ADR-0083 §15 pattern — examining a
   clause and finding it unmet — applied to three clauses at once.
 
-ADR-0073 §4's gate is *bound to* rather than discharged (§9); ADR-0038 §2a is
-untouched and belongs to ADR-0092; ADR-0017 §1 and §3 are examined in Context and
-found not to engage.
+**ADR-0092 — nothing owed, in either direction, and the pair was checked rather
+than assumed.** Its §10 leaves "the sensor seam… in full" to this lane and its §3
+leaves the display label here; §7 and §9 answer both and narrow neither of its
+rulings. This ADR restates `Attestation`, §6's minting rule and §4's supersedable
+widening as constraints it conforms to, and a reader holding ADR-0092 would act no
+differently after reading this one — ADR-0070 §1's test, unmet. Under ADR-0082 §1
+this ADR's own additions are **stacked additions** on it, recorded here and nowhere
+else.
+
+ADR-0073 §4's gate is *bound to* rather than discharged (§9); ADR-0038 §2a was
+moved by ADR-0092 §8 and not by this ADR; ADR-0017 §1 and §3 are examined in
+Context and found not to engage.
 
 ## Consequences
 
