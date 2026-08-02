@@ -207,10 +207,10 @@ def _exactly_an_integer(value: object) -> object:
     ``1`` that arrives, so nothing downstream can tell the difference.
 
     The code **below** settings already refuses this, on the stated ground that a
-    flag is not a count: ``ObservationStage._check_batch_size``,
-    ``LearningLoop._check_tuning``, ``Engine.__init__``, and
-    ``ModelBackedObserver._check_bound`` each exclude ``bool`` before their range
-    check. Because :class:`Settings` hands them an *already coerced* integer,
+    flag is not a count: ``_check_batch_size`` in ``orchestration/observation.py``,
+    ``_check_tuning`` in ``orchestration/loop.py``, ``Engine.__init__``, and
+    ``_check_bound`` in ``learning/observer.py`` each exclude ``bool`` before their
+    range check. Because :class:`Settings` hands them an *already coerced* integer,
     those guards can never fire on the settings path; they only ever protect the
     constructor seam a test or a second composition root reaches directly. This
     validator makes the configuration layer state the same rule the four layers

@@ -716,8 +716,8 @@ def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
     The target is retained off the read path with its window's end brought in to
     ``end = now`` where the window is unbounded at the end, otherwise
     ``end = min(now, valid_until)``; ``valid_from`` and every other field are
-    preserved. Mirrors ``MemoryIngestor._close_window``, carrying ADR-0080 §1's
-    clamp — a retirement never widens a window, so it cannot resurrect a
+    preserved. Mirrors ``_close_window`` in ``memory/ingest.py``, carrying ADR-0080
+    §1's clamp — a retirement never widens a window, so it cannot resurrect a
     self-closed belief — and §3's refusal of a close at or before ``valid_from``,
     **the tie included**, which is the empty interval ``[F, F)`` the durable store's
     decode re-validation rejects. Both so the fake cannot pass a consumer's test on

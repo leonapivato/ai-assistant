@@ -207,8 +207,9 @@ def checked_clock(now: Callable[[], datetime], *, owner: str) -> Clock:
     and uniform because Python compares two aware datetimes sharing a ``tzinfo``
     by wall clock, ignoring ``fold``. Converting at the producer means every
     downstream comparison sees UTC — including the ones no `core` validator ever
-    reaches, like ``SqliteMemoryStore._now_epoch``'s ``timestamp()``. Conversion
-    is information-preserving (ADR-0023 §1), so nothing is fabricated.
+    reaches, like the bare microsecond epoch ``SqliteMemoryStore._now_micros``
+    derives from its reading. Conversion is information-preserving (ADR-0023 §1),
+    so nothing is fabricated.
 
     **The guard covers the reading, not the invocation.** An exception raised by
     ``now`` *itself* propagates unwrapped: that is the clock's own failure,
