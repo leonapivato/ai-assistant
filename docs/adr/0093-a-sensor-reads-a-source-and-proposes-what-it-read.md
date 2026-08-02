@@ -513,7 +513,7 @@ value — because the *dimensions* are the decision and the numbers are revisabl
 | `calendar_window_future` | 7 days | `> 0` | how far forward it reaches |
 | `calendar_max_entries` | 500 | `[1, 2**63)` | entries in the window, and so proposals |
 | `calendar_max_bytes` | 8 MiB | `> 0` | the source read **before** parsing |
-| `calendar_max_expansion` | 10,000 | `[1, 2**63)` | occurrences considered per recurrence (§7b) |
+| `calendar_max_expansion` | 100,000 | `[1, 2**63)` | occurrences considered across the whole read (§7b) |
 
 **The sensor's identity is deliberately not in that table.** It is declared, not
 configured, for the reason given above this subsection: a free-text setting is how
@@ -570,10 +570,11 @@ Five of the seven are decisions rather than figures pulled from the air:
   ADR-0017 §3 requires of a credential read ("otherwise an implementation reads
   it, then checks, then stops"), applied to a parse.
 - **`calendar_max_expansion` bounds a *different* thing from the other two**, and
-  §7b argues why neither substitutes for it: it bounds the occurrences a recurrence
-  makes an implementation *consider*, which is unbounded by both the byte cap (the
-  component is tiny) and the entry cap (the cap counts what lands in the window,
-  not what is walked to reach it).
+  §7b argues why neither substitutes for it: it bounds the occurrences a read makes
+  an implementation *consider*, which is unbounded by both the byte cap (a
+  pathological component is tiny) and the entry cap (that counts what lands in the
+  window, not what is walked to reach it). It is spent across the whole read rather
+  than per component, for the reason §7b gives.
 - **All three caps refuse rather than truncate** (§5), so exceeding any raises under
   §8. A deployment with a genuinely larger calendar widens the cap or narrows the
   window, and does so knowingly.
@@ -642,9 +643,10 @@ to discover that 500 survive is precisely the work a cap is for.
 
 > **Normative.** A recurrence is expanded by **seeking to the window**, never by
 > enumerating from `DTSTART` and discarding what precedes it. Where a rule's form
-> does not admit a seek, expansion is bounded by `calendar_max_expansion` —
-> occurrences *considered* per component, default 10,000, range `[1, 2**63)`,
-> refused at load — and a component exceeding it raises under §8.
+> does not admit a seek, expansion is bounded by `calendar_max_expansion` — a
+> **source-wide** budget of occurrences considered across every component of one
+> read, default 100,000, range `[1, 2**63)`, refused at load — and a read that
+> exhausts it raises under §8.
 
 **An in-window cap does not bound the work of reaching the window, and this is the
 one hole a byte cap cannot cover.** A component reading
@@ -656,6 +658,16 @@ seek is the right answer for the rules that admit one, and the second bound is
 belt and braces for those that do not — fail-closed, in the same posture §5 takes
 everywhere else: a source too expensive to read is refused, not silently trimmed.
 The two together are what make "bounded" a property rather than an intention.
+
+**The budget is source-wide rather than per component, and a per-component version
+was tried and does not hold.** Under a per-component cap, an 8 MiB file can carry
+thousands of non-seekable recurrences, each spending its full allowance to
+establish that it has *no* in-window occurrence. Every component conforms, no entry
+is produced so `calendar_max_entries` never fires, and the read still performs
+hundreds of millions of steps. A budget that resets per component bounds each piece
+of the work and not the work, which is the failure a bound exists to exclude. One
+accumulator across the read is both simpler and the only version that is actually a
+bound.
 
 > **Normative.** An entry whose times are floating or date-only is localised in the
 > configured `Settings.timezone`, the same value ADR-0008 §5 gives the temporal
@@ -681,10 +693,13 @@ deterministic tests for each boundary above: an event spanning the window's star
 one spanning its end, an event ending *exactly* at the lower edge and one starting
 exactly at the upper, a zero-duration entry on each edge, an all-day entry at both
 edges, a recurrence expanding past the cap, an uninterpretable entry among valid
-   ones, a source whose in-window occurrences are entirely uninterpretable and over
-the cap, an old, high-frequency recurrence whose expansion must reach the window
-without walking to it, and a missing configured path whose scheduled failure is
-asserted **not** to put that path in the log line.
+ones, a source whose in-window occurrences are entirely uninterpretable and over
+the cap, an old high-frequency recurrence whose expansion must reach the window
+without walking to it, **many** individually-cheap non-seekable recurrences with no
+in-window occurrence between them, a missing configured path whose scheduled
+failure is asserted **not** to put that path in the log line, and a malformed
+source whose parser failure quotes a distinctive event title — asserting neither
+the title nor the raw cause message reaches a log.
 
 ### 8. Failure has two postures, because the reading has two consumers
 
