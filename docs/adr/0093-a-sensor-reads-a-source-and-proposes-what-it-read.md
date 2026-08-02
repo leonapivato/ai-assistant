@@ -874,6 +874,31 @@ occurrences. A single `VEVENT` carrying `RRULE:FREQ=SECONDLY` is a few dozen byt
 of occurrences in the default window. A cap counting components would accept it
 while the sensor built the tuple the cap exists to bound.
 
+> **Normative.** A `RECURRENCE-ID` override is resolved **against its master's
+> expansion before anything is counted or proposed**: it replaces the occurrence it
+> names, and an override the source marks cancelled **removes** that occurrence
+> from the expansion. A removed occurrence is never counted and never proposed.
+
+**Not emitting an occurrence the source says does not occur is not "proposing an
+absence", and the distinction is worth stating because §4's rule looks like it
+forbids this.** §4 governs what a sensor *asserts about the world* — it may not
+claim a thing was cancelled, and may not retract a belief on the strength of a
+reading. Declining to propose an occurrence that the source's own content says does
+not happen is neither: it is reading the source correctly. The alternative
+readings are both worse and both were available. Emitting the cancelled occurrence
+proposes a meeting the user's calendar explicitly says is off. Emitting some
+"cancelled" marker is the absence claim §4 actually forbids. Resolving overrides
+into the expansion first makes the question disappear rather than answering it,
+which is why the ordering is normative rather than advisory.
+
+**The residual is the one §11 already carries.** An occurrence proposed by an
+earlier read and cancelled since leaves a stored belief that this read does not
+retract — because §4 forbids the sensor retracting anything, and because a bounded
+or failed read is indistinguishable from a cancellation. The belief goes stale
+rather than wrong-and-invisible: it stays live, enumerable with its band, and the
+user can kill it (ADR-0073 §5). Closing it is the retraction decision §11 defers,
+and this case is exactly the one that will motivate it.
+
 > **Normative.** `calendar_max_entries` counts **in-window occurrences before
 > interpretation**, and the cap is applied before the skip rule below. An
 > uninterpretable occurrence counts towards the cap, and a source whose in-window
@@ -991,7 +1016,11 @@ read is suspended**, and separately a **parse or expansion made to run long** �
 each asserting the deadline fires, the event loop stayed responsive throughout, and
 a second read is refused while the worker is outstanding — a recurrence whose
 occurrences each repeat a large content field, asserting the content budget refuses
-before memory is spent — and the
+before memory is spent, a master recurrence with an in-window **cancelled
+`RECURRENCE-ID` override** — asserting the occurrence is absent from the proposals,
+absent from the cap's count, and that nothing is proposed about its cancellation —
+and the same with a non-cancelled override, asserting it replaces rather than
+duplicates its occurrence — and the
 same suspended worker **cancelled from outside**, asserting `CancelledError`
 propagates unchanged, a second read is still refused while the worker lives, and
 reads resume once it is released — and, **in a subprocess**, a hub shut down while a read is
