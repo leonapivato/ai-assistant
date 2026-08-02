@@ -898,6 +898,17 @@ Protocol"):**
    third capability is the gap ADR-0022 §Consequences filed against
    `FakeMemoryStore` as #105, not repeated here.
 
+   **A fourth capability is required, and it is what makes the cancellation clause
+   above testable at all:** the fake exposes the existing suspension gate —
+   `SuspendableResource.suspend_next`, whose handle's `reached` and `release` are
+   `ai_assistant/testing/cancellation.py`'s — so the suite can cancel a `read()`
+   that has demonstrably arrived at an await, and only then. Without it the clause
+   passes vacuously: a fake that completes immediately can only be cancelled
+   *before* it starts, which exercises none of the code an implementation would use
+   to catch a `CancelledError` during source I/O and convert it. That conversion is
+   the exact failure the clause exists to forbid, so a test that cannot reach it is
+   worse than no test — it reports the property as held.
+
 **Four rulings above are deliberately *not* suite clauses, and putting them there
 would be the error.** (§8's `SensorError` type *is* one, above; what is not is the
 provenance of the failure that reaches it.) The test is whether a clause is decidable from `name` and
