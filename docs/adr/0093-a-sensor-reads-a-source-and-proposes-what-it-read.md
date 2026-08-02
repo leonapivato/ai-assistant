@@ -566,6 +566,23 @@ permanently unreachable. That is exactly the coverage failure §5 argues a senso
 does not have, reintroduced by a filter choice rather than by a missing cursor, and
 it fails hardest on the entry the facet most wants: the meeting happening now.
 
+> **Normative.** Both intervals are **half-open**. The window is
+> `[read_at - calendar_window_past, read_at + calendar_window_future)` and an
+> entry's interval is `[start, end)`. An entry with a non-zero duration overlaps
+> when `start < window_end` and `end > window_start`; a zero-duration entry
+> overlaps when `window_start <= start < window_end`.
+
+"Overlaps" alone is not a predicate, and the gap is not academic: an event ending
+exactly at the window's lower edge is in under a closed reading and out under a
+half-open one, which — with the cap otherwise exactly filled — is the difference
+between a successful read and a refusal, from identical settings and an identical
+clock. Half-open is chosen because it is the reading under which adjacent windows
+partition time without double-counting, which is the property anything comparing
+two runs will want. The zero-duration arm is stated separately because the general
+overlap test degenerates for it: `end > window_start` is false for an instant
+sitting exactly *on* `window_start`, which would silently exclude the one entry
+shape that has no duration to spare.
+
 > **Normative.** A recurring entry is counted and proposed as its **occurrences
 > within the window**, not as the one component that generates them.
 
@@ -574,6 +591,19 @@ occurrences. A single `VEVENT` carrying `RRULE:FREQ=SECONDLY` is a few dozen byt
 — so `calendar_max_bytes` does not catch it — and expands to hundreds of thousands
 of occurrences in the default window. A cap counting components would accept it
 while the sensor built the tuple the cap exists to bound.
+
+> **Normative.** `calendar_max_entries` counts **in-window occurrences before
+> interpretation**, and the cap is applied before the skip rule below. An
+> uninterpretable occurrence counts towards the cap, and a source whose in-window
+> occurrence count exceeds it raises under §8 without any occurrence being
+> interpreted.
+
+The order is load-bearing and the two rules contradict without it: 501 in-window
+occurrences of which all 501 are uninterpretable would, under skip-first, produce a
+successful empty reading from a source that busted its cap — a refusal turned into
+a false "your calendar is clear", which is the failure §8 exists to prevent. It is
+also the only order under which the cap bounds anything: interpreting 501 entries
+to discover that 500 survive is precisely the work a cap is for.
 
 > **Normative.** An entry whose times are floating or date-only is localised in the
 > configured `Settings.timezone`, the same value ADR-0008 §5 gives the temporal
@@ -596,8 +626,11 @@ skipped entry, so §4's absence rule is respected rather than strained. Everythi
 else about the format — which properties map to a proposal's content, exotic
 `RRULE` and `EXDATE` forms, `RECURRENCE-ID` overrides — is the lane's, and it owes
 deterministic tests for each boundary above: an event spanning the window's start,
-one spanning its end, an all-day entry at both edges, a recurrence expanding past
-the cap, and an uninterpretable entry among valid ones.
+one spanning its end, an event ending *exactly* at the lower edge and one starting
+exactly at the upper, a zero-duration entry on each edge, an all-day entry at both
+edges, a recurrence expanding past the cap, an uninterpretable entry among valid
+ones, and a source whose in-window occurrences are entirely uninterpretable and
+over the cap.
 
 ### 8. Failure has two postures, because the reading has two consumers
 
