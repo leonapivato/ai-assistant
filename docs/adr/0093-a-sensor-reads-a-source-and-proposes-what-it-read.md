@@ -497,9 +497,21 @@ ADR-0008 §4 declined for the whole context subsystem.
 > **never runs on the event loop.** It runs on a worker the **sensor owns**, never
 > on the event loop's default executor, and the sensor awaits that worker.
 
-> **Normative.** Process shutdown **abandons** an outstanding sensor worker rather
-> than joining it. No shutdown phase waits on one, and a stalled read may not delay
-> or prevent the hub exiting.
+> **Normative.** A sensor worker is **terminable at process exit**: neither
+> service shutdown nor interpreter shutdown may join it, and a read blocked
+> indefinitely may not delay or prevent the hub exiting. A daemon thread meets
+> this; a `ThreadPoolExecutor` does not.
+
+**The obligation is the exit, and the mechanism is named only because the obvious
+one fails it.** "Owned, and not the default executor" is not sufficient and an
+earlier draft stopped there: a dedicated `ThreadPoolExecutor` satisfies both words
+and still hangs, because `concurrent.futures.thread` registers an interpreter-exit
+hook that joins its workers — so `serve()` returns, `asyncio.run` finishes, and the
+process then waits on the same stalled syscall one layer lower down. The
+requirement is therefore stated as a property of the worker rather than of its
+owner, and a daemon thread is named as the cheap way to hold it. An equivalently
+terminable mechanism — a separately killable subprocess, say — meets it too, and
+that choice is the sensor lane's.
 
 > **Normative.** A sensor owns a **deadline** on its own read,
 > `calendar_read_timeout` (§7a). On expiry it raises `SensorError` under §8.
@@ -954,9 +966,12 @@ read is suspended** — asserting the deadline fires, the event loop stayed
 responsive, and a second read is refused while the worker is outstanding — and the
 same suspended worker **cancelled from outside**, asserting `CancelledError`
 propagates unchanged, a second read is still refused while the worker lives, and
-reads resume once it is released — and a **service shutdown begun while a worker is
-still suspended**, asserting the process completes its shutdown and only then the
-worker is released.
+reads resume once it is released — and, **in a subprocess**, a hub shut down while a read is
+still blocked, asserting the process exits within a bounded time *with the read
+still blocked*. The subprocess is not incidental: an earlier draft specified this
+case in-process, asserting that the worker is released after shutdown completes,
+which no exited process can be around to observe. Only an external observer can
+watch a process die.
 
 ### 8. Failure has two postures, because the reading has two consumers
 
