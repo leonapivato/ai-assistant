@@ -850,18 +850,31 @@ silently. Saturating the anchor is right for the reason it is right at the edges
 there is no instant before the minimum for a predecessor to have started at, so the
 clamped anchor and the ideal one reach the same occurrences.
 
-> **Normative.** `read_at` is read from the clock **once, before the source read
-> begins**, and every window edge, seek anchor, override resolution and membership
-> test in this read uses that one instant. A sensor may not re-read the clock
+> **Normative.** `read_at` is read from the clock **exactly once per read, at the
+> instant the source's bytes are acquired** — after they are read, before they are
+> parsed. Every window edge, seek anchor, override resolution and membership test
+> in that read uses that one instant, and a sensor may not consult the clock again
 > mid-read.
 
-Without this the anchor drifts across a read that §7 permits to run for
-`calendar_read_timeout`: a clock sampled at 10:00:00 and one sampled at 10:00:10
-put different entries at the window's edges, so two conforming sensors given the
-same source and the same configuration propose different sets — and the same sensor
-does, run twice. The bound is what makes the drift reachable rather than
-theoretical, which is why the clause belongs beside the bounds and not with the
-clock.
+**One instant, and it is the snapshot's instant.** Two requirements meet here and
+they pull in different directions until the capture point is named precisely.
+*Determinism* wants a single reading: a clock consulted twice across a read that §7
+permits to run for `calendar_read_timeout` puts different entries at the window's
+edges, so two conforming sensors given the same source and configuration propose
+different sets, and so does one sensor run twice. *Truthfulness* wants the instant
+to be the one `read_at` claims to be — "the instant this system performed the
+read". Anchoring before the read satisfies the first and breaks the second: a
+capture at 10:00 that waits on its worker, opens a file replaced at 10:05, and
+reads it at 10:10 returns proposals describing the 10:05 file stamped 10:00, with
+membership evaluated against an instant that predates the data. A just-ended event
+is then proposed as current.
+
+Acquisition satisfies both. It is a single point, so nothing drifts; and it is the
+moment the bytes this reading actually describes came into our hands, so the stamp
+is true of them. Everything downstream — parsing, expansion, override composition,
+membership — is pure computation over that snapshot, so no later instant is
+meaningful to it. The caps that must act *before* acquisition, `calendar_max_bytes`
+and `calendar_read_timeout`, need no anchor and are unaffected.
 
 > **Normative.** Both intervals are **half-open**. The window is
 > `[read_at - calendar_window_past, read_at + calendar_window_future)` and an
@@ -1088,8 +1101,10 @@ whose parser failure quotes a distinctive event title — asserting neither the 
 nor the raw cause message reaches a log — a path that is a **writer-less FIFO**, asserting the read
 fails rather than hangs, a source that grows past `calendar_max_bytes` after it is
 opened, a long-duration recurrence whose seek anchor underflows, a floating
-entry at each of an ambiguous and a nonexistent local time, a **regular file whose
-read is suspended**, and separately a **parse or expansion made to run long** —
+entry at each of an ambiguous and a nonexistent local time, a source **replaced between the read's start and its
+acquisition**, asserting the reading's `read_at` and its window describe the bytes
+returned rather than the file that was there when the call began, a **regular file
+whose read is suspended**, and separately a **parse or expansion made to run long** —
 each asserting the deadline fires, the event loop stayed responsive throughout, and
 a second read is refused while the worker is outstanding — a recurrence whose
 occurrences each repeat a large content field, asserting the content budget refuses
@@ -1313,8 +1328,8 @@ cheap-looking and wrong.
     caller so the value that reaches ADR-0092's vehicle is the producer's own.
   - `read_at: UtcInstant` — the instant **this system** performed the read. Always
     present, because it is always knowable and always true: it is our own clock. It
-    is captured **once, before the read begins**, and is the single anchor every
-    window and recurrence decision uses (§7b).
+    is captured **once, at the moment the source's bytes are acquired**, and is the
+    single anchor every window and recurrence decision uses (§7b).
   - `as_of: UtcInstant | None` — the instant **the source declares for the reading
     as a whole**, where the source declares one, and `None` where it does not.
     Never merged with `read_at`, because collapsing them is the exact defect
