@@ -320,6 +320,13 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         'An <img src="#123"> tag.',
         "See <a href=#123>section</a>.",
         "An <img src=/docs/#123> tag.",
+        "See the [section](https://example.test/foo(bar)#123).",
+        "See the [section](https://example.test/(a)/(b)/(c)#123).",
+        "See https://example.test/foo(bar)#123 for detail.",
+        "See the [section](/docs/(a)#123) too.",
+        'See the [guide](/g "see #123").',
+        "See <a href = '#123'>section</a>.",
+        "The path docs/adr/(draft)#123 is not a citation.",
     ],
     ids=[
         "heading",
@@ -344,6 +351,13 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         "html-src",
         "html-unquoted",
         "html-unquoted-path",
+        "balanced-paren-destination",
+        "twice-nested-paren-destination",
+        "bare-url-with-parens",
+        "relative-paren-destination",
+        "link-title",
+        "spaced-html-attribute",
+        "paren-in-a-path",
     ],
 )
 def test_a_hash_that_is_not_a_tracker_citation_is_not_selected(tmp_path: Path, line: str) -> None:
@@ -367,6 +381,12 @@ def test_a_hash_that_is_not_a_tracker_citation_is_not_selected(tmp_path: Path, l
         "See https://example.test/x and #2.",
         "See the [guide](https://example.test/g) and #2.",
         'ADR-0021 says in terms that "#2 stays open".',
+        "See the [guide](https://example.test/g(x)) and #2.",
+        "- **#2** landed.",
+        "The `#2` window is open.",
+        "The lane's to close (**#2**).",
+        "See (#2/#3/#4) together.",
+        "ADR-0046 — §10's statement that '#2 closes [#3]'.",
     ],
     ids=[
         "parenthesised",
@@ -376,14 +396,59 @@ def test_a_hash_that_is_not_a_tracker_citation_is_not_selected(tmp_path: Path, l
         "beside-a-url",
         "beside-a-link",
         "quoted-in-prose",
+        "beside-a-paren-carrying-link",
+        "bolded",
+        "backticked",
+        "bolded-in-parens",
+        "slash-joined-in-parens",
+        "single-quoted-and-bracketed",
     ],
 )
 def test_a_tracker_citation_in_prose_is_still_selected(tmp_path: Path, line: str) -> None:
-    """The exclusions above must not swallow the form the corpus actually writes."""
+    """The exclusions above must not swallow the form the corpus actually writes.
+
+    Every delimiter run here was measured on ``docs/adr/**`` rather than
+    invented: stating the citation positively closes the syntax set, but only if
+    the statement covers what the corpus writes.
+    """
     _make_repo(tmp_path, {"0001-one.md": f"# 1. One\n\n{line}\n"})
     env = _fake_gh(tmp_path, [1])
 
     assert _citations(_report(tmp_path, env=env), "tracker")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "The pre-#2 situation is different.",
+        "See <details><summary>#2</summary> for detail.",
+    ],
+    ids=["hyphenated-compound", "between-html-tags"],
+)
+def test_a_citation_in_an_unrecognised_context_is_passed_silently(
+    tmp_path: Path, line: str
+) -> None:
+    """The measured cost of stating the citation positively, pinned so it is visible.
+
+    These *are* tracker citations and the checker no longer selects them, because
+    the run before the ``#`` is neither an opening-delimiter run nor a ``#NNN/``
+    join. ADR-0088 §6 ranks that miss benign where the false report it buys — a
+    Tier 1 failure over a link destination (#605) — is not. One instance exists
+    in the corpus today, ADR-0059's ``pre-#242``, on a number that resolves.
+
+    Widening the delimiter set to recover one of these is a legitimate change;
+    doing it by re-enumerating the syntaxes a ``#`` can hide in is the search
+    #598 ran eight rounds of without converging.
+    """
+    _make_repo(tmp_path, {"0001-one.md": f"# 1. One\n\n{line}\n"})
+    env = _fake_gh(tmp_path, [1])
+
+    report = _report(tmp_path, env=env)
+
+    counts = report["counts"]
+    assert isinstance(counts, dict)
+    assert counts["tracker"] == 0
+    assert _findings(report, "tracker") == []
 
 
 # --------------------------------------------------------------------------- #

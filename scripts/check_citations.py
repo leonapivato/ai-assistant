@@ -99,22 +99,58 @@ _DOCUMENT_SUFFIXES = frozenset(
 #: scope (ADR-0074's "ADR-0076 §9's obligation set" names ADR-0074's own §9).
 _DECISION_RE = re.compile(r"\bADR-(\d{4})\b")
 
-#: A tracker citation (ADR-0088 §1(c)).
+#: A tracker citation's *shape* (ADR-0088 §1(c)). Whether an occurrence of that
+#: shape is a citation is decided by ``_CITATION_CONTEXT_RE`` below, not here.
 #:
 #: **This is the one selector whose mistakes reach Tier 1**, where a false
-#: positive *fails* a change rather than joining a list a reader scans, so its
-#: exclusions are the strictest here. Ruled out: a markdown heading (``#`` then
-#: a space), a hex colour and a doubled ``#`` by the character classes; and a
-#: **numeric** fragment link — ``[section](#123)`` — by the ``](`` lookbehind,
-#: which the slug case never exercised.
-#:
+#: positive *fails* a change rather than joining a list a reader scans. The
+#: character classes rule out a markdown heading (``#`` then a space), a hex
+#: colour, and a doubled ``#`` — ``##7`` matches at neither ``#``, which is the
+#: safe reading of a shape nobody can attribute.
 _TRACKER_RE = re.compile(r"(?<![\w#])#(\d{1,6})(?![\w#])")
 
+#: **Where a tracker citation may begin — stated positively, so the answer is
+#: closed.**
+#:
+#: The negative question — *which syntaxes can hide a ``#NNN`` that is not a
+#: citation?* — has no last answer. Eight consecutive review rounds on #598 each
+#: found one more: ``](#123)``, ``https://…/#123``, ``//host/docs/#123``,
+#: ``](/docs/#123)``, ``](#2/#3)``, ``[x]: #123``, ``<a href="#123">``,
+#: ``<a href=#123>``. #605 found the ninth — a destination carrying balanced
+#: parentheses, where the span exclusion below stops at the first ``)`` and
+#: leaves ``#123`` behind. ADR-0088 §6 supplies the closing move rather than a
+#: tenth patch: "a citation the checker cannot evaluate … is **passed
+#: silently**". So this states the *citation* and passes everything else.
+#:
+#: A ``#NNN`` is a citation when the run of non-space text before it on the line
+#: is an **opening-delimiter run**, optionally followed by other citations joined
+#: with ``/``. Nothing else. A run carrying a letter, a digit, a ``.``, a ``:``,
+#: a ``/`` that is not a join, or a *closing* ``)`` or ``]`` means the ``#NNN``
+#: is attached to something, and what it is attached to is a question this
+#: checker does not answer. That single rule is why ``](`` is not a citation
+#: context while a prose `` (`` is: the ``]`` is in the run.
+#:
+#: The delimiter set is **measured, not guessed, and nothing is admitted on
+#: symmetry**. Across the 1,558 tracker citations `docs/adr/**` carries, the runs
+#: before them use exactly ``(``, ``[``, ``"``, ``'``, ``*`` and `` ` ``. ``_`` —
+#: ``*``'s peer in one markdown construct — is *not* here, because the corpus
+#: writes none and an unmeasured delimiter is the guess this rule exists to stop
+#: making. Admitting one later is a one-character change; not admitting it costs
+#: a miss.
+#:
+#: One corpus citation is not covered and is now passed silently: ADR-0059's
+#: ``pre-#242``, a hyphenated prose compound whose run is ``pre-``. That is the
+#: whole measured cost — 1 of 1,558, on a number that resolves — against a Tier 1
+#: failure over a link destination, which is what §6 means by a miss being benign
+#: where a false report is not.
+_CITATION_CONTEXT_RE = re.compile(r"""(?:^|[ \t])[(\["'*`]*(?:#\d{1,6}/)*\Z""")
+
 #: A markdown inline link's **destination**, blanked before trackers are read.
-#: Excluded as a *span* rather than by what it starts with, because its content
-#: is a URL in an open set of shapes — ``#123``, ``/docs/#123``, ``../adr/#123``,
-#: even ``#2/#3`` — and four review rounds each found one more. Nothing inside
-#: ``](…)`` is a citation, whatever it looks like.
+#: With the context rule above this is a *narrowing*, no longer the guarantee: it
+#: removes a ``#NNN`` the rule would otherwise accept, such as one inside a link
+#: **title** — ``[x](/a "see #123")``, where the run before the ``#`` is empty.
+#: Its own truncation on a balanced-paren destination (#605) is no longer
+#: dangerous, because context is read from the unmasked line.
 #:
 #: A parenthesised citation in prose — "the fix (#123) landed" — carries no
 #: closing bracket before it and stays selected.
@@ -126,28 +162,16 @@ _LINK_DESTINATION_RE = re.compile(r"\]\([^)\n]*\)")
 #: definition labelled ``[#588]`` still reads as one.
 _LINK_REFERENCE_RE = re.compile(r"(?<=\]:)[ \t]*\S+")
 
-#: A quoted HTML attribute value — ``<a href="#123">`` — markdown's third way of
-#: writing a destination, since raw HTML is valid markdown.
+#: An HTML attribute value — ``<a href="#123">`` — markdown's third way of
+#: writing a destination, since raw HTML is valid markdown. A narrowing like the
+#: destination above: the context rule already rejects ``href="#123"`` (the run
+#: carries ``href=``), and this additionally covers a value held off from its
+#: ``=`` by spaces, where the run would be a bare quote.
 #:
-#: **Excluded as a span, and it has to be**: the obvious rule, "a ``#NNN``
-#: preceded by a quote is not a citation", is refuted by the corpus, which
-#: quotes seven of them (``"#54 stays …"``). What separates the two is the
-#: ``attribute=`` before the quote, not the quote — so the value is matched
-#: quoted either way and unquoted too, since ``<a href=#123>`` is valid HTML.
+#: The obvious rule — "a ``#NNN`` preceded by a quote is not a citation" — is
+#: refuted by the corpus, which quotes seven of them (``"#54 stays …"``), so the
+#: quote is not the test and the value is matched unquoted too.
 _HTML_ATTRIBUTE_RE = re.compile(r"""[\w:.-]+\s*=\s*("[^"\n]*"|'[^'\n]*'|[^\s"'>`]+)""")
-
-#: **The one case the pattern above cannot decide: a ``/`` before the ``#``.**
-#: It is how the corpus joins citations — ``#313/#314``, ``#66/#83/#93``, 14
-#: occurrences — and it is also every fragment identifier that is not caught by
-#: the ``\w`` lookbehind: ``https://x/#123``, ``//host/docs/#123``,
-#: ``[section](/docs/#123)``.
-#:
-#: Enumerating the URL shapes does not converge — three review rounds found
-#: three more — so this states the *citation* instead: a ``/`` before a tracker
-#: number is only a separator when everything back to a space or an opening
-#: bracket is itself a run of ``#NNN/``. Anything else before that slash is a
-#: path, whatever scheme it carries or does not.
-_SLASH_JOINED_RE = re.compile(r"(?:^|[\s(\[])(?:#\d+/)+$")
 
 #: An inline code span. Longest run of backticks first, so ``` ``a `b` c`` ```
 #: is read as one span rather than two. Spans do not cross a line here: a
@@ -472,19 +496,23 @@ def _as_dotted_symbol(content: str, top_names: frozenset[str]) -> tuple[str, str
     return ("dotted-symbol", content)
 
 
-def _is_fragment_identifier(prefix: str) -> bool:
-    """Whether a ``#NNN`` following ``prefix`` is a URL fragment, not a citation.
+def _is_citation_context(prefix: str) -> bool:
+    """Whether a ``#NNN`` following ``prefix`` on its line is a citation at all.
 
-    Markdown link destinations are already gone by the time this runs, so what
-    is left is a bare URL in running prose. Only a ``/`` immediately before the
-    ``#`` is ambiguous, and it is decided by what that slash follows: a run of
-    ``#NNN/`` back to whitespace or an opening bracket is the corpus's way of
-    joining citations, and anything else is a path, whatever scheme it carries
-    or does not. Stating the citation this way rather than enumerating URL
-    shapes is what makes the answer closed; ADR-0088 §6 puts this selector's
-    mistakes in Tier 1, where a false positive fails a change.
+    The inversion ADR-0088 §6 asks for: this decides what a ``#NNN`` *is*, and
+    everything it does not recognise is passed silently rather than enumerated.
+    ``_CITATION_CONTEXT_RE`` carries the rule and what it measured.
+
+    Args:
+        prefix: The **unmasked** line up to the ``#``. The span exclusions decide
+            whether a ``#NNN`` survives to be asked about; this decides what it
+            is attached to, so it has to see the real text. Reading the masked
+            line instead is precisely what made a truncated destination dangerous
+            — blanking ``](https://x/a(b)`` to spaces turns the ``#123`` the mask
+            failed to cover into a space-preceded one, which is the citation
+            context itself (#605).
     """
-    return prefix.endswith("/") and _SLASH_JOINED_RE.search(prefix) is None
+    return _CITATION_CONTEXT_RE.search(prefix) is not None
 
 
 def extract_citations(path: str, text: str, top_names: frozenset[str]) -> list[Citation]:
@@ -502,14 +530,17 @@ def extract_citations(path: str, text: str, top_names: frozenset[str]) -> list[C
     for lineno, line in iter_prose_lines(text):
         for match in _DECISION_RE.finditer(line):
             found.append(Citation("decision", match.group(0), path, lineno))
-        # Link destinations — inline and reference-style — are blanked to the
-        # same width, so a citation elsewhere on the line keeps its position and
-        # its context.
+        # Destinations — inline, reference-style and HTML-attribute — are blanked
+        # to the same width, so every offset into the blanked line is still an
+        # offset into `line`. That is what lets the *shape* be found on the
+        # blanked line while its *context* is judged on the real one, which is
+        # the direction #605 turned around: a blank cannot manufacture the
+        # space-preceded context a citation begins in.
         outside_links = _LINK_DESTINATION_RE.sub(lambda m: " " * len(m.group(0)), line)
         outside_links = _LINK_REFERENCE_RE.sub(lambda m: " " * len(m.group(0)), outside_links)
         outside_links = _HTML_ATTRIBUTE_RE.sub(lambda m: " " * len(m.group(0)), outside_links)
         for match in _TRACKER_RE.finditer(outside_links):
-            if _is_fragment_identifier(outside_links[: match.start()]):
+            if not _is_citation_context(line[: match.start()]):
                 continue
             found.append(Citation("tracker", match.group(0), path, lineno))
         for content in _iter_code_spans(line):

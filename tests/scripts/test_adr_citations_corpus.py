@@ -98,12 +98,19 @@ def test_the_corpus_is_actually_being_read() -> None:
 
     ADR-0088 §6's whole hazard is a tool that looks authoritative while doing
     less than it claims, so the denominator is asserted rather than assumed.
+
+    The tracker floor is the tight one on purpose. That selector states which
+    contexts a ``#NNN`` is a citation in and passes every other silently (#605),
+    so its failure mode is now *quiet under-selection* — a narrowed rule that
+    stops selecting most of the corpus would leave Tier 1 green while checking
+    almost nothing. `main` carries 1,557; the floor sits well under that because
+    the corpus is append-only and the count only grows.
     """
     counts = _report("--no-tracker")["counts"]
 
     assert isinstance(counts, dict)
     assert counts["decision"] > 1000
-    assert counts["tracker"] > 100
+    assert counts["tracker"] > 1000
     assert counts["module-path"] > 100
     assert counts["dotted-symbol"] > 100
 
