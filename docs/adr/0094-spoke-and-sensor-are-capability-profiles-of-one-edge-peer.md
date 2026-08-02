@@ -162,11 +162,27 @@ peer — and attach rules to what it does rather than to what it is called.**
 > descriptions of which capabilities an attachment exercises, and no rule in this
 > corpus may be conditioned on which of those words is applied to a peer.
 
-> **Normative.** An attachment exercises some combination of three capabilities,
-> and every obligation this ADR states is stated over a capability rather than
-> over an attachment: **push** — the edge sends content to the hub unsolicited;
-> **doorbell** — the edge tells the hub there is something to come for, carrying
-> no content; **pull** — the hub asks the edge for content the edge has released.
+> **Normative.** An attachment exercises some combination of three capabilities:
+> **push** — the edge sends content to the hub unsolicited; **doorbell** — the
+> edge tells the hub there is something to come for, carrying no content;
+> **pull** — the hub asks the edge for content the edge has released.
+
+> **Normative.** Every obligation below names its own scope: the capabilities it
+> binds, or the whole attachment. A rule scoped to an attachment binds it once,
+> however many capabilities it exercises. No obligation in this corpus may be
+> conditioned on which profile name a peer is given.
+
+**Both scopes are needed and the mixture is deliberate, so §1 states the rule
+rather than a preference for one of them.** Most obligations here are properties
+of a channel and are scoped to the capabilities that open it — §3's release gate
+binds push and pull, §4 binds the doorbell, §7 binds whatever submits. Three are
+properties of the attachment and would be defeated by capability scoping. §5's
+ceiling is the clear case: a ceiling per capability gives a peer that both pushes
+and pulls two ceilings, and content then takes the looser route, which is the
+laundering §5 exists to forbid arriving through the taxonomy. §6 and §9 are the
+same shape — a device that may not distil is not permitted to distil on its second
+channel, and a bound on ephemeral state that reset per capability would bound
+nothing.
 
 The CLI is push-only. A calendar file is pull-only, and gains a doorbell the day
 something watches it for changes. A capture peer exercises all three: it pushes
@@ -188,6 +204,8 @@ what an edge attachment is. Nothing needs reconciling; the note exists so a late
 reader does not think it does.
 
 ### 2. The edge dials out; the hub never dials the edge
+
+*Scope: the attachment.*
 
 > **Normative.** Every connection between the hub and a peer is established by
 > the peer. The hub may not initiate a connection to a peer, and a peer may not
@@ -227,15 +245,32 @@ the correlation id exists so that "multiplexing or a progress stream be added
 deferral. So the mechanism is an additive wire decision owing its own ADR (§10),
 and this section decides only the direction, which that decision must not reverse.
 
-### 3. The hub reaches nothing the edge has not released
+### 3. Nothing leaves the edge that the peer has not released
+
+*Scope: push and pull.*
 
 > **Normative.** The hub has no operation that reads edge state a peer has not
 > released to it. A pull may return only what the peer has already placed in its
 > released set, and a peer that receives a pull for anything else refuses it.
 
+> **Normative.** A push carries only what the peer has placed in its released
+> set. Release is the single gate on everything that leaves the edge, and the
+> direction the material travels in does not weaken it.
+
 > **Normative.** What a peer releases is the peer's declaration, and the hub may
 > not widen it. A hub-side configuration value, a policy, or an operator setting
-> may not enlarge what a pull can reach.
+> may not enlarge what a push or a pull can reach.
+
+**Push is bound by the same gate as pull, and an earlier draft bound only pull.**
+That version was defeated on its own illustration: a capture peer could run a
+voice-activity detector under §6, treat every voiced segment as promoted under §9,
+and push it under §7 without ever being pulled — satisfying every clause while
+sending a bystander's audio to the hub. Adversarial review found it on the first
+round, and the defect is worth recording rather than quietly fixing, because it is
+the shape a *reach* rule takes when it is written against the channel that looks
+dangerous instead of against the property being protected. Pull looks dangerous
+because the hub is the actor; push is the wider channel precisely because the edge
+is. Releasing is the property, so the gate is on release.
 
 **The property this buys is structural rather than promised.** The alternative
 shape — a general "read the edge's buffer" verb, with the hub trusted to ask only
@@ -249,10 +284,25 @@ forgetting, and the failure is silent".
 
 The two concrete shapes make the difference legible. A calendar peer releases the
 whole file, at any time — the released set is large and static, and a pull for it
-is ordinary. A capture peer releases **only the slice a user trigger has
-promoted**; the rolling buffer is never in the released set, so no pull can reach
-it however the hub is configured, and a hub asking for "the last thirty seconds"
-receives a refusal rather than audio.
+is ordinary. A capture peer's rolling buffer is **never** in the released set
+(§9), so nothing reaches it in either direction: a hub asking for "the last thirty
+seconds" receives a refusal rather than audio, and a peer cannot push it either.
+Only a promoted slice is releasable.
+
+> **Normative.** What may cause a release is **not decided here**. A peer may not
+> read this section as authorising any particular promotion, and in particular
+> release is not authorisation: a released slice still faces §5's ceiling and
+> whatever grant model #629 settles.
+
+**Deliberately not decided, because deciding it would settle the trigger ladder
+by implication.** #441's sketched shape is that a user trigger promotes a slice —
+"assistant, capture that" — and #441 says of itself that "**Nothing here is
+ratified**", so this ADR must not present it as though it were. The ladder's later
+rungs (suggested capture, autonomous salience capture) move promotion away from an
+explicit trigger by degrees, and each rung is a permission question. What §3 fixes
+is that whatever answers it does so by governing **release**, which is one place,
+rather than by governing the hub's asking, which would be two. §10 carries the
+deferral.
 
 **This is not the grant model, and calling it one would discharge a deferral it
 does not discharge.** #629 records that `VISION.md` promises a sensor is
@@ -261,10 +311,12 @@ does not discharge.** #629 records that `VISION.md` promises a sensor is
 assistant, cannot be scoped, and leaves no audit record". Nothing above supplies
 any of that. A peer's released set is a *bound on reach*, not a record of the
 user's permission: it does not say who agreed, it is not revocable through the
-assistant, and it leaves no audit trail. The clauses are worth having anyway,
-because they make the grant model — when it arrives — a decision about *whether
-the hub may ask*, over a surface where the answer to "what could it reach if it
-did" is already bounded. §10 keeps the deferral live.
+assistant, and it leaves no audit trail. The clauses are worth having anyway, and
+their value is that they give the grant model **one place to attach**: a grant
+governs what may be *released*, and everything that leaves the edge in either
+direction is already bounded by release. Without them a grant model would have to
+govern the hub's asking and the peer's sending separately, and a peer that sends
+is the half no hub-side rule can reach. §10 keeps the deferral live.
 
 **The relationship between the two questions is worth stating, because they are
 arriving from opposite ends and will meet.** #441's trigger ladder —
@@ -277,6 +329,8 @@ four rungs of autonomy, and a third party who never addressed us. Whoever takes
 #629 should take it knowing that.
 
 ### 4. A doorbell is a wake, not a delivery
+
+*Scope: the doorbell capability.*
 
 > **Normative.** A doorbell carries no user data. It may not carry content, a
 > summary of content, a classifier's label, or any field of `Provenance` — and in
@@ -311,6 +365,8 @@ transmission rather than about the local filesystem, so a reader could reach the
 wrong answer without disobeying anything §3 wrote.
 
 ### 5. The hub decides the band; a submission never raises its own
+
+*Scope: the band rule binds every submission — push, and whatever a pull returns. The ceiling is the attachment's.*
 
 > **Normative.** The band of a record a peer's submission produces is decided by
 > the hub from what it knows about the submitting peer. A peer may not decide,
@@ -354,6 +410,8 @@ hub-minted identity would touch ADR-0092 §3.
 
 ### 6. Detection at the edge, distillation at the hub
 
+*Scope: the attachment.*
+
 > **Normative.** An edge peer may decide **whether to send** — voice-activity
 > detection, wake-phrase spotting, bounding, thresholding. It may not decide
 > **what a submission means**: no classification into a `MemoryKind`, no
@@ -387,6 +445,8 @@ answer; §10 defers it with its trigger. What this clause fixes is that the answ
 cannot be reached by letting the detector emit meaning.
 
 ### 7. The edge may not destroy the only artifact its submission can be re-read from
+
+*Scope: push and pull.*
 
 > **Normative.** Where a peer's submission is derived from source material the
 > peer holds, the peer submits the source material and may not substitute a lossy,
@@ -438,6 +498,8 @@ ADR-0017 §1 is engaged identically. §10 keeps the remote hop where it is.
 
 ### 8. The verification window is bounded, and its figures are the producer's
 
+*Scope: the hub, and the attachment for what it may retain.*
+
 > **Normative.** Material a peer submits under §7 is retained by the hub only for
 > a bounded verification window, during which the user may read what was made of
 > it and correct it, and is destroyed when the window closes. The peer retains
@@ -483,6 +545,8 @@ rules out — and it is the kind of consequence that becomes a support question 
 nobody wrote it down.
 
 ### 9. Ephemeral edge state is permitted, bounded, and never authoritative
+
+*Scope: the attachment.*
 
 > **Normative.** A peer may hold ephemeral state, bounded in size and in age, and
 > destroyed continuously rather than at a checkpoint. It is never authoritative:
@@ -541,9 +605,15 @@ resident-hub shape and `VISION.md` §8 are both built to prevent.
   extension additive, and ADR-0084 §11 and ADR-0042 §5 already hold the deferral.
   Fires with the first peer that needs pull. The direction §2 fixes is an input to
   that decision, not a question it reopens.
-- **The revocable grant model** (#629, ADR-0093 §11). §3 bounds what a pull can
-  reach and supplies none of granted, scoped or revocable. Fires on #629's own
-  trigger. It should be taken knowing that the trigger ladder's rungs are
+- **What may cause a release** (§3) — #441's trigger ladder, from an explicit
+  "capture that" to autonomous salience capture. §3 fixes that release is the gate
+  on everything leaving the edge and decides nothing about what opens it, and #441
+  is a tracker record that says of itself that nothing in it is ratified. Fires
+  with the first capture producer, and it is probably one decision with the grant
+  model below rather than two.
+- **The revocable grant model** (#629, ADR-0093 §11). §3 bounds what may leave the
+  edge in either direction and supplies none of granted, scoped or revocable.
+  Fires on #629's own trigger. It should be taken knowing that the trigger ladder's rungs are
   permission questions and that a model sized for one static file will not carry a
   microphone and a bystander.
 - **What governs an edge detector that is itself a model** (§6) — whether
