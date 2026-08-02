@@ -875,9 +875,10 @@ of occurrences in the default window. A cap counting components would accept it
 while the sensor built the tuple the cap exists to bound.
 
 > **Normative.** A component the source marks **cancelled contributes no
-> occurrences**, and this is decided before anything is counted or proposed. A
-> cancelled master contributes none at all; a cancelled `RECURRENCE-ID` override
-> removes the single occurrence it names.
+> occurrences over the extent it governs**, decided before anything is counted or
+> proposed. Extent is defined by the resolution clause below and nowhere else: a
+> master governs its whole series, and an override governs whatever its own form
+> governs.
 
 > **Normative.** A `RECURRENCE-ID` override is resolved **against its master's
 > expansion before anything is counted or proposed**. It replaces the occurrence it
@@ -930,6 +931,15 @@ in-window occurrence would have been counted and proposed — beliefs in a whole
 series of meetings the calendar marks off. Keying the rule on *what the source
 says about a component* rather than on which kind of component it is covers both,
 and covers whatever third shape the format has that neither of us enumerated.
+
+**Cancellation says *whether*; resolution says *how far*; and an earlier draft had
+cancellation asserting both.** It said a cancelled override "removes the single
+occurrence it names", which contradicts the resolution clause outright for a
+cancelled `RANGE=THISANDFUTURE`: 4 August then had to be both suppressed (by the
+range) and proposed (by the single-occurrence reading), so no output conformed.
+Two clauses that each define extent will disagree the moment a third form appears,
+which is a structural defect rather than a wording one — so extent now has exactly
+one definition and cancellation composes with it instead of restating it.
 
 **Not emitting an occurrence the source says does not occur is not "proposing an
 absence", and the distinction is worth stating because §4's rule looks like it
@@ -1078,9 +1088,11 @@ asserting later occurrences follow it rather than the master — an override of 
 uninterpretable form, asserting the occurrences it could have affected are
 suppressed rather than proposed from the master, **two overlapping
 `THISANDFUTURE` overrides**, asserting the later one governs from its own
-`RECURRENCE-ID` onward and the earlier one governs between them, and a
+`RECURRENCE-ID` onward and the earlier one governs between them, a
 single-instance override falling inside a range override's extent, asserting the
-single-instance one wins for its occurrence alone — and the
+single-instance one wins for its occurrence alone, and a **cancelled
+`RANGE=THISANDFUTURE` override**, asserting its occurrence and every later one are
+suppressed — and the
 same suspended worker **cancelled from outside**, asserting `CancelledError`
 propagates unchanged, a second read is still refused while the worker lives, and
 reads resume once it is released — and, **in a subprocess**, a hub shut down while a read is
