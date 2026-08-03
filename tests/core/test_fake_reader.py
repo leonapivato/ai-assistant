@@ -198,6 +198,22 @@ def test_a_blank_identity_is_refused_at_construction() -> None:
         FakeReader(name="   ")
 
 
+async def test_a_padded_identity_cannot_split_the_reading_from_its_attestation() -> None:
+    """``source`` does not strip and ``reported_by`` does, so the fake canonicalises.
+
+    Otherwise ``" calendar "`` produces a reading attributed to ``"calendar"`` by a
+    producer calling itself ``" calendar "`` — a failure of the suite's attribution
+    clause on a difference no author would see in the source.
+    """
+    subject = FakeReader(name=" calendar ")
+
+    reading = await subject.read()
+
+    assert subject.name == "calendar"
+    assert reading.source == "calendar"
+    assert_conforms(reading, subject.name)
+
+
 def test_an_episodic_proposal_is_refused_at_construction() -> None:
     """ADR-0093 §4's refusal, caught where the script was written."""
     episode = MemoryUpdateProposal(

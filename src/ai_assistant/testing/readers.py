@@ -314,7 +314,14 @@ class FakeReader:
         if not name.strip():
             msg = "a reader's declared identity must not be blank (ADR-0093 §7)"
             raise ValueError(msg)
-        self._name = name
+        # Canonicalised the way `Identifier` canonicalises `Attestation.
+        # reported_by`, so `SourceReading.source` and every proposal's reporter
+        # cannot disagree by a space. `source` is `EncodableText`, which does not
+        # strip, and `reported_by` is `Identifier`, which does — so `" calendar "`
+        # would otherwise produce a reading attributed to `"calendar"` by a
+        # producer calling itself `" calendar "`, failing the suite's attribution
+        # clause on a difference no author would see.
+        self._name = name.strip()
         self._read_at = read_at
         self._as_of = as_of
         self._failure = failure
@@ -322,13 +329,12 @@ class FakeReader:
         self._resource = SuspendableResource()
         self._calls = 0
         self._scripted = None if proposals is None else tuple(proposals)
-        for index, proposal in enumerate(self._scripted or ()):
-            _refuse_unconformable(index, name, proposal)
         # Built eagerly whether or not it is the one `read` returns: constructing
-        # it is what refuses a naive instant here rather than at read time. For a
-        # scripted reading it *is* what `read` returns — `SourceReading` is frozen
-        # and so is everything reachable through it (ADR-0068), so there is nothing
-        # a caller could mutate and no copy worth paying for.
+        # it is what refuses a naive instant, and validates a script, *here* rather
+        # than at read time. For a scripted reading it *is* what `read` returns —
+        # `SourceReading` is frozen and so is everything reachable through it
+        # (ADR-0068), so there is nothing a caller could mutate and no copy worth
+        # paying for.
         self._scripted_reading = self._build(self._scripted or ())
 
     @property
@@ -365,7 +371,19 @@ class FakeReader:
         return self._resource.suspend_next()
 
     def _build(self, proposals: tuple[MemoryUpdateProposal, ...]) -> SourceReading:
-        """One reading over ``proposals``, with this reader's identity and instants."""
+        """One validated reading over ``proposals``, with this reader's identity.
+
+        Every reading goes through here — scripted at construction, synthesised per
+        read — so the refusals below cannot be true of one path and not the other.
+        Validating only the constructor's argument is how a synthesised proposal
+        drifted out from under them once already.
+
+        Raises:
+            ValueError: If any proposal is one no conforming reader could have
+                emitted (see :func:`_refuse_unconformable`).
+        """
+        for index, proposal in enumerate(proposals):
+            _refuse_unconformable(index, self._name, proposal)
         return SourceReading(
             source=self._name,
             read_at=self._read_at,
