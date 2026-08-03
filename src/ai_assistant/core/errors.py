@@ -413,6 +413,43 @@ class ContextError(AssistantError):
     """Situational context could not be assembled (e.g. a source-wiring bug)."""
 
 
+class ReaderError(AssistantError):
+    """A :class:`~ai_assistant.core.protocols.Reader` could not read its source.
+
+    Raised when a read cannot complete **because of its source** — the file is
+    missing, unreadable, or malformed — with the underlying failure preserved as
+    ``__cause__`` (ADR-0093 §8, §10, under ADR-0095 §1's names). A reader may not
+    let a source-level exception, an ``OSError`` or a parser's own class, cross the
+    seam unwrapped: both consumers would then have to catch by *implementation* —
+    knowing which exceptions each reader's parser can throw — and the alternative
+    to that knowledge is a bare ``except Exception``, which swallows programming
+    errors as degraded sources.
+
+    **One class and not a family.** A missing file, a permission denial and a
+    malformed document are the *same* fact to both consumers — the source could
+    not be read — and they differ only in what an operator should do, which is what
+    the cause and the log line carry. :class:`ContextError` is deliberately not
+    reused: it is reserved for programmer/wiring bugs the assembler should not
+    paper over (ADR-0008 §4), and a calendar file that is absent is neither.
+
+    **A cancellation is never converted into one** (ADR-0093 §8). A cancelled read
+    has, in plain English, "not completed", and a reader wrapping everything it
+    catches would convert it — with the result that both consumers treat a
+    caller's own cancellation as a degraded source, on a shutdown that was working
+    correctly. ``read()`` is bound by ``core/protocols.py``'s cancellation clause
+    exactly as every other seam is.
+
+    **Its message is payload-free.** It carries the reader's declared identity and
+    the failure's class, and never the source's location, its contents, or any
+    string derived from either. ``raise ReaderError(str(exc)) from exc`` satisfies
+    every word of the wrapping rule and, for a missing
+    ``/home/alice/Private/therapy.ics``, produces a message that *is* that path —
+    which the scheduler then writes to a log (ADR-0083 §7). That is Tier 1 data in
+    an operational log, forbidden outright by ADR-0004 §5. The cause is retained on
+    the exception; only its **class** may be logged, never its message.
+    """
+
+
 class ToolError(AssistantError):
     """An external tool failed to execute."""
 

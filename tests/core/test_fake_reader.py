@@ -1,0 +1,220 @@
+"""The canonical FakeReader passes the shared Reader suite (ADR-0093, ADR-0095).
+
+This is what lets other subsystems trust ``ai_assistant.testing.FakeReader`` as a
+stand-in for a real producer: it is held to the same contract the concrete ``.ics``
+reader will be, in the lane ADR-0093 §10 defers it to.
+
+Below the binding are the behaviours specific to the fake — its scripting, its
+refusals at construction, and the resource it models so the suite's cancellation
+case is not vacuous — none of which are contract.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+import pytest
+from reader_contract import GatedRead, ReaderContract, assert_conforms
+
+from ai_assistant.core.errors import ReaderError
+from ai_assistant.core.types import (
+    Attestation,
+    EpisodicMemory,
+    MemorySource,
+    MemoryUpdateProposal,
+    Provenance,
+    SemanticMemory,
+)
+from ai_assistant.testing import DEFAULT_READER_NAME, FakeReader, attested_proposal
+
+if TYPE_CHECKING:
+    from ai_assistant.core.protocols import Reader
+
+_WHEN = datetime(2026, 1, 1, tzinfo=UTC)
+_LATER = datetime(2026, 3, 1, tzinfo=UTC)
+
+
+class TestFakeReaderContract(ReaderContract):
+    """Runs FakeReader through the shared Reader conformance suite."""
+
+    @pytest.fixture
+    def reader(self) -> Reader:
+        return FakeReader()
+
+    @pytest.fixture
+    def empty_reader(self) -> Reader:
+        return FakeReader([], name="quiet-source")
+
+    @pytest.fixture
+    def failing_reader(self) -> Reader:
+        return FakeReader(name="broken-source", failure=FileNotFoundError())
+
+    def gated_read(self) -> GatedRead:
+        subject = FakeReader()
+        return GatedRead(reader=subject, gate=subject.suspend_next())
+
+
+# --- behaviour specific to FakeReader, beyond the shared contract -----------
+
+
+async def test_the_default_script_reports_something() -> None:
+    """A suite run against this fake must not pass its band clause vacuously."""
+    reading = await FakeReader().read()
+
+    assert reading.proposals
+    assert_conforms(reading, DEFAULT_READER_NAME)
+
+
+async def test_an_empty_script_is_the_explicit_nothing_to_report_state() -> None:
+    """Distinct from the default, and distinct from a failure (ADR-0093 §8)."""
+    reading = await FakeReader([]).read()
+
+    assert reading.proposals == ()
+    assert reading.source == DEFAULT_READER_NAME
+
+
+async def test_a_declared_as_of_is_carried_and_defaults_to_absent() -> None:
+    """``None`` is the first real source's case, and a ruling (ADR-0093 §10)."""
+    assert (await FakeReader().read()).as_of is None
+    assert (await FakeReader(as_of=_WHEN).read()).as_of == _WHEN
+
+
+async def test_a_scripted_failure_is_wrapped_with_its_cause_and_a_payload_free_message() -> None:
+    """Both halves of §8: the cause survives, and the message says nothing.
+
+    Preserving the cause and logging it are different acts, and the obvious
+    wrapper conflates them: ``raise ReaderError(str(exc)) from exc`` would put the
+    source's path into a message the scheduler writes to a log (ADR-0004 §5).
+    """
+    cause = PermissionError("/home/alice/Private/therapy.ics")
+    subject = FakeReader(name="calendar", failure=cause)
+
+    with pytest.raises(ReaderError) as caught:
+        await subject.read()
+
+    assert caught.value.__cause__ is cause
+    assert str(caught.value) == "calendar: PermissionError"
+    assert "therapy" not in str(caught.value)
+
+
+async def test_a_scripted_proposal_is_returned_verbatim() -> None:
+    """The consumer scripts the belief; there is no batch for the fake to fill in."""
+    proposal = attested_proposal("the user has a 10:00 standup", reported_by="calendar")
+
+    reading = await FakeReader([proposal], name="calendar").read()
+
+    assert reading.proposals == (proposal,)
+
+
+async def test_every_read_returns_the_same_frozen_reading() -> None:
+    """Fixed at construction, so a fake never disagrees with itself between calls."""
+    subject = FakeReader()
+
+    first = await subject.read()
+    second = await subject.read()
+
+    assert first == second
+    assert subject.call_count == 2
+
+
+def test_a_blank_identity_is_refused_at_construction() -> None:
+    """The canonical fake must not be configurable into breaking its own contract."""
+    with pytest.raises(ValueError, match=r"(?i)identity|blank"):
+        FakeReader(name="   ")
+
+
+def test_an_episodic_proposal_is_refused_at_construction() -> None:
+    """ADR-0093 §4's refusal, caught where the script was written."""
+    episode = MemoryUpdateProposal(
+        proposed=EpisodicMemory(
+            id="e-1",
+            content="the standup happened",
+            occurred_at=_WHEN,
+            provenance=Provenance(
+                source=MemorySource.EXTERNAL,
+                confidence=0.9,
+                last_updated=_LATER,
+                attestation=Attestation(reported_by="calendar", reported_at=_WHEN),
+            ),
+        ),
+        rationale="calendar reported it",
+    )
+
+    with pytest.raises(ValueError, match=r"(?i)episodic"):
+        FakeReader([episode], name="calendar")
+
+
+def test_a_proposal_outside_the_attested_band_is_refused_at_construction() -> None:
+    """What a reader reports is a third party's claim, never our own inference."""
+    inferred = MemoryUpdateProposal(
+        proposed=SemanticMemory(
+            id="s-1",
+            content="the user prefers mornings",
+            fact="the user prefers mornings",
+            provenance=Provenance(
+                source=MemorySource.INFERRED,
+                confidence=0.4,
+                last_updated=_LATER,
+            ),
+        ),
+        rationale="worked out from the calendar",
+    )
+
+    with pytest.raises(ValueError, match=r"(?i)attested"):
+        FakeReader([inferred], name="calendar")
+
+
+def test_a_naive_instant_is_refused_where_it_was_written() -> None:
+    """Built eagerly, so ``UtcInstant``'s refusal lands at construction, not at read."""
+    with pytest.raises(ValueError, match=r"(?i)aware|naive|timezone|utc"):
+        FakeReader(read_at=datetime(2026, 1, 1))  # noqa: DTZ001 — the point is the naivety
+
+
+def test_a_blank_proposal_content_is_refused_by_the_helper() -> None:
+    """``attested_proposal`` refuses what nothing downstream would (see its docstring)."""
+    with pytest.raises(ValueError, match=r"(?i)content"):
+        attested_proposal("  ", reported_by="calendar")
+
+
+def test_the_helper_reports_the_source_clock_and_ours_separately() -> None:
+    """Monday's report, revised into the store on Tuesday (ADR-0092 §3)."""
+    proposal = attested_proposal(
+        "the user has a 10:00 standup",
+        reported_by="calendar",
+        reported_at=_WHEN,
+        last_updated=_LATER,
+    )
+
+    attestation = proposal.proposed.provenance.attestation
+    assert attestation is not None
+    assert attestation.reported_by == "calendar"
+    assert attestation.reported_at == _WHEN
+    assert proposal.proposed.provenance.last_updated == _LATER
+
+
+async def test_a_second_read_does_not_reach_the_source_a_cancelled_one_still_holds() -> None:
+    """ADR-0060's resource half, on the one subject that can exhibit it.
+
+    Not a suite clause — a generic suite has no handle on an arbitrary reader's
+    file descriptor (see ``reader_contract``'s module docstring) — but the fake
+    models the resource, so the property the module clause is *about* is asserted
+    somewhere rather than nowhere: cancelling the first caller must not let the
+    second in while the first's work is still notionally using the source.
+    """
+    subject = FakeReader()
+    gate = subject.suspend_next()
+
+    first = asyncio.ensure_future(subject.read())
+    await gate.reached()
+    second = asyncio.ensure_future(subject.read())
+    first.cancel()
+    gate.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    await second
+
+    assert not subject.log.overlapped
+    assert subject.log.visits == 2

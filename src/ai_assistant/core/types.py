@@ -1991,6 +1991,112 @@ class ObservationOutcome(BaseModel):
     )
 
 
+# --- reading: what one pass over a source produced (ADR-0093, ADR-0095) ------
+# The read-only seam's return value. Two instants rather than one, because the
+# clock that read a source and the clock that source reports on are different
+# clocks (ADR-0073 §4), and a value rather than a bare sequence of proposals,
+# because the facet half lands later as an optional field (ADR-0093 §3).
+
+
+class SourceReading(BaseModel):
+    """What one :class:`~ai_assistant.core.protocols.Reader` pass produced.
+
+    The proposals a reader drew from its source in one bounded read, with the
+    identity of the reader that produced them and the instants that say *when*
+    they were true. It follows :class:`ObservationOutcome`'s precedent that a seam
+    returning more than one fact returns a named value rather than a tuple — and
+    here that shape is load-bearing for a second reason: ADR-0093 §3 defers the
+    **facet half** of this type, which lands later as an *optional* field, and a
+    reading that predates that field stays valid. A Protocol returning a bare
+    sequence of proposals would make the facet's arrival a signature change, which
+    is a breaking ``core`` change owing its own ADR (golden rule 5), bought purely
+    to avoid naming a model now.
+
+    **``read_at`` and ``as_of`` are two different clocks and are never merged**
+    (ADR-0093 §10). Collapsing them is the exact defect ADR-0073 §4 describes: "a
+    record synced on Tuesday from a calendar that said so on Monday renders
+    'Tuesday', which is a true statement about us and a false one about the
+    source."
+
+    **Per-proposal report time is not carried here.** Where a source's report time
+    is per-entry — as a calendar's is — it belongs on the proposal, in
+    :class:`Attestation`, and a reader sets it when constructing the proposal
+    (ADR-0093 §10, ADR-0092 §1). ``as_of`` is the reading-wide claim and nothing
+    else.
+
+    **An empty ``proposals`` tuple is a successful reading**, and means the source
+    had nothing to propose within the bound. It is not a failure signal and no
+    caller may treat it as one: a read that cannot complete **raises**
+    :class:`~ai_assistant.core.errors.ReaderError` and constructs no reading at all
+    (ADR-0093 §8).
+
+    Attributes:
+        source: The producing reader's ``name`` — the reading's stable, Tier 2
+            identity (ADR-0004 §1). Carried on the reading rather than left to the
+            caller so the value that reaches
+            :attr:`Attestation.reported_by` is the producer's own. It must never
+            embed Tier 0/1 data: a reader that wraps personal data names *itself*
+            (``"calendar"``), never the data it holds, and never its source's
+            location — an identity is what lands in :class:`Provenance`, in every
+            export and in every log line (ADR-0093 §7).
+        read_at: The instant **this system** performed the read. Always present,
+            because it is always knowable and always true — it is our own clock —
+            and captured **once, at the moment the source's bytes are acquired**,
+            so it is the single anchor every window and recurrence decision uses.
+        as_of: The instant **the source declares for the reading as a whole**,
+            where it declares one, and ``None`` where it does not.
+
+            **Optional by decision rather than by laxity, and the ``None`` is
+            load-bearing.** A local ``.ics`` file declares no reading-level as-of:
+            the format's report times are per-``VEVENT`` (``DTSTAMP``,
+            ``LAST-MODIFIED``), and the file's mtime is a fact about our filesystem
+            rather than a claim the source made. So the only two values a
+            *required* field could take for the first source are a filesystem
+            observation — which collapses the very distinction ADR-0073 §4 draws —
+            or one entry's stamp applied to all of them, which is false for every
+            other entry. A source that *does* declare one (a feed's
+            ``Last-Modified``, a sync API's server instant) has an honest home for
+            it. **It carries only an instant the source itself declares for the
+            whole reading, and may never be filled from the filesystem, from the
+            clock, or from one entry's stamp applied to the rest** (ADR-0093 §10).
+        proposals: What the source said, as records to put through the write path,
+            in the reader's own order. Possibly empty (above). Every one of them is
+            in the ``ATTESTED`` band and none is an ``EpisodicMemory``, which the
+            shared ``Reader`` conformance suite pins rather than this type: a
+            producer-side obligation about what a *reader* may emit, not a property
+            of every reading-shaped value (ADR-0093 §4).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source: EncodableText = Field(
+        description=(
+            "The producing reader's declared identity — Tier 2, stable, and never "
+            "derived from the source's location or contents (ADR-0093 §7)."
+        ),
+    )
+    read_at: UtcInstant = Field(
+        description=(
+            "When this system performed the read (tz-aware), captured once as the "
+            "source's bytes were acquired."
+        ),
+    )
+    as_of: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "Any reading-wide instant the source itself declares (tz-aware); None "
+            "where it declares none. Never our clock and never the file's mtime."
+        ),
+    )
+    proposals: tuple[MemoryUpdateProposal, ...] = Field(
+        default=(),
+        description=(
+            "The beliefs the source reported, in the reader's order. Empty is a "
+            "successful reading, not a failure signal (ADR-0093 §8)."
+        ),
+    )
+
+
 # --- situational context: the assembled "right now" (ADR-0008) ---------------
 # Advisory and assembled per request, never durable state.
 
