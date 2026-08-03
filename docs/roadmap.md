@@ -39,7 +39,7 @@ Everything else, including capability breadth, is sequenced behind
 These are premises this roadmap sets, not measurements (ADR-0019 §3). Each
 becomes binding only when an ADR ratifies the slice that implements it; the
 first leg includes amending `VISION.md` so that it owns passive observation,
-the sensor/actuator split, and the hub-and-spokes shape, none of which its
+the reader/actuator split, and the hub-and-spokes shape, none of which its
 interaction-implicit learning language covers.
 
 1. **Passive accumulation is the primary mechanism; explicit correction is the
@@ -51,11 +51,14 @@ interaction-implicit learning language covers.
    producer — not a new architecture.
 2. **Sensors before actuators.** Read-only ingestion (calendar-shaped sources
    that feed observation and context) comes early: it carries no
-   irreversibility and forces the networked-egress decision (ADR-0017 §3) at
-   its lowest-stakes end. Tools that *act* on the world arrive later and in
-   bulk (MCP-shaped), behind the contract decisions they force — ranking
-   (#241), parameter-schema enforcement (ADR-0029 §7), and the rest of the
-   egress conditions.
+   irreversibility. **The second half of this stance no longer holds**: it read
+   that ingestion also forces the networked-egress decision (ADR-0017 §3) at its
+   lowest-stakes end, and leg 6 below records why it does not — a reader opens a
+   file the hub can already read, so nothing about §3 is engaged or revised
+   there. Tools that *act* on the world arrive later and in bulk (MCP-shaped),
+   behind the contract decisions they force — ranking (#241), parameter-schema
+   enforcement (ADR-0029 §7), and the rest of the egress conditions; that is
+   where the egress decision is now expected to be spent.
 3. **Hub and spokes, with one spoke for now.** One resident service — the hub —
    owns all state and intelligence; every interface is a stateless client of
    its API. Conversations, memory, and identity live server-side and are
@@ -259,22 +262,40 @@ behind the hub's API.
    writer: #526's `BEGIN IMMEDIATE` landed across all five stores as consistency
    work, leaving #505's journal-mode durability decision deliberately deferred
    (ADR-0083 §12, ADR-0084 §10).
-6. **Sensors.** The first read-only ingestion source or two, feeding both
+6. **Readers.** The first read-only ingestion source or two, feeding both
    context facets (ADR-0008 anticipated calendar/tasks as optional fields) and
-   the observer's episode stream. This is where ADR-0017 §3's conditions for a
-   networked seam are finally met or consciously revised — at read-only stakes.
-   **Leg 5 did not spend that decision and could not**: ADR-0084 §9 read ADR-0017
-   clause by clause and found that a loopback listener moving bytes between two
-   processes on one machine engages neither §1's off-device rule nor §3's
-   conditions, changing nothing about ADR-0017. A hub with a socket is not a
-   precedent for a network. MCP-shaped clients are welcome here, but as sensors
-   only; actuators stay in the later arc. One precondition is already ratified onto this leg's first
+   the observer's episode stream. The seam is a `Reader`: ADR-0093 specified it
+   as a `Sensor`, and ADR-0095 §1 renamed it, freeing "sensor" for the spoke
+   profile ADR-0094 §1 uses it for. Stance 2's pairing above and the MCP note
+   below carry that freed sense, not this one.
+   **This leg does not reach ADR-0017 §3's conditions for a networked seam**,
+   which an earlier revision of this entry expected it to meet or consciously
+   revise. The owner's ruling scoping the leg is that the first source is a
+   **local `.ics` file** (#625), and ADR-0084 §1 has already read both ADR-0017
+   clauses for the hub's own socket: §1 governs data that leaves the *device*,
+   and §3's fourteen conditions are conditions on designating the `tools/`
+   egress seam. A file the hub opens on its own disk leaves no device, and
+   ADR-0095 §2 deliberately keeps readers out of `tools/` — so neither clause is
+   engaged here either, and examining a clause and finding it unmet changes
+   nothing about ADR-0017. A hub with a socket is not a precedent for a network,
+   and a reader opening a local file is not one either. Nor is that an artefact
+   of the first source being the small one: ADR-0095 names the two source
+   patterns that survive the hub moving to a box of its own — files synced onto
+   it, and co-located fetchers such as `vdirsyncer` whose output the reader
+   reads off disk — and in both the network
+   is the fetcher's, never the seam's. So §3 stays unspent, and falls to the
+   acting tools stance 2 sequences after this leg.
+   MCP-shaped clients are welcome here, but as sensors only; actuators stay in
+   the later arc. One precondition is already ratified onto this leg's first
    `EXTERNAL` producer: it may not ship without conveying both the reporting
    source's identity and the time that source reported it, since a belief in the
    `ATTESTED` band must not be readable as the user's own word or as our
    inference, and must not be offered our revision time as the source's. Whether
    `Provenance` grows fields for that is a `core` decision made with the producer
-   in hand (ADR-0073 §4, §10). *Exit: the assistant knows something true about
+   in hand (ADR-0073 §4, §10). The exit test's second half rests on a surface
+   nothing offers yet: `ActionPolicy` governs *actions*, not sources, so "you may
+   read my calendar" has nowhere to be recorded, and the grant model is its own
+   decision (#629). *Exit: the assistant knows something true about
    the user's day it was never told, from a source the user granted.*
 7. **Memory at volume.** Consolidation (many episodes distilled into few
    durable beliefs, run by the hub's scheduler), confidence decay and salience

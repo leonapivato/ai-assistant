@@ -163,7 +163,7 @@ The orchestration layer should explicitly define:
 
 Low-risk, reversible actions may become more automatic. High-impact actions should remain inspectable and permissioned.
 
-Reading the world and acting on it are governed separately. A **sensor** — a
+Reading the world and acting on it are governed separately. A **reader** — a
 read-only source the user has connected, feeding situational context and
 observation — is granted, scoped, and revocable, but it changes nothing outside
 the assistant. An **actuator** — a tool that sends, buys, schedules, or modifies —

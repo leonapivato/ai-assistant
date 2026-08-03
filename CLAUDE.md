@@ -42,6 +42,7 @@ core/           contracts (Protocols), shared types, config, errors
 models/         model-agnostic LLM layer (wraps pydantic-ai)   → ModelProvider
 memory/         persistent user model + long-term memory        → MemoryStore
 context/        situational context assembly (time, calendar, tasks)
+readers/        read-only ingestion; no subsystem imports it   → Reader
 planning/       request → executable plan, progress tracking
 tools/          tool registry + external integrations
 permissions/    policy/permission checks + audit trail
