@@ -186,6 +186,10 @@ all three by construction.
 > was built from; and `as_of`, a `UtcInstant | None`, being the instant **the
 > source itself declares** for that reading, and `None` where it declares none.
 
+> **Normative.** A `ContextFacet` whose `source` is blank after stripping is
+> refused at construction. The value is **never normalised** — not stripped, not
+> case-folded — so it stays byte-equal to the reading's own.
+
 > **Normative.** A facet's `as_of` carries only an instant the source itself
 > declares. It may never be filled from the filesystem, from the clock, from
 > `read_at`, or from one entry's stamp applied to the rest.
@@ -234,21 +238,42 @@ store and no transaction time, so it needs `read_at` of its own. What is reused 
 the *argument*, which is ADR-0092 §1's: a band whose whole standing is that someone
 else said it is the last thing that should be able to say nothing about whose.
 
-**`EncodableText`, matching the field it copies — and an earlier draft said
-`Identifier`, which architecture review showed breaks §5's equality validator.**
-`Identifier` is the tighter type and the tempting one: the value is rendered to a
-user under §7's floor, where a blank source renders "your … said", which is the
-half-answer ADR-0092 §2 makes unconstructable on the belief side. But `Identifier`
-carries `_non_blank`, which **strips**, and `SourceReading.source` is
-`EncodableText`, which does not. A conforming reader named `"  calendar  "` — the
-suite requires `name` stable and non-empty, not trimmed — would then produce a
-reading whose `source` keeps the spaces and a facet whose `source` loses them, and
-§5's validator would refuse a reading that every other rule permits.
+**Two review rounds pulled this field in opposite directions, and the resolution is
+that `Identifier` conflates two things the facet needs separately.** `_non_blank`
+both *rejects* a blank value and *normalises* the one it accepts, returning it
+stripped. The facet wants the first and must refuse the second.
 
-**The rule this settles is more general than the bug: a faithful copy takes the
-type of the field it copies.** Tightening only the copy is how two spellings of one
-value drift, and the drift is silent until something compares them — which is
-exactly what §5's validator does, which is why it surfaced here and not later.
+- **Architecture review, first round, against `Identifier`.** `SourceReading.source`
+  is `EncodableText`, which does not strip, so a conforming reader named
+  `"  calendar  "` — ADR-0093 §10's suite requires `name` stable and non-empty, not
+  trimmed — produces a reading whose `source` keeps the spaces and a facet whose
+  `source` loses them. §5's equality validator would then refuse a reading every
+  other rule permits.
+- **Architecture review, second round, against bare `EncodableText`.** A reader
+  named `"   "` satisfies "non-empty" on its face. Its reading and its facet then
+  compare equal, the validator accepts, and §7 obliges a surface to name a source
+  that renders as nothing — recreating on the new prompt-facing boundary exactly
+  the provenance half-answer ADR-0092 §2 made unconstructable for a belief.
+
+Both are right, and they are the same finding seen from two sides: **the identity
+contract is loose at `Reader.name`, and the facet must neither inherit that
+looseness nor fix it by normalising.** So the field takes the copied field's type
+and adds the rejecting half alone. Whether the pair becomes a named alias in
+`core/types.py` or a field validator is the implementing lane's spelling; the
+semantics above are the contract.
+
+**The rule this settles is more general than either bug: a faithful copy takes the
+type of the field it copies, and may tighten only in ways that reject.** Tightening
+by *normalising* is how two spellings of one value drift, and the drift is silent
+until something compares them — which is what §5's validator does, which is why it
+surfaced here rather than in a rendering months later.
+
+**This does not close #662 and is not a substitute for it.** `Reader.name` and
+`SourceReading.source` still admit `"   "`, so the reading itself can still carry an
+illegible identity; what changes is that a facet cannot, and that a reader with such
+a name now fails visibly. On the belief path it already does — `Attestation.reported_by`
+is `Identifier`, so `CalendarReader._proposal` raises today for such a reader — which
+is the shape this clause matches rather than invents.
 
 **The same mismatch is already on `main`, one field over, and this ADR declines to
 add a third instance.** `Attestation.reported_by` is `Identifier` and is set from
@@ -627,7 +652,12 @@ prompt-assembly lane".
 
 1. `ContextFacet` in `core/types.py` — frozen (ADR-0068), with `source`, `read_at`
    and `as_of` documented as §2 rules them, including the never-from-the-filesystem
-   prohibition in the form `SourceReading.as_of`'s docstring already uses.
+   prohibition in the form `SourceReading.as_of`'s docstring already uses, and with
+   `source` refusing a blank value **without** normalising the one it accepts — the
+   rejecting half of `_non_blank` and not its stripping half, for the reason §2
+   gives. A test pins both halves: `"   "` is refused, and `"  calendar  "` is
+   accepted and returned byte-for-byte, since a normalising validator would pass the
+   first test and silently break §5's equality.
 2. `CalendarFacet` and `CurrentContext.calendar`, per §6.
 3. `SourceReading.facet` with its concrete annotation and its stamp-equality
    validator, per §5 — with a **round-trip test** pinning that a `SourceReading`
@@ -819,13 +849,17 @@ implements against it, and it changes no code.
   sub-second artefact, and it separates the reference instant from the instant the
   temporal fields were computed at. The finding itself is taken — the property is
   now a marked clause and the two misreadings it enables are forbidden.
-- **Type `ContextFacet.source` as `Identifier`.** The draft this ADR was reviewed
-  in, and rejected in §2: `Identifier` strips and `EncodableText` does not, so a
+- **Type `ContextFacet.source` as `Identifier`.** A draft this ADR was reviewed in,
+  and rejected in §2: `Identifier` strips and `EncodableText` does not, so a
   conforming reader with a padded `name` would produce a facet whose source no
   longer equals the reading's and a validator that refuses it. Architecture review
   found it; the probe confirmed the same mismatch already exists between
-  `Attestation.reported_by` and `SourceReading.source` on `main`. #662 is where all
-  three get one contract.
+  `Attestation.reported_by` and `SourceReading.source` on `main`.
+- **Type it as bare `EncodableText`.** The next draft, and rejected in §2 by the
+  following round of the same review: a reader named `"   "` is non-empty under
+  ADR-0093 §10's suite, so the facet would satisfy §7's floor while naming nothing
+  legible. The resolution takes the rejecting half of `Identifier` without its
+  normalising half; #662 is where all three fields get one contract.
 - **Annotate `SourceReading.facet` with the base `ContextFacet`.** The draft this
   ADR was reviewed in, and rejected in §1 on measured evidence: pydantic serialises
   by the declared annotation, so a base-annotated field holding a `CalendarFacet`
