@@ -1,6 +1,6 @@
 # 94. Client, sensor and actuator are capability profiles of one spoke: the edge dials out, the hub decides the band, and nothing at the edge distils
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-02
 - **Note (2026-08-02): ADR-0095 renamed the in-process seam this ADR is at pains
   to exclude, and the word "sensor" is now free for the spoke profile §1 uses it
@@ -85,7 +85,7 @@
   carrying it is prose only. ADR-0093's header set that precedent for an ADR that
   decides architecture without touching code; this one rules on the hub's door,
   on which producer may claim which band, and on where the system's intelligence
-  may run, so it takes the same set. It is **reviewed while `Proposed` and
+  may run, so it took the same set. It was **reviewed while `Proposed` and
   ratified only after** (`CONTRIBUTING.md` → "Contract ADRs land before their
   implementation").
 - **Amends no earlier ADR and supersedes none**, and §11 applies ADR-0070 §1's
