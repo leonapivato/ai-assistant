@@ -674,6 +674,18 @@ prompt-assembly lane".
    carrying a `CalendarFacet` survives `model_dump` and `model_validate` with its
    payload intact, which is the property §1's third clause exists to hold and the
    one the base annotation lost without complaint.
+
+> **Normative.** The stamp-equality validator ships with **three independent
+> rejection tests**, each altering exactly one of `source`, `read_at` and `as_of` on
+> the facet and asserting that construction is refused, alongside the accepting
+> case.
+
+One test over a facet that differs in all three would pass against a validator
+written with `and` where it meant `or` — accepting a reading whose facet names a
+different source while every other required test here stays green. That is the gap
+#587 names in general and it is worth closing by enumeration here, because this
+validator is the only thing standing between a faithful copy and a misattributed
+one (§5).
 4. A coverage test, which §1's clauses are held by rather than described in:
 
 > **Normative.** The `core` lane ships a test, in the shape
