@@ -527,6 +527,21 @@ forbidden_modules = [
 # construct a `CalendarReader` to inject. Nothing in `app` imports it *today* —
 # ADR-0093 §10's closing paragraph puts the `Engine` operation and the wiring in
 # a later lane — so this is the edge being kept legal, not one being used.
+#
+# **Direct imports only, which is what makes the `app` carve-out above actually
+# work.** Without this the carve-out is nominal: `service.hub` imports `app` to
+# call `build_engine`, so the moment the composition root constructs a
+# `CalendarReader` the chain `service -> app -> readers` breaches this contract and
+# `readers` is unreachable in production after all — the exact outcome the
+# paragraph above says listing `app` would cause, arrived at without listing it.
+# The ban this contract means is the *direct* one, and every source's comment says
+# so in its own terms: `service`'s is that "a job that imported a reader would be
+# the shape [ADR-0083] §8 forbids", which is a statement about the job's own
+# imports, not about what the composition root it calls through may construct.
+# This is the provider-SDK contract's own idiom, cited by the paragraph above and
+# now matched: that contract permits `app -> models -> pydantic_ai` for the same
+# reason and by the same flag.
+allow_indirect_imports = "true"
 name = "nothing imports the readers"
 type = "forbidden"
 source_modules = [
