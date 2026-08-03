@@ -166,6 +166,17 @@ def test_a_proposal_outside_the_attested_band_is_refused_at_construction() -> No
         FakeReader([inferred], name="calendar")
 
 
+def test_a_proposal_attested_to_another_source_is_refused_at_construction() -> None:
+    """A belief may not be stored under a reader that never reported it.
+
+    The one refusal whose absence would not fail ``read()`` but would fail the
+    shared suite — and, in production, would put a stored belief under a
+    ``reported_by`` no later fold could bring back together (ADR-0092 §6).
+    """
+    with pytest.raises(ValueError, match=r"(?i)attested to|producer"):
+        FakeReader([attested_proposal("a standup", reported_by="other")], name="calendar")
+
+
 def test_a_naive_instant_is_refused_where_it_was_written() -> None:
     """Built eagerly, so ``UtcInstant``'s refusal lands at construction, not at read."""
     with pytest.raises(ValueError, match=r"(?i)aware|naive|timezone|utc"):

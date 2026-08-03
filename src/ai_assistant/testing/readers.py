@@ -107,7 +107,14 @@ def attested_proposal(
     Args:
         content: The belief's canonical text rendering, and the fact itself.
         reported_by: The source instance that reported it — the producing reader's
-            declared identity (ADR-0093 §7). Tier 2, and never a path.
+            declared identity (ADR-0093 §7). Tier 2, and never a path. It **must
+            equal the ``name`` of the** :class:`FakeReader` **this is scripted
+            into**, which that constructor refuses otherwise: the identity reaching
+            :attr:`~ai_assistant.core.types.Attestation.reported_by` is the
+            producer's own (ADR-0093 §10), and ADR-0092 §6 mints our own ids, so it
+            is the only durable handle the stored record keeps on where it came
+            from. The two are one value until ADR-0093 §11's registry deferral
+            fires and ``reported_by`` becomes instance-distinguishing.
         record_id: A stable id for the record. ``None`` derives one from
             ``reported_by`` and ``content``, so two calls with the same belief mint
             the same id and a consumer can test a fold. **Minted by us and never
@@ -192,7 +199,19 @@ class FakeReader:
                 distinct, explicit "this source had nothing to propose", which is a
                 **successful** reading a consumer needs to exercise (ADR-0093 §8).
             name: The identity this reader declares, and therefore the reading's
-                ``source``.
+                ``source`` and every proposal's ``reported_by``. A parameter here
+                and a **declared constant** on a real reader (ADR-0093 §7) — a fake
+                whose identity were hard-coded could not stand in for two readers
+                at once, which is what a consumer testing "the right identity
+                reached the right belief" needs it for. That it is Tier 2 stays a
+                *test author's* obligation, and deliberately not a validator: §7
+                rules that "no validator can tell a chosen label from a personal
+                one", which is why it makes a real reader's identity declared
+                rather than configured instead of trying to check it. So name the
+                producer (``"calendar"``), never its source's location or the data
+                it holds (``"alice@example.com calendar"``). Nothing production
+                reads it — ``lint-imports`` keeps ``ai_assistant.testing`` out of
+                every shipping package — so the blast radius is one test's output.
             read_at: The instant this fake pretends it acquired the source's bytes
                 — our clock, always present because it is always knowable.
             as_of: A reading-wide instant the *source* declares, or ``None`` where
@@ -207,19 +226,21 @@ class FakeReader:
                 permits a message to say.
 
         Raises:
-            ValueError: If ``name`` is blank, or any scripted proposal is outside
-                the ``ATTESTED`` band or is an ``EpisodicMemory``. Each is a clause
-                of the ``Reader`` contract, so allowing it would only move the
-                failure to ``read()`` time, far from the mistake — and the
-                canonical fake must not be configurable into breaking its own
-                contract.
+            ValueError: If ``name`` is blank, or any scripted proposal is an
+                ``EpisodicMemory``, is outside the ``ATTESTED`` band, or is
+                attested to a source other than ``name``. Each is a clause of the
+                ``Reader`` contract, so allowing it would only move the failure to
+                ``read()`` time — or, for the last, to a stored belief attributed
+                to a reader that never reported it — far from the mistake. The
+                canonical fake must not be configurable into failing its own
+                conformance suite.
         """
         if not name.strip():
             msg = "a reader's declared identity must not be blank (ADR-0093 §7)"
             raise ValueError(msg)
         scripted = _synthesise(name, read_at) if proposals is None else tuple(proposals)
         for index, proposal in enumerate(scripted):
-            _refuse_unconformable(index, proposal)
+            _refuse_unconformable(index, name, proposal)
         self._name = name
         self._failure = failure
         self._resource = SuspendableResource()
@@ -313,12 +334,13 @@ def _synthesise(name: str, read_at: datetime) -> tuple[MemoryUpdateProposal, ...
     )
 
 
-def _refuse_unconformable(index: int, proposal: MemoryUpdateProposal) -> None:
+def _refuse_unconformable(index: int, name: str, proposal: MemoryUpdateProposal) -> None:
     """Refuse a scripted proposal no conforming reader could have emitted.
 
     Raises:
-        ValueError: If the proposal is an ``EpisodicMemory`` (ADR-0093 §4) or its
-            provenance is outside the ``ATTESTED`` band (ADR-0093 §4, ADR-0072 §2).
+        ValueError: If the proposal is an ``EpisodicMemory`` (ADR-0093 §4), its
+            provenance is outside the ``ATTESTED`` band (ADR-0093 §4, ADR-0072 §2),
+            or its attestation names a source other than ``name`` (ADR-0093 §10).
     """
     if proposal.proposed.kind == MemoryKind.EPISODIC.value:
         msg = (
@@ -331,6 +353,18 @@ def _refuse_unconformable(index: int, proposal: MemoryUpdateProposal) -> None:
         msg = (
             f"proposals[{index}]: a reader proposes in the ATTESTED band, not "
             f"{band.name} — what it reports is a third party's claim (ADR-0093 §4)"
+        )
+        raise ValueError(msg)
+    attestation = proposal.proposed.provenance.attestation
+    # Unreachable while the band above holds: ADR-0092 §1's iff makes an ATTESTED
+    # provenance without an attestation unconstructable. Read rather than asserted
+    # so this stays a check and not a narrowing `assert` the gate would strip.
+    if attestation is not None and attestation.reported_by != name:
+        msg = (
+            f"proposals[{index}]: attested to {attestation.reported_by!r} but produced by "
+            f"{name!r} — the identity that reaches Attestation.reported_by is the "
+            f"producer's own (ADR-0093 §10), and ADR-0092 §6 leaves it the only durable "
+            f"handle the stored record keeps on where it came from"
         )
         raise ValueError(msg)
 

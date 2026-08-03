@@ -33,7 +33,11 @@ absence from the suite for absence from the contract:
   arbitrary implementation's source fail, so it pins the *type* (below) but not
   that the type is reached from a missing, unreadable or malformed source. Those
   three cases are the concrete reader's, and ADR-0093 §10 names all three so its
-  lane writes each rather than the one easiest to provoke.
+  lane writes each rather than the one easiest to provoke. §8's two neighbouring
+  obligations on that raise — that ``__cause__`` survives, and that the message is
+  payload-free — are unreachable generically for their own reasons and are the
+  same lane's; :meth:`ReaderContract.failing_reader` states both, and **#648**
+  tracks all three so a docstring is not the only thing holding them.
 * **§4's "never proposes an absence."** A statement about what a producer declines
   to emit; nothing in a return value exhibits it.
 * **§3's "neither consumer derives its answer from the other's reading."** A
@@ -125,6 +129,9 @@ def assert_conforms(reading: SourceReading, name: str) -> None:
     for proposal in reading.proposals:
         assert proposal.proposed.kind != MemoryKind.EPISODIC.value
         assert band_of(proposal.proposed.provenance.source) is BeliefBand.ATTESTED
+        attestation = proposal.proposed.provenance.attestation
+        assert attestation is not None
+        assert attestation.reported_by == name
 
 
 class ReaderContract:
@@ -155,9 +162,20 @@ class ReaderContract:
     def failing_reader(self) -> Reader:
         """Override with a subject whose source cannot be read at all.
 
-        The suite pins the *type* that escapes; that a real missing, unreadable or
-        malformed source is what reaches it is the concrete reader's test
-        (ADR-0093 §10, and the module docstring above).
+        The suite pins the *type* that escapes. Three further obligations §8 puts
+        on that raise are the **concrete reader's tests** and are named here so its
+        lane writes them (ADR-0093 §10 names the first; #648 tracks all three):
+        that a real missing, unreadable or malformed source is what reaches it;
+        that the underlying failure survives as ``__cause__``; and that the message
+        is payload-free — identity and the cause's class, never the source's
+        location or contents.
+
+        Neither of the last two is a clause a generic suite can reach. A reader
+        that detects a malformed document by its own validation has no underlying
+        exception to preserve, so ``__cause__ is not None`` would fail a conforming
+        implementation; and payload-freeness cannot be decided without knowing what
+        the payload *would* have been, which is the source's secret and not
+        something ``name`` and one call disclose.
         """
         raise NotImplementedError
 
@@ -258,6 +276,44 @@ class ReaderContract:
         for proposal in reading.proposals:
             source = proposal.proposed.provenance.source
             assert band_of(source) is BeliefBand.ATTESTED, source
+
+    async def test_every_proposal_is_attributed_to_the_reader_that_produced_it(
+        self, reader: Reader
+    ) -> None:
+        """The identity that reaches the stored belief is the producer's own.
+
+        ADR-0093 §10 carries ``source`` on the reading "so the value that reaches
+        ADR-0092's vehicle is the producer's own" — and that vehicle is
+        :attr:`~ai_assistant.core.types.Attestation.reported_by`. A reading whose
+        ``source`` says ``calendar`` while its proposals are attested to something
+        else stores beliefs attributed to a reader that never reported them, which
+        no later fold can bring back together: ADR-0092 §6 mints our own ids, so
+        ``reported_by`` is "the only durable handle the record keeps on where it
+        came from".
+
+        **It is a suite clause on ADR-0093 §10's own test** — decidable from
+        ``name`` and one ``read()`` return value, which is the whole of what a
+        conforming ``Reader`` is — rather than because §10's list enumerates it;
+        the list predates the field being real, and §10 names its four *exclusions*
+        precisely so an unlisted, decidable clause is read as an omission and not a
+        licence.
+
+        **Revisit when ADR-0093 §11's registry deferral fires.** It defers "a
+        source registry, and with it a configurable display label and an
+        instance-distinguishing ``reported_by``", firing at the second instance of
+        one source type — at which point a reader's identity and the *instance* it
+        reports for may legitimately differ, and this equality is the assertion
+        that lane amends. Until then a reader reads one source (§1), so the two are
+        one value, and ADR-0093 §7 states the equality for the first reader in as
+        many words.
+        """
+        reading = await reader.read()
+
+        assert reading.proposals, "the subject proposed nothing, so this clause is vacuous"
+        for proposal in reading.proposals:
+            attestation = proposal.proposed.provenance.attestation
+            assert attestation is not None, "an ATTESTED belief carries one (ADR-0092 §1)"
+            assert attestation.reported_by == reader.name
 
     # --- the empty reading is a success (ADR-0093 §8) ------------------------
 
