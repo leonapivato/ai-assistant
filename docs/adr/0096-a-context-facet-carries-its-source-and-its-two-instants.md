@@ -21,7 +21,7 @@
   stated condition**, which lifts the reserved facet-only enablement state by
   satisfying it rather than by editing it. It **amends no earlier ADR and
   supersedes none**; §9 applies ADR-0070 §1's test clause by clause, including to
-  the three places where the opposite reading is available.
+  the four places where the opposite reading is available.
 - **Decided with a producer in hand, which is not what the sequencing assumed.**
   ADR-0092's `Attestation`, ADR-0093's `Reader`/`SourceReading`/`ReaderError`, the
   `readers/` package with a working `CalendarReader`, `orchestration`'s ingestion
@@ -37,9 +37,11 @@
 
 ADR-0093 split a reader's output between two consumers — memory, and the
 situational context — and shipped only the memory half. Everything on that half is
-built. The context half is not, and it is blocked on one thing: `CurrentContext`
-has no field for a reader to contribute to, so `readers/__init__.py` describes a
-calendar reader whose facet path exists on paper and nowhere else.
+built — the Protocol, the reading type, the `readers/` package, a working
+`CalendarReader`, the ingestion stage and ADR-0093 §7a's nine `Settings` figures.
+The context half is not, and it is blocked on one thing: `CurrentContext` has no
+field for a reader to contribute to. `readers/__init__.py` says so from the other
+side, listing "the ``context/`` facet" first among the lanes still owed.
 
 That blockage is deliberate and is stated as a rule rather than an omission.
 ADR-0093 §7a rules the facet-only enablement state "**reserved, not enabled**",
@@ -217,7 +219,7 @@ shared `Reader` conformance suite (ADR-0093 §10), and this value is rendered to
 user under §7's floor, where a blank source renders "your … said" — the half-answer
 ADR-0092 §2 makes unconstructable on the belief side. `SourceReading.source` is
 typed `EncodableText`, which is looser than the suite that governs it; that is
-pre-existing, is not this ADR's to change, and is filed as an issue by this lane.
+pre-existing, is not this ADR's to change, and is filed as **#662** by this lane.
 
 ### 3. Staleness is legible and is never a gate: no threshold, no flag, no cache
 
@@ -390,10 +392,11 @@ is not making an attestation and owes no report time.
 
 > **Normative.** `CurrentContext` gains `calendar: CalendarFacet | None = None`.
 > `CalendarFacet` extends `ContextFacet` with three fields: `entries_in_progress`,
-> a count of the occurrences covering `read_at`; `next_starts_at`, a
-> `UtcInstant | None` being the earliest in-window occurrence starting strictly
-> after `read_at`, and `None` where the window holds none; and `covers_until`, a
-> `UtcInstant` being the exclusive upper edge of the window the reading covered.
+> a non-negative `int` counting the occurrences in progress at `read_at` by the
+> clause below; `next_starts_at`, a `UtcInstant | None` being the earliest
+> in-window occurrence starting strictly after `read_at`, and `None` where the
+> window holds none; and `covers_until`, a `UtcInstant` being the exclusive upper
+> edge of the window the reading covered.
 
 > **Normative.** An occurrence with a non-zero duration is in progress when
 > `start <= read_at < end`; a zero-duration occurrence is in progress when
@@ -514,9 +517,12 @@ prompt-assembly lane".
 
 > **Normative.** The `core` lane ships a test, in the shape
 > `tests/core/test_instant_coverage.py` uses, asserting that every optional field
-> of `CurrentContext` other than the temporal core is annotated with a
-> `ContextFacet` subclass and that no `ContextFacet` subclass redefines `source`,
-> `read_at` or `as_of`.
+> of `CurrentContext` is annotated with a `ContextFacet` subclass and that no
+> `ContextFacet` subclass redefines `source`, `read_at` or `as_of`.
+
+The temporal core needs no exemption from that test: `now`, `time_of_day`,
+`is_weekend` and `within_working_hours` are all required fields with no default,
+so "every optional field" already selects exactly the facets.
 
 That test is what makes §1 a property of the file rather than of the fields
 someone remembered, and it is marked because §1's clauses are otherwise held by
