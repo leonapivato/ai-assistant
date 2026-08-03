@@ -68,6 +68,7 @@ class FakeEngine:
         self.closed = 0
         self.purged = 0
         self.observed = 0
+        self.ingested = 0
         #: Run inside ``start()``. Tests use it to signal the process at a point
         #: where the hub's own handlers are certainly installed.
         self.on_start: Callable[[], None] | None = None
@@ -98,6 +99,14 @@ class FakeEngine:
     async def observe(self, *, conversation_id: str | None = None) -> None:
         self.observed += 1
         _marker.info("fake_engine_observed")
+
+    async def ingest(self) -> None:
+        # Leg 6's read-only ingestion (ADR-0093 §6). Present whether or not a
+        # deployment arms the job, because `jobs_for` builds §7's whole table
+        # before filtering it by interval — a stand-in missing a method the real
+        # façade carries fails the hub's *startup*, not just the job.
+        self.ingested += 1
+        _marker.info("fake_engine_ingested")
 
     async def aclose(self) -> None:
         self.closed += 1
