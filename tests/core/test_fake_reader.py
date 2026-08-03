@@ -149,7 +149,38 @@ async def test_a_blank_mint_fails_rather_than_becoming_a_key() -> None:
     """The guard ADR-0092 §6 owes a minted id, at the factory's output."""
     subject = FakeReader(id_factory=lambda: "   ")
 
-    with pytest.raises(ValueError, match=r"(?i)blank id|key"):
+    with pytest.raises(ValueError, match=r"(?i)non-blank|key"):
+        await subject.read()
+
+
+async def test_a_non_string_mint_is_refused_rather_than_reaching_a_string_method() -> None:
+    """A malformed mint is a deliberate refusal, not an ``AttributeError``.
+
+    ``mypy`` already forbids the annotation, so this is the guard for a factory
+    that defeats it — which is the case a *guarded output* is for.
+    """
+    subject = FakeReader(id_factory=lambda: 1)  # type: ignore[arg-type,return-value]
+
+    with pytest.raises(ValueError, match=r"(?i)built-in str"):
+        await subject.read()
+
+
+async def test_a_hostile_string_subclass_is_refused_before_it_is_touched() -> None:
+    """``type(minted) is not str`` invokes no user code (``FakeMemoryWriter``'s reason).
+
+    An ``isinstance`` check would admit this and then leak the subclass's own
+    exception across the seam as a store key.
+    """
+
+    class Hostile(str):
+        __slots__ = ()
+
+        def strip(self, chars: str | None = None, /) -> str:
+            raise AssertionError
+
+    subject = FakeReader(id_factory=lambda: Hostile("r-1"))
+
+    with pytest.raises(ValueError, match=r"(?i)built-in str"):
         await subject.read()
 
 

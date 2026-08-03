@@ -116,13 +116,24 @@ def _mint(factory: Callable[[], str] | None = None) -> str:
         The minted id.
 
     Raises:
-        ValueError: If the factory returns a blank id. ADR-0092 §6 owes exactly
-            this — "the producer's id factory is **guarded at its output**" — so a
-            malformed mint fails loudly instead of becoming a key.
+        ValueError: If the factory returns anything that is not a non-blank
+            built-in ``str``. ADR-0092 §6 owes exactly this — "the producer's id
+            factory is **guarded at its output**" — so a malformed mint fails
+            loudly instead of becoming a key.
     """
     minted = factory() if factory is not None else f"reader-{uuid4().hex}"
-    if not minted.strip():
-        msg = "the id factory returned a blank id; a malformed mint must not become a key"
+    # The guard ``FakeMemoryWriter._checked_id`` uses, for its reasons. An
+    # **exact** ``str`` is required rather than an ``isinstance`` one: a hostile
+    # subclass — one whose ``strip`` or ``__hash__`` raises — passes ``isinstance``
+    # and then leaks an arbitrary exception across the seam as a store key. And
+    # nothing about the returned object is introspected in the message (not
+    # ``repr``, not ``type(...).__name__``), because a hostile ``__repr__`` could
+    # raise past the guard; ``type(minted) is not str`` invokes no user code.
+    if type(minted) is not str or not minted.strip():
+        msg = (
+            "the id factory did not return a non-blank built-in str; "
+            "a malformed mint must not become a key (ADR-0092 §6)"
+        )
         raise ValueError(msg)
     return minted
 
