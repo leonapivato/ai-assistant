@@ -52,6 +52,21 @@
   them would make §11 misdescribe the §1 it points at. **The filename is
   unchanged** — ADR-0093's was left alone through the same kind of rename
   (ADR-0095 §1), and the number is the stable identifier.
+- **Note (2026-08-03): the filename was corrected to match this ADR's title.**
+  The note above records it as unchanged; that stays true of the 2026-08-02 edit
+  and no longer describes the file, which was
+  `0094-spoke-and-sensor-are-capability-profiles-of-one-edge-peer.md` and is now
+  `0094-client-sensor-and-actuator-are-profiles-of-one-spoke.md`. **The
+  distinction from ADR-0093, whose filename is still left alone, is between lag
+  and contradiction:** ADR-0093's records what it decided at the time and its
+  status line points at the supersession, which is history a filename may carry.
+  This one asserted the inverse of its own ratified §1 — making **edge peer** the
+  genus and **spoke** a profile, the reading the Context above overturns as "the
+  wrong word for an attachment on its own terms" — and a filename may not
+  contradict its document's live text. The number remains the stable identifier
+  and every reference in the corpus is by number, so nothing else moved. **No
+  decision changes**, and this is the appended dated note ADR-0070 §1 requires
+  now that this ADR is ratified.
 - **Decides no `core` surface — no Protocol, no type, no field — and no
   implementation. The refusal is the decision rather than a scoping
   convenience.** There is one client in the tree, no sensor, and no capture

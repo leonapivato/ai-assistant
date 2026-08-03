@@ -1,7 +1,18 @@
 # 95. The read-only seam is a `Reader`, "sensor" belongs to the spoke layer, and the contract's weight stays in `core`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-02
+- **Note (2026-08-03): ratified, and its references to ADR-0094's status were
+  corrected in place at that moment.** This ADR was written while ADR-0094 stood
+  `Proposed` and said so in the present tense in two places — the header bullet
+  below and §7's closing statement — which ADR-0094's own ratification on
+  2026-08-02 made false. Ratifying those sentences unaltered would have frozen
+  §7's in-place-edit licence as live guidance over an ADR that ADR-0070 §1 now
+  protects. **The correction was made in place rather than appended because this
+  ADR still stood `Proposed`** — the same adjudication §7 applies to ADR-0094,
+  applied here — and it is the completion at ratification that §7 itself assigns
+  to the ratifying lane. **No decision changes:** the names, the placement ruling
+  and the refusal to lower the contract's weight are untouched.
 - Partially supersedes: ADR-0093 — the contract's name and the package its
   concretes live in (§2's placement clause and §10's names); §1 below. Every
   other ruling ADR-0093 made stands unchanged and is read under §1's
@@ -17,10 +28,14 @@
   headers each took the same set for. It is **reviewed while `Proposed` and
   ratified only after** (`CONTRIBUTING.md` → "Contract ADRs land before their
   implementation").
-- **Amends ADR-0094, which stands `Proposed`, by editing its text rather than by
-  appending to it** — §7 states the adjudication that permits this and records
-  what was edited. **ADR-0094's ratification is not touched**; that flip is its
-  own lane's and remains outstanding.
+- **Amends ADR-0094, which stood `Proposed` when this ADR was written, by editing
+  its text rather than by appending to it** — §7 states the adjudication that
+  permits this and records what was edited. **ADR-0094's ratification was not
+  touched by this ADR**; that flip was its own lane's and landed separately on
+  2026-08-02. **ADR-0094 is now `Accepted`, so §7's adjudication is spent:** it
+  licensed the one edit made while that ADR stood `Proposed`, and licenses no
+  other. ADR-0070 §1's no-rewrite rule now protects ADR-0094's text, and any
+  further correction to it is an appended dated note.
 
 ## Context
 
@@ -450,7 +465,10 @@ Completing them belongs to ADR-0094's own lane at ratification, which is when
 that document is re-read whole; a second lane rewriting an unratified ADR's prose
 underneath the author who owes its ratification buys inconsistency for nothing.
 
-**ADR-0094's ratification is not touched.** Its `Status` stays `Proposed`.
+**ADR-0094's ratification is not touched by this ADR.** Its `Status` stood
+`Proposed` while this was written and was flipped to `Accepted` by its own lane
+on 2026-08-02, which is also when the sweep left to that lane above was
+completed. The in-place adjudication above does not reach it now.
 
 **Nothing else in the corpus is amended.** ADR-0008 §2 is cited in §3 as it
 stands and its boundary is described rather than moved; ADR-0070 and ADR-0082 are
