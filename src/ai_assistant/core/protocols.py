@@ -152,6 +152,7 @@ if TYPE_CHECKING:
         PermissionRuling,
         PlanExport,
         Question,
+        SourceReading,
         StepTransition,
         ToolCall,
         ToolDefinition,
@@ -1007,6 +1008,157 @@ class Observer(Protocol):
                 this is a cross-subsystem contract: a stage that bounds its own
                 selection is not evidence that the next caller will.
             ModelError: Propagated unwrapped from a model-backed implementation.
+        """
+        ...
+
+
+@runtime_checkable
+class Reader(Protocol):
+    """Reads one source and proposes what it read (ADR-0093, ADR-0095 §1).
+
+    The read-only seam: it opens a source the hub can read — a notes vault synced
+    onto the box, the maildir a co-located fetcher writes — and returns one bounded
+    :class:`~ai_assistant.core.types.SourceReading` of what that source currently
+    says. Named for its product role, as every Protocol here is (``Planner``,
+    ``Observer``, ``MemoryPolicy``): the role is *reading a source*.
+
+    **It holds no store handle, no writer, no policy and no engine**, which is the
+    scope limit rather than a rule about it. An implementation may not write to any
+    store, may not read a belief, and may not decide the fate of anything it
+    proposes. The alternative — a producer holding a store and choosing what to
+    read — would make the scope of ingestion "a property of the producer's code
+    rather than of a ratified seam, and every later reviewer would have to
+    re-derive it by reading an implementation. Here it is a type" (ADR-0077 §1,
+    taken for its own reason rather than by imitation).
+
+    **Every belief it proposes reaches memory through the gate**, i.e.
+    :meth:`MemoryWriter.ingest` and the :class:`MemoryPolicy` behind it. A reader
+    inherits no part of ADR-0075's capture exemption: a calendar entry is a third
+    party's report, which is the definition of the ``ATTESTED`` band, and a band
+    whose whole standing is that someone else said it is the last band that should
+    reach the store unmediated (ADR-0093 §1).
+
+    **It is never its own caller.** Selecting when a reader runs, and ingesting
+    what it returns, are `orchestration`'s (ADR-0093 §1). Its reading has two
+    legitimate consumers at two cadences — the situational context facet at
+    assembly time, and ingestion on its schedule — and neither may derive its
+    answer from the other's reading (§3).
+
+    **A ``Reader`` is not a spoke** (ADR-0094 §1, ADR-0095 §1). It is an
+    in-process object that opens a file, not an attachment that dials the hub
+    across a process boundary, and no clause governing spokes binds it.
+
+    Cancelling :meth:`read` is governed by this module's cancellation clause
+    (ADR-0060), with one consequence spelled out on the method because it is the
+    one place a conforming-looking reader can quietly get it wrong. This module's
+    input-observation clause (ADR-0065) is **vacuous** here and is meant to stay
+    that way: :meth:`read` takes no arguments, so there is no caller-owned
+    container for a result to be torn across.
+    """
+
+    @property
+    def name(self) -> str:
+        """This reader's stable identifier, declared rather than configured.
+
+        It is **Tier 2 / operational** (ADR-0004 §1) and must stay that way, and
+        the obligation is stricter here than :attr:`ContextSource.name`'s rather
+        than merely inherited, because a reader's identity has a second consumer.
+        It is never derived from the source's location or contents — a path,
+        filename, address or account identifier may not be used as one — because
+        the identity is what lands on the reading, on
+        :attr:`~ai_assistant.core.types.Attestation.reported_by` of every belief
+        the gate then stores, in every export, and in every log line, in a system
+        whose ADR-0004 §5 rule is that logs never contain Tier 1 data. A reader
+        that wraps personal data names *itself* (``"calendar"``), never the data it
+        holds (``"alice@example.com calendar"``). It is stated as its own clause
+        because "used for logging" has been read as licence before (ADR-0055), and
+        here it would be read as licence twice over.
+
+        **Stable across calls**, and not a configurable value: a free-text setting
+        is precisely the mechanism by which a user would put their email address or
+        a path there, and no validator can tell a chosen label from a personal one.
+        A declared constant cannot carry personal data at all, which is a property
+        rather than a rule (ADR-0093 §7).
+
+        A property rather than a constructor argument, for
+        :attr:`ContextSource.name`'s reason: the assembler and the ingestion stage
+        both log it, and a seam that cannot be asked its own name forces every
+        caller to carry one beside it.
+        """
+        ...
+
+    async def read(self) -> SourceReading:
+        """Read the source once, within this reader's own bound, and report it.
+
+        **It takes no arguments, and that is a decision** (ADR-0093 §10). A reader
+        is given its own source (§1) and its bound is its own configuration (§5),
+        so a caller able to widen the read is a caller able to defeat the bound —
+        which is exactly the property ADR-0077 §1 bought by putting the maximum on
+        the producer.
+
+        **What may be proposed.** Records in the ``ATTESTED`` band —
+        ``provenance.source`` is
+        :attr:`~ai_assistant.core.types.MemorySource.EXTERNAL`, so each carries an
+        :class:`~ai_assistant.core.types.Attestation` (ADR-0092 §1) — and **never**
+        an ``EpisodicMemory``. An ingested episode has neither a gate it can
+        survive nor an exemption it can claim: ADR-0075 §2 declines the capture
+        exemption to this producer, and ADR-0075 §4 shows the gate is destructive
+        to an episode. Manufacturing one would mean arguing an exemption for a
+        record of an event this system did *not* witness (ADR-0093 §4).
+
+        **It never proposes an absence**, cancellation or retraction of anything,
+        and an entry missing from a later reading is not evidence that the entry
+        was withdrawn. This is the safety rule the whole seam turns on, and it
+        follows from the bound rather than from preference: a bounded read, a
+        truncated file, a permission error and a genuinely deleted entry are
+        **indistinguishable from the reading**, so a producer allowed to propose
+        absence would retract the user's beliefs on the strength of a failed read —
+        and the failure would look exactly like success (ADR-0093 §4).
+
+        **Each proposal carries a ``rationale`` naming the source, and a
+        ``sensitivity`` chosen for what the source holds rather than defaulted.**
+        ``MemoryUpdateProposal.sensitivity`` defaults to ``DataTier.PERSONAL``,
+        which is correct for a calendar and must not be assumed correct for the
+        next source; a producer that defaults its way past that classification is
+        the failure ADR-0004 §1's tiering exists to prevent.
+
+        **A reader mints its own id for every record it proposes** and may never
+        use the source's key — a ``VEVENT`` ``UID``, a row id, a URL — whether
+        directly or namespaced (ADR-0092 §6).
+
+        **Failure is a raise, never a smaller reading.** A read either completes
+        within its bound and returns a
+        :class:`~ai_assistant.core.types.SourceReading`, or raises; it may not
+        return what it managed to gather. A half-parsed calendar is not a smaller
+        calendar, and proposing from a partial read would write beliefs whose bound
+        is the failure's shape with nothing in the stored record saying so
+        (ADR-0093 §8).
+
+        Returns:
+            One reading: this reader's identity, the instant the read happened, any
+            reading-wide as-of the source itself declared, and the proposals. An
+            **empty ``proposals`` tuple is a successful reading** — the source had
+            nothing to propose within the bound — and no caller may treat it as a
+            failure signal. Returning an empty reading *on failure* is what this
+            seam refuses: the scheduled job would report success on every failure
+            and a reader whose file was unreadable for a week would look healthy
+            for a week, while the facet would present "your calendar is clear" when
+            the truth is "we could not read your calendar" (ADR-0093 §8).
+
+        Raises:
+            ReaderError: If the read cannot complete **because of its source** —
+                missing, unreadable, or malformed — with the underlying failure
+                preserved as ``__cause__`` and a payload-free message. An
+                implementation may not let a source-level exception, an ``OSError``
+                or a parser's own class, cross this seam unwrapped (ADR-0093 §8).
+            CancelledError: Re-raised unchanged when the call is cancelled from
+                outside. It is **excepted from the wrapping rule above** and is
+                never converted into a ``ReaderError``. The carve-out is stated
+                because the wording it qualifies invites the mistake — a cancelled
+                read has, in plain English, "not completed", and a reader wrapping
+                everything it catches would convert it, with the result that the
+                facet degrades and the scheduler logs a source fault and re-arms,
+                on a shutdown that was working correctly (ADR-0093 §8, ADR-0083 §4).
         """
         ...
 

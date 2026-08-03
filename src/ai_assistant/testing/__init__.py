@@ -31,12 +31,18 @@ from ai_assistant.testing.observation import (
 from ai_assistant.testing.permissions import FakeActionPolicy, FakeAuditTrail
 from ai_assistant.testing.planning import FakePlanner, FakePlanStore
 from ai_assistant.testing.policy import FakeMemoryPolicy, PolicyCall
+from ai_assistant.testing.readers import (
+    DEFAULT_READER_NAME,
+    FakeReader,
+    attested_proposal,
+)
 from ai_assistant.testing.tools import FakeToolRegistry
 from ai_assistant.testing.writer import FakeMemoryWriter
 
 __all__ = [
     "DEFAULT_MAX_BATCH_SIZE",
     "DEFAULT_MAX_PROPOSALS",
+    "DEFAULT_READER_NAME",
     "FakeActionPolicy",
     "FakeAssistantEngine",
     "FakeAuditTrail",
@@ -52,6 +58,7 @@ __all__ = [
     "FakeObserver",
     "FakePlanStore",
     "FakePlanner",
+    "FakeReader",
     "FakeToolImplementation",
     "FakeToolInvoker",
     "FakeToolRegistry",
@@ -59,5 +66,6 @@ __all__ = [
     "ObservationGate",
     "ObservedBelief",
     "PolicyCall",
+    "attested_proposal",
     "succeeds",
 ]
