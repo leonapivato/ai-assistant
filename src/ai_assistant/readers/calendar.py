@@ -60,6 +60,7 @@ from ai_assistant.core.types import (
 from ai_assistant.readers._occurrences import (
     occurrences_in_window,
     saturating_add,
+    saturating_shift,
 )
 from ai_assistant.readers._source import OneWorker, acquire
 
@@ -489,11 +490,23 @@ def _render(occurrence: Occurrence) -> str:
 
 
 def _when(occurrence: Occurrence) -> str:
-    """The occurrence's extent, rendered in the entry's own zone."""
+    """The occurrence's extent, rendered in the entry's own zone.
+
+    **Rendering computes an instant too**, which is easy to forget because it
+    looks like formatting. ADR-0093 §7b's saturation is stated over "every instant
+    these sections compute", and the last date of an all-day span is one of them:
+    a degenerate ``DTSTART;VALUE=DATE:00010101`` / ``DTEND;VALUE=DATE:00010101``
+    entry is parseable, in-window under a window that reaches the minimum, and
+    stepping back a day from its exclusive end is not representable. Unguarded
+    that raises, and §8 then reports a source fault against a source that parsed
+    perfectly — the outcome the saturation rule exists to prevent, arriving
+    through the one arithmetic nobody counts as arithmetic.
+    """
     start, end = occurrence.local_start, occurrence.local_end
     if occurrence.all_day:
         # The end is exclusive, so a one-day entry ends on the following date.
-        last = end - timedelta(days=1)
+        # Saturated: see this function's docstring.
+        last = saturating_shift(end, -timedelta(days=1))
         if last.date() <= start.date():
             return f"all day on {start:%Y-%m-%d}"
         return f"all day from {start:%Y-%m-%d} to {last:%Y-%m-%d}"

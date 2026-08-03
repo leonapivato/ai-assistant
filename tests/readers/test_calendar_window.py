@@ -297,3 +297,37 @@ async def test_an_entry_whose_local_end_is_unrepresentable_saturates_too(
     )
 
     assert titles == ["Last call"]
+
+
+async def test_a_degenerate_all_day_entry_at_the_minimum_date_still_renders(
+    tmp_path: Path,
+) -> None:
+    """Rendering computes an instant too, and §7b's saturation covers it.
+
+    ``DTEND`` equal to ``DTSTART`` on a ``DATE`` value is degenerate but
+    parseable, and stepping back a day from its exclusive end to name the span's
+    last date is not representable at ``0001-01-01``. Unguarded that raises, and
+    §8 then reports a source fault against a source that parsed perfectly — which
+    is the failure the saturation rule exists to prevent, arriving through the one
+    arithmetic nobody counts as arithmetic.
+
+    The entry is **not** skipped for being degenerate: §7b skips what the reader
+    cannot interpret, and a zero-width day is interpretable — it is the
+    zero-duration arm of the overlap test, which the entry satisfies.
+    """
+    raw = calendar(
+        vevent(
+            "DTSTART;VALUE=DATE:00010101",
+            "DTEND;VALUE=DATE:00010101",
+            "SUMMARY:Dawn of time",
+        )
+    )
+
+    titles = await _titles(
+        source(tmp_path, raw),
+        now=lambda: datetime.min.replace(tzinfo=UTC) + timedelta(days=2),
+        window_past=timedelta(days=3650),
+        window_future=timedelta(days=1),
+    )
+
+    assert titles == ["Dawn of time"]
