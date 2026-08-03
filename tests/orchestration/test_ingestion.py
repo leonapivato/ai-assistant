@@ -1,0 +1,316 @@
+"""The ingestion stage: the read, the gate, and what it reports (ADR-0093 §6).
+
+Every collaborator is a canonical fake from ``ai_assistant.testing`` or a thin
+scripted wrapper around one, so nothing here imports a subsystem concrete — nor a
+concrete *reader*, which ``lint-imports`` forbids this layer outright (ADR-0093
+§2). What is under test is the **stage**: that a reading's proposals reach memory
+through the ratified gate, in order, and what its report says. The reader's own
+clauses — the band, the episode refusal, the bound, the payload-free failure — are
+its conformance suite's and are never re-asserted here.
+
+The one hand-rolled double is :class:`_FailingWriter`, which delegates to the
+canonical :class:`FakeMemoryWriter` and fails on a named call. It has to be
+scripted: "the earlier proposals are already applied" is a claim about records
+that really landed, so replacing the writer rather than wrapping it would make the
+assertion vacuous.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+import pytest
+
+from ai_assistant.core.errors import MemoryStoreError, ReaderError
+from ai_assistant.core.types import MemoryDecisionKind
+from ai_assistant.orchestration import IngestionStage, MemoryWriteStage
+from ai_assistant.testing import (
+    FakeDeferralStore,
+    FakeMemoryPolicy,
+    FakeMemoryStore,
+    FakeMemoryWriter,
+    FakeReader,
+    attested_proposal,
+)
+from ai_assistant.testing.readers import DEFAULT_READER_NAME
+
+if TYPE_CHECKING:
+    from ai_assistant.core.protocols import MemoryWriter, Reader
+    from ai_assistant.core.types import MemoryIngestResult, MemoryUpdateProposal
+
+#: The instant every store fake in this module reads its clock at. Deliberately
+#: *after* ``FakeReader``'s own default ``read_at``: the reading's instant is the
+#: producer's and the store's is ours, and a test that shared one number could not
+#: tell a report echoing the reading from a report echoing the clock.
+_AT = datetime(2026, 3, 4, 10, 0, tzinfo=UTC)
+
+
+class _FailingWriter:
+    """A ``MemoryWriter`` that raises ``MemoryStoreError`` on its *n*-th call."""
+
+    def __init__(self, inner: FakeMemoryWriter, *, fail_on: int) -> None:
+        self._inner = inner
+        self._fail_on = fail_on
+        self.calls = 0
+
+    async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
+        """Delegate, except on the call the script names."""
+        self.calls += 1
+        if self.calls == self._fail_on:
+            msg = "the store is broken"
+            raise MemoryStoreError(msg)
+        return await self._inner.ingest(proposal)
+
+
+class Harness:
+    """A wired :class:`IngestionStage` and the fakes behind it, for assertions."""
+
+    def __init__(
+        self,
+        *,
+        reader: Reader | None = None,
+        writer: MemoryWriter | None = None,
+        policy: FakeMemoryPolicy | None = None,
+    ) -> None:
+        self.now: datetime = _AT
+        self.memory = FakeMemoryStore(now=lambda: self.now)
+        self.policy = policy if policy is not None else FakeMemoryPolicy()
+        self.real_writer = FakeMemoryWriter(
+            store=self.memory, policy=self.policy, now=lambda: self.now
+        )
+        self.writer: MemoryWriter = writer if writer is not None else self.real_writer
+        # The stage reaches memory through the orchestration **write stage** rather
+        # than through a `MemoryWriter` of its own (ADR-0078 §3), so a proposal the
+        # policy defers parks a durable question. The queue is held here so a case
+        # can read back what was parked.
+        self.deferrals = FakeDeferralStore(now=lambda: self.now)
+        self.writes = MemoryWriteStage(writer=self.writer, deferrals=self.deferrals)
+        self.reader: Reader = reader if reader is not None else FakeReader()
+        self.stage = IngestionStage(reader=self.reader, writes=self.writes)
+
+
+def _proposals(count: int, *, name: str = DEFAULT_READER_NAME) -> list[MemoryUpdateProposal]:
+    """``count`` well-formed attested proposals, distinguishable by content."""
+    return [
+        attested_proposal(
+            f"{name} reported thing {index}", reported_by=name, record_id=f"r-{index}"
+        )
+        for index in range(count)
+    ]
+
+
+# --- every belief reaches memory through the gate (ADR-0093 §1) ---------
+
+
+async def test_every_proposal_reaches_memory_through_the_ratified_gate() -> None:
+    """The reader proposes; a deterministic policy disposes; the stage rules on nothing.
+
+    ADR-0093 §1: "Every belief a reader's reading proposes reaches memory through
+    ``MemoryWriter.ingest`` and the ``MemoryPolicy`` behind it. A reader inherits
+    no part of ADR-0075's capture exemption." The policy seeing every proposal is
+    what that sentence means operationally — a producer that reached the store
+    around it would be the arrangement ADR-0028's propose/dispose split exists to
+    prevent.
+    """
+    harness = Harness(reader=FakeReader(_proposals(3)))
+
+    report = await harness.stage.ingest()
+
+    assert len(harness.policy.calls) == 3
+    assert report.proposed == 3
+    assert report.stored == 3
+    assert report.deferred == 0
+    assert report.rejected == 0
+    stored = await harness.memory.search("reported thing", limit=10)
+    assert len(stored) == 3
+
+
+async def test_the_proposals_are_ingested_in_the_readers_own_order() -> None:
+    """In order and independently, exactly as the learn and observation legs do it."""
+    harness = Harness(reader=FakeReader(_proposals(3)))
+
+    await harness.stage.ingest()
+
+    assert [call.proposal.proposed.id for call in harness.policy.calls] == ["r-0", "r-1", "r-2"]
+
+
+async def test_the_report_carries_the_readings_identity_and_our_read_instant() -> None:
+    """``source`` is the producer's declared identity and ``read_at`` is *our* clock.
+
+    ADR-0093 §10 keeps the two instants apart — a reading-wide ``as_of`` is the
+    *source's* claim and is a different fact (ADR-0073 §4) — and §7 makes the
+    identity Tier 2 and never a path, which is what lets a report be carried
+    around at all.
+    """
+    reader = FakeReader(_proposals(1, name="calendar"), name="calendar")
+
+    report = await Harness(reader=reader).stage.ingest()
+
+    assert report.source == "calendar"
+    assert report.read_at == (await reader.read()).read_at
+
+
+async def test_the_stage_passes_nothing_to_the_read() -> None:
+    """``read()`` takes no arguments, so the stage cannot widen the bound (§5, §10).
+
+    A caller able to widen the read is a caller able to defeat the bound, which is
+    the property ADR-0077 §1 bought by putting the maximum on the producer. There
+    is nothing to assert about arguments that do not exist, so what is asserted is
+    the consequence: one pass is exactly one read.
+    """
+    reader = FakeReader(_proposals(2))
+    harness = Harness(reader=reader)
+
+    await harness.stage.ingest()
+
+    assert reader.call_count == 1
+
+
+# --- an empty reading is a success, and a failed read is not (ADR-0093 §8) ---
+
+
+async def test_an_empty_reading_is_a_successful_pass_that_wrote_nothing() -> None:
+    """The source had nothing to propose within the bound — not a failure signal.
+
+    ADR-0093 §8 is explicit that "no caller may treat it as one", and this is the
+    caller. Nothing reaches the policy, because there is nothing to rule on.
+    """
+    harness = Harness(reader=FakeReader([]))
+
+    report = await harness.stage.ingest()
+
+    assert report.proposed == 0
+    assert report.stored == 0
+    assert report.deferred == 0
+    assert report.rejected == 0
+    assert harness.policy.calls == []
+
+
+async def test_a_source_failure_propagates_rather_than_becoming_an_empty_report() -> None:
+    """A read that cannot complete raises, and no report is constructed.
+
+    The two states must stay distinguishable at this seam: an empty reading that
+    also meant "unreadable" would make a reader whose file was unreadable for a
+    week look healthy for a week (ADR-0093 §8). Nothing is written on the way out.
+    """
+    harness = Harness(reader=FakeReader(failure=PermissionError("denied")))
+
+    with pytest.raises(ReaderError):
+        await harness.stage.ingest()
+
+    assert harness.policy.calls == []
+    assert await harness.memory.search("reported", limit=10) == []
+
+
+async def test_a_cancelled_read_is_never_converted_into_a_source_fault() -> None:
+    """``CancelledError`` crosses the stage unchanged (ADR-0093 §8, ADR-0060).
+
+    The carve-out matters *here* as much as in the reader: converting it would
+    make the scheduler log a source fault and re-arm on a shutdown that was
+    working correctly (ADR-0083 §4).
+    """
+    reader = FakeReader(_proposals(1))
+    harness = Harness(reader=reader)
+    gate = reader.suspend_next()
+
+    pass_ = asyncio.ensure_future(harness.stage.ingest())
+    await gate.reached()
+    pass_.cancel()
+    gate.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await pass_
+    assert harness.policy.calls == []
+
+
+# --- what the gate ruled, counted honestly ------------------------------
+
+
+async def test_a_deferred_ruling_parks_a_durable_question() -> None:
+    """The stage writes through the *write stage*, so an ``ASK_USER`` is queued.
+
+    ADR-0078 §3's one obligation, reaching a third producer: "a producer holding
+    the writer directly gets the ratified policy and applier and silently loses
+    the queue". A reader's proposals reach nobody in the moment, so a lost
+    question is a question nobody is ever asked.
+    """
+    harness = Harness(
+        reader=FakeReader(_proposals(1)),
+        policy=FakeMemoryPolicy(MemoryDecisionKind.ASK_USER),
+    )
+
+    report = await harness.stage.ingest()
+
+    assert report.deferred == 1
+    assert report.stored == 0
+    assert report.rejected == 0
+    assert len(await harness.deferrals.pending(limit=10)) == 1
+
+
+async def test_a_refused_ruling_stores_nothing_and_asks_nothing() -> None:
+    """``rejected`` is the remainder, and it is what a ``REJECT`` lands in."""
+    harness = Harness(
+        reader=FakeReader(_proposals(2)),
+        policy=FakeMemoryPolicy(MemoryDecisionKind.REJECT),
+    )
+
+    report = await harness.stage.ingest()
+
+    assert report.proposed == 2
+    assert report.stored == 0
+    assert report.deferred == 0
+    assert report.rejected == 2
+    assert await harness.deferrals.pending(limit=10) == []
+
+
+async def test_the_three_counts_always_partition_the_proposals() -> None:
+    """``rejected`` is derived, so the numbers cannot disagree (ADR-0085 §6b)."""
+    harness = Harness(reader=FakeReader(_proposals(4)))
+
+    report = await harness.stage.ingest()
+
+    assert report.stored + report.deferred + report.rejected == report.proposed
+
+
+# --- the residual ADR-0093 §5 names, and the one it does not ------------
+
+
+async def test_a_writer_failure_leaves_the_earlier_proposals_applied() -> None:
+    """No transaction, and nothing claims success for a partially applied reading.
+
+    ``MemoryStore`` offers none, so the failure propagates with what came before
+    it already written — and no report is returned to say otherwise (ADR-0022 §4).
+    ``assistant beliefs`` shows exactly what landed.
+    """
+    harness = Harness()
+    failing = _FailingWriter(harness.real_writer, fail_on=2)
+    harness.writes = MemoryWriteStage(writer=failing, deferrals=harness.deferrals)
+    stage = IngestionStage(reader=FakeReader(_proposals(3)), writes=harness.writes)
+
+    with pytest.raises(MemoryStoreError):
+        await stage.ingest()
+
+    assert failing.calls == 2
+    assert len(await harness.memory.search("reported thing 0", limit=10)) == 1
+
+
+async def test_a_second_pass_re_reads_and_destroys_nothing_the_first_stored() -> None:
+    """The guarantee ADR-0093 §5 actually relies on, and the residual it accepts.
+
+    A reader mints its own id per record (ADR-0092 §6), so a re-read aims at
+    nothing: "what a reader may rely on is that a re-read destroys nothing; what
+    it may not assume is that a re-proposed entry always folds." The default
+    script re-synthesises with a fresh id each pass, which is the conformant
+    behaviour, and the fake policy accepts rather than folding — so this asserts
+    the half that is promised, and #631 carries the half that is not.
+    """
+    harness = Harness()
+
+    first = await harness.stage.ingest()
+    second = await harness.stage.ingest()
+
+    assert first.stored == 1
+    assert second.stored == 1
+    assert len(await harness.memory.search("reported one thing", limit=10)) == 2

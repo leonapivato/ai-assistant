@@ -12,7 +12,7 @@ import ast
 import os
 import stat
 import sys
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 
@@ -27,6 +27,7 @@ from ai_assistant.core.errors import (
     ConfigurationError,
     DeferralStoreError,
     ModelError,
+    ReaderError,
 )
 from ai_assistant.core.types import Reversibility, RiskLevel
 from ai_assistant.learning import ModelBackedObserver
@@ -988,6 +989,131 @@ async def test_build_engine_gives_the_answer_path_the_writer_and_store_learn_use
         writer = engine._questions._writer
         assert isinstance(writer, MemoryIngestor)  # narrows the Protocol-typed seam
         assert writer._store is memory
+    finally:
+        await engine.aclose()
+
+
+def _one_event_calendar(directory: Path) -> Path:
+    """A minimal ``.ics`` with one event an hour from now, and its path.
+
+    Written against the *real* clock, because the composition root deliberately
+    leaves the reader's clock at its default: nothing at this layer has a second
+    clock to hand it, and inventing one would be the second timezone source
+    ADR-0093 §7b refuses for the same reason. An hour ahead sits comfortably inside
+    the seven-day default window (§7a), so the case does not depend on the wall
+    clock beyond it being a clock.
+    """
+    begins = datetime.now(UTC) + timedelta(hours=1)
+    ends = begins + timedelta(minutes=30)
+    stamp = "%Y%m%dT%H%M%SZ"
+    path = directory / "calendar.ics"
+    path.write_bytes(
+        (
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//ai-assistant tests//EN\r\n"
+            "BEGIN:VEVENT\r\nUID:e1\r\nDTSTAMP:20260101T000000Z\r\n"
+            f"DTSTART:{begins.strftime(stamp)}\r\nDTEND:{ends.strftime(stamp)}\r\n"
+            "SUMMARY:Dentist\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        ).encode()
+    )
+    return path
+
+
+async def test_build_engine_wires_no_reader_when_no_source_is_configured(
+    tmp_path: Path,
+) -> None:
+    """The shipping default, and the refusal that keeps it honest (ADR-0093 §7).
+
+    "Every reader ships **disabled by default**, and the reason is that nothing may
+    read a user's personal files because a default said so." So the ordinary
+    deployment builds no stage — and asking it to ingest is a wiring fault it
+    refuses, rather than an empty report indistinguishable from a source that had
+    nothing to say (§8).
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        assert engine._ingestion is None
+        with pytest.raises(ConfigurationError):
+            await engine.ingest()
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_wires_the_ingestion_stage_over_the_one_memory_store(
+    tmp_path: Path,
+) -> None:
+    """ADR-0028 §4's obligation applied to a **third** producer (ADR-0093 §6).
+
+    The stage writes through the *same* write stage the learn leg and the
+    observation stage use, which is ADR-0078 §3's one wiring obligation: a producer
+    holding a ``MemoryWriter`` of its own "gets the ratified policy and applier and
+    silently loses the queue", and a reader's proposals reach nobody in the moment,
+    so a lost question is one nobody is ever asked. Over a second store an ingested
+    belief would be unreadable and unforgettable through the surfaces the user
+    actually has.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        calendar_reader_path=_one_event_calendar(tmp_path),
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        stage = engine._ingestion
+        assert stage is not None
+        assert stage._writes is engine._loop._writes
+    finally:
+        await engine.aclose()
+
+
+async def test_an_ingested_belief_is_readable_through_the_surface_the_user_has(
+    tmp_path: Path,
+) -> None:
+    """The whole path, end to end: a file on disk becomes an inspectable belief.
+
+    This is the claim the wiring exists to support and the one nothing below the
+    composition root can make — ``lint-imports`` forbids every subsystem to import
+    ``ai_assistant.readers``, so this layer is the only place a concrete reader and
+    a real store meet (ADR-0093 §2, ADR-0095 §3). It also pins the direction
+    ADR-0093 §1 rules on: the reader proposed, and the gate disposed.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        calendar_reader_path=_one_event_calendar(tmp_path),
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        report = await engine.ingest()
+
+        assert report.source == "calendar"
+        assert report.proposed == 1
+        assert report.stored == 1
+        beliefs = await engine.beliefs()
+        assert len(beliefs) == 1
+        assert "Dentist" in beliefs[0].content
+    finally:
+        await engine.aclose()
+
+
+async def test_a_configured_but_missing_source_fails_at_run_time_and_not_at_build(
+    tmp_path: Path,
+) -> None:
+    """The split ADR-0093 §7 draws, honoured by the layer that could break it.
+
+    Shape is validated at load — the path must be absolute — while "existence and
+    readability" are properties of the world at an instant and are checked at run
+    time, "where it degrades under §6 rather than refusing to start". A hub that
+    would not boot because a calendar file sat on an unmounted volume would turn an
+    advisory source into a boot dependency, which is the coupling ADR-0008 §4
+    declined for the whole context subsystem.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        calendar_reader_path=tmp_path / "nowhere.ics",
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        assert engine._ingestion is not None
+        with pytest.raises(ReaderError):
+            await engine.ingest()
     finally:
         await engine.aclose()
 
