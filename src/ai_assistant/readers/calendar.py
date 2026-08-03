@@ -521,7 +521,7 @@ def _when(occurrence: Occurrence) -> str:
         if last.date() <= start.date():
             return f"all day on {start:%Y-%m-%d}"
         return f"all day from {start:%Y-%m-%d} to {last:%Y-%m-%d}"
-    zone = str(start.tzinfo)
+    zone = occurrence.zone_label
     if start == end:
         return f"at {start:%Y-%m-%d %H:%M} ({zone})"
     if start.date() == end.date():
