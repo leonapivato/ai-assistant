@@ -116,33 +116,36 @@ async def test_a_re_read_mints_a_new_id_rather_than_aiming_at_the_last_one() -> 
     closed validity window through ``ACCEPT``'s blind upsert — the ADR-0038 §2a
     resurrection. The content is unchanged across the two reads, which is exactly
     the case a derived id would collapse.
+
+    The factory is injected rather than left to ``uuid4`` (CONTRIBUTING →
+    "Determinism"): what is under test is that a *second* mint happens at all, and
+    ambient randomness would assert it through a probability rather than through
+    the behaviour. That the default mint is opaque is its own case below.
     """
-    subject = FakeReader()
+    minted = iter(["r-1", "r-2"])
+    subject = FakeReader(id_factory=lambda: next(minted))
 
     first = await subject.read()
     second = await subject.read()
 
     assert first.proposals[0].proposed.content == second.proposals[0].proposed.content
-    assert first.proposals[0].proposed.id != second.proposals[0].proposed.id
+    assert first.proposals[0].proposed.id == "r-1"
+    assert second.proposals[0].proposed.id == "r-2"
     assert subject.call_count == 2
 
 
-async def test_a_minted_id_is_opaque_to_the_source() -> None:
-    """Not the source's key, and not a hash of what it said (ADR-0092 §6)."""
+async def test_the_default_mint_is_opaque_to_the_source() -> None:
+    """Not the source's key, and not a hash of what it said (ADR-0092 §6).
+
+    The one case that exercises the un-injected ``uuid4`` path, and it asserts
+    nothing probabilistic: a hex digest can contain neither the content (it has
+    spaces) nor a name with a non-hex letter in it.
+    """
     reading = await FakeReader(name="calendar").read()
     record = reading.proposals[0].proposed
 
     assert record.content not in record.id
     assert "calendar" not in record.id
-
-
-async def test_an_id_factory_names_the_records_for_a_test_that_needs_to() -> None:
-    """A caller *choosing* an id is not a producer *deriving* one."""
-    ids = iter(["r-1", "r-2"])
-    subject = FakeReader(id_factory=lambda: next(ids))
-
-    assert (await subject.read()).proposals[0].proposed.id == "r-1"
-    assert (await subject.read()).proposals[0].proposed.id == "r-2"
 
 
 async def test_a_blank_mint_fails_rather_than_becoming_a_key() -> None:
