@@ -3,11 +3,12 @@
 - Status: Proposed
 - Date: 2026-08-03
 - **Decides `core` surface and implements none of it.** It adds a base model and
-  two facet types to `core/types.py`, one optional field to `CurrentContext`, one
-  optional field to `SourceReading`, and one `Settings` figure. Golden rule 5 and
-  ADR-0015 §5 put a contract ADR in its own PR, merged before anything implements
-  against it, so **no code changes with it** — the types, the `context/` adapter
-  and the composition wiring are later lanes (§8).
+  one facet type to `core/types.py`, one optional field to `CurrentContext` and one
+  optional field to `SourceReading`. **No `Settings` figure is owed**, which is a
+  consequence of §6's payload rather than an omission. Golden rule 5 and ADR-0015
+  §5 put a contract ADR in its own PR, merged before anything implements against
+  it, so **no code changes with it** — the types, the `context/` adapter and the
+  composition wiring are later lanes (§8).
 - **Required review set: adversarial *and* architecture**, even though the PR
   carrying it is prose only. It decides `core/types.py` surface, which is the
   ground ADR-0093, ADR-0094 and ADR-0095 each took the same set for, and which
@@ -344,6 +345,34 @@ wrongly, not data to reconcile. `ContextError` is exactly where ADR-0008 §4 put
 that: "reserved for programmer/wiring bugs the assembler should not paper over".
 It is the same posture as §3's source-key collision, one field over.
 
+**The two consumers hold two reader instances, and this is decided here because
+leaving it silent means the composition lane picks by accident.**
+
+> **Normative.** The `context/` adapter and the ingestion stage are injected with
+> **separate** `Reader` instances for one source. Neither shares the other's
+> reader.
+
+ADR-0093 §7 bounds a reader at **one outstanding worker** — "While it is held, a
+new `read()` raises `ReaderError` immediately and starts nothing" — and that
+reservation is per instance. Share one instance and a scheduled ingestion read
+suppresses the request-path facet for as long as it runs, which couples the two
+cadences §3 exists to keep independent, in the direction that makes an advisory
+facet wait on a periodic job. Two instances cost two workers at most, which is
+still bounded, and each consumer then owns its own failure.
+
+**A slow source degrades the facet rather than the request, and it degrades it for
+more than one request.** The assembler's own `source_timeout` defaults to 5 s while
+`calendar_read_timeout` is 10 s, so a slow calendar is skipped by
+`AssemblingContextProvider._safe_contribute` before the reader's own deadline
+fires — and the reader's worker is still outstanding, so the *next* assembly's
+`read()` raises `ReaderError` immediately and its facet is absent too, until the
+worker returns. Two concurrent assemblies produce the same outcome for the second
+one. **All of that is the ratified design working**, not a defect: the adapter
+carries no `required` marker, so every one of those paths ends at an absent facet,
+which §4 rules says nothing beyond its absence. It is stated because a consumer
+watching a facet blink in and out will be tempted to read something into the
+pattern, and §4's clause forbids exactly that.
+
 **Both halves are computed on every read, and they may contain different things.**
 This is worth stating because it looks like a defect and is not. `CalendarReader`
 skips an occurrence whose `DTSTAMP` is absent — it must, since ADR-0092 §3 permits
@@ -481,11 +510,18 @@ prompt-assembly lane".
    prohibition in the form `SourceReading.as_of`'s docstring already uses.
 2. `CalendarFacet` and `CurrentContext.calendar`, per §6.
 3. `SourceReading.facet`, per §5.
-4. **A coverage test in the shape `tests/core/test_instant_coverage.py` uses**:
-   every optional field of `CurrentContext` other than the temporal core is
-   annotated with a `ContextFacet` subclass, and no `ContextFacet` subclass
-   redefines the three reserved names. This is what makes §1 a property of the file
-   rather than of the fields someone remembered.
+4. A coverage test, which §1's two clauses are held by rather than described in:
+
+> **Normative.** The `core` lane ships a test, in the shape
+> `tests/core/test_instant_coverage.py` uses, asserting that every optional field
+> of `CurrentContext` other than the temporal core is annotated with a
+> `ContextFacet` subclass and that no `ContextFacet` subclass redefines `source`,
+> `read_at` or `as_of`.
+
+That test is what makes §1 a property of the file rather than of the fields
+someone remembered, and it is marked because §1's clauses are otherwise held by
+review alone — "the same class of gap ADR-0015 names — an invariant held by prose
+rather than mechanism", in `tests/core/test_protocol_triad.py`'s own words.
 
 **The reader lane:** `CalendarReader` populates `SourceReading.facet` with a
 `CalendarFacet` built from the same occurrences and the same `read_at`, computing
@@ -500,6 +536,10 @@ and `{}` when it does not, carrying **no** `required` marker so a reader fault
 degrades the facet and leaves the rest of the context assembled (ADR-0093 §3,
 ADR-0026 §4, ADR-0008 §4). It is registered only when `calendar_reader_path` is
 set. Its `name` is Tier 2 under `ContextSource.name`'s existing obligation.
+
+**The composition lane:** the adapter is constructed with its **own**
+`CalendarReader`, not the one the ingestion stage holds (§5), and is added to the
+provider's source list when the path is configured.
 
 **No lane owes a prompt change**, per §7.
 
@@ -516,10 +556,12 @@ opposite reading is available:
   ADR-0008 would add an optional facet field before this ADR and after it, which is
   ADR-0070 §1's test, unmet. Using a mechanism as specified is not amending it —
   the ADR-0083 §15 pattern ADR-0093 §12 applied to this same section.
-- **ADR-0008 §1's `extra="forbid"` and §4's degradation** are relied on unchanged.
-  §4's rule that a failing optional source is skipped and leaves its facet `None` is
-  what §4 above cites as already deciding the absence question; agreeing with a
-  ratified clause is not amending it.
+- **ADR-0008 §1's `extra="forbid"`, §4's degradation and §5's fresh-per-call
+  assembly** are relied on unchanged. §4's rule that a failing optional source is
+  skipped and leaves its facet `None` is what §4 above cites as already deciding the
+  absence question, and §3's no-cache clause is §5's "computes fresh each call —
+  context is a point-in-time snapshot, not cached state" stated over the facet the
+  snapshot now contains. Agreeing with a ratified clause is not amending it.
 - **ADR-0093 §7a's reserved facet-only state.** Its clause is conditional on its
   face — "**Until** an ADR adds the calendar facet as an optional `CurrentContext`
   field" — so meeting the condition is the clause operating, not the clause being
