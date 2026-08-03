@@ -301,6 +301,36 @@ source speaks, and the only one of the two that is a statement about the world.
 They must not be merged, and where `as_of` is `None` the honest answer to the second
 question is that the source does not say, which is what a surface reports under §7.
 
+> **Normative.** `CurrentContext.now` and a facet's `read_at` are captured
+> independently within one concurrent assembly, so their difference is bounded by
+> that assembly's duration and **may be of either sign**. No consumer may present a
+> negative age, and none may read the sign as information.
+
+**That clause records a fact about the assembler rather than a defect in it, and
+adversarial review is what surfaced it.** `AssemblingContextProvider` runs its
+sources concurrently — `_gather_contributions` starts them all as tasks — so
+`ClockContextSource` stamps `now` when it runs while a reader stamps `read_at` at
+byte acquisition, which ADR-0093 §7b fixes as "exactly once per read, at the instant
+the source's bytes are acquired". A read that takes a second therefore lands
+`read_at` *after* `now`, and a consumer computing "how long ago we looked" gets a
+negative duration for a perfectly successful read. The magnitude is bounded by the
+assembler's own `source_timeout`, five seconds by default.
+
+**Ordering the two is the obvious repair and it is refused.** Running the clock
+source last, or stamping `now` after the merge, changes ADR-0008 §3's concurrent
+merge for a sub-second artefact — and worse, it separates the reference instant
+from the instant the temporal fields were computed at, so `time_of_day` and
+`within_working_hours` would describe one moment while `now` named another, unless
+the clock were re-run. That is a real complication bought for a sign. Naming the
+property and forbidding the two ways a consumer could be misled by it costs one
+clause.
+
+**It is also the sharpest statement of why the first figure is not a freshness
+signal within one assembly**: both instants sit inside the same few hundred
+milliseconds, so the difference is noise whichever way it falls. The field earns its
+place through the two roles below, where the magnitude is large and the sign is not
+in doubt.
+
 **Under ADR-0008 §5 the first figure is small, and that is not a reason to drop
 it.** `assemble()` "computes fresh each call", and ADR-0093 §3 rules that "the
 context facet reads at assembly time", so `read_at` sits close to `now` on every
@@ -720,8 +750,12 @@ implements against it, and it changes no code.
   figure. Fires when something measures how old a reading may be before a decision
   built on it is wrong; the figure then belongs to the consumer that measured it,
   not to `core`.
-- **What a surface says about a facet.** §7 rules a floor and ADR-0072 §6 reserves
-  the wording. Fires with the prompt-assembly lane.
+- **What a surface says about a facet**, including how it renders an age whose sign
+  §3 permits to flip. §7 rules a floor and ADR-0072 §6 reserves the wording, and no
+  lane computes an age today, so the obligation has nothing yet to bind and nothing
+  to test. Fires with the prompt-assembly lane, which is also where a test for the
+  negative-age case belongs — at the consumer that computes one, not at a producer
+  that is behaving correctly when it produces it.
 - **The remaining nine of VISION §4's facets.** Each owes its own ADR under
   ADR-0008 §1, and each inherits §1's base and §2's three fields rather than
   re-deciding them. That is the whole of what this ADR front-loads.
@@ -779,6 +813,12 @@ implements against it, and it changes no code.
   read's proposals already carry them into memory, so the facet would ship the same
   content into the same prompt by a second route with a different stamp, and it
   would need a content budget, a truncation rule and a timezone ruling to do it.
+- **Order the clock source last, or stamp `now` after the merge, so that
+  `now >= read_at` always.** Adversarial review's direction for the negative-age
+  finding, and rejected in §3: it changes ADR-0008 §3's concurrent merge for a
+  sub-second artefact, and it separates the reference instant from the instant the
+  temporal fields were computed at. The finding itself is taken — the property is
+  now a marked clause and the two misreadings it enables are forbidden.
 - **Type `ContextFacet.source` as `Identifier`.** The draft this ADR was reviewed
   in, and rejected in §2: `Identifier` strips and `EncodableText` does not, so a
   conforming reader with a padded `name` would produce a facet whose source no
