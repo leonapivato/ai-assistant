@@ -10,17 +10,24 @@
   stands `Proposed`**: ADR-0070 §1 scopes its no-rewrite rule to "**ratified**
   decision text", and separates the two states itself — a contract ADR "is still
   reviewed while `Proposed` and ratified only after". ADR-0095 §7 states the
-  adjudication in full. Three sites were corrected: §1's marked clause excluding
-  an in-process producer, and the two places in the Context and in §1 that state
-  ADR-0093's package as live fact. **§11's classification block is deliberately
+  adjudication in full. What was corrected: §1's marked clause excluding an
+  in-process producer, the two places in the Context and in §1 that state
+  ADR-0093's package as live fact, and the remaining references to the seam by
+  its old name in live rules. Quotations of ADR-0093's own text keep the words it
+  used. **§11's classification block is deliberately
   untouched** — it records this lane's own review history, including an earlier
   draft that called a locally-read calendar file a "pull peer", and rewriting a
   historical narrative to use a name that did not exist when the events happened
-  would falsify the record. Every remaining "sensor" and `Sensor` in the text
-  below is read under ADR-0095 §1's substitution; completing the sweep is this
-  ADR's own lane's, at ratification. **Nothing decided here changes, and this
-  note is not a status token** — the `Status` field above is untouched and the
-  ratification flip remains outstanding.
+  would falsify the record. **The substitution is scoped to this ADR's
+  references to ADR-0093's in-process seam and to nothing else.** In particular
+  §1's profile name "sensor" — the vocabulary this ADR applies to an *edge
+  peer* — keeps its own meaning and is **not** read as `Reader`; freeing the word
+  for that use is what ADR-0095 was for, and reading it as the in-process seam
+  would contradict §1's marked clause that a `Reader` is not an edge peer.
+  Completing the remaining prose is this ADR's own lane's, at ratification.
+  **Nothing decided here changes, and this note is not a status token** — the
+  `Status` field above is untouched and the ratification flip remains
+  outstanding.
 - **Decides no `core` surface — no Protocol, no type, no field — and no
   implementation. The refusal is the decision rather than a scoping
   convenience.** There is one spoke in the tree, no sensor, and no capture
@@ -71,13 +78,14 @@ The project has two names for a thing that feeds the hub, and they differ on two
 axes at once, which is why they have been mistaken for a single split.
 
 A **spoke** is a client of the local API (ADR-0084): it lives in **its own
-process**, dials in, sends what the user typed, and holds nothing. A **sensor** is
-a read-only producer (ADR-0093): it lives **inside the hub** — §2 puts concrete
-readers in `ai_assistant/readers/` and §1 gives them no caller of their own — and
-it reads a source and proposes what it read. So one is out-of-process and
-addressed; the other is in-process and unaddressed. Nothing has ever forced the
-question, because the one spoke that exists is a CLI and the one sensor that is
-specified reads a file on the same disk.
+process**, dials in, sends what the user typed, and holds nothing. A **reader**
+is a read-only producer (ADR-0093, which called it a `Sensor`; renamed by
+ADR-0095): it lives **inside the hub** — §2 puts concrete readers in
+`ai_assistant/readers/` and §1 gives them no caller of their own — and it reads a
+source and proposes what it read. So one is out-of-process and addressed; the
+other is in-process and unaddressed. Nothing has ever forced the question,
+because the one spoke that exists is a CLI and the one reader that is specified
+reads a file on the same disk.
 
 Ambient capture — the rolling-buffer design #441 records — is **out-of-process and
 unaddressed at once**, and that is the combination the corpus has no name for. A
@@ -88,8 +96,8 @@ same device delivers an addressed instruction *and* the overheard material aroun
 it.
 
 **Neither existing set of rules reaches it, and this is a gap rather than an
-ambiguity.** ADR-0093 §5 fences a non-re-readable source out of the `Sensor`
-contract in as many words, and a sensor is in-process besides, so an ambient
+ambiguity.** ADR-0093 §5 fences a non-re-readable source out of the `Reader`
+contract in as many words, and a reader is in-process besides, so an ambient
 producer is not one on two independent grounds. ADR-0084's rules are written for a
 client relaying what a user typed, and say nothing about a producer. A lane
 building ambient capture today would find both ADRs declining jurisdiction and no
@@ -111,14 +119,14 @@ accident (§7)", with §7 the referent. Nothing in ADR-0084 forbids a device fro
 holding anything; what it forbids is the hub's behaviour depending on state the
 client keeps.
 
-**ADR-0093's `Sensor` already fences ambient capture out of itself.** §5 buys the
+**ADR-0093's `Reader` already fences ambient capture out of itself.** §5 buys the
 no-cursor result with re-readability and then states the limit: "A source that
 cannot be re-read in full within its bound — an append-only feed, a paginated API,
 a mailbox — is out of this contract's scope and owes its own decision." A live
 audio stream is the purest instance of that class: the past second is gone unless
 something held it. §7a's whole configuration model is a path and an interval,
 which does not describe a device that speaks first. So a capture peer is not a
-`Sensor` under ADR-0093, and cannot become one by implementing the Protocol.
+`Reader` under ADR-0093, and cannot become one by implementing the Protocol.
 
 **So the gap is real, and the answer is not "add a third name".** A third name
 leaves the same question open for the fourth kind of attachment, and it puts the
@@ -244,14 +252,14 @@ is what gives that ruling a subject; a capability this ADR declined to name is o
 a later lane introduces together with its transport, which is the order in which
 the expensive answer gets chosen by default.
 
-**An in-process `Sensor` is not an edge peer, and nothing in this ADR reaches
-it.** ADR-0093 §1 gives a sensor no caller of its own — "Selecting when a sensor
+**An in-process `Reader` is not an edge peer, and nothing in this ADR reaches
+it.** ADR-0093 §1 gives a reader no caller of its own — "Selecting when a sensor
 runs, and ingesting what it returns, are `orchestration`'s" — and §2 places
 concrete readers in `ai_assistant/readers/`, inside the hub. There is no
 connection to establish, no released set to declare and no handshake, so §2 and §3
 have nothing to bind. **A calendar file read from local disk is therefore not a
 "pull peer", and an earlier draft of this section called it one.** That draft
-would have required the ADR-0093 sensor a queued lane is about to build to acquire
+would have required the ADR-0093 reader a queued lane is about to build to acquire
 a transport it has no reason to have — a decision change to ADR-0093 dressed as an
 illustration. Adversarial review found it on the second round. The error is worth
 recording because it is the one this taxonomy invites: a capability vocabulary
@@ -261,7 +269,7 @@ boundary**, not a role.
 **This decides less than it looks like, which is the point.** It does not name a
 descriptor, an enrolment record or a field; §10 defers all three. What it does is
 fix where a later lane must look for its obligations. Under two names, an ambient
-capture lane could reason "I am not a `Sensor` — ADR-0093 §5 says so — and I am
+capture lane could reason "I am not a `Reader` — ADR-0093 §5 says so — and I am
 not the CLI, so ADR-0084 §7 is not about me", and arrive at a device governed by
 nothing. Under one kind with three capabilities, that lane's obligations are
 decided by what it does, and doing something new means arguing a new capability
@@ -977,7 +985,7 @@ ADR-0092 §10 and ADR-0093's Context both rest on it.
 ## Consequences
 
 - **A later lane's obligations are decided by what its attachment does**, so a
-  producer that is neither the CLI nor a `Sensor` inherits rules rather than
+  producer that is neither the CLI nor a `Reader` inherits rules rather than
   silence. That is the whole product of §1, and it is worth exactly as much as
   the clauses attached to it.
 - **The band ceiling closes a gap before it opens.** Nothing today can put a
