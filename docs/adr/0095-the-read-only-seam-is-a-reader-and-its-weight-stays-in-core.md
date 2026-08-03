@@ -1,4 +1,4 @@
-# 95. The read-only seam is a `Reader`, "sensor" belongs to the peer layer, and the contract's weight stays in `core`
+# 95. The read-only seam is a `Reader`, "sensor" belongs to the spoke layer, and the contract's weight stays in `core`
 
 - Status: Proposed
 - Date: 2026-08-02
@@ -54,8 +54,8 @@ The project owner's leg 5 steer is that the hub eventually gets a **dedicated
 always-on box**, and that today's loopback-only posture is a consequence of that
 box not existing yet rather than a design position. ADR-0083 made the hub a
 resident process and ADR-0084 gave it a local API; ADR-0094 then made every
-attachment that crosses the process boundary an **edge peer** that dials out.
-Compose those and the user's laptop is a *peer*, not the host.
+attachment that crosses the process boundary a **spoke** that dials out.
+Compose those and the user's laptop is a *spoke*, not the host.
 
 On a dedicated box there is no calendar, no notes vault, no git repository and
 no browser history on local disk. So the category ADR-0093 built for — a
@@ -72,25 +72,26 @@ are worth naming because they are what the seam is actually for:
   tools instead of to a connector this project would write and then own.
 
 **An earlier framing of this category listed five members, and three of them do
-not survive scrutiny.** A drop folder is undesigned. Peer-deposited files belong
-to the *peer's* submission path — ADR-0094 §3's release gate and §7's
+not survive scrutiny.** A drop folder is undesigned. Spoke-deposited files belong
+to the *spoke's* submission path — ADR-0094 §3's release gate and §7's
 re-derivability obligation — and not to a scheduled reader. Imports and exports
 are one-shot user actions on a different surface. Correcting the membership from
 five to two matters for §4 rather than being tidiness: a category argued from a
 padded list looks like it is shrinking towards one deployment-bounded member,
 and that reading is what made lowering the seam's weight look reasonable.
 
-### The collision: "sensor" is double-booked, and the peer sense has the better claim
+### The collision: "sensor" is double-booked, and the spoke sense has the better claim
 
 ADR-0093 uses `Sensor` for an **in-process** Protocol. ADR-0094 §1 uses "sensor"
-as an example **peer profile name**, carrying explicitly no normative force —
-"no rule may be conditioned on which profile name … is applied to a peer".
+as an example **spoke profile name**, carrying explicitly no normative force —
+"no rule may be conditioned on which profile name … is applied to a spoke".
 
 The two senses are not merely different, they are near-opposites on the one axis
 ADR-0094 §1 makes load-bearing: a `Sensor` is inside the hub, an edge sensor is
 across the process boundary. ADR-0094 needed a marked clause to keep them
-apart — "In particular a `Sensor` (ADR-0093) is not one, and no clause of this
-ADR binds it" — and its §11 records that **an earlier draft got this wrong in
+apart — its §1 rules that a producer running inside the hub is **not** a spoke,
+and names ADR-0093's contract as the case in point, so that no clause of that ADR
+binds it — and its §11 records that **an earlier draft got this wrong in
 exactly the way the collision predicts**, calling a locally-read calendar file a
 "pull peer" and thereby requiring an in-process object to establish a connection
 and declare a released set. Adversarial review caught it on the second round.
@@ -99,15 +100,16 @@ That is not a hypothetical cost, it is a spent one: one marked clause, one
 paragraph of §1, one block of §11, and a review round. A vocabulary that needs a
 standing disclaimer to stay usable is double-booked.
 
-**The peer sense has the better claim to the word.** A peer is a device that
-senses the world — a microphone, a camera, a phone; an in-process object opens a
-file. The roadmap's "sensors before actuators" pairing is about what the system
-perceives and acts on at its edge, which is the peer layer. Freeing the word
-makes ADR-0094 §1's profile list unambiguous rather than merely legal.
+**The spoke sense has the better claim to the word.** A spoke can be a device
+that senses the world — a microphone, a camera, a phone; an in-process object
+opens a file. The roadmap's "sensors before actuators" pairing is about what the
+system perceives and acts on at its edge, which is the spoke layer. Freeing the
+word makes ADR-0094 §1's profile list unambiguous rather than merely legal.
 
 **`peer` itself is not renamed and nothing here touches it.** `wire/peer.py`
-already uses the word for the process at the other end of a socket, and
-ADR-0094 §1 records that the two senses agree.
+uses the word for the process at the other end of a socket, which is the only
+sense it now carries: ADR-0094 §1 reserves it for that transport sense and for a
+future hub-to-hub relationship, and calls no spoke a peer.
 
 ### An honest statement of what this ADR is not allowed to settle
 
@@ -143,14 +145,14 @@ put it** — a Protocol in `core/protocols.py` shipping as a full triad.
 > every other ruling it makes binds unchanged under the substituted names.
 
 > **Normative.** The substitution reaches ADR-0093 and references to its
-> in-process seam, and nothing else. It does **not** reach "sensor" used as an
-> edge-peer profile name (ADR-0094 §1), which keeps its own meaning.
+> in-process seam, and nothing else. It does **not** reach "sensor" used as a
+> spoke profile name (ADR-0094 §1), which keeps its own meaning.
 
 The second clause is not a formality. Read as a rule about the *word*, the first
-would rewrite ADR-0094 §1's profile list into "spoke, `Reader`" — and §1's marked
-clause says in the same breath that a `Reader` is **not** an edge peer, so the
-profile would name a thing it is defined to exclude. Freeing the word for the
-peer layer is the point of this ADR (§2); a substitution that swallowed the freed
+would rewrite ADR-0094 §1's profile list into "client, `Reader`, actuator" — and
+§1's marked clause says in the same breath that a `Reader` is **not** a spoke, so
+the profile would name a thing it is defined to exclude. Freeing the word for the
+spoke layer is the point of this ADR (§2); a substitution that swallowed the freed
 sense would re-create the collision it exists to end, one layer down.
 
 The substitution rule is what makes this a partial supersession rather than a
@@ -426,8 +428,8 @@ history that did not happen.
 So ADR-0094's live-rule sites are corrected rather than annotated. What was
 edited, exactly:
 
-- **§1's marked clause**, which named `Sensor` as the thing that is not an edge
-  peer, now names `Reader`. This is the clause the collision cost, and it is the
+- **§1's marked clause**, which named `Sensor` as the thing that is not a
+  spoke, now names `Reader`. This is the clause the collision cost, and it is the
   one a later lane acts on.
 - **The prose in §1 and in the Context** stating ADR-0093's placement as current
   fact — that §2 "places concrete sensors in `ai_assistant/sensors/`" — now
@@ -462,7 +464,7 @@ this ADR merges before the triad lane starts.
 
 - **The rename is free now and would not be later.** One ADR, no code, no
   migration. The triad lane builds `Reader` from the start.
-- **"Sensor" is available to the peer layer**, which is what ADR-0094 §1's
+- **"Sensor" is available to the spoke layer**, which is what ADR-0094 §1's
   profile vocabulary wanted and what the roadmap's "sensors before actuators"
   pairing describes. ADR-0094 §1's disclaimer clause becomes a plain statement
   about process boundaries rather than a defence against a homonym.
