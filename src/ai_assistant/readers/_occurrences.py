@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Final
+from zoneinfo import ZoneInfo
 
 from dateutil.rrule import rrulestr
 from icalendar import Calendar
@@ -92,6 +93,18 @@ _FIXED_PERIOD: Final = {
 #: period strictly later than the synthetic start's, where no such filtering
 #: applies. It costs two extra iterations of the budget.
 _SEEK_UNDERSHOOT: Final = 2
+
+#: The longest zone label a rendered proposal may carry, in characters.
+#:
+#: **A bound, not a formatting preference.** The label comes from the source: a
+#: ``TZID`` naming a custom ``VTIMEZONE`` resolves to a tzinfo whose ``str`` is
+#: ``<tzicalvtz '…'>`` around that identifier, and ``TZNAME`` is source text too —
+#: both unbounded, both repeated once per occurrence. Left unbounded they are a
+#: second route to the blow-up ``calendar_max_content_bytes`` exists to stop, and
+#: one no summary cap reaches. Past this length the numeric UTC offset is
+#: rendered instead, which is bounded by construction. The tz database's longest
+#: key is 32 characters, so no real zone is affected.
+_MAX_ZONE_LABEL: Final = 40
 
 
 class SourceNotParseableError(Exception):
@@ -183,8 +196,12 @@ class Occurrence:
             **uninterpretable** — it still counts towards the entry cap (§7b) and
             is then skipped rather than proposed, because ADR-0092 §3 permits no
             substitute for a report time the source did not make.
-        text_bytes: How many UTF-8 bytes :attr:`summary` and :attr:`location`
-            take, measured **once per component** and carried as an ``int``.
+        zone_label: How the entry's zone is named in the rendering — its IANA key
+            where it has one, its ``TZNAME`` where that is short enough, and the
+            numeric UTC offset otherwise (:data:`_MAX_ZONE_LABEL`).
+        text_bytes: How many UTF-8 bytes :attr:`summary`, :attr:`location` and
+            :attr:`zone_label` take, measured **once per component** and carried
+            as an ``int``.
             ``calendar_max_content_bytes`` must be charged *before* a proposal is
             materialised — "a check that runs after the allocation has already
             paid for it" (§7a) — and re-encoding a near-8 MiB summary once per
@@ -199,6 +216,7 @@ class Occurrence:
     all_day: bool
     summary: str
     location: str
+    zone_label: str
     reported_at: datetime | None
     text_bytes: int
 
@@ -372,9 +390,16 @@ class _Entry:
     reported_at: datetime | None
     summary: str
     location: str
-    #: The UTF-8 size of the two fields above, measured once (see
-    #: :attr:`Occurrence.text_bytes`).
+    #: How this component's zone is named when an occurrence of it is rendered,
+    #: bounded by :data:`_MAX_ZONE_LABEL`.
+    zone_label: str
+    #: The UTF-8 size of :attr:`summary` and :attr:`location`, measured once (see
+    #: :attr:`Occurrence.text_bytes`). The zone label is charged separately,
+    #: because the component supplying the text is not always the one supplying
+    #: the frame it is rendered in.
     text_bytes: int
+    #: The UTF-8 size of :attr:`zone_label`, measured once.
+    zone_bytes: int
     form: _Form
     #: The occurrence this component overrides, in UTC. ``None`` for a master.
     recurrence_id: datetime | None
@@ -452,7 +477,9 @@ def _reduce(component: Any, zone: tzinfo) -> _Entry | None:
             reported_at=None,
             summary="",
             location="",
+            zone_label="",
             text_bytes=0,
+            zone_bytes=0,
             form=form,
             recurrence_id=recurrence_id,
             rules=(),
@@ -466,6 +493,7 @@ def _reduce(component: Any, zone: tzinfo) -> _Entry | None:
 
     summary = _text(component.get("SUMMARY"))
     location = _text(component.get("LOCATION"))
+    zone_label = _zone_label(local_start)
     return _Entry(
         local_start=local_start,
         duration=duration,
@@ -474,7 +502,9 @@ def _reduce(component: Any, zone: tzinfo) -> _Entry | None:
         reported_at=_reported_at(component, zone),
         summary=summary,
         location=location,
+        zone_label=zone_label,
         text_bytes=len(summary.encode()) + len(location.encode()),
+        zone_bytes=len(zone_label.encode()),
         form=form,
         recurrence_id=recurrence_id,
         rules=rules,
@@ -559,6 +589,25 @@ def _reported_at(component: Any, zone: tzinfo) -> datetime | None:
 
 def _text(value: object) -> str:
     return "" if value is None else str(value)
+
+
+def _zone_label(instant: datetime) -> str:
+    """Name the entry's zone in a form that is short, printable and bounded.
+
+    Computed **once per component**, never per occurrence: for a custom
+    ``VTIMEZONE`` the tzinfo's ``str`` is a repr wrapped around the source's own
+    ``TZID``, so building it per occurrence would allocate the very payload
+    :data:`_MAX_ZONE_LABEL` exists to bound, once for each one.
+    """
+    zone = instant.tzinfo
+    label = str(zone) if isinstance(zone, ZoneInfo) else (instant.tzname() or "")
+    if label and len(label) <= _MAX_ZONE_LABEL and label.isprintable():
+        return label
+    offset = instant.utcoffset() or timedelta(0)
+    seconds = int(offset.total_seconds())
+    sign = "-" if seconds < 0 else "+"
+    seconds = abs(seconds)
+    return f"UTC{sign}{seconds // 3600:02d}:{seconds % 3600 // 60:02d}"
 
 
 def _dates(component: Any, name: str, zone: tzinfo) -> tuple[datetime, ...]:
@@ -670,7 +719,7 @@ def _resolve(
             # equal specificity at the same point — so it fails closed rather than
             # picking one (§7b).
             continue
-        occurrence = _occurrence(moment, governing=governing)
+        occurrence = _occurrence(moment, master=master, governing=governing)
         if _overlaps(occurrence, window_start=window_start, window_end=window_end):
             yield occurrence
 
@@ -849,12 +898,20 @@ def _governing(
     return latest if latest is not None else master
 
 
-def _occurrence(moment: datetime, *, governing: _Entry) -> Occurrence:
-    """Build the occurrence the master generated at ``moment``, under ``governing``."""
+def _occurrence(moment: datetime, *, master: _Entry, governing: _Entry) -> Occurrence:
+    """Build the occurrence the master generated at ``moment``, under ``governing``.
+
+    Two components can be involved and they answer different questions. ``governing``
+    supplies the *content* — the title, the place, the report time. The **frame** —
+    the zone the wall clock is expressed in, and therefore the label a rendering
+    carries — belongs to whichever component's wall time ``local_start`` is: the
+    master's for its own occurrences and for a range override's shifted ones, the
+    override's own for a single-instance replacement.
+    """
     if governing.form is _Form.MASTER:
-        local_start = moment
+        local_start, framing = moment, master
     elif governing.form is _Form.SINGLE:
-        local_start = governing.local_start
+        local_start, framing = governing.local_start, governing
     else:
         # A range override is a *shift* applied from its own RECURRENCE-ID onward:
         # a daily 09:00 master with a THISANDFUTURE override moving 3 August to
@@ -863,7 +920,7 @@ def _occurrence(moment: datetime, *, governing: _Entry) -> Occurrence:
         # renders in one frame, and applied in wall time so the series does not
         # walk an hour on a DST boundary.
         shift = governing.start_utc - (governing.recurrence_id or governing.start_utc)
-        local_start = saturating_shift(moment, shift)
+        local_start, framing = saturating_shift(moment, shift), master
     # One canonical pair, saturated once, with both local forms **derived from
     # it**. Saturating a wall clock on its own is what let the two disagree, and
     # it goes wrong at each bound in its own way: an unrepresentable *end* at the
@@ -880,8 +937,11 @@ def _occurrence(moment: datetime, *, governing: _Entry) -> Occurrence:
         all_day=governing.all_day,
         summary=governing.summary,
         location=governing.location,
+        zone_label=framing.zone_label,
         reported_at=governing.reported_at,
-        text_bytes=governing.text_bytes,
+        # The frame's label rather than the content's: it is what the rendering
+        # carries, so it is what the budget must charge.
+        text_bytes=governing.text_bytes + framing.zone_bytes,
     )
 
 

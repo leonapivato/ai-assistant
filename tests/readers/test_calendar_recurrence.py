@@ -670,3 +670,81 @@ async def test_a_dtstart_the_rule_does_not_generate_is_still_part_of_the_set(
         (3, "09:00", "Standup"),
         (4, "09:00", "Standup"),
     ]
+
+
+def _custom_timezone(tzid: str) -> str:
+    """A ``VTIMEZONE`` whose ``TZID`` is whatever the case wants it to be."""
+    return "\r\n".join(
+        [
+            "BEGIN:VTIMEZONE",
+            f"TZID:{tzid}",
+            "BEGIN:STANDARD",
+            "DTSTART:19700101T000000",
+            "TZOFFSETFROM:+0000",
+            "TZOFFSETTO:+0000",
+            f"TZNAME:{tzid}",
+            "END:STANDARD",
+            "END:VTIMEZONE",
+        ]
+    )
+
+
+async def test_a_source_supplied_zone_name_is_bounded_and_charged(tmp_path: Path) -> None:
+    """The zone label is source text, so it is a route into the content budget.
+
+    A ``TZID`` naming a custom ``VTIMEZONE`` resolves to a tzinfo whose ``str`` is
+    a repr wrapped around that identifier, and ``TZNAME`` is source text too —
+    both unbounded, both repeated once per occurrence, and neither reached by a
+    cap on summaries. Charging a flat per-proposal overhead and rendering the
+    label anyway lets a source materialise content past
+    ``calendar_max_content_bytes`` while the accounting says it did not, which is
+    exactly the bound ADR-0093 §7a states and the ordering it requires.
+
+    Two halves, and both are needed: the label is **bounded** — past 40 characters
+    the numeric UTC offset is rendered instead, so no real zone is affected and no
+    identifier can be long — and it is **charged**, so the budget describes what is
+    built rather than what was expected.
+    """
+    tzid = "Z" * 250
+    raw = calendar(
+        _custom_timezone(tzid),
+        vevent(
+            f"DTSTART;TZID={tzid}:20260803T120000",
+            "DURATION:PT1H",
+            "SUMMARY:x",
+            uid="one",
+        ),
+    )
+    path = source(tmp_path, raw)
+
+    reading = await reader(path, max_content_bytes=10_000).read()
+
+    (proposal,) = reading.proposals
+    assert tzid not in proposal.proposed.content
+    assert "tzicalvtz" not in proposal.proposed.content
+    assert proposal.proposed.content == (
+        'Calendar entry "x", on 2026-08-03 from 12:00 to 13:00 (UTC+00:00).'
+    )
+
+    # And a budget that cannot hold one proposal refuses rather than building it.
+    with pytest.raises(ReaderError) as raised:
+        await reader(path, max_content_bytes=1).read()
+    assert isinstance(raised.value.__cause__, ContentBudgetExhaustedError)
+
+
+async def test_a_short_source_supplied_zone_name_is_kept(tmp_path: Path) -> None:
+    """Bounded, not discarded: a real zone name is what a user recognises."""
+    raw = calendar(
+        _custom_timezone("Corp/HQ"),
+        vevent(
+            "DTSTART;TZID=Corp/HQ:20260803T120000",
+            "DURATION:PT1H",
+            "SUMMARY:x",
+            uid="one",
+        ),
+    )
+
+    reading = await reader(source(tmp_path, raw)).read()
+
+    (proposal,) = reading.proposals
+    assert proposal.proposed.content.endswith("(Corp/HQ).")
