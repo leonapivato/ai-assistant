@@ -578,12 +578,101 @@ legible (ADR-0086 §1).
 """
 
 
+class Attestation(BaseModel):
+    """What reported a belief, and when that source said so (ADR-0073 §4).
+
+    The two halves of an attested belief's answer to "why is this held?", carried
+    as **one value object rather than two nullable fields** (ADR-0092 §2). Two
+    independent ``| None`` fields admit four states, of which two are half-answers:
+    a record naming a source but not when it spoke renders "your calendar had this
+    as of …" with a blank, and one naming a time but not a source attributes it to
+    nobody. Both fields required inside one optional slot makes the half-states
+    **unconstructable** instead of merely discouraged — the shape :class:`Validity`
+    already uses on :class:`MemoryBase` for the same reason.
+
+    Attributes:
+        reported_by: The connected source **instance** — "the user's work
+            calendar", not "iCalendar" — stable across syncs, because ADR-0092 §6
+            leaves it as the only durable handle the record keeps on where it came
+            from (an import's id is ours and is minted per sync). It is rendered to
+            the user and survives into ``export``, so it is not a place for a
+            credential or a filesystem path that discloses more than the source's
+            identity. Whether a human-facing display label is configured alongside
+            it is the sensor seam's question and is **not** this field; a surface
+            with no label falls back to this value. Typed :data:`Identifier` — the
+            "required, non-empty" ADR-0092 §1 asks for — rather than
+            :data:`VisibleIdentifier`, whose tightening is issue #62's for every
+            identifier at once.
+        reported_at: The instant the reporting source asserts the fact was current,
+            **on that source's own clock** (ADR-0092 §3). Not when we read the file,
+            not when we wrote the record, and never a local substitute — in
+            particular not the file's mtime, which is a property of the last local
+            write and moves under a copy, a restore or a ``touch`` while the
+            source's claim stays where it was. A source that says nothing about
+            when it spoke has no attestation to make, and :class:`Provenance`'s
+            validator then settles the outcome structurally: no attestation means no
+            ``EXTERNAL`` provenance, so the record is not proposed as an attested
+            belief at all.
+
+    Two consequences of ``reported_at`` being someone else's clock, both rulings
+    rather than observations (ADR-0092 §3):
+
+    * **``reported_at`` earlier than ``Provenance.last_updated`` is the normal
+      case**, not an anomaly — Monday's report, revised into the store on Tuesday.
+      A consumer treating the pair as an ordering invariant has misunderstood which
+      clock each belongs to.
+    * **A ``reported_at`` in our future is not refused.** Source clocks skew, and a
+      validator comparing the two would refuse a record that is perfectly
+      encodable, perfectly readable and merely early — inventing a read-path
+      failure, which is what ADR-0086 §3's admissibility test exists to avoid. Skew
+      is a *rendering* concern: a surface may say so, and must still not present our
+      clock as the source's. Nothing in ``core`` compares them.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    reported_by: Identifier = Field(
+        description=(
+            "The connected source instance that reported this belief, stable "
+            "across syncs (ADR-0092 §3)."
+        ),
+    )
+    reported_at: UtcInstant = Field(
+        description=(
+            "When that source asserts the fact was current, on the source's own "
+            "clock — never ours, and never a local proxy (ADR-0092 §3)."
+        ),
+    )
+
+
 class Provenance(BaseModel):
     """Where a memory came from and how much it should be trusted.
 
     Attaching this to every record is what distinguishes user-asserted facts
     (the profile) from inferred beliefs (the user model), and what stops one
     unusual interaction from hardening into a permanent, wrong "preference".
+
+    **An ``attestation`` is present exactly when the band is ``ATTESTED``**
+    (ADR-0092 §1), and the ``if and only if`` is deliberate in both directions.
+    *Set when ``ATTESTED``* makes ADR-0073 §4's gate structural rather than
+    procedural: a precondition a producer satisfies by remembering is one it can
+    fail by forgetting, and the failure is silent — an attested record with no
+    attestation renders exactly the misleading answer that gate forbids. *Absent
+    otherwise* keeps ``source`` the single classifier: ADR-0072 §4 rules that
+    classification is keyed on ``source`` and never on ``confidence``, so no
+    producer can promote a belief by claiming certainty, and an attestation on an
+    ``INFERRED`` record would be the same laundering by a different field — a
+    derived guess wearing a citation to a system that never reported it. Nothing
+    may acquire the standing of a band it is not in by decorating itself.
+
+    **On this class rather than on :class:`MemoryBase`**, where ``validity`` sits.
+    ADR-0045 §2 argued that placement in a way that decides this one the other way:
+    the window is a lifecycle property of the record's life *in the store*, set
+    operationally by the applier, and putting it here — "whose every other field is
+    set by the *producer* of the belief" — would mix two authorships. An
+    attestation is the pure case of the other kind. Who reported a belief and when
+    they said so are producer-set facts about trust and source, which is what
+    ADR-0045 §2 says this class stays about.
 
     **``evidence`` is ordered oldest-accumulated first, and carries no
     ``max_length``** (ADR-0086 §2, §3). The order is what lets a fold displace by
@@ -642,6 +731,13 @@ class Provenance(BaseModel):
             "belief holds — the latter is ``MemoryBase.validity`` (ADR-0045 §3)."
         ),
     )
+    attestation: Attestation | None = Field(
+        default=None,
+        description=(
+            "What reported this belief and when that source said so; set if and "
+            "only if ``band_of(source)`` is ``ATTESTED`` (ADR-0092 §1)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _user_asserted_is_certain(self) -> Provenance:
@@ -677,6 +773,52 @@ class Provenance(BaseModel):
             msg = (
                 f"{self.source.name} provenance is in the DERIVED band and must "
                 f"have confidence below 1.0"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _attested_iff_attestation(self) -> Provenance:
+        """An ``attestation`` is carried exactly by the ``ATTESTED`` band (ADR-0092 §1).
+
+        The third band-keyed validator on this class, and it is here for the reason
+        the two above it are: the gate is not the only path a :class:`Provenance`
+        takes — :class:`Goal` carries one and reaches no propose/dispose gate at
+        all — and a validator on the value needs no gate. An attested ``Goal`` would
+        owe the same disclosure as an attested belief, and only a validator reaches
+        it (:meth:`_derived_is_never_certain` states that argument in full).
+
+        **Admissible on ADR-0086 §3's own test**, which is "not 'is it a validator on
+        a ``core`` type' but 'does it refuse something that already worked'". Nothing
+        has ever produced an ``EXTERNAL`` record: the only mention of the member
+        anywhere under ``src/`` is :func:`band_of`'s arm, no module constructs one,
+        and ADR-0092 §9 made a store scan a precondition of this validator landing —
+        the implementing lane confirmed through ``export`` (which returns
+        window-closed records too, ADR-0045 §6) that the deployment's store holds
+        none. So this refuses nothing a running deployment can already decode, which
+        is exactly the condition ADR-0072 §3 named when it *declined*
+        :meth:`_derived_is_never_certain` ("there is no producer yet that could
+        violate the rule") and ADR-0077's observer later met. This is that precedent
+        one band over.
+
+        **And the timing is the argument, not an accident of it.** The first import
+        makes the band permanently non-empty, after which this rule is a data
+        migration rather than a validator — and the band whose entire warrant is
+        someone else's would have acquired the ability to say nothing about whose.
+        """
+        attested = band_of(self.source) is BeliefBand.ATTESTED
+        if attested and self.attestation is None:
+            msg = (
+                f"{self.source.name} provenance is in the ATTESTED band and must carry an "
+                f"attestation naming what reported it and when that source said so "
+                f"(ADR-0073 §4, ADR-0092 §1)"
+            )
+            raise ValueError(msg)
+        if not attested and self.attestation is not None:
+            msg = (
+                f"{self.source.name} provenance is not in the ATTESTED band and must not carry "
+                f"an attestation: a belief may not acquire the standing of a band it is not in "
+                f"by citing a source that never reported it (ADR-0072 §4, ADR-0092 §1)"
             )
             raise ValueError(msg)
         return self
