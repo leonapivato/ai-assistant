@@ -54,12 +54,12 @@
   (ADR-0095 §1), and the number is the stable identifier.
 - **Decides no `core` surface — no Protocol, no type, no field — and no
   implementation. The refusal is the decision rather than a scoping
-  convenience.** There is one spoke in the tree, no sensor, and no capture
+  convenience.** There is one client in the tree, no sensor, and no capture
   producer anywhere. Deciding an enrolment schema or a capability descriptor here
   is precisely what ADR-0073 §4 forbade — a decision "for that lane — with a
   producer in hand — not one to guess here" — and what ADR-0093 §7 deferred to the
   third source. What this ADR decides is **rules about conduct**; the surface that
-  expresses them is owed when a second peer exists, and §10 states the condition.
+  expresses them is owed when a second spoke exists, and §10 states the condition.
 - **Decided with no producer in hand, which this corpus normally refuses, and the
   justification is deliberately narrow.** The test applied to every candidate
   ruling was: is it cheap to state now and structurally unrecoverable later —
@@ -101,20 +101,20 @@
 The project has two names for a thing that feeds the hub, and they differ on two
 axes at once, which is why they have been mistaken for a single split.
 
-A **spoke** is a client of the local API (ADR-0084): it lives in **its own
+A **client** is a spoke that dials the local API (ADR-0084): it lives in **its own
 process**, dials in, sends what the user typed, and holds nothing. A **reader**
 is a read-only producer (ADR-0093, which called it a `Sensor`; renamed by
 ADR-0095): it lives **inside the hub** — §2 puts concrete readers in
 `ai_assistant/readers/` and §1 gives them no caller of their own — and it reads a
 source and proposes what it read. So one is out-of-process and addressed; the
 other is in-process and unaddressed. Nothing has ever forced the question,
-because the one spoke that exists is a CLI and the one reader that is specified
+because the one client that exists is a CLI and the one reader that is specified
 reads a file on the same disk.
 
 Ambient capture — the rolling-buffer design #441 records — is **out-of-process and
 unaddressed at once**, and that is the combination the corpus has no name for. A
 microphone is on a device, so it is on the far side of a process boundary like a
-spoke; and it produces material nobody addressed to us, like a sensor. Worse, one
+client; and it produces material nobody addressed to us, like a reader. Worse, one
 connection carries both halves: when the user says "assistant, capture that", the
 same device delivers an addressed instruction *and* the overheard material around
 it.
@@ -149,7 +149,7 @@ cannot be re-read in full within its bound — an append-only feed, a paginated 
 a mailbox — is out of this contract's scope and owes its own decision." A live
 audio stream is the purest instance of that class: the past second is gone unless
 something held it. §7a's whole configuration model is a path and an interval,
-which does not describe a device that speaks first. So a capture peer is not a
+which does not describe a device that speaks first. So a capture spoke is not a
 `Reader` under ADR-0093, and cannot become one by implementing the Protocol.
 
 **So the gap is real, and the answer is not "add a third name".** A third name
@@ -158,7 +158,7 @@ rules back where a later lane escapes them by not matching one. What this ADR do
 instead is fix the boundary at the **process edge** — where the hub's guarantees
 stop being enforceable by the hub — and attach rules to what an attachment across
 that edge *does*. An in-process producer stays entirely ADR-0093's; §1 says so as
-a marked clause, because the alternative reading would require the calendar sensor
+a marked clause, because the alternative reading would require the calendar reader
 a queued lane is about to build to grow a transport.
 
 ### The band is assigned by the door today, and that is the fact §5 turns on
@@ -194,7 +194,7 @@ decision, and the one thing dialling that door is a CLI where the user is
 literally typing. `USER_ASSERTED` is the honest classification of what arrives.
 
 **Under one kind of attachment it stops being correct, and the failure is at the
-top of the ladder rather than the bottom.** A capture peer runs as the same user
+top of the ladder rather than the bottom.** A capture spoke runs as the same user
 and speaks the same protocol. A sentence a bystander said in the room, promoted by
 a user trigger, would arrive through the same operation and be stamped
 `USER_ASSERTED` at confidence 1.0 — the band ADR-0072 defines as the user's own
@@ -209,17 +209,17 @@ Four things adjacent to every section below belong to other decisions, and are
 named here so their absence reads as a boundary rather than an oversight. §10
 states each with the condition that fires it.
 
-- **A revocable permission-grant model.** #629 records that a sensor may be
+- **A revocable permission-grant model.** #629 records that a reader may be
   enabled with no grant at all, and ADR-0093 §7 rules that "configuration is not
   a grant, and no surface may present it as one". §3 below is careful to be a
-  prohibition on the hub rather than a grant on the peer, for exactly that reason.
+  prohibition on the hub rather than a grant on the spoke, for exactly that reason.
 - **The remote hop.** ADR-0017 §1 and ADR-0084 §1/§11 are untouched and §10 says
-  so in as many words, because "designed for remote peers" being read as
+  so in as many words, because "designed for remote spokes" being read as
   permission already granted is the failure ADR-0084's Consequences warn about by
   name.
 - **The ambient episode exemption.** ADR-0075 §2 listed "the buffered ambient
   capture #441 sketches" among the producers that inherit nothing and *reserved*
-  the argument; ADR-0093 §4 then forbade a sensor proposing an `EpisodicMemory`.
+  the argument; ADR-0093 §4 then forbade a reader proposing an `EpisodicMemory`.
   §10 states the shape of the collision and does not grant it.
 - **`VISION.md`'s sensor-spectrum amendment.** Owed, and #441's standing
   discipline is to ratify it only when a real sensor exists. Named, not written.
@@ -227,17 +227,17 @@ states each with the condition that fires it.
 ## Decision
 
 We will treat every attachment that reaches the hub across a process boundary as
-**one kind of thing — an edge peer — and attach rules to what it does rather than
+**one kind of thing — a spoke — and attach rules to what it does rather than
 to what it is called.**
 
 ### 1. One kind of attachment, and it is bounded by the process boundary
 
-> **Normative.** An **edge peer** is an attachment that reaches the hub across a
+> **Normative.** A **spoke** is an attachment that reaches the hub across a
 > process boundary, over the local API of ADR-0084. There is one kind of it, and
-> no rule may be conditioned on which profile name — "spoke", "sensor", or a later
-> one — is applied to a peer.
+> no rule may be conditioned on which profile name — "client", "sensor",
+> "actuator", or a later one — is applied to a spoke.
 
-> **Normative.** A producer running inside the hub is **not** an edge peer. In
+> **Normative.** A producer running inside the hub is **not** a spoke. In
 > particular a `Reader` (ADR-0093, renamed by ADR-0095 §1) is not one, and no
 > clause of this ADR binds it.
 
@@ -249,24 +249,26 @@ to what it is called.**
 > **Normative.** Every obligation below names its own scope: the capabilities it
 > binds, or the whole attachment. A rule scoped to an attachment binds it once,
 > however many capabilities it exercises. No obligation in this corpus may be
-> conditioned on which profile name a peer is given.
+> conditioned on which profile name a spoke is given.
 
 **Both scopes are needed and the mixture is deliberate, so §1 states the rule
 rather than a preference for one of them.** Most obligations here are properties
 of a channel and are scoped to the capabilities that open it — §3's release gate
 binds push and pull, §4 binds the doorbell, §7 binds whatever submits. Three are
 properties of the attachment and would be defeated by capability scoping. §5's
-ceiling is the clear case: a ceiling per capability gives a peer that both pushes
+ceiling is the clear case: a ceiling per capability gives a spoke that both pushes
 and pulls two ceilings, and content then takes the looser route, which is the
 laundering §5 exists to forbid arriving through the taxonomy. §6 and §9 are the
 same shape — a device that may not distil is not permitted to distil on its second
 channel, and a bound on ephemeral state that reset per capability would bound
 nothing.
 
-The CLI is push-only. A capture peer is the case that needs all three: it pushes
+The CLI is push-only. A capture spoke is the case that needs all three: it pushes
 what a promotion released, it may ring when a detector fires, and the hub fetches
 the promoted slice rather than being handed it. The profiles are useful vocabulary
-and they are not types.
+and they are not types: a **client** carries a person, a **sensor** reads the
+world, an **actuator** acts on it, and each names a bundle of capabilities rather
+than a class this ADR binds.
 
 **Pull has no instance today, and the honest statement is that it is named
 because the *wrong* shape of it is unrecoverable, not because something needs
@@ -276,13 +278,14 @@ is what gives that ruling a subject; a capability this ADR declined to name is o
 a later lane introduces together with its transport, which is the order in which
 the expensive answer gets chosen by default.
 
-**An in-process `Reader` is not an edge peer, and nothing in this ADR reaches
+**An in-process `Reader` is not a spoke, and nothing in this ADR reaches
 it.** ADR-0093 §1 gives a reader no caller of its own — "Selecting when a sensor
 runs, and ingesting what it returns, are `orchestration`'s" — and §2 places
 concrete readers in `ai_assistant/readers/`, inside the hub. There is no
 connection to establish, no released set to declare and no handshake, so §2 and §3
 have nothing to bind. **A calendar file read from local disk is therefore not a
-"pull peer", and an earlier draft of this section called it one.** That draft
+pull-capable spoke, and an earlier draft of this section called it a "pull
+peer".** That draft
 would have required the ADR-0093 reader a queued lane is about to build to acquire
 a transport it has no reason to have — a decision change to ADR-0093 dressed as an
 illustration. Adversarial review found it on the second round. The error is worth
@@ -299,18 +302,49 @@ nothing. Under one kind with three capabilities, that lane's obligations are
 decided by what it does, and doing something new means arguing a new capability
 rather than inheriting silence.
 
-**The word "peer" is already in the tree and the two senses agree.**
-`wire/peer.py` uses it for the process at the other end of a socket, which is
-what an edge attachment is. Nothing needs reconciling; the note exists so a later
-reader does not think it does.
+> **Normative.** "Peer" is reserved for its transport sense — the process at the
+> other end of a socket, which is what `wire/peer.py` means by it — and for a
+> future hub-to-hub relationship. No architectural noun in this corpus calls a
+> spoke a peer.
+
+**The reservation has a firing condition, which is why it is a clause rather
+than a note about a word nobody is using.** If hubs ever talk to each other —
+federation, a household running two, a hub that backs another up — *those* are
+peers in the word's ordinary sense: equal parties, neither holding authority
+over the other, either able to open the conversation. That is the one
+relationship in this system's foreseeable shape the word describes accurately,
+and it is what the reservation is holding the word for. **Fires when a second hub
+exists.** Nothing here authorises one: ADR-0083's resident hub is singular, and
+§10's remote-hop deferral is untouched and is about a spoke off the device, not a
+second hub. This is the ADR-0093 §7 move — decline the word now, and name the
+condition that would revive the question — rather than leaving it merely unused,
+because a word left merely unused gets taken by the next lane that needs a noun.
+
+**And "peer" was the wrong word for an attachment on its own terms, which is why
+an earlier text of this ADR is corrected rather than defended.** That text made
+**edge peer** the genus and demoted **spoke** to a profile name. A peer is an
+equal; this architecture is explicitly not one. The hub owns all state and all
+intelligence (`VISION.md` §8, ADR-0083), a spoke holds nothing authoritative
+(§9), the hub decides the band of everything a spoke submits (§5), and every
+connection runs one way (§2). That is a star with an authority at its centre —
+hub and spokes — and not a mesh. The vocabulary was also at odds with the corpus
+that already had a word: ADR-0084 uses "spoke" for the whole category, not for
+one profile of it — §5's "a spoke needs the whole surface" is about the engine's
+API, §8's "every spoke built in between would inherit the blind spot" is about
+anything the transport reaches — and `docs/roadmap.md`'s later-arc leg is "Remote
+spokes", meaning attachments in general. **Restoring "spoke" as the genus
+therefore removes an inconsistency rather than creating one, and no clause of
+ADR-0084, ADR-0083 or the roadmap needed changing**; every one of their uses is
+genus-sense already, and a term broadened from a profile to the genus cannot
+falsify a sentence calling some particular attachment a spoke.
 
 ### 2. The edge dials out; the hub never dials the edge
 
 *Scope: the attachment.*
 
-> **Normative.** Every connection between the hub and a peer is established by
-> the peer. The hub may not initiate a connection to a peer, and a peer may not
-> accept one. Pull is served over a connection the peer already established.
+> **Normative.** Every connection between the hub and a spoke is established by
+> the spoke. The hub may not initiate a connection to a spoke, and a spoke may not
+> accept one. Pull is served over a connection the spoke already established.
 
 This is the ruling with the widest gap between its cost now and its cost later,
 and it is cheap now because **it is what the tree already does**: ADR-0084 §1 has
@@ -321,16 +355,16 @@ alternative rather than changing anything.
 **The naive reading of pull is the expensive one.** "The hub fetches from the
 device" reads as the hub opening a connection to the device, and that means a
 listening socket on a phone, a laptop or a microphone; an address for the hub to
-hold; NAT traversal the day the peer is not on this machine; and an inbound
+hold; NAT traversal the day the spoke is not on this machine; and an inbound
 attack surface on every edge device in the deployment. Each of those is a
-protocol-shaped commitment, and reversing one after peers are deployed is the
+protocol-shaped commitment, and reversing one after spokes are deployed is the
 lockstep upgrade ADR-0084's "What is expensive to retrofit" section says a
 single-user install has no machinery for.
 
 **It looks academic on loopback, and that is the argument for deciding it now
 rather than against.** Two processes on one machine make the direction invisible:
 either party can connect to either. The direction only becomes observable at the
-first remote peer, which is precisely the moment at which it has stopped being
+first remote spoke, which is precisely the moment at which it has stopped being
 changeable. ADR-0084 spent its care on three retrofits for this reason and treated
 "swapping the address family" as the reversible decision it is; connection
 direction is on the expensive side of that line, and it was not one of the three.
@@ -346,24 +380,24 @@ the correlation id exists so that "multiplexing or a progress stream be added
 deferral. So the mechanism is an additive wire decision owing its own ADR (§10),
 and this section decides only the direction, which that decision must not reverse.
 
-### 3. Nothing leaves the edge that the peer has not released
+### 3. Nothing leaves the edge that the spoke has not released
 
 *Scope: push and pull.*
 
-> **Normative.** The hub has no operation that reads edge state a peer has not
-> released to it. A pull may return only what the peer has already placed in its
-> released set, and a peer that receives a pull for anything else refuses it.
+> **Normative.** The hub has no operation that reads edge state a spoke has not
+> released to it. A pull may return only what the spoke has already placed in its
+> released set, and a spoke that receives a pull for anything else refuses it.
 
-> **Normative.** A push carries only what the peer has placed in its released
+> **Normative.** A push carries only what the spoke has placed in its released
 > set. Release is the single gate on everything that leaves the edge, and the
 > direction the material travels in does not weaken it.
 
-> **Normative.** What a peer releases is the peer's declaration, and the hub may
+> **Normative.** What a spoke releases is the spoke's declaration, and the hub may
 > not widen it. A hub-side configuration value, a policy, or an operator setting
 > may not enlarge what a push or a pull can reach.
 
 **Push is bound by the same gate as pull, and an earlier draft bound only pull.**
-That version was defeated on its own illustration: a capture peer could run a
+That version was defeated on its own illustration: a capture spoke could run a
 voice-activity detector under §6, treat every voiced segment as promoted under §9,
 and push it under §7 without ever being pulled — satisfying every clause while
 sending a bystander's audio to the hub. Adversarial review found it on the first
@@ -384,16 +418,16 @@ precondition that a producer can satisfy by remembering is one it can fail by
 forgetting, and the failure is silent".
 
 The capture shape is what makes the rule concrete, and it is the shape the rule
-was written against. A capture peer's rolling buffer is **never** in its released
+was written against. A capture spoke's rolling buffer is **never** in its released
 set (§9), so nothing reaches it in either direction: a hub asking for "the last
-thirty seconds" receives a refusal rather than audio, and the peer cannot push it
-either. Only a promoted slice is releasable. Note that a peer whose released set
+thirty seconds" receives a refusal rather than audio, and the spoke cannot push it
+either. Only a promoted slice is releasable. Note that a spoke whose released set
 is large and static — a process that holds a document and offers all of it, at any
 time — satisfies these clauses trivially, which is the correct outcome: the gate
 is not a bound on how much may be released, it is a bound on the hub reaching past
 what was.
 
-> **Normative.** What may cause a release is **not decided here**. A peer may not
+> **Normative.** What may cause a release is **not decided here**. A spoke may not
 > read this section as authorising any particular promotion, and in particular
 > release is not authorisation: a released slice still faces §5's ceiling and
 > whatever grant model #629 settles.
@@ -413,13 +447,13 @@ does not discharge.** #629 records that `VISION.md` promises a sensor is
 "granted, scoped, and revocable" and that none of the three holds today; ADR-0093
 §7 rules that a `Settings` field "cannot be revoked by the user through the
 assistant, cannot be scoped, and leaves no audit record". Nothing above supplies
-any of that. A peer's released set is a *bound on reach*, not a record of the
+any of that. A spoke's released set is a *bound on reach*, not a record of the
 user's permission: it does not say who agreed, it is not revocable through the
 assistant, and it leaves no audit trail. The clauses are worth having anyway, and
 their value is that they give the grant model **one place to attach**: a grant
 governs what may be *released*, and everything that leaves the edge in either
 direction is already bounded by release. Without them a grant model would have to
-govern the hub's asking and the peer's sending separately, and a peer that sends
+govern the hub's asking and the spoke's sending separately, and a spoke that sends
 is the half no hub-side rule can reach. §10 keeps the deferral live.
 
 **The relationship between the two questions is worth stating, because they are
@@ -472,13 +506,13 @@ wrong answer without disobeying anything §3 wrote.
 
 *Scope: the band rule binds every submission — push, and whatever a pull returns. The ceiling is the attachment's.*
 
-> **Normative.** The band of a record a peer's submission produces is decided by
-> the hub from what it knows about the submitting peer. A peer may not decide,
+> **Normative.** The band of a record a spoke's submission produces is decided by
+> the hub from what it knows about the submitting spoke. A spoke may not decide,
 > claim, or influence the band of what it submits, and a claim carried in a
 > submission is not evidence of the standing it claims.
 
-> **Normative.** Every peer has a band ceiling, and a submission that would
-> produce a record above that peer's ceiling is **refused**, not downgraded and
+> **Normative.** Every spoke has a band ceiling, and a submission that would
+> produce a record above that spoke's ceiling is **refused**, not downgraded and
 > not silently reclassified.
 
 **This is ADR-0093 §1's rule with the producer changed.** "A sensor … may not
@@ -492,22 +526,22 @@ intact.** ADR-0072 §2's mapping is a total function of `MemorySource`, enforced
 mechanically — `band_of`'s wildcard "does nothing but `assert_never`", so a source
 added without choosing its band fails the gate. Nothing here makes the band a
 function of the transport. What the ceiling constrains is which `MemorySource` a
-given peer's submission may *result in*, which is upstream of the classification
+given spoke's submission may *result in*, which is upstream of the classification
 and leaves the classification exactly where ADR-0072 §4 put it: "keyed on `source`
 and never on `confidence`, so no producer can promote a belief into the asserted
-band by claiming certainty". A peer promoting itself by claiming a source is the
+band by claiming certainty". A spoke promoting itself by claiming a source is the
 same laundering by a third field, and it gets the same answer.
 
 **Refused rather than downgraded, and the alternative is worse in a specific
 way.** Silently reclassifying an over-ceiling submission to the highest band the
-peer may reach produces a record that is *plausible* and wrong: a bystander's
-sentence lands as `ATTESTED` with the capture peer named as the source that
-reported it, which is a claim the peer never made and cannot support. Refusing is
+spoke may reach produces a record that is *plausible* and wrong: a bystander's
+sentence lands as `ATTESTED` with the capture spoke named as the source that
+reported it, which is a claim the spoke never made and cannot support. Refusing is
 ADR-0093 §5's posture — "A bound is enforced by **refusing**, never by
 truncating" — for the same reason it gave: the alternative produces output a
 consumer cannot distinguish from a correct one.
 
-**Where the ceiling is declared, and what a peer's identity is, are deliberately
+**Where the ceiling is declared, and what a spoke's identity is, are deliberately
 not decided.** Both are surface: an enrolment record with a ceiling field, and an
 identity minted or declared. §10 defers them together, and §11 rules on whether a
 hub-minted identity would touch ADR-0092 §3.
@@ -516,7 +550,7 @@ hub-minted identity would touch ADR-0092 §3.
 
 *Scope: the attachment.*
 
-> **Normative.** An edge peer may decide **whether to send** — voice-activity
+> **Normative.** A spoke may decide **whether to send** — voice-activity
 > detection, wake-phrase spotting, bounding, thresholding. It may not decide
 > **what a submission means**: no classification into a `MemoryKind`, no
 > extraction of a belief, no summarisation, no assignment of any `Provenance`
@@ -552,11 +586,11 @@ cannot be reached by letting the detector emit meaning.
 
 *Scope: push and pull.*
 
-> **Normative.** Where a peer's submission is derived from source material the
-> peer holds, the peer submits the source material and may not substitute a lossy,
+> **Normative.** Where a spoke's submission is derived from source material the
+> spoke holds, the spoke submits the source material and may not substitute a lossy,
 > model-dependent derivation of it.
 
-> **Normative.** A peer may not destroy the material a submission was derived from
+> **Normative.** A spoke may not destroy the material a submission was derived from
 > while that submission is unresolved.
 
 > **Normative.** A custody rule fails the clause above if it lets the material be
@@ -565,14 +599,14 @@ cannot be reached by letting the detector emit meaning.
 > material after an attempt has terminally failed **is** permitted, provided the
 > failure is reported and not silent; what the report says is §10's.
 
-> **Normative.** That clause governs what a peer **does**, not what it survives. A
-> peer that loses unresolved material to a crash has suffered a fault, not
+> **Normative.** That clause governs what a spoke **does**, not what it survives. A
+> spoke that loses unresolved material to a crash has suffered a fault, not
 > destroyed it, and whether such material must survive a restart is **not decided
 > here** (§10).
 
 **The durability condition attaches to the acknowledgement and not to every exit,
 and an earlier draft attached it to both.** That version made deletion after a
-terminal refusal simultaneously required — §8 will not let a peer hold material
+terminal refusal simultaneously required — §8 will not let a spoke hold material
 forever — and forbidden, since the hub never durably holds material it refuses.
 Adversarial review found it after §8 was narrowed, which is where the defect came
 from: the terminal-failure exit moved out of §8 into §10's deferral and this
@@ -585,23 +619,23 @@ failure must be legible rather than silent.
 **The act-versus-fault line is drawn because the alternative reading boxes the
 custody lane, and architecture review found the box.** Read as a durability
 guarantee, the clause above would require an unresolved submission to survive a
-peer restart — which is durable storage at the edge, which reverses §9 and reaches
+spoke restart — which is durable storage at the edge, which reverses §9 and reaches
 `VISION.md` §8's "stateless client", which §10 defers and this lane may not touch.
 A constraint whose only satisfying mechanism a document forbids elsewhere is not a
 constraint; it is a decision made by omission, in the direction nobody argued. So
 the clause is scoped to conduct, where it is enforceable and where its whole
-purpose lies — a peer must not *choose* to drop the source — and the durability
+purpose lies — a spoke must not *choose* to drop the source — and the durability
 question goes to §10 as a question the custody lane must answer rather than as an
 answer it must reach.
 
-For an audio-shaped peer this means the promoted slice, not a transcript made at
+For an audio-shaped spoke this means the promoted slice, not a transcript made at
 the edge. The clause is stated over derivations rather than over audio because the
 argument is not about audio.
 
 **The deciding argument is ADR-0093 §5's, running the other way.** §5 buys the
 no-cursor result with re-readability and fences out sources that lack it. A stream
 lacks it absolutely — and #441's rolling buffer is the device that manufactures a
-bounded amount of it back, which is what makes a capture peer answerable to §5's
+bounded amount of it back, which is what makes a capture spoke answerable to §5's
 reasoning at all. The promoted slice is then **the only artifact in the whole
 pipeline that can be re-read**. A transcript is a lossy projection through one
 model at one moment; if the edge transcribes and drops the audio, a mis-hearing is
@@ -616,7 +650,7 @@ remark is who spoke — which is exactly the input a band ceiling has to act on.
 text has already made that decision at the edge, unauditably and irreversibly,
 which turns §5 into a rule with nothing to apply.
 
-**A transcribing peer breaks hub-and-spokes at its premise.** ADR-0083's shape and
+**A transcribing spoke breaks hub-and-spokes at its premise.** ADR-0083's shape and
 `VISION.md` §8 put the intelligence in the hub; a transcriber is a model outside
 `models/`, outside ADR-0013's router, with no ADR-0062 fallback naming and no
 ADR-0061 agnosticism testing — reached by an implementation choice rather than by
@@ -641,7 +675,7 @@ ADR-0017 §1 is engaged identically. §10 keeps the remote hop where it is.
 
 *Scope: the hub, and the attachment for what it may retain.*
 
-> **Normative.** Material a peer submits under §7 is retained by the hub only for
+> **Normative.** Material a spoke submits under §7 is retained by the hub only for
 > a bounded verification window, during which the user may read what was made of
 > it and correct it, and it is destroyed when the window closes.
 
@@ -654,8 +688,8 @@ ADR-0017 §1 is engaged identically. §10 keeps the remote hop where it is.
 > **Normative.** The figures are named in the deciding ADR of the producer that
 > needs them, refused at load rather than at first use, and are not named here.
 
-> **Normative.** A peer does not retain submitted material once its submission has
-> resolved, and a producer's ADR may not leave a peer holding submitted material
+> **Normative.** A spoke does not retain submitted material once its submission has
+> resolved, and a producer's ADR may not leave a spoke holding submitted material
 > indefinitely. **What resolution is, and the custody handoff that defines it, are
 > not decided here** (§10).
 
@@ -669,7 +703,7 @@ codec satisfies the window and fills the disk. A size cap alone bounds bytes and
 not exposure, which is the thing a *verification* window is for.
 
 **The figures are not named here, and ADR-0093 is the authority for not naming
-them.** §7a names nine figures for the calendar sensor and then draws the line
+them.** §7a names nine figures for the calendar reader and then draws the line
 explicitly: "**These figures belong to the calendar sensor, not to the `Sensor`
 contract.** What the contract obligates is §5: bounded, named, refused at load …
 and enforced by refusing." ADR-0074 §9.3's rule that a bounded default with no
@@ -685,17 +719,17 @@ adversarial rounds each found a hole in the previous round's fix.** The record i
 worth keeping rather than erasing, because it is the clearest evidence this
 document contains for where its own bar (header) actually falls:
 
-1. The first version said only that a peer "retains nothing after the hub
+1. The first version said only that a spoke "retains nothing after the hub
    acknowledges", which lets a hub acknowledge into memory and crash before
    persisting — destroying the one re-readable artifact §7 exists to protect.
 2. Defining an acknowledgement as durable custody then left a submission the hub
    can *never* accept with no exit: §7 forbade destroying it, acquisition could
    not happen, and retrying could not change the answer.
 3. Adding a terminal outcome and a bounded retry window bounded each submission
-   and not their number, so an unreachable hub plus a promoting peer fills the
+   and not their number, so an unreachable hub plus a promoting spoke fills the
    device with individually-conforming submissions — ADR-0093 §7b's own
    per-component-versus-source-wide argument, one level up.
-4. Bounding the pending set in aggregate still left a peer that **crashes**
+4. Bounding the pending set in aggregate still left a spoke that **crashes**
    mid-attempt: the queue and the slice are in memory, so the attempt neither
    retries nor terminally resolves, and the loss is silent. This one is not
    carried as a constraint but as a question (§10), because its only satisfying
@@ -703,7 +737,7 @@ document contains for where its own bar (header) actually falls:
 
 **Each of those fixes was correct, and the sequence is the finding.** A custody
 handoff is a two-party protocol over a lossy channel with independent failure on
-both sides. Deciding it needs the transport (§10), a peer state model (surface,
+both sides. Deciding it needs the transport (§10), a spoke state model (surface,
 §10) and a producer, and this ADR has none of the three. **Continuing to decide it
 would be the exact failure the header sets out to avoid**: an ADR ratifying a
 protocol that has needed four corrections and is visibly owed a fifth.
@@ -747,11 +781,11 @@ nobody wrote it down.
 
 *Scope: the attachment.*
 
-> **Normative.** A peer may hold ephemeral state, bounded in size and in age, and
+> **Normative.** A spoke may hold ephemeral state, bounded in size and in age, and
 > destroyed continuously rather than at a checkpoint.
 
 > **Normative.** Ephemeral state is never authoritative: nothing the hub does may
-> depend on it, and it is not part of the peer's released set until a promotion
+> depend on it, and it is not part of the spoke's released set until a promotion
 > places a slice there (§3).
 
 > **Normative.** Material a promotion has released is held under §8 rather than
@@ -763,7 +797,7 @@ nobody wrote it down.
 from contradicting each other.** The buffer's bound is an age: nothing sits in it
 longer than the window, whether or not anything ever reads it. A released slice
 has left that regime — it is awaiting a two-party handoff whose duration is not
-the peer's to fix — so collapsing the two would either make a promotion expire
+the spoke's to fix — so collapsing the two would either make a promotion expire
 mid-transfer or let an unresolved submission sit at the edge forever. **Saying
 which regime a released slice is in is this ADR's; saying how long it may stay
 there is not**, and §10 carries that as an obligation on the custody lane rather
@@ -776,7 +810,7 @@ source will not hold still**. That is the same object ADR-0093 §5 requires and
 fences on: §5's no-cursor result is bought by re-readability, and a stream has
 none, so the buffer is the compensating device that manufactures exactly the
 property §5 depends on — in bounded quantity, which is why §5's fence is satisfied
-by a capture peer that has one and not by a stream that does not.
+by a capture spoke that has one and not by a stream that does not.
 
 **Read as an exception to ADR-0084, this section would be an amendment. It is
 not one, and the reading is worth refuting rather than dismissing**, because it
@@ -787,7 +821,7 @@ between two commands", and §3's idle-timeout argument names the operative
 property: the client "holds no **server-side session** to lose". Every one of
 those is about the client's relationship to *hub* state. A rolling buffer holds
 nothing of the hub's, resolves against nothing the hub minted, and cannot make the
-peer behave differently across a hub restart — the buffer is the same buffer
+spoke behave differently across a hub restart — the buffer is the same buffer
 either way. ADR-0084's §7 sentences all stay true, and a reader holding only
 ADR-0084 acts identically before and after. Under ADR-0070 §1 that is not an
 amendment; §11 records it.
@@ -810,14 +844,14 @@ resident-hub shape and `VISION.md` §8 are both built to prevent.
 ### 10. Deferred, by name, each with the condition that fires it
 
 - **All `core` surface for any of the above** — an enrolment record, a capability
-  descriptor, a band-ceiling field, a peer identity, a released-set
-  representation. Fires when a **second** peer exists: one peer cannot show which
-  of these differ per peer, and ADR-0073 §4's "with a producer in hand" is the
+  descriptor, a band-ceiling field, a spoke identity, a released-set
+  representation. Fires when a **second** spoke exists: one spoke cannot show which
+  of these differ per spoke, and ADR-0073 §4's "with a producer in hand" is the
   standing this ADR does not have. §10a marks what that costs a later lane.
 - **How pull rides the connection** (§2). ADR-0084 §3's connection is serial and
   cannot express a hub-initiated request; the correlation id is what makes the
   extension additive, and ADR-0084 §11 and ADR-0042 §5 already hold the deferral.
-  Fires with the first peer that needs pull. The direction §2 fixes is an input to
+  Fires with the first spoke that needs pull. The direction §2 fixes is an input to
   that decision, not a question it reopens.
 - **What may cause a release** (§3) — #441's trigger ladder, from an explicit
   "capture that" to autonomous salience capture. §3 fixes that release is the gate
@@ -833,7 +867,7 @@ resident-hub shape and `VISION.md` §8 are both built to prevent.
 - **What governs an edge detector that is itself a model** (§6) — whether
   ADR-0013's router, ADR-0062's fallback naming and ADR-0061's agnosticism testing
   reach it, or whether an edge detector is a different class of thing. Fires with
-  the first peer that ships one. §6 fixes only that its output may not be meaning.
+  the first spoke that ships one. §6 fixes only that its output may not be meaning.
 - **The figures** (§8, §9) — the verification window's duration and size, and the
   buffer's age and size bounds. Fires with the deciding ADR of the first producer
   that needs any of them, which names them under ADR-0093 §5's discipline: named,
@@ -841,35 +875,35 @@ resident-hub shape and `VISION.md` §8 are both built to prevent.
   must be bounded, not by how much. The custody lane below owns its own figures on
   the same terms.
 - **The custody handoff** (§8) — what an acknowledgement asserts, when an attempt
-  resolves, what happens to material the hub can never accept, how long a peer may
-  keep retrying, how a peer restart is recovered from, and what any of it is
+  resolves, what happens to material the hub can never accept, how long a spoke may
+  keep retrying, how a spoke restart is recovered from, and what any of it is
   reported as. **It is a two-party protocol over a lossy channel with independent
   failure on both sides, and this ADR has neither the transport (deferred above),
-  a peer state model (surface, deferred above), nor a producer.** Fires with the
-  first peer that submits material it holds — plausibly the same decision as the
+  a spoke state model (surface, deferred above), nor a producer.** Fires with the
+  first spoke that submits material it holds — plausibly the same decision as the
   transport. **The conditions it inherits are marked in §10a**, because ADR-0089
   §3 makes marked clauses the whole of a marked ADR's obligations and a clause
   cannot live inside a list item (§2).
 - **Whether ambient capture may write an `EpisodicMemory`, and on what
   exemption.** ADR-0075 §2 named "the buffered ambient capture #441 sketches" in
   its exclusion list and reserved the argument rather than granting it; ADR-0093 §4
-  then forbade a sensor proposing an episode, citing ADR-0075 §4's demonstration
+  then forbade a reader proposing an episode, citing ADR-0075 §4's demonstration
   that the gate is destructive to episodes — kind-scoped conflict detection,
   `REINFORCE` on the first conflict, and a merge that returns "the **new turn
   stored at the older turn's id**". Ambient capture's whole product is episodes, so
   the collision is real and near. **The shape it will take, stated so the argument
-  starts from the right place and not granted here:** a capture peer can vouch for
+  starts from the right place and not granted here:** a capture spoke can vouch for
   *the recording being faithful* and cannot vouch for *the exchange being ours*,
   because the third party in the room never addressed us. That suggests the
   episode may be exemptible on ADR-0075's own grounds — deterministic recording of
   an event, no inference — while everything derived from it stays gated. It is a
   larger claim than ADR-0075 §2 made, it needs a producer, and it needs its own
   ADR. Fires when something wants a timeline rather than beliefs.
-- **The remote hop. Nothing in this ADR authorises a non-loopback peer.**
+- **The remote hop. Nothing in this ADR authorises a non-loopback spoke.**
   ADR-0017 §1 governs user data leaving the device and §3's fourteen conditions
   govern designating the `tools/` seam; ADR-0084 §1 and §11 hold the transport
   half. All are untouched. §2's connection direction and §7's re-derivability rule
-  are *designed so that a remote peer would not force a redesign*, and that is the
+  are *designed so that a remote spoke would not force a redesign*, and that is the
   whole of what they buy — the same distinction ADR-0084's Consequences draw
   between "one bind away on the wire" and "one ratified decision away in fact".
   §7's closing paragraph is why a transcript does not shortcut it, and §10a marks
@@ -898,7 +932,7 @@ decide the protocol; the arguments are in §8 and are not repeated.
 **The `core` clause forbids a lane acting without an ADR, not the ADR.** An
 earlier wording forbade implementing any rule here "by adding a field to `core`"
 full stop, which would have blocked the very surface §10 defers — a band-ceiling
-field and a peer identity are exactly what the second-peer contract may need.
+field and a spoke identity are exactly what the second-spoke contract may need.
 Architecture review caught it. What this ADR refuses is surface arriving *without*
 a decision, which is golden rule 5 rather than a new rule; whether the later
 contract needs a `core` field is that ADR's to answer, and it is expected to.
@@ -909,19 +943,19 @@ contract needs a `core` field is that ADR's to answer, and it is expected to.
 > **Normative.** An ADR deciding the custody handoff gives every submission
 > attempt a terminal outcome reachable in finite time.
 
-> **Normative.** An ADR deciding the custody handoff bounds a peer's unresolved
+> **Normative.** An ADR deciding the custody handoff bounds a spoke's unresolved
 > submissions **in aggregate**, by count and by total bytes, and not per
 > submission alone.
 
 > **Normative.** An ADR deciding the custody handoff states explicitly whether an
-> unresolved submission survives a peer restart, and at what cost to §9. It may
+> unresolved submission survives a spoke restart, and at what cost to §9. It may
 > not settle that question by silence.
 
 > **Normative.** No lane may add `core` surface expressing a rule of this ADR
 > without an ADR deciding that surface, merged before anything implements against
 > it (golden rule 5).
 
-> **Normative.** Nothing in this ADR authorises a peer that is not on this
+> **Normative.** Nothing in this ADR authorises a spoke that is not on this
 > machine. ADR-0017 §1 and §3 and ADR-0084 §1 and §11 are untouched, and §2's
 > connection direction and §7's re-derivability rule are not permission to cross a
 > device boundary.
@@ -952,7 +986,7 @@ places where the opposite reading is available are argued rather than asserted.
   identically before and after. **Not an amendment.** The strain is on
   `VISION.md` §8's broader sentence, which is not an ADR and is deferred to
   #441's amendment (§10) rather than reinterpreted here.
-- **ADR-0093's `Sensor` contract.** A taxonomy that used the word "sensor" looks
+- **ADR-0093's `Reader` contract.** A taxonomy that used the word "sensor" looks
   like it should amend it, and **an earlier draft did amend it without saying
   so** — by calling a locally-read calendar file a "pull peer", which would have
   required a `Sensor` to establish a connection (§2) and declare a released set
@@ -962,7 +996,7 @@ places where the opposite reading is available are argued rather than asserted.
   found it on the second round. **It is repaired by narrowing rather than by
   recording an amendment**, because narrowing is what was intended: §1 now fixes
   the process boundary as this ADR's outer edge and states as a marked clause that
-  a `Sensor` is not an edge peer.
+  a `Reader` is not a spoke.
 
   On the corrected text, **no amendment is owed on two independent grounds.** No
   clause of this ADR binds an in-process producer at all, so nothing of ADR-0093's
@@ -970,13 +1004,13 @@ places where the opposite reading is available are argued rather than asserted.
   contract — "A source that cannot be re-read in full within its bound … is out of
   this contract's scope and **owes its own decision**" — so this ADR is the
   decision that clause anticipated rather than an encroachment on it. Nothing
-  above changes what a `Sensor` is, what it may propose, how it is bounded or how
-  it is driven; a calendar sensor conforming to ADR-0093 conforms unchanged, and a
+  above changes what a `Reader` is, what it may propose, how it is bounded or how
+  it is driven; a calendar reader conforming to ADR-0093 conforms unchanged, and a
   reader holding only ADR-0093 acts identically. **Not an amendment.**
-- **ADR-0092 §3's `reported_by`, and whether a hub-minted peer identity would
+- **ADR-0092 §3's `reported_by`, and whether a hub-minted spoke identity would
   touch it.** §3 rules that `reported_by` "identifies the connected source
   *instance*, not the vendor" and must be "stable across syncs", and ADR-0093 §7
-  then ruled a sensor's identity **declared, not configured**, specifically to keep
+  then ruled a reader's identity **declared, not configured**, specifically to keep
   a path or an address out of `Provenance`, exports and logs — "A declared constant
   cannot carry personal data at all, which is a property rather than a rule." A
   hub-minted identity would close that hazard by construction and is therefore
@@ -997,11 +1031,11 @@ adds an obligation that contradicts no sentence ADR-0092 wrote, which under
 ADR-0082 §1 is a **stacked addition**: recorded here and nowhere else.
 
 **ADR-0072 §2 and §4 are conformed to, not narrowed.** §5's ceiling constrains
-which `MemorySource` a peer's submission may result in; `band_of` stays a total
+which `MemorySource` a spoke's submission may result in; `band_of` stays a total
 function of `MemorySource` and classification stays keyed on `source`. ADR-0084 §2
 and §3 are cited as they stand; §2's connection direction adds a rule where
 ADR-0084 gave none, since nothing in it contemplated the hub as an initiator.
-ADR-0017 §1 and §3 are examined in §10 and found not to engage, a local peer
+ADR-0017 §1 and §3 are examined in §10 and found not to engage, a local spoke
 crossing no device boundary — ADR-0084 §1 settled that "A loopback listener moves
 bytes between two processes on one machine; it engages neither clause", and
 ADR-0092 §10 and ADR-0093's Context both rest on it.
@@ -1018,10 +1052,10 @@ ADR-0092 §10 and ADR-0093's Context both rest on it.
   something else does. It costs nothing now and it is unbuildable-after-the-fact,
   because the records it would have prevented are the hardest in the store to
   retire.
-- **The connection direction is fixed while it is still free.** Every edge peer
-  dials out; no peer ever listens. On loopback this changes nothing, which is the
+- **The connection direction is fixed while it is still free.** Every spoke
+  dials out; no spoke ever listens. On loopback this changes nothing, which is the
   point: the alternative is only observable once it is no longer reversible.
-- **A capture peer is now known to be expensive**, and honestly so. It owes source
+- **A capture spoke is now known to be expensive**, and honestly so. It owes source
   media rather than a transcript (§7), a bounded verification window with figures
   it must name (§8), a custody protocol meeting three stated constraints and
   answering the restart-survival question explicitly (§10),
@@ -1035,26 +1069,26 @@ ADR-0092 §10 and ADR-0093's Context both rest on it.
   constraints and the fourth as a question, so the cost was not wasted — but the
   lane that takes it should expect a decision, not a section.
 - **What gets harder:** an edge that wants to do more than detect needs an ADR
-  rather than a design choice, and a peer that wants the hub to reach further has
+  rather than a design choice, and a spoke that wants the hub to reach further has
   to release more rather than be trusted more. Both are deliberate, and both are
   the kind of thing otherwise reached by an implementation.
 - **Two debts stay open and are now visible.** `VISION.md` §8's "stateless client"
   is broader than what ADR-0084 decided and broader than §9 permits, and #629's
   grant model is still unmet. Neither is closed here; both are named so the gap is
   a stated debt rather than a sentence nobody re-reads.
-- **Revisit when** a second peer exists (every deferred surface in §10 fires at
-  once), when a peer needs pull (§2's mechanism), or when something wants an
+- **Revisit when** a second spoke exists (every deferred surface in §10 fires at
+  once), when a spoke needs pull (§2's mechanism), or when something wants an
   ingested timeline (§10's episode question).
 
 ## Alternatives considered
 
-- **Add a third name for the ambient case and leave spoke and sensor alone.**
+- **Add a third name for the ambient case and leave client and reader alone.**
   Rejected in §1: it answers this instance and leaves the same question open for
   the fourth kind of attachment, and it puts the rules back on names, where a
   later lane can escape them by not matching one.
 - **Decide the enrolment surface now, since the rules imply fields.** Rejected as
-  the central scoping decision. One peer cannot exhibit which of these values
-  differ per peer, and ADR-0073 §4 already ruled that this class of question is
+  the central scoping decision. One spoke cannot exhibit which of these values
+  differ per spoke, and ADR-0073 §4 already ruled that this class of question is
   decided "with a producer in hand — not one to guess here". A field designed
   against an imagined producer is surface with no consumer, which ADR-0045 §1 and
   ADR-0028 §7 refuse, and it would arrive as `core` contract surface owing an ADR
@@ -1071,9 +1105,9 @@ ADR-0092 §10 and ADR-0093's Context both rest on it.
   being correct forever, where releasing makes it depend on nothing. This is the
   same trade ADR-0092 §1 made against a producer convention, and it goes the same
   way.
-- **Let the hub dial the peer, which is the obvious shape for pull.** Rejected in
+- **Let the hub dial the spoke, which is the obvious shape for pull.** Rejected in
   §2: it puts a listening socket on every edge device, needs an address for the
-  hub to hold and NAT traversal the day the peer is off this machine, and is
+  hub to hold and NAT traversal the day the spoke is off this machine, and is
   invisible on loopback right up to the moment it becomes unchangeable.
 - **Defer the whole taxonomy until a capture producer exists.** The strongest
   alternative, and it is why this ADR's header states its own bar rather than
