@@ -659,9 +659,15 @@ def _starts(
     seen: set[datetime] = set()
     candidates: list[datetime] = []
 
-    if not master.rules and not master.rdates:
-        budget.spend()
-        candidates.append(master.local_start)
+    # ``DTSTART`` is part of the recurrence set by RFC 5545 whatever else the
+    # component carries, so it is a candidate unconditionally: a rule whose
+    # ``BY`` parts exclude the start — ``FREQ=WEEKLY;BYDAY=TU`` on a Monday — is
+    # under-synchronised rather than start-less, and dropping the one occurrence
+    # the source states outright would be the wrong reading of a sloppy file. The
+    # de-duplication below absorbs the ordinary synchronised case, where the rule
+    # generates it too, and the band filter absorbs the far-past case.
+    budget.spend()
+    candidates.append(master.local_start)
     for rule in master.rules:
         candidates.extend(
             _rule_starts(

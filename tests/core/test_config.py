@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, get_args
 
 import numpy
@@ -772,6 +773,17 @@ _INTEGER_FIELDS: Final = tuple(
 )
 
 
+#: Fields a field-generic case must supply **beside** the one it is exercising,
+#: because some settings are only coherent together. ``calendar_reader_interval``
+#: is the only one today: ADR-0093 §7a refuses an interval with no source at load,
+#: so a case that set it alone would be exercising that cross-field refusal rather
+#: than the per-field guard it means to. Supplying the companion for every case is
+#: harmless — the path is a valid value and no assertion below reads it — and it
+#: keeps the parametrisation field-agnostic, which is what makes a new setting
+#: covered without anyone editing the cases.
+_COMPANIONS: Final[dict[str, Any]] = {"calendar_reader_path": Path("/srv/calendars/personal.ics")}
+
+
 def _settings_with(name: str, value: object) -> Settings:
     """Construct ``Settings`` with the one field ``name`` set to ``value``.
 
@@ -781,7 +793,7 @@ def _settings_with(name: str, value: object) -> Settings:
     a single ``**dict`` offered against every field's own type at once. Confining
     the ``Any`` to this helper keeps that gap one line wide.
     """
-    kwargs: dict[str, Any] = {name: value}
+    kwargs: dict[str, Any] = {**_COMPANIONS, name: value}
     return Settings(**kwargs)
 
 
@@ -811,6 +823,17 @@ def test_every_integer_setting_is_discovered() -> None:
         "hub_max_frame_bytes",
         "hub_max_connections",
         "hub_max_pending_handshakes",
+        # ADR-0093 §7a's four counting caps. Acknowledged here for the reason the
+        # transport figures are: each is refused at load outside its range, and
+        # joining this tuple is what subjects it to the guards below. The ``bool``
+        # one is not decoration for any of them — ``calendar_max_entries=True`` is
+        # a calendar read that proposes exactly one entry while reporting health,
+        # which is the shape §5 refuses when it says a bound is enforced by
+        # refusing and never by truncating.
+        "calendar_max_entries",
+        "calendar_max_bytes",
+        "calendar_max_expansion",
+        "calendar_max_content_bytes",
     }
 
 
@@ -1019,6 +1042,17 @@ def test_every_duration_setting_is_discovered() -> None:
         # cap or no read deadline has exactly the failure §3 exists to prevent, so
         # 'off' is not an available value".
         "hub_read_timeout",
+        # ADR-0093 §7a's four durations. The interval follows ADR-0083 §7's
+        # convention exactly — disabled is ``None``, never ``0`` — and the two
+        # window arms are the only durations in the model bounded *above*, because
+        # ``> 0`` alone admits ``timedelta.max``, for which
+        # ``read_at + calendar_window_future`` is not a representable instant.
+        # ``calendar_reader_interval`` is also the one field with a cross-field
+        # precondition; see :data:`_COMPANIONS`.
+        "calendar_reader_interval",
+        "calendar_window_past",
+        "calendar_window_future",
+        "calendar_read_timeout",
     }
 
 
@@ -1158,6 +1192,8 @@ def test_every_duration_setting_still_parses_from_the_environment(
     no environment spelling other than the sentinel: one literal that every one of
     the four accepts proves the string path just as well.
     """
+    for companion, value in _COMPANIONS.items():
+        monkeypatch.setenv(f"ASSISTANT_{companion.upper()}", str(value))
     monkeypatch.setenv(f"ASSISTANT_{name.upper()}", "PT1H")
     assert getattr(load_settings(), name) == timedelta(hours=1)
 
