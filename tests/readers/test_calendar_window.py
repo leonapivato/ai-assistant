@@ -272,3 +272,28 @@ async def test_an_uninterpretable_entry_among_valid_ones_is_skipped(tmp_path: Pa
     raw = calendar(_entry("ok", NOW, NOW + timedelta(hours=1), "Valid"), broken)
 
     assert await _titles(source(tmp_path, raw)) == ["Valid"]
+
+
+async def test_an_entry_whose_local_end_is_unrepresentable_saturates_too(
+    tmp_path: Path,
+) -> None:
+    """Saturation covers the **wall-clock** arithmetic as well as the UTC instants.
+
+    ``read_at ± window`` is not the only computed instant near the bound: an entry
+    at ``9999-12-31`` with a two-day duration is a perfectly valid entry inside a
+    perfectly valid window whose *local* end is not representable. Computed
+    unguarded, the ``OverflowError`` reaches §8 as a source fault against a source
+    that is fine — the exact outcome §7b's "none of this arithmetic raises" exists
+    to prevent, and one the UTC-side clamp does not cover because the entry is
+    rendered from its own zone.
+    """
+    raw = calendar(vevent("DTSTART:99991231T000000Z", "DURATION:P2D", "SUMMARY:Last call"))
+
+    titles = await _titles(
+        source(tmp_path, raw),
+        now=lambda: datetime.max.replace(tzinfo=UTC) - timedelta(days=2),
+        window_past=timedelta(hours=2),
+        window_future=timedelta(days=3650),
+    )
+
+    assert titles == ["Last call"]

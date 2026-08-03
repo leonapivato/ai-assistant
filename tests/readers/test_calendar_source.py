@@ -378,3 +378,35 @@ async def test_the_reader_carries_no_lifecycle_method(tmp_path: Path) -> None:
 
     assert not hasattr(subject, "close")
     assert not hasattr(subject, "aclose")
+
+
+async def test_a_worker_that_never_starts_does_not_wedge_the_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reservation is released when there is no worker to release it.
+
+    ``_work``'s ``finally`` is the only other release, and it never runs if the
+    thread never started — so a host out of thread resources would leave every
+    later ``read()`` refused for an outstanding worker that does not exist, long
+    after the resources recovered. ADR-0060 forbids exactly that state: a resource
+    "left held with nothing running that will release it". The abandonment rule of
+    §7 is only honest while the count is bounded by *running* work.
+    """
+    subject = reader(source(tmp_path, _ONE_ENTRY))
+
+    class _Refuses:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def start(self) -> None:
+            msg = "can't start new thread"
+            raise RuntimeError(msg)
+
+    monkeypatch.setattr(_source, "threading", types.SimpleNamespace(Thread=_Refuses))
+    with pytest.raises(ReaderError) as raised:
+        await subject.read()
+    assert isinstance(raised.value.__cause__, RuntimeError)
+
+    monkeypatch.undo()
+    # Not refused, and not by having waited: the reservation was never left held.
+    assert (await subject.read()).proposals

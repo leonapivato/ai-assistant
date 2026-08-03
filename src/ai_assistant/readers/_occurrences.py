@@ -63,6 +63,11 @@ UTC_MAX: Final = datetime.max.replace(tzinfo=UTC)
 #: can happen at most a day either side of the bounds above.
 _MIDPOINT: Final = datetime(5000, 1, 1)  # noqa: DTZ001 — a naive yardstick, never an instant
 
+#: The wall-clock bounds :func:`saturating_shift` clamps to. Naive on purpose:
+#: they are reattached to the entry's own zone rather than used as instants.
+_NAIVE_MAX: Final = datetime.max  # noqa: DTZ901 — clamped wall clock, not an instant
+_NAIVE_MIN: Final = datetime.min  # noqa: DTZ901 — clamped wall clock, not an instant
+
 #: Frequencies whose period is a fixed wall-clock length, and therefore the ones
 #: an occurrence grid can be jumped along arithmetically. ``MONTHLY`` and
 #: ``YEARLY`` are deliberately absent: their periods are at least 28 days, so
@@ -246,6 +251,28 @@ def saturating_add(instant: datetime, delta: timedelta) -> datetime:
         return instant + delta
     except OverflowError:
         return UTC_MAX if delta > timedelta(0) else UTC_MIN
+
+
+def saturating_shift(instant: datetime, delta: timedelta) -> datetime:
+    """Add ``delta`` to an aware instant **in its own zone**, clamping instead of raising.
+
+    :func:`saturating_add` is the same rule for the UTC-normalised instants the
+    window is decided on; this one is for the wall-clock values a recurrence is
+    stated in and an entry is rendered from. Both are needed and neither covers
+    the other: ``DTSTART:99991231T000000Z`` with ``DURATION:P2D`` is a valid entry
+    inside a valid window whose *local* end is not representable, and computing it
+    unguarded raises an ``OverflowError`` that reaches ADR-0093 §8 as a source
+    fault against a source that is fine — the exact outcome §7b's "none of this
+    arithmetic raises" exists to prevent.
+    """
+    try:
+        return instant + delta
+    except OverflowError:
+        # The naive bounds, deliberately: an aware datetime's representable range
+        # is its *wall clock*'s, so the clamp belongs on the naive part and the
+        # entry's own zone is then reattached unchanged.
+        bound = _NAIVE_MAX if delta > timedelta(0) else _NAIVE_MIN
+        return bound.replace(tzinfo=instant.tzinfo, fold=instant.fold)
 
 
 def _to_utc(instant: datetime) -> datetime:
@@ -806,8 +833,8 @@ def _occurrence(moment: datetime, *, governing: _Entry) -> Occurrence:
         # renders in one frame, and applied in wall time so the series does not
         # walk an hour on a DST boundary.
         shift = governing.start_utc - (governing.recurrence_id or governing.start_utc)
-        local_start = moment + shift
-    local_end = local_start + governing.duration
+        local_start = saturating_shift(moment, shift)
+    local_end = saturating_shift(local_start, governing.duration)
     start = _to_utc(local_start)
     return Occurrence(
         start=start,
@@ -851,4 +878,5 @@ __all__ = [
     "SourceNotParseableError",
     "occurrences_in_window",
     "saturating_add",
+    "saturating_shift",
 ]

@@ -256,13 +256,28 @@ class OneWorker:
 
         loop = asyncio.get_running_loop()
         outcome: asyncio.Future[T] = loop.create_future()
-        threading.Thread(
+        worker = threading.Thread(
             target=self._work,
             args=(loop, outcome, work),
             name=self._thread_name,
             # The whole of §7's exit clause, in one flag.
             daemon=True,
-        ).start()
+        )
+        try:
+            worker.start()
+        except BaseException:
+            # **The reservation is released here and nowhere else on this path,
+            # because there is no worker to release it.** `_work`'s `finally` is
+            # the only other release, and it never runs if the thread never
+            # started — so a host out of thread resources would wedge this reader
+            # permanently: every later `read()` refused for an outstanding worker
+            # that does not exist, long after the resources recovered. ADR-0060
+            # forbids exactly that state, a resource "left held with nothing
+            # running that will release it", and the abandonment rule is only
+            # honest while the count is bounded by *running* work.
+            with self._lock:
+                self._busy = False
+            raise
 
         try:
             # `asyncio.wait` rather than `asyncio.wait_for`, because `wait_for`
