@@ -52,6 +52,17 @@ dependencies = [
     "sqlite-vec>=0.1.6",
     "structlog>=26.1.0",
     "typer>=0.27.0",
+    # RFC 5545 parsing and `RRULE` math for the calendar reader, and for nothing
+    # else. It is imported only by `ai_assistant/readers/`, the leaf package the
+    # contract below forbids every subsystem from importing, so its types never
+    # cross a subsystem boundary: the seam's output is a `core` `SourceReading`.
+    # Line unfolding, property escaping, `TZID` resolution and `BYSETPOS`
+    # expansion are the parts of the format it is not sensible to hand-roll; what
+    # ADR-0093 §7b makes normative — the window, the overrides, the seek and the
+    # budgets — is ours and is implemented *over* it rather than delegated to it,
+    # which is also what keeps a swap confined to one package. `python-dateutil`
+    # and `tzdata` arrive transitively with it.
+    "icalendar>=6.0",
 ]
 
 [project.scripts]
@@ -81,6 +92,7 @@ dev = [
     "pre-commit>=4.6.0",
     "import-linter>=2.0",
     "pip-audit>=2.7",
+    "types-python-dateutil>=2.9.0.20260716",
 ]
 
 # ADR-0024 §4 supersedes ADR-0002's `uv_build` clause: `uv_build` supports no
@@ -231,6 +243,10 @@ forbidden_modules = [
     # is asserted about and not checked on.
     "ai_assistant.wire",
     "ai_assistant.service",
+    # Leg 6's leaf package of concrete readers (ADR-0093 §2, ADR-0095 §2). Same
+    # reason again: `core` holds the `Reader` Protocol, so the edge that would
+    # invert the dependency is one an implementation could plausibly reach for.
+    "ai_assistant.readers",
 ]
 
 [[tool.importlinter.contracts]]
@@ -294,6 +310,11 @@ source_modules = [
     # not checked on. It was missed when `service` was created and is added here
     # rather than filed, because this is the change that edits this contract.
     "ai_assistant.service",
+    # A reader parses a file off disk and asks a model nothing (ADR-0093 §1).
+    # Listed for the same reason: golden rule 4 is meant to be mechanical, and
+    # the sibling contract below keeps `readers` free of every `ai_assistant`
+    # package while saying nothing about an external one.
+    "ai_assistant.readers",
 ]
 # `huggingface_hub` is here for ADR-0024 §4: the model-artifact acquisition seam
 # stays owned by `models/`, and this makes that mechanically enforced rather than
@@ -336,6 +357,9 @@ source_modules = [
     # missed when it was created.
     "ai_assistant.wire",
     "ai_assistant.service",
+    # And so is a concrete reader: it ships in the same wheel and runs inside the
+    # hub (ADR-0093 §1), so the canonical `FakeReader` must not reach it.
+    "ai_assistant.readers",
 ]
 forbidden_modules = ["ai_assistant.testing"]
 
@@ -401,6 +425,10 @@ source_modules = [
     # `wire` is the addition ADR-0084 §6 makes, and the direction matters: the
     # *service* imports the wire for its server half, never the other way round.
     "ai_assistant.wire",
+    # `readers` is leg 6's addition, and the direction matters the same way: the
+    # scheduler ADR-0083 §7 puts *in* the service drives a reader through an
+    # `Engine` call (ADR-0093 §6), so nothing in `readers` reaches back up.
+    "ai_assistant.readers",
 ]
 forbidden_modules = ["ai_assistant.service"]
 
@@ -437,7 +465,90 @@ forbidden_modules = [
     "ai_assistant.interfaces",
     "ai_assistant.app",
     "ai_assistant.service",
+    "ai_assistant.readers",
 ]
+
+[[tool.importlinter.contracts]]
+# ADR-0093 §2, restated by ADR-0095 §2: concrete readers live in a top-level
+# `ai_assistant/readers/` package, which "may import `core` and nothing else in
+# `ai_assistant`; no subsystem may import it. The `lint-imports` contract
+# expressing that is the implementing lane's." This is the first half.
+#
+# **The package and this contract land together, and that is deliberate.** The
+# triad lane (#647) declined to create an empty `readers/` ahead of its contract
+# precisely because a package that exists without one is the silent escape the
+# `service` and `wire` contracts warn about — every package is enumerated by
+# name there, so an unlisted one inherits nothing and is checked by nothing.
+#
+# Every package is listed rather than relying on `ai_assistant` wholesale, in the
+# shape the `service` and `wire` contracts established.
+name = "readers depend on core and nothing else"
+type = "forbidden"
+source_modules = ["ai_assistant.readers"]
+forbidden_modules = [
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    "ai_assistant.orchestration",
+    "ai_assistant.interfaces",
+    "ai_assistant.app",
+    "ai_assistant.service",
+    "ai_assistant.wire",
+]
+
+[[tool.importlinter.contracts]]
+# ADR-0093 §2's second half: "no subsystem may import it."
+#
+# **This is the clause ADR-0095 §3 leans on**, and it is why the `Reader`
+# Protocol stays in `core` rather than becoming an internal seam of this package.
+# Two subsystems hold the type — `orchestration` by injection (ADR-0093 §1, §6)
+# and later `context/` through its facet adapter (§3) — and an internal seam
+# would require exactly the `orchestration -> ai_assistant.readers` edge this
+# forbids in as many words. The split is the resolution of that tension: the
+# contract in `core` where every subsystem may name it, the implementations in a
+# leaf package nothing imports.
+#
+# `ai_assistant.testing` is listed for the reason the sibling contract above
+# lists it against `service`: the canonical `FakeReader` stands in *for* a
+# concrete reader and must never reach one.
+#
+# **`ai_assistant.app` is deliberately absent, and its absence is the clause's
+# meaning rather than a gap.** ADR-0093 §2 says "no **subsystem** may import it",
+# and the composition root is not one — it is the place golden rule 1 puts the
+# injection that lets `orchestration` receive an implementation it may not name.
+# It is the same carve-out the provider-SDK contract above states for `models`
+# ("The composition root legitimately imports the `models` package to construct
+# `PydanticAIProvider`"). Listing `app` here would make `readers` unreachable in
+# production for good: no other package may import it, so nothing could ever
+# construct a `CalendarReader` to inject. Nothing in `app` imports it *today* —
+# ADR-0093 §10's closing paragraph puts the `Engine` operation and the wiring in
+# a later lane — so this is the edge being kept legal, not one being used.
+name = "nothing imports the readers"
+type = "forbidden"
+source_modules = [
+    "ai_assistant.core",
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    "ai_assistant.orchestration",
+    "ai_assistant.interfaces",
+    "ai_assistant.testing",
+    "ai_assistant.wire",
+    # `service` is deliberately here too, and the direction is the point: the
+    # scheduler drives a reader through a **public `Engine` call** whose body
+    # "holds no store, no sensor and no subsystem import" (ADR-0093 §6, ADR-0083
+    # §8). A job that imported a reader would be the shape §8 forbids.
+    "ai_assistant.service",
+]
+forbidden_modules = ["ai_assistant.readers"]
 
 [[tool.importlinter.contracts]]
 # ADR-0083 §10, sequenced into ADR-0084's lane and landing with it: "Closing that
