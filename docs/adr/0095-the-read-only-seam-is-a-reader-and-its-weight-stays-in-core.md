@@ -142,6 +142,17 @@ put it** — a Protocol in `core/protocols.py` shipping as a full triad.
 > above is read as its replacement. ADR-0093's text is **not** rewritten, and
 > every other ruling it makes binds unchanged under the substituted names.
 
+> **Normative.** The substitution reaches ADR-0093 and references to its
+> in-process seam, and nothing else. It does **not** reach "sensor" used as an
+> edge-peer profile name (ADR-0094 §1), which keeps its own meaning.
+
+The second clause is not a formality. Read as a rule about the *word*, the first
+would rewrite ADR-0094 §1's profile list into "spoke, `Reader`" — and §1's marked
+clause says in the same breath that a `Reader` is **not** an edge peer, so the
+profile would name a thing it is defined to exclude. Freeing the word for the
+peer layer is the point of this ADR (§2); a substitution that swallowed the freed
+sense would re-create the collision it exists to end, one layer down.
+
 The substitution rule is what makes this a partial supersession rather than a
 restatement, and §7 argues that classification. ADR-0093 uses the word 153 times
 across 1,615 lines; rewriting it is forbidden outright by ADR-0070 §1 ("ratified
@@ -420,7 +431,9 @@ edited, exactly:
   one a later lane acts on.
 - **The prose in §1 and in the Context** stating ADR-0093's placement as current
   fact — that §2 "places concrete sensors in `ai_assistant/sensors/`" — now
-  states the live package.
+  states the live package, and the remaining live-rule references to the seam by
+  its old name now use the new one. Quotations of ADR-0093's own text keep the
+  words ADR-0093 used.
 - **A dated header note** recording that this ADR renamed the seam and that the
   edit was made in place under the adjudication above, so the change is legible
   to a reader who saw the earlier text.
