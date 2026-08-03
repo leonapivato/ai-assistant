@@ -424,12 +424,16 @@ edited, exactly:
 - **A dated header note** recording that this ADR renamed the seam and that the
   edit was made in place under the adjudication above, so the change is legible
   to a reader who saw the earlier text.
+- **§11's classification block is left untouched.** It is a record of that lane's
+  review history — an earlier draft that called a local file a "pull peer", found
+  on the second adversarial round — and rewriting a historical narrative to use a
+  name that did not exist when the events happened would falsify it.
 
-- **§11's classification block is left untouched.** It is a record of that
-  lane's review history — an earlier draft that called a local file a "pull peer",
-  found on the second adversarial round — and rewriting a historical narrative to
-  use a name that did not exist when the events happened would falsify it. The
-  names in it are read under §1's substitution like ADR-0093's.
+**The sweep of ADR-0094 is deliberately not finished here.** Its remaining uses
+of the seam's name are read under §1's substitution, exactly as ADR-0093's are.
+Completing them belongs to ADR-0094's own lane at ratification, which is when
+that document is re-read whole; a second lane rewriting an unratified ADR's prose
+underneath the author who owes its ratification buys inconsistency for nothing.
 
 **ADR-0094's ratification is not touched.** Its `Status` stays `Proposed`.
 
