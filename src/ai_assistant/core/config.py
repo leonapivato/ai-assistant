@@ -576,6 +576,18 @@ _MIN_FRAME_BYTES: Final = 1024
 #: accept a value the client provably cannot send".
 _MAX_FRAME_BYTES: Final = 2**32 - 1
 
+#: ADR-0093 §7a's ceiling on either arm of the calendar window. Ten years is far
+#: past any calendar anyone reads and far short of the representable limit, which
+#: is the whole requirement of the number: it exists so that
+#: ``read_at ± calendar_window_*`` is always a representable instant.
+#:
+#: Repeated here rather than imported from ``ai_assistant.readers`` for the reason
+#: ``_MIN_FRAME_BYTES`` is repeated: ``core`` depends on nothing else in
+#: ``ai_assistant`` (golden rule 2), and the package holding it as a constant is
+#: below that rule. ``tests/readers/test_calendar_settings.py`` pins the two
+#: together, so the duplication cannot drift.
+_MAX_CALENDAR_WINDOW: Final = timedelta(days=3650)
+
 
 class Settings(BaseSettings):
     """Typed application settings.
@@ -1120,6 +1132,221 @@ class Settings(BaseSettings):
             "with no unlimited spelling."
         ),
     )
+
+    # --- The calendar reader (ADR-0093 §7, §7a; ADR-0095 §1) --------------
+    # Leg 6 configures **exactly one source, by explicit fields**. There is no
+    # source registry and no list-valued source configuration, on ADR-0083 §7's
+    # own precedent — its three job intervals are three flat fields, not a table —
+    # because a registry is a schema decision with a validation story and one
+    # source does not buy it. §7 revisits at the third source, which is also
+    # roughly when §11's grant question stops being deferrable.
+    #
+    # **The field names carry ADR-0095 §1's substitution.** §7a spells the first
+    # two `calendar_sensor_*`; §1 renames the seam and rules that "throughout
+    # ADR-0093, 'sensor' denotes a `Reader`". Shipping `calendar_sensor_path`
+    # would also collide with the *other* live sense of the word — ADR-0094 §1
+    # keeps "sensor" as a **spoke profile name**, so a setting spelled that way
+    # would read as configuration for a device across the process boundary, which
+    # is precisely the double-booking ADR-0095 exists to end.
+    #
+    # **It ships disabled by default, and the reason is not that anything
+    # technical is missing** (§7): nothing may read a user's personal files
+    # because a default said so. Naming the reason is what stops the default
+    # flipping the day the technical obstacle clears, and it places the default
+    # correctly relative to the grant question — a fresh install that read a
+    # calendar unasked would be making that decision by omission, which is the one
+    # way it must not be made. **Configuration is not a grant**, and no surface
+    # may present it as one: a field here cannot be revoked by the user through
+    # the assistant, cannot be scoped, and leaves no audit record (§7, #629).
+    #
+    # **The two nullable fields interact, so §7a names the four states rather than
+    # leaving them to compose**: both unset is fully disabled (the default); a path
+    # with no interval is the **facet-only** state, which is *reserved, not
+    # enabled* — no adapter may ship before `CurrentContext` grows the calendar
+    # field, so today it configures a source nothing reads; both set is the live
+    # arrangement, subject to §9's gates; and an interval with no path is
+    # incoherent and is refused at load by `_a_reader_interval_needs_a_source`
+    # below.
+    calendar_reader_path: Path | None = Field(
+        default=None,
+        description=(
+            "Absolute path to the single .ics file the calendar reader reads; None "
+            "disables it (ADR-0093 §7a). One regular file — a synced calendar export, "
+            "or a co-located fetcher's `singlefile` output — never a directory (#649)."
+        ),
+    )
+
+    @field_validator("calendar_reader_path")
+    @classmethod
+    def _calendar_source_is_absolute(cls, value: Path | None) -> Path | None:
+        """Refuse a relative source path, and expand ``~`` (ADR-0093 §7).
+
+        **Shape at load, existence at run time**, and the split follows what each
+        thing is a property of. Absoluteness is a property of the *configuration*:
+        a relative value resolves against each process's working directory, so the
+        hub started at boot and a test run from a project directory would read the
+        same setting and open different files. A file's existence is a property of
+        the *world at an instant* — a hub that refused to start because a calendar
+        file was on an unmounted volume would turn an advisory source into a boot
+        dependency, which is precisely the coupling ADR-0008 §4 declined for the
+        whole context subsystem.
+
+        **Not canonicalised, and that is the one place this departs from
+        ``data_dir``.** ``realpath`` resolves symlinks, which is a *filesystem*
+        question, and asking it at load would put a fragment of the run-time check
+        into the half of the split that must not have one. Nothing here derives a
+        second location from this path the way ADR-0084 §9 derives the socket from
+        ``data_dir``, so there is no two-readers-disagreeing hazard to close.
+        """
+        if value is None:
+            return None
+        expanded = value.expanduser()
+        if not expanded.is_absolute():
+            msg = (
+                f"calendar_reader_path must be an absolute path, got {str(value)!r}; a "
+                f"relative value resolves against each process's working directory "
+                f"(ADR-0093 §7)"
+            )
+            raise ValueError(msg)
+        return expanded
+
+    # ADR-0083 §7's convention exactly, and for its reason: the scheduler re-arms
+    # from *completion*, so an interval of zero makes the job due again the instant
+    # it finishes, and "off" and "as fast as possible" look identical in a config
+    # file. Hence **disabled is `None`, never `0`**.
+    #
+    # The job this arms is a later lane (ADR-0093 §10's closing paragraph); the
+    # field lands here because §7a names it, and because the incoherent-state
+    # refusal below cannot be expressed without it.
+    calendar_reader_interval: _NullableDuration = Field(
+        default=None,
+        gt=timedelta(0),
+        description=(
+            "How often the hub reads the configured calendar; None disables the "
+            "scheduled ingestion job (ADR-0093 §7a). Never 0."
+        ),
+    )
+    # The window is **two fields, not one**, because a calendar's usefulness is
+    # asymmetric: the future is what the assistant needs to know about, and the
+    # past is wanted only so that "this morning" is still in view. One symmetric
+    # horizon would have to be sized for the future and would drag a week of
+    # history along with it. The defaults are deliberately small, on ADR-0077 §1's
+    # posture for `observation_batch_size` — "a handful of exchanges, not a month
+    # of transcript" — and for the same reason: this is Tier 1 data being read and
+    # proposed, and a bound nobody argued is a payload nobody measured.
+    #
+    # `calendar_window_past` may be zero and `calendar_window_future` may not. A
+    # deployment that wants only what is ahead is coherent; one that wants a window
+    # of zero width has configured a reader that reads nothing while reporting
+    # health, which is what ADR-0077 §1 refused for a zero batch.
+    #
+    # **Both are bounded above, and the ceiling is not decoration.** `> 0` alone
+    # admits `timedelta.max`, for which `read_at + calendar_window_future` is not a
+    # representable instant — so a figure passing a load-time range check would
+    # produce an `OverflowError` on the first run, escaping ADR-0093 §8's two
+    # outcomes entirely and reaching the scheduler as neither a source failure nor
+    # a cancellation.
+    calendar_window_past: _DurationSetting = Field(
+        default=timedelta(days=1),
+        ge=timedelta(0),
+        le=_MAX_CALENDAR_WINDOW,
+        description=(
+            "How far back the clock-relative calendar window reaches (ADR-0093 §7a). "
+            "May be zero; at most ten years."
+        ),
+    )
+    calendar_window_future: _DurationSetting = Field(
+        default=timedelta(days=7),
+        gt=timedelta(0),
+        le=_MAX_CALENDAR_WINDOW,
+        description=(
+            "How far forward the clock-relative calendar window reaches (ADR-0093 §7a). "
+            "Strictly positive; at most ten years."
+        ),
+    )
+    calendar_max_entries: _IntegerSetting = Field(
+        default=500,
+        ge=1,
+        lt=2**63,
+        description=(
+            "The most in-window occurrences one calendar read may return, and so the "
+            "most proposals (ADR-0093 §7a). Exceeding it refuses the read; it is never "
+            "truncated."
+        ),
+    )
+    # Separate from `calendar_max_entries`, and it is the one that **must** exist:
+    # an entry cap can only be applied *after* parsing, so a cap on entries alone
+    # lets a 2 GiB .ics be fully parsed before anything refuses it — the bound
+    # applied one step too late to bound the work. This is the same ordering
+    # ADR-0017 §3 requires of a credential read, applied to a parse.
+    calendar_max_bytes: _IntegerSetting = Field(
+        default=8 * 1024 * 1024,
+        gt=0,
+        description=(
+            "The most bytes one calendar read consumes, enforced on the read itself "
+            "and before any parsing (ADR-0093 §7, §7a)."
+        ),
+    )
+    # Bounds a **different** thing from the other two, and neither substitutes for
+    # it: the occurrences a read makes the reader *consider*, which is unbounded by
+    # the byte cap (a pathological component is tiny) and by the entry cap (that
+    # counts what lands in the window, not what is walked to reach it). Spent
+    # across the whole read rather than per component — a budget that resets per
+    # component bounds each piece of the work and not the work (ADR-0093 §7b).
+    calendar_max_expansion: _IntegerSetting = Field(
+        default=100_000,
+        ge=1,
+        lt=2**63,
+        description=(
+            "The most recurrence occurrences one calendar read may consider across "
+            "every component (ADR-0093 §7a, §7b)."
+        ),
+    )
+    calendar_read_timeout: _DurationSetting = Field(
+        default=timedelta(seconds=10),
+        gt=timedelta(0),
+        description=(
+            "The calendar reader's deadline on its own read (ADR-0093 §7, §7a). A path "
+            "that is absolute and readable may still be a stalled mount, and every other "
+            "bound sits behind an operation that never returns."
+        ),
+    )
+    # Bounds the **output**, which none of the others do. A source can satisfy all
+    # three while the proposals blow up: one recurrence carrying a near-8 MiB field
+    # with exactly 500 in-window occurrences is inside every other cap and
+    # materialises roughly 4 GiB, because an occurrence repeats its component's
+    # content and nothing was counting bytes on the way out (ADR-0093 §7a).
+    calendar_max_content_bytes: _IntegerSetting = Field(
+        default=4 * 1024 * 1024,
+        gt=0,
+        description=(
+            "The most proposal content one calendar read may materialise, checked "
+            "before each proposal is built (ADR-0093 §7a)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _a_reader_interval_needs_a_source(self) -> Settings:
+        """Refuse a scheduled read of a source that is not configured (ADR-0093 §7a).
+
+        The fourth state of §7a's matrix, and the only incoherent one. The refusal
+        follows this module's own posture — a figure the runtime would refuse must
+        fail at load — and the alternative outcomes are all worse and all silently
+        different: a scheduler that omits the requested job reports health while
+        running nothing, one that arms it re-runs a failing job forever, and one
+        that treats it as a source fault turns a configuration mistake into an
+        infinite retry.
+
+        Raises:
+            ValueError: If an interval is set with no path beside it.
+        """
+        if self.calendar_reader_interval is not None and self.calendar_reader_path is None:
+            msg = (
+                "calendar_reader_interval is set but calendar_reader_path is not; a "
+                "scheduled read needs a source to read (ADR-0093 §7a)"
+            )
+            raise ValueError(msg)
+        return self
 
     # --- Permissions -----------------------------------------------------
     # The four thresholds ThresholdActionPolicy gates on (ADR-0036 §1). These are
