@@ -503,14 +503,17 @@ def _when(occurrence: Occurrence) -> str:
     through the one arithmetic nobody counts as arithmetic.
     """
     start, end = occurrence.local_start, occurrence.local_end
-    if end is None:
-        # The end instant is representable, but not in this entry's zone — only
-        # reachable within a day of the maximum, and only ahead of UTC. Naming it
-        # in UTC is unambiguous; clamping the wall clock to make it fit would name
-        # a *different* instant and understate the entry's extent.
-        return (
-            f"from {start:%Y-%m-%d %H:%M} ({start.tzinfo}) to {occurrence.end:%Y-%m-%d %H:%M} (UTC)"
-        )
+    if start is None or end is None:
+        # One end of the interval has no honest name in this entry's own zone,
+        # which is reachable only within a day of a representable bound: an
+        # unrepresentable *end* at the top (`Pacific/Kiritimati`, UTC+14), and at
+        # the bottom a stated *start* whose true instant underflows, so the wall
+        # time the source gave stops describing the instant we saturated to
+        # (`Asia/Kolkata`, whose year-1 offset is +05:53:28). Naming the whole
+        # interval in UTC is unambiguous; clamping a wall clock to make it fit
+        # names a *different* instant, and the rendered duration is then one the
+        # source never gave.
+        return f"from {occurrence.start:%Y-%m-%d %H:%M} to {occurrence.end:%Y-%m-%d %H:%M} (UTC)"
     if occurrence.all_day:
         # The end is exclusive, so a one-day entry ends on the following date.
         # Saturated: see this function's docstring.
