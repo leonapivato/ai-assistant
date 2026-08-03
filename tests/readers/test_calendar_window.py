@@ -367,6 +367,42 @@ async def test_an_end_unrepresentable_in_the_entrys_zone_is_named_in_utc(
 
     (proposal,) = reading.proposals
     assert proposal.proposed.content == (
-        'Calendar entry "Last sunrise", from 9999-12-31 12:00 (Pacific/Kiritimati) '
-        "to 9999-12-31 22:00 (UTC)."
+        'Calendar entry "Last sunrise", from 9999-12-30 22:00 to 9999-12-31 22:00 (UTC).'
+    )
+
+
+async def test_a_start_whose_true_instant_underflows_is_named_in_utc_too(
+    tmp_path: Path,
+) -> None:
+    """The same invariant at the other bound, where it fails the other way round.
+
+    ``Asia/Kolkata``'s year-1 offset is ``+05:53:28``, so
+    ``DTSTART;TZID=Asia/Kolkata:00010101T000000`` denotes ``0000-12-31 18:06:32Z``
+    — not a representable instant. :attr:`start` saturates to ``0001-01-01
+    00:00Z``, and at that point the wall time the source stated has **stopped
+    describing** the instant the reading holds: rendering it beside a derived
+    local end claims a nearly seven-hour event where the source gave one hour.
+
+    So both local forms are views of the canonical UTC pair, and either being
+    absent sends the whole interval to UTC. The duration the proposal states is
+    then the one the reading actually holds.
+    """
+    raw = calendar(
+        vevent(
+            "DTSTART;TZID=Asia/Kolkata:00010101T000000",
+            "DURATION:PT1H",
+            "SUMMARY:First light",
+        )
+    )
+
+    reading = await reader(
+        source(tmp_path, raw),
+        now=lambda: datetime.min.replace(tzinfo=UTC) + timedelta(days=2),
+        window_past=timedelta(days=3650),
+        window_future=timedelta(days=1),
+    ).read()
+
+    (proposal,) = reading.proposals
+    assert proposal.proposed.content == (
+        'Calendar entry "First light", from 0001-01-01 00:00 to 0001-01-01 01:00 (UTC).'
     )

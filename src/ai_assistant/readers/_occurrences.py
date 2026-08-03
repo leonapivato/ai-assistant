@@ -158,15 +158,23 @@ class Occurrence:
         start: The occurrence's start, in UTC. The window decision was made on
             this and on :attr:`end`.
         end: Its end, in UTC. Half-open: the occurrence covers ``[start, end)``.
-        local_start: The same instant in the entry's own zone, for rendering.
-        local_end: :attr:`end` expressed in that zone, or ``None`` where it cannot
-            be — which is reachable only within a day of the representable maximum
-            and only in a zone ahead of UTC. **Derived from :attr:`end` rather than
-            computed alongside it**, so the two can never disagree: clamping the
-            wall clock independently would leave a ``Pacific/Kiritimati`` entry
-            starting ``99991231T120000`` with ``DURATION:P1D`` rendering as twelve
-            hours while its interval is the source's twenty-four. A renderer that
-            gets ``None`` says so in UTC rather than naming a different instant.
+        local_start: The wall time the source stated, or ``None`` where that wall
+            time names no representable instant — ``DTSTART;TZID=Asia/Kolkata:
+            00010101T000000`` is ``0000-12-31 18:06:32Z``, which is not one, so
+            :attr:`start` saturates and the stated wall time is no longer a
+            description of it.
+        local_end: :attr:`end` expressed in the entry's zone, or ``None`` where it
+            cannot be — ``Pacific/Kiritimati`` is UTC+14, so an entry starting
+            ``99991231T120000`` with ``DURATION:P1D`` ends at a representable
+            ``9999-12-31 22:00Z`` whose local form is not.
+
+            **Both are views of the canonical UTC pair and never computed beside
+            it**, which is the invariant, not a detail: clamping a wall clock on
+            its own lands on a *different instant*, and a renderer that then names
+            it states a duration the source never gave — twelve hours for that
+            Kiritimati entry's twenty-four, nearly seven hours for the Kolkata
+            one's one. ``None`` means "this end has no honest local name", and the
+            renderer says so in UTC rather than inventing one.
         all_day: Whether the source expressed it as a date rather than a time.
         summary: The entry's ``SUMMARY``, possibly empty.
         location: The entry's ``LOCATION``, possibly empty.
@@ -186,7 +194,7 @@ class Occurrence:
 
     start: datetime
     end: datetime
-    local_start: datetime
+    local_start: datetime | None
     local_end: datetime | None
     all_day: bool
     summary: str
@@ -282,12 +290,27 @@ def saturating_shift(instant: datetime, delta: timedelta) -> datetime:
         return bound.replace(tzinfo=instant.tzinfo, fold=instant.fold)
 
 
-def _to_utc(instant: datetime) -> datetime:
-    """Normalise an aware instant to UTC, saturating rather than raising."""
+def _utc_exact(instant: datetime) -> datetime | None:
+    """The instant in UTC, or ``None`` where the wall time names no instant.
+
+    A wall time inside the representable range can still denote an instant outside
+    it, once its zone's offset is applied: ``0001-01-01 00:00`` in ``Asia/Kolkata``
+    — whose year-1 offset is ``+05:53:28`` — is ``0000-12-31 18:06:32Z``. The
+    caller saturates, and the ``None`` is what tells it that the *stated* wall time
+    has stopped describing the instant it saturated to.
+    """
     try:
         return instant.astimezone(UTC)
     except OverflowError, ValueError, OSError:
-        return UTC_MIN if instant.replace(tzinfo=None) < _MIDPOINT else UTC_MAX
+        return None
+
+
+def _to_utc(instant: datetime) -> datetime:
+    """Normalise an aware instant to UTC, saturating rather than raising."""
+    exact = _utc_exact(instant)
+    if exact is not None:
+        return exact
+    return UTC_MIN if instant.replace(tzinfo=None) < _MIDPOINT else UTC_MAX
 
 
 def _in_zone(instant: datetime, zone: tzinfo | None) -> datetime | None:
@@ -841,14 +864,18 @@ def _occurrence(moment: datetime, *, governing: _Entry) -> Occurrence:
         # walk an hour on a DST boundary.
         shift = governing.start_utc - (governing.recurrence_id or governing.start_utc)
         local_start = saturating_shift(moment, shift)
-    start = _to_utc(local_start)
-    # One canonical end, saturated once, and the local form **derived from it**.
-    # Saturating the wall clock separately is what let the two disagree.
+    # One canonical pair, saturated once, with both local forms **derived from
+    # it**. Saturating a wall clock on its own is what let the two disagree, and
+    # it goes wrong at each bound in its own way: an unrepresentable *end* at the
+    # top, and at the bottom a stated *start* that saturates and is then no longer
+    # a description of the instant the reading holds.
+    exact_start = _utc_exact(local_start)
+    start = exact_start if exact_start is not None else _to_utc(local_start)
     end = saturating_add(start, governing.duration)
     return Occurrence(
         start=start,
         end=end,
-        local_start=local_start,
+        local_start=local_start if exact_start is not None else None,
         local_end=_in_zone(end, local_start.tzinfo),
         all_day=governing.all_day,
         summary=governing.summary,
