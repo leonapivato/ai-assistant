@@ -11,6 +11,7 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
     TERMINAL_DEFERRAL_STATES,
+    Attestation,
     BeliefBand,
     CurrentContext,
     DataTier,
@@ -22,6 +23,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     FeedbackEvent,
     FeedbackKind,
+    Goal,
     MemoryDecision,
     MemoryDecisionKind,
     MemoryIngestResult,
@@ -46,6 +48,20 @@ from ai_assistant.core.types import (
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 _LATER = datetime(2026, 6, 1, tzinfo=UTC)
+
+#: The attestation an `EXTERNAL` provenance must carry since ADR-0092 §1. Named so
+#: the cases below say "attested" once rather than repeating the two halves.
+_ATTESTED_BY = Attestation(reported_by="calendar:work", reported_at=_WHEN)
+
+
+def _attestation_for(source: MemorySource) -> Attestation | None:
+    """What ``source`` is obliged to carry: an attestation iff it is ``ATTESTED``.
+
+    The iff of ADR-0092 §1, read from :func:`band_of` rather than from a list of
+    sources, so a `MemorySource` added later gets the right answer here without an
+    edit and the cases below stay total over the enum.
+    """
+    return _ATTESTED_BY if band_of(source) is BeliefBand.ATTESTED else None
 
 
 def test_validity_defaults_to_a_fully_open_window() -> None:
@@ -134,7 +150,12 @@ def test_a_derived_provenance_accepts_anything_below_full(source: MemorySource) 
 
 def test_an_external_provenance_may_still_claim_full_confidence() -> None:
     """`EXTERNAL` is in the ATTESTED band, and ADR-0038 §2a lets it be certain."""
-    prov = Provenance(source=MemorySource.EXTERNAL, confidence=1.0, last_updated=_WHEN)
+    prov = Provenance(
+        source=MemorySource.EXTERNAL,
+        confidence=1.0,
+        last_updated=_WHEN,
+        attestation=_ATTESTED_BY,
+    )
 
     assert band_of(prov.source) is BeliefBand.ATTESTED
     assert prov.confidence == 1.0
@@ -150,9 +171,203 @@ def test_the_two_confidence_rules_do_not_overlap() -> None:
         band = band_of(source)
         forbidden = 1.0 if band is BeliefBand.DERIVED else 0.5
         if band is BeliefBand.ATTESTED:
-            continue  # neither rule binds it
+            continue  # neither *confidence* rule binds it
         with pytest.raises(ValidationError):
-            Provenance(source=source, confidence=forbidden, last_updated=_WHEN)
+            Provenance(
+                source=source,
+                confidence=forbidden,
+                last_updated=_WHEN,
+                attestation=_attestation_for(source),
+            )
+
+
+# --- the attestation: what reported it, and when (ADR-0092 §1, §3) -----------
+
+
+def test_an_attestation_carries_both_halves() -> None:
+    """The two halves ADR-0073 §4 asks for, held together in one value."""
+    attestation = Attestation(reported_by="calendar:work", reported_at=_WHEN)
+
+    assert attestation.reported_by == "calendar:work"
+    assert attestation.reported_at == _WHEN
+
+
+@pytest.mark.parametrize("missing", ["reported_by", "reported_at"], ids=str)
+def test_neither_half_of_an_attestation_is_optional(missing: str) -> None:
+    """A half-answer is unconstructable, which is the whole point of the object.
+
+    ADR-0092 §2 rejected two nullable fields on `Provenance` for exactly this: they
+    admit four states, two of which are half-answers a surface renders as "your
+    calendar had this as of ___" or attributes to nobody. Both fields required
+    inside one optional slot makes those states unreachable rather than merely
+    discouraged.
+    """
+    fields = {"reported_by": "calendar:work", "reported_at": _WHEN}
+    del fields[missing]
+
+    with pytest.raises(ValidationError):
+        Attestation(**fields)  # type: ignore[arg-type]  # the point is the missing field
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"], ids=repr)
+def test_a_blank_reporter_is_refused(blank: str) -> None:
+    """`reported_by` is non-empty (ADR-0092 §1): a source that identifies nothing.
+
+    It is the only durable handle the record keeps on where it came from, because
+    ADR-0092 §6 rules that an import's id is ours and minted per sync — so a blank
+    here is a record that can never say who reported it.
+    """
+    with pytest.raises(ValidationError):
+        Attestation(reported_by=blank, reported_at=_WHEN)
+
+
+def test_a_naive_report_time_is_refused() -> None:
+    """`reported_at` is a `UtcInstant`, so ADR-0023 §3's refusal reaches it too."""
+    with pytest.raises(ValidationError):
+        Attestation(reported_by="calendar:work", reported_at=datetime(2026, 1, 1))  # noqa: DTZ001
+
+
+def test_an_attested_provenance_must_carry_an_attestation() -> None:
+    """The first half of the iff: set when the band is `ATTESTED` (ADR-0092 §1).
+
+    ADR-0073 §4 makes carrying both halves "a precondition of [the producer]
+    shipping", and this is what turns that from procedural into structural: a
+    precondition a producer satisfies by remembering is one it can fail by
+    forgetting, and the failure is silent — an attested record with no attestation
+    renders exactly the misleading answer §4's floor forbids.
+    """
+    with pytest.raises(ValidationError, match="must carry an attestation"):
+        Provenance(source=MemorySource.EXTERNAL, confidence=1.0, last_updated=_WHEN)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [source for source in MemorySource if band_of(source) is not BeliefBand.ATTESTED],
+    ids=str,
+)
+def test_a_non_attested_provenance_may_not_carry_an_attestation(source: MemorySource) -> None:
+    """The second half of the iff: absent otherwise (ADR-0092 §1).
+
+    This half keeps `source` the single classifier. ADR-0072 §4 rules that
+    classification "is keyed on ``source`` and never on ``confidence``, so no
+    producer can promote a belief into the asserted band by claiming certainty"; an
+    attestation on an `INFERRED` record would be the same laundering by a different
+    field — a derived guess wearing a citation to a system that never reported it.
+
+    Parametrised by *band* rather than by a written-out list of sources, so a
+    `MemorySource` added later is covered without an edit.
+    """
+    confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.6
+
+    with pytest.raises(ValidationError, match="must not carry an attestation"):
+        Provenance(
+            source=source,
+            confidence=confidence,
+            last_updated=_WHEN,
+            attestation=_ATTESTED_BY,
+        )
+
+
+def test_the_attestation_rule_is_stated_over_the_whole_source_enum() -> None:
+    """Totality, the shape `_EXPECTED_BANDS` uses: every source, both directions.
+
+    A `MemorySource` added later cannot slip past the iff by being absent from a
+    hand-written list — the obligation is derived from `band_of`, which is itself
+    total and mechanically enforced (ADR-0072 §2).
+    """
+    for source in MemorySource:
+        confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.6
+        obliged = band_of(source) is BeliefBand.ATTESTED
+        permitted = _ATTESTED_BY if obliged else None
+        refused = None if obliged else _ATTESTED_BY
+
+        prov = Provenance(
+            source=source,
+            confidence=confidence,
+            last_updated=_WHEN,
+            attestation=permitted,
+        )
+        assert (prov.attestation is not None) is obliged
+        with pytest.raises(ValidationError):
+            Provenance(
+                source=source,
+                confidence=confidence,
+                last_updated=_WHEN,
+                attestation=refused,
+            )
+
+
+def test_a_report_time_before_our_revision_is_the_normal_case() -> None:
+    """Monday's report, revised into the store on Tuesday (ADR-0092 §3).
+
+    The two fields are two different clocks — `reported_at` is the source's, and
+    `last_updated` is ours (ADR-0045 §3) — so this ordering is the point of
+    carrying both, not an anomaly. A consumer treating the pair as an ordering
+    invariant has misunderstood which clock each belongs to.
+    """
+    prov = Provenance(
+        source=MemorySource.EXTERNAL,
+        confidence=0.9,
+        last_updated=_LATER,
+        attestation=Attestation(reported_by="calendar:work", reported_at=_WHEN),
+    )
+
+    assert prov.attestation is not None
+    assert prov.attestation.reported_at < prov.last_updated
+
+
+def test_a_report_time_in_our_future_is_not_refused() -> None:
+    """Source clocks skew, and skew is a rendering concern (ADR-0092 §3).
+
+    A validator comparing the two would refuse a record that is perfectly
+    encodable, perfectly readable and merely early — inventing a read-path failure,
+    which is precisely what ADR-0086 §3's admissibility test permits this
+    validator to avoid. Nothing in `core` compares them.
+    """
+    prov = Provenance(
+        source=MemorySource.EXTERNAL,
+        confidence=0.9,
+        last_updated=_WHEN,
+        attestation=Attestation(reported_by="calendar:work", reported_at=_LATER),
+    )
+
+    assert prov.attestation is not None
+    assert prov.attestation.reported_at > prov.last_updated
+
+
+def test_an_attested_provenance_round_trips_through_json() -> None:
+    """The validator runs on *decode* too, which is why the store scan preceded it.
+
+    `SqliteMemoryStore` reconstructs every record through the model on every read,
+    so this is the path ADR-0086 §3's admissibility test is about: what the type
+    accepts here is what a deployment can read back.
+    """
+    prov = Provenance(
+        source=MemorySource.EXTERNAL, confidence=0.9, last_updated=_WHEN, attestation=_ATTESTED_BY
+    )
+
+    restored = Provenance.model_validate_json(prov.model_dump_json())
+
+    assert restored == prov
+    assert restored.attestation == _ATTESTED_BY
+
+
+def test_a_goal_is_reached_by_the_attestation_rule_too() -> None:
+    """Why the rule is on the type and not at the `MemoryPolicy` gate (ADR-0092 §2).
+
+    `_derived_is_never_certain` states the argument in full: "the gate is not the
+    only path a `Provenance` takes — `Goal` carries one and reaches no
+    propose/dispose gate at all — and a validator on the value needs no gate." An
+    attested goal owes the same disclosure as an attested belief, and only a
+    validator reaches it.
+    """
+    with pytest.raises(ValidationError):
+        Goal(
+            id="g-1",
+            statement="book the flight the calendar implies",
+            provenance=Provenance(source=MemorySource.EXTERNAL, confidence=0.9, last_updated=_WHEN),
+            created_at=_WHEN,
+        )
 
 
 # --- the evidence bound is not on this type (ADR-0086 §1, §2) ----------------

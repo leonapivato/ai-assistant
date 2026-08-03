@@ -60,8 +60,9 @@ mechanism half is rewritten by ADR-0045 §5):
   **absent from the store**, so it overwrites no existing record. Since ADR-0079
   §3 it retires **the whole ruled-on set**, not the named target alone: that
   target — ``EXTERNAL`` included, where a policy names one explicitly — plus every
-  other conflict whose source is supersedable, with ``USER_ASSERTED`` and
-  ``EXTERNAL`` *siblings* left live. Each retirement **clamps** rather than
+  other conflict whose source is in the retirement class, which since ADR-0092 §4
+  is ``{OBSERVED, INFERRED, EXTERNAL}``, with only ``USER_ASSERTED`` *siblings*
+  left live. Each retirement **clamps** rather than
   extends: the window closes at the earlier of the writer's close instant and the
   record's own ``valid_until``, ``valid_from`` untouched (ADR-0080 §1).
   ``record_id`` is the **live record's** id, neither the target's nor any
@@ -90,6 +91,16 @@ rulings; the **``EXTERNAL``** clause is **narrowed to ``REINFORCE``** — a
 ``USER_ASSERTED`` proposal *reinforcing* an ``EXTERNAL`` target still raises, while
 the same *supersession* is now permitted and writes a new-id correction. Every
 other pairing is permitted, which the suite exercises as well as those it refuses.
+
+**That reinforce refusal is the one ADR-0092 §5 exists to protect.** §4 put
+``EXTERNAL`` in the retirement class the widening above uses, and a writer that
+performed the widening by widening *one* shared constant would silently stop
+refusing this fold — reopening the ADR-0038 §2a data loss as a one-line change
+that passes every other case here. The two sets answer different questions
+(what a correction may retire; what an assertion may fold onto at the target's
+own id), so the suite states both and
+:meth:`~MemoryWriterContract.test_an_assertion_still_may_not_reinforce_an_external_record`
+pins the second on its own, where a merged constant fails visibly.
 
 It deliberately does **not** pin the conflict threshold, the *value* of the
 conflict limit, the constructor's tuning check, or — for ``REINFORCE`` — which
@@ -127,6 +138,8 @@ from ai_assistant.core.errors import MemoryStoreError, UnresolvedEvidenceError
 from ai_assistant.core.protocols import MemoryWriter
 from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
+    Attestation,
+    BeliefBand,
     DataTier,
     EpisodicMemory,
     MemoryDecision,
@@ -139,6 +152,7 @@ from ai_assistant.core.types import (
     Provenance,
     UserConfirmation,
     Validity,
+    band_of,
 )
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore
 
@@ -208,6 +222,12 @@ _LONG_AGO = datetime(2000, 1, 1, tzinfo=UTC)
 #: is after every plausible writer now, and pin their records' ``expires_at`` to
 #: ``None`` or beyond it so retention does not confound the window assertion.
 _AFTER_CLOSE = datetime(2100, 1, 1, tzinfo=UTC)
+
+#: What the ``ATTESTED`` band must carry since ADR-0092 §1. The suite pins nothing
+#: about its *contents* — the obligations here are about what a ruling reaches, not
+#: about what a source said — so one value serves every ``EXTERNAL`` record and
+#: :func:`_preference` attaches it from the band.
+_ATTESTED_BY = Attestation(reported_by="source-instance", reported_at=_WHEN)
 
 _CONTENT = "prefers concise emails"
 
@@ -413,6 +433,12 @@ def _preference(  # noqa: PLR0913 — one keyword per provenance axis a case may
             last_updated=_WHEN,
             evidence=evidence,
             evidence_elided=evidence_elided,
+            # Same principle as the line above, for ADR-0092 §1's obligation: the
+            # `ATTESTED` band must carry an attestation, so the helper meets it
+            # from the *band* rather than by naming `EXTERNAL` — a source added
+            # into that band later is covered without an edit. None of the
+            # obligations here turns on its contents.
+            attestation=_ATTESTED_BY if band_of(source) is BeliefBand.ATTESTED else None,
         ),
     )
 
@@ -516,13 +542,21 @@ class _SupersedeNamingPolicy:
         )
 
 
-#: The ids :func:`_plant_conflict_set` gives the two supersedable siblings — the
-#: ones ADR-0050 §1's widening sweeps in behind whatever target a ruling names.
-_SWEPT_IN = ("sib-observed", "sib-inferred")
+#: The ids :func:`_plant_conflict_set` gives the siblings in the **retirement
+#: class** — the ones ADR-0050 §1's widening sweeps in behind whatever target a
+#: ruling names. ``sib-external`` joined them in ADR-0092 §4, which partially
+#: supersedes ADR-0050 §1's ``EXTERNAL`` hold-out: the widening's set is the
+#: policy's retirement class, and ADR-0079 §3 states the obligation *intensionally*
+#: — "every other conflict … **whose source is supersedable**" — so widening the
+#: class widens the contract without ADR-0079 needing an edit.
+_SWEPT_IN = ("sib-observed", "sib-inferred", "sib-external")
 
-#: And the two it holds out of the widening under every ruling (ADR-0050 §1): a
-#: record the user gave us, and one an integration reported.
-_HELD_OUT = ("sib-asserted", "sib-external")
+#: And the one it holds out of the widening under every ruling: a record the user
+#: gave us. Topical similarity may not retire an assertion (ADR-0045 §5 clause 1),
+#: and ADR-0038 §3's one-way asymmetry is untouched by ADR-0092 §4 — that ADR
+#: widens what an *assertion* may retire and says nothing about who may retire an
+#: assertion. The user's own answer is still the only exception (ADR-0078 §5b).
+_HELD_OUT = ("sib-asserted",)
 
 
 async def _plant_conflict_set(store: MemoryStore, *, target_source: MemorySource) -> None:
@@ -1556,11 +1590,17 @@ class MemoryWriterContract:
         policy's best-ranked target leaves a second and third stale belief live on
         the topic.
 
-        And the two held-out sources stay live under either ruling: topical
-        similarity may not retire a record the user gave us (ADR-0045 §5), and
-        adopting ``EXTERNAL`` supersession is a separate deferred policy choice —
-        so an ``EXTERNAL`` *sibling* survives even in the case where an
-        ``EXTERNAL`` *target* does not.
+        **``EXTERNAL`` siblings are swept in too, since ADR-0092 §4** — which
+        adopts ``EXTERNAL`` supersession and partially supersedes ADR-0050 §1's
+        hold-out. So the ``named-target-external`` case now pins something narrower
+        than it used to: not that an ``EXTERNAL`` sibling survives, but that naming
+        an ``EXTERNAL`` record as the *primary* is still honoured and still audited
+        as the target.
+
+        The one held-out source stays live under either ruling: topical similarity
+        may not retire a record the user gave us (ADR-0045 §5), and ADR-0038 §3's
+        one-way asymmetry is untouched — ADR-0092 §4 widens what an *assertion* may
+        retire and nothing about who may retire an assertion.
         """
         store = FakeMemoryStore(now=_after_close)
         await _cite(store)
@@ -1592,6 +1632,90 @@ class MemoryWriterContract:
         correction = await store.get("corrected")
         assert correction is not None
         assert _CITED in correction.provenance.evidence
+
+    async def test_a_correction_retires_an_attested_sibling(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0092 §4's adoption, as a ``MemoryWriter`` obligation (ADR-0079 §3).
+
+        The case named in ADR-0092 §9: a user's correction supersedes a stale
+        inference and the *attested* record beside it is swept in with it, rather
+        than surviving as a second live belief on the same topic. Stated on its own
+        as well as inside the matrix above, because it is the behavioural half of
+        the adoption and the widening case would still pass if a writer swept in
+        one arbitrary extra record.
+
+        The class widened, not the shape: this is why ADR-0079 §3 owes no amendment
+        (ADR-0092 §8). §3 states the obligation *intensionally* — "every other
+        conflict … **whose source is supersedable**" — so widening what is
+        supersedable leaves that sentence true verbatim and leaves no reader acting
+        differently.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await store.add(_preference("stale", source=MemorySource.INFERRED))
+        await store.add(_preference("imported", source=MemorySource.EXTERNAL))
+        writer = make_writer(
+            store,
+            _SupersedeNamingPolicy("stale"),
+            id_factory=_scripted("corrected"),
+            conflict_limit=_ROOMY_CEILING,
+        )
+
+        result = await writer.ingest(
+            _proposal(_preference("new", source=MemorySource.USER_ASSERTED))
+        )
+
+        assert result.record_id == "corrected"
+        retained = {record.id: record for record in await store.export()}
+        for retired_id in ("stale", "imported"):
+            assert await store.get(retired_id) is None, f"{retired_id} was not retired"
+            assert retained[retired_id].validity.valid_until is not None
+        # Retired, not destroyed: the import is retained in `export` with its
+        # attestation intact, so "your calendar reported this, and we retired it"
+        # is still answerable (ADR-0045 §6, ADR-0073 §4).
+        assert retained["imported"].provenance.attestation is not None
+        assert await store.get("corrected") is not None
+
+    async def test_an_assertion_still_may_not_reinforce_an_external_record(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """The refusal ADR-0092 §5 exists to keep, stated where a merge would break it.
+
+        This is the regression a one-line performance of ADR-0092 §4 ships. The
+        widening above and this refusal read what *was* one ``_SUPERSEDABLE``
+        constant serving two unrelated questions:
+
+        1. which sibling conflicts a ``SUPERSEDE`` closes (the widening); and
+        2. which targets a ``USER_ASSERTED`` proposal may ``REINFORCE`` onto.
+
+        They were the same set only by coincidence. Adding ``EXTERNAL`` for (1)
+        makes (2)'s condition ``source not in <set>`` **false** for an ``EXTERNAL``
+        target, so the refusal stops firing and a correction folds at the external
+        id again — precisely the loss ADR-0038 §2a reproduced and ADR-0045 §5 kept
+        refused by name while lifting its ``SUPERSEDE`` sibling.
+
+        The suite states both, so a writer that merges the constants back together
+        fails **here** rather than passing everything and losing a user's correction
+        at the next sync. ADR-0092's Consequences names that merge as the kind of
+        thing a later reader tidies; this case is what stops the tidy-up.
+
+        A ``SUPERSEDE`` of the same target is *permitted* — it mints a fresh id
+        (ADR-0045 §4) — and the matrix case above covers it, which is what makes the
+        distinction here about the **ruling** and not about the source pair.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("imported", source=MemorySource.EXTERNAL))
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
+        before = await store.export()
+
+        with pytest.raises(MemoryStoreError):
+            await writer.ingest(_proposal(_preference("new", source=MemorySource.USER_ASSERTED)))
+
+        # Fail-closed and whole: the import is byte-identical and nothing landed,
+        # so a writer that folded and *then* raised is caught too.
+        assert await store.export() == before
+        assert await store.get("new") is None
 
     async def test_an_unmintable_multi_target_supersede_leaves_every_target_live(
         self, make_writer: WriterFactory
@@ -2481,16 +2605,27 @@ class MemoryWriterContract:
 
         assert [record.id for record in await store.export()] == ["asserted"]
 
-    async def test_a_confirmed_supersede_retires_the_assertion_and_leaves_an_external_live(
+    async def test_a_confirmed_supersede_retires_the_named_assertion_and_the_import(
         self, make_writer: WriterFactory
     ) -> None:
-        """The ordering case that would otherwise adopt ``EXTERNAL`` supersession (§5).
+        """The ordering case, on the tree ADR-0092 §4 leaves behind.
 
-        Both records are named in ``retires``, and the one retired is the
-        **assertion**: that is what the confirmation is *for*, and targeting the
-        external record instead would adopt a still-deferred policy choice (ADR-0045
-        §5/§7) by accident *and* leave live the assertion the user actually confirmed
-        retiring, because the applier's widening sweeps only supersedable siblings.
+        Both records are named in ``retires``, the assertion is the **named
+        target**, and both end up retired — but by two different routes, which is
+        the whole content of the case:
+
+        * the **assertion** is retired because the user's answer authorises it, and
+          only because of that: it is verified through the five checks of ADR-0078
+          §5b, and topical similarity could never have reached it (ADR-0045 §5);
+        * the **import** is retired by the ordinary widening, since ADR-0092 §4 put
+          ``EXTERNAL`` in the retirement class. It needs no authority from the
+          confirmation — which is exactly why ``retires`` naming it changes nothing.
+
+        Before ADR-0092 §4 this case pinned the import staying *live*, on the
+        ground that retiring it would adopt a deferred policy choice by accident.
+        The choice is now made, so what is left to protect is the **attribution**:
+        the ruling's audited target must still be the assertion the confirmation was
+        given for, not the incidental record beside it.
         """
         store = FakeMemoryStore(now=_after_close)
         await store.add(_preference("asserted", source=MemorySource.USER_ASSERTED))
@@ -2499,13 +2634,16 @@ class MemoryWriterContract:
             store, _SupersedeNamingPolicy("asserted"), id_factory=_scripted("corrected")
         )
 
-        await writer.ingest(
+        result = await writer.ingest(
             _confirmed(_preference("new"), retires=("asserted", "external"), frozen=_FROZEN)
         )
 
+        assert result.decision.target_id == "asserted", "the confirmation's own target is audited"
         retained = {record.id: record for record in await store.export()}
         assert not retained["asserted"].validity.live_at(_AFTER_CLOSE), "the assertion is retired"
-        assert retained["external"].validity.live_at(_AFTER_CLOSE), "the external record is not"
+        assert not retained["external"].validity.live_at(_AFTER_CLOSE), (
+            "and so is the import, by the widening rather than by the confirmation"
+        )
 
     async def test_a_confirmation_naming_two_assertions_retires_both_in_one_batch(
         self, make_writer: WriterFactory

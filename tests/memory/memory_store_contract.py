@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     StoreFactory = Callable[[Callable[[], datetime]], MemoryStore]
 from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
+    Attestation,
     BeliefBand,
     MemoryKind,
     MemoryRecord,
@@ -47,6 +48,7 @@ from ai_assistant.core.types import (
     Provenance,
     SemanticMemory,
     Validity,
+    band_of,
 )
 
 # Far in the past: expired (or window-closed) under any clock at or after 2000 —
@@ -84,10 +86,24 @@ def _provenance(
 
     Confidence follows the source rather than being a parameter: ``USER_ASSERTED``
     provenance is unconstructable below 1.0 (``_user_asserted_is_certain``), and
-    every other source in these cases wants a sub-1.0 figure.
+    every other source in these cases wants a sub-1.0 figure. The attestation
+    follows the *band* for the same reason (ADR-0092 §1): the ``ATTESTED`` band is
+    unconstructable without one, and keying on the band rather than on ``EXTERNAL``
+    covers a ``MemorySource`` added into it later without an edit here. No
+    obligation in this suite reads it — a store keeps what it is given — so one
+    value serves every case.
     """
     certain = source is MemorySource.USER_ASSERTED
-    return Provenance(source=source, confidence=1.0 if certain else 0.6, last_updated=last_updated)
+    return Provenance(
+        source=source,
+        confidence=1.0 if certain else 0.6,
+        last_updated=last_updated,
+        attestation=(
+            Attestation(reported_by="source-instance", reported_at=_REVISED)
+            if band_of(source) is BeliefBand.ATTESTED
+            else None
+        ),
+    )
 
 
 def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may need to vary

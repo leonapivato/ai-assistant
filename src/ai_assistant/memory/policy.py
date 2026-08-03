@@ -30,10 +30,27 @@ if TYPE_CHECKING:
 _DEFAULT_MIN_CONFIDENCE = 0.3
 _DEFAULT_TEMPORARY_TTL = timedelta(days=7)
 
-# Sources a user assertion may supersede (ADR-0038 §2). An allow-list rather
-# than "not USER_ASSERTED": adding a `MemorySource` should not silently enrol it
-# in a destructive rule, and `EXTERNAL` is excluded on its own grounds (§2a).
-_SUPERSEDABLE = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
+# The **retirement class**: sources a user assertion may retire (ADR-0038 §2,
+# widened by ADR-0092 §4). An allow-list rather than "not USER_ASSERTED", and that
+# property is the point ADR-0038 §2a's surviving argument makes: "a `MemorySource`
+# added later is not silently enrolled in a destructive rule by omission." ADR-0092
+# §4 changes one member, chosen; not the shape that makes the next member a
+# decision.
+#
+# `EXTERNAL` joins because the owner ruled that the external calendar is an *input*
+# and not the truth. ADR-0072 already granted the permission in the sentence
+# defining the band — an attested belief is "neither entitled to the standing the
+# supersession law protects nor re-derivable by observing harder" — and ADR-0092 §4
+# completes the second clause: an attested belief is not re-derivable *by us* and is
+# **re-reportable by its source**, on a schedule, which is a recovery path at least
+# as reliable as re-observation. So it sits on the recoverable side of ADR-0038 §2's
+# error calculus, and the case for retiring it is the case §2 already made for
+# inferences.
+#
+# **This is not the applier's reinforce-safe class**, which stays `{OBSERVED,
+# INFERRED}` (`memory/ingest.py`). ADR-0092 §5 splits the two because they answer
+# different questions; the constant here only ever answered this one.
+_RETIREMENT_CLASS = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED, MemorySource.EXTERNAL})
 
 
 def _rule_on_admissibility(proposal: MemoryUpdateProposal) -> MemoryDecision | None:
@@ -142,12 +159,17 @@ def _rule_on_confirmation(
        exists to authorise the one thing similarity may not do — retire a record
        the user gave us — so an asserted conflict is what it is *for*; and without
        it a set holding an ``EXTERNAL`` record and an assertion, both named, could
-       target the ``EXTERNAL`` one, which would adopt ``EXTERNAL`` supersession by
-       accident (still ADR-0045 §5/§7's deferred choice) *and* leave live the
-       assertion the user actually confirmed retiring, because the applier's
-       widening sweeps only supersedable siblings around the named target
-       (ADR-0050 §1). An ``EXTERNAL`` id in ``retires`` is therefore simply not
-       acted on: ``retires`` is a ceiling, not an instruction.
+       name the ``EXTERNAL`` one as the audited primary while the assertion the
+       user actually confirmed retiring rode in on the applier's widening, which
+       puts the *incidental* record in the ruling's ``target_id`` and the confirmed
+       one nowhere the audit trail names. Since ADR-0092 §4 that is a
+       mis-attribution rather than an unratified adoption — ``EXTERNAL``
+       supersession is now the shipped rule — but the qualifier stays, because the
+       thing a confirmation authorises is retiring an *assertion* and that is what
+       the ruling should say it did. An ``EXTERNAL`` id in ``retires`` is therefore
+       still not acted on here: ``retires`` is a ceiling, not an instruction, and
+       an ``EXTERNAL`` conflict needs no authority from the user to be retired
+       anyway.
     3. **Otherwise fall through** (``None``) to the policy's ordinary rules,
        unchanged. Reading this as "otherwise ``ACCEPT``" quietly disables the
        ordinary supersession law for every confirmed proposal: freeze a question
@@ -224,18 +246,24 @@ def _rule_on_assertion(conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
        win even when an inference is also in the set: superseding the inference would
        still commit the contradicting assertion.
 
-    2. **A supersedable inference → ``SUPERSEDE`` (ADR-0038, #244).** With no asserted
-       conflict, supersession targets the best-ranked conflict whose source is in
-       :data:`_SUPERSEDABLE` — an allow-list of the two *derived* sources, not
-       "anything that is not an assertion". ``EXTERNAL`` is excluded because adopting
-       its supersession is a separate deferred choice (ADR-0045 §5/§7); scanning past
-       it (rather than taking ``conflicts[0]``) reaches the first inference instead of
-       abandoning supersession. The named target is the **primary**; the applier
-       retires the *full* supersedable set it leads (:func:`_retirement_set`, #244),
-       so a second and third stale inference on the same topic do not survive.
+    2. **A retirable conflict → ``SUPERSEDE`` (ADR-0038, ADR-0092 §4, #244).** With
+       no asserted conflict, supersession targets the best-ranked conflict whose
+       source is in :data:`_RETIREMENT_CLASS` — an allow-list of the two *derived*
+       sources and ``EXTERNAL``, not "anything that is not an assertion", so a
+       ``MemorySource`` added later is not enrolled by omission. The scan (rather
+       than taking ``conflicts[0]``) is what reaches a retirable conflict past a
+       ``USER_ASSERTED`` one instead of abandoning supersession — it no longer has
+       an ``EXTERNAL`` hold-out to step over, since ADR-0092 §4 adopted that
+       supersession: the user outranks the calendar, and the import is an input
+       rather than the truth. The named target is the **primary**; the applier
+       retires the *full* retirement set it leads (:func:`_retirement_set`, #244),
+       so a second and third stale belief on the same topic do not survive.
 
-    3. **Nothing supersedable → ``ACCEPT``.** With only ``EXTERNAL`` conflicts (or
-       none), the assertion lands beside them (ADR-0045 §7's #254 shape).
+    3. **Nothing retirable → ``ACCEPT``.** Reachable only when the conflict set is
+       **empty**: with ``EXTERNAL`` in the class, every non-asserted conflict is
+       now retirable, and an asserted one was already ruled on by arm 1. The
+       ADR-0045 §7 shape where an assertion landed live beside a contradicting
+       import is what ADR-0092 §4 exists to end.
     """
     if any(c.provenance.source is MemorySource.USER_ASSERTED for c in conflicts):
         return MemoryDecision(
@@ -243,7 +271,7 @@ def _rule_on_assertion(conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
             reason="contradicts a prior user assertion; defer to the user (ADR-0050)",
         )
     superseded = next(
-        (c for c in conflicts if c.provenance.source in _SUPERSEDABLE),
+        (c for c in conflicts if c.provenance.source in _RETIREMENT_CLASS),
         None,
     )
     if superseded is None:
@@ -251,7 +279,7 @@ def _rule_on_assertion(conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
     return MemoryDecision(
         kind=MemoryDecisionKind.SUPERSEDE,
         target_id=superseded.id,
-        reason="user assertion supersedes the conflicting inferences",
+        reason="user assertion supersedes the conflicting beliefs",
     )
 
 
@@ -279,15 +307,18 @@ class DefaultMemoryPolicy:
        the user (``ASK_USER``): two things the user said cannot both stay live,
        yet neither may be destroyed on a topical-similarity signal, so the user
        resolves it (ADR-0050 §2, #245).
-    6. A user-asserted proposal *supersedes* the conflicting inferences: it rules
-       ``SUPERSEDE`` naming the best-ranked ``OBSERVED``/``INFERRED`` conflict,
-       and the applier retires the *whole* supersedable conflict set it leads —
+    6. A user-asserted proposal *supersedes* the conflicting beliefs: it rules
+       ``SUPERSEDE`` naming the best-ranked ``OBSERVED``/``INFERRED``/``EXTERNAL``
+       conflict, and the applier retires the *whole* retirement set it leads —
        which is now the whole set retrieval surfaced, since the writer refuses
        rather than truncating above its ceiling (ADR-0079 §1) — so a second and
-       third stale inference on the topic do not survive the correction (ADR-0038,
-       ADR-0040, ADR-0050 §1, #244).
+       third stale belief on the topic do not survive the correction (ADR-0038,
+       ADR-0040, ADR-0050 §1, ADR-0092 §4, #244). ``EXTERNAL`` is in that class
+       since ADR-0092 §4: a connected source is an *input*, so the user's
+       correction retires the import rather than sitting live beside it.
     7. A user-asserted proposal with nothing to supersede is trusted and
-       accepted.
+       accepted — which, since rule 6 took ``EXTERNAL``, means nothing conflicted
+       with it at all.
     8. A proposal that conflicts with an existing (non-asserted) record rules
        ``REINFORCE`` over it, folding into it (ADR-0040 §4).
     9. Weak evidence (below ``min_confidence``) is stored temporarily, with an

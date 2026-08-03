@@ -77,11 +77,29 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-# The only targets a user assertion may be folded onto (ADR-0038 §2a). Held here
-# rather than imported from `memory`, so the fake stays free of the subsystem's
-# internals (golden rule 1) while honouring the same refusals the production
-# writer does (ADR-0040 §5b).
-_SUPERSEDABLE = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
+# --- two classes, because one constant answered two questions (ADR-0092 §5) ---
+# Until ADR-0092 these were a single `_SUPERSEDABLE` frozenset here as in
+# `MemoryIngestor`, and they were the same set only by coincidence. §4 breaks it:
+# widening one identifier would make the reinforce refusal below stop firing for an
+# `EXTERNAL` target, and a *fake* that stopped refusing would be worse than the
+# production slip — it would certify consumers a real writer rejects (ADR-0026 §7),
+# which is the failure ADR-0079 §3 promoted the retirement set into the contract to
+# prevent. Both are held here rather than imported from `memory`, so the fake stays
+# free of the subsystem's internals (golden rule 1) while honouring the same
+# refusals the production writer does (ADR-0040 §5b).
+
+#: The **retirement class** — beliefs a correction is warranted to retire, used by
+#: :func:`_retirement_set` (ADR-0050 §1, ADR-0079 §3, widened with ``EXTERNAL`` by
+#: ADR-0092 §4). Matches ``MemoryIngestor``'s.
+_RETIREMENT_CLASS = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED, MemorySource.EXTERNAL})
+
+#: The **reinforce-safe class** — targets a user assertion may fold onto *at the
+#: target's id*, used by :func:`_refuse_unsafe_fold`'s ``REINFORCE`` arm. Still
+#: ``{OBSERVED, INFERRED}``: membership means "does not carry a foreign idempotency
+#: key", which ``EXTERNAL`` does not satisfy however wide the retirement class gets
+#: (ADR-0038 §2a, ADR-0045 §5b, ADR-0092 §5). Not to be merged back into the set
+#: above.
+_REINFORCE_SAFE = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
 
 #: The rulings that dispatch a write, and therefore the ones check 0 gates
 #: (:func:`_refuse_secret_write`, ADR-0078 §5b). Derived as a complement rather
@@ -449,6 +467,9 @@ def _refuse_unsafe_fold(
       ``REINFORCE`` only.** A ``REINFORCE`` still inherits the external id and is
       overwritten by the next sync (ADR-0038 §2a); a ``SUPERSEDE`` now gets a fresh
       id and is permitted (ADR-0045 §5b), so the arm is narrowed to ``REINFORCE``.
+      Keyed on :data:`_REINFORCE_SAFE`, **not** on the retirement class ADR-0092 §4
+      widened: reading that class here would turn ``source not in …`` false for an
+      ``EXTERNAL`` target and stop this refusal firing (ADR-0092 §5).
 
     Duplicated from ``MemoryIngestor`` deliberately: the fake owes the same
     refusals but must not reach into the ``memory`` subsystem to get them (golden
@@ -472,7 +493,7 @@ def _refuse_unsafe_fold(
     if (
         kind is MemoryDecisionKind.REINFORCE
         and incoming.provenance.source is MemorySource.USER_ASSERTED
-        and target.provenance.source not in _SUPERSEDABLE
+        and target.provenance.source not in _REINFORCE_SAFE
     ):
         msg = (
             f"refusing to reinforce onto {target.id!r}: a user assertion may not be reinforced "
@@ -675,10 +696,12 @@ def _retirement_set(
 
     The named ``target`` — whatever its source, so an ``EXTERNAL`` record a policy
     named explicitly *is* retired (ADR-0045 §5b) — plus every other conflict whose
-    source is in :data:`_SUPERSEDABLE`. ``EXTERNAL`` *siblings* are never swept in,
-    even when ``retires`` names one: adopting ``EXTERNAL`` supersession is a separate
-    deferred policy choice (ADR-0045 §5/§7) and ``retires`` is a ceiling rather than
-    an instruction. ``USER_ASSERTED`` siblings are never swept in **on similarity**
+    source is in :data:`_RETIREMENT_CLASS`. ``EXTERNAL`` **siblings are now swept in
+    too** (ADR-0092 §4's adoption, partially superseding ADR-0050 §1's hold-out): a
+    user's correction retires the import rather than leaving it live beside them.
+    ``retires`` stays a ceiling rather than an instruction; what ADR-0092 §4 removed
+    is the reason an ``EXTERNAL`` sibling needed a confirmation's authority at all.
+    ``USER_ASSERTED`` siblings are never swept in **on similarity**
     (ADR-0045 §5), and are swept in **only** where the proposal's ``confirmation``
     genuinely covers them (ADR-0078 §5b's narrowing of the hold-out) — so a
     confirmation naming two prior assertions retires both in the one batch. Checked
@@ -698,7 +721,7 @@ def _retirement_set(
         for conflict in conflicts
         if conflict.id != target.id
         and (
-            conflict.provenance.source in _SUPERSEDABLE
+            conflict.provenance.source in _RETIREMENT_CLASS
             or (
                 conflict.provenance.source is MemorySource.USER_ASSERTED
                 and _confirmation_covers(
@@ -814,6 +837,12 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     validators run on the value stored. The fold is the one install drawing from
     **two** sources, so both records' ``evidence_elided`` are summed — even when
     the union fits and nothing is displaced (ADR-0086 §4).
+
+    The ``attestation`` is the **incoming** one (ADR-0092 §6), which is required
+    rather than a choice: this ``Provenance`` is built field by field, so its iff
+    validator would raise on an attested fold carrying none. It follows the rule
+    ``source`` and ``last_updated`` already follow — newer content wins, and the
+    attestation describes the content that survived.
     """
     union = tuple(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence]))
     evidence, elided = _bounded_evidence(
@@ -826,5 +855,6 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
         evidence=evidence,
         evidence_elided=elided,
         last_updated=incoming.provenance.last_updated,
+        attestation=incoming.provenance.attestation,
     )
     return incoming.model_copy(update={"id": target.id, "provenance": provenance})

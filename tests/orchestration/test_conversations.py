@@ -27,6 +27,7 @@ from ai_assistant.core.errors import (
     UnknownConversationError,
 )
 from ai_assistant.core.types import (
+    Attestation,
     EpisodicMemory,
     MemoryKind,
     MemorySource,
@@ -114,12 +115,22 @@ async def _capture_turns(wiring: Wiring, count: int) -> tuple[str, list[str]]:
 
 
 def _foreign_episode(episode_id: str) -> EpisodicMemory:
-    """A record some other producer put in the reserved namespace (ADR-0074 §3)."""
+    """A record some other producer put in the reserved namespace (ADR-0074 §3).
+
+    ``EXTERNAL`` because the point is that *capture* did not write it; since
+    ADR-0092 §1 that band must name what reported it and when, which this fixture
+    supplies and no assertion below reads.
+    """
     return EpisodicMemory(
         id=episode_id,
         content="a record capture did not write",
         occurred_at=AT,
-        provenance=Provenance(source=MemorySource.EXTERNAL, confidence=0.5, last_updated=AT),
+        provenance=Provenance(
+            source=MemorySource.EXTERNAL,
+            confidence=0.5,
+            last_updated=AT,
+            attestation=Attestation(reported_by="calendar:work", reported_at=AT),
+        ),
     )
 
 
