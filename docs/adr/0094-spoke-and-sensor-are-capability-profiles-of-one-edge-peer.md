@@ -2,6 +2,25 @@
 
 - Status: Proposed
 - Date: 2026-08-02
+- **Note (2026-08-02): ADR-0095 renamed the in-process seam this ADR is at pains
+  to exclude, and the word "sensor" is now free for the peer profile §1 uses it
+  for.** ADR-0093's `Sensor` is a `Reader`, and its package
+  `ai_assistant/sensors/` is `ai_assistant/readers/` (ADR-0095 §1). **This ADR's
+  text was corrected in place rather than by an appended amendment, because it
+  stands `Proposed`**: ADR-0070 §1 scopes its no-rewrite rule to "**ratified**
+  decision text", and separates the two states itself — a contract ADR "is still
+  reviewed while `Proposed` and ratified only after". ADR-0095 §7 states the
+  adjudication in full. Three sites were corrected: §1's marked clause excluding
+  an in-process producer, and the two places in the Context and in §1 that state
+  ADR-0093's package as live fact. **§11's classification block is deliberately
+  untouched** — it records this lane's own review history, including an earlier
+  draft that called a locally-read calendar file a "pull peer", and rewriting a
+  historical narrative to use a name that did not exist when the events happened
+  would falsify the record. Every remaining "sensor" and `Sensor` in the text
+  below is read under ADR-0095 §1's substitution; completing the sweep is this
+  ADR's own lane's, at ratification. **Nothing decided here changes, and this
+  note is not a status token** — the `Status` field above is untouched and the
+  ratification flip remains outstanding.
 - **Decides no `core` surface — no Protocol, no type, no field — and no
   implementation. The refusal is the decision rather than a scoping
   convenience.** There is one spoke in the tree, no sensor, and no capture
@@ -54,7 +73,7 @@ axes at once, which is why they have been mistaken for a single split.
 A **spoke** is a client of the local API (ADR-0084): it lives in **its own
 process**, dials in, sends what the user typed, and holds nothing. A **sensor** is
 a read-only producer (ADR-0093): it lives **inside the hub** — §2 puts concrete
-sensors in `ai_assistant/sensors/` and §1 gives them no caller of their own — and
+readers in `ai_assistant/readers/` and §1 gives them no caller of their own — and
 it reads a source and proposes what it read. So one is out-of-process and
 addressed; the other is in-process and unaddressed. Nothing has ever forced the
 question, because the one spoke that exists is a CLI and the one sensor that is
@@ -187,7 +206,8 @@ to what it is called.**
 > one — is applied to a peer.
 
 > **Normative.** A producer running inside the hub is **not** an edge peer. In
-> particular a `Sensor` (ADR-0093) is not one, and no clause of this ADR binds it.
+> particular a `Reader` (ADR-0093, renamed by ADR-0095 §1) is not one, and no
+> clause of this ADR binds it.
 
 > **Normative.** An attachment exercises some combination of three capabilities:
 > **push** — the edge sends content to the hub unsolicited; **doorbell** — the
@@ -227,7 +247,7 @@ the expensive answer gets chosen by default.
 **An in-process `Sensor` is not an edge peer, and nothing in this ADR reaches
 it.** ADR-0093 §1 gives a sensor no caller of its own — "Selecting when a sensor
 runs, and ingesting what it returns, are `orchestration`'s" — and §2 places
-concrete sensors in `ai_assistant/sensors/`, inside the hub. There is no
+concrete readers in `ai_assistant/readers/`, inside the hub. There is no
 connection to establish, no released set to declare and no handshake, so §2 and §3
 have nothing to bind. **A calendar file read from local disk is therefore not a
 "pull peer", and an earlier draft of this section called it one.** That draft

@@ -1,7 +1,25 @@
 # 93. A sensor reads a source and proposes what it read; the clock bounds the read, so nothing needs a cursor
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0095 (the contract's name and the package its concretes live in)
 - Date: 2026-08-02
+- Partially superseded: 2026-08-02 by ADR-0095 — **two decisions are replaced and
+  nothing else is.** The contract below named `Sensor` is named `Reader`;
+  `SensorReading` is `SourceReading`; `SensorError` is `ReaderError`; and §2's
+  package `ai_assistant/sensors/` is `ai_assistant/readers/`. **Throughout the
+  text below, "sensor" denotes a `Reader` and each name above is read as its
+  replacement** (ADR-0095 §1). Every other ruling stands and binds unchanged
+  under the substituted names — §4's band, episode and absence rules; §5's bound,
+  its refuse-don't-truncate posture and its no-cursor argument; §6's scheduler
+  job; §7's configuration discipline; §7a's figures; §7b's `.ics` semantics; §8's
+  failure postures; §9's gates; §10's surface, member for member; and §11's
+  deferrals. §2's *placement* is unchanged in substance: the package is still
+  top-level, still imports `core` alone, and still may not be imported by any
+  subsystem; ADR-0095 §2 re-tests each of §2's four rejections against a changed
+  deployment premise and reaches the same package. The seam's **weight is
+  untouched** — ADR-0095 §3 examined a proposal to make it an internal seam
+  without a triad and refused it, so §10's `core` Protocol and its triad
+  obligation stand exactly as written. This line is an appended note; the
+  `Status` field above is this ADR's only status. See ADR-0095.
 - **Decides a `core` contract and implements none of it.** Golden rule 5 and
   ADR-0015 §5 put a contract ADR in its own PR, merged before anything implements
   against it. The Protocol, its shared conformance suite and its canonical fake in
