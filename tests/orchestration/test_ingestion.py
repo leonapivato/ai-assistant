@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ai_assistant.core.errors import MemoryStoreError, ReaderError
-from ai_assistant.core.types import MemoryDecisionKind
+from ai_assistant.core.types import DataTier, MemoryDecisionKind
 from ai_assistant.orchestration import IngestionStage, MemoryWriteStage
 from ai_assistant.testing import (
     FakeDeferralStore,
@@ -248,6 +248,67 @@ async def test_a_deferred_ruling_parks_a_durable_question() -> None:
     assert report.deferred == 1
     assert report.stored == 0
     assert report.rejected == 0
+    assert len(await harness.deferrals.pending(limit=10)) == 1
+
+
+async def test_a_secret_tier_deferral_is_counted_without_claiming_a_queued_question() -> None:
+    """``deferred`` counts **rulings**, and the secret-tier arm queues nothing.
+
+    ADR-0078 §1: nothing is enqueued for a ``DataTier.SECRET`` proposal, because
+    ADR-0004 §3 is unconditional that Tier 0 content lives "never in a database"
+    and a durable queue is a file. The ruling still happened, so the count is
+    right — what would be wrong is a report saying the question waits somewhere,
+    and this pins that the count survives the suppression rather than the promise
+    doing so.
+
+    Reachable for a reader in principle: ADR-0093 §4 obliges a ``sensitivity``
+    "chosen for what the source holds rather than defaulted", so a future source
+    holding credentials would land exactly here.
+    """
+    secret = _proposals(1)[0].model_copy(update={"sensitivity": DataTier.SECRET})
+    harness = Harness(
+        reader=FakeReader([secret]),
+        # The fake policy forces `ASK_USER` on secret-tier data whatever it is
+        # configured with, because a policy that could be configured out of that
+        # would violate its own conformance suite.
+        policy=FakeMemoryPolicy(MemoryDecisionKind.ACCEPT),
+    )
+
+    report = await harness.stage.ingest()
+
+    assert report.deferred == 1
+    assert report.stored == 0
+    assert report.rejected == 0
+    # Ruled on, and nothing persisted — which is the whole point of the arm.
+    assert await harness.deferrals.pending(limit=10) == []
+
+
+async def test_a_deferral_the_full_queue_refuses_is_still_counted_as_deferred() -> None:
+    """The second path where a ruling defers and no new question exists.
+
+    The queue answers ``REFUSED`` at its cap (ADR-0078 §2, §7) — "nothing was
+    admitted and there is no deferral to read" — and the ruling is unchanged. A
+    report that equated ``deferred`` with "queued" would be false here too, and
+    this is the case a reader reaches on volume rather than on sensitivity: a
+    calendar bounded at 500 in-window occurrences (ADR-0093 §7a) against a queue
+    whose cap is far lower.
+    """
+    harness = Harness(
+        reader=FakeReader(_proposals(3)),
+        policy=FakeMemoryPolicy(MemoryDecisionKind.ASK_USER),
+    )
+    harness.deferrals = FakeDeferralStore(now=lambda: harness.now, queue_limit=1)
+    stage = IngestionStage(
+        reader=harness.reader,
+        writes=MemoryWriteStage(writer=harness.writer, deferrals=harness.deferrals),
+    )
+
+    report = await stage.ingest()
+
+    assert report.proposed == 3
+    assert report.deferred == 3
+    assert report.rejected == 0
+    # One question fitted; the other two rulings are counted and unqueued.
     assert len(await harness.deferrals.pending(limit=10)) == 1
 
 

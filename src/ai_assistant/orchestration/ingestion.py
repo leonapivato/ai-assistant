@@ -75,11 +75,12 @@ class IngestionReport:
     at fifteen methods and this is not one of them, so nothing here is owed to
     `core`.
 
-    **The counts partition the proposals.** A ruling either deferred, or left a
-    record live, or did neither; :attr:`rejected` is the remainder rather than a
-    fourth stored number, so the three can never disagree with
-    :attr:`proposed` (ADR-0085 §6b's rule: derive what the fields already
-    determine).
+    **The counts partition the proposals, and each one names a *ruling*.** A
+    ruling either deferred, or left a record live, or did neither;
+    :attr:`rejected` is the remainder rather than a fourth stored number, so the
+    three can never disagree with :attr:`proposed` (ADR-0085 §6b's rule: derive
+    what the fields already determine). What became of the *question* a deferral
+    raised is a different fact and is not carried here — see :attr:`deferred`.
 
     **It carries no proposal content, and that is not an oversight.** The only
     caller is the hub's scheduler, which never logs a job's result precisely
@@ -104,9 +105,27 @@ class IngestionReport:
     #: How many left a record live in memory — an ``ACCEPT``, a ``REINFORCE``, a
     #: ``SUPERSEDE`` or a ``STORE_TEMPORARY``.
     stored: int
-    #: How many the policy parked a question for (``ASK_USER``). Nothing is
-    #: written yet for these, and the question waits in the durable queue the
-    #: write stage enqueued it into (ADR-0078 §3).
+    #: How many the policy **ruled** ``ASK_USER`` on. Nothing was written for
+    #: these.
+    #:
+    #: **It counts rulings, and deliberately does not claim a question was
+    #: queued.** Three of the write stage's outcomes deferred and enqueued
+    #: nothing new: a ``DataTier.SECRET`` proposal is ruled on and never
+    #: persisted, because ADR-0004 §3 is unconditional that Tier 0 content lives
+    #: "never in a database" and a durable queue is a file (ADR-0078 §1); a queue
+    #: at its cap answers ``REFUSED``; and an existing question the key still
+    #: speaks for answers ``SUPPRESSED``. Saying "the question waits in the
+    #: queue" would be false in all three, and the falsehood is the interesting
+    #: kind — it reads as a promise that someone will eventually be asked.
+    #:
+    #: **A fourth count for "and a question really was parked" is deliberately
+    #: not added.** It would be surface with no consumer, which is the rule
+    #: ADR-0045 §1 and ADR-0028 §7 state and ADR-0092 §10 applies to its own
+    #: candidate field: this report's only caller is the scheduler, which never
+    #: reads a job's result at all (ADR-0004 §5). The distinction ADR-0078 §10
+    #: item 9 obliges is owed to an *adapter* rendering a deferral to the user,
+    #: and this path has neither. What is owed here is not over-claiming, which
+    #: is what the wording above buys instead.
     deferred: int
 
     @property
