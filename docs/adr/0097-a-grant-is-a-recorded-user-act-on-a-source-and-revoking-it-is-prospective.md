@@ -166,14 +166,40 @@ changes nothing already written.
 > client (§9). No model, plan, tool, reader, scheduler job, `Settings` value,
 > migration or upgrade may create one.
 
-**The key is chosen because the join to the belief already exists.** A belief
-produced by a reader carries `reported_by` equal to that reader's declared
-identity, so "which grant authorised this belief?" is answered by a value already
-on the record. Keying the grant on anything else would mean a *new* field on
-`Provenance` or `Attestation` to carry the pointer — a `core/types.py` change to a
-ratified surface, owed for no gain, at the moment ADR-0092 §10 has just declined to
-add a third field to that value object for exactly the reason ADR-0045 §1 and
-ADR-0028 §7 give.
+**The key is chosen because the join to the belief already exists — and the join
+is to the source's history, not to one grant.** A belief produced by a reader
+carries `reported_by` equal to that reader's declared identity, so "which
+*source's* authorisations produced this belief?" is answered by a value already on
+the record, and the store's history for that value is the complete list of what
+the user granted and withdrew. Keying the grant on anything else would mean a
+*new* field on `Provenance` or `Attestation` to carry the pointer — a
+`core/types.py` change to a ratified surface, at the moment ADR-0092 §10 has just
+declined to add a third field to that value object for exactly the reason
+ADR-0045 §1 and ADR-0028 §7 give.
+
+> **Normative.** No belief carries the id of the grant that authorised the read
+> that produced it, and nothing in this ADR adds a field to `Provenance` or
+> `Attestation`. The resolvable relation is **belief → source → that source's
+> grant history**, and no surface may present it as belief → one grant.
+
+**The residual is real and is stated rather than glossed, because the stronger
+claim is the one a reader would assume.** A source may be granted, revoked and
+granted again, and every belief from either era carries the same `reported_by`.
+Nothing then distinguishes which of the two grants authorised which belief:
+`Attestation.reported_at` is "the source's clock" and not ours (ADR-0092 §3), and
+`Provenance.last_updated` is transaction time that a later `REINFORCE` moves
+(ADR-0045 §3), so neither brackets a grant era reliably. **What is guaranteed is
+therefore exactly this:** every read that ever happened was authorised at the time
+it happened (§5), and the store says, completely and in order, what the user
+granted and withdrew for that source. **What is not guaranteed** is a per-belief
+attribution to one grant record.
+
+**Closing it would cost the field this section just declined**, and there is no
+consumer for it yet: the question "which grant authorised this belief" has no
+surface that asks it, while the question "what have I granted, and what did I
+withdraw" is answered by `recent` and `export` (§10). §12 defers the per-belief
+attribution with the condition that fires it, rather than buying a field on a
+ratified `core` type for a question nobody is asking.
 
 **And the two properties the key needs are already obligations.** ADR-0092 §3
 requires `reported_by` to be stable across syncs "because §6 leaves it as the only
@@ -357,9 +383,9 @@ asked".
 ### 5. No live grant, no read — and the gate is the caller's, held by construction
 
 > **Normative.** A reader is not read for a use unless a **live grant covering
-> that reader's identity and that use** exists at the instant of the read. Where
-> none does, **nothing is opened**: the source is not resolved, not opened and not
-> parsed.
+> that reader's identity and that use** exists at the instant the read starts.
+> Where none does, **nothing is opened**: the source is not resolved, not opened
+> and not parsed. §5a governs a revocation that lands while a read is in flight.
 
 > **Normative.** The check is the **caller's** — `orchestration`'s ingestion stage
 > for `INGEST`, and `context/`'s reader adapter for `FACET`. A `Reader` neither
@@ -384,6 +410,60 @@ rules that "Selecting when a sensor runs, and ingesting what it returns, are
 policy. Both sites are the ones already holding the reader:
 `IngestionStage.__init__` takes it today, and ADR-0093 §3 rules that "A
 `ContextSource` in `context/` holds a `Sensor`".
+
+#### 5a. The check and the read are one step, and a revocation beats an in-flight read
+
+A gate spelled "ask the store, then read" is a check followed by a use, and
+ADR-0021 §4 names that shape as a hazard in this system's own terms: "'The system
+composes on one event loop' is precisely the setting in which an `await` between a
+check and a write is an interleaving point." A revocation arrives over the local
+API and is handled on that same loop, so a driver that suspends between the two
+can open a source the user revoked in between. Two clauses close it, and neither
+needs a lock.
+
+> **Normative.** No `await` may occur between the `live()` result a driver gates
+> on and its call to `Reader.read()`. The check and the start of the read are one
+> synchronous step.
+
+> **Normative.** A driver re-checks the grant when `read()` returns. A reading
+> whose grant is no longer live at that moment is **discarded**: nothing is
+> proposed from it, no facet is contributed from it, and the driver refuses under
+> §5's outcomes.
+
+**The first clause is sufficient for the window the finding names, and it is
+sufficient because of how the loop actually schedules.** Awaiting a coroutine does
+not yield to the event loop; it runs that coroutine's body until *its* first
+suspension. So with no intervening `await`, the code that decides to read and the
+code that starts the read are one uninterruptible step, and no revocation can land
+between them. This is a rule about the driver's body rather than a mechanism, and
+that is deliberate: it costs a line and a test, where a mechanism would cost a
+contract.
+
+**The second clause is what makes a revocation *win* rather than merely arrive.**
+It cannot be closed by the first, because a read legitimately begun while granted
+takes real time — up to `calendar_read_timeout`, which ADR-0093 §7a defaults to ten
+seconds — and a revocation may land inside it. The residual after both clauses is
+therefore exactly one already-started read per source, bounded by the reader's own
+deadline, whose bytes are **discarded rather than used**: nothing is proposed, no
+facet is contributed, and nothing durable records that the read happened.
+
+**A lease held across the read was considered and refused**, which is the shape the
+alternative takes. Holding a source-scoped guard from the check to the return of
+`read()` would make a revocation either block for the reader's deadline or fail
+while a read is in flight — a permission withdrawal waiting on the thing it is
+withdrawing. The whole point of a revocation is that it takes effect at once; a
+mechanism that makes it queue behind a ten-second read has optimised the wrong
+side of the race. Discarding the reading gives the revocation its full effect at
+the only place it matters — nothing crosses into memory or into a prompt — without
+letting a read hold the user's decision hostage.
+
+**Aborting the in-flight read is not available, and ADR-0093 §7 is why.** A
+reader's read runs on a worker the reader owns, which "a read blocked indefinitely
+may not delay or prevent the hub exiting" makes abandonable but not killable; the
+reader exposes no cancellation handle to a driver beyond ordinary task
+cancellation, and `Reader` "gains **no lifecycle method**". So "stop the read" is
+not a thing a driver can do, and a clause requiring it would be one no
+implementation could honour.
 
 **The required constructor argument is the mechanism, not a habit.** The
 alternative — an obligation stated in prose and honoured by review — is the shape
@@ -444,9 +524,9 @@ joins that list and is likewise indistinguishable, which is the intended outcome
 > **Normative.** A revocation is never presented as, and never produces, a
 > retraction or an absence claim about what the source reported.
 
-> **Normative.** A revoked grant's record is **retained**. A belief's
-> `reported_by` therefore still resolves to the record of the grant that
-> authorised the read, and to the instant that grant was revoked.
+> **Normative.** A revoked grant's record is **retained**, so a source that has
+> been revoked still has its complete grant history on file — under §1's
+> source-level relation, never as a per-belief attribution.
 
 This is the sharp question and it deserves the three candidates tested rather than
 one asserted.
@@ -492,10 +572,13 @@ report, and this is a fact about permission.
 
 **Retention of the revoked record is what keeps the answer honest.** Beliefs from a
 revoked source remain in the store, enumerable, banded `ATTESTED`, and killable by
-the user (ADR-0073 §5). Without the retained grant record, `reported_by` would point
-at a source with no authorisation on file and the belief would read as unauthorised;
-with it, the record says exactly what happened — granted at one instant, read
-under it, revoked at another. Nothing is added to the belief to achieve this (§1).
+the user (ADR-0073 §5). Were the record removed on revocation, `reported_by` would
+point at a source with **no authorisation on file at all**, and every belief from it
+would read as unauthorised; retaining it means the store says what happened for that
+source — granted at these instants, revoked at those. That is the source-level
+relation §1 rules and its limit: it does not say which grant a given belief was
+read under, and §1 is where that residual is argued. Nothing is added to the belief
+to achieve any of it.
 
 **What a user who wants forgetting does today, and what is owed.** They use
 `forget` per belief. Offering "revoke and forget everything this source told you"
@@ -733,23 +816,41 @@ Protocol"):**
    raises — the three states a driver's §5 gate must be tested against, so a
    consumer can test its own refusal path.
 
+   **A fourth capability is required, and it is what makes §5a's second clause
+   testable at all:** the fake can be scripted to **revoke between `live()`
+   calls** — the first call answers with a grant and a later one with `None`,
+   without the test having to record anything. Without it a driver's discard path
+   is unreachable from a test, and the clause would report as held while nothing
+   exercised it. This is the same reasoning ADR-0093 §10 used to require the
+   suspension gate on its own fake: a test that cannot reach the code a clause
+   forbids is worse than no test.
+
 **Two rulings above are deliberately *not* suite clauses**, and putting them there
 would be the error. The test is whether a clause is decidable from the store's own
 surface:
 
-- **§5's caller-side gate.** It is an obligation on `orchestration` and `context/`,
-  not on the store, and no store implementation exhibits it. It is the ingestion
-  stage's and the adapter's own tests, plus the required constructor argument that
-  makes omitting it a type error.
+- **§5's caller-side gate, and §5a's two clauses with it.** All three are
+  obligations on `orchestration` and `context/`, not on the store, and no store
+  implementation exhibits any of them. They belong to the ingestion stage's and the
+  adapter's own tests, alongside the required constructor argument that makes
+  omitting the gate a type error.
+
+  > **Normative.** Each driver's own tests cover the three cases §5 and §5a
+  > distinguish: no live grant at the check (nothing is opened), a grant revoked
+  > between the check and the return of `read()` (the reading is discarded), and a
+  > grant live throughout (the reading is used). The second is written against the
+  > driver, using the canonical fake's scripted revocation, and is not a store
+  > conformance clause.
+
 - **§7's prohibition on citing a grant as `authorised_by`.** A statement about
   what a *different* subsystem may not do; nothing in this store's return values
   exhibits it. It is an `ActionPolicy` review obligation and is stated here so its
   absence from this suite does not read as its absence from the contract.
 
 **What later lanes owe, and this ADR does not:** the `permissions/` implementation
-and its schema; the two caller-side gates and their required constructor arguments;
-the client surface ADR §9 names and the CLI commands behind it; and the operator log
-line §8 requires.
+and its schema; the two caller-side gates, their required constructor arguments and
+§5a's three-case tests; the client surface ADR §9 names and the CLI commands behind
+it; and the operator log line §8 requires.
 
 ### 11. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -828,6 +929,13 @@ changes**. The places where the opposite reading is available:
 - **Gating direct Tier 0/1 data access in general, and #74's
   model-provider-credential question.** §3's shape is now built for one subject;
   whether a credential is a permission subject at all is still what #74 settles.
+- **Per-belief grant attribution** — pinning a stored belief to the *particular*
+  grant record its read ran under, which §1 rules is not available and states the
+  residual for. It needs a pointer field on `Attestation`, which ADR-0092 §10 has
+  just declined to add a third field to for the reason ADR-0045 §1 and ADR-0028 §7
+  give. Fires with the first surface that asks "under which authorisation was this
+  written" — the likeliest is the belief inspection surface ADR-0073 §4 governs, if
+  it ever renders more than the band and the source.
 - **Who granted.** No user identity exists (#113, ADR-0036 §3). Fires with the
   first multi-user deployment, as an optional field.
 - **A grant for something that is not a `Reader`** — a spoke reporting beliefs
@@ -861,6 +969,13 @@ changes**. The places where the opposite reading is available:
   logs a refusal on every scheduler tick until the operator unsets the interval.
   That is configuration and consent disagreeing, and making it quiet would make it
   invisible.
+- **Two residuals are named rather than closed, and both are bounded.** A
+  revocation landing inside an in-flight read leaves at most one already-started
+  read per source, bounded by the reader's own deadline, whose bytes are discarded
+  (§5a) — the price of not letting a read hold a revocation hostage. And a belief
+  resolves to its source's grant history, not to the one grant it was read under
+  (§1) — the price of not adding a field to a ratified `core` type for a question
+  no surface asks.
 - **Two lanes are unblocked and one is created.** The triad and the `permissions/`
   implementation can start; the `context/` adapter and the ingestion gate know what
   they must hold; and the client surface (§9) is a new contract ADR that did not
@@ -904,6 +1019,13 @@ changes**. The places where the opposite reading is available:
   Rejected in §8. It is configuration passing for consent, performed once and
   invisibly, which is the single way ADR-0093 §7 says the decision must not be
   made.
+- **A source-scoped lease held from the grant check to the end of the read**, so
+  the check and the read are linearised against revocation. Rejected in §5a: it
+  makes a revocation block for the reader's deadline or fail while a read is in
+  flight, which is a permission withdrawal waiting on the thing it withdraws. The
+  cheaper pair — no `await` between the check and the start of the read, and
+  discard the reading if the grant has gone — gives the revocation its full effect
+  where it matters and costs a contract nothing.
 - **One record type per act — a `SourceGrant` and a `GrantRevocation`.** Rejected
   in §10: it makes every query return a union that ADR-0096 §5 would then require
   to be explicitly discriminated on the wire, to buy a distinction
