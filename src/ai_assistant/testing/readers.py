@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, final
+from uuid import uuid4
 
 from ai_assistant.core.errors import ReaderError
 from ai_assistant.core.types import (
@@ -57,7 +58,7 @@ from ai_assistant.core.types import (
 from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
@@ -78,6 +79,52 @@ _DEFAULT_REPORTED_AT: Final = datetime(2026, 1, 1, tzinfo=UTC)
 #: certain of (ADR-0038 §2a), but a third party's claim about the user is not the
 #: user's own word, and 0.9 is what the corpus's other attested fixtures use.
 _ATTESTED_CONFIDENCE: Final = 0.9
+
+
+def _mint(factory: Callable[[], str] | None = None) -> str:
+    """Mint one opaque record id, guarded at its output (ADR-0092 §6, ADR-0045 §4).
+
+    **Opaque, and re-minted per proposal rather than derived.** ADR-0092 §6 rules
+    that an ``EXTERNAL`` producer "proposes each record at an id it mints, opaque to
+    the source", and ADR-0081 §8 — which §6 quotes to say it is declining to pull
+    that trigger — names the alternative it forbids: "a producer that *derives* a
+    record id from content rather than minting one — **a content hash**, or an
+    external system's key adopted as the id". A derived id is an *address*, aimed
+    at the same record on every re-read, deterministically; "minting removes the
+    aim", and with it the ADR-0038 §2a resurrection where a re-sync recomputes a
+    retired record's id and overwrites its closed validity window through
+    ``ACCEPT``'s blind upsert.
+
+    That is why this fake breaks with ``FakeObserver``'s and
+    ``FakeFeedbackProcessor``'s deterministic content-derived ids rather than
+    copying them. Those producers are inside the class ADR-0081 §8's deferral
+    assumes safe; the first ``EXTERNAL`` producer is exactly the one §6 rules on. A
+    test that needs a stable id supplies one — a caller *choosing* an id is not a
+    producer *deriving* one.
+
+    **Idempotency does not vanish; it moves** (ADR-0092 §6). An unchanged re-read
+    proposes the same content, ``_detect_conflicts`` ranks the identical live
+    record top, and ``DefaultMemoryPolicy`` rules ``REINFORCE``, which folds at the
+    **target's** id. One record, updated in place, reached through the ordinary
+    write path rather than through a key the producer asserts.
+
+    Args:
+        factory: Supplies the id, for a test that wants to name them. ``None``
+            mints a ``uuid4``.
+
+    Returns:
+        The minted id.
+
+    Raises:
+        ValueError: If the factory returns a blank id. ADR-0092 §6 owes exactly
+            this — "the producer's id factory is **guarded at its output**" — so a
+            malformed mint fails loudly instead of becoming a key.
+    """
+    minted = factory() if factory is not None else f"reader-{uuid4().hex}"
+    if not minted.strip():
+        msg = "the id factory returned a blank id; a malformed mint must not become a key"
+        raise ValueError(msg)
+    return minted
 
 
 def attested_proposal(
@@ -115,10 +162,12 @@ def attested_proposal(
             is the only durable handle the stored record keeps on where it came
             from. The two are one value until ADR-0093 §11's registry deferral
             fires and ``reported_by`` becomes instance-distinguishing.
-        record_id: A stable id for the record. ``None`` derives one from
-            ``reported_by`` and ``content``, so two calls with the same belief mint
-            the same id and a consumer can test a fold. **Minted by us and never
-            the source's own key**, whether directly or namespaced (ADR-0092 §6).
+        record_id: A stable id, for a test that wants to name the record it is
+            asserting on. ``None`` **mints an opaque one** (see :func:`_mint`):
+            never the source's own key, and never derived from the content either,
+            so two calls with the same belief do not aim at one address. A caller
+            *choosing* an id here is not a producer *deriving* one, which is what
+            ADR-0092 §6 rules on.
         reported_at: When the source asserts the fact was current, on **its** clock.
         last_updated: When *we* last revised the belief — transaction time, our
             clock (ADR-0045 §3).
@@ -150,7 +199,7 @@ def attested_proposal(
         raise ValueError(msg)
     return MemoryUpdateProposal(
         proposed=SemanticMemory(
-            id=record_id if record_id is not None else f"{reported_by}:{content}",
+            id=record_id if record_id is not None else _mint(),
             content=content,
             fact=content,
             provenance=Provenance(
@@ -171,18 +220,28 @@ def attested_proposal(
 class FakeReader:
     """A ``Reader`` test double returning a scripted reading, or raising.
 
-    Structurally implements :class:`~ai_assistant.core.protocols.Reader`. The
-    reading is built **at construction**, so a script this fake could only honour
-    by breaking its own contract fails where it was written rather than at
-    ``read()`` time — and so does a naive instant, which
+    Structurally implements :class:`~ai_assistant.core.protocols.Reader`. A
+    *scripted* reading is validated and built **at construction**, so a script this
+    fake could only honour by breaking its own contract fails where it was written
+    rather than at ``read()`` time — and so does a naive instant, which
     :data:`~ai_assistant.core.types.UtcInstant` refuses.
+
+    **The default script is re-synthesised on every read, and that is ADR-0092 §6
+    rather than an implementation detail.** A real reader re-reads its source and
+    **mints a fresh id for every record it proposes**; a fake that handed back one
+    fixed reading would model a producer whose re-read aims at the ids it proposed
+    last time, which is the address §6 exists to remove (see :func:`_mint`). A
+    consumer testing "the second read duplicated rather than folded" needs the
+    conformant behaviour, not a convenient one. A *scripted* reading is returned
+    verbatim, ids included: those ids are the test author's choice, not a
+    derivation this fake performed.
 
     Beyond the contract it counts its calls and exposes its suspension gate;
     neither is contract. Only the behaviour pinned by the shared ``Reader``
     conformance suite is.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — a script, an identity, two instants, a failure and an id factory; each is one knob a consumer sets on its own
         self,
         proposals: Sequence[MemoryUpdateProposal] | None = None,
         *,
@@ -190,14 +249,16 @@ class FakeReader:
         read_at: datetime = _DEFAULT_READ_AT,
         as_of: datetime | None = None,
         failure: Exception | None = None,
+        id_factory: Callable[[], str] | None = None,
     ) -> None:
         """Create the fake reader.
 
         Args:
-            proposals: Returned verbatim by every read. ``None`` (the default)
-                synthesises one proposal instead; an *empty* sequence is the
-                distinct, explicit "this source had nothing to propose", which is a
-                **successful** reading a consumer needs to exercise (ADR-0093 §8).
+            proposals: Returned verbatim by every read, ids included. ``None`` (the
+                default) synthesises one proposal **per read** instead; an *empty*
+                sequence is the distinct, explicit "this source had nothing to
+                propose", which is a **successful** reading a consumer needs to
+                exercise (ADR-0093 §8).
             name: The identity this reader declares, and therefore the reading's
                 ``source`` and every proposal's ``reported_by``. A parameter here
                 and a **declared constant** on a real reader (ADR-0093 §7) — a fake
@@ -224,36 +285,40 @@ class FakeReader:
                 with a payload-free message carrying only this reader's identity
                 and the cause's class, which is the whole of what ADR-0093 §8
                 permits a message to say.
+            id_factory: Supplies the ids of *synthesised* proposals, for a test
+                that wants to name them. ``None`` mints a ``uuid4`` each time. It
+                is guarded at its output, which is the discipline ADR-0092 §6 owes
+                a minted id: a blank mint fails rather than becoming a key.
 
         Raises:
             ValueError: If ``name`` is blank, or any scripted proposal is an
-                ``EpisodicMemory``, is outside the ``ATTESTED`` band, or is
-                attested to a source other than ``name``. Each is a clause of the
-                ``Reader`` contract, so allowing it would only move the failure to
-                ``read()`` time — or, for the last, to a stored belief attributed
-                to a reader that never reported it — far from the mistake. The
-                canonical fake must not be configurable into failing its own
-                conformance suite.
+                ``EpisodicMemory``, is outside the ``ATTESTED`` band, is attested
+                to a source other than ``name``, or carries no rationale. Each is a
+                clause of the ``Reader`` contract, so allowing it would only move
+                the failure to ``read()`` time — or, for the attribution, to a
+                stored belief attributed to a reader that never reported it — far
+                from the mistake. The canonical fake must not be configurable into
+                failing its own conformance suite.
         """
         if not name.strip():
             msg = "a reader's declared identity must not be blank (ADR-0093 §7)"
             raise ValueError(msg)
-        scripted = _synthesise(name, read_at) if proposals is None else tuple(proposals)
-        for index, proposal in enumerate(scripted):
-            _refuse_unconformable(index, name, proposal)
         self._name = name
+        self._read_at = read_at
+        self._as_of = as_of
         self._failure = failure
+        self._id_factory = id_factory
         self._resource = SuspendableResource()
         self._calls = 0
-        # Built eagerly, and returned as-is by every read: `SourceReading` is
-        # frozen and so is everything reachable through it (ADR-0068), so there is
-        # nothing a caller could mutate and no copy worth paying for.
-        self._reading = SourceReading(
-            source=name,
-            read_at=read_at,
-            as_of=as_of,
-            proposals=scripted,
-        )
+        self._scripted = None if proposals is None else tuple(proposals)
+        for index, proposal in enumerate(self._scripted or ()):
+            _refuse_unconformable(index, name, proposal)
+        # Built eagerly whether or not it is the one `read` returns: constructing
+        # it is what refuses a naive instant here rather than at read time. For a
+        # scripted reading it *is* what `read` returns — `SourceReading` is frozen
+        # and so is everything reachable through it (ADR-0068), so there is nothing
+        # a caller could mutate and no copy worth paying for.
+        self._scripted_reading = self._build(self._scripted or ())
 
     @property
     def name(self) -> str:
@@ -288,15 +353,26 @@ class FakeReader:
         """
         return self._resource.suspend_next()
 
+    def _build(self, proposals: tuple[MemoryUpdateProposal, ...]) -> SourceReading:
+        """One reading over ``proposals``, with this reader's identity and instants."""
+        return SourceReading(
+            source=self._name,
+            read_at=self._read_at,
+            as_of=self._as_of,
+            proposals=proposals,
+        )
+
     async def read(self) -> SourceReading:
-        """Return the scripted reading, or raise the scripted failure.
+        """Return a reading, or raise the scripted failure.
 
         Takes no arguments, as the contract does: a caller able to widen the read
         is a caller able to defeat the bound (ADR-0093 §10).
 
         Returns:
-            The reading fixed at construction. Frozen all the way down, so two
-            callers share it safely.
+            The scripted reading, fixed at construction; or, on the default script,
+            a fresh reading whose proposal carries a **newly minted id** — the
+            behaviour ADR-0092 §6 requires of a re-read. Frozen all the way down
+            either way, so two callers share one safely.
 
         Raises:
             ReaderError: If this fake was constructed with a ``failure``, wrapping
@@ -314,21 +390,29 @@ class FakeReader:
                 # ADR-0004 §5 forbids in a log (ADR-0093 §8).
                 msg = f"{self._name}: {type(self._failure).__name__}"
                 raise ReaderError(msg) from self._failure
-            return self._reading
+            if self._scripted is not None:
+                return self._scripted_reading
+            return self._build(_synthesise(self._name, self._read_at, self._id_factory))
 
 
-def _synthesise(name: str, read_at: datetime) -> tuple[MemoryUpdateProposal, ...]:
+def _synthesise(
+    name: str, read_at: datetime, id_factory: Callable[[], str] | None = None
+) -> tuple[MemoryUpdateProposal, ...]:
     """The default script: one attested belief, so no clause passes vacuously.
 
     A suite running this fake asserts over ``reading.proposals``, and every one of
-    those clauses — not ``EPISODIC``, in the ``ATTESTED`` band — is empty on an
-    empty tuple. The default therefore proposes something, and the *empty* reading
-    is the state a consumer asks for explicitly.
+    those clauses — not ``EPISODIC``, in the ``ATTESTED`` band, attributed to the
+    producer, carrying a rationale — is empty on an empty tuple. The default
+    therefore proposes something, and the *empty* reading is the state a consumer
+    asks for explicitly.
+
+    Called **per read**, so each pass mints its own id (:func:`_mint`).
     """
     return (
         attested_proposal(
             f"{name} reported one thing",
             reported_by=name,
+            record_id=_mint(id_factory),
             last_updated=read_at,
         ),
     )

@@ -108,15 +108,57 @@ async def test_a_scripted_proposal_is_returned_verbatim() -> None:
     assert reading.proposals == (proposal,)
 
 
-async def test_every_read_returns_the_same_frozen_reading() -> None:
-    """Fixed at construction, so a fake never disagrees with itself between calls."""
+async def test_a_re_read_mints_a_new_id_rather_than_aiming_at_the_last_one() -> None:
+    """ADR-0092 §6: minting removes the aim, and a fake must not restore it.
+
+    The id is an *address*. A producer whose re-read recomputes the id it proposed
+    last time can land on a record the user has since retired and overwrite its
+    closed validity window through ``ACCEPT``'s blind upsert — the ADR-0038 §2a
+    resurrection. The content is unchanged across the two reads, which is exactly
+    the case a derived id would collapse.
+    """
     subject = FakeReader()
 
     first = await subject.read()
     second = await subject.read()
 
-    assert first == second
+    assert first.proposals[0].proposed.content == second.proposals[0].proposed.content
+    assert first.proposals[0].proposed.id != second.proposals[0].proposed.id
     assert subject.call_count == 2
+
+
+async def test_a_minted_id_is_opaque_to_the_source() -> None:
+    """Not the source's key, and not a hash of what it said (ADR-0092 §6)."""
+    reading = await FakeReader(name="calendar").read()
+    record = reading.proposals[0].proposed
+
+    assert record.content not in record.id
+    assert "calendar" not in record.id
+
+
+async def test_an_id_factory_names_the_records_for_a_test_that_needs_to() -> None:
+    """A caller *choosing* an id is not a producer *deriving* one."""
+    ids = iter(["r-1", "r-2"])
+    subject = FakeReader(id_factory=lambda: next(ids))
+
+    assert (await subject.read()).proposals[0].proposed.id == "r-1"
+    assert (await subject.read()).proposals[0].proposed.id == "r-2"
+
+
+async def test_a_blank_mint_fails_rather_than_becoming_a_key() -> None:
+    """The guard ADR-0092 §6 owes a minted id, at the factory's output."""
+    subject = FakeReader(id_factory=lambda: "   ")
+
+    with pytest.raises(ValueError, match=r"(?i)blank id|key"):
+        await subject.read()
+
+
+async def test_a_scripted_reading_is_stable_across_reads() -> None:
+    """Those ids are the test author's, so re-minting them would defeat the script."""
+    proposal = attested_proposal("a standup", reported_by="calendar", record_id="r-9")
+    subject = FakeReader([proposal], name="calendar")
+
+    assert await subject.read() == await subject.read()
 
 
 def test_a_blank_identity_is_refused_at_construction() -> None:
