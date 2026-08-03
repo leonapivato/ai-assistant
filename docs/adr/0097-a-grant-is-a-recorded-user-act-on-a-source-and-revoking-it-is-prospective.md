@@ -2,14 +2,15 @@
 
 - Status: Proposed
 - Date: 2026-08-03
-- **Decides `core` contract surface and implements none of it.** It adds one
-  Protocol to `core/protocols.py` (`SourceGrantStore`), two types to
-  `core/types.py` (`GrantScope`, `SourceGrant`), and three classes to
-  `core/errors.py` (§10). Golden rule 5 and ADR-0015 §5 put a contract ADR in its
-  own PR, merged before anything implements against it, so **no code changes with
-  it** — the triad (Protocol, shared conformance suite, canonical fake in
-  `ai_assistant.testing`), the `permissions/` implementation, the two caller-side
-  gates and the client surface are later lanes (§10).
+- **Decides `core` contract surface and implements none of it.** It adds **two**
+  Protocols to `core/protocols.py` (`SourceGrants`, `SourceGrantStore` — split by
+  capability, §3), two types to `core/types.py` (`GrantScope`, `SourceGrant`), and
+  three classes to `core/errors.py` (§10). Golden rule 5 and ADR-0015 §5 put a
+  contract ADR in its own PR, merged before anything implements against it, so
+  **no code changes with it** — the two triads (Protocol, shared conformance suite,
+  canonical fake in `ai_assistant.testing`, each), the `permissions/`
+  implementation, the two caller-side gates and the client surface are later lanes
+  (§10).
 - **Required review set: adversarial *and* architecture**, even though the PR
   carrying it is prose only. It decides `core/protocols.py` and `core/types.py`
   surface, which is the ground ADR-0093, ADR-0094, ADR-0095 and ADR-0096 each took
@@ -144,10 +145,11 @@ rather than left to be discovered."
 
 ## Decision
 
-We will add a `SourceGrantStore` contract in `core`: an append-only record of the
-user's decisions about which sources may be read and for what, checked by whoever
-drives a reader, and revocable by a second record that stops the reading and
-changes nothing already written.
+We will add a grant contract in `core` — a `SourceGrantStore` that keeps an
+append-only record of the user's decisions about which sources may be read and for
+what, and a query-only `SourceGrants` that whoever drives a reader checks against —
+revocable by a second record that stops the reading and changes nothing already
+written.
 
 ### 1. A grant is a recorded user act naming one source instance and what it authorises
 
@@ -273,12 +275,35 @@ cost is a moment in which nothing is granted, in which a scheduler tick would be
 refused under §5; on a single-user local machine that is a log line, and §5's
 refusal is designed to be one.
 
-### 3. Where it lives: a second Protocol beside `ActionPolicy`, implemented in `permissions/`
+### 3. Where it lives: two Protocols beside `ActionPolicy`, implemented in `permissions/`
 
-> **Normative.** `SourceGrantStore` is a Protocol in `core/protocols.py`.
-> Implementations live in `permissions/`. `ActionPolicy`, `ActionRequest`,
-> `PermissionRuling` and `PermissionDecision` are **untouched** by this ADR: no
-> member is added, no parameter widened, no semantics changed.
+> **Normative.** `SourceGrants` and `SourceGrantStore` are Protocols in
+> `core/protocols.py`. Implementations live in `permissions/`. `ActionPolicy`,
+> `ActionRequest`, `PermissionRuling` and `PermissionDecision` are **untouched**
+> by this ADR: no member is added, no parameter widened, no semantics changed.
+
+> **Normative.** The seam splits by capability. `SourceGrants` **answers** about
+> grants and can create none; `SourceGrantStore` records them. Anything that
+> drives a reader holds only `SourceGrants` (§5), and nothing but the hub's grant
+> surface (§9) holds a `SourceGrantStore`.
+
+**The split is what makes §1's "only a user act creates a grant" a type rather
+than a promise.** A driver handed the whole store is a scheduler job that can
+mint its own authorisation: the ingestion stage runs on ADR-0083 §7's timer, and
+a `record` on the object in its hand is a valid `SourceGrant` away from
+authorising itself. Nothing about the record would look wrong afterwards. So the
+capability is removed from the type the driver names, which is the move ADR-0077
+§1 made for the same reason — "It holds no store handle, and that is the scope
+limit rather than a rule about it … Here it is a type" — and ADR-0093 §1 repeated
+for the reader.
+
+**It is a static guarantee and is stated as one.** Structural typing means the
+concrete store satisfies `SourceGrants`, so a composition root passes one object
+to both; what the driver cannot do is *name* `record`, because `mypy --strict`
+runs over `src` and `tests` and the attribute is not on the annotated type. That
+is the same class of enforcement every boundary in this tree rests on, and
+overstating it as a runtime capability removal would be the kind of claim §1's
+own residual paragraph exists to avoid.
 
 **This is ADR-0021 §3's presumptive shape, taken rather than re-derived.** That
 section ruled the choice in advance — "widening `decide`'s parameter is breaking;
@@ -318,19 +343,28 @@ audit trail" — and only the second has ever been built. ADR-0021 §3 says the 
 from the other side when it defers the first. A source grant is not a new
 responsibility; it is the half the package was chartered with, arriving.
 
-> **Normative.** The contract's weight stays in `core`: `SourceGrantStore` is a
-> Protocol in `core/protocols.py` shipping as a full triad — Protocol, shared
-> conformance suite, and canonical fake in `ai_assistant.testing` — not an internal
-> seam of `permissions/`.
+> **Normative.** The contract's weight stays in `core`: **both** Protocols live in
+> `core/protocols.py` and **each** ships a full triad — Protocol, shared
+> conformance suite, and canonical fake in `ai_assistant.testing`. Neither is an
+> internal seam of `permissions/`.
 
 The argument is ADR-0095 §3's, and it is stated rather than assumed because the
-shape is identical. Two subsystems hold the type by injection — `orchestration`,
-whose ingestion stage checks it (§5), and `context/`, whose adapter does — and
-neither may import `permissions`' concrete module under golden rule 1. A `core`
-Protocol also cannot skip its triad: `tests/core/test_protocol_triad.py` enforces
-it over every Protocol in `core/protocols.py` with an empty `EXEMPTIONS` tuple, so
-"a `core` Protocol shipping no triad" is a red gate rather than a decision an ADR
-can make.
+shape is identical. Two subsystems hold `SourceGrants` by injection —
+`orchestration`, whose ingestion stage checks it (§5), and `context/`, whose
+adapter does — and neither may import `permissions`' concrete module under golden
+rule 1. A `core` Protocol also cannot skip its triad:
+`tests/core/test_protocol_triad.py` enforces it over every Protocol in
+`core/protocols.py` with an empty `EXEMPTIONS` tuple, so "a `core` Protocol
+shipping no triad" is a red gate rather than a decision an ADR can make.
+
+**The split therefore costs two triads, and that is named rather than
+discovered.** Two suites, two fakes and two binding classes, where one Protocol
+would have cost one of each. The `SourceGrants` half is small — one member, one
+behaviour — and §10 binds its suite to *both* fakes, which turns part of the cost
+into evidence that the store really does satisfy the narrow seam. It is worth
+paying because the alternative is §1's central clause held by review, which is the
+gap `tests/core/test_protocol_triad.py`'s own docstring names as "an invariant held
+by prose rather than mechanism".
 
 ### 4. The store is append-only, and a revocation is a record rather than a mutation
 
@@ -389,12 +423,13 @@ asked".
 
 > **Normative.** The check is the **caller's** — `orchestration`'s ingestion stage
 > for `INGEST`, and `context/`'s reader adapter for `FACET`. A `Reader` neither
-> holds a `SourceGrantStore` nor learns of one, and `Reader`'s surface is unchanged
+> holds a grant seam nor learns of one, and `Reader`'s surface is unchanged
 > (ADR-0093 §1, §10).
 
-> **Normative.** Every site that drives a reader takes its `SourceGrantStore` as a
-> **required constructor argument** with no default, so a composition that omits it
-> does not type-check.
+> **Normative.** Every site that drives a reader takes a **`SourceGrants`** — the
+> query seam, never `SourceGrantStore` — as a **required constructor argument**
+> with no default. A composition that omits it does not type-check, and a driver
+> that could record a grant does not type-check either (§3).
 
 **Refuse to read, not read-and-discard, and the difference is the whole point.**
 Opening the user's calendar is the act the grant is about; a design that reads the
@@ -591,8 +626,8 @@ neighbour and filed as #631.
 
 > **Normative.** A `SourceGrant` may never be cited as
 > `PermissionRuling.authorised_by`, and no `ActionPolicy` implementation may
-> consult a `SourceGrantStore`. ADR-0021 §5's disclosure floor is neither relaxed
-> nor satisfied by anything in this ADR.
+> consult a `SourceGrants` or a `SourceGrantStore`. ADR-0021 §5's disclosure floor
+> is neither relaxed nor satisfied by anything in this ADR.
 
 > **Normative.** ADR-0021 §6's deferred **standing grants for actions** are
 > untouched by this ADR and stay deferred, with the precondition ADR-0021 §3
@@ -658,6 +693,10 @@ only defect is their date.
 > is asked to edit, never a tool a model may invoke, and never a step a plan may
 > execute.
 
+> **Normative.** The hub's grant operations are the **only** holder of a
+> `SourceGrantStore`. No scheduler job, no pipeline stage, no `context/` source
+> and no reader driver holds one (§3, §5).
+
 ADR-0084 §5 made the CLI a client of the hub's API and promoted the façade to a
 Protocol, and ADR-0083 §2 makes `data_dir` the hub's. A grant is durable state the
 scheduler reads on a background tick, so it belongs where the other Tier 1 stores
@@ -719,22 +758,28 @@ condition is this ADR merging.
   > `scope`. A revoking record carries the `source` and `scope` of the grant it
   > revokes, transcribed verbatim; the store verifies the transcription (§4).
 
-- **`core/protocols.py`** gains **one** Protocol, `SourceGrantStore`,
-  `@runtime_checkable` as the seams around it are, owing five members:
-  - `async record(grant: SourceGrant) -> str` — append and return the id.
-    Write-once, atomic over the duplicate check, the live-grant check, the
-    revocation invariants and the append, for the reason ADR-0021 §4 gives:
-    without atomicity "the single-use guarantee is a race".
-  - `async live(*, source: str, use: GrantScope) -> SourceGrant | None` — the
-    live grant covering that source and use, or `None`. It returns the **record**
-    rather than a boolean so a caller can name what authorised the read.
-  - `async recent(*, limit: int = 50) -> list[SourceGrant]` — newest first, ties
-    broken by id, `limit` strictly positive and refused otherwise. Bounded because
-    every read of a Tier 1 store in this corpus is (ADR-0021 §4, ADR-0073 §2), and
-    the row count grows with grant churn rather than with the number of sources.
-  - `async export() -> list[SourceGrant]` — every record, in the same order.
-    ADR-0007 §3's export right, and `AuditTrail.export`'s shape.
-  - `async clear() -> int` — wholesale erasure only, for ADR-0021 §4's reason.
+- **`core/protocols.py`** gains **two** Protocols, both `@runtime_checkable` as the
+  seams around them are. The split is §3's second clause and it is a capability
+  boundary, not a taxonomy.
+  - **`SourceGrants`** — the query seam, one member:
+    - `async live(*, source: str, use: GrantScope) -> SourceGrant | None` — the
+      live grant covering that source and use, or `None`. It returns the
+      **record** rather than a boolean so a caller can name what authorised the
+      read.
+  - **`SourceGrantStore`** — the durable store, five members: `live` with exactly
+    the semantics above, plus
+    - `async record(grant: SourceGrant) -> str` — append and return the id.
+      Write-once, atomic over the duplicate check, the live-grant check, the
+      revocation invariants and the append, for the reason ADR-0021 §4 gives:
+      without atomicity "the single-use guarantee is a race".
+    - `async recent(*, limit: int = 50) -> list[SourceGrant]` — newest first, ties
+      broken by id, `limit` strictly positive and refused otherwise. Bounded
+      because every read of a Tier 1 store in this corpus is (ADR-0021 §4,
+      ADR-0073 §2), and the row count grows with grant churn rather than with the
+      number of sources.
+    - `async export() -> list[SourceGrant]` — every record, in the same order.
+      ADR-0007 §3's export right, and `AuditTrail.export`'s shape.
+    - `async clear() -> int` — wholesale erasure only, for ADR-0021 §4's reason.
 
   **No `get(id)` and no `delete(id)`, each declined for its own reason.** A
   selective delete is the page torn out of the book (ADR-0021 §4). A `get` has no
@@ -742,10 +787,15 @@ condition is this ADR merging.
   from a belief runs through `source`, not through an id — so it would be surface
   with no consumer (ADR-0045 §1, ADR-0028 §7). It is additive later.
 
-  An illustrative signature, in ADR-0073 §1's and ADR-0093 §10's form — the
+  Illustrative signatures, in ADR-0073 §1's and ADR-0093 §10's form — the
   semantics above are the contract, the spelling is the lane's:
 
   ```python
+  @runtime_checkable
+  class SourceGrants(Protocol):
+      async def live(self, *, source: str, use: GrantScope) -> SourceGrant | None: ...
+
+
   @runtime_checkable
   class SourceGrantStore(Protocol):
       async def record(self, grant: SourceGrant) -> str: ...
@@ -758,6 +808,21 @@ condition is this ADR merging.
 
       async def clear(self) -> int: ...
   ```
+
+  **`SourceGrantStore` does not inherit `SourceGrants`, and it does not need to.**
+  Every Protocol in this file is satisfied structurally, so one `permissions/`
+  class implementing all five members satisfies both seams at once, and a
+  driver's `SourceGrants` parameter accepts it. Declaring inheritance would add a
+  base-class relationship the tree uses nowhere and buy nothing mypy does not
+  already give.
+
+  **The two names are close, and that is the smaller risk of the two available.**
+  A driver's parameter is annotated with the type it is entitled to, so the
+  narrowing is visible at the one place it matters — `grants: SourceGrants` in a
+  constructor signature — and a driver that named the store instead is a
+  review-visible widening rather than a silent one. The alternative, a name that
+  did not obviously belong to the same pair, would have made the relationship
+  invisible instead.
 
 - **`core/errors.py`** gains **three** classes:
   - `GrantError(AssistantError)` — the store could not be read or written.
@@ -784,14 +849,32 @@ condition is this ADR merging.
   §8 rather than an omission: a grant has no configuration.
 
 **What the triad lane owes, as one change (`CONTRIBUTING.md` → "Adding a
-Protocol"):**
+Protocol"); both Protocols' triads are that one change, not two:**
 
-1. The Protocol and both types, with `source` documented under §1's Tier 2
+1. The two Protocols and both types, with `source` documented under §1's Tier 2
    obligation in the form `Attestation.reported_by`'s docstring already uses, and
    `scope` documented with its non-empty, no-duplicate, declaration-order rule.
-2. **The shared conformance suite** — the clauses that bind **every**
-   `SourceGrantStore`, which are the ones expressible without a backing technology.
-   Each maps to a ruling above:
+
+   > **Normative.** `SourceGrant`'s own tests pin the `scope` invariants at
+   > **construction**, independently of any store: an empty `scope` is refused, a
+   > `scope` with a repeated member is refused, a granting record with a valid
+   > `scope` is accepted, and an accepted `scope`'s order survives
+   > `model_dump`/`model_validate` unchanged.
+
+   **Stated because the store suite cannot reach it.** A plain
+   `tuple[GrantScope, ...]` accepts `()` and duplicates unless the model validates
+   them, and every clause in the suite below starts from a *valid* recorded grant
+   — so an implementation that shipped the type without the validators would pass
+   the whole suite while admitting an empty "grant" that authorises nothing and
+   still occupies §4's one-live-grant-per-source slot, blocking the real one. The
+   round-trip assertion is there because §10 chose a tuple over a `frozenset`
+   precisely so ADR-0087's canonical encoding has an order to encode, and an
+   invariant nothing serialises is one nothing checks.
+
+2. **The shared conformance suites** — the clauses that bind **every**
+   implementation, which are the ones expressible without a backing technology.
+   `SourceGrants` owes the first clause below and nothing else; `SourceGrantStore`
+   owes all of them. Each maps to a ruling above:
    - A recorded grant is returned by `live` for **each** use in its scope, and not
      for a use outside it (§2).
    - Recording a second grant for a source with a live one raises
@@ -811,19 +894,26 @@ Protocol"):**
      newest first with ties broken by id ascending.
    - `clear` empties the store and returns the count removed.
    - Input observation (ADR-0065) and cancellation (ADR-0060), as every seam owes.
-3. **The canonical fake in `ai_assistant.testing`**, scriptable to a store that
-   holds a live grant, one that holds a revoked grant, and one whose `record`
-   raises — the three states a driver's §5 gate must be tested against, so a
-   consumer can test its own refusal path.
+3. **Two canonical fakes in `ai_assistant.testing`** — `FakeSourceGrants` and
+   `FakeSourceGrantStore`, the names
+   `tests/core/test_protocol_triad.py` requires. Each is scriptable to hold a live
+   grant, to hold a revoked grant, and — for the store — to have `record` raise:
+   the three states a driver's §5 gate must be tested against, so a consumer can
+   test its own refusal path.
 
-   **A fourth capability is required, and it is what makes §5a's second clause
-   testable at all:** the fake can be scripted to **revoke between `live()`
-   calls** — the first call answers with a grant and a later one with `None`,
-   without the test having to record anything. Without it a driver's discard path
-   is unreachable from a test, and the clause would report as held while nothing
-   exercised it. This is the same reasoning ADR-0093 §10 used to require the
-   suspension gate on its own fake: a test that cannot reach the code a clause
-   forbids is worse than no test.
+   > **Normative.** The `SourceGrants` conformance suite is bound against **both**
+   > fakes. `FakeSourceGrantStore` is the wider seam's fake and satisfies the
+   > narrow one structurally, so binding it there costs one class and turns §3's
+   > "one implementation satisfies both" from an assertion into a test.
+
+   **A further capability is required of `FakeSourceGrants`, and it is what makes
+   §5a's second clause testable at all:** it can be scripted to **revoke between
+   `live()` calls** — the first call answers with a grant and a later one with
+   `None`, without the test having to record anything, which the query seam has no
+   method to do. Without it a driver's discard path is unreachable from a test and
+   the clause would report as held while nothing exercised it. This is the same
+   reasoning ADR-0093 §10 used to require the suspension gate on its own fake: a
+   test that cannot reach the code a clause forbids is worse than no test.
 
 **Two rulings above are deliberately *not* suite clauses**, and putting them there
 would be the error. The test is whether a clause is decidable from the store's own
@@ -961,9 +1051,11 @@ changes**. The places where the opposite reading is available:
   quietly retire a year of beliefs, and it does not pretend the source retracted
   anything (#639 stays a separate question about a separate fact).
 - **What gets harder:** every site that drives a reader now needs a
-  `SourceGrantStore` to be constructed at all, and an existing deployment stops
-  reading until its user grants (§8). Both are deliberate — the first makes the
-  gate impossible to forget, and the second is the only way the first grant is a
+  `SourceGrants` to be constructed at all; the corpus gains two Protocols and two
+  triads where one would have done (§3); and an existing deployment stops reading
+  until its user grants (§8). All three are deliberate — the first makes the gate
+  impossible to forget, the second makes "only a user act creates a grant" a type
+  rather than a promise, and the third is the only way the first grant is a
   decision rather than an inheritance.
 - **A visible cost is created and named:** a revoked-but-still-configured source
   logs a refusal on every scheduler tick until the operator unsets the interval.
@@ -1019,6 +1111,13 @@ changes**. The places where the opposite reading is available:
   Rejected in §8. It is configuration passing for consent, performed once and
   invisibly, which is the single way ADR-0093 §7 says the decision must not be
   made.
+- **One Protocol carrying both the query and the writes, injected everywhere.**
+  The first draft of this ADR did exactly that, and adversarial review showed it
+  defeats §1's central clause: the ingestion stage runs on a timer and would have
+  held `record`, so a scheduler job could mint its own authorisation and nothing
+  in the resulting record would look wrong. Rejected in §3 — the capability is
+  removed from the type the driver names, on ADR-0077 §1's "Here it is a type" —
+  at the cost of a second triad, which §3 states rather than discovers.
 - **A source-scoped lease held from the grant check to the end of the read**, so
   the check and the read are linearised against revocation. Rejected in §5a: it
   makes a revocation block for the reader's deadline or fail while a read is in
