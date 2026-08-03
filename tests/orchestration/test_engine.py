@@ -12,14 +12,17 @@ concrete (CLAUDE.md golden rule 1).
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
 
 from ai_assistant.core.errors import (
+    ConfigurationError,
     MemoryStoreError,
     PlanningError,
+    ReaderError,
     UnknownConversationError,
 )
 from ai_assistant.core.types import (
@@ -65,6 +68,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration import (
     ConversationLifecycle,
     Engine,
+    IngestionStage,
     MemoryWriteStage,
     ObservationStage,
     QuestionStage,
@@ -89,6 +93,7 @@ from ai_assistant.testing import (
     FakeMemoryWriter,
     FakeObserver,
     FakePlanStore,
+    FakeReader,
     FakeToolInvoker,
     ObservationGate,
 )
@@ -236,6 +241,7 @@ class Harness:
         loop_id_factory: Callable[[], str] | None = None,
         feedback: object | None = None,
         observer: object | None = None,
+        reader: object | None = None,
         queue_limit: int = 50,
         drain_timeout: timedelta | None = None,
     ) -> None:
@@ -284,6 +290,19 @@ class Harness:
             batch_size=OBSERVATION_BATCH,
             route=OBSERVER_ROUTE,
         )
+        # Leg 6's ingestion stage over the *same* write stage (ADR-0093 §6,
+        # ADR-0078 §3), and **only when a reader is given**: a reader ships disabled
+        # by default, so the ordinary engine — and therefore almost every case in
+        # this module — is built without one.
+        self.reader = reader
+        self.ingestion = (
+            None
+            if reader is None
+            else IngestionStage(
+                reader=reader,  # type: ignore[arg-type]  # a duck-typed fake stands in for the Protocol
+                writes=self.writes,
+            )
+        )
         loop = LearningLoop(
             context=FakeContextProvider(),
             memory=self.memory,
@@ -314,6 +333,7 @@ class Harness:
             conversations=self.conversations,
             observation=self.observation,
             questions=self.questions,
+            ingestion=self.ingestion,
             closers=tuple(closers),  # type: ignore[arg-type]
             id_factory=lambda: next(self.handles),
             drain_timeout=drain_timeout,
@@ -1490,6 +1510,146 @@ async def test_a_failing_memory_sweep_does_not_reach_the_deferral_sweep() -> Non
         await harness.engine.purge_expired()
 
     assert calls["questions"] == 0
+
+
+# --- the ingestion operation (ADR-0093 §6) ------------------------------
+
+
+async def test_ingest_reads_the_configured_source_and_reports_what_it_proposed() -> None:
+    """The operation ADR-0093 §6 says this façade grows, and its one caller's shape.
+
+    "``Engine`` grows an ingestion operation for the job to call: new concrete
+    surface in ``orchestration``, not ``core`` contract surface." The engine rules
+    on nothing and writes nothing itself; it relays to the stage, which puts every
+    proposal through the same gate ``learn`` and ``observe`` use.
+    """
+    reader = FakeReader()
+    harness = Harness(reader=reader)
+
+    report = await harness.engine.ingest()
+
+    # The producer's own declared identity, relayed unchanged (ADR-0093 §7, §10).
+    assert report.source == reader.name
+    assert report.proposed == 1
+    assert report.stored == 1
+    assert len(await harness.memory.search("reported one thing", limit=10)) == 1
+
+
+async def test_ingest_takes_no_argument_so_the_scheduler_can_bind_it() -> None:
+    """A caller cannot widen the read, and the bound method is a legal ``JobBody``.
+
+    Both fall out of the same signature: ADR-0093 §10 gives ``read()`` no arguments
+    because "a caller able to widen the read is a caller able to defeat the bound",
+    and ADR-0083 §8's job table holds bound no-argument engine methods. A version
+    taking even an optional argument would still bind, so what is asserted is the
+    contract's half — the call site the scheduler uses takes nothing at all.
+    """
+    harness = Harness(reader=FakeReader())
+
+    assert inspect.signature(harness.engine.ingest).parameters == {}
+
+
+async def test_ingest_refuses_when_no_reader_is_configured() -> None:
+    """A wiring fault is refused, never reported as a source with nothing to say.
+
+    An empty report is a **successful** pass over an empty source (ADR-0093 §8), so
+    returning one here would make a deployment whose reader failed to wire look
+    healthy forever while ingesting nothing — the failure ADR-0022 §4a refuses, and
+    the same reason §8 makes a failed *read* raise rather than return an empty
+    reading. Unreachable from the scheduler, which arms the job only on a
+    configured interval and whose ``Settings`` refuse an interval with no source
+    (§7a); this guards the second caller and the mis-wired composition root.
+    """
+    harness = Harness()
+
+    with pytest.raises(ConfigurationError):
+        await harness.engine.ingest()
+
+
+async def test_a_source_failure_reaches_the_scheduler_as_the_readers_own_error() -> None:
+    """``ReaderError`` propagates, and the façade adds nothing to it.
+
+    The scheduler logs a failed job "with its class" and retries at the next due
+    instant (ADR-0083 §7), which is only useful while the class survives the trip —
+    and the message stays payload-free by the reader's contract, which is what
+    keeps the source's path out of an operational log (ADR-0093 §8, ADR-0004 §5).
+    """
+    harness = Harness(reader=FakeReader(failure=FileNotFoundError("no such file")))
+
+    with pytest.raises(ReaderError) as raised:
+        await harness.engine.ingest()
+
+    assert isinstance(raised.value.__cause__, FileNotFoundError)
+
+
+async def test_ingest_is_tracked_so_shutdown_drains_its_write() -> None:
+    """It writes through two durable stores, so the drain must wait for it (ADR-0042 §2).
+
+    Untracked, a shutdown would close the connections underneath a write that is
+    still in flight — which is exactly what ``_tracked`` exists to prevent, and why
+    every operation that touches a store goes through it.
+    """
+    release = asyncio.Event()
+    closed = asyncio.Event()
+    closed_while_reading = False
+
+    async def close() -> None:
+        nonlocal closed_while_reading
+        closed_while_reading = not release.is_set()
+        closed.set()
+
+    reader = FakeReader()
+    harness = Harness(reader=reader, closers=(close,))
+    gate = reader.suspend_next()
+
+    ingesting = asyncio.ensure_future(harness.engine.ingest())
+    await gate.reached()
+    closing = asyncio.ensure_future(harness.engine.aclose())
+    # Several turns, so the drain task is scheduled and runs as far as it can. An
+    # untracked pass would let it reach the closers here.
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert not closed.is_set(), "a resource was closed while an ingestion was still running"
+    release.set()
+    gate.release()
+    await ingesting
+    await closing
+    assert closed.is_set()
+    assert closed_while_reading is False
+
+
+async def test_ingest_is_refused_once_shutdown_has_begun() -> None:
+    """The refusal the scheduler reads as *stop* rather than as a job failure (§8).
+
+    The shared constant, for :meth:`purge_expired`'s reason: two spellings of one
+    message is a seam that fails silently, leaving the scheduler retrying against
+    an engine that will never accept work again.
+    """
+    harness = Harness(reader=FakeReader())
+    await harness.engine.aclose()
+
+    with pytest.raises(RuntimeError) as raised:
+        await harness.engine.ingest()
+
+    assert str(raised.value) == ENGINE_SHUTTING_DOWN
+
+
+async def test_a_shutting_down_engine_refuses_before_it_reads_the_source() -> None:
+    """The refusal precedes the read, so a stopping hub opens no file.
+
+    ``_reject_if_closing`` runs first, which is what makes the ``RuntimeError``
+    above a *stop* rather than a fault reported after the work was already done —
+    and for this operation the work is I/O against the user's own data.
+    """
+    reader = FakeReader()
+    harness = Harness(reader=reader)
+    await harness.engine.aclose()
+
+    with pytest.raises(RuntimeError):
+        await harness.engine.ingest()
+
+    assert reader.call_count == 0
 
 
 async def test_a_colliding_handle_factory_still_yields_distinct_tokens() -> None:

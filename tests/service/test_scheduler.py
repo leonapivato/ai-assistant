@@ -140,6 +140,103 @@ async def test_a_disabled_job_is_absent_from_the_table_not_present_and_skipped(
         await engine.aclose()
 
 
+def _reader_settings(tmp_path: Path, *, interval: timedelta | None) -> Settings:
+    """Settings that configure the calendar source, and optionally arm its job.
+
+    The path is set in both cases: ``Settings`` refuses an interval whose source is
+    unset (ADR-0093 §7a's incoherent fourth state), and an engine built without the
+    path would hold no reader for the job to reach.
+    """
+    return Settings(
+        embedder=EmbedderKind.HASHING,
+        calendar_reader_path=tmp_path / "calendar.ics",
+        calendar_reader_interval=interval,
+    )
+
+
+async def test_the_calendar_reader_job_is_absent_until_an_operator_arms_it(
+    tmp_path: Path,
+) -> None:
+    """ADR-0093 §7: a reader ships disabled, and §6: enabled is then a real option.
+
+    The two clauses pull in different directions and both are asserted, because
+    honouring one alone is a plausible mistake in either direction. §7's default is
+    a **consent** decision — "nothing may read a user's personal files because a
+    default said so — not that anything technical is missing" — so a fresh
+    deployment arms nothing. §6 then says the reason observation ships disabled
+    "is specific to observation and does not transfer": §9's gate is ADR-0092,
+    which is ratified, so an operator who sets an interval gets a job that runs,
+    where arming observation would still buy repeated cost and no new coverage.
+    """
+    settings = _reader_settings(tmp_path, interval=None)
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        unarmed = jobs_for(engine, settings)
+        assert [job.name for job in unarmed] == ["retention_purge", "conversation_sweep"]
+
+        armed_settings = _reader_settings(tmp_path, interval=timedelta(hours=6))
+        armed = jobs_for(engine, armed_settings)
+        assert [job.name for job in armed] == [
+            "retention_purge",
+            "conversation_sweep",
+            "calendar_reader",
+        ]
+        assert armed[2].interval == timedelta(hours=6)
+        # The body is a **public ``Engine`` call**, by identity and not by name: a
+        # job that held a reader, a store or a subsystem import would be the shape
+        # ADR-0083 §8 forbids and ADR-0093 §6 restates.
+        assert armed[2].run == engine.ingest
+    finally:
+        await engine.aclose()
+
+
+async def test_an_unreadable_source_is_logged_by_class_and_never_by_path(
+    tmp_path: Path,
+) -> None:
+    """ADR-0093 §6 and §8's two halves, asserted end to end over the real façade.
+
+    §6: "A failing reader job never takes the process down. It is logged with its
+    class and retried at its next due instant" — stronger here than for the jobs
+    that clause was written for, because a reader's source is a file the system
+    does not own, so unreadability is an ordinary state of the world rather than a
+    defect. The source below simply does not exist, which is the commonest of them.
+
+    §8: the error's message is **payload-free**, carrying the reader's identity and
+    the failure's class and never the source's location. That is the clause a
+    conforming wrapper can satisfy while `raise ReaderError(str(exc)) from exc`
+    quietly puts ``/home/alice/Private/therapy.ics`` into an operational log, which
+    ADR-0004 §5 forbids outright. Asserted against the log the scheduler actually
+    writes rather than against the exception, because the log is where the harm
+    would land.
+    """
+    settings = _reader_settings(tmp_path, interval=_TICK)
+    engine = build_engine(settings, data_dir=tmp_path)
+    twice = asyncio.Event()
+    attempts = 0
+
+    async def counting() -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts >= 2:
+            twice.set()
+        return await engine.ingest()
+
+    try:
+        with structlog.testing.capture_logs() as captured:
+            await _drive(Scheduler([_job("calendar_reader", counting)]), until=twice)
+    finally:
+        await engine.aclose()
+
+    assert attempts >= 2, "the job was not retried after its source failed"
+    failures = [entry for entry in captured if entry["event"] == "hub_scheduler_job_failed"]
+    assert failures, _events(captured)
+    assert failures[0]["job"] == "calendar_reader"
+    assert failures[0]["error_class"] == "ReaderError"
+    rendered = repr(captured)
+    assert "calendar.ics" not in rendered
+    assert str(tmp_path) not in rendered
+
+
 @pytest.mark.parametrize("bad", [timedelta(0), timedelta(seconds=-1)])
 def test_a_job_refuses_a_non_positive_interval(bad: timedelta) -> None:
     """The guard restated where the invariant is used, not only at load (§7).
