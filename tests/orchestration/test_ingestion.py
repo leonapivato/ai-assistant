@@ -144,12 +144,14 @@ async def test_the_report_carries_the_readings_identity_and_our_read_instant() -
     identity Tier 2 and never a path, which is what lets a report be carried
     around at all.
     """
-    reader = FakeReader(_proposals(1, name="calendar"), name="calendar")
+    acquired = datetime(2026, 3, 4, 9, 30, tzinfo=UTC)
+    reader = FakeReader(_proposals(1, name="calendar"), name="calendar", read_at=acquired)
 
     report = await Harness(reader=reader).stage.ingest()
 
     assert report.source == "calendar"
-    assert report.read_at == (await reader.read()).read_at
+    # The reading's own instant, not the store's clock (`_AT`, half an hour later).
+    assert report.read_at == acquired
 
 
 async def test_the_stage_passes_nothing_to_the_read() -> None:
