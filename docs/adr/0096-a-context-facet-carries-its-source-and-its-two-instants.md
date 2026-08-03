@@ -3,8 +3,9 @@
 - Status: Proposed
 - Date: 2026-08-03
 - **Decides `core` surface and implements none of it.** It adds a base model and
-  one facet type to `core/types.py`, one optional field to `CurrentContext` and one
-  optional field to `SourceReading`. **No `Settings` figure is owed**, which is a
+  one facet type to `core/types.py`, one optional field to `CurrentContext`, and one
+  optional field to `SourceReading` with a model validator on it. **No `Settings`
+  figure is owed**, which is a
   consequence of §6's payload rather than an omission. Golden rule 5 and ADR-0015
   §5 put a contract ADR in its own PR, merged before anything implements against
   it, so **no code changes with it** — the types, the `context/` adapter and the
@@ -111,6 +112,25 @@ and rule that an absent facet says nothing beyond its absence.
 
 > **Normative.** A `ContextFacet` subclass may not redefine `source`, `read_at` or
 > `as_of`. Those three names are the base's and are reserved on every facet.
+
+> **Normative.** `ContextFacet` is a base for shared fields and for generic
+> consumption, and is **never itself a field annotation**. Every field that carries
+> a facet — on `CurrentContext`, on `SourceReading`, or anywhere else in
+> `core/types.py` — is annotated with concrete facet types.
+
+**The third clause exists because pydantic serialises by the declared annotation
+and says nothing when that loses data.** A field annotated with the base and
+holding a subclass round-trips as the base: the subclass's own fields are dropped
+on `model_dump` and are simply gone on the way back in. Measured on this
+repository's pydantic before the clause was written, a base-annotated field holding
+a two-field subclass dumped `{'facet': {'source': 'calendar'}}` and revalidated to
+the base class — **with no warning emitted at all.** That is the shape of defect
+this corpus keeps ruling against: it produces a wrong answer while every check
+passes. Adversarial review raised it against an earlier draft of §5, which
+annotated `SourceReading.facet` with the base for the tidiness of never widening a
+union; the tidiness was not worth a silent data loss, and the clause is stated on
+the base rather than on that one field so the next facet-bearing type does not
+rediscover it.
 
 The per-field half is ADR-0008 §1 obeyed rather than restated, and it is worth
 saying why the obvious generalisation is refused. A `facets: Mapping[str, Facet]`
@@ -322,13 +342,23 @@ this ADR is that event. §9 applies ADR-0070 §1's test to it.
 
 ### 5. `SourceReading` gains the optional facet field, and the two halves may legitimately disagree
 
-> **Normative.** `SourceReading` gains one optional field, `facet:
-> ContextFacet | None = None`. A reading that carries no facet is valid, and a
-> reader whose source has no situational reading returns `None` in it.
+> **Normative.** `SourceReading` gains one optional field, `facet`, annotated with
+> the concrete facet types a reader may produce — `CalendarFacet | None = None`
+> today — and widened by each later ADR that adds a facet. A reading that carries
+> no facet is valid, and a reader whose source has no situational reading returns
+> `None` in it.
+
+> **Normative.** When a second concrete type joins that annotation, the union is
+> made explicitly **discriminated**, each member carrying its own literal tag, so
+> that no payload's facet type is decided by inference.
 
 > **Normative.** A facet's `source`, `read_at` and `as_of` are the values of the
 > `SourceReading` that carried it, unchanged. An adapter may not construct a facet
 > from a different reading, edit its instants, or synthesise one.
+
+> **Normative.** `SourceReading` carries a model validator: where `facet` is set,
+> its `source`, `read_at` and `as_of` each equal the reading's own, and a reading
+> that violates it is refused at construction.
 
 > **Normative.** The `context/` adapter contributes the facet from the reading it
 > took, under the `CurrentContext` field it was wired for. A facet whose type does
@@ -337,8 +367,44 @@ this ADR is that event. §9 applies ADR-0070 §1's test to it.
 This is ADR-0093 §3's deferred half discharged in the place §3 put it: "Its
 **facet half is deferred** and lands as an **optional** field when the
 context-facet decision is made; a reading that predates that field stays valid."
-The type is the base rather than a union of concretes, so adding a facet later
-touches `CurrentContext` and one reader and not this field.
+
+**The annotation is concrete because the base one loses the payload silently**
+(§1), and the cost is honest: each later facet-bearing reader widens this union.
+That is not a new obligation — every facet already owes an ADR under ADR-0008 §1,
+and widening the union is one more line in the change that ADR authorises. The
+discriminator clause is the same defect class one step out: pydantic's smart union
+picks a member by fit, so two facets that differ only in a scalar could parse as
+each other, quietly, exactly as the base annotation dropped a field quietly.
+
+**The validator is what makes the stamp-equality clause true rather than
+remembered, and it is admissible on the corpus's own test.** ADR-0086 §3 states
+it — "The test is not 'is it a validator on a `core` type' but 'does it refuse
+something that already worked'" — and `facet` is a field that does not exist yet,
+so no persisted or in-flight reading can fail it and it is vacuous when `facet` is
+`None`. That is the ground ADR-0092 §2 stood its own band-keyed validator on, one
+type over, and the reasoning is ADR-0092 §1's: "a precondition that a producer can
+satisfy by remembering is one it can fail by forgetting, and the failure is
+silent". A facet stamped with a different source than the reading that carried it
+attributes content and freshness to the wrong system — the precise thing §7's
+floor exists to prevent, arriving through the producer instead of the surface.
+
+**The validator is on the type and deliberately *not* a clause added to ADR-0093
+§10's `Reader` conformance suite**, and the choice is made on two grounds rather
+than for convenience. It is **stronger**: the suite binds implementations of
+`Reader`, while a validator reaches every construction path, including a fixture,
+a fake and a library consumer — the same reason ADR-0092 §2 put its rule on
+`Provenance` rather than at the `MemoryPolicy` gate, since "the gate is not the
+only path a `Provenance` takes". And it keeps this ADR **additive on a type it
+already touches** instead of adding an item to another ADR's enumerated suite,
+which is the operation ADR-0082 §1 treats as changing what that section *said*.
+
+**The duplication inside `SourceReading` is intentional, which the validator can
+make look accidental.** If the facet's stamp must always equal the reading's, it
+looks redundant on the reading — and it is, for as long as the two travel
+together. They do not: the adapter lifts the facet out and puts it in
+`CurrentContext`, where the reading is gone and the stamp is the only thing left
+saying who produced the value and when. The validator's job is to keep the copy
+faithful, not to argue it away.
 
 **The narrowing at the adapter is honest rather than a hole.** A `ContextSource`
 holding a `Reader` is constructed for a specific field — this one contributes
@@ -512,8 +578,12 @@ prompt-assembly lane".
    and `as_of` documented as §2 rules them, including the never-from-the-filesystem
    prohibition in the form `SourceReading.as_of`'s docstring already uses.
 2. `CalendarFacet` and `CurrentContext.calendar`, per §6.
-3. `SourceReading.facet`, per §5.
-4. A coverage test, which §1's two clauses are held by rather than described in:
+3. `SourceReading.facet` with its concrete annotation and its stamp-equality
+   validator, per §5 — with a **round-trip test** pinning that a `SourceReading`
+   carrying a `CalendarFacet` survives `model_dump` and `model_validate` with its
+   payload intact, which is the property §1's third clause exists to hold and the
+   one the base annotation lost without complaint.
+4. A coverage test, which §1's clauses are held by rather than described in:
 
 > **Normative.** The `core` lane ships a test, in the shape
 > `tests/core/test_instant_coverage.py` uses, asserting that every optional field
@@ -576,10 +646,19 @@ opposite reading is available:
   both states. Nothing in §7a's text is edited, its nine figures are untouched, and
   its four-state table is unchanged: the second row moves from reserved to live
   because its stated precondition is satisfied. Not an amendment.
-- **ADR-0093 §3's deferred facet half.** §3 rules that it "lands as an **optional**
-  field when the context-facet decision is made". §5 above is that landing. A
-  deferral discharged on its own terms is not a decision changed — the treatment
-  ADR-0092's header applied when it discharged ADR-0073 §4 and ADR-0045 §5/§7/§10.
+- **ADR-0093 §3's deferred facet half, and §10's four-field surface.** §3 rules
+  that the facet half "lands as an **optional** field when the context-facet
+  decision is made" and §10 lists "the **facet field, absent for now**" as the
+  deferred fifth. §5 above is that landing, and its concrete annotation and
+  stamp-equality validator are properties of a field neither section specified —
+  new text about the fifth field, not changed text about the four. Nothing on
+  `source`, `read_at`, `as_of` or `proposals` moves. A deferral discharged on its
+  own terms is not a decision changed, which is the treatment ADR-0092's header
+  applied when it discharged ADR-0073 §4 and ADR-0045 §5/§7/§10.
+- **ADR-0093 §10's `Reader` conformance suite is not added to**, deliberately and
+  for the reason §5 gives. Had §5 put the stamp-equality rule there instead, this
+  section would owe the record ADR-0082 §1 requires when a later ADR "changed what
+  §8 *said*" for ADR-0028's list. It does not, so nothing is owed.
 
 **ADR-0073 §4 — examined and found not to reach**, which §7 argues rather than
 asserts, and which is why no floor of §4's is narrowed here. §7 states a *new*
@@ -679,6 +758,17 @@ implements against it, and it changes no code.
   read's proposals already carry them into memory, so the facet would ship the same
   content into the same prompt by a second route with a different stamp, and it
   would need a content budget, a truncation rule and a timezone ruling to do it.
+- **Annotate `SourceReading.facet` with the base `ContextFacet`.** The draft this
+  ADR was reviewed in, and rejected in §1 on measured evidence: pydantic serialises
+  by the declared annotation, so a base-annotated field holding a `CalendarFacet`
+  dumps the three stamp fields and drops the payload — silently, with no warning.
+  Adversarial review raised it; the probe confirmed it; the concrete annotation
+  removes it at the root and costs one widened union per future facet.
+- **Enforce §5's stamp equality by a clause in ADR-0093 §10's `Reader` conformance
+  suite** rather than by a validator on `SourceReading`. Rejected in §5: the suite
+  binds `Reader` implementations while a validator binds every construction path,
+  and adding an item to another ADR's enumerated suite is the operation ADR-0082 §1
+  treats as changing what that section said.
 - **Nest the three stamp fields under a `stamp:` sub-object.** Rejected in §1: the
   half-state argument that carried ADR-0092 §2 does not transfer, because the
   optionality here is on the facet field rather than on the stamp, and one clause
