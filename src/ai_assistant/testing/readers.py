@@ -337,10 +337,24 @@ def _synthesise(name: str, read_at: datetime) -> tuple[MemoryUpdateProposal, ...
 def _refuse_unconformable(index: int, name: str, proposal: MemoryUpdateProposal) -> None:
     """Refuse a scripted proposal no conforming reader could have emitted.
 
+    **What is checked, and the one half of ADR-0093 §4 that is not.** §4 obliges a
+    reader's proposals to "carry a ``rationale`` naming the source, and a
+    ``sensitivity`` chosen for what the source holds rather than defaulted". The
+    *carrying* is checked below, as ``FeedbackProcessorContract`` checks it for the
+    sibling producer. **Naming** is not, and neither is *chosen*: a substring test
+    for the identity would both over- and under-fire — ``"your work calendar said
+    so"`` names the source without containing ``calendar:work``, while
+    ``"scheduled calendar import"`` contains it and names a mechanism — and no
+    check can distinguish a deliberate ``PERSONAL`` from a defaulted one at all.
+    Both stay producer obligations stated in ``Reader.read``'s contract, on the
+    reasoning ADR-0093 §7 uses for the identity itself: a proxy that reports the
+    property as held is worse than none, because it is believed.
+
     Raises:
         ValueError: If the proposal is an ``EpisodicMemory`` (ADR-0093 §4), its
             provenance is outside the ``ATTESTED`` band (ADR-0093 §4, ADR-0072 §2),
-            or its attestation names a source other than ``name`` (ADR-0093 §10).
+            its attestation names a source other than ``name`` (ADR-0093 §10), or
+            it carries no rationale at all (ADR-0093 §4).
     """
     if proposal.proposed.kind == MemoryKind.EPISODIC.value:
         msg = (
@@ -353,6 +367,13 @@ def _refuse_unconformable(index: int, name: str, proposal: MemoryUpdateProposal)
         msg = (
             f"proposals[{index}]: a reader proposes in the ATTESTED band, not "
             f"{band.name} — what it reports is a third party's claim (ADR-0093 §4)"
+        )
+        raise ValueError(msg)
+    if not proposal.rationale.strip():
+        msg = (
+            f"proposals[{index}]: a reader's proposal carries a rationale naming the "
+            f"source (ADR-0093 §4); a blank one is what the user is shown when they "
+            f"ask why a belief is held"
         )
         raise ValueError(msg)
     attestation = proposal.proposed.provenance.attestation

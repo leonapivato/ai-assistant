@@ -129,6 +129,7 @@ def assert_conforms(reading: SourceReading, name: str) -> None:
     for proposal in reading.proposals:
         assert proposal.proposed.kind != MemoryKind.EPISODIC.value
         assert band_of(proposal.proposed.provenance.source) is BeliefBand.ATTESTED
+        assert proposal.rationale.strip()
         attestation = proposal.proposed.provenance.attestation
         assert attestation is not None
         assert attestation.reported_by == name
@@ -314,6 +315,33 @@ class ReaderContract:
             attestation = proposal.proposed.provenance.attestation
             assert attestation is not None, "an ATTESTED belief carries one (ADR-0092 §1)"
             assert attestation.reported_by == reader.name
+
+    async def test_every_proposal_carries_a_rationale(self, reader: Reader) -> None:
+        """A belief the user cannot be told the reason for is one they cannot judge.
+
+        ADR-0093 §4 obliges a reader's proposals to "carry a ``rationale`` naming
+        the source, and a ``sensitivity`` chosen for what the source holds rather
+        than defaulted". Only the **carrying** is assertable here, and it is
+        asserted for the reason ``FeedbackProcessorContract`` asserts it of the
+        sibling producer: ``MemoryUpdateProposal.rationale`` is
+        :data:`~ai_assistant.core.types.EncodableText`, which admits ``""``, so
+        nothing downstream refuses a proposal that explains itself with nothing.
+
+        **Naming the source is deliberately not checked, and neither is the
+        sensitivity being chosen.** A substring test for the identity would both
+        over- and under-fire — "your work calendar said so" names the source
+        without containing ``calendar:work``, and "scheduled calendar import"
+        contains it while naming a mechanism — and no check can tell a deliberate
+        ``PERSONAL`` from a defaulted one at all. Both stay producer obligations in
+        ``Reader.read``'s contract, on ADR-0093 §7's own reasoning about the
+        identity: a proxy that reports a property as held is worse than no check,
+        because it is believed.
+        """
+        reading = await reader.read()
+
+        assert reading.proposals, "the subject proposed nothing, so this clause is vacuous"
+        for proposal in reading.proposals:
+            assert proposal.rationale.strip()
 
     # --- the empty reading is a success (ADR-0093 §8) ------------------------
 

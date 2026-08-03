@@ -177,6 +177,27 @@ def test_a_proposal_attested_to_another_source_is_refused_at_construction() -> N
         FakeReader([attested_proposal("a standup", reported_by="other")], name="calendar")
 
 
+def test_a_proposal_with_no_rationale_is_refused_at_construction() -> None:
+    """The decidable half of ADR-0093 §4; *naming* the source stays the producer's."""
+    silent = MemoryUpdateProposal(
+        proposed=SemanticMemory(
+            id="s-2",
+            content="a standup at 10:00",
+            fact="a standup at 10:00",
+            provenance=Provenance(
+                source=MemorySource.EXTERNAL,
+                confidence=0.9,
+                last_updated=_LATER,
+                attestation=Attestation(reported_by="calendar", reported_at=_WHEN),
+            ),
+        ),
+        rationale="   ",
+    )
+
+    with pytest.raises(ValueError, match=r"(?i)rationale"):
+        FakeReader([silent], name="calendar")
+
+
 def test_a_naive_instant_is_refused_where_it_was_written() -> None:
     """Built eagerly, so ``UtcInstant``'s refusal lands at construction, not at read."""
     with pytest.raises(ValueError, match=r"(?i)aware|naive|timezone|utc"):
