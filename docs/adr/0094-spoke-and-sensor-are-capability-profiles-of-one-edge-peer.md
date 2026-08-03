@@ -1,9 +1,9 @@
-# 94. Spoke and sensor are capability profiles of one edge peer: the edge dials out, the hub decides the band, and nothing at the edge distils
+# 94. Client, sensor and actuator are capability profiles of one spoke: the edge dials out, the hub decides the band, and nothing at the edge distils
 
 - Status: Proposed
 - Date: 2026-08-02
 - **Note (2026-08-02): ADR-0095 renamed the in-process seam this ADR is at pains
-  to exclude, and the word "sensor" is now free for the peer profile §1 uses it
+  to exclude, and the word "sensor" is now free for the spoke profile §1 uses it
   for.** ADR-0093's `Sensor` is a `Reader`, and its package
   `ai_assistant/sensors/` is `ai_assistant/readers/` (ADR-0095 §1). **This ADR's
   text was corrected in place rather than by an appended amendment, because it
@@ -14,20 +14,44 @@
   in-process producer, the two places in the Context and in §1 that state
   ADR-0093's package as live fact, and the remaining references to the seam by
   its old name in live rules. Quotations of ADR-0093's own text keep the words it
-  used. **§11's classification block is deliberately
-  untouched** — it records this lane's own review history, including an earlier
+  used. **§11's classification block was left untouched by that
+  substitution** — it records this lane's own review history, including an earlier
   draft that called a locally-read calendar file a "pull peer", and rewriting a
   historical narrative to use a name that did not exist when the events happened
   would falsify the record. **The substitution is scoped to this ADR's
   references to ADR-0093's in-process seam and to nothing else.** In particular
-  §1's profile name "sensor" — the vocabulary this ADR applies to an *edge
-  peer* — keeps its own meaning and is **not** read as `Reader`; freeing the word
+  §1's profile name "sensor" — the vocabulary this ADR applies to a
+  *spoke* — keeps its own meaning and is **not** read as `Reader`; freeing the word
   for that use is what ADR-0095 was for, and reading it as the in-process seam
-  would contradict §1's marked clause that a `Reader` is not an edge peer.
-  Completing the remaining prose is this ADR's own lane's, at ratification.
-  **Nothing decided here changes, and this note is not a status token** — the
-  `Status` field above is untouched and the ratification flip remains
-  outstanding.
+  would contradict §1's marked clause that a `Reader` is not a spoke.
+  Completing the remaining prose was left to this ADR's own lane, at ratification,
+  and the note below records it done. **Nothing decided by that edit changed, and
+  it was not a status token** — it left the `Status` field alone and the
+  ratification flip outstanding.
+- **Note (2026-08-02, second correction): "spoke" is this ADR's genus, the
+  profiles are client / sensor / actuator, and "peer" is retired from
+  architectural use.** An earlier text of this ADR made **edge peer** the genus
+  and demoted **spoke** to one of its profile names. That is reversed: an
+  attachment across the process boundary is a **spoke**, and §1 reserves "peer"
+  for its transport sense and for a future hub-to-hub relationship, as a clause
+  with its own firing condition. **The text was corrected in place, for the
+  reason the note above gives** — ADR-0070 §1's no-rewrite rule is scoped to
+  *ratified* decision text and this ADR stood `Proposed`, the adjudication
+  ADR-0095 §7 states in full. **ADR-0095's own architectural uses of "peer" were
+  corrected to match in the same change**; it also stands `Proposed`, and its
+  ratification is its own lane's and remains outstanding.
+  **What was corrected here:** the title, every architectural use of "peer",
+  §1's marked clauses and its profile list, and — completing the sweep ADR-0095
+  §7 left to this lane at ratification — the remaining live-rule references to
+  ADR-0093's in-process seam by its old name. **What was not:** quotations of
+  other documents, which keep the words those documents used; `wire/peer.py` and
+  the transport-sense uses of "peer" throughout `src/` and `tests/`, which are
+  correct and untouched; and the review-history narrative in §1 and §11, which
+  records an earlier draft's "pull peer" in the vocabulary of the time. §11's
+  statements of *current* fact about live clauses are corrected, because leaving
+  them would make §11 misdescribe the §1 it points at. **The filename is
+  unchanged** — ADR-0093's was left alone through the same kind of rename
+  (ADR-0095 §1), and the number is the stable identifier.
 - **Decides no `core` surface — no Protocol, no type, no field — and no
   implementation. The refusal is the decision rather than a scoping
   convenience.** There is one spoke in the tree, no sensor, and no capture
