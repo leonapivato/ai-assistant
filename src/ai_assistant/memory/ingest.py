@@ -71,12 +71,40 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-# The only targets a user assertion may be folded onto (ADR-0038 §2a). Held here
-# as well as in `policy`, deliberately: the policy chooses, but `MemoryIngestor`
-# takes rulings from *any* injected `MemoryPolicy`, so the safety property has to
-# hold at the boundary that performs the write rather than at the one that
-# recommends it.
-_SUPERSEDABLE = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
+# --- two classes, because one constant answered two questions (ADR-0092 §5) ---
+# Until ADR-0092 these were a single `_SUPERSEDABLE` frozenset, and they were the
+# same set only by coincidence. §4 breaks the coincidence, and the split is the
+# whole of ADR-0092 §5: widening one identifier would have made the *reinforce*
+# refusal below stop firing for an `EXTERNAL` target — a one-line change that
+# passes the gate and reopens the exact data loss ADR-0038 §2a reproduced.
+#
+# **They must not be tidied back into one.** ADR-0092's Consequences names this as
+# the kind of thing a later reader merges; the conformance case pinning the
+# `USER_ASSERTED` -> `EXTERNAL` `REINFORCE` refusal is what stops the tidy-up. The
+# general shape is worth naming, since it is the second time this file has produced
+# it: ADR-0045 §5 had to make the same refusal *relation*-aware after ADR-0040 §3
+# had keyed it on the records. A set that answers two questions answers neither once
+# the questions come apart.
+
+#: The **retirement class** — beliefs a correction is warranted to retire, used by
+#: :func:`_retirement_set`'s widening (ADR-0050 §1, ADR-0079 §3, widened by ADR-0092
+#: §4). Held here as well as in `policy`, deliberately: the policy chooses, but
+#: `MemoryIngestor` takes rulings from *any* injected `MemoryPolicy`, so the safety
+#: property has to hold at the boundary that performs the write rather than at the
+#: one that recommends it. Still an allow-list rather than "not USER_ASSERTED", so a
+#: `MemorySource` added later is not enrolled in a destructive rule by omission
+#: (ADR-0038 §2a's surviving argument).
+_RETIREMENT_CLASS = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED, MemorySource.EXTERNAL})
+
+#: The **reinforce-safe class** — targets a user assertion may safely fold onto *at
+#: the target's id*, used by :func:`_refuse_unsafe_fold`'s ``REINFORCE`` arm
+#: (ADR-0038 §2a, narrowed to ``REINFORCE`` by ADR-0045 §5b). Membership means
+#: "does not carry a foreign idempotency key", and **``EXTERNAL`` still does not
+#: satisfy it**: a `REINFORCE` inherits the target's id, so a correction folded onto
+#: an imported record is overwritten by the next routine sync. ADR-0092 §4 widened
+#: what an assertion may *retire* and has no ground to touch what it may fold onto —
+#: a `SUPERSEDE` is safe there only because ADR-0045 §4 makes it mint a fresh id.
+_REINFORCE_SAFE = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
 
 #: The rulings that dispatch a write. Check 0 (:func:`_refuse_secret_write`) gates
 #: exactly these and nothing else, because ADR-0004 §3 forbids a secret **in the
@@ -169,14 +197,23 @@ def _refuse_unsafe_fold(
       supersession is permitted at the writer boundary (ADR-0045 §5b). The arm is
       therefore **narrowed to ``REINFORCE``**, not removed. Untouched by ADR-0078.
 
+      **It is keyed on :data:`_REINFORCE_SAFE` and not on the retirement class, and
+      the two are no longer the same set** (ADR-0092 §5). ADR-0092 §4 put
+      ``EXTERNAL`` in the class a correction may *retire*; had this arm kept reading
+      that class, ``source not in …`` would have gone false for an ``EXTERNAL``
+      target and this refusal would have silently stopped firing — reopening the
+      loss ADR-0038 §2a reproduced and ADR-0045 §5 kept refused by name. The two
+      questions are different: this one asks "may an assertion fold at *this
+      record's* id", which turns on whether the id is a foreign system's key.
+
     ``DefaultMemoryPolicy`` proposes none of these — its rule 4 defers, and rule 6
-    supersedes only ``OBSERVED``/``INFERRED`` — but a policy reaches the
-    ingestor through an injected seam and any conforming implementation may rule
-    differently. The refusal therefore lives here, at the boundary that performs
-    the write, rather than in the policy that recommends it. That is also why the
-    exception is **verified rather than trusted**: a gate that opened on an
-    unexamined field would hand that guarantee back to the caller's good
-    intentions (ADR-0078 §5b).
+    names a retirable conflict for ``SUPERSEDE`` rather than ``REINFORCE`` — but a
+    policy reaches the ingestor through an injected seam and any conforming
+    implementation may rule differently. The refusal therefore lives here, at the
+    boundary that performs the write, rather than in the policy that recommends it.
+    That is also why the exception is **verified rather than trusted**: a gate that
+    opened on an unexamined field would hand that guarantee back to the caller's
+    good intentions (ADR-0078 §5b).
 
     Fail-closed rather than silently downgrading, for the reason that already
     makes an absent fold target raise instead of falling back to storing the
@@ -208,7 +245,7 @@ def _refuse_unsafe_fold(
     if (
         kind is MemoryDecisionKind.REINFORCE
         and incoming.provenance.source is MemorySource.USER_ASSERTED
-        and target.provenance.source not in _SUPERSEDABLE
+        and target.provenance.source not in _REINFORCE_SAFE
     ):
         msg = (
             f"refusing to reinforce {target.id!r}: a user assertion may not be reinforced onto a "
@@ -542,8 +579,17 @@ def _retirement_set(
     of every other conflict it is *warranted* to retire.
 
     The set is the named ``target`` plus every other conflict whose source is in
-    :data:`_SUPERSEDABLE` (``OBSERVED``/``INFERRED``) — the derived beliefs a
-    correction may displace. Two sources are held out of the *widening* on purpose:
+    :data:`_RETIREMENT_CLASS` (``OBSERVED``/``INFERRED``/``EXTERNAL``) — the beliefs
+    a correction is warranted to displace. **``EXTERNAL`` joined that class in
+    ADR-0092 §4**, which discharges the adoption ADR-0045 §5/§7/§10 deferred and
+    partially supersedes ADR-0050 §1's hold-out: the external calendar is an *input*
+    and not the truth, so a user's correction retires the import rather than leaving
+    it live beside them. The band is retirable on ADR-0038 §2's own error calculus,
+    which turns on recoverability — an attested belief is not re-derivable by us and
+    is **re-reportable by its source**, on a schedule, a recovery path at least as
+    reliable as re-observation.
+
+    One source stays held out of the *widening*, and only one:
 
     - ``USER_ASSERTED`` conflicts are never swept in **on similarity** — clause 1
       stands, record-keyed, for both rulings (ADR-0045 §5): topical similarity may
@@ -561,16 +607,18 @@ def _retirement_set(
       passed them, because under an injected policy a confirmation can arrive with
       an *inference* named as the target while a live assertion sits in ``retires``
       — and the widening would then act on an authority nothing had checked.
-      ``EXTERNAL`` conflicts stay held out even when ``retires`` names one: a
-      ``retires`` is a ceiling, not an instruction, and adopting ``EXTERNAL``
-      supersession is still ADR-0045 §5/§7's deferred choice.
-    - ``EXTERNAL`` conflicts are not auto-retired even though ADR-0045 §5b now permits
-      an ``EXTERNAL`` supersession at the writer floor. Adopting ``EXTERNAL``
-      supersession is a separate, still-deferred policy choice (ADR-0045 §5/§7); the
-      widening stays within the ``{OBSERVED, INFERRED}`` class ``DefaultMemoryPolicy``
-      already supersedes. An ``EXTERNAL`` target a custom policy *names* is still
-      retired — it is the explicit ``target`` — but sibling ``EXTERNAL`` conflicts are
-      left live.
+      ``retires`` remains a **ceiling rather than an instruction**: naming an id
+      does not retire it, it only bounds what may be. That rule stands untouched by
+      ADR-0092 §4; what has gone is its second justification, since an ``EXTERNAL``
+      id in ``retires`` no longer needs a confirmation's authority to be swept in —
+      the class carries it, and a confirmation exists to authorise retiring an
+      **assertion**.
+
+    **This is not :data:`_REINFORCE_SAFE`, and the difference is load-bearing**
+    (ADR-0092 §5). That set is still ``{OBSERVED, INFERRED}``, because the question
+    it answers — may an assertion fold at *this record's* id — turns on the foreign
+    idempotency key an ``EXTERNAL`` record carries, which widening the retirement
+    class does not change.
 
     ``target`` leads the list (it is the primary the policy named and
     ``MemoryDecision`` audits); order among the rest follows ``conflicts`` (retrieval
@@ -589,7 +637,7 @@ def _retirement_set(
         for conflict in conflicts
         if conflict.id != target.id
         and (
-            conflict.provenance.source in _SUPERSEDABLE
+            conflict.provenance.source in _RETIREMENT_CLASS
             or (
                 conflict.provenance.source is MemorySource.USER_ASSERTED
                 and _confirmation_covers(
@@ -761,6 +809,16 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     records' ``evidence_elided`` are summed — including when the union fits and
     nothing is displaced, since an incoming record carrying a count of its own
     would otherwise have that history dropped (ADR-0086 §4).
+
+    **The ``attestation`` is the incoming one** (ADR-0092 §6), and this is required
+    rather than optional: the ``Provenance`` below is built field by field, so
+    ``Provenance``'s iff validator would raise on an attested fold that carried
+    none. The rule follows this function's own shape — ``source`` and
+    ``last_updated`` already come from the incoming record because newer content
+    wins, and the attestation describes the content that survived. It therefore
+    never disagrees with the ``source`` beside it, including in the awkward case
+    where one source's record is reinforced by another's report: the survivor
+    honestly says who reported the text it now holds.
     """
     union = tuple(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence]))
     evidence, elided = _bounded_evidence(
@@ -773,6 +831,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
         evidence=evidence,
         evidence_elided=elided,
         last_updated=incoming.provenance.last_updated,
+        attestation=incoming.provenance.attestation,
     )
     return incoming.model_copy(update={"id": target.id, "provenance": provenance})
 

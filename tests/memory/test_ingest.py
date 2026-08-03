@@ -10,6 +10,8 @@ import pytest
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
+    Attestation,
+    BeliefBand,
     DataTier,
     EpisodicMemory,
     MemoryDecision,
@@ -21,6 +23,7 @@ from ai_assistant.core.types import (
     Provenance,
     SemanticMemory,
     Validity,
+    band_of,
 )
 from ai_assistant.memory import (
     DefaultMemoryPolicy,
@@ -44,17 +47,32 @@ def _fixed_now() -> datetime:
     return datetime(2026, 6, 1, tzinfo=UTC)
 
 
+#: What the `ATTESTED` band must carry since ADR-0092 §1. Attached by `_prov` from
+#: the band rather than passed per case: none of the rules below turns on its
+#: *contents*, so spelling it out at every `EXTERNAL` site would put noise in front
+#: of the rule each case is about. The fold case that *does* care passes its own.
+_ATTESTED_BY = Attestation(reported_by="calendar:work", reported_at=_WHEN)
+
+
 def _prov(
     confidence: float,
     evidence: tuple[str, ...] = (),
     *,
     source: MemorySource = MemorySource.OBSERVED,
+    attestation: Attestation | None = None,
 ) -> Provenance:
     return Provenance(
         source=source,
         confidence=confidence,
         last_updated=_WHEN,
         evidence=evidence,
+        # Keyed on the band, so a `MemorySource` added into `ATTESTED` later needs
+        # no edit here, and so a case that supplies its own is not overridden.
+        attestation=(
+            attestation
+            if attestation is not None or band_of(source) is not BeliefBand.ATTESTED
+            else _ATTESTED_BY
+        ),
     )
 
 
@@ -245,10 +263,11 @@ async def test_a_correction_retires_every_conflicting_inference_not_only_the_bes
                 source=MemorySource.INFERRED,
             )
         )
-    # An EXTERNAL conflict on the same topic: warranted to supersede at the writer
-    # floor (ADR-0045 §5b) but held out of the auto-retire set, because adopting
-    # EXTERNAL supersession is a separate deferred choice (ADR-0050 §1). It must stay
-    # live.
+    # An EXTERNAL conflict on the same topic. Since ADR-0092 §4 adopted EXTERNAL
+    # supersession — partially superseding ADR-0050 §1's hold-out — it is in the
+    # retirement class and is swept in with the inferences: the calendar is an
+    # *input*, so the user's correction retires it rather than leaving it live
+    # beside them.
     await store.add(
         _preference(
             "imported", "user prefers noon meetings", confidence=1.0, source=MemorySource.EXTERNAL
@@ -270,22 +289,21 @@ async def test_a_correction_retires_every_conflicting_inference_not_only_the_bes
 
     assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
     assert result.record_id == "corrected"
-    # Every inferred belief on the topic is retired: off the read path, retained.
-    for retired_id in ("morning", "early", "dawn"):
+    retired_ids = ("morning", "early", "dawn", "imported")
+    # Every retirable belief on the topic is off the read path — the three
+    # inferences and, since ADR-0092 §4, the import.
+    for retired_id in retired_ids:
         assert await store.get(retired_id) is None
-    # The EXTERNAL conflict is NOT swept in — still live.
-    assert await store.get("imported") is not None
     # The correction is live; the whole retained set is the four originals plus it.
     assert await store.get("corrected") is not None
     exported = {record.id: record for record in await store.export()}
-    assert set(exported) == {"morning", "early", "dawn", "imported", "corrected"}
-    for retired_id in ("morning", "early", "dawn"):
+    assert set(exported) == {*retired_ids, "corrected"}
+    for retired_id in retired_ids:
         assert exported[retired_id].validity.valid_until is not None
-    # The one the policy did not name still closed on the same instant as the named
-    # target — one atomic close, not a partial one.
-    closes = {exported[i].validity.valid_until for i in ("morning", "early", "dawn")}
+    # The ones the policy did not name still closed on the same instant as the named
+    # target — one atomic close, not a partial one (ADR-0080 §1).
+    closes = {exported[i].validity.valid_until for i in retired_ids}
     assert len(closes) == 1
-    assert exported["imported"].validity.valid_until is None  # never retired
 
 
 @pytest.mark.parametrize("backend", ["in-memory", "sqlite"])
@@ -665,31 +683,42 @@ async def test_a_multi_target_supersede_reads_its_close_instant_exactly_once() -
     assert ends == {clock.readings[0]}
 
 
-async def test_a_correction_survives_the_next_external_re_sync() -> None:
-    # The regression ADR-0038 §2a exists to prevent, asserted end to end because
-    # the hole is in the interaction, not in either half. ADR-0045 §7 lifts the
-    # *writer-floor* refusal of an EXTERNAL supersession, but the shipped
-    # `DefaultMemoryPolicy` still does not rule SUPERSEDE over an EXTERNAL conflict
-    # (`_SUPERSEDABLE` stays {OBSERVED, INFERRED}, ADR-0040 §6): it ACCEPTs the
-    # correction *beside* the imported record, at the correction's own id. The
-    # next sync re-adds `calendar:1` (its idempotency key), which cannot touch the
-    # correction stored under a different id — so the user's words survive.
+async def test_a_correction_retires_the_import_and_survives_the_next_re_sync() -> None:
+    # ADR-0092 §7's trace, end to end, because the property is in the interaction
+    # and not in either half. It is the ADR-0038 §2a reproduction replayed on the
+    # tree ADR-0092 describes, and both halves of that ADR are load-bearing here:
+    #
+    #   Monday   the calendar reports London; the import lands as an attested
+    #            record at *our* id `m1` (§6: the source's key is not the store's
+    #            key, so a producer mints).
+    #   ...      the user says Berlin. §4 puts `m1` in the retirement class, the
+    #            policy rules SUPERSEDE, and the applier closes `m1`'s window and
+    #            writes the correction at a fresh id (ADR-0045 §4). `m1` is off
+    #            `get` and retained in `export` (ADR-0045 §6).
+    #   Tuesday  the calendar still says London and re-syncs, at a *newly minted*
+    #            id. Because it no longer computes `m1`'s id, it cannot land on the
+    #            retired record and erase the retirement — which is the narrow,
+    #            honest thing §6 buys, and the only thing asserted below.
     store = InMemoryMemoryStore()
-    ingestor = _ingestor(store)
+    ingestor = MemoryIngestor(
+        store=store, policy=DefaultMemoryPolicy(), now=_fixed_now, id_factory=lambda: "m2"
+    )
     await store.add(
         _preference(
-            "calendar:1",
+            "m1",
             "user works from the london office",
             confidence=1.0,
             source=MemorySource.EXTERNAL,
         )
     )
 
-    await ingestor.ingest(_proposal(_asserted("new", "user works from the berlin office")))
-    await ingestor.ingest(
+    corrected = await ingestor.ingest(
+        _proposal(_asserted("new", "user works from the berlin office"))
+    )
+    resync = await ingestor.ingest(
         _proposal(
             _preference(
-                "calendar:1",
+                "m3",  # minted afresh this sync, never `m1` (§6)
                 "user works from the london office",
                 confidence=1.0,
                 source=MemorySource.EXTERNAL,
@@ -697,18 +726,33 @@ async def test_a_correction_survives_the_next_external_re_sync() -> None:
         )
     )
 
-    correction = await store.get("new")
+    # The correction retired the import rather than landing beside it (§4).
+    assert corrected.decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert corrected.decision.target_id == "m1"
+    correction = await store.get("m2")
     assert correction is not None
     assert correction.content == "user works from the berlin office"
     assert correction.provenance.source is MemorySource.USER_ASSERTED
-    # ADR-0038 §2a accepts the correction *beside* the imported record, so the
-    # external record must still be intact — an implementation that clobbered
-    # `calendar:1` while sparing `new` would otherwise satisfy the assertions
-    # above and still be wrong.
-    imported = await store.get("calendar:1")
-    assert imported is not None
-    assert imported.content == "user works from the london office"
-    assert imported.provenance.source is MemorySource.EXTERNAL
+
+    # The retirement itself survives the re-sync. This is the assertion that
+    # matters: under the source's key as the store's id, the re-sync's blind
+    # `ACCEPT` upsert would have landed on `m1` and replaced a record whose window
+    # was closed with one whose window is open by default — erasing the only
+    # on-disk evidence that the user's correction ever took effect, which ADR-0045
+    # §6 guaranteed `export` would keep.
+    exported = {record.id: record for record in await store.export()}
+    assert exported["m1"].validity.valid_until is not None, "the retirement was erased"
+    assert exported["m1"].content == "user works from the london office"
+    assert await store.get("m1") is None  # retired, retained, off the read path
+
+    # Which branch the re-sync takes is a *similarity* outcome, and ADR-0092 §7
+    # names both as ratified: the correction surfaces and rule 4 rules ASK_USER
+    # (nothing written), or it does not and the import lands live at its fresh id
+    # beside the correction — the two-live-records residual §7 declines to close.
+    # Neither may destroy anything, which is what is asserted above.
+    assert resync.decision.kind in {MemoryDecisionKind.ASK_USER, MemoryDecisionKind.ACCEPT}
+    if resync.decision.kind is MemoryDecisionKind.ACCEPT:
+        assert await store.get("m3") is not None
 
 
 # --- The default policy supersedes ------------------------------------------

@@ -15,6 +15,8 @@ from memory_policy_contract import MemoryPolicyContract
 from pydantic import ValidationError
 
 from ai_assistant.core.types import (
+    Attestation,
+    BeliefBand,
     DataTier,
     EpisodicMemory,
     MemoryDecisionKind,
@@ -24,6 +26,7 @@ from ai_assistant.core.types import (
     Provenance,
     SemanticMemory,
     UserConfirmation,
+    band_of,
 )
 from ai_assistant.memory import DefaultMemoryPolicy
 
@@ -38,6 +41,22 @@ _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 #: rule instead. The cases that mean to measure it pass ``evidence=()``.
 _EPISODE = "episode-1"
 
+#: What an `EXTERNAL` record is obliged to carry since ADR-0092 §1 — an attestation
+#: naming what reported it and when that source said so. Attached by `_semantic`
+#: from the band rather than passed per case: none of the rules under test turns on
+#: its *contents*, so making every `EXTERNAL` site spell it out would be noise
+#: standing in front of the rule each case is actually about.
+_ATTESTED_BY = Attestation(reported_by="calendar:work", reported_at=_WHEN)
+
+
+def _attestation_for(source: MemorySource) -> Attestation | None:
+    """The attestation ``source``'s band obliges, read from :func:`band_of`.
+
+    Keyed on the band rather than on ``source is EXTERNAL``, so a `MemorySource`
+    added into the `ATTESTED` band later needs no edit here.
+    """
+    return _ATTESTED_BY if band_of(source) is BeliefBand.ATTESTED else None
+
 
 def _semantic(
     record_id: str,
@@ -51,7 +70,11 @@ def _semantic(
         content=record_id,
         fact=record_id,
         provenance=Provenance(
-            source=source, confidence=confidence, last_updated=_WHEN, evidence=evidence
+            source=source,
+            confidence=confidence,
+            last_updated=_WHEN,
+            evidence=evidence,
+            attestation=_attestation_for(source),
         ),
     )
 
@@ -203,25 +226,51 @@ async def test_user_assertion_contradicting_an_assertion_defers_even_with_an_inf
     assert decision.kind is MemoryDecisionKind.ASK_USER
 
 
-async def test_user_assertion_does_not_supersede_an_external_record() -> None:
-    # ADR-0038 §2a: supersedable is an allow-list of OBSERVED/INFERRED, not
-    # "anything that is not USER_ASSERTED". Merging into an external record
-    # would give the correction that system's idempotency key, and the next
-    # sync would overwrite it (see the ingest-level test). Pinned because
-    # `is not MemorySource.USER_ASSERTED` is the natural-looking simplification
-    # that reintroduces the hole.
+async def test_user_assertion_supersedes_an_external_record() -> None:
+    # ADR-0092 §4, reversing ADR-0038 §2a's policy-side exclusion: the external
+    # calendar is an *input*, not the truth, so the user's correction retires the
+    # import rather than landing live beside it. §2a's mechanical reason is gone —
+    # ADR-0045 §4 makes a SUPERSEDE mint a fresh id rather than inherit the
+    # external one — and ADR-0038 §2's error calculus puts the band on the
+    # recoverable side, since an attested belief is re-reportable by its source on
+    # a schedule. What ADR-0092 §4 did *not* touch is the REINFORCE refusal, which
+    # still inherits the id; the ingest-level case pins that.
     proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
     imported = _semantic("imported", source=MemorySource.EXTERNAL, confidence=1.0)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[imported])
 
-    assert decision.kind is MemoryDecisionKind.ACCEPT
+    assert decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert decision.target_id == "imported"
 
 
-async def test_user_assertion_skips_an_external_conflict_to_supersede_an_inference() -> None:
-    # The allow-list scans, it does not stop at the first entry: an external
-    # record ranked above an inference must be passed over, not treated as a
-    # reason to abandon supersession altogether.
+@pytest.mark.parametrize("source", list(MemorySource), ids=str)
+async def test_an_assertion_never_lands_beside_a_conflict_any_more(
+    source: MemorySource,
+) -> None:
+    # Arm 3's reachability, stated over the whole enum. Before ADR-0092 §4 an
+    # assertion contradicting only an EXTERNAL record was ACCEPTed *beside* it and
+    # both stayed live — the "stale belief stays live" shape of #38, surviving for
+    # one source. With EXTERNAL in the retirement class there is no longer any
+    # non-empty conflict set an assertion is merely accepted alongside: every
+    # source either gets retired (the class) or gets deferred to the user
+    # (USER_ASSERTED, ADR-0050 §2). Parametrised so a `MemorySource` added later
+    # cannot restore the shape by being left out of the class.
+    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
+    confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.6
+    conflict = _semantic("prior", source=source, confidence=confidence)
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[conflict])
+
+    assert decision.kind is not MemoryDecisionKind.ACCEPT
+    assert decision.kind in {MemoryDecisionKind.SUPERSEDE, MemoryDecisionKind.ASK_USER}
+
+
+async def test_user_assertion_takes_the_best_ranked_retirable_conflict() -> None:
+    # The scan reaches past a USER_ASSERTED conflict rather than abandoning
+    # supersession — which is what it was always for; before ADR-0092 §4 it also
+    # had an EXTERNAL hold-out to step over, and now it does not. An imported
+    # record ranked first is simply the target.
     proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
     conflicts = [
         _semantic("imported", source=MemorySource.EXTERNAL, confidence=1.0),
@@ -231,7 +280,7 @@ async def test_user_assertion_skips_an_external_conflict_to_supersede_an_inferen
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
 
     assert decision.kind is MemoryDecisionKind.SUPERSEDE
-    assert decision.target_id == "our-guess"
+    assert decision.target_id == "imported"
 
 
 async def test_external_proposal_conflicting_with_an_assertion_defers() -> None:
@@ -403,11 +452,17 @@ async def test_a_confirmed_proposal_targets_the_assertion_and_not_an_external_re
     """Step 2's qualifier, load-bearing in two directions (ADR-0078 §5a).
 
     Without "whose source is ``USER_ASSERTED``", a set holding an ``EXTERNAL`` record
-    and an assertion — both named in ``retires``, the external one first — could target
-    the external record: which would adopt ``EXTERNAL`` supersession by accident
-    (still ADR-0045 §5/§7's deferred choice) *and* leave live the assertion the user
-    actually confirmed retiring, because the applier's widening sweeps only
-    supersedable siblings around the named target.
+    and an assertion — both named in ``retires``, the external one first — could name
+    the external record as the audited primary while the assertion the user actually
+    confirmed retiring rode in on the applier's widening: the *incidental* record in
+    the ruling's ``target_id``, and the confirmed one nowhere the audit trail names.
+
+    Since ADR-0092 §4 adopted ``EXTERNAL`` supersession that is a mis-attribution
+    rather than an unratified adoption, but the qualifier stays for the reason it
+    was written: a confirmation's authority is to retire an **assertion**, and the
+    ruling should say that is what it did. An ``EXTERNAL`` id in ``retires`` is
+    still not acted on here — ``retires`` is a ceiling, not an instruction — and it
+    no longer needs to be, because the applier's widening now sweeps it anyway.
     """
     external = _semantic("ext", source=MemorySource.EXTERNAL)
     prior = _semantic("prior", source=MemorySource.USER_ASSERTED, confidence=1.0)

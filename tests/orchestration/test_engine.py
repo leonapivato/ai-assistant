@@ -25,6 +25,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     ActionPlan,
     AnswerKind,
+    Attestation,
     BeliefBand,
     BeliefSummary,
     ContinuationToken,
@@ -59,6 +60,7 @@ from ai_assistant.core.types import (
     ToolDefinition,
     TurnOutcome,
     Validity,
+    band_of,
 )
 from ai_assistant.orchestration import (
     ConversationLifecycle,
@@ -1942,7 +1944,13 @@ def _record(  # noqa: PLR0913 — one knob per field a Belief carries; that is t
     content: str = "the office is in Boston",
     score: float | None = None,
 ) -> SemanticMemory:
-    """A stored semantic record, with every field the projection reads addressable."""
+    """A stored semantic record, with every field the projection reads addressable.
+
+    The attestation is *not* a knob: the `ATTESTED` band is unconstructable without
+    one since ADR-0092 §1, and no projection case here reads it, so it is supplied
+    from the band rather than from a keyword nobody would vary. Keyed on `band_of`
+    so a `MemorySource` added into that band later needs no edit here.
+    """
     return SemanticMemory(
         id=record_id,
         content=content,
@@ -1950,7 +1958,15 @@ def _record(  # noqa: PLR0913 — one knob per field a Belief carries; that is t
         score=score,
         validity=Validity(valid_until=valid_until),
         provenance=Provenance(
-            source=source, confidence=confidence, evidence=evidence, last_updated=last_updated
+            source=source,
+            confidence=confidence,
+            evidence=evidence,
+            last_updated=last_updated,
+            attestation=(
+                Attestation(reported_by="calendar:work", reported_at=AT)
+                if band_of(source) is BeliefBand.ATTESTED
+                else None
+            ),
         ),
     )
 

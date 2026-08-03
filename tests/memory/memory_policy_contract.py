@@ -51,6 +51,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.protocols import MemoryPolicy
 from ai_assistant.core.types import (
+    Attestation,
     BeliefBand,
     DataTier,
     EpisodicMemory,
@@ -114,7 +115,18 @@ def _record(
         confidence = 1.0
     elif band_of(source) is BeliefBand.DERIVED and confidence == 1.0:
         confidence = _JUST_BELOW_FULL
-    provenance = Provenance(source=source, confidence=confidence, last_updated=_WHEN)
+    # And since ADR-0092 §1 the `ATTESTED` band must carry an attestation, on the
+    # same principle: the suite hands a policy what a producer can actually build,
+    # so the obligation is met from the band rather than by naming `EXTERNAL` — a
+    # source added into that band later is covered without an edit here.
+    attestation = (
+        Attestation(reported_by="source-instance", reported_at=_WHEN)
+        if band_of(source) is BeliefBand.ATTESTED
+        else None
+    )
+    provenance = Provenance(
+        source=source, confidence=confidence, last_updated=_WHEN, attestation=attestation
+    )
     match record_kind:
         case "episodic":
             return EpisodicMemory(
