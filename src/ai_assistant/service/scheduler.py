@@ -155,7 +155,7 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
     table rather than present and skipped, and ``hub_ready`` reports the names that
     are actually armed.
 
-    Three jobs, and each of the three is a decision §7 argues rather than describes:
+    Four jobs, and each is a decision an ADR argues rather than describes:
 
     * **Retention purge** — ``MemoryStore.purge_expired`` *and*
       ``DeferralStore.purge``, as **one** job, because ADR-0078 §10 item 8 says the
@@ -172,6 +172,29 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       and spends a model call each time, and it cannot reach the turns the window
       has already passed. Enabling it on a timer before the cursor exists buys
       repeated cost and no new coverage.
+    * **Calendar reader** — leg 6's read-only ingestion (ADR-0093 §6), and the one
+      job whose disabled default is *only* about consent. §7 is emphatic that
+      "nothing may read a user's personal files because a default said so — not
+      that anything technical is missing", so ``calendar_reader_interval`` is
+      ``None`` until an operator sets it (§7a) and the job is simply absent until
+      then.
+
+      **It is not observation's kind of disabled, and §6 says so in as many
+      words**: "A reader's job may ship enabled once §9's gate is discharged. The
+      reason observation ships disabled is specific to observation and does not
+      transfer." §9's gate is ADR-0092, which is ratified — so an operator who
+      arms this job gets a job that works, where arming observation would buy
+      "repeated cost and no new coverage" whatever the operator wanted. The
+      difference is §5's: a reader's bound moves with the clock, so every run
+      recomputes its window from scratch and nothing accumulates behind a cursor
+      that does not exist. Stating this is the point of the ADR — left unstated,
+      the next lane reads the observation default as the house posture for
+      scheduled ingestion and ships a switch nobody can safely flip.
+
+      ``Settings`` refuses an interval whose source path is unset (ADR-0093 §7a),
+      so this entry can never arm a job with nothing to read: the incoherent
+      fourth state of §7a's matrix fails at load, where a scheduler that omitted
+      the requested job would instead report health while running nothing.
 
     **Confirmation deadlines are deliberately not here.** The roadmap names them as
     this scheduler's, and §7 is the one place that sentence does not survive contact
@@ -195,6 +218,7 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
         ("retention_purge", settings.retention_purge_interval, engine.purge_expired),
         ("conversation_sweep", settings.conversation_sweep_interval, engine.start),
         ("observation", settings.observation_interval, engine.observe),
+        ("calendar_reader", settings.calendar_reader_interval, engine.ingest),
     )
     return tuple(
         Job(name=name, interval=interval, run=run)

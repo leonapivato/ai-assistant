@@ -64,8 +64,9 @@ reaches memory. It holds the ratified ``MemoryWriter`` *and* the ``DeferralStore
 so an ``ASK_USER`` ruling's question is parked durably instead of vanishing when the
 proposal goes out of scope — the drop issue #423 reports, closed by a wiring choice
 rather than by a new writer. Every producer's stage (``LearningLoop``,
-``ObservationStage``) writes through it rather than through a ``MemoryWriter`` handle
-of its own, which is the one obligation ADR-0078 §3 places on this lane.
+``ObservationStage``, ``IngestionStage``) writes through it rather than through a
+``MemoryWriter`` handle of its own, which is the one obligation ADR-0078 §3 places
+on this lane.
 
 ``QuestionStage`` is the **answer path** (ADR-0078 §8, §9): it enumerates the
 questions waiting, and the separate list of those whose answer was begun and never
@@ -80,6 +81,16 @@ through the ratified write path — reporting what was proposed, what became of 
 and which model route read the episodes (``ObservationReport``,
 ``ObservedProposal``). The producer holds no store, so selecting the batch could
 never have been its job (ADR-0077 §1).
+
+``IngestionStage`` is the **ingestion stage** (ADR-0093 §6), the third producer's
+stage: it reads the injected ``Reader`` once, within that reader's own bound, and
+puts every belief the reading proposes through the same write path — because a
+reader "holds no store handle" and "may not decide the fate of anything it
+proposes" (§1), so selecting when it runs and ingesting what it returns are this
+layer's. It is driven by a scheduler job and never by a turn (§6), and it holds no
+cursor: §5's bound is a function of the clock, the reader's configuration and the
+source's own content, which is what makes a periodic re-read honest without new
+durable state.
 """
 
 from ai_assistant.orchestration.conversations import (
@@ -99,6 +110,7 @@ from ai_assistant.orchestration.engine import (
     queued_question,
 )
 from ai_assistant.orchestration.executor import StepExecutor
+from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
 from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.observation import (
     ObservationStage,
@@ -124,6 +136,8 @@ __all__ = [
     "ConversationLifecycle",
     "DataExport",
     "Engine",
+    "IngestionReport",
+    "IngestionStage",
     "LearningLoop",
     "MemoryWriteStage",
     "ObservationStage",
