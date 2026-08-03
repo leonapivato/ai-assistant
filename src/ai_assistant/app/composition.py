@@ -34,6 +34,7 @@ from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import (
     ConversationLifecycle,
     Engine,
+    IngestionStage,
     LearningLoop,
     MemoryWriteStage,
     ObservationStage,
@@ -44,6 +45,7 @@ from ai_assistant.orchestration import (
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.permissions import SqliteAuditTrail, ThresholdActionPolicy
 from ai_assistant.planning import ModelBackedPlanner, SqlitePlanStore
+from ai_assistant.readers import CalendarReader
 from ai_assistant.tools import build_default_registry
 
 if TYPE_CHECKING:
@@ -90,7 +92,13 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
       routing*, one named route that never falls back (ADR-0077 §3, see
       :func:`_build_observer_provider`) — and the stage is told which route that is,
       because reporting which model read the episodes is what ADR-0013 §6 records as
-      owed and no seam exposes it.
+      owed and no seam exposes it;
+    * the **read-only ingestion stage** is wired only when a source is configured
+      (ADR-0093 §7's disabled default), over that *same* write stage — and this is
+      the one place a concrete :class:`~ai_assistant.core.protocols.Reader` may be
+      constructed at all, because ``lint-imports`` forbids ``ai_assistant.readers``
+      to every subsystem and exempts only this layer (see
+      :func:`_build_calendar_reader`).
 
     **Configuration is validated before any resource is opened (#372).** The
     resource-free construction — the model seam (which checks every configured
@@ -125,8 +133,11 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             permission gate thresholds the policy is constructed with (#239), and
             the observer's route and its two per-call bounds (``observer_model``,
             ``observation_batch_size``, ``observation_max_proposals``; ADR-0077),
-            the data directory (``data_dir``) and the shutdown drain budget the
-            façade is handed (``shutdown_drain_seconds``; ADR-0083 §2, §4).
+            the calendar source and ADR-0093 §7a's eight figures bounding a read of
+            it (``calendar_reader_path`` and friends; unset by default, in which
+            case no reader is built), the data directory (``data_dir``) and the
+            shutdown drain budget the façade is handed
+            (``shutdown_drain_seconds``; ADR-0083 §2, §4).
         data_dir: Where the SQLite stores live, **overriding**
             ``settings.data_dir`` when given. It keeps its keyword rather than
             being folded into the setting (ADR-0083 §2): it is the injection seam
@@ -177,6 +188,12 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
     # unbuildable model fails as a ConfigurationError before any disk is touched
     # (ADR-0006 §2 default, #372's above-disk contract; see :func:`_build_embedder`).
     embedder = _build_embedder(settings)
+    # The read-only source, if this deployment configured one (ADR-0093 §7). Also
+    # above the data directory, and it belongs there for #372's reason rather than
+    # by association: constructing a reader opens nothing — it validates §7a's
+    # figures and names a daemon thread it has not started — so a calendar window
+    # or cap outside its range fails the build before any store is written.
+    reader = _build_calendar_reader(settings)
 
     # The keyword still wins over the setting when it is given (ADR-0083 §2), so
     # every existing caller — and the hub, handing over the directory it resolved
@@ -340,6 +357,29 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             # is shown resolves its conflicts against the records an answer to it
             # would actually retire.
             questions=QuestionStage(writer=writer, deferrals=deferrals, memory=memory),
+            # Leg 6's ingestion stage (ADR-0093 §6), over the *same* write stage
+            # the learn leg and the observation stage use — ADR-0078 §3's one
+            # obligation reaching a third producer, so an attested proposal the
+            # policy defers parks a question the user can answer and one it stores
+            # is inspectable and forgettable through the surfaces that already
+            # exist (ADR-0028 §4).
+            #
+            # **`None` when no source is configured, which is the default** (§7).
+            # A reader ships disabled because "nothing may read a user's personal
+            # files because a default said so", so the ordinary deployment builds
+            # no stage at all and `Engine.ingest` refuses rather than reporting an
+            # empty success. Nothing calls it in that state anyway: the scheduler
+            # arms the job only on a configured interval, and `Settings` refuses an
+            # interval whose path is unset (§7a).
+            #
+            # **Wired on the path alone, not on the path *and* the interval.** The
+            # path configures the source and the interval arms the cadence; §7a's
+            # facet-only state is one where "nothing reads" the source, and that
+            # stays literally true here — no job is armed, no other caller exists,
+            # and a constructed reader opens no file until someone calls `read()`.
+            # The `context/` adapter that state is reserved for is a later lane's
+            # and is not shipped here.
+            ingestion=(None if reader is None else IngestionStage(reader=reader, writes=writes)),
             closers=[
                 _as_async(memory.close),
                 _as_async(trail.close),
@@ -611,6 +651,74 @@ def _build_observer_provider(settings: Settings, spec: str) -> RetryingProvider:
     """
     ensure_vendor_available(spec)
     return RetryingProvider(PydanticAIProvider(spec), policy=RetryPolicy.from_settings(settings))
+
+
+def _build_calendar_reader(settings: Settings) -> CalendarReader | None:
+    """Construct the configured calendar reader, or ``None`` if there is no source.
+
+    **This function is why the composition root may import
+    ``ai_assistant.readers`` at all.** ``lint-imports`` forbids that package to
+    every subsystem — ADR-0093 §2's "no subsystem may import it", which ADR-0095
+    §3 leans on to keep the ``Reader`` Protocol in ``core`` — and deliberately
+    omits ``app``, on the ground the contract states in its own comment: listing
+    the composition root "would make ``readers`` unreachable in production for
+    good: no other package may import it, so nothing could ever construct a
+    ``CalendarReader`` to inject". It is the same carve-out the provider-SDK
+    contract states for ``models``, and this is the injection golden rule 1 puts
+    here — ``orchestration`` receives a ``Reader`` it may not name.
+
+    **``None`` is the shipping default and it is a consent decision, not a
+    technical one** (ADR-0093 §7): "Every reader ships **disabled by default**,
+    and the reason is that nothing may read a user's personal files because a
+    default said so — not that anything technical is missing." Naming the reason
+    is what stops the default flipping the day the technical obstacle clears, and
+    it places the default correctly relative to the grant question §11 defers — a
+    fresh install that read a calendar unasked would be making that grant decision
+    by omission, which is the one way it must not be made. A ``Settings`` field is
+    **not** a grant either (§7's last clause), which is why leg 6's exit test
+    stays open and #629 tracks it.
+
+    Every figure comes from ``Settings``, where ADR-0093 §7a's ranges are already
+    refused at load; the constructor states them again because it is a second seam
+    a test or a second composition root reaches directly, and §5 puts the refusal
+    at construction rather than at the first run.
+
+    The **timezone is the one ``Settings.timezone``** ADR-0008 §5 gives the
+    temporal context, passed rather than re-derived: "A reader may not invent a
+    second timezone source", because two components resolving "today" against
+    different zones is the class of defect ADR-0026 exists to prevent, arriving
+    through data rather than through a clock.
+
+    The clock is left at the reader's own default. ADR-0026 governs *reading* it,
+    and the reader guards what it was given (``checked_clock``); nothing here has
+    a second clock to hand it, and inventing one would be the second source this
+    layer just refused for the zone.
+
+    Args:
+        settings: Loaded application settings — the source path and ADR-0093 §7a's
+            eight figures.
+
+    Returns:
+        The reader, or ``None`` when ``calendar_reader_path`` is unset.
+
+    Raises:
+        ValueError: If a figure is outside its range or the path is not absolute.
+            Unreachable through ``Settings``, which refuses both at load; it is
+            the constructor's own guard on the seam a caller could reach directly.
+    """
+    if settings.calendar_reader_path is None:
+        return None
+    return CalendarReader(
+        settings.calendar_reader_path,
+        timezone=settings.timezone,
+        window_past=settings.calendar_window_past,
+        window_future=settings.calendar_window_future,
+        max_entries=settings.calendar_max_entries,
+        max_bytes=settings.calendar_max_bytes,
+        max_expansion=settings.calendar_max_expansion,
+        read_timeout=settings.calendar_read_timeout,
+        max_content_bytes=settings.calendar_max_content_bytes,
+    )
 
 
 def _build_embedder(settings: Settings) -> Embedder:

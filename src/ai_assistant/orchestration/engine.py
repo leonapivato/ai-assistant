@@ -41,10 +41,21 @@ scheduler as a second caller of the same operation, unchanged and **disabled by
 default** until the observation cursor lands (ADR-0083 §7, §13).
 
 Beside those sits the **maintenance surface** ADR-0083 §8 adds for that scheduler:
-:meth:`Engine.start`'s sweeps, :meth:`Engine.purge_expired`, and
-:attr:`Engine.drain_phase`. New *concrete* surface on this class rather than
-``core`` contract surface — the scheduler holds this object from inside the hub,
-not the ``AssistantEngine`` Protocol a client sees.
+:meth:`Engine.start`'s sweeps, :meth:`Engine.purge_expired`,
+:meth:`Engine.ingest` and :attr:`Engine.drain_phase`. New *concrete* surface on
+this class rather than ``core`` contract surface — the scheduler holds this object
+from inside the hub, not the ``AssistantEngine`` Protocol a client sees, whose
+fifteen methods ADR-0085 §1 fixes and none of these is among.
+
+:meth:`Engine.ingest` is that surface's second scheduled operation and leg 6's
+(ADR-0093 §6): it reads the injected :class:`~ai_assistant.core.protocols.Reader`
+once and puts every belief the reading proposes through the same write path
+``learn`` and ``observe`` use, because ADR-0093 §1 declines the capture exemption
+to a reader and a third party's report is the last thing that should reach the
+store unmediated. It is **optional collaborator, required behaviour**: a reader
+ships disabled by default (§7), so an engine wired without one is the ordinary
+deployment — and asking it to ingest is then a wiring fault it refuses rather than
+an empty success it reports.
 
 **Scope today.** ``respond`` "still ends at the plan" and the multi-step
 plan-driving stage — ordering, dependencies and cancellation across a plan's
@@ -72,6 +83,7 @@ from typing import TYPE_CHECKING, Any, Final, TypeVar, assert_never
 import structlog
 
 from ai_assistant.core.errors import (
+    ConfigurationError,
     ConversationStoreError,
     PlanningError,
     UnknownContinuationError,
@@ -130,6 +142,7 @@ if TYPE_CHECKING:
         TurnResult,
     )
     from ai_assistant.orchestration.conversations import ConversationLifecycle
+    from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
     from ai_assistant.orchestration.loop import LearningLoop
     from ai_assistant.orchestration.observation import ObservationStage
     from ai_assistant.orchestration.questions import QuestionStage
@@ -562,6 +575,7 @@ class Engine:
         conversations: ConversationLifecycle,
         observation: ObservationStage,
         questions: QuestionStage,
+        ingestion: IngestionStage | None = None,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
         max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
@@ -660,6 +674,25 @@ class Engine:
                 ``conversations`` is: an engine that could be built without it is an
                 engine where a deferred question reaches nobody, which is the exact
                 failure ADR-0078 exists to end.
+            ingestion: The read-only ingestion stage (ADR-0093 §6), or ``None``
+                where this deployment configured no source. It writes through the
+                *same* write stage the learn leg and ``observation`` use — the
+                composition-root obligation ADR-0078 §3 puts on every producer, so
+                an ingested belief the policy defers parks a question the user can
+                actually answer, and one it stores is retrievable and forgettable
+                through the surfaces the user already has (ADR-0028 §4).
+
+                **Optional, where its three siblings above are required, and the
+                asymmetry is ADR-0093 §7 rather than laxity.** Every reader ships
+                **disabled by default**, "and the reason is that nothing may read a
+                user's personal files because a default said so" — so an engine
+                with no reader is not a half-built engine, it is the default
+                deployment, and requiring the stage would make every caller
+                manufacture a reader for a source the operator never configured.
+                What is *not* optional is what :meth:`ingest` does about it: it
+                refuses rather than reporting an empty success, because a job that
+                reports health while ingesting nothing is the failure mode this
+                corpus keeps naming (ADR-0022 §4a).
             closers: The resources the façade owns, as async close callables, in
                 the order :meth:`aclose` must run them. The composition root hands
                 these over so the façade is the defined owner that releases every
@@ -746,6 +779,7 @@ class Engine:
         self._conversations = conversations
         self._observation = observation
         self._questions = questions
+        self._ingestion = ingestion
         self._closers = tuple(closers)
         self._id_factory = id_factory
         self._max_outstanding = max_outstanding_confirmations
@@ -870,6 +904,91 @@ class Engine:
         records = await self._memory.purge_expired()
         questions = await self._deferrals.purge()
         return PurgeReport(records=records, questions=questions)
+
+    async def ingest(self) -> IngestionReport:
+        """Read the configured source once and propose what it read (ADR-0093 §6).
+
+        The **maintenance surface**'s second scheduled operation, and leg 6's:
+        "``Engine`` grows an ingestion operation for the job to call: new concrete
+        surface in ``orchestration``, not ``core`` contract surface". Its only
+        caller is the hub's scheduler (ADR-0083 §7), whose job body is this bound
+        method and "holds no store, no reader and no subsystem import" — a client
+        of the same façade the CLI is a client of.
+
+        **Nothing else calls it, and nothing may wire it into a turn** (§6). No
+        request-time run proposes anything and there is no ambient trigger:
+        ingestion has a model-free but unbounded-in-consequence tail — a policy
+        ruling, a write, possibly a parked question — and nobody is waiting for any
+        of it, which is ADR-0077 §8's "Nothing is waiting on it, and a turn is."
+        The facet read §3 permits at assembly time is a separate path that proposes
+        nothing, and §7a reserves it until ``CurrentContext`` grows the field.
+
+        **Takes no argument, deliberately.** The reader is given its own source and
+        its own bound (§1, §5), so ``read()`` takes none either: a caller able to
+        widen the read is a caller able to defeat the bound. It also makes this a
+        legal ``JobBody``, which the scheduler's table requires.
+
+        **The engine rules on nothing and writes nothing itself.** It delegates to
+        the :class:`~ai_assistant.orchestration.ingestion.IngestionStage`, which
+        reads the injected ``Reader`` and puts each returned proposal through the
+        write stage — conflict resolution, the ``MemoryPolicy``'s ruling, the
+        write, and the durable question a deferral raises all happen behind that
+        seam, exactly as :meth:`learn` and :meth:`observe` do it. A reader inherits
+        no part of ADR-0075's capture exemption (§1).
+
+        **Enabled is a deployment's choice and off is the default.** §6 permits a
+        reader's job to ship enabled "once §9's gate is discharged", and ADR-0092 —
+        which is that gate — is ratified; so unlike observation, whose job is
+        disabled for a reason no configuration can answer (ADR-0083 §7, §13),
+        this one runs whenever the operator arms it. What it is *not* is on by
+        default: §7 is emphatic that "nothing may read a user's personal files
+        because a default said so", and ``calendar_reader_interval`` is ``None``
+        until someone sets it (§7a).
+
+        Tracked like every other public method, so shutdown drains the write it is
+        in the middle of before closing the connections it is writing through
+        (ADR-0042 §2).
+
+        Returns:
+            What the source proposed and what memory did with it. Every count zero
+            is a **successful** pass over a source that had nothing to say within
+            the bound, and no caller may read it as a failure (ADR-0093 §8).
+
+        Raises:
+            RuntimeError: If the engine is shutting down. The scheduler treats this
+                as *stop* rather than as a job failure (ADR-0083 §8), which is what
+                :data:`ENGINE_SHUTTING_DOWN` exists for.
+            ConfigurationError: If this engine was built with no reader. Refusing
+                is the point: an empty report would be indistinguishable from a
+                source that had nothing to say, so a deployment whose reader failed
+                to wire would look healthy forever while ingesting nothing — the
+                shape ADR-0022 §4a refuses, and the same reason §8 makes a failed
+                *read* raise rather than return an empty reading. It is
+                unreachable from the scheduler, which arms this job only when an
+                interval is configured and ``Settings`` refuses an interval with no
+                source (§7a); it guards the second caller and the mis-wired
+                composition root.
+            ReaderError: If the read could not complete because of its source. The
+                scheduler logs it with its class and retries at the next due
+                instant, and never takes the process down (§6, ADR-0083 §7) — a
+                reader's source is a file the system does not own, so
+                unreadability is an ordinary state of the world rather than a
+                defect. Its message is payload-free by contract, which is what
+                keeps the source's path out of the operational log (§8, ADR-0004
+                §5).
+            MemoryStoreError: If the write path failed. A partially applied reading
+                is left as it stands and nothing claims success for it (ADR-0022
+                §4); ``beliefs`` shows exactly what landed.
+            DeferralStoreError: If a deferred question could not be parked.
+        """
+        self._reject_if_closing()
+        if self._ingestion is None:
+            msg = (
+                "no reader is configured, so there is nothing to ingest; set "
+                "ASSISTANT_CALENDAR_READER_PATH to configure the source (ADR-0093 §7a)"
+            )
+            raise ConfigurationError(msg)
+        return await self._tracked(self._ingestion.ingest())
 
     async def converse(
         self,
