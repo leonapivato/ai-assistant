@@ -159,7 +159,14 @@ class Occurrence:
             this and on :attr:`end`.
         end: Its end, in UTC. Half-open: the occurrence covers ``[start, end)``.
         local_start: The same instant in the entry's own zone, for rendering.
-        local_end: Likewise.
+        local_end: :attr:`end` expressed in that zone, or ``None`` where it cannot
+            be — which is reachable only within a day of the representable maximum
+            and only in a zone ahead of UTC. **Derived from :attr:`end` rather than
+            computed alongside it**, so the two can never disagree: clamping the
+            wall clock independently would leave a ``Pacific/Kiritimati`` entry
+            starting ``99991231T120000`` with ``DURATION:P1D`` rendering as twelve
+            hours while its interval is the source's twenty-four. A renderer that
+            gets ``None`` says so in UTC rather than naming a different instant.
         all_day: Whether the source expressed it as a date rather than a time.
         summary: The entry's ``SUMMARY``, possibly empty.
         location: The entry's ``LOCATION``, possibly empty.
@@ -180,7 +187,7 @@ class Occurrence:
     start: datetime
     end: datetime
     local_start: datetime
-    local_end: datetime
+    local_end: datetime | None
     all_day: bool
     summary: str
     location: str
@@ -834,13 +841,15 @@ def _occurrence(moment: datetime, *, governing: _Entry) -> Occurrence:
         # walk an hour on a DST boundary.
         shift = governing.start_utc - (governing.recurrence_id or governing.start_utc)
         local_start = saturating_shift(moment, shift)
-    local_end = saturating_shift(local_start, governing.duration)
     start = _to_utc(local_start)
+    # One canonical end, saturated once, and the local form **derived from it**.
+    # Saturating the wall clock separately is what let the two disagree.
+    end = saturating_add(start, governing.duration)
     return Occurrence(
         start=start,
-        end=saturating_add(start, governing.duration),
+        end=end,
         local_start=local_start,
-        local_end=local_end,
+        local_end=_in_zone(end, local_start.tzinfo),
         all_day=governing.all_day,
         summary=governing.summary,
         location=governing.location,

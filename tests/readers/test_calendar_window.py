@@ -331,3 +331,42 @@ async def test_a_degenerate_all_day_entry_at_the_minimum_date_still_renders(
     )
 
     assert titles == ["Dawn of time"]
+
+
+async def test_an_end_unrepresentable_in_the_entrys_zone_is_named_in_utc(
+    tmp_path: Path,
+) -> None:
+    """One canonical end, and the local form derived from it — never clamped apart.
+
+    ``Pacific/Kiritimati`` is UTC+14, so an entry starting ``9999-12-31 12:00``
+    local with a one-day duration ends at ``9999-12-31 22:00Z`` — perfectly
+    representable — while ``10000-01-01 12:00`` local is not. Saturating the wall
+    clock independently clamps it to ``9999-12-31 23:59:59+14:00``, which is
+    ``09:59:59Z``: twelve hours *before* the interval's real end. The proposal then
+    states a twelve-hour event where the source says twenty-four, and the belief
+    stored is wrong about the world rather than merely imprecise.
+
+    So the local form is derived from the saturated UTC end and rendering says so
+    in UTC when the zone cannot hold it. Naming a different instant to make it fit
+    is the one thing that must not happen.
+    """
+    raw = calendar(
+        vevent(
+            "DTSTART;TZID=Pacific/Kiritimati:99991231T120000",
+            "DURATION:P1D",
+            "SUMMARY:Last sunrise",
+        )
+    )
+
+    reading = await reader(
+        source(tmp_path, raw),
+        now=lambda: datetime.max.replace(tzinfo=UTC) - timedelta(days=2),
+        window_past=timedelta(days=3),
+        window_future=timedelta(days=1),
+    ).read()
+
+    (proposal,) = reading.proposals
+    assert proposal.proposed.content == (
+        'Calendar entry "Last sunrise", from 9999-12-31 12:00 (Pacific/Kiritimati) '
+        "to 9999-12-31 22:00 (UTC)."
+    )
