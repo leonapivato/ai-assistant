@@ -44,16 +44,16 @@
   ADR-0072 §5's own trigger as fired (#663). The conditions checked at this
   moment and still unmet: `readers/` holds one reader, no actuator exists, no
   ADR lets an ingested record be an `EpisodicMemory`, leg 7 is unbuilt, and no
-  mixed-origin payload reaches a producer `MemoryPolicy` rules on. **One reading
-  was filed rather than settled here (#678)**: `tools/builtin.py` ships
-  `current_time` and `recall_memory`, so §12's "the first tool that returns
-  text" is met on its literal words, while the external content that bullet is
-  about — a third party's text arriving through a tool or MCP result — has not
-  arrived, and no tool result reaches a model call at all. Narrowing a
-  deferral's trigger would change when a later lane acts, which is not a
-  ratifying edit's to do. **ADR-0070 §1's no-rewrite rule now protects this
-  text**, so any later correction — including that one — is an appended dated
-  note.
+  mixed-origin payload reaches a producer `MemoryPolicy` rules on. **One
+  question was filed rather than settled here (#678)**: `tools/builtin.py` ships
+  `current_time` and `recall_memory`, and `recall_memory` returns a stored
+  record's `content` — which, for an ingested record, is external content by §1.
+  So §12's "the first tool that returns text" is met on its literal words, and
+  whether those words are elliptical for the MCP results the bullet's own
+  trailing clause scopes it to is #678's to settle. **Confirming or narrowing a
+  deferral's trigger is not a ratifying edit's to do**, in either direction.
+  **ADR-0070 §1's no-rewrite rule now protects this text**, so any later
+  correction — including that one — is an appended dated note.
 - **Decides a posture and adds no `core` surface.** No Protocol, no type, no error
   class, no field. That is a finding rather than a restraint. **Two** seams this
   posture could have used are absent, and each is deferred in §12 with its trigger
