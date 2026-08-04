@@ -217,7 +217,11 @@ a second consumer.
 clause forbids it in the identity, and the reason transfers verbatim: the grant
 store is a durable Tier 1 record that survives into `export`, so a path used as the
 key would put the same data in the same class of place the identity rule exists to
-keep it out of.
+keep it out of. **And that is enforced where it can be rather than asserted here:**
+`Identifier` refuses only a blank string, so the type cannot tell a declared
+identity from a home directory — §9 therefore admits a `source` only when it equals
+the `name` of a `Reader` the hub actually holds, which makes the admissible set the
+set of declared constants and leaves no free-text route in.
 
 **The grant is not keyed to a user, and that is a property of this system rather
 than an omission.** There is no user identity anywhere in the tree — ADR-0036 §3
@@ -819,6 +823,41 @@ only defect is their date.
 > `SourceGrantStore`. No scheduler job, no pipeline stage, no `context/` source
 > and no reader driver holds one (§3, §5).
 
+> **Normative.** The grant operation accepts a `source` **only** when it equals
+> the declared `name` of a `Reader` the hub holds. A source naming no such reader
+> is refused, and no `SourceGrant` is constructed from it. The operation also
+> answers what the grantable sources are, so a client offers a choice among
+> declared identities rather than a free-text field.
+
+> **Normative.** A refusal under the clause above names no path and echoes no
+> caller-supplied string beyond what the client already sent, so a mistyped value
+> cannot reach the log (ADR-0004 §5).
+
+**Without this, §1's key rule is a rule and not a property — and ADR-0093 §7 shows
+the difference matters.** `Identifier` refuses a blank string and nothing else, so
+a `SourceGrant` carrying `source="/home/alice/calendar.ics"` or an email address
+satisfies its own type, records, and survives into `export` — putting exactly the
+Tier 1 data §7 forbids in an identity into a durable, user-rendered, exportable
+store. §7's own answer to this hazard was not a rule but a shape: the identity is
+"**declared by the sensor** and is not a configurable value", because "A declared
+constant cannot carry personal data at all, which is a property rather than a
+rule". Deriving the grant's subject from the readers the hub actually holds is that
+same property, one layer up: the set of admissible values is the set of declared
+constants, and there is no free-text path into it.
+
+**The check is here rather than in the store, and that placement is forced.**
+`permissions/` may not import `ai_assistant.readers` — ADR-0093 §2 rules that "no
+subsystem may import it", and `lint-imports` holds it — so a store cannot know
+which identities exist. The hub's grant operation is the one place that holds the
+readers by injection and can answer, which is the same reason §5 puts the read gate
+in the drivers rather than in the reader.
+
+**A grant whose reader later disappears is not a defect.** A deployment that unsets
+`calendar_reader_path` leaves a stored grant naming a source nothing drives; the
+record is history and stays readable, `live` keeps answering about it, and no read
+happens because no reader exists. Nothing needs to reconcile the two, and a rule
+that pruned such grants would be the store editing its own history.
+
 ADR-0084 §5 made the CLI a client of the hub's API and promoted the façade to a
 Protocol, and ADR-0083 §2 makes `data_dir` the hub's. A grant is durable state the
 scheduler reads on a background tick, so it belongs where the other Tier 1 stores
@@ -1095,14 +1134,23 @@ surface:
   what a *different* subsystem may not do; nothing in this store's return values
   exhibits it. It is an `ActionPolicy` review obligation and is stated here so its
   absence from this suite does not read as its absence from the contract.
+- **§9's rule that a `source` must name a reader the hub holds.** A store cannot
+  check it — `permissions/` may not import `ai_assistant.readers` (ADR-0093 §2) —
+  and `Identifier` only refuses a blank string, so nothing in `core` can either.
+
+  > **Normative.** The grant operation's own tests pin it: a `source` that is a
+  > filesystem path, an email address, or any string that is not a held reader's
+  > declared `name` is refused, no `SourceGrant` is constructed, and the value
+  > never reaches `recent` or `export`.
 
 **What later lanes owe, and this ADR does not:** the `permissions/` implementation
 and its schema; the two caller-side gates, their required `SourceGrants`
 constructor arguments, and **all five** of the driver cases §5 and §5a name — no
 live grant, a raising `live()` before the read, a revocation between the check and
 the return, a raising `live()` on the re-check, and a grant live throughout; the
-client surface ADR §9 names and the CLI commands behind it; and the operator log
-line §8 requires.
+client surface ADR §9 names, the CLI commands behind it, and §9's
+source-must-name-a-held-reader check with its own tests; and the operator log line
+§8 requires.
 
 ### 11. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
