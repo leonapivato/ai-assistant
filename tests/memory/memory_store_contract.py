@@ -591,6 +591,31 @@ class MemoryStoreContract:
         assert await store.search("coffee", limit=0) == []
         assert await store.search("coffee", limit=-1) == []
 
+    async def test_a_search_limit_wider_than_a_backing_store_can_bind_still_answers(
+        self, store: MemoryStore
+    ) -> None:
+        """A ranking cut above any possible row count means "all of them", not an error.
+
+        ``limit`` is a Python ``int`` and has no width, so ``2**63`` is a perfectly
+        valid request. A backend that carries it into its query binds it as an
+        integer parameter, and one that wide raises ``OverflowError`` out of the
+        driver — neither ``ValueError`` nor ``MemoryStoreError``, so it leaves this
+        seam's error boundary through a hole while every other clause here passes.
+
+        **Clamped, where ``list_beliefs`` refuses.** The two are not in tension and
+        the Protocol says so: a paged enumeration's bound is a position in a total
+        order, where an out-of-range value is a caller error worth reporting
+        (ADR-0073 §2), while this one is a cut applied *after* a ranking, where a
+        bound past every candidate asks for the whole ranking and can be served.
+        ``SqliteMemoryStore._search_sync`` already clamps it — to sqlite-vec's own
+        KNN ceiling, which is the lower of the two bounds and subsumes the bind
+        range (issue #115) — and this pins it as a property of the contract rather
+        than of that one implementation (#679).
+        """
+        await store.add(_semantic("1", "coffee"))
+
+        assert [record.id for record in await store.search("coffee", limit=2**63)] == ["1"]
+
     async def test_delete_removes_and_reports_existence(self, store: MemoryStore) -> None:
         await store.add(_semantic("1", "a fact"))
 
