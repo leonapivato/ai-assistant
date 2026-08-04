@@ -189,13 +189,29 @@ class _GrantLog:
         the log's own object, so the read-path detachment would silently stop
         holding.
 
+        **And rebuilt from the instance's field state rather than from
+        ``model_dump()``**, which is where this parts company with
+        ``FakeAuditTrail.record``'s otherwise identical shape. ``model_dump`` is an
+        ordinary overridable method, so a ``SourceGrant`` subclass can return a
+        mapping that does not describe itself — a ``FACET``-only instance whose
+        dump says ``(FACET, INGEST)`` — and the store would then append a *wider
+        grant than the one it was handed*. That is not the
+        caller-falsifies-its-own-record case ADR-0018 §3 puts outside a store's
+        reach: the object presented is a valid narrow grant and the record kept is
+        a different one, which is precisely what "stores a … snapshot" denies.
+        ``__dict__`` is where pydantic keeps validated field state and dispatches
+        no user code, so reading it makes the snapshot a snapshot of the *object*
+        rather than of what the object says about itself. A subclass carrying extra
+        fields is refused here by ``extra="forbid"``, which is the same answer for
+        the same reason.
+
         Raises:
             InvalidGrantError: If the record does not satisfy its own model, if
                 its id is already recorded, if it grants a source that already has
                 a live grant, or if it revokes and fails any of §4's invariants.
         """
         try:
-            snapshot = SourceGrant.model_validate(grant.model_dump())
+            snapshot = SourceGrant.model_validate(dict(grant.__dict__))
         except ValidationError as exc:
             msg = f"grant {grant.id!r} is not a valid record: {exc}"
             raise InvalidGrantError(msg) from exc
