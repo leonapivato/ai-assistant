@@ -697,19 +697,23 @@ inspection surface must *convey* per belief — band, confidence, kind, content,
 it is held. This clause governs what the surface must not let the content *do* to
 the surface's own framing. Both bind the same screen and neither implies the other.
 
-### 8. Audit legibility: attribution to the source, never to the author within it
+### 8. Audit legibility: the band today, the source undischarged, the author never
 
 > **Normative.** A belief whose content is external is inspectable as such: the
-> surface conveys that the content came from a named source rather than from the
-> user or from this system's own inference.
+> surface conveys that the content came from **a source the user connected**, and
+> neither from the user's own word nor from this system's inference.
+
+> **Normative.** Naming **which** source is **not discharged**. It binds the ADR
+> that next revises the projection carrying a belief to an inspection surface, and
+> binds no surface that cannot do it. §12 records it as live.
 
 > **Normative.** No surface claims to identify the author *within* a source.
 > `Attestation.reported_by` names a reader's declared identity and nothing finer,
 > and a surface that renders it as though it named a person asserts what this
 > system does not hold.
 
-**The first clause is nearly discharged already and is stated so it stays that
-way.** ADR-0073 §4's floor requires the band on every inspected belief and forbids
+**The first clause is satisfied today, and by the band rather than by anything new.**
+ADR-0073 §4's floor already requires the band on every inspected belief and forbids
 presenting an attested belief "as the user's word or as our inference", and
 `Provenance._attested_iff_attestation` makes the `Attestation` mandatory and
 exclusive, refusing a belief that would "acquire the standing of a band it is not in
@@ -717,7 +721,36 @@ by citing a source that never reported it". What this clause adds is that the
 requirement is now a *security* property and not only an epistemic one, so a later
 surface that drops the band for brevity is dropping a defence.
 
-**The second clause narrows #668's fifth bullet, deliberately.** #668 asks that the
+**The second clause exists because an earlier draft asserted the opposite of the
+tree, twice in one sentence.** It required the surface to convey that the content
+came "from a **named** source", and the prose called that "nearly discharged
+already". Both are false. `core.types.Belief` carries `id`, `band`, `kind`,
+`content`, `confidence`, `last_updated`, `evidence` and `valid_until` — **no
+`Attestation` and no source** — and `BeliefSummary` likewise; `grep -rn attestation
+src/ai_assistant/orchestration/*.py src/ai_assistant/interfaces/cli.py` returns
+nothing. The `Attestation` exists on the stored `Provenance` and is dropped by the
+projection. `interfaces.cli` says so in its own words on the attested branch:
+*"Which source, and when it said so, are not recorded."* So the clause obliged
+something no surface could do, and the prose beside it claimed the obligation was
+nearly met. Adversarial review found it on round 10.
+
+**Three tiers, and stating them separately is the honest version.** This system can
+say **"a source you connected reported it"** today; it cannot yet say **"your
+calendar"**; and it will never say **"Bob"**. The first is the band and is the
+safety property §7 also rides on. The second is a projection gap, live and
+undischarged. The third is refused on principle by the clause below.
+
+**This is the third instance of one shape, not a new discovery.** `Belief` and
+`BeliefSummary` already cannot carry a belief's elided-citation count (**#568**),
+`Retirement` cannot carry a retired record's origin (**#673**, §12), and now the
+`Attestation` does not survive the projection either. **The lossy inspection
+projection is a known, tracked property of these types**, and §7's third clause
+already assigns that class of debt to the ADR owning the projection rather than to
+the surface reading it. This ADR states its gap and adds no `core` surface to close
+it, for the reason it declined the same move at §5 and §12: the fix is a contract
+decision on another subsystem's types and is a lane of its own.
+
+**The third clause narrows #668's fifth bullet, deliberately.** #668 asks that the
 user be able to see "this came from an email someone sent you". This system can
 honestly say "this came from your calendar" and cannot say who sent the invite —
 because ADR-0093 §7 rules that a reader's identity is "**declared by the sensor**
@@ -731,7 +764,7 @@ which is a Tier 1 decision nobody has taken and which this ADR does not take.
 promising the coarser one**, because a user who reads "someone sent you" will read
 the name they are shown as that someone.
 
-**What this clause deliberately does not require.** It says nothing about reporting
+**What this section deliberately does not require.** It says nothing about reporting
 a *refused or capped* proposal, which is #668's other half, and the omission is
 forced: `Engine.ingest`'s only caller is the hub's scheduler, which reads no job's
 result, so a ruling made on the ingestion path reaches nobody at all. That is
@@ -903,11 +936,19 @@ support.
   channel question reaches first.
 - **The projections that cannot carry an origin**, which §7's third clause makes
   their owners' debt rather than a surface's: `core.types.Question` (no
-  `Attestation`, no `reported_by`) and `core.types.Retirement` (no band, no source).
-  Both are `core` surface. Two distinct things are owed on them and they have
-  different weight: **origin at all** — enough for a surface to know a span is not
-  the assistant's, which is §7's safety half and which `Retirement` lacks entirely —
-  and **which source**, which is §8's legibility half and which `Question` lacks.
+  `Attestation`, no `reported_by`), `core.types.Retirement` (no band, no source),
+  and `core.types.Belief` / `BeliefSummary`, which drop the `Attestation` entirely —
+  `grep -rn attestation` over `orchestration/` and `interfaces/cli.py` returns
+  nothing, and `interfaces.cli` admits it in its own words on the attested branch:
+  *"Which source, and when it said so, are not recorded."*
+  All are `core` surface, and this is the **third instance of one lossy-projection
+  shape** rather than three coincidences: **#568** already records that `Belief` and
+  `BeliefSummary` cannot carry a belief's elided-citation count. Two distinct things
+  are owed here and they have different weight: **origin at all** — enough for a
+  surface to know a span is not the assistant's, which is §7's safety half and which
+  `Retirement` lacks entirely — and **which source**, which is §8's legibility half,
+  is **live and undischarged** under §8's second clause, and which `Question` and the
+  belief surface both lack.
   **`Retirement`'s gap is live, not deferred, and an earlier draft of this bullet
   said the opposite.** That draft claimed neither was reachable without something
   beside it naming the origin; adversarial review falsified it on round 9 and the
@@ -919,9 +960,11 @@ support.
   question's own `band` describes the *proposal*, not the retirements, so there is
   no marker beside it either. Verified in `orchestration/questions.py` and
   `interfaces/cli.py`. **Filed as #673, and it fires now** rather than on a future
-  revision. `Question`'s missing `reported_by` is the weaker, genuinely deferred
-  half: it **fires with the second reader**, when "attested" stops identifying the
-  source by elimination — ADR-0093 §11's trigger for the source registry and the
+  revision. The **named-source** half — `Question`'s missing `reported_by` and the belief
+  surface's dropped `Attestation` — is the weaker one and is deferred rather than
+  blocking: §8's first clause is met by the band today, and the named half **fires
+  with the second reader**, when "attested" stops identifying the source by
+  elimination — ADR-0093 §11's trigger for the source registry and the
   display label, and plausibly one decision with them.
 - **A presentation state for an inference that rests on external evidence.** Not a
   §7 case — §1 makes external content a property of a span's recorded origin, and a
