@@ -579,19 +579,51 @@ async def export(self) -> list[MemoryRecord]:
 
 *The case for a record*, stated at its strongest: an implementer acting on ADR-0007
 alone writes that signature and, after this ADR, has a non-conforming
-implementation. That is "acting differently" in the test's most literal reading.
-*The case against, which governs*: §1's block is captioned by what the section
-decided — "`MemoryStore` gains:" — and §1 itself classifies its change as
-"**additive**: existing callers are unaffected". §1's operations all still exist,
-with their meanings; `export()` called with no argument returns exactly what §1 and
-§3 say it returns, and the argument's default is chosen so that it does. An
-additive, default-preserving extension of a surface an earlier ADR introduced is the
-method-level form of an additive field, which ADR-0086 §11 classified as owing
-nothing ("ADR-0068 froze the graph and did not close it, and §4's field is
-additive"). The going practice agrees from the other side: ADR-0086 §6 added
-`get_many` to this very Protocol and recorded nothing against ADR-0007, which is not
-even in its "not owed" list. **Addition.** A reviewer who reads the test the other
-way should say so against the quoted block, which is what ADR-0082 §1 invites.
+implementation. That is "acting differently" in the test's most literal reading,
+and this ADR was reviewed by a lens that read it exactly that way.
+
+*The case against, which governs, and it is settled by asking the question
+ADR-0082 §1 puts to a reviewer:* **which sentence of ADR-0007 becomes false or
+over-wide?** Walk them. "`MemoryStore` gains:" — still true, it did. "`add`, `get`,
+and `search` keep their existing names and async shape" — about other methods.
+"This is an **additive** Protocol change: existing callers are unaffected; new
+callers gain the data-rights surface" — still true, and true of *this* change in the
+same words, since `export()` called with no argument returns exactly the records §1
+and §3 say it returns and the default is chosen so that it does. The signature line
+itself becomes **incomplete**, not false: `export` is still `async`, still returns
+`list[MemoryRecord]`, and still answers a bare call the same way. ADR-0082 §1's test
+is "false or over-wide", and an addition characteristically leaves earlier text true
+and incomplete — which is what makes it a *stacked addition* rather than an
+amendment.
+
+**Two ratified precedents point the same way, and the contrary reading contradicts
+both.** ADR-0086 §11 ruled "Not owed — … ADR-0068. ADR-0068 froze the graph and did
+not close it, and §4's field is additive": an additive field on a type an earlier
+ADR specified, which makes an implementation built to that earlier ADR incomplete in
+exactly the way a keyword argument does. And ADR-0086 §6 added `get_many` to **this
+very Protocol**, which likewise leaves a reader of ADR-0007 building a non-conforming
+store, and recorded nothing against ADR-0007 — which does not even appear in its
+"not owed" list.
+
+**The strongest evidence is on ADR-0007's own `Status` line, and it is a worked
+example of what an `export` amendment costs.** ADR-0045 §6 changed *which records
+`export` returns* — live to retained — and that is recorded, on the `Status` line
+and in a dated header note, on this same §3/§1 pair. So the corpus already
+demonstrates the trigger for an `export` record, and it is a change to the answer.
+This ADR does not move that answer by one record.
+
+**And the contrary reading is a rule change made by review rather than by ADR.**
+If a signature growing owes a record, so does every Protocol addition, on whichever
+ADR first listed the method — which is unbounded book-keeping and is the ground
+ADR-0082 §1 puts out of a reviewer's reach: "What a reviewer may not do is demand a
+record, or its removal, on book-keeping grounds alone: that the earlier ADR's list
+'should mention' the change, that a conformance list has grown, or that a sibling
+ADR was recorded differently." Changing that line is a decision worth taking, and
+the instrument is an ADR superseding ADR-0082 §1, not a finding on this one.
+
+**Addition.** A reviewer who still reads the test the other way is invited to name
+the sentence of ADR-0007 that becomes false or over-wide, which is the showing
+ADR-0082 §1 requires and which this section has tried and failed to find.
 
 **ADR-0007 §3 — not owed.** §3 decides that an export is portable, one-way, carries
 no embeddings, and that the caller serialises. All four are untouched. §3's
