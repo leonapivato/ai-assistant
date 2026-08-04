@@ -28,8 +28,13 @@ unbounded-in-consequence tail — a policy ruling, a write, possibly a parked
 question — and nobody is waiting for any of it, which is ADR-0077 §8's first
 reason applied unchanged: "Nothing is waiting on it, and a turn is." The facet
 read §3 permits at assembly time is a different path with a different cadence,
-and it proposes nothing; it is not this stage's and does not exist yet (§7a
-reserves it until ``CurrentContext`` grows the field).
+and it proposes nothing; it belongs to ``context``'s own adapter, over its **own**
+reader instance (ADR-0096 §5).
+
+**And nothing is read without a live ``INGEST`` grant** (ADR-0097 §5). The check
+is this stage's, not the reader's — "A ``Reader`` neither holds a grant seam nor
+learns of one" — because ADR-0093 §1 already put the decision of when a reader
+runs here, and a reader that gated itself would be its own caller.
 
 **No check stands between the reader and the writer, deliberately.** The sibling
 :class:`~ai_assistant.orchestration.observation.ObservationStage` refuses a
@@ -53,13 +58,30 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ai_assistant.core.types import MemoryDecisionKind
+from ai_assistant.core.errors import SourceNotGrantedError
+from ai_assistant.core.types import GrantScope, MemoryDecisionKind
 
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from ai_assistant.core.protocols import Reader
+    from ai_assistant.core.protocols import Reader, SourceGrants
     from ai_assistant.orchestration.writes import MemoryWriteStage
+
+
+def _refusal(source: str) -> str:
+    """The refusal message ADR-0097 §8 makes an operator-legible obligation.
+
+    **The identity and the use, and nothing else.** The scheduler logs a failed
+    job's ``str(exc)`` verbatim (ADR-0083 §7), so this string is the log line: a
+    path or an entry's text here would be Tier 1 data in an operational log, which
+    ADR-0004 §5 forbids outright. A reader's identity is safe by construction —
+    ADR-0093 §7 makes it *declared* rather than configured, so "a declared constant
+    cannot carry personal data at all, which is a property rather than a rule".
+    """
+    return (
+        f"no live {GrantScope.INGEST.value} grant covers the {source!r} source, so "
+        f"nothing was read; grant it before ingestion can run (ADR-0097 §5)"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,8 +159,8 @@ class IngestionReport:
 class IngestionStage:
     """Reads one source and puts what it proposed through the write path."""
 
-    def __init__(self, *, reader: Reader, writes: MemoryWriteStage) -> None:
-        """Wire the stage from an injected reader and the shared write stage.
+    def __init__(self, *, reader: Reader, writes: MemoryWriteStage, grants: SourceGrants) -> None:
+        """Wire the stage from an injected reader, the write stage and the grant seam.
 
         Args:
             reader: The producer. It is given its own source and its own bound
@@ -146,6 +168,12 @@ class IngestionStage:
                 widens the read: a caller able to widen it is a caller able to
                 defeat the bound, which is the property ADR-0077 §1 bought by
                 putting the maximum on the producer.
+
+                **Not shared with the ``context/`` adapter**, which holds its own
+                instance of the same reader (ADR-0096 §5): ADR-0093 §7's
+                one-outstanding-worker reservation is per instance, so a shared one
+                would let this stage's scheduled read suppress the request-path
+                facet for as long as it runs.
             writes: The orchestration **write stage** — the memory write path
                 (conflicts, the policy's ruling and the write in one call) plus
                 the durable queue an ``ASK_USER`` ruling parks its question in
@@ -162,9 +190,26 @@ class IngestionStage:
                 obligation no type can express (ADR-0028 §4): wired to a second
                 store, an ingested belief would be unreadable and unforgettable
                 through the surfaces the user actually has.
+            grants: The **query** seam ADR-0097 §5 gates this stage on, and never a
+                ``SourceGrantStore``. Required with no default, deliberately —
+                "the required constructor argument is the mechanism, not a habit",
+                and the alternative is the shape this very docstring already calls
+                the weak one, "a composition-root obligation no type can express".
+                This one *can* be expressed, so it is: a stage that cannot be built
+                without a grant seam cannot be wired without one, and
+                ``mypy --strict`` is the enforcer rather than a reviewer's memory.
+
+                **Narrow by type, and that is the point of §3's split.** A stage
+                handed the whole store is a scheduler job that can mint its own
+                authorisation — it runs on ADR-0083 §7's timer, and a ``record`` on
+                the object in its hand is a valid ``SourceGrant`` away from
+                authorising itself, with nothing about the record looking wrong
+                afterwards. So the capability is removed from the type this stage
+                names.
         """
         self._reader = reader
         self._writes = writes
+        self._grants = grants
 
     async def ingest(self) -> IngestionReport:
         """Read the source once and ingest every proposal it returned.
@@ -192,6 +237,28 @@ class IngestionStage:
         with their bands, rank below an ``ASSERTED`` one, and are killable by the
         user (ADR-0073 §5).
 
+        **Nothing is read without a live ``INGEST`` grant** (ADR-0097 §5). The
+        source is not resolved, not opened and not parsed: opening the user's
+        calendar *is* the act the grant is about, and a design that read the file
+        and then declined to propose from it would already have done the thing it
+        was not permitted to do — on the schedule. The guarantee is bounded and is
+        stated so nothing reads it as a stronger one: every read is **authorised at
+        the instant it starts**, and nothing produced by a read whose grant has
+        gone by the time it returns is used. It is not a guarantee that no byte is
+        read after a revocation is recorded, because a read already in flight runs
+        on a worker the reader owns and nothing here can stop it (ADR-0093 §7).
+
+        Three rules hold what *is* available, and none needs a lock: no ``await``
+        stands between the ``live()`` answer and ``read()`` (awaiting a coroutine
+        does not yield to the loop, so this stage cannot sit on a stale answer at
+        all); the grant is re-checked when ``read()`` returns, and a reading whose
+        grant died in between is discarded whole — nothing is proposed and nothing
+        durable records that the read happened; and an unanswerable check **fails
+        closed**, because "the check failed, so carry on with what we already knew"
+        is the wrong trade twice over when the thing being protected is the user's
+        personal files (ADR-0016 §4's ``UNKNOWN``-cost floor, with "the store" in
+        place of "the author").
+
         Returns:
             What the source proposed and what became of each proposal. An empty
             reading yields a report with every count at zero, which is a
@@ -199,6 +266,30 @@ class IngestionStage:
             failure signal (ADR-0093 §8).
 
         Raises:
+            SourceNotGrantedError: If no live ``INGEST`` grant covers this reader
+                — at the check before the read, or at the re-check after it. It is
+                never reported as a successful pass: an ungranted pass reported as
+                zero proposals is indistinguishable from "the source had nothing to
+                say within the bound", so a deployment whose grant was revoked
+                would look healthy while ingesting nothing (ADR-0022 §4a). Nor is
+                it a ``ReaderError``: that class means "the source could not be
+                read", and an operator debugging a missing calendar should not be
+                sent to the filesystem for a fault that lives in the grant store.
+                The message names the reader's identity and the use that was
+                refused, and carries no path and no source content, which is what
+                makes the scheduler's log line legible under ADR-0097 §8.
+
+                A deployment that revokes a grant while leaving
+                ``calendar_reader_interval`` set therefore logs a refusal every
+                interval, and that is correct behaviour rather than a defect to
+                design around: it is configuration and consent disagreeing out
+                loud. The operator's fix is to unset the interval — a configuration
+                act answering a configuration fact.
+            GrantError: If the grant store could not answer, before or after the
+                read. **Propagated rather than converted into
+                ``SourceNotGrantedError``**: a store fault and a withdrawn grant
+                are different facts and an operator must be able to tell them
+                apart (ADR-0097 §5a).
             ReaderError: If the read could not complete because of its source —
                 missing, unreadable, malformed, over a bound, or past the reader's
                 own deadline. Propagated rather than absorbed: an empty reading
@@ -215,7 +306,16 @@ class IngestionStage:
                 converted into a ``ReaderError``, so a shutdown that is working
                 correctly is not logged as a source fault (ADR-0093 §8).
         """
+        source = self._reader.name
+        # The check and the start of the read are one synchronous step: nothing
+        # between this `await` returning and `read()` being called may suspend.
+        if await self._grants.live(source=source, use=GrantScope.INGEST) is None:
+            raise SourceNotGrantedError(_refusal(source))
         reading = await self._reader.read()
+        # The revocation that landed while the read ran wins: the reading is
+        # discarded whole, and nothing durable records that it happened.
+        if await self._grants.live(source=source, use=GrantScope.INGEST) is None:
+            raise SourceNotGrantedError(_refusal(source))
         stored = 0
         deferred = 0
         for proposal in reading.proposals:

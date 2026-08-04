@@ -5,9 +5,16 @@ A ``ContextSource`` contributes part of the situational context. This seam is
 so its partial ``Mapping`` contributions never cross a boundary — only the
 assembled :class:`~ai_assistant.core.types.CurrentContext` does.
 
-``ClockContextSource`` is the one source today: it derives the temporal context
-(time of day, weekend, working hours) from an injected clock and configured
-locale.
+``ClockContextSource`` derives the temporal context (time of day, weekend,
+working hours) from an injected clock and configured locale.
+``CalendarContextSource`` is the first source that reads the world: it holds a
+``Reader`` and a ``SourceGrants``, and contributes the calendar facet when — and
+only when — a live grant covers that read.
+
+Nothing concrete is imported. The reader and the grant seam arrive by injection
+and are seen only through their Protocols (CLAUDE.md golden rule 1), which
+``lint-imports`` enforces literally: no subsystem may import
+``ai_assistant.readers`` or ``ai_assistant.permissions``.
 """
 
 from __future__ import annotations
@@ -18,12 +25,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import ConfigurationError, ContextError
-from ai_assistant.core.types import TimeOfDay
+from ai_assistant.core.types import CalendarFacet, ContextFacet, GrantScope, TimeOfDay
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from ai_assistant.core.clock import Clock
+    from ai_assistant.core.protocols import Reader, SourceGrants
 
 
 def _utcnow() -> datetime:
@@ -168,3 +176,156 @@ class ClockContextSource:
             "is_weekend": local.weekday() >= 5,  # noqa: PLR2004  Sat=5, Sun=6
             "within_working_hours": self._working_start <= local.hour < self._working_end,
         }
+
+
+class CalendarContextSource:
+    """Contributes the calendar facet from a reader, when a grant covers the read.
+
+    Structurally implements :class:`ContextSource`. ADR-0093 §3's ruling in one
+    object — "A ``ContextSource`` in `context/` holds a ``Reader``" — with
+    ADR-0097 §5's gate in front of it, which is the caller's and never the
+    reader's: "A ``Reader`` neither holds a grant seam nor learns of one."
+
+    **It reads at assembly time and contributes what that read carried, never a
+    cached value** (ADR-0096 §3). A facet is built from a reading taken during the
+    assembly that returns it; a failed read yields an absent facet rather than the
+    previous one. That is ADR-0008 §5's "computes fresh each call — context is a
+    point-in-time snapshot, not cached state" stated over the facet the snapshot
+    now contains, and it is what makes the no-cache rule *checkable*: a facet whose
+    ``read_at`` is materially older than ``now`` is a cache someone introduced.
+
+    **It carries no ``required`` marker, so every fault here ends at an absent
+    facet** (ADR-0026 §4, ADR-0008 §4). A ``ReaderError``, a ``GrantError``, a
+    timeout, a wiring bug — the assembler's ``_safe_contribute`` logs the class and
+    skips the source, and ``CurrentContext.calendar`` is ``None``. ADR-0096 §4
+    rules that the ``None`` says nothing beyond its absence, and ADR-0097 §5 adds
+    *ungranted* to the states it does not distinguish: an ungranted calendar is
+    observationally identical to one that failed to read, because a field saying
+    "the calendar is not granted" is a model being handed a script to ask for
+    access.
+
+    **A slow source degrades the facet for more than one request, and that is the
+    ratified design working rather than a defect.** The assembler's
+    ``source_timeout`` defaults to 5 s while ``calendar_read_timeout`` is 10 s, so a
+    slow calendar is skipped before the reader's own deadline fires — and the
+    reader's worker is still outstanding, so the *next* assembly's ``read()``
+    raises immediately and its facet is absent too, until the worker returns
+    (ADR-0093 §7). A consumer watching a facet blink in and out will be tempted to
+    read something into the pattern; ADR-0096 §4 forbids exactly that.
+
+    **Its reader is its own** (ADR-0096 §5). The ingestion stage holds a separate
+    instance of the same reader: ADR-0093 §7 bounds a reader at one outstanding
+    worker, per instance, so sharing one would let a scheduled ingestion read
+    suppress the request-path facet for as long as it runs — coupling a request
+    cadence to a periodic job, in the direction that makes an advisory facet wait.
+    """
+
+    def __init__(self, *, reader: Reader, grants: SourceGrants) -> None:
+        """Wire the source from an injected reader and the grant query seam.
+
+        Args:
+            reader: The producer, holding its own source and its own bound
+                (ADR-0093 §1, §5) — so this source neither locates the source nor
+                widens the read. **Not shared with the ingestion stage**, for the
+                reason in the class docstring.
+            grants: The **query** seam, and never a ``SourceGrantStore``
+                (ADR-0097 §3, §5). Required, with no default: a composition that
+                omits it does not type-check, which is what makes the gate a
+                mechanism rather than an obligation stated in prose and honoured
+                by review. Narrow by type as well as by name — a source that could
+                *record* a grant is a source that could authorise its own read, and
+                ``mypy --strict`` refuses to let this one name ``record`` at all.
+        """
+        self._reader = reader
+        self._grants = grants
+
+    @property
+    def name(self) -> str:
+        """This source's stable identifier — the reader's declared identity.
+
+        The reader's own ``name`` rather than a second constant, so an operator
+        reading a degradation log sees which source degraded rather than which
+        adapter wrapped it. It is Tier 2 by construction: ADR-0093 §7 makes a
+        reader's identity **declared, never configured**, precisely so it cannot
+        carry a path or an address into a log line.
+        """
+        return self._reader.name
+
+    async def contribute(self) -> Mapping[str, object]:
+        """Read the source once, if a live ``FACET`` grant covers it, and contribute.
+
+        The gate is ADR-0097 §5's, and its guarantee is bounded in a way worth
+        stating so nothing reads it as a stronger one: **every read is authorised
+        at the instant it starts, and nothing produced by a read whose grant has
+        gone by the time it returns is used.** It is *not* a guarantee that no byte
+        is read after a revocation is recorded — a read already in flight completes
+        on a worker the reader owns, which nothing here can stop (ADR-0093 §7).
+
+        Three properties hold it, and none needs a lock:
+
+        * **Nothing is opened without a grant.** The source is not resolved, not
+          opened and not parsed — opening the user's calendar *is* the act the
+          grant is about, so a design that read the file and then declined to use
+          it would already have done the thing it was not permitted to do.
+        * **No ``await`` stands between the ``live()`` answer and ``read()``.**
+          Awaiting a coroutine does not yield to the event loop, so with nothing in
+          between this source cannot sit on a stale answer at all; a driver free to
+          await anything there could hold one for arbitrarily long, which is the
+          difference between a race bounded by a worker's scheduling and one
+          bounded by nothing (ADR-0021 §4, ADR-0097 §5a).
+        * **The grant is re-checked when ``read()`` returns**, and a reading whose
+          grant died in between is discarded. That is what makes a revocation
+          *win* rather than merely arrive: nothing crosses into a prompt.
+
+        **It fails closed on an unanswerable check.** A ``live()`` that raises
+        ``GrantError`` is not a grant — before the read nothing is opened, and
+        after the read the reading is discarded. The error is left to propagate
+        rather than converted, so a store fault and a withdrawn grant stay
+        different facts for an operator reading the assembler's log; both end at an
+        absent facet, as every optional-source fault does (ADR-0097 §5a).
+
+        Returns:
+            ``{"calendar": facet}`` when a granted read carried one, and ``{}``
+            otherwise — no grant, a grant withdrawn mid-read, or a reading with no
+            facet in it. The empty mapping is the *only* absence: this source never
+            contributes a marker saying which of them happened (ADR-0096 §4).
+
+        Raises:
+            ContextError: If the reading carried a facet of a type this source is
+                not wired to contribute — a deployment wired wrongly rather than
+                data to reconcile, which is exactly what ADR-0008 §4 reserves this
+                error for.
+            GrantError: If the grant store could not answer, before or after the
+                read. Propagated, never converted (above).
+            ReaderError: As the reader raises. Propagated for the same reason: the
+                assembler degrades this source and logs the class, and converting
+                it here would tell an operator the wrong thing about where the
+                fault lives.
+        """
+        source = self._reader.name
+        # The check and the start of the read are one synchronous step: nothing
+        # between this `await` returning and `read()` being called may suspend.
+        if await self._grants.live(source=source, use=GrantScope.FACET) is None:
+            return {}
+        reading = await self._reader.read()
+        # The revocation that landed while the read ran wins: the reading is
+        # discarded whole, and nothing records that it happened.
+        if await self._grants.live(source=source, use=GrantScope.FACET) is None:
+            return {}
+        # Widened deliberately. `SourceReading.facet` is annotated with the one
+        # concrete facet type today, so a narrower local would make the guard
+        # below statically dead — and ADR-0096 §5 widens that union with every
+        # later facet-bearing reader, at which point a reader wired to the wrong
+        # adapter is a live possibility rather than an impossible one. The guard
+        # is written for the union it is about to have.
+        facet: ContextFacet | None = reading.facet
+        if facet is None:
+            return {}
+        if not isinstance(facet, CalendarFacet):
+            msg = (
+                f"the {source!r} reader contributed a {type(facet).__name__} to the "
+                f"'calendar' field of the situational context; a source is wired for "
+                f"one facet type and this is a wiring bug (ADR-0096 §5)"
+            )
+            raise ContextError(msg)
+        return {"calendar": facet}

@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ai_assistant.context import AssemblingContextProvider, ClockContextSource
+from ai_assistant.context import (
+    AssemblingContextProvider,
+    CalendarContextSource,
+    ClockContextSource,
+)
 from ai_assistant.core.config import EmbedderKind
 from ai_assistant.core.errors import ConfigurationError, ModelError
 from ai_assistant.learning import ModelBackedObserver, RuleBasedFeedbackProcessor
@@ -53,10 +57,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.config import Settings
-    from ai_assistant.core.protocols import Embedder
+    from ai_assistant.core.protocols import Embedder, SourceGrants
 
 
-def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
+def build_engine(
+    settings: Settings, *, data_dir: Path | None = None, grants: SourceGrants | None = None
+) -> Engine:
     """Wire the production subsystems into a ready :class:`Engine` (ADR-0042 §2).
 
     The one place concrete subsystems are constructed. It discharges the wiring
@@ -93,9 +99,11 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
       :func:`_build_observer_provider`) — and the stage is told which route that is,
       because reporting which model read the episodes is what ADR-0013 §6 records as
       owed and no seam exposes it;
-    * the **read-only ingestion stage** is wired only when a source is configured
-      (ADR-0093 §7's disabled default), over that *same* write stage — and this is
-      the one place a concrete :class:`~ai_assistant.core.protocols.Reader` may be
+    * the **read-only ingestion stage and the calendar context source** are wired
+      only when a source is configured (ADR-0093 §7's disabled default) *and* a
+      grant seam is available to gate them (ADR-0097 §5), each over its **own**
+      reader instance (ADR-0096 §5) — and this is the one place a concrete
+      :class:`~ai_assistant.core.protocols.Reader` may be
       constructed at all, because ``lint-imports`` forbids ``ai_assistant.readers``
       to every subsystem and exempts only this layer (see
       :func:`_build_calendar_reader`).
@@ -144,6 +152,25 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             every existing test uses, and the hub passes the directory it already
             resolved and locked in §3's step 2 so that one resolution is shared
             rather than performed twice. Created if absent.
+        grants: The **query** seam the two reader drivers are gated on (ADR-0097
+            §5). ``None`` — the default — wires neither of them, whatever
+            ``calendar_reader_path`` says.
+
+            **It is a parameter rather than something this function builds,
+            because ADR-0097 §9 rules that "the hub's grant operations are the
+            **only** holder of a ``SourceGrantStore``".** The `permissions/`
+            implementation and the hub surface that records a grant are later
+            lanes, so today nothing can construct one and nothing can grant; a
+            deployment therefore reads no calendar, which is exactly §8's stated
+            consequence — "An installation that has been reading a source stops
+            reading it until the user grants."
+
+            **Nothing is invented in its place, deliberately.** A null-object
+            ``SourceGrants`` wired here would put an authorisation decision in the
+            composition root and hide the missing store behind something that
+            looks wired; leaving the drivers unbuilt says the true thing, and
+            :meth:`Engine.ingest`'s refusal names both conditions so an operator
+            is not told their configured reader is unconfigured.
 
     Returns:
         A ready :class:`Engine`. Drive it with ``converse``/``resume`` and close
@@ -175,26 +202,50 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
     # first observation.
     observer_route = _observer_spec(settings)
     observer_model = _build_observer_provider(settings, observer_route)
+    # The read-only sources, if this deployment configured one (ADR-0093 §7) and
+    # something can answer whether it may be read (ADR-0097 §5). **Two reader
+    # instances rather than one**, and ADR-0096 §5 decides it here rather than
+    # leaving the composition lane to pick by accident: ADR-0093 §7 bounds a reader
+    # at one outstanding worker *per instance*, so a shared reader would let a
+    # scheduled ingestion read suppress the request-path facet for as long as it
+    # runs — coupling a request cadence to a periodic job, in the direction that
+    # makes an advisory facet wait on it. Two instances cost two workers at most,
+    # which is still bounded, and each consumer then owns its own failure.
+    #
+    # Both are built above the data directory, and they belong there for #372's
+    # reason rather than by association: constructing a reader opens nothing — it
+    # validates §7a's figures and names a daemon thread it has not started — so a
+    # calendar window or cap outside its range fails the build before any store is
+    # written.
+    facet_reader = _build_calendar_reader(settings)
+    ingestion_reader = _build_calendar_reader(settings)
     context = AssemblingContextProvider(
         [
             ClockContextSource(
                 timezone=settings.timezone,
                 working_hours_start=settings.working_hours_start,
                 working_hours_end=settings.working_hours_end,
-            )
+            ),
+            # The facet half of leg 6 (ADR-0096 §8), registered only when the path
+            # is configured — a source with nothing to read would be I/O on
+            # personal data in exchange for nothing (ADR-0093 §7a) — and only when
+            # a grant seam exists to gate it, since ADR-0097 §5 makes that seam a
+            # required constructor argument rather than an obligation in prose.
+            #
+            # It carries no `required` marker, so a reader fault, a store fault or
+            # a withdrawn grant each degrade the facet and leave the rest of the
+            # context assembled (ADR-0008 §4, ADR-0026 §4).
+            *(
+                []
+                if facet_reader is None or grants is None
+                else [CalendarContextSource(reader=facet_reader, grants=grants)]
+            ),
         ]
     )
     # Construct the embedder here too — above the data directory — so a missing or
     # unbuildable model fails as a ConfigurationError before any disk is touched
     # (ADR-0006 §2 default, #372's above-disk contract; see :func:`_build_embedder`).
     embedder = _build_embedder(settings)
-    # The read-only source, if this deployment configured one (ADR-0093 §7). Also
-    # above the data directory, and it belongs there for #372's reason rather than
-    # by association: constructing a reader opens nothing — it validates §7a's
-    # figures and names a daemon thread it has not started — so a calendar window
-    # or cap outside its range fails the build before any store is written.
-    reader = _build_calendar_reader(settings)
-
     # The keyword still wins over the setting when it is given (ADR-0083 §2), so
     # every existing caller — and the hub, handing over the directory it resolved
     # and locked before any store was opened — keeps its injection seam. What
@@ -372,14 +423,24 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             # arms the job only on a configured interval, and `Settings` refuses an
             # interval whose path is unset (§7a).
             #
-            # **Wired on the path alone, not on the path *and* the interval.** The
-            # path configures the source and the interval arms the cadence; §7a's
-            # facet-only state is one where "nothing reads" the source, and that
-            # stays literally true here — no job is armed, no other caller exists,
-            # and a constructed reader opens no file until someone calls `read()`.
-            # The `context/` adapter that state is reserved for is a later lane's
-            # and is not shipped here.
-            ingestion=(None if reader is None else IngestionStage(reader=reader, writes=writes)),
+            # **Wired on the path and the grant seam, never on the interval.** The
+            # path configures the source and the interval arms the cadence, so
+            # ADR-0093 §7a's facet-only state is one where the stage exists and no
+            # job is armed. What is new is the second condition: ADR-0097 §5 makes
+            # a `SourceGrants` a required constructor argument, and §9 puts the
+            # only holder of a store in the hub's grant operations — which do not
+            # exist yet — so `grants` is `None` in every deployment today and no
+            # source is read at all. That is §8's own consequence rather than a
+            # gap: "An installation that has been reading a source stops reading it
+            # until the user grants."
+            #
+            # Its **own** reader, never the one the context source holds
+            # (ADR-0096 §5).
+            ingestion=(
+                None
+                if ingestion_reader is None or grants is None
+                else IngestionStage(reader=ingestion_reader, writes=writes, grants=grants)
+            ),
             closers=[
                 _as_async(memory.close),
                 _as_async(trail.close),

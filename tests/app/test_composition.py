@@ -21,6 +21,7 @@ import pytest
 import ai_assistant
 from ai_assistant.app import build_engine, ensure_model_credentials
 from ai_assistant.app import composition as composition_module
+from ai_assistant.context import AssemblingContextProvider, CalendarContextSource
 from ai_assistant.core.config import EmbedderKind, Settings, load_settings
 from ai_assistant.core.errors import (
     AssistantError,
@@ -37,6 +38,8 @@ from ai_assistant.models import HashingEmbedder
 from ai_assistant.orchestration import Engine
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.planning import SqlitePlanStore
+from ai_assistant.readers import CALENDAR_READER_NAME
+from ai_assistant.testing import FakeSourceGrants, source_grant
 from ai_assistant.tools import InMemoryToolRegistry
 
 
@@ -1018,6 +1021,113 @@ def _one_event_calendar(directory: Path) -> Path:
     return path
 
 
+def _calendar_sources(engine: Engine) -> list[CalendarContextSource]:
+    """The calendar context sources the built provider actually composes.
+
+    Reached through the loop's provider because that is where the assembled
+    ``CurrentContext`` comes from: a source registered anywhere else would not
+    contribute to a turn, so asserting on the list this layer built would be
+    asserting on the wrong object.
+    """
+    provider = engine._loop._context
+    assert isinstance(provider, AssemblingContextProvider)
+    return [source for source in provider._sources if isinstance(source, CalendarContextSource)]
+
+
+def _calendar_grants() -> FakeSourceGrants:
+    """A grant seam holding a live grant for the one reader this tree has.
+
+    ``CALENDAR_READER_NAME`` rather than a literal, because ADR-0097 §1 keys a
+    grant to the reader's **declared** identity and a grant naming anything else
+    covers nothing — the join this fake would otherwise silently get wrong.
+    """
+    return FakeSourceGrants([source_grant(CALENDAR_READER_NAME)])
+
+
+async def test_build_engine_wires_neither_driver_without_a_grant_seam(
+    tmp_path: Path,
+) -> None:
+    """A configured source is not enough: ADR-0097 §5 needs something to ask.
+
+    §9 puts the only holder of a ``SourceGrantStore`` in the hub's grant
+    operations, which do not exist yet — so no deployment today passes ``grants``
+    and no deployment today reads a calendar. That is ADR-0097 §8's own stated
+    consequence rather than a gap: "An installation that has been reading a source
+    stops reading it until the user grants."
+
+    Both drivers are covered here, because the property that matters is that
+    *neither* half of leg 6 reads the file: the stage is unwired, and the context
+    source is not registered at all.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        calendar_reader_path=_one_event_calendar(tmp_path),
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        assert engine._ingestion is None
+        assert not _calendar_sources(engine)
+        with pytest.raises(ConfigurationError, match="grant seam"):
+            await engine.ingest()
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_registers_the_calendar_source_when_both_are_present(
+    tmp_path: Path,
+) -> None:
+    """The facet half of leg 6, wired on the path and the grant seam (ADR-0096 §8)."""
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        calendar_reader_path=_one_event_calendar(tmp_path),
+    )
+    engine = build_engine(settings, data_dir=tmp_path, grants=_calendar_grants())
+    try:
+        assert len(_calendar_sources(engine)) == 1
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_registers_no_calendar_source_without_a_path(
+    tmp_path: Path,
+) -> None:
+    """A source with nothing to read is I/O on personal data in exchange for nothing.
+
+    ADR-0093 §7a's words about the state it reserved, and the reason the adapter is
+    registered on the path rather than unconditionally.
+    """
+    settings = Settings(embedder=EmbedderKind.HASHING)
+    engine = build_engine(settings, data_dir=tmp_path, grants=_calendar_grants())
+    try:
+        assert not _calendar_sources(engine)
+    finally:
+        await engine.aclose()
+
+
+async def test_the_two_consumers_hold_separate_reader_instances(
+    tmp_path: Path,
+) -> None:
+    """ADR-0096 §5, decided there rather than left for this layer to pick by accident.
+
+    ADR-0093 §7 bounds a reader at **one outstanding worker**, and that reservation
+    is per instance. Share one and a scheduled ingestion read suppresses the
+    request-path facet for as long as it runs — coupling a request cadence to a
+    periodic job, in the direction that makes an advisory facet wait on it.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        calendar_reader_path=_one_event_calendar(tmp_path),
+    )
+    engine = build_engine(settings, data_dir=tmp_path, grants=_calendar_grants())
+    try:
+        stage = engine._ingestion
+        assert stage is not None
+        (facet_source,) = _calendar_sources(engine)
+        assert stage._reader is not facet_source._reader
+    finally:
+        await engine.aclose()
+
+
 async def test_build_engine_wires_no_reader_when_no_source_is_configured(
     tmp_path: Path,
 ) -> None:
@@ -1055,7 +1165,7 @@ async def test_build_engine_wires_the_ingestion_stage_over_the_one_memory_store(
         embedder=EmbedderKind.HASHING,
         calendar_reader_path=_one_event_calendar(tmp_path),
     )
-    engine = build_engine(settings, data_dir=tmp_path)
+    engine = build_engine(settings, data_dir=tmp_path, grants=_calendar_grants())
     try:
         stage = engine._ingestion
         assert stage is not None
@@ -1079,7 +1189,7 @@ async def test_an_ingested_belief_is_readable_through_the_surface_the_user_has(
         embedder=EmbedderKind.HASHING,
         calendar_reader_path=_one_event_calendar(tmp_path),
     )
-    engine = build_engine(settings, data_dir=tmp_path)
+    engine = build_engine(settings, data_dir=tmp_path, grants=_calendar_grants())
     try:
         report = await engine.ingest()
 
@@ -1109,7 +1219,7 @@ async def test_a_configured_but_missing_source_fails_at_run_time_and_not_at_buil
         embedder=EmbedderKind.HASHING,
         calendar_reader_path=tmp_path / "nowhere.ics",
     )
-    engine = build_engine(settings, data_dir=tmp_path)
+    engine = build_engine(settings, data_dir=tmp_path, grants=_calendar_grants())
     try:
         assert engine._ingestion is not None
         with pytest.raises(ReaderError):

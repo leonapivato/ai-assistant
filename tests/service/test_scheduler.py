@@ -38,7 +38,9 @@ import structlog
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, Engine
+from ai_assistant.readers import CALENDAR_READER_NAME
 from ai_assistant.service.scheduler import Job, Scheduler, jobs_for
+from ai_assistant.testing import FakeSourceGrants, source_grant
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -210,7 +212,14 @@ async def test_an_unreadable_source_is_logged_by_class_and_never_by_path(
     would land.
     """
     settings = _reader_settings(tmp_path, interval=_TICK)
-    engine = build_engine(settings, data_dir=tmp_path)
+    # Granted, because the subject is a *source* failure: ADR-0097 §5's refusal is
+    # a different fact from ADR-0093 §8's, and an ungranted engine would log a
+    # `SourceNotGrantedError` while this case asserts on the reader's own class.
+    engine = build_engine(
+        settings,
+        data_dir=tmp_path,
+        grants=FakeSourceGrants([source_grant(CALENDAR_READER_NAME)]),
+    )
     twice = asyncio.Event()
     attempts = 0
 

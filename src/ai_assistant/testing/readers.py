@@ -46,6 +46,7 @@ from ai_assistant.core.errors import ReaderError
 from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
+    CalendarFacet,
     DataTier,
     MemoryKind,
     MemorySource,
@@ -252,13 +253,14 @@ class FakeReader:
     conformance suite is.
     """
 
-    def __init__(  # noqa: PLR0913 — a script, an identity, two instants, a failure and an id factory; each is one knob a consumer sets on its own
+    def __init__(  # noqa: PLR0913 — a script, an identity, two instants, a facet, a failure and an id factory; each is one knob a consumer sets on its own
         self,
         proposals: Sequence[MemoryUpdateProposal] | None = None,
         *,
         name: str = DEFAULT_READER_NAME,
         read_at: datetime = _DEFAULT_READ_AT,
         as_of: datetime | None = None,
+        facet: CalendarFacet | None = None,
         failure: Exception | None = None,
         id_factory: Callable[[], str] | None = None,
     ) -> None:
@@ -291,6 +293,13 @@ class FakeReader:
                 ruling rather than laxity: it may never be filled from the
                 filesystem, from the clock, or from one entry's stamp applied to
                 the rest (ADR-0093 §10).
+            facet: The situational half of every reading this fake returns, or
+                ``None`` — the default, and the state a consumer of a reader whose
+                source has no situational reading sees (ADR-0096 §5). Its stamp
+                must be this fake's own: :class:`SourceReading`'s validator refuses
+                a facet naming a different source or carrying different instants,
+                which is what makes a mis-stamped script fail *here* rather than at
+                the consumer that lifted it into ``CurrentContext``.
             failure: The **source-level** failure to model. When given, every read
                 raises :class:`~ai_assistant.core.errors.ReaderError` from it —
                 with a payload-free message carrying only this reader's identity
@@ -302,7 +311,9 @@ class FakeReader:
                 a minted id: a blank mint fails rather than becoming a key.
 
         Raises:
-            ValueError: If ``name`` is blank, or any scripted proposal is an
+            ValueError: If ``name`` is blank, if ``facet``'s stamp is not the one
+                this fake's readings carry (a ``ValidationError``, which is a
+                ``ValueError``), or if any scripted proposal is an
                 ``EpisodicMemory``, is outside the ``ATTESTED`` band, is attested
                 to a source other than ``name``, or carries no rationale. Each is a
                 clause of the ``Reader`` contract, so allowing it would only move
@@ -324,6 +335,7 @@ class FakeReader:
         self._name = name.strip()
         self._read_at = read_at
         self._as_of = as_of
+        self._facet = facet
         self._failure = failure
         self._id_factory = id_factory
         self._resource = SuspendableResource()
@@ -389,6 +401,11 @@ class FakeReader:
             read_at=self._read_at,
             as_of=self._as_of,
             proposals=proposals,
+            # Carried on every reading this fake builds, scripted or synthesised,
+            # so the two paths cannot disagree about the field a consumer reads.
+            # A facet whose stamp is not this reading's is refused here, at
+            # construction, by `SourceReading`'s own validator (ADR-0096 §5).
+            facet=self._facet,
         )
 
     async def read(self) -> SourceReading:
