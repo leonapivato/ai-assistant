@@ -1,7 +1,68 @@
 # 100. A belief states whom it is about when that is not the owner, and the label resolves to nothing
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-04
+- **Note (2026-08-04): ratified.** `Proposed` → `Accepted`, in the separate lane
+  #633 requires, after **both** required reviews came back green on the content
+  this ADR merged with: adversarial **APPROVE with no findings** and architecture
+  **APPROVE with no findings**, both at tree `ef808106cab1`, round 5, churn ratio
+  1.3, each posted to PR #687 by `just ship`. That is the outcome ADR-0070 §1
+  requires the ratifying edit to record. Beyond the `Status` line the edits are
+  three: the tense of the header bullet below that names the review set, seven
+  citations repointed off #665, and §12's "Filed." given its number (below).
+  **No decision text is touched and no normative clause acquires, loses or
+  alters an obligation**, which is ADR-0070 §1's own test applied to the
+  ratifying edit first.
+
+  **No status premise had to be corrected, and the reason is the header bullet
+  below that says so in advance.** The bullet discharging ADR-0099 §5 was written
+  to survive its own ratification — "ADR-0099 stood `Proposed` when this ADR was
+  written … every reference below to ADR-0099 is to its text as merged on
+  2026-08-04, not to its status on any later day" — so the one present-tense
+  status premise this document could have carried was never written. That is the
+  device ADR-0097 §11 lacked and had to be corrected in place for at its own
+  ratification. ADR-0099 was ratified in this same lane, alongside it, exactly as
+  that bullet anticipated.
+
+  **ADR-0101 and one implementation merged between this ADR's authoring and its
+  ratification.** Ratified against `707c467`, where
+  `git diff --name-only 0e66674 707c467` names this file, ADR-0101 and the three
+  files of the `SourceGrantStore` implementation (#695) and nothing else. The
+  document was re-read whole and its claims about the tree checked against the
+  code rather than read for plausibility; **all hold** — `core/types.py` still
+  carries no `about_person`, `FeedbackEvent.subject` still means a preference
+  scope, `Occurrence` still parses no attendee, and `MemoryIngestor` still
+  detects conflicts on kind and content alone. The `SourceGrantStore` reaches
+  none of them. **Two clauses fired as written rather than going stale**: §12's
+  first deferral named the subject-scoped delete and export ADR "the next one",
+  and ADR-0101 is it; and §6's second clause reserved the matching rule to "a
+  later ADR … the only thing that may lift the clause above", which ADR-0101 §2
+  is. ADR-0101 §11 applies ADR-0070 §1's test to both and rules each **not
+  owed** — calling §6's reservation "the closest of the five" and concluding "no
+  sentence of ADR-0100 becomes false or over-wide", because §6 wrote the
+  mechanism ADR-0101 used and the Consequences already say two spellings are two
+  subjects "until a lane rules otherwise". Those rulings are honoured here rather
+  than re-taken, and both sections are left as written but for their trackers.
+
+  **Seven citations are repointed off #665.** §6, §12, the Context's summary of
+  ADR-0099 §5, §4, the Consequences and the Alternatives each filed *person
+  identity, enrolment and speaker identification* — a person registry, handles,
+  who counts as a person — against #665, which is "Voice spoke: aloud read-back
+  is a disclosure surface": an **output**-side disclosure question whose own text
+  treats the request path as settled elsewhere and decides none of it. ADR-0101
+  §3 found this, recorded it rather than fixing another lane's text, and filed
+  **#691**; all seven now name #691, and the prose placing the question on the
+  voice-spoke leg was already right and is unchanged. Every site was judged
+  individually against both issues' bodies, and none of the seven turned out to
+  be about read-back. **A citation correction, not a decision change**: what is
+  deferred, to whom, and on what condition are exactly as ratified. §12's last
+  deferral also gains the number of the issue it says was "Filed" — **#688** —
+  which resolves a reference the text already asserted. Both made in place
+  because this ADR still stood `Proposed`, which ADR-0070 §1 scopes its
+  no-rewrite rule against and ADR-0095 §7 states in full.
+
+  **ADR-0070 §1's no-rewrite rule now protects this text**, so any later
+  correction is an appended dated note.
 - **Decides one axis, the two `core` fields that carry it, and the two things
   that must ship with them.** `MemoryBase` gains an optional `about_person`;
   `FeedbackEvent` gains the same field and `assistant learn` gains a route into
@@ -23,10 +84,10 @@
   PR carrying this ADR touches neither — it is prose only. The set is taken
   anyway because the *decision* is `core` surface: ADR-0093 through ADR-0099 each
   declared both for that reason, and this one specifies a field on the envelope
-  every belief in the system carries. Reviewed while `Proposed` and ratified only
-  after, in a separate lane (`CONTRIBUTING.md` → "Contract ADRs land before their
-  implementation"; #633 records why the flip cannot ride in the PR that carries
-  it).
+  every belief in the system carries. It was reviewed while `Proposed` and
+  ratified only after, in a separate lane (`CONTRIBUTING.md` → "Contract ADRs
+  land before their implementation"; #633 records why the flip could not ride in
+  the PR that carried it).
 - **Discharges the first deferral of ADR-0099 §5**, which reads "The subject axis
   itself — whether a belief names its subject, in what type, with what identity,
   and what an absent subject means. It is the next ADR." ADR-0099 stood
@@ -113,7 +174,7 @@ must be checked, one must be able to speak, one must stay silent.
 ADR-0099 §5 defers the axis on the **consumer**, not the producer: "Fires with
 the first consumer that must distinguish", naming four — subject-scoped delete or
 export, a rendering that names a subject, speaker attribution on the voice leg
-(#665), "and anything that has to *check* ADR-0077 §2's 'about the user' rule
+(#691), "and anything that has to *check* ADR-0077 §2's 'about the user' rule
 rather than instruct it".
 
 It is the fourth that has fired, and the honest statement of why is that it is
@@ -339,7 +400,7 @@ This one clause is what keeps the axis from becoming the thing it must not
 become. Inferring "Marta" from `Calendar entry "Coffee with Marta"` is
 person-identification from free text: it decides who counts as a person, when two
 mentions are one person, and when a name in a sentence is its subject rather than
-its scenery. That is the voice-spoke leg's question (#665), and ADR-0094 §10
+its scenery. That is the voice-spoke leg's question (#691), and ADR-0094 §10
 already warns that it is distinct from *device* identity. A subject axis that
 quietly acquired an inference step would have taken it.
 
@@ -461,7 +522,7 @@ where every other check in this corpus starts.
 
 **Why a bare label and not a handle.** The alternative — an opaque id into a
 person record — requires deciding what a person record is, when two mentions are
-one person, and who may create one. That is a person registry, it is #665's, and
+one person, and who may create one. That is a person registry, it is #691's, and
 ADR-0094 §10 separates it from device identity precisely so a lane that finds one
 of them deferred does not assume the other. A field that resolves to nothing
 takes none of those decisions, and the corpus already runs one:
@@ -722,10 +783,10 @@ already describes.
   law. Fires with the first surface that renders a subject, and it is the lane
   that would extend ADR-0073 §4's enumeration (§11).
 - **Person identity, enrolment and speaker identification** — what names a
-  person, how one is enrolled, how an utterance is attributed. #665's, and
+  person, how one is enrolled, how an utterance is attributed. #691's, and
   ADR-0094 §10 keeps it distinct from *device* identity. §6 is written so that
   none of it is presumed: a label that resolves to nothing survives any answer
-  #665 gives, including one that introduces handles later.
+  #691 gives, including one that introduces handles later.
 - **Bystander consent** — what is owed to a person a spoke captures who is not
   the owner. #441 and the capture lane; ADR-0094 §10 holds the trigger ladder and
   the grant model. Ruling that a bystander is a subject rather than a principal
@@ -738,8 +799,8 @@ already describes.
 - **Whether `FeedbackEvent.subject` should be renamed `scope`.** Not taken here:
   it is a `core/types.py` rename, breaking under golden rule 5, and it changes a
   decision ADR-0009 made, so it needs its own ADR rather than a paragraph in this
-  one. Filed. Fires if the two fields are shown to be confused in practice, and
-  §7's side-by-side naming is the cheap mitigation until then.
+  one. Filed as **#688**. Fires if the two fields are shown to be confused in
+  practice, and §7's side-by-side naming is the cheap mitigation until then.
 
 ## Consequences
 
@@ -771,7 +832,7 @@ already describes.
 - **One more optional field on the envelope every record carries.** The migration
   is mechanical (§8), the wire change is additive, and `export` carries the field
   with no change because it returns `MemoryRecord`.
-- **Revisit if** a person registry arrives from #665, at which point §6's label
+- **Revisit if** a person registry arrives from #691, at which point §6's label
   is the thing that must either resolve or stay unresolved beside it; or if a
   producer appears that receives a structured subject from its source, which is
   the first case §4's "structured field" clause was written for and has no
@@ -822,7 +883,7 @@ already describes.
   one-field wrapper would buy nothing and would look like a place to add a
   handle, which §6 refuses.
 - **An opaque handle into a person record.** Rejected in §6: it is a person
-  registry, it decides #665's question, and it is unbuildable without deciding
+  registry, it decides #691's question, and it is unbuildable without deciding
   when two mentions are one person.
 - **A tuple of subjects.** Rejected in §6. It is a relationship graph one field
   early, and two beliefs about two people split cleanly and delete independently.

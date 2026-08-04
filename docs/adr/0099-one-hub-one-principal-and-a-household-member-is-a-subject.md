@@ -1,7 +1,67 @@
 # 99. One hub, one principal: a household member is a subject in the owner's model, not an account on the owner's hub
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-04
+- **Note (2026-08-04): ratified.** `Proposed` → `Accepted`, in the separate lane
+  #633 requires, after **both** required reviews came back green on the content
+  this ADR merged with: adversarial **APPROVE with no findings** and architecture
+  **APPROVE with no findings**, both at tree `2f0af740eafb`, round 5, churn ratio
+  1.3, each posted to PR #686 by `just ship`. That is the outcome ADR-0070 §1
+  requires the ratifying edit to record. Beyond the `Status` line the edits are
+  three: the tense of the header bullet below that names the review set, and two
+  citations repointed off #665 (below). **No decision text is touched and no
+  normative clause acquires, loses or alters an obligation**, which is ADR-0070
+  §1's own test applied to the ratifying edit first.
+
+  **Two ADRs and one implementation merged between this ADR's authoring and its
+  ratification, so the staleness check was made rather than assumed.** The
+  ratifications before this one could say "nothing merged but this ADR"; this one
+  cannot. Ratified against `707c467`, where `git diff --name-only cd16a3e
+  707c467` names this file, ADR-0100, ADR-0101 and the three files of the
+  `SourceGrantStore` implementation (#695) and nothing else. **Every claim this
+  ADR makes about the tree was re-checked at that commit and holds**: no belief
+  record or Protocol carries a person-subject, ADR-0007's surface has no subject
+  dimension, and `assistant learn` still writes third-party beliefs with nowhere
+  to state one. The `SourceGrantStore` reaches none of them, and it keys no grant
+  to a user, so ADR-0097 §1's "the grant is not keyed to a user" — which §1 and
+  the Context both lean on — is now implemented rather than merely ruled.
+
+  **What the two ADRs changed is that two deferrals fired as written**, which is
+  the mechanism working rather than a sentence going stale. §5's first deferral —
+  the subject axis, "It is the next ADR" — is discharged by ADR-0100, whose §11
+  applies ADR-0070 §1's test to exactly this and concludes "no record is owed on
+  ADR-0099's `Status` line". §5's second — subject-scoped delete and export — is
+  discharged by ADR-0101, whose §11 rules the same of both ("**not owed**", on
+  the ground that "discharging a deferral by the route the deferral itself
+  specified is the mechanism working"). Both rulings are honoured here rather
+  than re-taken, and §5 is left as written but for its tracker — the way
+  ADR-0093's text was left when ADR-0096 and ADR-0097 discharged its §11
+  deferrals.
+
+  **Two citations are repointed off #665, which is the one correction this edit
+  makes.** §5 filed *person identity, enrolment and speaker identification*, and
+  the *speaker attribution* consumer above it, against #665 — "Voice spoke: aloud
+  read-back is a disclosure surface", an **output**-side disclosure question whose
+  own text treats the request path as settled elsewhere ("Speaker ID gates who the
+  hub thinks *asked*") and which decides nothing about what names a person or how
+  one is enrolled. So the deferral pointed at an issue that could never discharge
+  it. ADR-0101 §3 found this, recorded it in this ADR's own §6 "recorded rather
+  than fixed" shape, and filed **#691**; both citations now name #691, and the
+  prose — "the voice-spoke leg owns it" — was already right and is unchanged.
+  **This is a citation correction, not a decision change**: what is deferred, to
+  whom, and on what condition are all exactly as ratified. Made in place because
+  this ADR still stood `Proposed`, which ADR-0070 §1 scopes its no-rewrite rule
+  against and ADR-0095 §7 states in full — and #691 itself notes that this window
+  was the cheap one.
+
+  **Two date-scoped claims were checked and deliberately left.** §2's "unmodeled
+  as of this ADR's date" and the Context's "the phrase 'world model' appears
+  nowhere in `docs/`, `VISION.md` or `README.md` as of this ADR's date" are both
+  arguments about the corpus this ADR argues against, and the only documents that
+  now read otherwise are this ADR and the one it fired. Rewriting a dated
+  observation to account for its own consequences would destroy the record rather
+  than correct it. **ADR-0070 §1's no-rewrite rule now protects this text**, so
+  any later correction is an appended dated note.
 - **Decides a scope and adds no surface.** No Protocol, no type, no field, no
   code. It ratifies the framing every existing decision already leans on — the
   store is **the owner's world model** — and settles the one question that
@@ -13,10 +73,10 @@
   `core/types.py`. ADR-0094 took the same set for the same shape of change — a
   scoping and vocabulary ruling that added no surface — and this one bounds
   every `core` decision that comes after it, including the subject axis §5 sends
-  to its own ADR. Reviewed while `Proposed` and ratified only after, in a
+  to its own ADR. It was reviewed while `Proposed` and ratified only after, in a
   separate lane (`CONTRIBUTING.md` → "Contract ADRs land before their
-  implementation"; #633 records why the flip cannot ride in the PR that carries
-  it).
+  implementation"; #633 records why the flip could not ride in the PR that
+  carried it).
 - **Amends no earlier ADR and supersedes none**, and §6 applies ADR-0070 §1's
   test and ADR-0082 §1's record rule to the two places where the opposite
   reading is available: ADR-0058's scoping of its own threat model, and
@@ -287,7 +347,7 @@ is a floor on what a surface may imply, discharged today by not implying it.
   each made in their own lane. **Fires with the first consumer that must
   distinguish**, and four are visible: subject-scoped delete or export (below);
   a rendering that must satisfy §4's floor by naming the subject rather than by
-  declining to imply it; speaker attribution on the voice leg (#665); and
+  declining to imply it; speaker attribution on the voice leg (#691); and
   anything that has to *check* ADR-0077 §2's "about the user" rule rather than
   instruct it, which is the enforcement gap the Context describes.
 
@@ -308,7 +368,7 @@ is a floor on what a surface may imply, discharged today by not implying it.
   depends on; it cannot be taken first.
 - **Person identity, enrolment, and speaker identification** — what names a
   person, how one is enrolled, and how an utterance is attributed to one. The
-  voice-spoke leg owns it (#665). This is **distinct from** ADR-0094 §10's
+  voice-spoke leg owns it (#691). This is **distinct from** ADR-0094 §10's
   deferred spoke identity, which is *device* identity: knowing which microphone
   spoke is not knowing who talked into it, and the two must not be conflated by
   a lane that finds one of them already deferred.
