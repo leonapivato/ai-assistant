@@ -1991,6 +1991,232 @@ class ObservationOutcome(BaseModel):
     )
 
 
+# --- context facets: a source's situational "right now" (ADR-0096) -----------
+# Declared here, ahead of `SourceReading`, because a reading *carries* one (§5)
+# and `CurrentContext` *receives* one (§1) — the two consumers of one read, at
+# their own cadences (ADR-0093 §3). A facet is a third party's report read at an
+# instant, so it carries its own provenance rather than being rendered beside
+# `is_weekend` as a bare value: the temporal core is bare because a clock reading
+# has no provenance to lose, and a facet has.
+
+
+def _rejecting_non_blank(value: str) -> str:
+    """Reject a blank value, returning it **unchanged** (ADR-0096 §2).
+
+    The rejecting half of :func:`_non_blank` without its normalising half, and the
+    asymmetry is the decision rather than an oversight. A facet's ``source`` is a
+    *faithful copy* of the reading's, which is :data:`EncodableText` and does not
+    strip — so stripping here would make a conforming reader named ``"  calendar
+    "`` produce a reading whose ``source`` keeps the spaces and a facet whose
+    ``source`` loses them, and :class:`SourceReading`'s stamp-equality validator
+    would then refuse a reading every other rule permits. Tightening by
+    *normalising* is how two spellings of one value drift, silently, until
+    something compares them.
+
+    The general rule ADR-0096 §2 draws from it: **a faithful copy takes the type
+    of the field it copies, and may tighten only in ways that reject.**
+
+    Raises:
+        ValueError: If the value is blank after stripping.
+    """
+    if not value.strip():
+        msg = "a facet's source must not be blank"
+        raise ValueError(msg)
+    return value
+
+
+type NonBlankEncodableText = Annotated[EncodableText, AfterValidator(_rejecting_non_blank)]
+"""Text that is neither blank nor unwritable, and is **never normalised**.
+
+:data:`Identifier` refuses a blank value *and* strips the one it accepts;
+:data:`EncodableText` does neither. This is the third combination, and ADR-0096 §2
+needs it because a value copied between two fields must compare equal to its
+original: it refuses ``"   "`` while returning ``"  calendar  "`` byte-for-byte.
+
+**It does not close #667**, which proposes one identifier contract across
+:attr:`Reader.name <ai_assistant.core.protocols.Reader.name>`,
+:attr:`SourceReading.source` and :attr:`Attestation.reported_by` at once. What it
+does is keep a *facet* from carrying an identity that names nothing legible, on
+the construction paths a conformance suite cannot reach — a fixture, a fake, or a
+producer that is not a ``Reader`` at all.
+"""
+
+
+class ContextFacet(BaseModel):
+    """One source's situational contribution, stamped with who said it and when.
+
+    The base every non-temporal :class:`CurrentContext` facet extends (ADR-0096
+    §1). It carries the source's identity and the two instants that say when its
+    content was true, so a facet reaching a prompt can never be rendered as a bare
+    fact of the system's own — which is the laundering ADR-0072 §6 refuses: "a
+    wrong record laundered into a fact by flat prose, restated back to the user
+    with the assistant's authority, and never questioned because it did not arrive
+    looking questionable".
+
+    **A base class rather than a convention**, because a convention here fails
+    silently: a rule saying "every facet carries its source and its instants",
+    held by review, lasts exactly until the tenth facet author does not read
+    ADR-0096 — and the failure is a facet rendered as a bare value.
+    ``tests/core/test_facet_coverage.py`` makes it a property of the file rather
+    than of the fields someone remembered.
+
+    **Never itself a field annotation** (ADR-0096 §1). Pydantic serialises by the
+    *declared* annotation and says nothing when that loses data: a field annotated
+    with this base but holding a :class:`CalendarFacet` dumps the three fields
+    below and drops the payload, with no warning emitted at all. Every field
+    carrying a facet — on :class:`CurrentContext`, on :class:`SourceReading`, or
+    anywhere else — is annotated with concrete facet types.
+
+    **``source``, ``read_at`` and ``as_of`` are reserved on every subclass.** Flat
+    fields share one namespace with a subclass's payload, so a future facet whose
+    own vocabulary includes "source" would shadow the stamp. The coverage test
+    refuses the redefinition rather than a ``stamp:`` sub-object costing every
+    consumer a second indirection.
+
+    **Shaped after :class:`Attestation` and deliberately not reusing it.** The
+    kinship is real — that is the corpus's answer to "who said so, and when" — and
+    reuse fails on both its fields. ``reported_at`` is required and admits no
+    substitute (ADR-0092 §3), so an ``Attestation`` on a calendar facet is
+    unconstructable for the one producer that exists; and ``Attestation`` carries
+    no our-clock field at all, because on a stored belief that role is
+    :attr:`Provenance.last_updated` — which a facet, having no store and no
+    transaction time, does not have.
+
+    Attributes:
+        source: The producing reading's ``source``, unchanged — the reader's
+            declared, Tier 2 identity (ADR-0093 §7). It must never embed Tier 0/1
+            data: a source that wraps personal data names *itself*
+            (``"calendar"``), never the data it holds and never its location.
+            Refused when blank and **never normalised**, so it stays byte-equal to
+            the reading's own (see :data:`NonBlankEncodableText`).
+        read_at: The instant **this system** performed the read this facet was
+            built from. Always present, because it is our own clock and there is
+            no source that can fail to supply it.
+        as_of: The instant **the source itself declares** for that reading, and
+            ``None`` where it declares none.
+
+            **It may never be filled from the filesystem, from the clock, from
+            ``read_at``, or from one entry's stamp applied to the rest**
+            (ADR-0096 §2). The mtime is the specific temptation: a reader is
+            usually looking at a *mirror*, and "when did the mirror last sync" has
+            an answer sitting right there in ``st_mtime`` — which is the last
+            local write, moving under a copy, a restore, an ``rsync`` preserving
+            times, or a ``touch``. ADR-0092 §3 already refuses it for
+            ``reported_at``, and a facet is a **weaker** record than a belief, not
+            a stronger one, so it does not get a licence a belief is denied.
+
+    **Staleness is computed by a consumer, never carried here** (ADR-0096 §3). No
+    facet carries a staleness verdict — no boolean, no freshness class, no expiry
+    — and no ``Settings`` figure defines when one becomes stale: a ``stale: bool``
+    is not a description but a switch, and the first consumer to find it would use
+    it to drop the facet, which is the one outcome the owner's ruling
+    ("present-but-stale, understood from its source") forbids. A consumer computes
+    two different figures: :attr:`CurrentContext.now` minus ``read_at`` is *how
+    long ago we looked*, and ``now`` minus ``as_of`` — where the source declares
+    one — is *how old the source says its picture is*.
+
+    **Those two instants are captured independently within one concurrent
+    assembly**, so their difference is bounded by that assembly's duration and
+    **may be of either sign**: ``AssemblingContextProvider`` runs its sources as
+    concurrent tasks, so a clock source stamps ``now`` when it runs while a reader
+    stamps ``read_at`` at byte acquisition (ADR-0093 §7b). No consumer may present
+    a negative age, and none may read the sign as information.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source: NonBlankEncodableText = Field(
+        description=(
+            "The producing reading's declared identity, byte-for-byte — Tier 2, "
+            "never a path and never the data it holds (ADR-0093 §7)."
+        ),
+    )
+    read_at: UtcInstant = Field(
+        description="When this system performed the read this facet was built from (tz-aware).",
+    )
+    as_of: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "Any reading-wide instant the source itself declares (tz-aware); None "
+            "where it declares none. Never our clock and never the file's mtime."
+        ),
+    )
+
+
+class CalendarFacet(ContextFacet):
+    """What the calendar says is happening now and what is next (ADR-0096 §6).
+
+    Three scalars and an instant. **It carries no entry text** — no summary,
+    location, description, organiser, attendee or identifier, and no per-entry
+    report time — and that is a decision twice over.
+
+    The same read's *proposals* already carry the in-window occurrences into
+    memory as ``ATTESTED`` beliefs, where retrieval surfaces them and ADR-0072 §5
+    ranks them. Putting them here as well would ship the same content into the
+    same prompt by two routes carrying two different stamps, which is precisely
+    the "neither is mistaken for the other" hazard ADR-0093 §3 names — manufactured
+    by us rather than found. And a calendar's titles and locations are the most
+    disclosing thing it holds: ``CalendarReader`` already refuses ``DESCRIPTION``
+    for a *durable* belief, and the advisory path does not get a weaker rule. The
+    facet's job is the one thing the beliefs cannot answer at request time without
+    a scan: *is something happening right now, and when is the next thing*.
+
+    **A count rather than a boolean**, because ``busy: bool`` has to decide what
+    counts as busy and the first case breaks it — an all-day "Holiday" covers the
+    instant and is not a meeting. Choosing is a judgement about the user's day, and
+    ADR-0093 §2 rules that "A reader infers nothing: it reads a file and reports
+    what the file says". A count is a fact about the parsed occurrences.
+
+    **The payload is additive.** A later ADR may add ``entries`` as an optional
+    field the day a consumer needs them, and every producer and fixture that
+    predates it stays valid; shipping them now and removing them later would be a
+    breaking change. The asymmetry decides it (ADR-0096 §10).
+
+    Attributes:
+        entries_in_progress: How many occurrences were in progress at
+            :attr:`~ContextFacet.read_at`. An occurrence with a non-zero duration
+            is in progress when ``start <= read_at < end``; a zero-duration one
+            when ``start == read_at``. That is ADR-0093 §7b's half-open membership
+            evaluated at an instant rather than over a window, and the two arms
+            exist for §7b's reason.
+        next_starts_at: The earliest in-window occurrence starting **strictly
+            after** ``read_at``, and ``None`` where the window holds none.
+
+            **``None`` states that the reading found no later occurrence within
+            its window, and never that none exists.** No consumer may read it as
+            an absence and no surface may present it as one — which is what
+            :attr:`covers_until` is carried to make interpretable.
+        covers_until: The **exclusive** upper edge of the window this reading
+            covered. It travels with the value because a consumer of
+            :class:`CurrentContext` does not read ``Settings``, so the horizon has
+            to be here or not exist at all.
+
+            The backward edge is deliberately not carried: nothing a consumer
+            reads is bounded by it, since ``entries_in_progress`` is anchored at
+            ``read_at`` and §7b's overlap membership already guarantees that an
+            occurrence which began before the window and is still running is in
+            the reading. Both edges saturate under §7b, so this is always a
+            representable instant.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    entries_in_progress: int = Field(
+        ge=0,
+        description="Occurrences in progress at read_at (ADR-0096 §6's membership rule).",
+    )
+    next_starts_at: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "The earliest in-window occurrence starting strictly after read_at; "
+            "None when the window held none — never 'there is none'."
+        ),
+    )
+    covers_until: UtcInstant = Field(
+        description="The exclusive upper edge of the window the reading covered (tz-aware).",
+    )
+
+
 # --- reading: what one pass over a source produced (ADR-0093, ADR-0095) ------
 # The read-only seam's return value. Two instants rather than one, because the
 # clock that read a source and the clock that source reports on are different
@@ -2065,6 +2291,27 @@ class SourceReading(BaseModel):
             shared ``Reader`` conformance suite pins rather than this type: a
             producer-side obligation about what a *reader* may emit, not a property
             of every reading-shaped value (ADR-0093 §4).
+        facet: The situational half of this reading — the other consumer's
+            (ADR-0093 §3, ADR-0096 §5). ``None`` is valid and means this reader's
+            source has no situational reading to contribute.
+
+            **Annotated with the concrete facet types a reader may produce**, and
+            widened by each later ADR that adds a facet, because the base
+            annotation loses the payload silently (see :class:`ContextFacet`).
+            When a second concrete type joins it, the union is made explicitly
+            **discriminated**, each member carrying its own literal tag, so that no
+            payload's facet type is decided by pydantic's smart union picking a
+            member by fit.
+
+            **Both halves are computed on every read and they may legitimately
+            contain different things.** ``CalendarReader`` skips an occurrence
+            whose ``DTSTAMP`` is absent — it must, since ADR-0092 §3 permits no
+            substitute for a report time the source did not make — but the facet
+            has no attestation to construct, so that occurrence is counted in the
+            facet and missing from the proposals. ADR-0093 §3 already rules that
+            this is the design rather than an error: "What matters is not that they
+            agree but that neither is mistaken for the other." Nobody should "fix"
+            it by making the facet skip the same entries.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -2095,6 +2342,60 @@ class SourceReading(BaseModel):
             "successful reading, not a failure signal (ADR-0093 §8)."
         ),
     )
+    facet: CalendarFacet | None = Field(
+        default=None,
+        description=(
+            "The situational half of this reading, stamped identically to it; "
+            "None where the source has no situational reading (ADR-0096 §5)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _facet_is_stamped_from_this_reading(self) -> SourceReading:
+        """A carried facet's stamp is this reading's, unchanged (ADR-0096 §5).
+
+        **The duplication is intentional, which this validator can make look
+        accidental.** If the facet's stamp must always equal the reading's, it
+        looks redundant *on the reading* — and it is, for as long as the two travel
+        together. They do not: the ``context/`` adapter lifts the facet out and
+        puts it in :class:`CurrentContext`, where the reading is gone and the stamp
+        is the only thing left saying who produced the value and when. This
+        validator's job is to keep the copy faithful, not to argue it away.
+
+        **On the type rather than in the ``Reader`` conformance suite**, on two
+        grounds. It is *stronger*: the suite binds implementations of ``Reader``,
+        while a validator reaches every construction path — a fixture, a fake, a
+        library consumer — the same reason ADR-0092 §2 put its rule on
+        :class:`Provenance` rather than at the ``MemoryPolicy`` gate. And it keeps
+        the rule additive on a type ADR-0096 already touches instead of adding an
+        item to another ADR's enumerated suite.
+
+        Admissible under ADR-0086 §3's test — "does it refuse something that
+        already worked" — because ``facet`` is a new field: no persisted or
+        in-flight reading can fail it, and it is vacuous when ``facet`` is
+        ``None``.
+
+        Raises:
+            ValueError: If the facet's ``source``, ``read_at`` or ``as_of``
+                differs from this reading's. Each is checked and reported
+                separately: a facet stamped with a different source than the
+                reading that carried it attributes content and freshness to the
+                wrong system.
+        """
+        if self.facet is None:
+            return self
+        mismatches = [
+            f"{field} ({getattr(self.facet, field)!r} != {getattr(self, field)!r})"
+            for field in ("source", "read_at", "as_of")
+            if getattr(self.facet, field) != getattr(self, field)
+        ]
+        if mismatches:
+            msg = (
+                f"a reading's facet carries that reading's own stamp, unchanged; "
+                f"these differ: {', '.join(mismatches)} (ADR-0096 §5)"
+            )
+            raise ValueError(msg)
+        return self
 
 
 # --- situational context: the assembled "right now" (ADR-0008) ---------------
@@ -2113,9 +2414,46 @@ class TimeOfDay(StrEnum):
 class CurrentContext(BaseModel):
     """The situational "right now" that shapes a response (see ADR-0008).
 
-    A temporal core today; future facets (calendar, tasks, device, ...) are added
-    as optional fields when their source subsystems exist. Advisory, not durable
-    state: it is assembled fresh per request and never stored.
+    A temporal core plus one facet today; the remaining facets (tasks, device,
+    ...) are added as optional fields when their source subsystems exist, each
+    typed as a concrete :class:`ContextFacet` subclass (ADR-0096 §1). Advisory,
+    not durable state: it is assembled fresh per request and never stored.
+
+    **One optional field per facet, and never a mapping.** A
+    ``facets: Mapping[str, ContextFacet]`` container looks like it saves nine
+    future edits and instead moves three properties out of the type system:
+    ``extra="forbid"`` stops catching an internal source that contributes an
+    unknown facet, because every key is admissible; the assembler's collision
+    check becomes hand-written key arithmetic; and every consumer receives an
+    object whose type says nothing about what it holds. That last one decides it —
+    a run-time-keyed container of facets **is** the ``Mapping[str, object]``
+    ADR-0008 §2 deliberately confines to ``context/``, promoted into ``core``
+    under a different name.
+
+    **``None`` is the single absence, and it carries no further meaning**
+    (ADR-0096 §4, ADR-0097 §5). A facet field is present when a reading for it was
+    produced during this assembly and ``None`` otherwise; the ``None`` does not
+    distinguish unconfigured, disabled, never-read, ungranted, failed or empty,
+    and no consumer may infer which it was. **No facet and no field of this type
+    reports a source's configuration, enablement or grant state** — this value
+    reaches a prompt through ``planning``'s request rendering, and a field saying
+    "the calendar is disabled" is an operator fact wearing situational clothes
+    that a model will answer by asking the user to enable it. That is a grant
+    conversation conducted by a field nobody designed. Whoever needs to
+    distinguish the states is an operator, and the assembler's own logs already
+    serve them.
+
+    Attributes:
+        now: The tz-aware reference instant this context describes.
+        time_of_day: The coarse local bucket ``now`` falls in.
+        is_weekend: Whether ``now`` is a local weekend day.
+        within_working_hours: Whether the local time falls in the configured
+            working-hours window.
+        calendar: What the calendar said during this assembly, or ``None``
+            (ADR-0096 §6). Built from a reading taken during the assembly that
+            returns it — never served from a cached, carried-over or previously
+            assembled reading, and a failed read yields ``None`` rather than the
+            previous value (§3).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -2125,6 +2463,13 @@ class CurrentContext(BaseModel):
     is_weekend: bool
     within_working_hours: bool = Field(
         description="Whether the local time falls in the configured working-hours window.",
+    )
+    calendar: CalendarFacet | None = Field(
+        default=None,
+        description=(
+            "What the calendar said during this assembly; None says nothing "
+            "beyond its absence (ADR-0096 §4)."
+        ),
     )
 
 
