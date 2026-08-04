@@ -443,13 +443,18 @@ where every other check in this corpus starts.
 ### 6. Identification: a label, carried verbatim, resolving to nothing
 
 > **Normative.** `about_person` holds a label as the user or the source stated
-> it. It is not an identifier, not a key, and not a reference. Nothing resolves
-> it, and no store, producer, surface or later lane may treat two equal labels as
-> the same person or two unequal labels as different people.
+> it. It is not an identifier, not a key, and not a reference: under this ADR
+> nothing resolves it, and no store, producer, surface or lane may treat two
+> equal labels as the same person or two unequal labels as different people.
 
-> **Normative.** No component normalises, canonicalises, case-folds, trims beyond
-> the blank check, aliases or de-duplicates a subject label. It is stored as
-> given and returned as given.
+> **Normative.** Whether labels may be compared, matched, aliased or resolved to
+> a person — and by what rule — is reserved to a later ADR, which is the only
+> thing that may lift the clause above. No lane may reach that answer by
+> implementing one.
+
+> **Normative.** A subject label is stored exactly as given and returned exactly
+> as given. No component normalises, canonicalises, case-folds, trims beyond §1's
+> blank check, aliases or de-duplicates it on the way in or on the way out.
 
 > **Normative.** A belief has at most one subject. A belief about two people is
 > two beliefs.
@@ -463,11 +468,17 @@ takes none of those decisions, and the corpus already runs one:
 `EpisodicMemory.participants` has been free-text-resolving-to-nothing since
 ADR-0005 §1.
 
-**Why matching is not decided here, and why storage still is.** Verbatim storage
-is the one choice that leaves every matching rule available: a lane can add
-case-insensitive matching, aliasing or a registry on top of exact strings, and
-none of them can be added on top of labels that were silently normalised on the
-way in. The corpus has the same instinct about `reported_at`: ADR-0092 §3 refuses
+**Why matching is not decided here, and why storage still is — and the two
+clauses above are the split, not a contradiction.** The first fixes what holds
+*while nothing else is ratified*: comparison behaves as though the label resolved
+to nothing, which is the fail-safe reading and the only one available before a
+matching rule exists. The second says which instrument may change that — a later
+ADR, ratified, and never a lane deciding it in code. The third is what makes both
+affordable: verbatim storage leaves every matching rule available, since
+case-insensitive matching, aliasing or a registry can all be layered over exact
+strings, and none of them can be recovered from labels that were silently
+normalised on the way in. Storage is settled here **because** matching is not:
+the floor is what keeps the later answer open. The corpus has the same instinct about `reported_at`: ADR-0092 §3 refuses
 any local substitute for what a source said, because a value that is *nearly*
 right is harder to spot than one that is missing. A normalised name is nearly
 right.
@@ -687,9 +698,10 @@ already describes.
   sequenced them together. **Its dependency is satisfied by this ADR and it is
   not taken here**, because it changes the `MemoryStore` Protocol, which golden
   rule 5 and ADR-0015 §5 put in its own ratified, separately-merged ADR. It is
-  the next one. It will have to decide the matching rule §6 leaves open, and it
-  inherits §8's honest limit: a subject-scoped delete cannot reach a record whose
-  subject was never stated.
+  the next one. **It is the ADR §6's second clause reserves the matching rule to**
+  — "forget everything about Marta" is unanswerable without deciding whether
+  `"marta"` is the same subject — and it inherits §8's honest limit: a
+  subject-scoped delete cannot reach a record whose subject was never stated.
 - **Whether a stated subject scopes conflict detection.** `MemoryIngestor`
   detects conflicts on "same kind, highly similar content", so a third-party
   belief can already conflict with an owner belief and a `SUPERSEDE` can already
