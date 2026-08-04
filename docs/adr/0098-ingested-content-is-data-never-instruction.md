@@ -1,7 +1,46 @@
 # 98. Ingested content is data, never instruction — and the blast radius is bounded by construction
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-03
+- **Note (2026-08-03): ratified, and §7's tally of its own over-reaches was
+  corrected in place at that moment.** `Proposed` → `Accepted`, in the separate
+  lane #633 requires, after **both** required reviews came back green on the
+  content this ADR merged with: adversarial **APPROVE with no findings** and
+  architecture **APPROVE with no findings**, both at tree `e76a0270daf0`, round
+  14, churn ratio 1.4, each posted to PR #671 by `just ship`. That is the outcome
+  ADR-0070 §1 requires the ratifying edit to record.
+
+  **What was corrected:** §7's closing paragraph said "**Five times across eight
+  rounds** this document reached past what the tree or its own definitions
+  supply" and enumerated five instances, the last found on round 8. **The
+  document records a sixth of exactly that shape fifty lines below it**: §8's
+  second clause exists because an earlier draft "obliged something no surface
+  could do", which adversarial review found on **round 10**. The tally was
+  written at the round-8 repair and never moved. Ratified unaltered, an
+  `Accepted` ADR-0098 would undercount its own defect history in the one
+  paragraph whose stated purpose is to record it rather than fix it quietly. The
+  count and its enumeration now read **six across ten rounds**, naming §8's
+  clause. Round 9's §12 defect is deliberately **not** added: claiming a path
+  unreachable when it is reachable is an *under*-statement, not the reaching-past
+  shape this paragraph names. **The correction was made in place rather than
+  appended because this ADR still stood `Proposed`** — ADR-0070 §1 scopes its
+  no-rewrite rule to "**ratified** decision text", and ADR-0095 §7 states that
+  adjudication in full. **No decision changes:** the paragraph is unmarked prose
+  under this ADR's own ADR-0089 regime (§11), so it supplied no obligation before
+  the edit and supplies none after, and no normative clause acquires, loses or
+  alters one — which is ADR-0070 §1's own test applied to the ratifying edit
+  first. The tense of the header bullet naming the review set moves with the flip
+  for the same reason, and nothing else in the document is edited.
+
+  The document was re-read whole at this moment and its claims about the tree
+  were checked against the code rather than read for plausibility. **All hold,
+  and they hold for a mechanical reason**: nothing has merged since the commit
+  this ADR was written against (`87d9214`) but this ADR's own commits, so
+  `git diff --name-only 87d9214..main` names this file and nothing else. Both
+  projections §12 records as defective are still exactly as recorded, every
+  trigger in §12 is still unfired, `readers/` still holds one reader, and no
+  actuator exists. **ADR-0070 §1's no-rewrite rule now protects this text**, so
+  any later correction is an appended dated note.
 - **Decides a posture and adds no `core` surface.** No Protocol, no type, no error
   class, no field. That is a finding rather than a restraint. **Two** seams this
   posture could have used are absent, and each is deferred in §12 with its trigger
@@ -21,8 +60,8 @@
   grounds: the decision constrains prompt assembly across `planning`, `learning`
   and `orchestration` at once; it binds the later ADR that designates an actuation
   seam (§3); and it is a security posture, where a second independent lens is worth
-  more than the convention's minimum. It was **reviewed while `Proposed` and is
-  ratified only afterwards**, in a separate lane (#633).
+  more than the convention's minimum. It was **reviewed while `Proposed` and
+  ratified only after**, in a separate lane (#633).
 - **Filed as #668.** It **folds the downstream half of #641** and leaves that
   issue's reader-side half open; it **leaves #659** and takes a dependency on it
   (§8, §12); it **touches #663 without discharging it** and adds one named input to
@@ -707,11 +746,12 @@ there is anything to present. §12 defers it there, beside the marker it would r
 external belief it would retire, or a rationale quoting the source, carries genuine
 external spans, and the first two clauses govern those exactly as written.
 
-**Five times across eight rounds this document reached past what the tree or its own
+**Six times across ten rounds this document reached past what the tree or its own
 definitions supply** — §3's two model-obedience clauses, §3's transitive limb, §7's
-source attribution, §7's propagation clause, and §7's unbounded scope — and every
-one was caught by a reviewer rather than by its author. That is recorded rather than quietly fixed, for
-the reason ADR-0089 §2 records its own defect: the pull toward stating a property
+source attribution, §7's propagation clause, §7's unbounded scope, and §8's
+named-source clause — and every one was caught by a reviewer rather than by its
+author. That is recorded rather than quietly fixed, for the reason ADR-0089 §2
+records its own defect: the pull toward stating a property
 one layer further out than the data supports is a property of writing about this
 subject, not of any one draft.
 
