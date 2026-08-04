@@ -691,7 +691,11 @@ def test_current_context_constructs_and_forbids_extra_fields() -> None:
             time_of_day=TimeOfDay.MORNING,
             is_weekend=False,
             within_working_hours=True,
-            calendar="busy",  # type: ignore[call-arg]  # extra field must be rejected
+            # A facet field that does *not* exist. ``calendar`` was this test's
+            # subject until ADR-0096 made it real, which is the trap
+            # ``extra="forbid"`` exists to spring: an internal source contributing
+            # an unknown facet fails loudly rather than silently dropping data.
+            tasks="busy",  # type: ignore[call-arg]  # extra field must be rejected
         )
 
 
