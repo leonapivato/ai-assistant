@@ -1,7 +1,63 @@
 # 102. The grant surface is four engine operations, and the source is chosen from what the hub holds
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-04
+- **Note (2026-08-04): ratified.** `Proposed` → `Accepted`, in the separate lane
+  #633 requires, after **both** required reviews came back green on the content
+  this ADR merged with: adversarial **APPROVE with no findings** and architecture
+  **APPROVE with no findings**, both at tree `7a68b4b73a28`, round 9, churn ratio
+  1.1, each posted to PR #699 by `just ship`. That is the outcome ADR-0070 §1
+  requires the ratifying edit to record, and it is taken from that comment rather
+  than from a report: the comment's `<!-- ship:27be5ab17a27 -->` anchor is #699's
+  merged head, and `git rev-parse` resolves that head's tree to the tree named
+  above — the same tree as `74581c6`, the commit the PR merged as, so the content
+  the reviews read is the content that landed. Beyond the `Status` line the only
+  edit is the tense of the header bullet below that names the review set. **No
+  decision text is touched and no normative clause acquires, loses or alters an
+  obligation**, which is ADR-0070 §1's own test applied to the ratifying edit
+  first.
+
+  **No status premise had to be corrected, and the header bullet below asserts in
+  advance that none could be — an assertion checked here rather than taken.** It
+  reads "**Every reference below to a neighbouring ADR is to its text as merged
+  on 2026-08-04, not to its status on any later day.** ADR-0101 stood `Proposed`
+  when this ADR was written … and no clause here is written in the present tense
+  about another ADR's `Status`." The document was swept against that claim, site
+  by site. Every reference to ADR-0101 names its *text* and none names its
+  status: the Context's and §14's use of its §7 deferral of the export surface,
+  §13's two uses of its §11 ruling on ADR-0007 §1, and the review-set bullet's
+  "ADR-0093 through ADR-0101 each declared it for", which is about what those
+  documents declared and not about where they stand. The clause holds and it
+  covers what it had to. ADR-0101 was ratified in this same lane, alongside this
+  ADR, and the flip touched none of the text cited here.
+
+  **One merge landed between this ADR's authoring and its ratification.**
+  Ratified against `b86e8c2`, where `git diff --name-only 9f1832a b86e8c2` —
+  `9f1832a` being the commit this ADR reads the tree at, by name, in both the
+  Context and §12 — names this file and the three files of #701's sub-minute
+  zone-offset fix, and nothing else. #701 changed `readers/__init__.py`,
+  `readers/_occurrences.py` and one reader test, none of which this ADR cites.
+  **Every claim this ADR makes about the tree was re-checked against the code at
+  `b86e8c2` rather than read for plausibility, and all hold**: `AssistantEngine`
+  still carries fifteen methods and `core/types.py`'s promoted-surface comment
+  still says twenty-four types; `build_engine` still takes
+  `grants: SourceGrants | None = None` and `Hub` still calls it without one;
+  `_build_calendar_reader` is still called twice, so two `CalendarReader`
+  instances are still built; `SqliteSourceGrantStore.__init__` still takes
+  `*, path` with no default and is still constructed nowhere outside
+  `tests/permissions/test_grants.py`; and §12's ten sites still claim five stores
+  — the seven `src/` modules and the three test modules it enumerates by name.
+
+  **No deferral of this ADR has fired, and none of the lanes §12 describes has
+  landed.** #684 and #675 are open, and the contract lane is #702 — open, and
+  blocked on this ratification, which is #633's sequence working rather than a
+  claim going stale.
+
+  **One present-tense clause was checked and deliberately left**: the bullet
+  below says "a separate lane ratifies it" of ADR-0101. It states the mechanism
+  #633 mandates rather than ADR-0101's status, and it is what happened here.
+  **ADR-0070 §1's no-rewrite rule now protects this text**, so any later
+  correction is an appended dated note.
 - **Decides the client-facing surface ADR-0097 §9 names as owed.**
   `AssistantEngine` gains **four** methods — `grantable_sources`, `grant`,
   `revoke` and `recent_grants` — `core/types.py` gains **one** type,
@@ -18,10 +74,10 @@
   PR carrying this ADR touches neither — it is prose only. The set is taken
   anyway because the *decision* is `core` surface, which is what ADR-0093
   through ADR-0101 each declared it for, and this one extends the engine
-  Protocol ADR-0085 promoted. Reviewed while `Proposed` and ratified only after,
-  in a separate lane (`CONTRIBUTING.md` → "Contract ADRs land before their
-  implementation"; #633 records why the flip cannot ride in the PR that carries
-  it).
+  Protocol ADR-0085 promoted. It was reviewed while `Proposed` and ratified only
+  after, in a separate lane (`CONTRIBUTING.md` → "Contract ADRs land before their
+  implementation"; #633 records why the flip could not ride in the PR that
+  carried it).
 - **Discharges ADR-0097 §9's last clause**, which reads "The `AssistantEngine`
   method signatures for these operations, the promoted result types, and their
   wire frames are **not decided here**. They are owed as their own contract ADR,
