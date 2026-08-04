@@ -902,6 +902,15 @@ class AuditTrailContract:
         did not ask for. ``SqliteAuditTrail.recent`` is where that reasoning is
         written out, and it is the implementation this clause was a property of
         rather than of the contract until now (#679).
+
+        **This decides nothing; the ratified Protocol already did.**
+        ``AuditTrail.recent``'s ``Raises:`` names ``ValueError`` for one input and
+        one only — "if ``limit`` is not strictly positive" — and rejects clamping
+        *for that input*, because a caller asking for something meaningless should
+        learn so. ``2**63`` is strictly positive, so serving it is what the
+        contract as written already requires; anything else would be a raise the
+        Protocol does not document. ``MemoryStore.list_beliefs`` shows what an
+        upper refusal looks like when one is meant, and no read here has one.
         """
         await trail.record(decision("d-1"))
 

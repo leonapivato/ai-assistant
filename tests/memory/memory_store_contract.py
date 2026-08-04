@@ -602,15 +602,22 @@ class MemoryStoreContract:
         driver — neither ``ValueError`` nor ``MemoryStoreError``, so it leaves this
         seam's error boundary through a hole while every other clause here passes.
 
-        **Clamped, where ``list_beliefs`` refuses.** The two are not in tension and
-        the Protocol says so: a paged enumeration's bound is a position in a total
-        order, where an out-of-range value is a caller error worth reporting
-        (ADR-0073 §2), while this one is a cut applied *after* a ranking, where a
-        bound past every candidate asks for the whole ranking and can be served.
-        ``SqliteMemoryStore._search_sync`` already clamps it — to sqlite-vec's own
-        KNN ceiling, which is the lower of the two bounds and subsumes the bind
-        range (issue #115) — and this pins it as a property of the contract rather
-        than of that one implementation (#679).
+        **Clamped, where ``list_beliefs`` refuses — and this decides nothing, the
+        ratified Protocol already did.** ``list_beliefs`` documents ``ValueError``
+        outside ``[0, 2**63)`` and then names the exception in the same breath:
+        that refusal "deliberately differs from ``search``, whose non-positive
+        ``limit`` matches nothing: that limit is a ranking cut applied after a KNN
+        and can neither invert into unboundedness nor reach a bind parameter".
+        ``search``'s own ``Raises:`` documents no ``ValueError`` at all. So the
+        contract as written already puts a wide positive ``limit`` on the served
+        side of the line, and this pins that rather than adding to it.
+
+        The clamp is where the mechanism catches up with the promise:
+        ``SqliteMemoryStore._search_sync`` *does* carry ``limit`` into a bind
+        parameter, as the KNN's ``k``, and clamps it to sqlite-vec's own ceiling —
+        the lower of the two bounds, which subsumes the bind range (issue #115).
+        Until now that was a property of one implementation and of nothing else
+        (#679).
         """
         await store.add(_semantic("1", "coffee"))
 
