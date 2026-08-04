@@ -44,9 +44,16 @@ held?"; ADR-0092 §1 hangs an `Attestation` off it to answer "what reported it,
 and when that source said so". ADR-0045 §2 puts a `Validity` window on the
 envelope to answer "when is this live".
 
-No field answers **about whom**. There is no subject anywhere in `core/types.py`
-and none in any Protocol. So every belief the store holds is implicitly about
-one person, and which person that is has never been written down.
+No field answers **about whom** — with one near-miss the next lane must not trip
+over. `core/types.py` *does* carry a `subject`, on `FeedbackEvent`, exposed by
+the CLI as `assistant learn --about` and described as "Optional scope/context,
+e.g. 'email tone'". `RuleBasedFeedbackProcessor` lands it as
+`PreferenceMemory.context`, which scopes *when a preference applies* — and
+`SemanticMemory` takes no such field at all, so an asserted fact carries nothing
+of it. **The word is already taken, for a different axis, in only one of the two
+kinds it can reach.** No belief record and no Protocol in the tree carries a
+person-subject. So every belief the store holds is implicitly about one person,
+and which person that is has never been written down.
 
 ### That is tolerable only under a framing nobody has ratified
 
@@ -59,23 +66,38 @@ The phrase "world model" appears nowhere in `docs/`, `VISION.md` or `README.md`
 as of this ADR's date. The framing is load-bearing and unwritten, which is the
 condition this corpus treats as a defect rather than a convenience.
 
-### The channel is already open, and this is not a future problem
+### Third-party beliefs are not a future problem; two shipped paths write them
 
-`assistant observe` is a shipped CLI command in `interfaces/cli.py`. It needs no
-configuration and no grant, it defaults to the most recently active
-conversation, and it asks the engine to distil beliefs from that conversation's
-turns (ADR-0077). Say "my wife prefers window seats" in a conversation, run
-`observe`, and what lands is a belief that is *about* someone else and
-structurally indistinguishable from a belief about the owner.
+**The sanctioned path is `assistant learn`.** It takes free text, and
+`RuleBasedFeedbackProcessor` writes it with `source=MemorySource.USER_ASSERTED`
+at full confidence. Nothing in the command, the type or the processor restricts
+whom the content is about: `assistant learn "Marta prefers window seats"` is an
+ordinary, supported, fully-warranted `USER_ASSERTED` belief today, and it is
+about someone who is not the owner. This is not a defect to close — under §1 it
+is exactly right — but it means the store is *already* accumulating third-party
+beliefs deliberately, with no way to tell them from the rest.
 
-Read-only ingestion widens that channel; it does not open it. The one thing
-that would make this an ADR to write later rather than now is if nothing could
-yet produce a third-party belief, and something already can.
+**The incidental path is `assistant observe`**, shipped in `interfaces/cli.py`,
+needing no configuration and no grant, defaulting to the most recently active
+conversation. Here the corpus has already tried to rule the question and could
+not carry the ruling: ADR-0077 §2 warrants a proposal "only when the belief is
+**about the user**" — an about-whom obligation stated in prose, with no field to
+express it, no gate to check it, and by §2's own admission "the half of that
+principle a gate cannot enforce". Say "my wife prefers window seats" in a
+conversation and run `observe`, and whatever lands is structurally
+indistinguishable from a belief about the owner, including to the rule that was
+supposed to prevent it.
+
+**That pair is the argument for writing this now.** The corpus does not lack an
+opinion about whom a belief is about — ADR-0077 §2 has one. What it lacks is
+anywhere to *put* the answer, so the opinion binds nobody and the sanctioned
+path ignores it by design. Read-only ingestion widens the channel; it does not
+open it.
 
 ### Three consequences follow, and only the first is this ADR's
 
-1. **Third-party beliefs already exist as a possibility**, per above. This ADR
-   rules the frame they sit in.
+1. **Third-party beliefs are already being written**, per above, by a sanctioned
+   path and an incidental one. This ADR rules the frame they sit in.
 2. **Deletion and export by subject are unimplementable.** ADR-0007 §1's surface
    is `delete(record_id)`, `clear()` and `export()` — one record, everything, or
    the whole store. "Forget everything about Marta" has nothing to index on.
@@ -171,6 +193,13 @@ owner's model rather than an account on the owner's hub, then "about whom"
 becomes the **only** axis left that can carry them. Closing the principal axis
 loads the subject axis; it does not relieve it.
 
+**The corpus has already written an obligation it cannot express on this axis.**
+ADR-0077 §2 warrants an observer proposal "only when the belief is **about the
+user**" — a rule *about the subject*, ratified, binding on a shipped producer,
+and carried by no field. That is the axis asserting itself in prose because it
+has nowhere else to go, and it is the strongest available evidence that §1 has
+not made the question go away.
+
 The corpus already contains the vocabulary for exactly this move. ADR-0092's
 `Attestation` exists because folding `EXTERNAL` into another band "hands an
 integration the standing reserved for the user's own word" — a distinction of
@@ -241,15 +270,26 @@ is a floor on what a surface may imply, discharged today by not implying it.
 
 - **The subject axis itself** — whether a belief names its subject, in what
   type, with what identity, and what an absent subject means. It is the next
-  ADR, taken **with the producer in hand** per ADR-0073 §4's discipline. Fires
-  with the first producer that writes a belief about someone other than the
-  owner deliberately, rather than incidentally as `observe` can today. One
-  pointer for that lane, and it is a pointer rather than a ruling: ADR-0092 §1
-  put `Attestation` on `Provenance` because who-reported-it is a producer-set
-  fact "about *trust and source*", while ADR-0045 §2 put `Validity` on the
-  envelope as "a lifecycle property of *the record's life in the store*". A
-  subject is neither — it is what the belief is *about* — and that argues the
-  envelope. **That lane decides it; this one does not.**
+  ADR. **The producer half of ADR-0073 §4's "with a producer in hand" is already
+  satisfied and this deferral does not rest on it**: `assistant learn` writes
+  third-party beliefs today and `observe` can (Context). What is missing is the
+  **consumer** — something that must actually tell one subject from another, and
+  whose need decides the field's shape. Adding the axis before that is the
+  surface-with-no-consumer refusal ADR-0045 §1, ADR-0028 §7 and ADR-0092 §10
+  each made in their own lane. **Fires with the first consumer that must
+  distinguish**, and three are visible: subject-scoped delete or export (below),
+  a rendering that must satisfy §4's floor by naming the subject rather than by
+  declining to imply it, and speaker attribution on the voice leg (#665).
+
+  Two pointers for that lane, neither a ruling. **On placement:** ADR-0092 §1 put
+  `Attestation` on `Provenance` because who-reported-it is a producer-set fact
+  "about *trust and source*", while ADR-0045 §2 put `Validity` on the envelope as
+  "a lifecycle property of *the record's life in the store*". A subject is
+  neither — it is what the belief is *about* — and that argues the envelope. **On
+  the name:** `subject` is taken. `FeedbackEvent.subject` is a preference scope
+  (Context), so a person-subject reusing the word inherits a collision in the one
+  vocabulary that already writes beliefs. **That lane decides both; this one does
+  not.**
 - **Subject-scoped delete and export** — ADR-0007's `delete`/`clear`/`export`
   gaining a dimension, so that "forget everything about Marta" and "show me
   everything you hold about Marta" are expressible. **Both, not just delete**:
@@ -373,10 +413,11 @@ to prevent.
   refused rather than left unmentioned.
 - **Decide nothing; wait for the producer.** This is the corpus's default
   discipline (ADR-0073 §4) and it is right about *fields*, which is why §5
-  defers the subject axis. It is wrong about *frames*: a frame left undecided
-  does not stay open, it gets fixed by whatever the first implementer assumes,
-  and the first implementer here is a shipped `observe` command already
-  producing third-party beliefs.
+  defers the subject axis — on the missing *consumer*, since the producers have
+  already shipped. It is wrong about *frames*: a frame left undecided does not
+  stay open, it gets fixed by whatever the first implementer assumes, and
+  `assistant learn` has been writing third-party beliefs under an unwritten
+  frame since it shipped.
 - **Rule the frame and the subject field together, in one ADR.** Rejected for
   the reason ADR-0073 §4 gives — no producer is in hand, so the field would be
   guessed at — and because bundling them puts a contract-surface decision behind
