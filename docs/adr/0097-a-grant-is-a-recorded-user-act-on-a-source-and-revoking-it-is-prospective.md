@@ -373,8 +373,10 @@ by prose rather than mechanism".
 > or individually deleted. Erasure is wholesale only.
 
 > **Normative.** `record` stores a **detached, validated snapshot**, recursively
-> over reachable state, and never retains the caller's object. Every query returns
-> a detached snapshot likewise.
+> over reachable state, and never retains the caller's object. Every query on
+> **either** seam returns a detached snapshot likewise — including
+> `SourceGrants.live`, which is the only member the narrow seam has and the one
+> answer §5's gate rests on.
 
 > **Normative.** At most one **live** grant exists per source at any instant. A
 > grant recorded for a source that already has a live grant is refused; narrowing
@@ -943,10 +945,23 @@ Protocol"); both Protocols' triads are that one change, not two:**
 
 2. **The shared conformance suites** — the clauses that bind **every**
    implementation, which are the ones expressible without a backing technology.
-   `SourceGrants` owes the first clause below and nothing else; `SourceGrantStore`
-   owes all of them. Each maps to a ruling above:
+   `SourceGrants` owes the **first two** clauses below; `SourceGrantStore` owes all
+   of them. Each maps to a ruling above:
    - A recorded grant is returned by `live` for **each** use in its scope, and not
      for a use outside it (§2).
+   - **`live` returns a detached snapshot**, and the case is written as a mutation:
+     mutating the returned grant's `__dict__` — `scope` in particular — leaves the
+     next `live` answering exactly as it did before (§4).
+
+     **This binds the narrow seam and not only the store, which is where it would
+     have been missed.** `live` is the *only* member of `SourceGrants`, so a
+     query-only implementation that handed back its own object would satisfy a
+     detachment rule written over "queries on the store" while leaking the one
+     value in the system that decides whether a source may be read. The concrete
+     bypass is worth naming because `frozen=True` does not close it: a caller
+     granted `FACET` alone mutates `scope` on the object `live` returned to include
+     `INGEST`, and the driver's next check authorises ingestion the user never
+     granted. That is §5's gate defeated through its own answer.
    - Recording a second grant for a source with a live one raises
      `InvalidGrantError`; after a revocation, a new grant for that source is
      accepted (§4).
