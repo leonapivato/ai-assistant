@@ -569,15 +569,21 @@ implied.
 ### 7. The escalation surface is a rendering target too
 
 > **Normative.** A surface that presents a proposal, a question, a ruling, or a
-> belief to the user presents every external span within it as **third-party
-> content**: words the surface does not attribute to the assistant and does not
-> attribute to the user.
+> belief to the user presents every span **its projection identifies as external**
+> as **third-party content**: words the surface does not attribute to the assistant
+> and does not attribute to the user.
 
 > **Normative.** That presentation holds under §2's non-forgeability property, read
 > against the presenting surface's own syntax.
 
+> **Normative.** A projection that carries content which may be external, and
+> carries no origin for it, is **defective in that respect**. The obligation falls
+> on the ADR that defines or next revises that projection, never on the surface
+> reading it, and never as licence to present the span as the assistant's words.
+> §12 names the ones known when this was written.
+
 > **Normative.** Naming **which** source is §8's obligation, and is owed only on a
-> surface that holds the source. This clause is met without it.
+> surface that holds the source. The first clause is met without it.
 
 **Every mitigation in this ADR terminates at a human, and that is where the text
 arrives least examined.** §4's fourth clause routes a suspect proposal to a user
@@ -609,8 +615,29 @@ assertion, `QuestionStage` projects it into `core.types.Question`, and that mode
 cannot say *from your calendar*. Verified against `core/types.py`; the finding
 holds.
 
-**The repair is to state the obligation at the granularity that carries the safety
-property, not at the one that reads best.** What defeats the phishing case is the
+**The third clause is what makes this section terminable, and it arrived four
+rounds late.** Rounds 5 through 8 each found a different projected field that
+cannot carry an origin — `Question` has no `Attestation`, `Retirement` has neither
+band nor source, and the §4 seam's marker does not exist — and each was answered by
+narrowing the clause around that one field. That is whack-a-mole, and the fourth
+instance is what made the shape visible: **§7 was written as an unbounded obligation
+over projections that were never designed to carry provenance**, so every field is a
+finding waiting to happen. The third clause closes the class instead. A surface is
+bound by what its projection gives it; a projection that can carry an external span
+and no origin for it is defective, and the debt sits with the ADR that owns that
+projection. A fifth such field is already answered.
+
+**Two are known and named now.** `core.types.Question` — `extra="forbid"`,
+`frozen=True` — carries `content`, `kind`, `band`, `rationale`, `reason` and no
+`Attestation` and no `reported_by`. `core.types.Retirement` carries `record_id` and
+`content` and nothing else, so a question's "what accepting would retire" can render
+an external calendar record with no marker at all: a user assertion conflicting with
+both a prior assertion and an attested record produces exactly that. Both verified
+against `core/types.py`. Neither is a licence — a surface that cannot say *this is
+from a source* must not therefore say *this is the assistant's*.
+
+**The repair to the second clause is to state the obligation at the granularity that
+carries the safety property, not at the one that reads best.** What defeats the phishing case is the
 user knowing the words are **somebody else's**. Naming the source is *legibility*,
 which is §8's subject and which §8 already bounds to source granularity and no
 finer. Splitting them that way keeps the safety half binding on every surface today,
@@ -652,10 +679,10 @@ there is anything to present. §12 defers it there, beside the marker it would r
 external belief it would retire, or a rationale quoting the source, carries genuine
 external spans, and the first two clauses govern those exactly as written.
 
-**Four times across seven rounds this document reached past what the tree or its own
+**Five times across eight rounds this document reached past what the tree or its own
 definitions supply** — §3's two model-obedience clauses, §3's transitive limb, §7's
-source attribution, and §7's propagation clause — and every one was caught by a
-reviewer rather than by its author. That is recorded rather than quietly fixed, for
+source attribution, §7's propagation clause, and §7's unbounded scope — and every
+one was caught by a reviewer rather than by its author. That is recorded rather than quietly fixed, for
 the reason ADR-0089 §2 records its own defect: the pull toward stating a property
 one layer further out than the data supports is a property of writing about this
 subject, not of any one draft.
@@ -874,6 +901,19 @@ support.
   `PermissionDecision` and §8 is written not to assume one. **Fires with the first
   surface obliged to show that a proposal was refused or capped**, which #659's
   channel question reaches first.
+- **The projections that cannot carry an origin**, which §7's third clause makes
+  their owners' debt rather than a surface's: `core.types.Question` (no
+  `Attestation`, no `reported_by`) and `core.types.Retirement` (no band, no source).
+  Both are `core` surface. Two distinct things are owed on them and they have
+  different weight: **origin at all** — enough for a surface to know a span is not
+  the assistant's, which is §7's safety half and which `Retirement` lacks entirely —
+  and **which source**, which is §8's legibility half and which `Question` lacks.
+  Neither is reachable as a live defect today: nothing on `main` routes an external
+  span into either without something beside it in the same view that says where it
+  came from. **Fires with the ADR that next revises either**, and with the second
+  reader, which is the moment "attested" stops identifying the source by
+  elimination — ADR-0093 §11's trigger for the source registry and the display
+  label, and plausibly one decision with them.
 - **A presentation state for an inference that rests on external evidence.** Not a
   §7 case — §1 makes external content a property of a span's recorded origin, and a
   derived proposal's text is the assistant's own — but a real legibility question:
@@ -881,15 +921,6 @@ support.
   own behaviour, and ADR-0073 §4's "why it is held" is where it would be said. It
   needs the marker of the deferral above to exist before there is anything to
   present, so it **fires with that seam** and is plausibly one decision with it.
-- **A question that can name its source.** `core.types.Question` carries `band` and
-  no `Attestation`, so the durable-question surface can say *attested* and not *from
-  which source* — §7's third clause records that this is deliberate rather than
-  overlooked. It is `core` surface (a field on `Question` and whatever `QuestionStage`
-  projects it from) and it is **legibility, not safety**: the phishing defence rides
-  on `band`, which is already there. **Fires when a second reader exists**, which is
-  the first moment "attested" stops identifying the source by elimination — the same
-  trigger ADR-0093 §11 gives the source registry and the display label, and plausibly
-  one decision with them.
 - **The actuator and egress design** — ADR-0017 §3's fourteen conditions, the
   approval and limit machinery of VISION §Principle 3, and **#241**'s open rule for
   choosing among several capable tools, which #668 names as inheriting this posture
