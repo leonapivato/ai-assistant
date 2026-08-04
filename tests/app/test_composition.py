@@ -1104,6 +1104,88 @@ async def test_build_engine_registers_no_calendar_source_without_a_path(
         await engine.aclose()
 
 
+def _in_progress_calendar(directory: Path) -> Path:
+    """A source holding one entry that is happening **right now**.
+
+    Anchored on the wall clock for :func:`_one_event_calendar`'s reason — this
+    layer wires the reader's own default clock, and inventing a second one here
+    would be the second timezone/clock source ADR-0093 §7b refuses. Half an hour
+    either side of now, so the entry is unambiguously in progress at whatever
+    instant the read lands on (#658 tracks the live-clock dependency this shares).
+    """
+    began = datetime.now(UTC) - timedelta(minutes=30)
+    ends = began + timedelta(hours=1)
+    stamp = "%Y%m%dT%H%M%SZ"
+    path = directory / "in-progress.ics"
+    path.write_bytes(
+        (
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//ai-assistant tests//EN\r\n"
+            "BEGIN:VEVENT\r\nUID:e1\r\nDTSTAMP:20260101T000000Z\r\n"
+            f"DTSTART:{began.strftime(stamp)}\r\nDTEND:{ends.strftime(stamp)}\r\n"
+            "SUMMARY:Dentist\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        ).encode()
+    )
+    return path
+
+
+async def test_a_granted_calendar_reaches_the_assembled_context_as_a_facet(
+    tmp_path: Path,
+) -> None:
+    """The facet half, end to end over the concrete reader (ADR-0096 §8).
+
+    The claim nothing below this layer can make: ``lint-imports`` forbids every
+    subsystem to import ``ai_assistant.readers``, so this is the only place a real
+    ``CalendarReader`` and a real provider meet. It is the counterpart to the
+    ingestion end-to-end case — a file on disk becomes a *facet* rather than a
+    belief — and it is what would fail if the reader stopped populating
+    ``SourceReading.facet`` and the adapter went back to contributing ``{}`` for
+    every deployment.
+
+    **It asserts the stamp and the count and nothing about the entry**, because the
+    facet carries no entry text at all: "Dentist" reaches memory through the
+    proposals and must not reach the situational context by a second route with a
+    different stamp (ADR-0096 §6).
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        calendar_reader_path=_in_progress_calendar(tmp_path),
+    )
+    engine = build_engine(settings, data_dir=tmp_path, grants=_calendar_grants())
+    try:
+        context = await engine._loop._context.assemble()
+
+        assert context.calendar is not None
+        assert context.calendar.source == CALENDAR_READER_NAME
+        assert context.calendar.read_at <= context.calendar.covers_until
+        assert context.calendar.entries_in_progress == 1
+    finally:
+        await engine.aclose()
+
+
+async def test_an_ungranted_calendar_reaches_the_context_as_nothing_at_all(
+    tmp_path: Path,
+) -> None:
+    """And the ungranted deployment is observationally identical to an unread one.
+
+    ADR-0097 §5's last clause over the concrete reader: the file below holds an
+    entry that is happening right now, and the assembled context says nothing
+    about it and nothing about why. ``CurrentContext`` never reports a source's
+    grant state, because a field that did would be a model being handed a script
+    to ask for access.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        calendar_reader_path=_in_progress_calendar(tmp_path),
+    )
+    engine = build_engine(settings, data_dir=tmp_path, grants=FakeSourceGrants())
+    try:
+        context = await engine._loop._context.assemble()
+
+        assert context.calendar is None
+    finally:
+        await engine.aclose()
+
+
 async def test_the_two_consumers_hold_separate_reader_instances(
     tmp_path: Path,
 ) -> None:
