@@ -17,9 +17,9 @@
   surface; `scripts/ship.sh` gates the architecture lens on those two files
   changing, and would accept adversarial alone. The set is taken anyway, on three
   grounds: the decision constrains prompt assembly across `planning`, `learning`
-  and `orchestration` at once; it binds later ADRs, including ADR-0017 §3's
-  designation conditions (§3); and it is a security posture, where a second
-  independent lens is worth more than the convention's minimum. It was **reviewed
+  and `orchestration` at once; it binds the later ADR that designates an actuation
+  seam (§3); and it is a security posture, where a second independent lens is worth
+  more than the convention's minimum. It was **reviewed
   while `Proposed` and is ratified only afterwards**, in a separate lane (#633).
 - **Filed as #668.** It **folds the downstream half of #641** and leaves that
   issue's reader-side half open; it **leaves #659** and takes a dependency on it
@@ -204,9 +204,11 @@ consequences are larger.
 - **It may not decide the reader's own adversary model** — hostile `.ics`, a
   compromised sync peer, a public feed's tier. That is #641's reader-side half and
   §10 leaves it there.
-- **It may not decide the actuator or egress design.** ADR-0017 §3's fourteen
-  conditions are their own lane's. §3 states an obligation those conditions
-  inherit; it does not write them.
+- **It may not decide the actuator or egress design, and may not narrow ADR-0017
+  §3 or ADR-0021 §6 in the attempt.** ADR-0017 §3's fourteen conditions and
+  ADR-0021 §6's standing grants are ratified and are their lanes' to extend. §3
+  states one obligation the actuator lane inherits, adds no condition to that list,
+  and leaves the one question that would have narrowed both open by name.
 - **It may not narrow ADR-0021's audit trail into a memory-ruling trail.** ADR-0021
   types the trail on `PermissionDecision` and mentions memory only as a contrast;
   a durable record of a memory ruling is an unclaimed gap, and §8's legibility rule
@@ -322,34 +324,61 @@ conveyance must have; the lane that finally lands still owns the phrasing of bot
 > read on position rather than on labelling, and both must hold.
 
 > **Normative.** No actuator is selected, parameterised, or confirmed by external
-> content, nor by a model output produced from external content without an
-> intervening user decision on that action.
+> content.
 
-> **Normative.** The clause above binds every later ADR that designates an egress
-> or actuation seam, including the conditions ADR-0017 §3 requires for designating
-> the `tools/` seam.
+> **Normative.** The clause above binds the later ADR that designates an actuation
+> or egress seam. It adds no condition to ADR-0017 §3's list and relaxes none of
+> them; those fourteen stand exactly as written.
 
-**The second clause is ruled now because it is free now and expensive later.** No
+> **Normative.** Whether a **standing** authorisation — ADR-0021 §6's standing
+> grants, or ADR-0017 §3's "**Recipient authorisation that traces to a user
+> decision or a standing user policy**" — may cover an action a model selected
+> while reading external content is **not settled here**. The lane that designates
+> an actuation seam decides it explicitly, and may not inherit an answer from a
+> rule written before any actuator existed.
+
+**The actuator clause is ruled now because it is free now and expensive later.** No
 actuator exists on `main`: `Role.TOOL` is rejected at the provider seam, no tool
 transmits (ADR-0017 §1), and the roadmap defers tools to MCP. This is the moment
 the rule costs nothing to state and constrains nobody's shipped code — and the
 moment after the first actuator lands is the moment it becomes a supersession
 instead of a paragraph. #668 names the "lethal trifecta" — attacker-authored input,
 accumulated private memory, actuators with egress — and this ADR rules the third
-leg negatively while it can, leaving the actuator's own design entirely open.
+leg negatively where it can, leaving the actuator's own design open.
 
-**"Without an intervening user decision on that action" is the whole of the
-exception, and it is narrow deliberately.** A user who reads "your 3pm moved" and
-says "cancel it" has made a decision about an action; the calendar entry that
-prompted them is not the authority, the user is. What the clause forbids is the
-system closing that loop itself: content selecting the tool, content supplying the
-parameters, or content satisfying a confirmation. The permission chassis already
-holds the shape — ADR-0042 §4 keeps the adapter from authoring the outcome, and
-"`ActionPolicy.resolve`… is what turns `approved` into an `ALLOW` or `DENY`" — and
-this clause says which inputs may never reach that resolution as authority.
+**The line is drawn on the *span*, not on the model output downstream of it, and
+an earlier draft drew it in the wrong place.** That draft forbade an actuator
+driven "by a model output produced from external content without an intervening
+user decision on that action", which is two defects in one sentence. It would
+have narrowed ADR-0017 §3's standing-user-policy condition and ADR-0021 §6's
+standing grants while §11 claimed it narrowed neither — architecture review found
+exactly that on the first round. And it would have been a bound this ADR cannot
+obtain: §5 establishes that "produced from external content" is **not recoverable**
+once a model's output has been recorded truthfully, so a flat prohibition on it is
+the unobtainable bound §6's second clause forbids anyone from stating. Ruling on
+the span, where the origin is recorded, is the part that can actually be checked.
+
+**What the retained clause forbids, and why it collides with nothing.** The system
+closing the loop itself: content selecting the tool, content supplying the
+parameters, content satisfying a confirmation. ADR-0017 §3's recipient-authorisation
+condition is about *who may receive*, and its binding condition already insists that
+"What is transmitted is bound to what was authorised… and consumed unchanged" —
+content supplying arguments moves the semantic recipient those arguments select,
+which that condition is already fighting. ADR-0021 §6's standing grants authorise a
+*class of action*; nothing in them says content may choose one. The permission
+chassis holds the shape — ADR-0042 §4 keeps the adapter from authoring the outcome,
+and "`ActionPolicy.resolve`… is what turns `approved` into an `ALLOW` or `DENY`" —
+and this clause names which inputs may never reach that resolution as authority.
+
+**A user's own decision is never external content**, by §1: a user who reads "your
+3pm moved" and says "cancel it" has decided; the entry that prompted them is not
+the authority, they are. That is a consequence of §1's class, not an exception
+carved into this section.
 
 **It says nothing about which actions are permitted.** VISION §Principle 3 governs
-that, and ADR-0021 §6's standing grants are untouched and unnarrowed.
+that, and ADR-0021 §6's standing grants are untouched — the standing-authorisation
+clause above leaves the one question that could have narrowed them open by name
+rather than answering it.
 
 ### 4. Three ceilings on what external content may become
 
@@ -559,8 +588,9 @@ over it with a channel that does not exist. ADR-0021's trail is typed on
 No lane is owed by this ADR alone; each of these rides with the lane that would
 otherwise breach a clause.
 
-- **The prompt-assembly lane** (ADR-0072 §6's, still unbuilt) owes §2 in full for
-  `planner._render_request` and `observer._render_batch`: the marking, and a test
+- **The prompt-assembly lane** (ADR-0072 §6's, still unbuilt; filed as **#672**)
+  owes §2 in full for `planner._render_request` and `observer._render_batch`: the
+  marking, and a test
   that feeds a record whose `content` contains the assembler's own bullet, label,
   and header syntax and asserts that the assembled prompt still attributes every
   span correctly. That test is the clause; a test asserting only that a label is
@@ -651,10 +681,20 @@ clause by clause to the ADRs this one leans on hardest:
 - **ADR-0093 §4, ADR-0094 §5, ADR-0092 §4, ADR-0096 §6** are each *relied on* here
   as they stand — as the reason a rule holds by construction, or the shape a rule
   is copied from. None is narrowed or widened. **Addition.**
-- **ADR-0017 §3** is not amended by §3's third clause. Those conditions do not yet
-  exist as text; an obligation stated in advance for a lane to satisfy constrains
-  that future lane and changes nothing a reader of ADR-0017 does today.
-  **Addition.**
+- **ADR-0017 §3 and ADR-0021 §6** are not amended, and this is the bullet an
+  earlier draft got wrong. §3's fourteen conditions **do** exist as ratified text
+  and one of them — "Recipient authorisation that traces to a user decision **or a
+  standing user policy**" — is the clause a wider §3 would have narrowed, as would
+  ADR-0021 §6's standing grants for actions. The first draft of §3 forbade an
+  actuator driven by model output produced from external content absent a per-action
+  user decision, which reads directly onto both; architecture review found it on
+  round 1 and it was **narrowed rather than recorded as an amendment**, because the
+  narrowing was owed on this ADR's own merits (§3, and §5's unobtainability
+  argument) and not merely to avoid the record. As it now stands, §3 rules on the
+  *span* — content selecting, parameterising or confirming — which neither of those
+  clauses speaks to, and explicitly leaves the standing-authorisation question to
+  the actuator lane. Every sentence of both stays true and a reader of either acts
+  identically. **Addition.**
 
 **Nothing here is a supersession**, wholly or partially: no decision moves, and
 there is no sentence in the corpus a reader would now act differently on. So no
@@ -665,9 +705,8 @@ no file but this one.
 unmarked prose supplies no obligation and exists to determine what the marked
 clauses mean (ADR-0089 §3). Marking is forward-only (§5), and nothing ratified
 before it is drawn into the regime by it. **ADR-0089 itself stood `Proposed` at
-`87d9214`** — the state #622 records and ADR-0097's ratification note names — while
-ADR-0093, ADR-0094, ADR-0096 and ADR-0097 were each ratified carrying marks under
-it. This ADR follows that established practice rather than resolving the
+`87d9214`**, which is what **#622** records — while ADR-0093, ADR-0094, ADR-0096
+and ADR-0097 were each ratified carrying marks under it. This ADR follows that established practice rather than resolving the
 inconsistency, which is #622's and not this lane's; whichever way #622 is resolved,
 a marked ADR whose marks state its obligations is the reading both outcomes
 support.
@@ -694,13 +733,19 @@ support.
   `PermissionDecision` and §8 is written not to assume one. **Fires with the first
   surface obliged to show that a proposal was refused or capped**, which #659's
   channel question reaches first.
-- **The actuator and egress design** that §3's second clause constrains — ADR-0017
-  §3's fourteen conditions, the approval and limit machinery of VISION §Principle 3,
-  and **#241**'s open rule for choosing among several capable tools, which #668
-  names as inheriting this posture and which §3's second clause reaches directly: a
-  ranking influenced by content-derived text is content selecting the actuator.
-  **Fires with the first actuator.** §3 fixes what may never be
-  its authority and nothing else.
+- **The actuator and egress design** — ADR-0017 §3's fourteen conditions, the
+  approval and limit machinery of VISION §Principle 3, and **#241**'s open rule for
+  choosing among several capable tools, which #668 names as inheriting this posture
+  and which §3's actuator clause reaches directly: a ranking driven by an external
+  span is that span selecting the actuator. **Fires with the first actuator.** §3 fixes
+  what may never be an action's authority and nothing else about it.
+- **Whether a standing authorisation covers a content-triggered action** — §3's
+  last clause states the question and refuses to answer it, because answering it
+  would narrow ADR-0017 §3's standing-user-policy condition or ADR-0021 §6's
+  standing grants from an ADR with no actuator in hand. **Fires with the same lane**,
+  which must answer it explicitly. §5's unobtainability argument is an input: an
+  answer phrased over "output produced from external content" is not checkable, so
+  whatever is decided has to be decidable from recorded origin.
 - **Spoke-borne external content.** A bystander's speech is external content by §1
   and inherits §2, §3 and §4; the submission path, the per-spoke band ceiling and
   the custody handoff are ADR-0094 §5, §8 and §10's, deferred there on their own
@@ -729,7 +774,7 @@ touches every rendered record and every fixture that asserts on prompt text.
 `[E<n>]` label are both forgeable today, and the second one interacts with an
 evidence floor, so that lane is doing security work rather than formatting work and
 should be scoped as such. §7 adds an obligation to every client surface, present and
-future. And §3's second clause will be inconvenient for the first actuator lane
+future. And §3's actuator clause will be inconvenient for the first actuator lane
 exactly when a content-derived parameter looks obviously safe.
 
 **The accepted cost, named once more because it is the thing most likely to be
