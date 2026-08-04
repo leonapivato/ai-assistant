@@ -173,16 +173,18 @@ right a surface at all.
 
 ### 1. Two operations on `MemoryStore`, and the shapes differ because the risks do
 
-> **Normative.** `MemoryStore.export` gains one keyword-only argument,
-> `about_person: EncodableText | None = None`. `None` preserves its present
+> **Normative.** `MemoryStore.export` becomes
+> `async def export(self, *, about_person: EncodableText | None = None) -> list[MemoryRecord]`.
+> Its one new argument is keyword-only, and `None` preserves the method's present
 > meaning exactly — every retained record. A non-blank label returns exactly the
 > retained records §2's query matches, unchanged in every other respect: expired
 > records excluded, window-closed records included (ADR-0007 §3 as amended by
 > ADR-0045 §6).
 
-> **Normative.** `MemoryStore` gains `delete_about(about_person: EncodableText) -> int`,
-> which destroys every record §2's query matches and returns the number removed.
-> Its argument is **required**; no value of it means "everything".
+> **Normative.** `MemoryStore` gains
+> `async def delete_about(self, about_person: EncodableText) -> int`, which
+> destroys every record §2's query matches and returns the number removed. Its
+> argument is **required** and positional; no value of it means "everything".
 
 > **Normative.** `delete(record_id)`, `clear()` and `purge_expired()` are unchanged
 > in name, signature and meaning, and no lane may add a subject dimension to any of
@@ -191,6 +193,12 @@ right a surface at all.
 > **Normative.** A blank or whitespace-only `about_person` argument is refused with
 > `ValueError` on both operations. It is never read as `None`, and it never matches
 > a record.
+
+**Docstrings are owed and are not reproduced here**, which is ADR-0085 §3's move
+and its reason: `CONTRIBUTING.md`'s Google-style requirement applies to the real
+`core/protocols.py`, and reproducing the prose would bury the shapes this section
+exists to fix. What each docstring must state is settled by the clauses of this
+section and of §§2, 4, 5, 6 and 9, and by nothing outside them (ADR-0089 §3).
 
 **The asymmetry is the decision, not an oversight, and it is stated so it decides
 the next case too.**
@@ -342,6 +350,11 @@ separates them.
 
 > **Normative.** `delete_about` is atomic: every matched record is removed, or none
 > is. No read ever observes a partial erasure.
+
+> **Normative.** `delete_about` raises `MemoryStoreError` on any backend failure,
+> and nothing is removed. §1's `ValueError` for a blank argument is raised before
+> any record is read. A query that matches nothing is not a failure: it removes
+> nothing and returns `0`, as `delete` returns `False`.
 
 `write_atomic` already establishes the primitive and its reason — "a batch that
 commits in full or not at all" (ADR-0046) — and the reason binds harder here. A
