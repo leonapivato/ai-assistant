@@ -180,19 +180,19 @@ records are kept".
 
 **Every annotation is spelled out**, in ADR-0085 §3's form and under its §2
 convention: the subject of a call is positional and every other argument is
-keyword-only. `Identifier`, `EncodableText` and `DEFAULT_PAGE_SIZE` are
-`core/types.py`'s existing names.
+keyword-only. `NonBlankEncodableText`, `EncodableText` and `DEFAULT_PAGE_SIZE`
+are `core/types.py`'s existing names.
 
 ```python
 async def grantable_sources(self) -> tuple[GrantableSource, ...]: ...
 
 
 async def grant(
-    self, source: Identifier, *, scope: Sequence[GrantScope]
+    self, source: NonBlankEncodableText, *, scope: Sequence[GrantScope]
 ) -> SourceGrant: ...
 
 
-async def revoke(self, source: Identifier) -> SourceGrant | None: ...
+async def revoke(self, source: NonBlankEncodableText) -> SourceGrant | None: ...
 
 
 async def recent_grants(
@@ -202,6 +202,49 @@ async def recent_grants(
 
 **Docstrings are omitted here and are not optional in the Protocol**, exactly as
 ADR-0085 §3 states for its own block.
+
+> **Normative.** The `source` argument of `grant` and `revoke` is
+> `NonBlankEncodableText`, which rejects a blank value and normalises nothing.
+> No implementation of these operations may strip, case-fold or otherwise
+> normalise a caller-supplied `source` at any point before it is compared.
+
+**`Identifier` is the wrong type here, and it is the type an author reaches for
+first.** ADR-0085 §3c rules that "Every id argument is `Identifier`", and a
+source name looks like an id. But `Identifier`'s validator "Reject[s] a blank
+identifier, **returning it stripped**" — ADR-0097 §9 quotes that line for its own
+reasons — and `wire/surface.py`'s `argument_adapter` validates each argument
+against the Protocol's own annotation before `wire/server.py` dispatches. So a
+wire call `grant(" calendar ")` would arrive at the operation as `"calendar"`
+and be **matched** against a held reader named `"calendar"`, where ADR-0097 §10
+requires in as many words that "a source differing from a held reader's `name`
+only by surrounding whitespace is refused rather than matched". The normalisation
+would happen one layer below the comparison, where no clause about the
+comparison can reach it, and the in-process engine — which is handed the string
+unvalidated — would refuse the same call the wire accepted. That is ADR-0084
+§4's substitutability failure arriving through an annotation.
+
+**ADR-0085 §3c is applied at its stated scope rather than stretched.** Its
+subject is the *id* arguments — `record_id`, `question_id`, `conversation_id` —
+and its argument is that a client "must be comparing values of the same type" as
+the field it addresses. A `source` is not one of those: it is a value whose whole
+contract is exact comparison against a declared constant, and the strengthening
+§3c buys for an id is the exact property that breaks it here.
+
+**`NonBlankEncodableText` is the type the corpus already made for this, and it
+was made for the same hazard one field away.** ADR-0096 §2 needed "the rejecting
+half of `_non_blank` without its normalising half" so that a facet's `source`
+stays a faithful copy of a reading's, and drew the general rule from it: "a
+faithful copy takes the type of the field it copies, and may tighten only in ways
+that reject", because "Tightening by *normalising* is how two spellings of one
+value drift, silently, until something compares them." A grant's `source`
+argument is compared rather than copied, which wants the same property for a
+sharper reason.
+
+**The result field stays `Identifier` and nothing about it moves.**
+`SourceGrant.source` and `GrantableSource.source` are constructed hub-side from
+a reader's declared `name` that §4 has already required to equal its own
+`str.strip()`, so the normalising validator is a no-op on every value that can
+reach them.
 
 **The two names avoid two collisions that would have been silent.**
 `recent_grants` rather than `grants` — because `build_engine` already has a
@@ -217,6 +260,65 @@ which question it answers.
 ADR-0085 §8b's envelope worst case is untouched: `grantable_sources` is 17
 bytes against `interrupted_questions` at 21, and the 512-byte reserve is
 recomputed from the same worst case it always was.
+
+#### 2a. The declared failures, and the one new error class
+
+ADR-0085 §9 makes the per-method failures part of the contract, on the ground
+that "A Protocol whose methods raise unnamed exceptions is not a contract a
+conformance suite can hold anyone to". So they are declared here rather than left
+to the lane, and `OversizedValueError` is assumed throughout in §9's own form —
+it is declared by every method on this surface and is not repeated per row.
+
+> **Normative.** The four operations declare exactly these failures, plus
+> `OversizedValueError` on every one of them:
+>
+> | Method | Declares |
+> | --- | --- |
+> | `grantable_sources` | `GrantError` |
+> | `grant` | `ValueError`, `UngrantableSourceError`, `GrantError`, `InvalidGrantError` |
+> | `revoke` | `ValueError`, `GrantError`, `InvalidGrantError` |
+> | `recent_grants` | `ValueError`, `GrantError` |
+
+> **Normative.** `UngrantableSourceError` is a direct subclass of
+> `AssistantError` in `core/errors.py`. It defines no `__init__` and carries a
+> message and no structured state, and its message names no caller-supplied
+> value and no filesystem path (§4).
+
+**What each declaration covers.** `GrantError` is ADR-0097 §10's — the store
+could not be read or written — and every operation here reads or writes it.
+`InvalidGrantError` is also §10's, and reaches `grant` when the store refuses a
+second live grant or a duplicate id, and `revoke` when the record it built lost a
+race to another revocation (§5). `ValueError` is ADR-0085 §9's, kept as a caller
+programming error rather than a condition of the system: a blank or unwritable
+`source` on `grant` and `revoke`, an empty or duplicated `scope` on `grant`, and
+a `limit` that is not strictly positive on `recent_grants` (§10). ADR-0085 §9's
+clause applies to all of them unchanged — an implementation refuses these
+locally, before any I/O, so both implementations refuse the same values without a
+round trip.
+
+**One new class rather than two, on ADR-0097 §10's own reasoning.** §10 declined
+to split `InvalidGrantError` three ways "because the caller's recourse is
+identical in all three — read the store and construct a different record". The
+same test decides this one: whether no held reader declares the value or a held
+reader declares it inadmissibly, the caller's recourse is to call
+`grantable_sources` and pick from what it returns.
+
+**Not a subclass of `GrantError`, and not `SourceNotGrantedError`.**
+`GrantError`'s stated subject is a store that could not be read or written, and
+this refusal never touches the store. `SourceNotGrantedError` is ADR-0097 §10's
+driver-side refusal — "the user has not granted this source for this use" — and a
+caller that could not tell it from "there is no such source" is one that will
+tell a user to grant something the hub cannot offer. The names are also
+deliberately not near-neighbours: `UngrantableSourceError` rather than a second
+`SourceNotGrant*Error`, so the two are not confusable at a glance.
+
+**Carrying a message and nothing else is what makes it survive the wire.**
+`wire/errors.py` uses "the exception type's own class name" as the error code and
+reconstructs by resolving that name over `core.errors`, refusing rather than
+guessing where "the hub's details do not fit its own constructor". A class with
+no `__init__` reconstructs from its message alone, which ADR-0085 §10a names as
+the shape that always round-trips — and it is the shape §4's refusal rule wants
+anyway, since there is nothing this refusal may carry.
 
 ### 3. One new promoted type, and liveness is stated rather than derived
 
@@ -553,12 +655,25 @@ which `Settings` defaults to 16 MiB with a floor of 1024 bytes (ADR-0085 §8d).
 The arithmetic is stated because §8f states it for the belief page and because
 the answers differ between these four.
 
-- **`grant` and `revoke` fit the floor.** A `SourceGrant` encodes to on the
-  order of 150 to 200 bytes — two identifiers, a short declared source, at most
-  two enum values and an instant, in ADR-0087 §2's forms — against the 512-byte
-  payload budget a 1024-byte frame leaves. So a user can grant and withdraw
-  consent on any frame size the configuration admits, which is the property
-  worth having.
+- **`grant` and `revoke` fit the floor on the tree's own figures, and that is a
+  measurement rather than a guarantee.** A `SourceGrant` whose `source` is
+  `CALENDAR_READER_NAME` and whose ids are UUID strings encodes to on the order
+  of 150 to 200 bytes — two identifiers, a short declared source, at most two
+  enum values and an instant, in ADR-0087 §2's forms — against the 512-byte
+  payload budget a 1024-byte frame leaves. So on this tree a user can grant and
+  withdraw consent at any frame size the configuration admits, which is the
+  property worth having.
+
+  **It is not promised for every conforming input, and stating it as a promise
+  would be false.** `Identifier` and `DurableIdentifier` carry no maximum
+  length, so a reader declaring a very long identity or a factory minting a very
+  long id produces a valid `SourceGrant` that exceeds the floor. That is
+  ADR-0085 §9's own observation about the existing surface — "`Identifier`
+  carries no maximum length, so even `forget(record_id=…)` can be handed an
+  oversized argument" — and its answer is the one taken here: `OversizedValueError`
+  is declared by these two operations like every other (§2a), and no clause in
+  this ADR exempts them from ADR-0085 §8c's bound. Bounding either alias is a
+  change to a ratified `core` type that this ADR does not own.
 - **`recent_grants` is bounded by `limit` exactly as the other paging methods
   are**, and busts a 1024-byte frame at the default page for the same reason
   they do. ADR-0085 §8e's answer applies unchanged: a declared
@@ -624,8 +739,9 @@ beside a ratified one.
 **The contract lane**, as one change (`CONTRIBUTING.md` → "Adding a Protocol",
 read as the Protocol *change* it is rather than a new triad):
 
-1. The four methods on `AssistantEngine`, `GrantableSource` in `core/types.py`,
-   and `UngrantableSourceError` in `core/errors.py`. The `AssistantEngine`
+1. The four methods on `AssistantEngine` with §2a's declared failures in their
+   docstrings, `GrantableSource` in `core/types.py`, and
+   `UngrantableSourceError` in `core/errors.py`. The `AssistantEngine`
    docstring's "all fifteen methods" becomes nineteen, `core/types.py`'s
    promoted-surface comment's "twenty-four types" becomes twenty-five, and
    `wire/surface.py`'s "fifteen methods and twenty-five parameters" becomes
@@ -896,7 +1012,13 @@ touched.
   Rejected in §7. The CLI is no longer a caller, every other Tier 1 store is
   opened by `build_engine`, and a parameter no production caller fills is the
   precise state #684 exists to record.
-- **Reuse `InvalidGrantError` for an inadmissible source.** Rejected in §4 and
+- **Annotate the `source` argument `Identifier`, as every id argument on this
+  surface is.** Rejected in §2, and it is the rejection with the sharpest
+  mechanism: `Identifier` strips, `wire/surface.py` validates each argument
+  against the Protocol's annotation before dispatch, so the wire would silently
+  match a source ADR-0097 §10 requires to be refused — and the in-process engine,
+  handed the string unvalidated, would refuse what the wire accepted.
+- **Reuse `InvalidGrantError` for an inadmissible source.** Rejected in §2a, §4 and
   §13: ADR-0097 §10 scopes that class to "the store **refused** the record", and
   the admission check refuses before a record exists. It would also give a
   caller a recourse that does not apply — construct a different record — when
