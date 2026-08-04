@@ -611,16 +611,36 @@ holds.
 
 **The repair is to state the obligation at the granularity that carries the safety
 property, not at the one that reads best.** What defeats the phishing case is the
-user knowing the words are **somebody else's** — and `Question.band` already carries
-exactly that, because `ATTESTED` means a source reported it and the assistant did
-not conclude it. Naming the source is *legibility*, which is §8's subject and which
-§8 already bounds to source granularity and no finer. Splitting them that way keeps
-the safety half binding on every surface today, keeps this ADR free of `core`
-surface, and leaves a real residual rather than a pretended one: **a question cannot
-name its source.** §12 defers that with its trigger. Requiring it here would have
-been an obligation no conforming implementation could meet — the third time this
-document reached past what the tree can supply, and the third time a reviewer was
-right to say so.
+user knowing the words are **somebody else's**. Naming the source is *legibility*,
+which is §8's subject and which §8 already bounds to source granularity and no
+finer. Splitting them that way keeps the safety half binding on every surface today,
+keeps this ADR free of `core` surface, and leaves a real residual rather than a
+pretended one: **a question cannot name its source.** §12 defers that with its
+trigger.
+
+**Which projected field carries the safety half depends on the proposal, and an
+earlier draft answered that too broadly.** It said `Question.band` carries it,
+because `ATTESTED` means a source reported it and the assistant did not conclude it.
+That is true of a **reader's own transcription** and false of the case §4's fourth
+clause exists for. A model-authored proposal carrying external evidence is
+`OBSERVED` or `INFERRED`, so its `band` is `DERIVED` — and a client rendering
+`DERIVED` faithfully says *the assistant inferred this*, which attributes an
+attacker-derived span to the assistant and is the precise thing §7's first clause
+forbids. Adversarial review found it on round 6. It is unreachable today for §5's
+reason — nothing on `main` can produce such a proposal — and it becomes reachable
+the moment §12's first deferral lands, which is why the obligation is put on that
+seam rather than left to be rediscovered by whoever builds it:
+
+> **Normative.** The seam of §12's first deferral propagates its externality marker
+> into whatever a user-facing surface projects from a proposal. `band` alone does
+> not satisfy §7's first clause for a `DERIVED` proposal carrying external evidence.
+
+**Three rounds running, this document reached past what the tree can supply** — §3's
+model-obedience clauses, §7's source attribution, and now §7's carrier — and every
+one was caught by a reviewer rather than by its author. That is worth recording
+rather than quietly fixing, for the reason ADR-0089 §2 records its own: the pull
+toward stating a property one layer further out than the data supports is a
+property of writing about this subject, not of any one draft.
 
 **The division is ADR-0042 §4's, unchanged and deliberately re-stated rather than
 re-decided**: the engine carries the value verbatim, the adapter escapes for its
@@ -823,7 +843,9 @@ support.
   can be cited, an ADR that lets an ingested record be an `EpisodicMemory`
   (ADR-0093 §11's own deferral), or the first `orchestration` payload of mixed
   origin. The lane that takes it owes the caller-stamped/producer-declared argument
-  named in §9.
+  named in §9, **and owes §7's marked propagation clause**: the marker has to reach
+  the user-facing projection, because a `DERIVED` proposal carrying external evidence
+  is rendered as the assistant's own inference without it.
 - **Expressing the §2 distinction structurally rather than in-band** — content parts
   at the `ModelProvider` seam, or a trust-carrying field on `Message`. `Message.name`
   exists, is set by no producer in `src/`, and is discarded by
