@@ -858,6 +858,62 @@ record is history and stays readable, `live` keeps answering about it, and no re
 happens because no reader exists. Nothing needs to reconcile the two, and a rule
 that pruned such grants would be the store editing its own history.
 
+#### 9a. A grant follows the identity, and the identity is not yet instance-distinguishing
+
+A grant recorded for `calendar` keeps authorising `calendar` after
+`calendar_reader_path` is repointed at a different file, because every
+`CalendarReader` declares the same name. That is worth stating plainly rather than
+leaving to be discovered, and the first thing to be clear about is whose property
+it is.
+
+**It is ADR-0093 §7's, and it is deliberate there.** §7 makes a reader's identity
+"**declared by the sensor** … never derived from the source's location or contents",
+because a configurable one "is precisely the mechanism by which a user would put
+their email address or a path there". The consequence is that the identity names a
+*reader*, and ADR-0093 §11 defers "an instance-distinguishing `reported_by`" to the
+source-registry lane by name. So there is no instance identity in this system to
+key a grant on; the same fact already means two different `.ics` files produce
+beliefs indistinguishable by `reported_by`, with or without this ADR.
+
+**Two things follow, and both are decided here rather than left open.**
+
+> **Normative.** The client renders, at the moment of granting, the source's
+> **current configured location**, so the user grants an informed act rather than a
+> bare name. That value is shown to the user and is **never** written to the grant,
+> never logged, and never exported — it is the user's own data rendered back to
+> them on their own machine, which is not the disclosure ADR-0004 §5 and ADR-0093
+> §7 forbid.
+
+> **Normative.** A grant is keyed to a source **identity**, so repointing a
+> configured reader at a different location leaves the existing grant standing over
+> the new one. This ADR does not close that, and **no surface may claim it does** —
+> in particular, no client may describe a grant as covering a particular file.
+
+> **Normative.** The lane that introduces a source registry and an
+> instance-distinguishing identity (ADR-0093 §11) owes, as part of that work, the
+> rule for what a live grant does when its source's identity or backing location
+> changes. **A second instance of one source type may not become grantable before
+> that rule exists.** This is a named precondition on that lane, in the form
+> ADR-0021 §3 used on the standing-grant ADR.
+
+**Why the exposure is narrow today, stated without pretending it is zero.** ADR-0093
+§7 configures exactly one source and forbids a registry, so the only reachable case
+is an operator repointing that one path — and on the deployment this system is built
+for, the operator and the user are the same person (ADR-0004's "a single-user local
+app"). "The configuration was changed under a live grant" is then that person
+editing their own file, not a third party substituting a source beneath them. It
+becomes a genuine authorisation gap exactly when those two roles diverge or when a
+second instance exists, which is why the precondition above is placed on the lane
+that creates the second instance and why §12 defers the multi-user case alongside
+it.
+
+**Binding the grant to the location was considered and is refused twice over.** A
+path on the record is the Tier 1 leak §1 and §9 exist to prevent. A digest of the
+path avoids the leak and invents an instance identity — which is exactly the
+question ADR-0093 §11 reserved for the registry lane, decided inside a permissions
+ADR by choosing a field, which is the quiet way to decide a neighbouring lane's
+question that ADR-0093 §10 warns against in its own words.
+
 ADR-0084 §5 made the CLI a client of the hub's API and promoted the façade to a
 Protocol, and ADR-0083 §2 makes `data_dir` the hub's. A grant is durable state the
 scheduler reads on a background tick, so it belongs where the other Tier 1 stores
@@ -1236,6 +1292,12 @@ changes**. The places where the opposite reading is available:
   give. Fires with the first surface that asks "under which authorisation was this
   written" — the likeliest is the belief inspection surface ADR-0073 §4 governs, if
   it ever renders more than the band and the source.
+- **What a live grant does when its source's identity or backing location
+  changes** (§9a). Deferred to ADR-0093 §11's source-registry lane as a **named
+  precondition** rather than as a wish: a second instance of one source type may
+  not become grantable until that lane rules it. Fires with the registry, or
+  earlier with the first multi-user deployment, where the operator repointing a
+  path stops being the same person as the grantor.
 - **A mechanism linearising the grant check with the source's acquisition**, which
   would shrink §5a's residual from "a read already in flight completes" to "no byte
   is read after a revocation". It needs a new seam on `Reader` — a lease, a
