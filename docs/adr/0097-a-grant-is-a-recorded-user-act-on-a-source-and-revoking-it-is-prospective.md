@@ -833,6 +833,41 @@ only defect is their date.
 > caller-supplied string beyond what the client already sent, so a mistyped value
 > cannot reach the log (ADR-0004 §5).
 
+> **Normative.** A source is grantable only when the held reader's `name` is
+> already in canonical form — equal to its own `str.strip()`. A reader whose
+> declared name is not is **not grantable**, and the refusal names the reader.
+
+> **Normative.** Every comparison of a `source` value — at admission, in `live`,
+> and in `record`'s live-grant check — is **exact**. No implementation may strip,
+> case-fold or otherwise normalise at lookup.
+
+**These two exist because the types on the two ends of §1's key do not agree, and
+the disagreement is silent.** `SourceGrant.source` is `Identifier`, whose validator
+"Reject[s] a blank identifier, **returning it stripped**"; `ReaderContract` requires
+only that `reader.name.strip()` be non-empty, so `" calendar "` is a conforming
+declared name. A grant for such a reader would be stored as `"calendar"` while
+every driver queried `live` with `" calendar "` — an exact-match store then denies
+a grant the user made, and a normalising one quietly invents an identity rule
+nothing ratified. Either way the user's grant authorises nothing and no error says
+so.
+
+**Refusing at admission is the fix that stays inside this lane.** The alternative —
+requiring readers to declare canonical names — is a change to `Reader`'s
+conformance obligations, a ratified Protocol with a built implementation, which
+golden rule 5 puts in its own ADR. Refusing to *grant* a non-canonically-named
+reader needs nothing outside the grant operation, fails closed, and binds nothing
+today: the tree's one reader declares `CALENDAR_READER_NAME = "calendar"`.
+
+**A neighbouring divergence is named and deliberately not fixed here.**
+`SourceReading.source` is `EncodableText` — neither blank-checked nor stripped —
+while `Attestation.reported_by` is `Identifier`, so the value a reader emits and
+the value that lands on a belief already pass through different rules today, with
+or without this ADR. That is `core/types.py` ground this lane was not given and
+whose repair is a breaking change under golden rule 5. It is filed as **#667**,
+which also records ADR-0096 §8's ruling against normalising as the third rule in
+the same family. §1's join is exact for any reader whose name is canonical, which
+the two clauses above make the only kind that can be granted.
+
 **Without this, §1's key rule is a rule and not a property — and ADR-0093 §7 shows
 the difference matters.** `Identifier` refuses a blank string and nothing else, so
 a `SourceGrant` carrying `source="/home/alice/calendar.ics"` or an email address
@@ -1111,8 +1146,12 @@ Protocol"); both Protocols' triads are that one change, not two:**
 
 2. **The shared conformance suites** — the clauses that bind **every**
    implementation, which are the ones expressible without a backing technology.
-   `SourceGrants` owes the **first two** clauses below; `SourceGrantStore` owes all
-   of them. Each maps to a ruling above:
+   `SourceGrants` owes the **first three** clauses below; `SourceGrantStore` owes
+   all of them. Each maps to a ruling above:
+   - `live` matches `source` **exactly**: a lookup differing from a recorded
+     grant's source only by surrounding whitespace, or only by case, returns
+     `None` (§9). Written as a suite clause because it is the one place a store
+     could be "helpful" and change what a grant covers.
    - A recorded grant is returned by `live` for **each** use in its scope, and not
      for a use outside it (§2).
    - **`live` returns a detached snapshot**, and the case is written as a mutation:
@@ -1218,7 +1257,10 @@ surface:
   > **Normative.** The grant operation's own tests pin it: a `source` that is a
   > filesystem path, an email address, or any string that is not a held reader's
   > declared `name` is refused, no `SourceGrant` is constructed, and the value
-  > never reaches `recent` or `export`.
+  > never reaches `recent` or `export`. A held reader whose declared `name` is not
+  > equal to its own `str.strip()` is refused as ungrantable, and a source
+  > differing from a held reader's `name` only by surrounding whitespace is refused
+  > rather than matched.
 
 - **§9a's configured-location disclosure**, which is the *permitted* half of the
   same rule and needs its own tests for the opposite reason. The location is
