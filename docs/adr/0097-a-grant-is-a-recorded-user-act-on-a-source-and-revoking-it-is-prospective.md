@@ -372,6 +372,10 @@ by prose rather than mechanism".
 > record** whose `revokes` names the grant it revokes; no record is ever updated
 > or individually deleted. Erasure is wholesale only.
 
+> **Normative.** `record` stores a **detached, validated snapshot**, recursively
+> over reachable state, and never retains the caller's object. Every query returns
+> a detached snapshot likewise.
+
 > **Normative.** At most one **live** grant exists per source at any instant. A
 > grant recorded for a source that already has a live grant is refused; narrowing
 > or widening is §2's revoke-then-grant.
@@ -412,6 +416,17 @@ to make a display ordering pretty in a case the tree has never hit. No decision
 here rests on order; ADR-0021 §4 lives with wall-clock ordering for a store with
 far more of it. If a consumer ever needs a total order it owes its own decision,
 and §12 records the trigger.
+
+**Detaching on the *write* path is the half that is easy to drop, and ADR-0021 §4
+names the failure in one sentence: "Detachment on queries alone closes the door and
+leaves the window open."** `frozen=True` refuses `grant.scope = ...` and does not
+refuse `grant.__dict__["scope"] = ...`, so a store that kept the caller's object
+would let a grant be rewritten *after* it was appended — through a store whose
+entire premise (the clause above) is that its records are not rewritten. The
+validating half matters for the same reason `_revalidated` exists on the audit
+trail: a record corrupted past its own model — a naive `decided_at`, an emptied
+`scope` — would be stored and then make every later read incoherent, and §10's
+construction invariants would have been checked on an object nobody kept.
 
 **This answers "are granting and revoking audited" by construction rather than by
 adding a log.** The record *is* the audit record: a store in which the only writes
@@ -950,6 +965,15 @@ Protocol"); both Protocols' triads are that one change, not two:**
    - Every query returns a **detached** snapshot, ADR-0018 §3's rule applied to a
      third store and for ADR-0021 §4's reason — a caller holding a store's own
      object could rewrite the record of what was granted.
+   - **`record` detaches its input too, and the case is written from the write
+     side**: after a successful `record`, mutating the caller's object through
+     `__dict__` — `source`, `scope` and `revokes` each in turn — leaves every later
+     `live`, `recent` and `export` returning the record as it was appended (§4).
+     Written separately from the query clause because query detachment does not
+     repair state the store already shares, which is the window ADR-0021 §4 says
+     detaching on reads alone leaves open.
+   - `record` **revalidates**: a `SourceGrant` corrupted past its own model is
+     refused with `InvalidGrantError` rather than stored (§4).
    - `recent` refuses a non-positive `limit` and returns at most `limit` records,
      newest first with ties broken by id ascending.
    - `clear` empties the store and returns the count removed.
