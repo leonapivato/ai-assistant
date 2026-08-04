@@ -508,9 +508,37 @@ nobody made.
 attacker's sentence reaches a durable belief through a plan rationale that our own
 model authored and `engine._exchange_of` recorded truthfully. The episode is
 `OBSERVED` because an exchange really did occur. Every provenance field along that
-path is correct. **There is no field to read, and adding one would require
-re-deciding ADR-0075 §2's producer line**, which this ADR is not allowed to touch
-and would not want to: that line is what makes episodic capture possible at all.
+path is correct, and **there is no field to read.**
+
+**Why adding one is deferred — stated correctly, because an earlier draft got this
+wrong and the wrong version was the load-bearing sentence of the deferral.** That
+draft said adding a field "would require re-deciding ADR-0075 §2's producer line".
+**It would not.** ADR-0075 §2 draws its boundary on *what the producer does* — "the
+boundary is drawn on *what the producer does* — record, or infer — and not on the
+source enum" — and scopes its exemption to "a deterministic, non-inferring recording
+of a turn the engine has already answered, written by `orchestration`". An
+engine-stamped *this exchange's prompt carried external spans* is a deterministic,
+non-inferring record of something `orchestration` itself just did. It lands on the
+**recording** side of that line. §2 is not engaged and would not need re-deciding.
+
+The real grounds are three, and none of them is about inference:
+
+- **It is `core/types.py` surface.** Golden rule 5 and ADR-0015 §5 put a contract
+  change in its own ADR, merged before anything implements against it. That alone
+  is sufficient and is the same reason §12 defers every other seam here.
+- **Where it would land decides its blast radius.** On `Provenance`, ADR-0068 §2
+  applies: that type is "the cross-subsystem hinge", "reached from **both**
+  subsystems", so a change to it "lands as a single `core` contract PR ahead of the
+  two subsystems". *This is a scope argument and not an immutability one* — ADR-0068
+  freezes **instances**, deeply, and says nothing about adding a field to a model,
+  so it must not be cited as though it forbade the field.
+- **The standing test is unmet**, which is §5's own argument above: ADR-0073 §4
+  wants this decided "with a producer in hand", and no producer on `main` can breach
+  the clause it would serve.
+
+Naming the wrong ground was worse than naming none, because it told a later lane the
+seam was closed by a decision that does not close it — and that lane would have had
+to re-derive ADR-0075 §2 to find out.
 
 > **Normative.** No ADR, lane, or surface may state or imply that this posture
 > detects external content embedded in text whose recorded origin is not external.
@@ -916,12 +944,31 @@ support.
 
 - **The seam that makes externality recoverable at the ruling point** — a marker on
   a record or a proposal, and whatever `MemoryPolicy` change reads it. §4's fourth
-  clause is written against it and §5 argues why it cannot be specified now. **Fires
-  with the first producer that can breach the clause**: a second reader whose output
-  can be cited, an ADR that lets an ingested record be an `EpisodicMemory`
-  (ADR-0093 §11's own deferral), or the first `orchestration` payload of mixed
-  origin. The lane that takes it owes the caller-stamped/producer-declared argument
-  named in §9.
+  clause is written against it and §5 argues why it cannot be specified now.
+
+  **One of its conditions has already fired, and is written as fired rather than as
+  pending.** An earlier draft listed "the first `orchestration` payload of mixed
+  origin" among the things still to come. That payload exists today:
+  `ModelBackedPlanner.plan` builds a single `Role.USER` message whose content is
+  `_render_request(snapshot, context, memories)` — the user's own goal statement and
+  the retrieved records in one string — and `_render_record` tags each with
+  `record.provenance.source.value`, `EXTERNAL` among them. **This ADR filed #672
+  about those very labels**, so a trigger written as pending against a line the same
+  lane filed a finding on is the sharpest form of the defect. It is the shape #663
+  records: a revisit trigger that had fired while nothing tracked it.
+
+  **What remains unfired** is narrower and is the condition actually meant: the first
+  mixed-origin payload handed to a producer **whose output is ruled on by
+  `MemoryPolicy`**. The planner is not that — its output is an `ActionPlan`, not a
+  proposal — and the observer, which is, receives episodes and nothing else
+  (ADR-0077 §1, §3). **Also fires with**: a second reader whose output can be cited;
+  an ADR that lets an ingested record be an `EpisodicMemory` (ADR-0093 §11's own
+  deferral); and **leg 7's consolidation** — `docs/roadmap.md` names it as "many
+  episodes distilled into few durable beliefs, run by the hub's scheduler", which is
+  a model-backed producer reading records in bulk and proposing through the gate,
+  and therefore the largest instance of §5's laundering path the roadmap currently
+  contains. The lane that takes the seam owes the
+  caller-stamped/producer-declared argument named in §9.
 - **Expressing the §2 distinction structurally rather than in-band** — content parts
   at the `ModelProvider` seam, or a trust-carrying field on `Message`. `Message.name`
   exists, is set by no producer in `src/`, and is discarded by
