@@ -730,10 +730,15 @@ the answers differ between these four.
   they do. ADR-0085 §8e's answer applies unchanged: a declared
   `OversizedValueError`, whose `field` is `None` because the payload is a bare
   array.
-- **`grantable_sources` grows with the number of held readers and with path
-  length**, and the path is the only unbounded factor. With the tree's one
-  source it is one row; at the 1024-byte floor a long configured path can exceed
-  the budget, and the declared failure is the answer there too.
+- **`grantable_sources` grows with the number of held readers and with the size
+  of each row**, and a row has **four** unbounded factors rather than one: the
+  configured location, and — through `live` — a `SourceGrant`'s `id`, `source`
+  and `revokes`, every one of which is `Identifier` or `DurableIdentifier` and
+  carries no maximum length. With the tree's one source, an eight-byte declared
+  name and UUID ids it is one row of a few hundred bytes. At the 1024-byte floor
+  a long configured path is the reachable way past the budget and an overlong
+  declared identity or minted id is the other, and the declared failure is the
+  answer to all of them.
 
   **This is the one place a frame size decides whether a source can be granted
   at all, and it is worth stating rather than leaving to be met.**
@@ -743,10 +748,12 @@ the answers differ between these four.
   source it can enumerate nothing about and therefore may not grant, even though
   `grant`'s own request and result would fit.
 
-  > **Normative.** A source whose disclosure does not fit the configured frame
-  > is not grantable through a conforming client, and no client may grant it by
-  > skipping the disclosure. Raising `hub_max_frame_bytes` is the operator's
-  > remedy and the only one this ADR offers.
+  > **Normative.** Where `grantable_sources` cannot return within the configured
+  > frame — for a location, for a live grant's identifiers, or for the number of
+  > held readers — no source that response would have carried is grantable
+  > through a conforming client, and no client may grant one by skipping the
+  > disclosure. Raising `hub_max_frame_bytes` is the operator's remedy and the
+  > only one this ADR offers.
 
   **The blast radius is the whole response, not the one row.** ADR-0085 §8c
   bounds the payload rather than a value, so an oversized `grantable_sources`
@@ -767,9 +774,10 @@ the answers differ between these four.
   deliberately configured the floor.
 
 > **Normative.** The lane that introduces a source registry (ADR-0093 §11) owes
-> a re-derivation of `grantable_sources`' worst case in the same change, because
-> its payload grows with the number of held readers and this ADR bounds it only
-> at the count the tree has.
+> a re-derivation of `grantable_sources`' worst case over the whole
+> `GrantableSource` graph in the same change — the row count, each location, and
+> each live grant's `id`, `source` and `revokes` — because this ADR bounds none
+> of them by contract and measures them only at the figures the tree has.
 
 **`recent_grants` takes `limit` and no `offset`, which departs from the four
 existing paging signatures deliberately.** `SourceGrantStore.recent` has no
@@ -1041,10 +1049,11 @@ touched.
   cannot show the user a location — a voice spoke under ADR-0094 is the nearest
   candidate — because §6's clause then refuses every grant from it rather than
   degrading.
-- **A revocability guarantee that survives an unbounded source identity.**
-  `Identifier` has no maximum length, so `revoke`'s request payload is bounded
-  only by the identity a reader declares, and a long enough one exceeds a small
-  configured frame (§10). Today the admissible identities are the declared
+- **A guarantee that granting and revoking survive an unbounded identifier.**
+  `Identifier` and `DurableIdentifier` have no maximum length, so `revoke`'s
+  request payload is bounded only by the identity a reader declares and
+  `grantable_sources`' rows are bounded only by that plus each live grant's
+  minted ids, and a long enough value exceeds a small configured frame (§10). Today the admissible identities are the declared
   constants of the readers the hub holds — one of them, eight bytes — so the
   exposure is an operator declaring a very long name in their own code, whose
   remedy is `hub_max_frame_bytes`. Fires with the first bound on `Identifier`, or
@@ -1080,7 +1089,8 @@ touched.
   configuration admits (§10). The last is a measurement and not a guarantee:
   `Identifier` carries no maximum length, so a sufficiently long reader identity
   makes a `revoke` request payload exceed a small frame and raise
-  `OversizedValueError` like any other. Bounding it is a `core` change this ADR
+  `OversizedValueError` like any other — and the same alias bounds
+  `grantable_sources`' rows through `live` (§10). Bounding it is a `core` change this ADR
   does not own, the operator's remedy is `hub_max_frame_bytes`, and §14 records
   what would fire a contract that survives both without one.
 - **Granting is asymmetric with withdrawing, and the asymmetry runs the safe
