@@ -885,6 +885,28 @@ class AuditTrailContract:
         with pytest.raises(ValueError, match="limit"):
             await trail.recent(limit=limit)
 
+    async def test_a_limit_wider_than_a_backing_store_can_bind_still_answers(
+        self, trail: AuditTrail
+    ) -> None:
+        """A bound above any possible row count means "all of them", not an error.
+
+        ``limit`` is a Python ``int`` and has no width, so ``2**63`` is a perfectly
+        valid strictly-positive request. Binding one that wide into SQLite raises
+        ``OverflowError`` — neither ``ValueError`` nor ``AuditError``, so it leaves
+        this seam's error boundary through a hole while every other clause here
+        still passes.
+
+        Not the ``limit=-1`` case above, and the difference is the whole of why one
+        is refused and this one clamped: a bound past every row serves exactly what
+        was asked for, where clamping a negative would serve something the caller
+        did not ask for. ``SqliteAuditTrail.recent`` is where that reasoning is
+        written out, and it is the implementation this clause was a property of
+        rather than of the contract until now (#679).
+        """
+        await trail.record(decision("d-1"))
+
+        assert [each.id for each in await trail.recent(limit=2**63)] == ["d-1"]
+
     async def test_an_empty_trail_answers_emptily(self, trail: AuditTrail) -> None:
         assert await trail.recent() == []
         assert await trail.export() == []
