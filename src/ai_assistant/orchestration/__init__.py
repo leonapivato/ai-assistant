@@ -52,6 +52,14 @@ the stored number, which nothing on this path ever writes (ADR-0077 §6).
 ``payloads`` holds the surface's payload rules: ADR-0087's canonical encoding, and
 the contract limit ADR-0084 §4 makes every implementation enforce.
 
+``GrantOperations`` is the **grant surface** (ADR-0102 §1, §7): what may be
+granted, granting, revoking, and the record of both. It is the only object in the
+system holding a ``SourceGrantStore`` (ADR-0097 §3, §9) — every driver holds the
+narrow ``SourceGrants`` instead — and ``Engine`` delegates its four
+``AssistantEngine`` grant methods to it. It lives here because those must be
+``AssistantEngine`` methods to be addressable over the socket, and that Protocol is
+provided by this package.
+
 ``ConversationLifecycle`` is the **capture/lifecycle stage** (ADR-0074 §9): the
 one layer holding both durable stores, and therefore the owner of every sequence
 that spans them — capturing a turn as an ``EpisodicMemory``, carrying out a
@@ -110,6 +118,7 @@ from ai_assistant.orchestration.engine import (
     queued_question,
 )
 from ai_assistant.orchestration.executor import StepExecutor
+from ai_assistant.orchestration.grants import GrantOperations, HeldSource
 from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
 from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.orchestration.observation import (
@@ -136,6 +145,8 @@ __all__ = [
     "ConversationLifecycle",
     "DataExport",
     "Engine",
+    "GrantOperations",
+    "HeldSource",
     "IngestionReport",
     "IngestionStage",
     "LearningLoop",

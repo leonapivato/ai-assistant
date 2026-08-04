@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from assistant_engine_contract import (
+    _SOURCE,
     _TINY_LIMIT,
     AssistantEngineContract,
     page_after_mutating_the_filter,
@@ -57,6 +58,13 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
     def tiny_engine(self) -> AssistantEngine:
         """The same implementation, with the limit small enough to reach."""
         return FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
+
+    @pytest.fixture
+    def granting_engine(self) -> AssistantEngine:
+        """One fake engine holding a single grantable source with a location."""
+        engine = FakeAssistantEngine()
+        engine.hold_source(_SOURCE, location="/srv/calendar.ics")
+        return engine
 
     @pytest.fixture
     def parked_engine(self) -> AssistantEngine:

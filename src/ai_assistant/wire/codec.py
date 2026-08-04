@@ -43,7 +43,12 @@ from typing import TYPE_CHECKING, Any, Final
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ai_assistant.core.errors import OversizedValueError
-from ai_assistant.core.types import Identifier, encodable_text
+from ai_assistant.core.types import (
+    GrantScope,
+    Identifier,
+    NonBlankEncodableText,
+    encodable_text,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -73,6 +78,7 @@ _SECONDS_PER_MINUTE: Final[int] = 60
 _MINUTES_PER_HOUR: Final[int] = 60
 
 _IDENTIFIER: Final = TypeAdapter[str](Identifier)
+_NON_BLANK_TEXT: Final = TypeAdapter[str](NonBlankEncodableText)
 
 
 def _instant(value: datetime) -> str:
@@ -385,3 +391,131 @@ def page_argument(value: int, *, name: str) -> int:
         msg = f"{name} must be in [0, 2**63), got {value}"
         raise ValueError(msg)
     return value
+
+
+def positive_page_argument(value: int, *, name: str) -> int:
+    """Refuse a page argument that is not strictly positive (ADR-0102 §10).
+
+    :func:`page_argument`'s stricter sibling, for the one argument on the promoted
+    surface whose range and its store's do not coincide: ADR-0085 §9 admits
+    ``[0, 2**63)`` and ``SourceGrantStore.recent`` requires a strictly positive
+    ``limit``, so ``recent_grants(limit=0)`` is well-formed under the surface rule
+    and refused by the store. ADR-0102 §10 refuses it locally in every
+    implementation instead, so neither is silently more permissive.
+
+    Args:
+        value: The page argument as the caller passed it.
+        name: The parameter's name, for the message.
+
+    Returns:
+        The value, unchanged.
+
+    Raises:
+        TypeError: If the value is not an integer, or is a ``bool``.
+        ValueError: If the value is not in ``[1, 2**63)``.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"{name} must be an integer, got {value!r}"
+        raise TypeError(msg)
+    if not 1 <= value < _PAGE_ARGUMENT_BOUND:
+        msg = f"{name} must be strictly positive and below 2**63, got {value}"
+        raise ValueError(msg)
+    return value
+
+
+def non_blank_text(value: str, *, name: str) -> str:
+    """Validate one :data:`~ai_assistant.core.types.NonBlankEncodableText` argument.
+
+    :func:`identifier`'s deliberate opposite number, and the asymmetry is the whole
+    of ADR-0102 §2. ``identifier`` carries the *whole* of ``Identifier`` — it
+    rejects a blank value **and strips** the one it accepts — because an identity
+    argument compared against a stored id must normalise the same way in every
+    implementation. A grant's ``source`` is compared against a **declared
+    constant**, and there the strengthening inverts: stripping one layer below the
+    comparison would make ``grant(" calendar ")`` match a reader named
+    ``"calendar"`` over the wire, where ADR-0097 §10 requires in as many words that
+    "a source differing from a held reader's ``name`` only by surrounding
+    whitespace is refused rather than matched" — while the in-process engine, handed
+    the string unvalidated, refused it. That is ADR-0084 §4's substitutability
+    failure arriving through an annotation.
+
+    So this refuses and returns **byte for byte** what it was given. ADR-0096 §2
+    drew the general rule when it needed the same property one field away: "a
+    faithful copy takes the type of the field it copies, and may tighten only in
+    ways that reject", because "tightening by *normalising* is how two spellings of
+    one value drift, silently, until something compares them".
+
+    Args:
+        value: The text as the caller passed it.
+        name: The parameter's name, for the message.
+
+    Returns:
+        The value, unchanged — never stripped, never case-folded.
+
+    Raises:
+        ValueError: If the value is blank, or has no UTF-8 encoding. Refused
+            locally, before any I/O (ADR-0085 §9).
+    """
+    try:
+        return _NON_BLANK_TEXT.validate_python(value)
+    except ValidationError as exc:
+        msg = f"{name} must be non-blank text with a UTF-8 encoding"
+        raise ValueError(msg) from exc
+
+
+def grant_scope(value: Sequence[GrantScope], *, name: str) -> tuple[GrantScope, ...]:
+    """Materialise and refuse a malformed ``scope`` argument (ADR-0102 §2a).
+
+    Three things, in this order, all before any I/O:
+
+    * **Materialised first**, which is this module's input-observation obligation
+      (ADR-0065, and the surface's own restatement of it): a caller that mutates the
+      sequence it passed cannot change the grant that is recorded.
+    * **Every member is a** :class:`~ai_assistant.core.types.GrantScope`. A wire
+      client decoding an unknown string for a scope member meets the same value, so
+      this is a contract clause rather than one implementation's input hygiene.
+    * **Empty and duplicated are refused**, which is ADR-0097 §2 and §10 one step
+      earlier than the record's own validator. Refusing here is what makes ADR-0085
+      §9's "refused locally, before any I/O" true of the argument: without it a
+      ``grant`` with an empty scope would mint an id and read a clock before the
+      model refused it, and the refusal would arrive from inside a constructor
+      rather than from the call.
+
+    The order is **not** normalised here. That is the record's validator's job
+    (:func:`ai_assistant.core.types._grant_scope`), which puts the members in
+    declaration order so two implementations serialise one grant identically; doing
+    it twice would be two places to keep agreeing.
+
+    Args:
+        value: The uses as the caller supplied them.
+        name: The parameter's name, for the message.
+
+    Returns:
+        The same uses, materialised, in the caller's order.
+
+    Raises:
+        TypeError: If a member is not a ``GrantScope``.
+        ValueError: If the scope is empty or names a use twice.
+    """
+    # Widened to ``object`` so the member check below is a *runtime* guard rather
+    # than a statement mypy proves unreachable. The annotation says what a
+    # conforming caller passes; this says what happens when one does not, which is
+    # the same split :func:`page_argument` makes for ``1.5`` and ``True``.
+    unchecked: tuple[object, ...] = tuple(value)
+    snapshot: list[GrantScope] = []
+    for use in unchecked:
+        if not isinstance(use, GrantScope):
+            msg = f"every member of {name} must be a GrantScope, got {use!r}"
+            raise TypeError(msg)
+        snapshot.append(use)
+    if not snapshot:
+        msg = (
+            f"{name} must name at least one use: a grant authorising nothing still "
+            f"reads as a grant, and still occupies the source's one live-grant slot "
+            f"(ADR-0097 §2)"
+        )
+        raise ValueError(msg)
+    if len(set(snapshot)) != len(snapshot):
+        msg = f"{name} names each use at most once, got {tuple(snapshot)!r} (ADR-0097 §10)"
+        raise ValueError(msg)
+    return tuple(snapshot)

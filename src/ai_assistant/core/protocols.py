@@ -136,6 +136,7 @@ if TYPE_CHECKING:
         FeedbackEvent,
         Goal,
         GoalDeletion,
+        GrantableSource,
         GrantScope,
         Identifier,
         LearnOutcome,
@@ -146,6 +147,7 @@ if TYPE_CHECKING:
         MemoryUpdateProposal,
         MemoryWrite,
         Message,
+        NonBlankEncodableText,
         ObservationOutcome,
         ObservationReport,
         ParkedBinding,
@@ -3475,7 +3477,8 @@ class AssistantEngine(Protocol):
     * the concrete engine keeps both methods and stays substitutable, because a
       Protocol constrains what an implementation must have, not what it may not.
 
-    **One argument convention, applied to all fifteen methods** (ADR-0085 §2): the
+    **One argument convention, applied to all nineteen methods** (ADR-0085 §2, and
+    ADR-0102 §2 for the four grant operations): the
     *subject* of a call — the one thing it acts on — is positional, and every other
     argument is keyword-only. A keyword-only modifier can be joined by another
     without changing any call site; a second optional positional cannot. On the
@@ -3523,10 +3526,15 @@ class AssistantEngine(Protocol):
        ADR-0084 §11 makes that the client lane's prerequisite. Tracked in #570.
 
     :class:`~ai_assistant.core.errors.OversizedValueError` is therefore declared by
-    **every** method below and is not repeated in fifteen ``Raises`` blocks. No
+    **every** method below and is not repeated in nineteen ``Raises`` blocks. No
     method is provably inside the bound: :data:`~ai_assistant.core.types.Identifier`
     carries no maximum length, so even ``forget`` can be handed an oversized
-    argument, and every enumerating method's result grows with ``limit``.
+    argument, and every enumerating method's result grows with ``limit``. ADR-0102
+    §10 applies the same bound to the four grant operations without exempting any of
+    them, and names the one place it decides whether a source can be granted at all:
+    :meth:`grantable_sources` carries §6's disclosure, so a configured location too
+    long for the frame takes the whole enumeration down and leaves every source
+    ungrantable through a conforming client.
 
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060), and how each observes its arguments by the input-observation clause
@@ -3922,5 +3930,239 @@ class AssistantEngine(Protocol):
             PlanningError: If the durable execution state could not be read or
                 reconciled.
             AuditError: If a recorded decision could not be read.
+        """
+        ...
+
+    # --- the grant surface (ADR-0097 §9, ADR-0102 §1) ---------------------
+
+    async def grantable_sources(self) -> tuple[GrantableSource, ...]:
+        """List the sources the user may grant, with what is currently true of each.
+
+        ADR-0097 §9's third clause — "The surface also answers what the grantable
+        sources are" — so a client "offers a choice among declared identities rather
+        than a free-text field". The set is the declared names of the readers this
+        engine holds, which is what makes the admissible set a set of declared
+        constants rather than free text (ADR-0093 §7).
+
+        **This response is the only carrier of a source's configured location**
+        (ADR-0102 §6, discharging ADR-0097 §9a). It is computed per call, never
+        written to a :class:`~ai_assistant.core.types.SourceGrant`, never returned
+        by :meth:`recent_grants`, never written to a log record and never persisted.
+        Reading the user's own configuration back to the user over ADR-0084 §1's
+        ``0600`` socket discloses it to nobody, which is §9a's own argument.
+
+        **A source whose configured location exists and has no UTF-8 encoding is
+        omitted**, and enumeration is not refused for it (ADR-0102 §6). Linux
+        pathnames are bytes and Python surfaces an undecodable one through
+        ``surrogateescape``, so ``str(path)`` can hold a lone surrogate that
+        :data:`~ai_assistant.core.types.EncodableText` refuses and ADR-0087's
+        encoder cannot express. Degrading ``location`` to ``None`` instead was the
+        first draft and is refused: it would offer a source no conforming client may
+        grant, and a client that ignored :meth:`grant`'s disclosure obligation would
+        mint precisely the uninformed grant ADR-0097 §9a exists to prevent. A reader
+        whose *declared name* is inadmissible (:meth:`grant`) is omitted for the
+        same reason; the operator log line names the reader and carries no path.
+
+        **A client renders each ``location`` and takes an explicit act from the user
+        before it calls :meth:`grant`, and a client that cannot show the user a
+        location does not call it** (ADR-0102 §6). Nothing on the wire distinguishes
+        a client that rendered it from one that did not, so this is stated as the
+        unenforceable obligation it is (ADR-0098 §5): what an engine enforces is
+        that the value is *available* and that it settles nowhere. "Does not send
+        ``grant``" rather than "prompts on a terminal" is deliberate — the property
+        is that the user saw what they are authorising, and a spoke with no display
+        refuses rather than granting unseen (ADR-0097 §8).
+
+        Returns:
+            One entry per grantable source this engine holds, deduplicated by
+            declared identity so several instances of one source contribute one
+            entry (ADR-0102 §7). Empty where nothing is configured, which is not an
+            error: configuration says *where* and the grant says *whether*, and
+            neither may be mistaken for the other.
+
+        Raises:
+            GrantError: If the grant store could not be read — every entry's
+                ``live`` is a read of it.
+        """
+        ...
+
+    async def grant(
+        self, source: NonBlankEncodableText, *, scope: Sequence[GrantScope]
+    ) -> SourceGrant:
+        """Record the user's grant of one source for the uses ``scope`` names.
+
+        The record is minted **here**: its id comes from an injected factory and its
+        ``decided_at`` from an injected clock, and no caller supplies either, nor
+        ``revokes`` (ADR-0102 §5). A client that sent a whole
+        :class:`~ai_assistant.core.types.SourceGrant` would backdate a user act in a
+        store whose entire value is that it says what actually happened, mint an id
+        into a write-once store, and be able to point ``revokes`` at a record it
+        never read.
+
+        **``source`` is** :data:`~ai_assistant.core.types.NonBlankEncodableText`
+        **and not** :data:`~ai_assistant.core.types.Identifier`, which is the type an
+        author reaches for first and is wrong here (ADR-0102 §2). ``Identifier``
+        strips, and ``wire/surface.py`` validates each argument against this
+        annotation before dispatch — so a wire call ``grant(" calendar ")`` would
+        arrive as ``"calendar"`` and be *matched* against a held reader named
+        ``"calendar"``, where ADR-0097 §10 requires that "a source differing from a
+        held reader's ``name`` only by surrounding whitespace is refused rather than
+        matched". The normalisation would happen one layer below the comparison,
+        and the in-process engine — handed the string unvalidated — would refuse the
+        same call the wire accepted. **No implementation may strip, case-fold or
+        otherwise normalise ``source`` at any point before it is compared.**
+
+        **Admission, after validation and never instead of it** (ADR-0102 §4). A
+        validated ``source`` is admitted **only** when it equals, exactly, the
+        declared ``name`` of a :class:`Reader` this engine holds **and** that name
+        validates as :data:`~ai_assistant.core.types.Identifier` and equals its own
+        ``str.strip()``. Any other validated value raises
+        :class:`~ai_assistant.core.errors.UngrantableSourceError`, no ``SourceGrant``
+        is constructed from it, and the value reaches no store and no log.
+
+        **No liveness pre-check, and the store is the arbiter** (ADR-0102 §5). An
+        ``await`` between a check and a write is an interleaving point (ADR-0021 §4)
+        and two clients can be connected at once, so a pre-check would narrow the
+        window without closing it while inviting a reader to believe it had.
+        ADR-0097 §10 makes ``record`` atomic over the duplicate check, the
+        live-grant check, the revocation invariants and the append, so a lost race
+        is a typed refusal and never a second live grant.
+
+        Args:
+            source: The reader's declared identity, compared exactly.
+            scope: The uses this grant authorises. Non-empty and without duplicates;
+                order is normalised to declaration order by the record's own
+                validator (ADR-0097 §2, §10).
+
+        Returns:
+            The recorded grant, as it was appended.
+
+        Raises:
+            ValueError: If ``source`` is blank or has no UTF-8 encoding, or if
+                ``scope`` is empty or names a use twice. A caller programming error
+                rather than a condition of the system, refused **locally and before
+                any I/O**, so both implementations refuse the same values without a
+                round trip (ADR-0085 §9).
+            UngrantableSourceError: If the validated ``source`` is not admissible.
+                The refusal carries no filesystem path; it names the reader where a
+                *held* reader's declared name or configured location is the
+                inadmissible thing, and names no value at all where no held reader
+                declares the value (ADR-0102 §4).
+            GrantError: If the grant store could not be read or written.
+            InvalidGrantError: If the store refused the record — most reachably
+                because the source already has a live grant. Propagated rather than
+                retried or converted into a success: the client's remedy is to
+                re-read :meth:`grantable_sources`, which will show the source
+                already granted.
+        """
+        ...
+
+    async def revoke(self, source: NonBlankEncodableText) -> SourceGrant | None:
+        """Withdraw the live grant on one source, or report that there was none.
+
+        **Revocation is the operation this surface protects, and it applies no
+        admission check** (ADR-0102 §4). Beyond the argument validation above, a
+        revocation is refused for no property of the source's name — and in
+        particular is *not* refused because no reader currently declares it.
+        ADR-0097 §9 records that "a grant whose reader later disappears is not a
+        defect", so an operator who unsets a source's path leaves a stored grant
+        naming a source nothing drives; if this method applied the admission check
+        that user could no longer withdraw their own live grant, and a configuration
+        edit would have made a grant **permanently unrevokable**. That is precisely
+        the failure ADR-0097 §4 refused when it declined an ordering invariant on
+        ``decided_at``. Revocation is the user's whole remedy under ADR-0097 §6 and
+        nothing may stand between them and it.
+
+        **Nothing leaks through the opening this leaves.** A ``revoke`` naming a
+        value no reader declares finds no live grant, constructs nothing, records
+        nothing and returns ``None`` — so the free-text route into the store that
+        ADR-0097 §1 and §9 exist to close stays closed on this path too, not by
+        refusing the value but by there being nothing for it to reach.
+
+        **The live grant is resolved by querying every member of**
+        :class:`~ai_assistant.core.types.GrantScope` **and taking the first answer**
+        (ADR-0102 §5), which is total because a grant's scope is non-empty. Querying
+        one member is the wrong version that passes every test that exists: an
+        implementation checking only ``FACET`` would leave an ``INGEST``-only grant
+        unrevokable while reporting success by returning ``None``. The revoking
+        record transcribes the revoked grant's ``source`` and ``scope`` verbatim.
+
+        **It returns when the revoking record is durably appended, and it does not
+        wait for, cancel, or report a read already in flight** (ADR-0102 §9). No
+        client may present a revocation as having stopped one: ADR-0097 §5a
+        guarantees that every read is authorised at the instant it *starts*, and a
+        read already running completes on a worker nothing can stop (ADR-0093 §7).
+        What is true is that no further read starts and nothing an in-flight read
+        produces is used. The ``None`` return is not silence about this either — it
+        means the source had no live grant when the operation ran, and says nothing
+        about reads.
+
+        Args:
+            source: The source to withdraw, compared exactly and normalised by
+                nothing (see :meth:`grant`).
+
+        Returns:
+            The revoking record that was appended, or ``None`` where no live grant
+            covered the source.
+
+        Raises:
+            ValueError: If ``source`` is blank or has no UTF-8 encoding. Refused
+                locally, before any I/O.
+            GrantError: If the grant store could not be read or written.
+            InvalidGrantError: If the store refused the revoking record — reachably,
+                where the record it built lost a race to another revocation. A
+                refusal rather than a silent success is the right answer: the client
+                re-reads :meth:`grantable_sources` and sees the source is no longer
+                granted, which is what it wanted.
+        """
+        ...
+
+    async def recent_grants(self, *, limit: int = DEFAULT_PAGE_SIZE) -> tuple[SourceGrant, ...]:
+        """List what the user granted and withdrew, newest first.
+
+        The surface that discharges ADR-0097 §4's audit property: the record *is*
+        the audit record, so nothing here is written to an
+        :class:`AuditTrail` and no :class:`PermissionDecision` is synthesised for a
+        grant (ADR-0102 §11). Revoked grants and revocations alike are returned —
+        revocation retires nothing, and a source that has been revoked keeps its
+        complete history on file (ADR-0097 §6).
+
+        **A record this returns is never presented as live or as withdrawn on its
+        own** (ADR-0102 §3). Liveness is :attr:`GrantableSource.live`'s, computed
+        hub-side from the ``revokes`` relation; ADR-0097 §4 permits a revocation
+        timestamped *before* the grant it revokes, and this page is ordered by
+        ``decided_at``, so a clock correction can put a revoking record outside a
+        page that contains the grant it revokes.
+
+        **``limit`` and no ``offset``**, which departs from the four other paging
+        signatures deliberately (ADR-0102 §10):
+        :meth:`SourceGrantStore.recent` has no offset, so an ``offset`` here would
+        be either a store change ADR-0102 does not own or an engine-side
+        over-fetch-and-slice — a paging surface that lies about its cost, and whose
+        cost grows with the page it is skipping. It is additive the day the store
+        gains one (ADR-0008 §1).
+
+        Args:
+            limit: How many records to return. Defaults to
+                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`, and an
+                implementation called without it behaves as though it had been
+                passed.
+
+        Returns:
+            The most recent records, newest first, ties broken by ``id`` ascending.
+
+        Raises:
+            ValueError: If ``limit`` is not strictly positive, or is outside
+                ``[0, 2**63)``. **Refused locally and before any I/O, in every
+                implementation** (ADR-0102 §10). Stated because the two contracts
+                disagree about zero: ADR-0085 §9 admits a page argument in
+                ``[0, 2**63)`` and ``SourceGrantStore.recent`` requires a strictly
+                positive ``limit``, so ``recent_grants(limit=0)`` is well-formed
+                under the surface rule and refused by the store — and §9's own
+                clause is that neither implementation may be silently more
+                permissive.
+            TypeError: If ``limit`` is not an integer, or is a ``bool``. The type is
+                checked before the range for :meth:`beliefs`' reason.
+            GrantError: If the grant store could not be read.
         """
         ...

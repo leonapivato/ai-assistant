@@ -16,6 +16,7 @@ the databases — the runner, the executor, the audit trail — is real.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from itertools import count
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -36,6 +37,8 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration import (
     ConversationLifecycle,
     Engine,
+    GrantOperations,
+    HeldSource,
     MemoryWriteStage,
     ObservationStage,
     QuestionStage,
@@ -55,6 +58,7 @@ from ai_assistant.testing import (
     FakeMemoryStore,
     FakeMemoryWriter,
     FakeObserver,
+    FakeSourceGrantStore,
     FakeToolInvoker,
 )
 
@@ -65,6 +69,31 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
 
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+
+
+def _grant_ids() -> Callable[[], str]:
+    """Ids that differ per call, so a second record is never a duplicate."""
+    numbers = count(1)
+    return lambda: f"grant-{next(numbers)}"
+
+
+def _grant_operations(sources: Sequence[HeldSource] = ()) -> GrantOperations:
+    """The grant collaborator every ``Engine`` needs (ADR-0102 §7).
+
+    Required rather than optional on the façade, like ``questions`` and
+    ``observation``: the four grant methods are on the Protocol, so an engine that
+    could be built without them is one whose surface is conditionally present. Empty
+    ``sources`` is the ordinary deployment — a reader ships disabled, so nothing is
+    grantable until one is configured (ADR-0093 §7).
+    """
+    return GrantOperations(
+        store=FakeSourceGrantStore(),
+        sources=sources,
+        id_factory=_grant_ids(),
+        clock=lambda: AT,
+    )
+
+
 PATIENT = timedelta(seconds=30)
 CAPABILITY = "send_email"
 PARAMETERS = {"to": "someone@example.com"}
@@ -151,6 +180,7 @@ def _make_engine(
         id_factory=lambda: uuid4().hex,
     )
     return Engine(
+        grant_operations=_grant_operations(),
         loop=loop,
         runner=runner,
         plans=plans,

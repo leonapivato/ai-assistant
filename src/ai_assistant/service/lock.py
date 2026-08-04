@@ -1,7 +1,7 @@
 """The instance lock: exactly one hub per data directory (ADR-0083 §1, §10).
 
 Exclusivity is a **ruling**, not an optimisation — the hub is the only process
-that opens the five SQLite databases, and the API is the only door. Two mechanisms
+that opens the six SQLite databases, and the API is the only door. Two mechanisms
 enforce it and this is the first: an exclusive advisory ``flock`` that stops a
 second *hub*. The second is a ``lint-imports`` contract, which stops the in-repo
 route to a second opener; ADR-0083 §10 sequences half of that with the lane that

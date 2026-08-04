@@ -608,6 +608,42 @@ class SourceNotGrantedError(AssistantError):
     """
 
 
+class UngrantableSourceError(AssistantError):
+    """A ``source`` names nothing the hub can offer a grant for (ADR-0102 §2a, §4).
+
+    Raised by the engine's ``grant`` operation when a validated ``source`` is not
+    admissible: no reader the hub holds declares it, the reader that declares it
+    declares a name that is not in canonical form, or the reader's configured
+    location exists and has no UTF-8 encoding so §6's disclosure cannot be made.
+    Nothing is constructed from the value, and it reaches no store.
+
+    **One class rather than three**, on ADR-0097 §10's own reasoning for keeping
+    :class:`InvalidGrantError` single: "the caller's recourse is identical in all
+    three". Here it is identical too — call ``grantable_sources`` and pick from what
+    it returns — so a family would be three names for one response.
+
+    **Not a subclass of** :class:`GrantError`, whose stated subject is a store that
+    could not be read or written: this refusal never touches the store. And
+    deliberately not named near :class:`SourceNotGrantedError`'s — that one is the
+    driver-side "the user has not granted this source for this use", and
+    a caller that could not tell it from "there is no such source" is one that will
+    tell a user to grant something the hub cannot offer.
+
+    **It carries a message and nothing else**, which is what makes it survive the
+    wire. ``wire/errors.py`` reconstructs by resolving the class name over
+    ``core.errors`` and calling it with the message positionally, so a class with no
+    ``__init__`` round-trips from its message alone (ADR-0085 §10a) — and that is
+    the shape §4's refusal rule wants anyway, since a refusal here may carry no
+    filesystem path and may not echo a caller-supplied ``source``.
+
+    **What the message may name** (ADR-0102 §4): a refusal raised because a *held*
+    reader's declared name or configured location is inadmissible names that
+    reader; one raised because no held reader declares the value names no value at
+    all. A client that sent the value still has it, and the useful remedy is the
+    enumeration rather than an echo.
+    """
+
+
 class PlanningError(AssistantError):
     """A request could not be turned into an executable plan.
 

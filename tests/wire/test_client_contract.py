@@ -51,6 +51,7 @@ import pytest
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "orchestration"))
 
 from assistant_engine_contract import (
+    _SOURCE,
     _TINY_LIMIT,
     AssistantEngineContract,
 )
@@ -149,6 +150,24 @@ class TestHubEngineClientContract(AssistantEngineContract):
         """
         backing = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
         async with serving(backing, tmp_path / "hub.sock", max_frame_bytes=_TINY_FRAME) as client:
+            yield client
+
+    @pytest.fixture
+    async def granting_engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """A client of a hub holding a single grantable source with a location.
+
+        **This is the subject that makes ADR-0102 §2's argument real.** The suite's
+        whitespace clause — a ``source`` differing from a held reader's name only by
+        surrounding whitespace is refused rather than matched — is the one clause
+        the wire implementation alone could have failed, because ``wire/surface.py``
+        validates each argument against the Protocol's own annotation *before*
+        ``wire/server.py`` dispatches. Had ``source`` been annotated ``Identifier``,
+        that validation would have stripped the value and the hub would have matched
+        it, while the in-process engine refused the same call.
+        """
+        backing = FakeAssistantEngine()
+        backing.hold_source(_SOURCE, location="/srv/calendar.ics")
+        async with serving(backing, tmp_path / "hub.sock") as client:
             yield client
 
     @pytest.fixture

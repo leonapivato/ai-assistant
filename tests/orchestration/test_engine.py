@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from datetime import UTC, datetime, timedelta
+from itertools import count
 from typing import TYPE_CHECKING
 
 import pytest
@@ -68,6 +69,8 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration import (
     ConversationLifecycle,
     Engine,
+    GrantOperations,
+    HeldSource,
     IngestionStage,
     MemoryWriteStage,
     ObservationStage,
@@ -95,6 +98,7 @@ from ai_assistant.testing import (
     FakePlanStore,
     FakeReader,
     FakeSourceGrants,
+    FakeSourceGrantStore,
     FakeToolInvoker,
     ObservationGate,
     source_grant,
@@ -111,6 +115,30 @@ if TYPE_CHECKING:
     )
 
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
+
+
+def _grant_ids() -> Callable[[], str]:
+    """Ids that differ per call, so a second record is never a duplicate."""
+    numbers = count(1)
+    return lambda: f"grant-{next(numbers)}"
+
+
+def _grant_operations(sources: Sequence[HeldSource] = ()) -> GrantOperations:
+    """The grant collaborator every ``Engine`` needs (ADR-0102 §7).
+
+    Required rather than optional on the façade, like ``questions`` and
+    ``observation``: the four grant methods are on the Protocol, so an engine that
+    could be built without them is one whose surface is conditionally present. Empty
+    ``sources`` is the ordinary deployment — a reader ships disabled, so nothing is
+    grantable until one is configured (ADR-0093 §7).
+    """
+    return GrantOperations(
+        store=FakeSourceGrantStore(),
+        sources=sources,
+        id_factory=_grant_ids(),
+        clock=lambda: AT,
+    )
+
 
 #: Long enough that the fakes' instant tools finish inside it anywhere.
 PATIENT = timedelta(seconds=30)
@@ -339,6 +367,7 @@ class Harness:
             id_factory=lambda: next(self.ids),
         )
         self.engine = Engine(
+            grant_operations=_grant_operations(),
             loop=loop,
             runner=runner,
             plans=self.plans,
@@ -533,6 +562,7 @@ def _fresh_facade(harness: Harness) -> Engine:
     the same ``plans`` and ``trail``.
     """
     return Engine(
+        grant_operations=_grant_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
@@ -644,6 +674,7 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
     goals = iter(f"g-{n}" for n in range(2, 100))
     harness.engine._loop._id_factory = lambda: next(goals)  # fresh goal ids for new turns
     facade = Engine(
+        grant_operations=_grant_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
@@ -700,6 +731,7 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
     goals = iter(f"g-{n}" for n in range(1, 100))
     harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
     facade_a = Engine(
+        grant_operations=_grant_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
@@ -748,6 +780,7 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
     goals = iter(f"g-{n}" for n in range(1, 100))
     harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
     facade = Engine(
+        grant_operations=_grant_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
@@ -883,6 +916,7 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
             return getattr(self._inner, name)
 
     facade = Engine(
+        grant_operations=_grant_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
@@ -1782,6 +1816,7 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
     goals = iter(f"g-{n}" for n in range(1, 100))
     harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
     engine = Engine(
+        grant_operations=_grant_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
@@ -1846,6 +1881,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         tools=(confirmable(),), planner=GatedConfirmPlanner(), loop_id_factory=lambda: next(goals)
     )
     engine = Engine(
+        grant_operations=_grant_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
@@ -1876,6 +1912,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
     harness = Harness()
     with pytest.raises(ValueError, match="must be positive"):
         Engine(
+            grant_operations=_grant_operations(),
             loop=harness.engine._loop,
             runner=harness.engine._runner,
             plans=harness.plans,
@@ -1895,6 +1932,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
     harness = Harness()
     with pytest.raises(TypeError, match="must be an integer"):
         Engine(
+            grant_operations=_grant_operations(),
             loop=harness.engine._loop,
             runner=harness.engine._runner,
             plans=harness.plans,

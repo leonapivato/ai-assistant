@@ -9,13 +9,19 @@ are read from :class:`~ai_assistant.core.protocols.AssistantEngine` itself.
 **A transcribed table would be a second vocabulary to keep in step with the
 first**, which is the objection ADR-0085 §4 raises to mapping ``Disposition`` to a
 bare string and §10a raises to a hand-kept error registry. It applies with more
-force here: the Protocol carries fifteen methods and twenty-five parameters, a
+force here: the Protocol carries nineteen methods and twenty-nine parameters, a
 Protocol change costs an ADR and would arrive with no mechanical signal that the
 wire had been left behind, and the divergence would surface as one implementation
 quietly ignoring an argument the other honours. Reading the annotations makes the
 mapping *total by construction* — a method the Protocol grows is a method this
 module already knows about, and one whose type the wire cannot carry fails loudly
 at import rather than silently at the first call.
+
+**ADR-0102 is the evidence that was right.** It put four methods and one error
+class on the surface, and §12 item 5 records the consequence: nothing in this
+module changed, and nothing in ``wire/errors.py`` either, because ``METHODS``, the
+argument and result adapters and the error code are all derived from the contract.
+Only the figures in the paragraph above moved, and only because they are prose.
 
 **The annotations are resolved against ``core.types``' namespace** because
 ``core/protocols.py`` imports its types under ``if TYPE_CHECKING``. That is a fact

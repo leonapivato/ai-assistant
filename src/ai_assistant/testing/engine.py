@@ -35,7 +35,12 @@ from datetime import UTC, datetime, timedelta
 from itertools import count
 from typing import TYPE_CHECKING
 
-from ai_assistant.core.errors import UnknownContinuationError, UnknownConversationError
+from ai_assistant.core.errors import (
+    InvalidGrantError,
+    UngrantableSourceError,
+    UnknownContinuationError,
+    UnknownConversationError,
+)
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     ActionPlan,
@@ -52,6 +57,8 @@ from ai_assistant.core.types import (
     Disposition,
     ExecutionState,
     Goal,
+    GrantableSource,
+    GrantScope,
     IngestSummary,
     LearnDecision,
     LearnOutcome,
@@ -62,6 +69,7 @@ from ai_assistant.core.types import (
     Question,
     QuestionState,
     SkipReason,
+    SourceGrant,
     StepExecution,
     StepOutcome,
     StepStatus,
@@ -73,14 +81,22 @@ from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     check_arguments,
     check_payload,
+    grant_scope,
     identifier,
+    non_blank_text,
     page_argument,
+    positive_page_argument,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import EncodableText, FeedbackEvent, Identifier
+    from ai_assistant.core.types import (
+        EncodableText,
+        FeedbackEvent,
+        Identifier,
+        NonBlankEncodableText,
+    )
 
 #: A fixed instant, so a fake engine's output is deterministic without a clock.
 _AT = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
@@ -145,6 +161,16 @@ class FakeAssistantEngine:
         self.turn_outcome: TurnOutcome | None = None
         self.observation: ObservationReport = ObservationReport()
         self.answered: AnswerOutcome | None = None
+        #: The grantable sources this engine holds, by declared identity, each
+        #: mapped to its configured location or to ``None`` where it has none
+        #: (ADR-0102 §6). Scriptable with :meth:`hold_source`, so a client's own
+        #: refusal paths — a source with a location and one without, granted and
+        #: ungranted — are all reachable from a test (ADR-0102 §12 item 3).
+        self.sources_held: dict[str, str | None] = {}
+        #: Every grant and revocation this engine recorded, in the order it
+        #: recorded them. Both kinds live here, because revocation is an **append**
+        #: and never a mutation (ADR-0097 §4).
+        self.grants_recorded: list[SourceGrant] = []
         #: Every call, in order, as ``(method, arguments)`` — so a test can assert
         #: what reached the engine without reaching into its state.
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -438,6 +464,102 @@ class FakeAssistantEngine:
         self.calls.append(("pending_confirmations", {}))
         return self._checked(tuple(self.parked.values()), "pending_confirmations")
 
+    # --- the grant surface (ADR-0102 §1) -----------------------------------
+
+    async def grantable_sources(self) -> tuple[GrantableSource, ...]:
+        """List the held sources, each with its location and its live grant."""
+        self.calls.append(("grantable_sources", {}))
+        return self._checked(
+            tuple(
+                GrantableSource(source=identity, location=location, live=self._live_grant(identity))
+                for identity, location in self.sources_held.items()
+            ),
+            "grantable_sources",
+        )
+
+    async def grant(
+        self, source: NonBlankEncodableText, *, scope: Sequence[GrantScope]
+    ) -> SourceGrant:
+        """Admit the source against the held identities, then record the grant.
+
+        **``source`` is refused blank and normalised by nothing** (ADR-0102 §2), so
+        this fake refuses ``grant(" calendar ")`` against a held ``"calendar"``
+        exactly as the concrete engine does. Getting that wrong here would let a
+        client's tests pass over the one path the wire annotation could have
+        normalised, which is the direction nobody looks.
+        """
+        named = non_blank_text(source, name="source")
+        uses = grant_scope(scope, name="scope")
+        check_arguments("grant", max_bytes=self._max_payload_bytes, source=named, scope=uses)
+        self.calls.append(("grant", {"source": named, "scope": uses}))
+        if named not in self.sources_held:
+            msg = (
+                "no source by that name can be granted; call grantable_sources() and "
+                "choose one of the identities it returns (ADR-0097 §9)"
+            )
+            raise UngrantableSourceError(msg)
+        if self._live_grant(named) is not None:
+            # What the store's atomic one-live-grant rule raises (ADR-0097 §10), so
+            # the clause ADR-0102 §12 puts in the shared suite is reachable here.
+            msg = f"the {named!r} source already has a live grant (ADR-0097 §4)"
+            raise InvalidGrantError(msg)
+        record = SourceGrant(
+            id=f"grant-{len(self.grants_recorded) + 1}",
+            source=named,
+            scope=uses,
+            decided_at=self._tick(),
+        )
+        self.grants_recorded.append(record)
+        return self._checked(record, "grant")
+
+    async def revoke(self, source: NonBlankEncodableText) -> SourceGrant | None:
+        """Withdraw the live grant on one source, applying **no** admission check.
+
+        A value no held source declares is not refused for that (ADR-0102 §4): it
+        finds no live grant and returns ``None``, which is what keeps a grant whose
+        reader was later unconfigured revocable.
+        """
+        named = non_blank_text(source, name="source")
+        check_arguments("revoke", max_bytes=self._max_payload_bytes, source=named)
+        self.calls.append(("revoke", {"source": named}))
+        live = self._live_grant(named)
+        if live is None:
+            return self._checked(None, "revoke")
+        record = SourceGrant(
+            id=f"grant-{len(self.grants_recorded) + 1}",
+            source=live.source,
+            scope=live.scope,
+            decided_at=self._tick(),
+            revokes=live.id,
+        )
+        self.grants_recorded.append(record)
+        return self._checked(record, "revoke")
+
+    async def recent_grants(self, *, limit: int = DEFAULT_PAGE_SIZE) -> tuple[SourceGrant, ...]:
+        """List every recorded grant and revocation, newest first."""
+        positive_page_argument(limit, name="limit")
+        check_arguments("recent_grants", max_bytes=self._max_payload_bytes, limit=limit)
+        self.calls.append(("recent_grants", {"limit": limit}))
+        ordered = sorted(
+            self.grants_recorded, key=lambda record: (record.decided_at, record.id), reverse=True
+        )
+        return self._checked(tuple(ordered[:limit]), "recent_grants")
+
+    def _live_grant(self, source: str) -> SourceGrant | None:
+        """The grant on ``source`` no recorded revocation names (ADR-0097 §4).
+
+        **Derived from the ``revokes`` relation alone**, never by comparing two
+        ``decided_at`` values, which is what ADR-0102 §3's second normative clause
+        exists for: a revocation timestamped *before* the grant it revokes is
+        permitted, so a fake that ordered by time would report a withdrawn grant as
+        live — on exactly the case the shared suite is written to reach.
+        """
+        revoked = {record.revokes for record in self.grants_recorded if record.revokes is not None}
+        for record in self.grants_recorded:
+            if record.source == source and record.revokes is None and record.id not in revoked:
+                return record
+        return None
+
     # --- setting one up ----------------------------------------------------
 
     def hold(
@@ -517,6 +639,59 @@ class FakeAssistantEngine:
         )
         self.activity[conversation_id] = started
         return conversation_id
+
+    def hold_source(self, identity: str, *, location: str | None = None) -> None:
+        """Make one source grantable, with or without a configured location.
+
+        The scriptable half ADR-0102 §12 item 3 asks for. A source held **without** a
+        location is the case §6 makes grantable with ``location`` absent — nothing
+        configured means the disclosure obligation is vacuous — and it is the case a
+        client's "show it before you grant" test needs to distinguish from a source
+        that has one.
+
+        Args:
+            identity: The declared identity, as a reader's ``name`` would return it.
+            location: Where the source reads from, or ``None`` where nothing is
+                configured.
+        """
+        self.sources_held[identity] = location
+
+    def hold_grant(
+        self,
+        identity: str,
+        *,
+        scope: Sequence[GrantScope] = (GrantScope.FACET,),
+        decided_at: datetime | None = None,
+        revokes: str | None = None,
+    ) -> SourceGrant:
+        """Append one grant or revocation directly, and return it.
+
+        The **timestamp is settable** so a test can reach the one case ADR-0102 §3's
+        second clause is about and nothing else reaches: a revocation whose
+        ``decided_at`` is *earlier* than the grant it revokes, which ADR-0097 §4
+        permits explicitly and which an implementation deriving liveness from a
+        time-ordered page gets wrong.
+
+        Args:
+            identity: The source the record is about.
+            scope: The uses. On a revoking record this must transcribe the revoked
+                grant's scope verbatim, which is the store's own invariant.
+            decided_at: When the user decided; defaults to this engine's logical
+                clock.
+            revokes: The id of the grant this record revokes, or ``None``.
+
+        Returns:
+            The appended record.
+        """
+        record = SourceGrant(
+            id=f"grant-{len(self.grants_recorded) + 1}",
+            source=identity,
+            scope=tuple(scope),
+            decided_at=decided_at if decided_at is not None else self._tick(),
+            revokes=revokes,
+        )
+        self.grants_recorded.append(record)
+        return record
 
     def park(self, handle: str, *, tool_id: str = "t-1") -> Confirmation:
         """Park one confirmation this engine will resolve, and return it."""

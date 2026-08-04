@@ -91,7 +91,7 @@ def test_prepare_is_idempotent(tmp_path: Path) -> None:
 def test_a_directory_writable_by_others_is_refused(tmp_path: Path, mode: int) -> None:
     """The hole itself: another user who can write the directory can replace its contents.
 
-    Not a theoretical one — the five SQLite databases have no handshake to fall
+    Not a theoretical one — the six SQLite databases have no handshake to fall
     back on, so a replaced file is simply read as though it were ours.
     """
     target = tmp_path / "hub-data"

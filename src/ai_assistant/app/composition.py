@@ -8,6 +8,8 @@ shutdown path — everything ADR-0042 §2 requires of this layer.
 
 from __future__ import annotations
 
+import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ai_assistant.context import (
@@ -38,6 +40,8 @@ from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import (
     ConversationLifecycle,
     Engine,
+    GrantOperations,
+    HeldSource,
     IngestionStage,
     LearningLoop,
     MemoryWriteStage,
@@ -47,7 +51,11 @@ from ai_assistant.orchestration import (
     StepRunner,
 )
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
-from ai_assistant.permissions import SqliteAuditTrail, ThresholdActionPolicy
+from ai_assistant.permissions import (
+    SqliteAuditTrail,
+    SqliteSourceGrantStore,
+    ThresholdActionPolicy,
+)
 from ai_assistant.planning import ModelBackedPlanner, SqlitePlanStore
 from ai_assistant.readers import CalendarReader
 from ai_assistant.tools import build_default_registry
@@ -57,12 +65,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.config import Settings
-    from ai_assistant.core.protocols import Embedder, SourceGrants
+    from ai_assistant.core.protocols import Embedder
 
 
-def build_engine(
-    settings: Settings, *, data_dir: Path | None = None, grants: SourceGrants | None = None
-) -> Engine:
+def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
     """Wire the production subsystems into a ready :class:`Engine` (ADR-0042 §2).
 
     The one place concrete subsystems are constructed. It discharges the wiring
@@ -99,11 +105,18 @@ def build_engine(
       :func:`_build_observer_provider`) — and the stage is told which route that is,
       because reporting which model read the episodes is what ADR-0013 §6 records as
       owed and no seam exposes it;
+    * the **grant store is opened here**, as the **sixth** connection-owning Tier 1
+      store, and the *same object* is passed twice — as a
+      :class:`~ai_assistant.core.protocols.SourceGrantStore` to the grant operations
+      and as a :class:`~ai_assistant.core.protocols.SourceGrants` to every driver
+      (ADR-0102 §7). Structural typing is what makes one object serve both; what a
+      driver cannot do is *name* ``record``, because ``mypy --strict`` runs over
+      ``src`` and ``tests`` and the attribute is not on the annotated type
+      (ADR-0097 §3);
     * the **read-only ingestion stage and the calendar context source** are wired
-      only when a source is configured (ADR-0093 §7's disabled default) *and* a
-      grant seam is available to gate them (ADR-0097 §5), each over its **own**
-      reader instance (ADR-0096 §5) — and this is the one place a concrete
-      :class:`~ai_assistant.core.protocols.Reader` may be
+      whenever a source is configured (ADR-0093 §7's disabled default), each over
+      its **own** reader instance (ADR-0096 §5) — and this is the one place a
+      concrete :class:`~ai_assistant.core.protocols.Reader` may be
       constructed at all, because ``lint-imports`` forbids ``ai_assistant.readers``
       to every subsystem and exempts only this layer (see
       :func:`_build_calendar_reader`).
@@ -152,25 +165,23 @@ def build_engine(
             every existing test uses, and the hub passes the directory it already
             resolved and locked in §3's step 2 so that one resolution is shared
             rather than performed twice. Created if absent.
-        grants: The **query** seam the two reader drivers are gated on (ADR-0097
-            §5). ``None`` — the default — wires neither of them, whatever
-            ``calendar_reader_path`` says.
 
-            **It is a parameter rather than something this function builds,
-            because ADR-0097 §9 rules that "the hub's grant operations are the
-            **only** holder of a ``SourceGrantStore``".** The `permissions/`
-            implementation and the hub surface that records a grant are later
-            lanes, so today nothing can construct one and nothing can grant; a
-            deployment therefore reads no calendar, which is exactly §8's stated
-            consequence — "An installation that has been reading a source stops
-            reading it until the user grants."
+    **The ``grants`` parameter is gone** (ADR-0102 §7), and removing it rather than
+    defaulting it is the point. It was a ``SourceGrants | None = None`` whose one
+    production caller — the hub — never filled it, so no deployment could record a
+    grant, no deployment read its configured calendar, and leg 6's exit test was
+    reachable by a test with an injected fake and not by a user. That is exactly
+    the state #684 exists to record, and a default that silently wires nothing is
+    how a configured reader came to be unreachable without anything failing. After
+    this an engine either has a grant store or does not build.
 
-            **Nothing is invented in its place, deliberately.** A null-object
-            ``SourceGrants`` wired here would put an authorisation decision in the
-            composition root and hide the missing store behind something that
-            looks wired; leaving the drivers unbuilt says the true thing, and
-            :meth:`Engine.ingest`'s refusal names both conditions so an operator
-            is not told their configured reader is unconfigured.
+    **#684's third checkbox reads otherwise and is superseded**, for two reasons
+    the issue predates. It assigns the wiring to "``build_engine``'s caller — the
+    hub, and the CLI through it"; the CLI is no longer a caller at all, since
+    ``_open_engine`` returns a ``HubEngineClient`` and ADR-0084 §6's
+    ``interfaces -> app`` contract makes building an engine there a build failure.
+    And every other Tier 1 store in this system is opened here, so putting the
+    sixth somewhere else would be a second wiring convention bought for nothing.
 
     Returns:
         A ready :class:`Engine`. Drive it with ``converse``/``resume`` and close
@@ -202,9 +213,9 @@ def build_engine(
     # first observation.
     observer_route = _observer_spec(settings)
     observer_model = _build_observer_provider(settings, observer_route)
-    # The read-only sources, if this deployment configured one (ADR-0093 §7) and
-    # something can answer whether it may be read (ADR-0097 §5). **Two reader
-    # instances rather than one**, and ADR-0096 §5 decides it here rather than
+    # The read-only sources, if this deployment configured one (ADR-0093 §7).
+    # **Two reader instances rather than one**, and ADR-0096 §5 decides it here
+    # rather than
     # leaving the composition lane to pick by accident: ADR-0093 §7 bounds a reader
     # at one outstanding worker *per instance*, so a shared reader would let a
     # scheduled ingestion read suppress the request-path facet for as long as it
@@ -219,28 +230,18 @@ def build_engine(
     # written.
     facet_reader = _build_calendar_reader(settings)
     ingestion_reader = _build_calendar_reader(settings)
-    context = AssemblingContextProvider(
-        [
-            ClockContextSource(
-                timezone=settings.timezone,
-                working_hours_start=settings.working_hours_start,
-                working_hours_end=settings.working_hours_end,
-            ),
-            # The facet half of leg 6 (ADR-0096 §8), registered only when the path
-            # is configured — a source with nothing to read would be I/O on
-            # personal data in exchange for nothing (ADR-0093 §7a) — and only when
-            # a grant seam exists to gate it, since ADR-0097 §5 makes that seam a
-            # required constructor argument rather than an obligation in prose.
-            #
-            # It carries no `required` marker, so a reader fault, a store fault or
-            # a withdrawn grant each degrade the facet and leave the rest of the
-            # context assembled (ADR-0008 §4, ADR-0026 §4).
-            *(
-                []
-                if facet_reader is None or grants is None
-                else [CalendarContextSource(reader=facet_reader, grants=grants)]
-            ),
-        ]
+    # The temporal core is built here, above the data directory, because it is what
+    # *validates*: a non-conforming zone or a working-hours pair fails the build
+    # before disk is touched (#372). The ``AssemblingContextProvider`` around it is
+    # assembled below instead, and that is a change ADR-0102 §7 forces rather than a
+    # preference — the calendar facet is gated on a ``SourceGrants`` (ADR-0097 §5)
+    # and the object answering that seam is the grant store, which is a resource and
+    # therefore opens below. The provider's own constructor validates nothing, so
+    # nothing #372 protects moves with it.
+    clock_source = ClockContextSource(
+        timezone=settings.timezone,
+        working_hours_start=settings.working_hours_start,
+        working_hours_end=settings.working_hours_end,
     )
     # Construct the embedder here too — above the data directory — so a missing or
     # unbuildable model fails as a ConfigurationError before any disk is touched
@@ -306,6 +307,37 @@ def build_engine(
             queue_limit=settings.deferral_queue_limit,
         )
         opened.append(deferrals.close)
+        # The **sixth** connection-owning Tier 1 store (ADR-0102 §7), under the same
+        # data directory and the same owner-only file mode as the other five,
+        # because what it holds is the record of what the user permitted. ADR-0083
+        # ruling 4's exclusivity needs nothing new for it: it lives inside the
+        # directory the instance lock already covers, is opened by the same process,
+        # and is closed in the same ordered shutdown.
+        #
+        # **One object, passed twice** (ADR-0097 §3, ADR-0102 §7): as a
+        # ``SourceGrantStore`` to the grant operations, and as a ``SourceGrants`` to
+        # every driver. Structural typing is what makes that sound, and the
+        # narrowing is the *annotation on the driver's constructor* rather than
+        # anything done here — "what the driver cannot do is *name* ``record``".
+        grants = SqliteSourceGrantStore(path=directory / "grants.db")
+        opened.append(grants.close)
+
+        # The context provider, assembled now that the grant seam exists. Its
+        # calendar facet is registered only when a source is configured — a source
+        # with nothing to read would be I/O on personal data in exchange for nothing
+        # (ADR-0093 §7a). It carries no `required` marker, so a reader fault, a
+        # store fault or a withdrawn grant each degrade the facet and leave the rest
+        # of the context assembled (ADR-0008 §4, ADR-0026 §4).
+        context = AssemblingContextProvider(
+            [
+                clock_source,
+                *(
+                    []
+                    if facet_reader is None
+                    else [CalendarContextSource(reader=facet_reader, grants=grants)]
+                ),
+            ]
+        )
 
         # One object as both the selecting registry and the acting invoker
         # (ADR-0029 §8). Populated with the first local tools (ADR-0048); the
@@ -423,23 +455,49 @@ def build_engine(
             # arms the job only on a configured interval, and `Settings` refuses an
             # interval whose path is unset (§7a).
             #
-            # **Wired on the path and the grant seam, never on the interval.** The
-            # path configures the source and the interval arms the cadence, so
-            # ADR-0093 §7a's facet-only state is one where the stage exists and no
-            # job is armed. What is new is the second condition: ADR-0097 §5 makes
-            # a `SourceGrants` a required constructor argument, and §9 puts the
-            # only holder of a store in the hub's grant operations — which do not
-            # exist yet — so `grants` is `None` in every deployment today and no
-            # source is read at all. That is §8's own consequence rather than a
-            # gap: "An installation that has been reading a source stops reading it
+            # **Wired on the path, never on the interval.** The path configures
+            # the source and the interval arms the cadence, so ADR-0093 §7a's
+            # facet-only state is one where the stage exists and no job is armed.
+            # It is no longer *also* conditional on a grant seam: ADR-0097 §5 makes
+            # a `SourceGrants` a required constructor argument and §9 puts the only
+            # holder of a store in the hub's grant operations, which had not been
+            # built — so `grants` was `None` in every deployment and no source was
+            # read at all (#684). ADR-0102 §7 opens the store here, so the seam is
+            # always present and only the *grant* decides whether anything is read.
+            # §8's consequence stands unchanged and is now the user's to answer:
+            # "An installation that has been reading a source stops reading it
             # until the user grants."
             #
             # Its **own** reader, never the one the context source holds
             # (ADR-0096 §5).
             ingestion=(
                 None
-                if ingestion_reader is None or grants is None
+                if ingestion_reader is None
                 else IngestionStage(reader=ingestion_reader, writes=writes, grants=grants)
+            ),
+            # The four grant operations (ADR-0102 §1, §7), over the *same* store
+            # passed to the drivers above — a second store would let a user grant a
+            # source the gate then read a different answer about.
+            #
+            # **The identities and locations come from the reader objects this
+            # function built**, each read off the object rather than re-derived from
+            # a setting, which is §7's clause and is what keeps `orchestration` from
+            # having to know what a calendar is. A *sequence* rather than a mapping:
+            # §7 rules that two readers declaring one identity at differing
+            # locations is a configuration error the engine does not build through,
+            # and a mapping would deduplicate that conflict away unseen. The two
+            # instances this function builds agree by construction — both come from
+            # `calendar_reader_path` — which is exactly why the refusal has to be
+            # expressed rather than assumed.
+            grant_operations=GrantOperations(
+                store=grants,
+                sources=[
+                    HeldSource(reader.name, location=_configured_location(settings))
+                    for reader in (facet_reader, ingestion_reader)
+                    if reader is not None
+                ],
+                id_factory=_uuid,
+                clock=_utcnow,
             ),
             closers=[
                 _as_async(memory.close),
@@ -463,6 +521,9 @@ def build_engine(
                 # Correctness never depended on either sweep running; ADR-0078 §1's
                 # exposure cap did, and that is what has now been bought.
                 _as_async(deferrals.close),
+                # The grant store joins the same ordered shutdown as the other five
+                # (ADR-0083 ruling 4, ADR-0102 §7).
+                _as_async(grants.close),
             ],
             # The shutdown budget every production engine gets, hub and CLI alike
             # (ADR-0083 §4). It belongs here rather than on the ``Engine`` default
@@ -892,6 +953,49 @@ def _build_embedder(settings: Settings) -> Embedder:
         # as a model-call failure.
         msg = f"could not construct the on-device embedder: {exc}"
         raise ConfigurationError(msg) from exc
+
+
+def _uuid() -> str:
+    """Mint one opaque, random id for a grant record (ADR-0021 §3, ADR-0102 §5).
+
+    A store neither mints ids nor reads a clock, so the factory arrives by
+    injection — and it is the *composition root* that supplies it rather than a
+    client, because a client minting into a write-once store is one of the three
+    grounds ADR-0102 §5 rejects "the client constructs and sends a whole
+    ``SourceGrant``" on.
+    """
+    return str(uuid.uuid4())
+
+
+def _utcnow() -> datetime:
+    """Read the instant a grant record is stamped with (ADR-0102 §5).
+
+    Injected for the same reason and one sharper: a client's clock would backdate a
+    user act in a store whose entire value (ADR-0097 §4) is that it says what
+    actually happened. ``SourceGrant.decided_at`` is a ``UtcInstant``, so the
+    reading is validated timezone-aware UTC at construction.
+    """
+    return datetime.now(UTC)
+
+
+def _configured_location(settings: Settings) -> str | None:
+    """Where this deployment configured its one source to read from (ADR-0102 §6).
+
+    A plain ``str`` and not a ``Path``, because §6's hazard is precisely a pathname
+    with no UTF-8 encoding: Linux pathnames are bytes and Python surfaces an
+    undecodable one through ``surrogateescape``, so ``str(path)`` can hold a lone
+    surrogate. The string is what has to be judged, and judging it is the grant
+    operations' job rather than this layer's — here it is only read.
+
+    **One source, and the day there is a second this stops being a function of
+    ``Settings`` alone.** ADR-0093 §11's registry lane is where a location becomes a
+    property of a registered source rather than of a named field, and ADR-0102 §10's
+    normative clause already owes that lane a re-derivation of the enumeration's
+    worst case.
+    """
+    if settings.calendar_reader_path is None:
+        return None
+    return str(settings.calendar_reader_path)
 
 
 def _as_async(close: Callable[[], None]) -> Callable[[], Awaitable[None]]:

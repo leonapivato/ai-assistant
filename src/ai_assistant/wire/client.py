@@ -45,8 +45,11 @@ from ai_assistant.wire.codec import (
     ENVELOPE_RESERVE_BYTES,
     arguments_object,
     check_payload,
+    grant_scope,
     identifier,
+    non_blank_text,
     page_argument,
+    positive_page_argument,
     project,
 )
 from ai_assistant.wire.errors import (
@@ -76,11 +79,15 @@ if TYPE_CHECKING:
         ConversationSummary,
         EncodableText,
         FeedbackEvent,
+        GrantableSource,
+        GrantScope,
         Identifier,
         LearnOutcome,
         MemoryKind,
+        NonBlankEncodableText,
         ObservationReport,
         Question,
+        SourceGrant,
         TurnOutcome,
     )
 
@@ -141,7 +148,7 @@ class HubEngineClient:
         await _hang_up(writer)
         del reader
 
-    # --- the fifteen methods ----------------------------------------------
+    # --- the nineteen methods ---------------------------------------------
 
     async def converse(
         self,
@@ -379,6 +386,82 @@ class HubEngineClient:
             The parks, each with a token that resolves now.
         """
         return await self._call("pending_confirmations")  # type: ignore[no-any-return]
+
+    # --- the four grant operations (ADR-0102 §12 item 4) --------------------
+
+    async def grantable_sources(self) -> tuple[GrantableSource, ...]:
+        """What the user may grant, with each source's location and live grant.
+
+        **This is the response that carries §6's disclosure**, and a client that
+        cannot show the user a ``location`` may not go on to call :meth:`grant`
+        (ADR-0102 §6). The obligation is the client's and the hub cannot enforce it,
+        which is why it is stated here as well as on the Protocol.
+
+        Returns:
+            One entry per grantable source the hub holds.
+        """
+        return await self._call("grantable_sources")  # type: ignore[no-any-return]
+
+    async def grant(
+        self, source: NonBlankEncodableText, *, scope: Sequence[GrantScope]
+    ) -> SourceGrant:
+        """Record the user's grant of one source, hub-side.
+
+        **``source`` is validated and *not* normalised** — the local refusal
+        ADR-0085 §9 requires, in the shape ADR-0102 §2 fixes. Reaching for
+        :func:`~ai_assistant.wire.codec.identifier` here would strip the value
+        before it was sent and make this client accept a call the in-process engine
+        refuses, which is the substitutability failure §2 rejects the ``Identifier``
+        annotation for.
+
+        ``scope`` is **materialised before the first ``await``** and refused empty or
+        duplicated, so a caller mutating the sequence it passed cannot change the
+        grant that is recorded (ADR-0065, ADR-0097 §2).
+
+        Args:
+            source: The reader's declared identity, sent byte for byte.
+            scope: The uses this grant authorises.
+
+        Returns:
+            The grant the hub recorded.
+        """
+        named = non_blank_text(source, name="source")
+        uses = grant_scope(scope, name="scope")
+        return await self._call("grant", source=named, scope=uses)  # type: ignore[no-any-return]
+
+    async def revoke(self, source: NonBlankEncodableText) -> SourceGrant | None:
+        """Withdraw the live grant on one source, hub-side.
+
+        No admission check is applied here or on the hub (ADR-0102 §4): a source no
+        reader declares is not refused for that, it simply has no live grant. Only
+        the argument validation above is local.
+
+        Args:
+            source: The source to withdraw, sent byte for byte.
+
+        Returns:
+            The revoking record the hub appended, or ``None`` where no live grant
+            covered the source.
+        """
+        named = non_blank_text(source, name="source")
+        return await self._call("revoke", source=named)  # type: ignore[no-any-return]
+
+    async def recent_grants(self, *, limit: int = DEFAULT_PAGE_SIZE) -> tuple[SourceGrant, ...]:
+        """One page of what the user granted and withdrew, newest first.
+
+        ``limit`` is refused unless it is **strictly positive**, which is stricter
+        than :meth:`questions`' page rule and is ADR-0102 §10's own clause: the
+        store behind this refuses a non-positive limit, and ADR-0085 §9 forbids
+        either implementation from being silently more permissive than the other.
+
+        Args:
+            limit: How many records this page holds.
+
+        Returns:
+            The page.
+        """
+        positive_page_argument(limit, name="limit")
+        return await self._call("recent_grants", limit=limit)  # type: ignore[no-any-return]
 
     # --- the wire ----------------------------------------------------------
 

@@ -48,6 +48,28 @@ computed and mints no authority: the ``UserConfirmation`` an accept carries is
 constructed in `orchestration`, from a claim, and an adapter can neither build one nor
 see one.
 
+``sources``, ``grant``, ``revoke`` and ``grants`` are the grant surface (ADR-0097
+§9, ADR-0102 §1): the four operations by which a person connects a source, says
+what may be read from it, withdraws that, and reads back what they decided. A
+source is **chosen from what the hub offers and never typed**, so no path can enter
+a durable, exportable, user-rendered record (ADR-0097 §1, §9).
+
+Two obligations land on *this module* rather than on the engine, and both are
+unenforceable from the hub's side — nothing on the wire distinguishes a client that
+honoured them (ADR-0098 §5). **``grant`` renders the source's configured location
+and takes an explicit act before it sends anything** (ADR-0102 §6), which is why it
+enumerates first and refuses to grant anything the enumeration did not carry: a
+grant nobody was shown is one step from the state ADR-0097 §8 forbids, where
+configuration presents itself as consent. And **a revocation is never presented as
+having stopped a read in flight** (ADR-0102 §9) — what is true is that no *further*
+read starts and nothing a running read produces is used, and ADR-0097 §5a
+explicitly declines to promise more.
+
+``revoke`` deliberately has **no ceremony**, where ``forget`` has one: forgetting
+destroys a belief and ADR-0073 §5 requires the thing be shown first, while revoking
+destroys nothing and is the user's whole remedy, which ADR-0102 §4 says nothing may
+stand between them and.
+
 v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 """
 
@@ -72,6 +94,7 @@ from ai_assistant.core.types import (
     Disposition,
     FeedbackEvent,
     FeedbackKind,
+    GrantScope,
     LearnDecision,
     MemoryKind,
     QuestionState,
@@ -82,7 +105,7 @@ from ai_assistant.wire import HubEngineClient, TransportError
 from ai_assistant.wire.address import check_socket_path, socket_path
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.protocols import AssistantEngine
     from ai_assistant.core.types import (
@@ -92,12 +115,14 @@ if TYPE_CHECKING:
         Confirmation,
         ConversationDigest,
         ConversationSummary,
+        GrantableSource,
         IngestSummary,
         LearnOutcome,
         ObservationReport,
         ObservedProposal,
         Question,
         QueuedQuestion,
+        SourceGrant,
         StepOutcome,
         TurnOutcome,
     )
@@ -230,6 +255,21 @@ _DEFAULT_BELIEF_KINDS: tuple[MemoryKind, ...] = tuple(
 )
 
 
+#: ``assistant grant``'s repeatable scope flag, hoisted to module scope for the
+#: reason the ``learn`` and ``beliefs`` enum options are (ruff's B008). Required
+#: with no default, deliberately: ADR-0097 §2 refuses an empty scope at
+#: construction, and a *default* scope would be this adapter deciding what a user
+#: permitted — the one decision ADR-0097 §8 says nothing may make for them.
+_GRANT_SCOPE_OPTION = typer.Option(
+    ...,
+    "--scope",
+    help=(
+        "What this grant allows (repeatable): 'facet' to look at the source while "
+        "answering, 'ingest' to durably remember what it says."
+    ),
+)
+
+
 def _utcnow() -> datetime:
     """The wall-clock 'now' the ``learn`` command stamps on a ``FeedbackEvent``.
 
@@ -319,6 +359,22 @@ def _page_argument(value: int) -> int:
     """
     if not 0 <= value < _PAGE_BOUND:
         msg = f"must be between 0 and {_PAGE_BOUND - 1}"
+        raise typer.BadParameter(msg)
+    return value
+
+
+def _positive_page_argument(value: int) -> int:
+    """Reject a ``--limit`` the grant store would refuse (ADR-0102 §10).
+
+    :func:`_page_argument`'s stricter sibling, for the one paging argument on this
+    surface whose floor is 1 rather than 0: ``SourceGrantStore.recent`` requires a
+    strictly positive limit, and ADR-0102 §10 makes every implementation refuse a
+    non-positive one locally. Caught during Typer's parameter parsing so it is a
+    normal usage error (exit code 2) before any client is built, exactly as
+    :func:`_page_argument` is.
+    """
+    if not 1 <= value < _PAGE_BOUND:
+        msg = f"must be between 1 and {_PAGE_BOUND - 1}"
         raise typer.BadParameter(msg)
     return value
 
@@ -633,6 +689,92 @@ def forget(
     raise typer.Exit(code)
 
 
+@app.command()
+def sources() -> None:
+    """List the sources you can connect me to, and say which are connected.
+
+    Each line names a source, where it currently reads from, and whether you have
+    granted it — and for what. Nothing here reads any of those sources; this is the
+    list of what you *could* let me read.
+
+    You can only grant a source that appears here. There is deliberately no way to
+    type a path: what may be granted is the set of sources this installation was
+    built with, so a typo cannot become a permission.
+    """
+    code = asyncio.run(_list_sources())
+    raise typer.Exit(code)
+
+
+@app.command()
+def grant(
+    source: str = typer.Argument(..., help="The source to connect (see 'assistant sources')."),
+    scope: list[GrantScope] = _GRANT_SCOPE_OPTION,
+    *,
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the question. The source is still shown first."
+    ),
+) -> None:
+    """Let me read one source, for the uses you name.
+
+    I show you the source and **where it reads from** before asking, because a
+    permission you were not shown is not one you gave. ``--yes`` supplies the
+    answer; it never skips the rendering.
+
+    ``--scope facet`` lets me look at the source to answer what you are asking right
+    now, and remember nothing from it. ``--scope ingest`` lets me durably believe
+    what it says. They are separate on purpose — "you may look at my calendar to
+    answer this, but do not remember it" is a thing people mean. Name both to allow
+    both.
+
+    A source can have one grant at a time. To change what a grant covers, revoke it
+    and grant again; both acts stay on the record.
+    """
+    code = asyncio.run(_grant_source(source, scope=scope, assume_yes=yes))
+    raise typer.Exit(code)
+
+
+@app.command()
+def revoke(
+    source: str = typer.Argument(..., help="The source to disconnect."),
+) -> None:
+    """Stop me reading one source, from now on.
+
+    **No question is asked and nothing stands in the way**, deliberately: this is
+    your remedy, and a prompt between you and it is a prompt too many. It works even
+    for a source that is no longer configured, which is exactly when you would
+    otherwise be stuck.
+
+    What this does **not** do: it retires nothing I already believe, and it does not
+    stop a read that is already running — it stops the next one from starting, and
+    nothing a running read produces is used. Use ``assistant beliefs`` and
+    ``assistant forget`` for what I already hold.
+    """
+    code = asyncio.run(_revoke_source(source))
+    raise typer.Exit(code)
+
+
+@app.command()
+def grants(
+    limit: int = typer.Option(
+        50,
+        "--limit",
+        callback=_positive_page_argument,
+        help="How many records to show at most (at least 1).",
+    ),
+) -> None:
+    """Show what you granted and what you withdrew, most recent first.
+
+    Both kinds of act are here, and nothing is ever edited or removed from this
+    list: withdrawing a grant adds a record, it does not delete one. That is what
+    makes this the honest answer to "what have I permitted, and when".
+
+    **Do not read liveness off this list.** A record here says an act happened, not
+    that it still stands — use ``assistant sources``, which asks me directly.
+    """
+    code = asyncio.run(_list_grants(limit=limit))
+    raise typer.Exit(code)
+
+
 async def _open_engine() -> AssistantEngine:
     """Load settings and obtain a client of the running hub (ADR-0084 §6, §9).
 
@@ -640,7 +782,7 @@ async def _open_engine() -> AssistantEngine:
     ``build_engine`` and ``Engine.start()``; the process that rendered the prompt
     was the process that opened ``memory.db``. It cannot any more, and not only by
     convention: ADR-0083 ruling 4 makes the hub the only process that opens the
-    five databases and the API the only door, and the ``interfaces -> app`` import
+    six databases and the API the only door, and the ``interfaces -> app`` import
     contract now makes building an engine here a build failure rather than a
     choice (ADR-0084 §6).
 
@@ -906,6 +1048,80 @@ async def _observe_conversation(conversation_id: str | None) -> int:
         return _EXIT_ERROR
 
     return await _drive_observe(engine, conversation_id)
+
+
+async def _list_sources() -> int:
+    """Obtain a client, enumerate the grantable sources, and render them.
+
+    The grant-surface counterpart to :func:`_list_beliefs`, with the same single
+    error boundary (ADR-0042 §7).
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_sources(engine)
+
+
+async def _grant_source(source: str, *, scope: list[GrantScope], assume_yes: bool) -> int:
+    """Obtain a client, show the source, take the answer, and grant (ADR-0102 §6).
+
+    ``--yes`` supplies the answer and never the rendering, for
+    :func:`_forget_belief`'s reason turned around: there a person cannot consent to
+    destroying something they were not shown, and here a person cannot consent to a
+    source they were not shown. ADR-0097 §9a is the clause, and ADR-0102 §6's third
+    normative clause is what binds *this* module: a client renders ``location`` and
+    takes an explicit act before it sends ``grant``.
+    """
+    confirm: Callable[[GrantableSource], bool] = (
+        (lambda _source: True) if assume_yes else _confirm_grant
+    )
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_grant(engine, source, scope=scope, confirm=confirm)
+
+
+async def _revoke_source(source: str) -> int:
+    """Obtain a client, withdraw the grant, and say what happened.
+
+    **No ceremony, and that is a decision rather than an omission** (ADR-0102 §4).
+    ``forget`` and ``forget-conversation`` show-then-confirm because they *destroy*
+    what the assistant holds (ADR-0073 §5); revoking destroys nothing — it is
+    prospective, retires no belief and deletes no record (ADR-0097 §6). What it is,
+    is the user's whole remedy, and ADR-0102 §4 is explicit that nothing may stand
+    between them and it: a prompt here would be one more thing to get past at the
+    moment someone has decided to withdraw consent.
+
+    It is also why this sends ``revoke`` **without** consulting
+    ``grantable_sources`` first. That lookup would reintroduce, client-side, exactly
+    the admission check §4 removed from the operation — and it would fail for the
+    one case the removal exists for: a grant whose reader has since been
+    unconfigured, which is unrevokable the moment anything checks.
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_revoke(engine, source)
+
+
+async def _list_grants(*, limit: int) -> int:
+    """Obtain a client, read the grant record, and render it (ADR-0097 §4)."""
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_grants(engine, limit=limit)
 
 
 async def _forget_belief(belief_id: str, *, assume_yes: bool) -> int:
@@ -1198,6 +1414,110 @@ async def _drive_learn(engine: AssistantEngine, event: FeedbackEvent) -> int:
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
+    return _EXIT_OK
+
+
+async def _drive_sources(engine: AssistantEngine) -> int:
+    """Ask the hub what may be granted and render it (ADR-0102 §1)."""
+    try:
+        offered = await engine.grantable_sources()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_sources(offered)
+    return _EXIT_OK
+
+
+async def _drive_grant(
+    engine: AssistantEngine,
+    source: str,
+    *,
+    scope: list[GrantScope],
+    confirm: Callable[[GrantableSource], bool],
+) -> int:
+    """Enumerate, show, take the answer, and only then grant (ADR-0102 §6).
+
+    **The enumeration is not an optimisation and skipping it is not permitted.**
+    ADR-0102 §6's third clause obliges a client to render the source's configured
+    location and take an explicit act before it sends ``grant``, and "a client that
+    cannot show the user the location does not send ``grant``". Nothing on the wire
+    distinguishes a client that obeyed from one that did not (ADR-0098 §5), so this
+    is the only place the clause can live — and it is why the flow is
+    enumerate-then-grant rather than a single call.
+
+    A source the enumeration does not carry is therefore **not granted from here**,
+    whatever the reason it is missing: no such source, a reader whose declared name
+    is inadmissible, or a configured location with no UTF-8 encoding. All three
+    leave nothing to show, and §6 fails closed rather than granting unseen.
+
+    The source is relayed **untouched** — never stripped — because whether it names
+    a held reader is the hub's question and ADR-0102 §2 makes an exact comparison
+    the whole contract of that argument.
+    """
+    try:
+        offered = await engine.grantable_sources()
+        chosen = next((one for one in offered if one.source == source), None)
+        if chosen is None:
+            _render_no_such_source(source, offered)
+            return _EXIT_ERROR
+        _render_grant_prompt(chosen, scope)
+        if not confirm(chosen):
+            console.print("[dim]Left alone. Nothing was granted.[/]")
+            return _EXIT_OK
+        # Relayed as the user typed it, and as the enumeration returned it: they are
+        # equal by the check above, so this is the declared identity either way.
+        recorded = await engine.grant(chosen.source, scope=scope)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    console.print(
+        f"[green]Granted.[/] I may now read [bold]{_safe(recorded.source)}[/] for "
+        f"{_scope_phrase(recorded.scope)}. Withdraw it any time with "
+        f"'assistant revoke {_safe(recorded.source)}'."
+    )
+    return _EXIT_OK
+
+
+async def _drive_revoke(engine: AssistantEngine, source: str) -> int:
+    """Relay one revocation and say exactly what it did — and did not do.
+
+    The wording is load-bearing (ADR-0102 §9). "Your calendar is no longer being
+    read" is the sentence a person writes and it overclaims: what is true is that no
+    *further* read starts and nothing an in-flight read produces is used. ADR-0097
+    §5a declines to promise more, so neither does this. And ``None`` is not silence
+    about it either — it means there was no live grant when the call ran, which says
+    nothing about reads, so rendering it as "nothing was happening" would invent the
+    same overclaim from the other side.
+    """
+    try:
+        withdrawn = await engine.revoke(source)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    if withdrawn is None:
+        console.print(
+            "[yellow]Nothing to withdraw:[/] no live grant covers that source. "
+            "(That is about the grant, not about any read — see 'assistant grants' "
+            "for what was granted and withdrawn.)"
+        )
+        return _EXIT_ERROR
+    console.print(
+        f"[green]Withdrawn.[/] I will start no further read of "
+        f"[bold]{_safe(withdrawn.source)}[/], and nothing a read still running "
+        f"produces will be used. What I already believe from it is untouched — see "
+        f"'assistant beliefs'."
+    )
+    return _EXIT_OK
+
+
+async def _drive_grants(engine: AssistantEngine, *, limit: int) -> int:
+    """Read the grant record and render it, newest first (ADR-0097 §4)."""
+    try:
+        recorded = await engine.recent_grants(limit=limit)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_grants(recorded, limit=limit)
     return _EXIT_OK
 
 
@@ -2184,6 +2504,161 @@ def _render_no_such_belief(belief_id: str) -> None:
         f"[yellow]No live belief has the id[/] {_safe(belief_id)}. "
         "It may never have existed, or it may have been revised or forgotten already — "
         "this surface shows and destroys only beliefs held right now."
+    )
+
+
+def _scope_phrase(scope: Sequence[GrantScope]) -> str:
+    """Say what a scope allows, in words rather than in enum values.
+
+    Total over :class:`~ai_assistant.core.types.GrantScope` through
+    :func:`assert_never`, so a third member surfaces at type-check time rather than
+    as a missing phrase — the same discipline every other exhaustive rendering on
+    this surface uses.
+    """
+    phrases = []
+    for use in scope:
+        match use:
+            case GrantScope.FACET:
+                phrases.append("looking at it while answering")
+            case GrantScope.INGEST:
+                phrases.append("durably remembering what it says")
+            case _:  # pragma: no cover — exhaustive over the enum
+                assert_never(use)
+    return " and ".join(phrases) if phrases else "nothing"
+
+
+def _render_sources(offered: tuple[GrantableSource, ...]) -> None:
+    """Render the grantable sources, each with its location and its standing.
+
+    **Liveness is read off ``live`` and never derived** (ADR-0102 §3): the hub
+    computed it from the ``revokes`` relation, and a client walking
+    ``recent_grants`` instead would report a withdrawn grant as live whenever a
+    clock had been corrected backwards. So this renders the field it was handed.
+    """
+    if not offered:
+        console.print(
+            "[yellow]No sources are available to connect.[/] Nothing is configured "
+            "for this installation to read. Configuration says *where* a source is; "
+            "a grant says *whether* I may read it — and neither stands in for the "
+            "other, so there is nothing to grant until one is configured."
+        )
+        return
+    console.print(f"[bold]{len(offered)}[/] source(s) you can connect me to:\n")
+    for one in offered:
+        console.print(f"  [bold cyan]{_safe(one.source)}[/]")
+        # The location is shown and comes to rest nowhere: it is on this response
+        # and on no stored record, in no log and in no export (ADR-0097 §9a).
+        where = "not configured" if one.location is None else _safe(one.location)
+        console.print(f"    reads from: {where}")
+        if one.live is None:
+            console.print("    [dim]not granted — I read nothing from it[/]")
+        else:
+            console.print(
+                f"    [green]granted[/] for {_scope_phrase(one.live.scope)} "
+                f"(since {_when(one.live.decided_at)})"
+            )
+        console.print()
+
+
+def _render_no_such_source(source: str, offered: tuple[GrantableSource, ...]) -> None:
+    """Report a name the enumeration does not carry, and say what it does carry.
+
+    **The remedy is the list rather than an echo**, which is ADR-0097 §9's refusal
+    rule read from the client's side: a caller that sent the value still has it, and
+    what it needs is the admissible set.
+
+    It deliberately does not speculate about *why* a name is absent. Three different
+    conditions produce the same answer here — no such source, a reader whose
+    declared name is not in canonical form, and a configured location that cannot be
+    shown (ADR-0102 §4, §6) — and only the last two are visible to an operator, in
+    the hub's log. Guessing between them at a user's terminal would be inventing a
+    diagnosis this process cannot make.
+    """
+    console.print(
+        f"[yellow]I cannot offer a source called[/] {_safe(source)}[yellow].[/] "
+        "You can only grant a source I can show you first, which is what keeps a "
+        "typo from becoming a permission."
+    )
+    if offered:
+        names = ", ".join(_safe(one.source) for one in offered)
+        console.print(f"Available: {names}. See 'assistant sources' for the details.")
+    else:
+        console.print("Nothing is configured for me to read, so there is nothing to grant.")
+
+
+def _render_grant_prompt(chosen: GrantableSource, scope: Sequence[GrantScope]) -> None:
+    """Show the source, where it reads from, and what the grant would allow.
+
+    **This is ADR-0102 §6's third clause discharged**, and the ordering is the whole
+    of it: the location is rendered *before* consent is taken, because a grant given
+    without seeing what is being connected is the uninformed grant ADR-0097 §9a
+    exists to prevent. ``--yes`` supplies the answer and never removes this
+    rendering, exactly as it does not on ``forget`` (ADR-0073 §5, ADR-0052 §4).
+
+    Where the source has **no configured location**, §9a's obligation is vacuous —
+    there is nothing to show — and that is said plainly rather than left blank. The
+    other case, a location that cannot be written down, never reaches here: such a
+    source is absent from the enumeration, and :func:`_drive_grant` refuses to send
+    ``grant`` for anything the enumeration did not carry.
+    """
+    console.print(f"About to connect [bold cyan]{_safe(chosen.source)}[/].\n")
+    if chosen.location is None:
+        console.print("  [yellow]It has no configured location.[/]")
+    else:
+        console.print(f"  It reads from: [bold]{_safe(chosen.location)}[/]")
+    console.print(f"  You would be allowing: {_scope_phrase(scope)}.")
+    if chosen.live is not None:
+        console.print(
+            "\n  [yellow]It is already granted[/] for "
+            f"{_scope_phrase(chosen.live.scope)}. A source has one grant at a time, "
+            "so this will be refused — withdraw the current one first with "
+            f"'assistant revoke {_safe(chosen.source)}'."
+        )
+    console.print(
+        "\n[dim]Withdrawing later stops further reads; it does not un-remember what "
+        "was already read.[/]"
+    )
+
+
+def _confirm_grant(_source: GrantableSource) -> bool:
+    """Read the human's yes/no *without* rendering — the caller already displayed it.
+
+    Defaults to **no**, like every other consent question on this surface: the
+    question is about letting the assistant read a personal source, and a bare
+    Enter must not be the answer that permits it (ADR-0097 §8's posture, where
+    nothing mints a grant from what is merely configured).
+    """
+    return typer.confirm("Connect it?", default=False)
+
+
+def _render_grants(recorded: tuple[SourceGrant, ...], *, limit: int) -> None:
+    """Render the grant record, newest first, without claiming any of it is live.
+
+    **A record is shown as an act and never as a standing** (ADR-0102 §3): this
+    page is ordered by ``decided_at`` and ADR-0097 §4 permits a revocation
+    timestamped before the grant it revokes, so a clock correction can put the two
+    out of order here — which is a display oddity and never a wrong answer, as long
+    as nothing on this page pretends to answer "is it granted now". That question is
+    ``assistant sources``.
+    """
+    if not recorded:
+        console.print("[yellow]Nothing recorded.[/] You have not granted or withdrawn anything.")
+        return
+    console.print(f"[bold]{len(recorded)}[/] record(s), most recent decision first:\n")
+    for record in recorded:
+        act = "withdrew" if record.revokes is not None else "granted"
+        console.print(
+            f"  [bold]{_when(record.decided_at)}[/] — {act} "
+            f"[bold cyan]{_safe(record.source)}[/] for {_scope_phrase(record.scope)}"
+        )
+        console.print(f"    [dim]{_safe(record.id)}[/]")
+    if len(recorded) == limit:
+        console.print(
+            f"\n[dim]Showing {limit}. Ask for more with --limit; there is no total count.[/]"
+        )
+    console.print(
+        "\n[dim]Whether a source is granted *now* is 'assistant sources' — a record "
+        "here says an act happened, not that it still stands.[/]"
     )
 
 

@@ -8,7 +8,7 @@ and ``core`` imports `orchestration`, which golden rule 2 forbids and
 
 **``lint-imports`` catches that one type at a time and only once someone writes the
 import.** This catches it as a property: it walks the declared field graph out from
-the fifteen signatures and asserts every type it reaches is declared in
+every signature on it and asserts every type it reaches is declared in
 ``core.types``. A type left behind fails here naming itself, rather than as an
 architecture violation several edits later.
 
@@ -17,10 +17,20 @@ happened to the one field list that ADR: it was falsified in a single review rou
 having missed ``MemoryBase.id`` and ``Provenance.evidence`` — "a rule over 'every
 string' survives, and a list of fields rots". The same argument applies one level
 up, so the closure is checked by walking rather than by an enumeration this module
-would have to maintain. The twenty-four names ADR-0085 §5 gathers are asserted
-*reachable*, which is a different claim: it catches a type the ADR promoted and an
-implementation forgot, and it cannot go stale in the direction that matters,
-because a type nobody reaches is caught by the walk being closed.
+would have to maintain. The names the corpus has promoted are asserted *reachable*,
+which is a different claim: it catches a type an ADR promoted and an implementation
+forgot, and it cannot go stale in the direction that matters, because a type nobody
+reaches is caught by the walk being closed.
+
+**The set the corpus has promoted is now two ADRs' and not one's.** ADR-0085 §5
+gathered twenty-four for fifteen methods; ADR-0102 §3 adds ``GrantableSource`` for
+the four grant operations, and §13 applies ADR-0070 §1's test to ADR-0085 §1's "and
+nothing else" and concludes no supersession is owed — what that exclusion excludes
+is *lifecycle*, named in the paragraph it introduces, and the closed graph the
+title claims is a property of the **types** rather than of the method count.
+ADR-0102 §3 shows the walk from ``GrantableSource`` terminating in ``core`` on
+every branch, and the assertions below are what check that claim rather than take
+it.
 """
 
 from __future__ import annotations
@@ -43,10 +53,15 @@ from ai_assistant.core.protocols import AssistantEngine
 #: needs ``core.types``' namespace handed in explicitly.
 _NAMESPACE: Final = {**vars(core_types), **vars(protocols_module)}
 
-#: The twenty-four ADR-0085 §5 gathers from its own walk: thirteen from
-#: ``engine.py`` (of which ``BeliefSummary`` is new, §4a), six from ``questions.py``,
-#: one from ``runner.py``, one from ``loop.py``, two from ``observation.py`` and one
-#: from ``conversations.py``.
+#: The twenty-five the corpus has promoted. Twenty-four are ADR-0085 §5's own walk:
+#: thirteen from ``engine.py`` (of which ``BeliefSummary`` is new, §4a), six from
+#: ``questions.py``, one from ``runner.py``, one from ``loop.py``, two from
+#: ``observation.py`` and one from ``conversations.py``. The twenty-fifth is
+#: ADR-0102 §3's ``GrantableSource``, which the four grant operations name.
+#:
+#: ``SourceGrant`` and ``GrantScope`` are **not** here and that is not an omission:
+#: they predate this block (ADR-0097 §2) and are ``core`` leaves the walk terminates
+#: at, exactly as :func:`_declared_by_this_change` sorts them.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
         "ContinuationToken",
@@ -73,6 +88,7 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "ObservedProposal",
         "ObservationReport",
         "ConversationDigest",
+        "GrantableSource",
     }
 )
 
@@ -91,7 +107,7 @@ def _method_names() -> list[str]:
 
 
 def _reachable() -> set[type]:
-    """Walk the declared field graph out from the fifteen signatures.
+    """Walk the declared field graph out from every signature on the surface.
 
     The walk follows a field's **annotation to its declared type**, stops at
     anything it has already seen, and **never follows a method** — which is what
@@ -138,7 +154,7 @@ def test_every_type_the_surface_reaches_is_declared_in_core() -> None:
 
 
 def test_the_walk_reaches_every_promoted_type() -> None:
-    """ADR-0085 §5's twenty-four are all really on the surface.
+    """Every promoted type is really on the surface.
 
     The complement of the test above: that one catches a type left behind, this
     one catches a type the ADR promoted and an implementation never wired up — a
@@ -151,13 +167,15 @@ def test_the_walk_reaches_every_promoted_type() -> None:
     )
 
 
-def test_the_promoted_set_is_the_twenty_four_the_adr_gathered() -> None:
-    """No twenty-fifth type slipped onto the surface unreviewed.
+def test_the_promoted_set_is_the_one_the_adrs_gathered() -> None:
+    """No further type slipped onto the surface unreviewed.
 
     ADR-0085 §5's walk is the *complete* graph, and ADR-0015 §5's point is that no
     lane authors ``core`` contract surface unreviewed. A type reachable from these
-    signatures that the ADR never named is exactly that, so it fails here rather
-    than merely growing ``core/types.py``.
+    signatures that no ADR named is exactly that, so it fails here rather than
+    merely growing ``core/types.py`` — which is what caught ``GrantableSource``
+    when ADR-0102 added it, and is why this check earns its keep rather than
+    merely restating :data:`PROMOTED`.
 
     The pre-existing ``core`` leaves the walk terminates at are excluded by name
     from the comparison rather than listed: they are whatever ``core.types`` held
@@ -221,15 +239,19 @@ def test_the_walk_really_is_transitive() -> None:
     assert {"StepFailure", "ToolFailureKind", "Provenance", "Validity", "PlanStep"} <= reached
 
 
-def test_the_surface_carries_the_fifteen_methods_the_adr_fixed() -> None:
-    """ADR-0085's count, which the conformance suite needs a number to be complete against.
+def test_the_surface_carries_the_nineteen_methods_the_adrs_fixed() -> None:
+    """The count, which the conformance suite needs a number to be complete against.
 
-    Seventeen public methods exist on the concrete engine; ``start`` and ``aclose``
-    are ruled off the Protocol by ADR-0084 §5, so the promoted surface is fifteen.
-    ADR-0085 §11b records this as a correction of that ADR's "around nineteen": a
-    count, not a decision, and §5's argument does not rest on the figure.
+    ``start`` and ``aclose`` are ruled off the Protocol by ADR-0084 §5, so the
+    promoted surface is what the two contract ADRs put on it and nothing else:
+    ADR-0085 §1's fifteen plus ADR-0102 §1's four. ADR-0085 §11b recorded fifteen as
+    a correction of ADR-0084 §5's "around nineteen" — a count, not a decision, and
+    §5's argument did not rest on the figure. It does not rest on this one either;
+    what the number is for is making a *complete* suite something a reader can
+    check, since a method nobody bound to the shared contract is a method no
+    implementation is held to.
     """
-    assert len(_method_names()) == 15
+    assert len(_method_names()) == 19
 
 
 #: ADR-0085 §6b's twelve derived predicates. **The list is normative there** — "a
