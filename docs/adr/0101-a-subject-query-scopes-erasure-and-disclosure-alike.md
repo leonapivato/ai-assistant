@@ -1,7 +1,63 @@
 # 101. A subject query scopes erasure and disclosure alike, and it matches a label rather than a person
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-04
+- **Note (2026-08-04): ratified.** `Proposed` → `Accepted`, in the separate lane
+  #633 requires, after **both** required reviews came back green on the content
+  this ADR merged with: adversarial **APPROVE with no findings** and architecture
+  **APPROVE with no findings**, both at tree `fa87e807c7aa`, round 3, churn ratio
+  1.0, each posted to PR #694 by `just ship`. That is the outcome ADR-0070 §1
+  requires the ratifying edit to record, and it is taken from that comment rather
+  than from a report: the comment's `<!-- ship:657b02802585 -->` anchor is #694's
+  merged head, and `git rev-parse` resolves that head's tree to the tree named
+  above — the same tree as `707c467`, the commit the PR merged as, so the content
+  the reviews read is the content that landed. Beyond the `Status` line the only
+  edit is the tense of the header bullet below that names the review set. **No
+  decision text is touched and no normative clause acquires, loses or alters an
+  obligation**, which is ADR-0070 §1's own test applied to the ratifying edit
+  first.
+
+  **No status premise had to be corrected, and the reason is the header bullet
+  below that says so in advance.** The bullet discharging ADR-0100 §12 was
+  written to survive its neighbours' ratification — "ADR-0099 and ADR-0100 both
+  stood `Proposed` when this ADR was written … every reference below to either is
+  to its text as merged on 2026-08-04, not to its status on any later day" — so
+  the one present-tense status premise this document could have carried was never
+  written. That is the device ADR-0097 §11 lacked and had to be corrected in
+  place for at its own ratification. ADR-0099 and ADR-0100 were both ratified at
+  `9f1832a`, exactly as that bullet anticipated, and every reference below to
+  either is to text that flip did not touch.
+
+  **Three merges landed between this ADR's authoring and its ratification, so
+  the staleness check was run rather than recited.** Ratified against `b86e8c2`,
+  where `git diff --name-only 08da580 b86e8c2` — `08da580` being the base this
+  ADR was written and reviewed against — names this file, ADR-0099, ADR-0100,
+  ADR-0102, the three files of the `SourceGrantStore` implementation (#695) and
+  the three files of the sub-minute zone-offset fix (#701), and nothing else.
+  **Every claim this ADR makes about the tree was re-read against the code at
+  that commit and holds**: `AssistantEngine` still carries fifteen methods and
+  neither an `export` nor a `clear`; `interfaces/cli.py` still registers the
+  twelve commands the Context names and no export command; and
+  `ConversationLifecycle.export` still composes a `DataExport` that is a frozen
+  dataclass in `orchestration` and that nothing outside `orchestration` calls.
+  **ADR-0102 is the merge that could have moved one of those and does not.** It
+  decides four further `AssistantEngine` methods and implements none — it is a
+  contract ADR under the same golden rule 5 sequence as this one — so the count
+  the Context reads off the tree is unchanged; and its §14 and Context lean on
+  §7's finding that ADR-0004 §6's export right reaches no user rather than
+  discharging it. Neither #695 nor #701 reaches any claim here.
+
+  **No deferral of this ADR has fired.** §7's two firing conditions are both
+  about the export right's surface and neither has a lane; the `MemoryStore`
+  triad §7 reserves to that lane is unbuilt, which is what §7's last clause
+  requires rather than a gap. #691, filed by §3, is open.
+
+  **One present-tense clause was checked and deliberately left.** The bullet
+  below says "a separate lane ratifies them" of ADR-0099 and ADR-0100. It states
+  the mechanism #633 mandates rather than either ADR's status, it is what
+  happened at `9f1832a`, and no reader is misled by it — both documents carry
+  `Status: Accepted`. **ADR-0070 §1's no-rewrite rule now protects this text**,
+  so any later correction is an appended dated note.
 - **Decides the `MemoryStore` contract for subject-scoped erasure and disclosure,
   and the matching rule ADR-0100 §6's second clause reserved.** `export` gains a
   scope argument, a new `delete_about` destroys what that same scope selects, and
@@ -17,9 +73,10 @@
   architecture lens on `core/protocols.py` or `core/types.py` changing, and the PR
   carrying this ADR touches neither — it is prose only. The set is taken anyway
   because the *decision* is `core` surface, which is what ADR-0093 through ADR-0100
-  each declared it for. Reviewed while `Proposed` and ratified only after, in a
-  separate lane (`CONTRIBUTING.md` → "Contract ADRs land before their
-  implementation"; #633 records why the flip cannot ride in the PR that carries it).
+  each declared it for. It was reviewed while `Proposed` and ratified only after,
+  in a separate lane (`CONTRIBUTING.md` → "Contract ADRs land before their
+  implementation"; #633 records why the flip could not ride in the PR that
+  carried it).
 - **Discharges the first deferral of ADR-0100 §12**, which reads in part
   "**Subject-scoped delete and export.** ADR-0007 §1's `delete(record_id)`,
   `clear()` and `export()` gaining a dimension … **It is the ADR §6's second clause
