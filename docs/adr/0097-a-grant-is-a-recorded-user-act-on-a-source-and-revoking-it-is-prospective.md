@@ -377,9 +377,41 @@ by prose rather than mechanism".
 > or widening is §2's revoke-then-grant.
 
 > **Normative.** The store refuses a revocation whose named grant is absent, is
-> itself a revocation, is already revoked, names a different `source`, transcribes
-> a different `scope`, or is timestamped after the revocation claiming to revoke
-> it.
+> itself a revocation, is already revoked, names a different `source`, or
+> transcribes a different `scope`.
+
+> **Normative.** Liveness is derived from the `revokes` relation alone. No
+> implementation may decide whether a grant is live by comparing `decided_at`
+> values, and **a revocation is never refused for its timestamp** — including one
+> that predates the grant it revokes.
+
+**The timestamp is deliberately not an invariant, and this is the one place this
+ADR departs from `AuditTrail`'s shape on purpose.** `SqliteAuditTrail._check_resolution`
+refuses a resolution "timestamped before the confirmation it answers", and an
+earlier draft of this section copied that clause across. It is wrong here, and the
+failure is the worst one available: `decided_at` is caller-supplied and the store
+reads no clock (ADR-0021 §3's rule, which this contract keeps), so a host clock
+corrected backwards after a grant was recorded makes every truthfully-timestamped
+revocation of it refusable until wall-clock time catches up. A large enough
+correction makes a grant **permanently unrevokable** — the one property
+`VISION.md` names that this ADR exists to deliver, defeated by an invariant that
+was protecting nothing.
+
+**Protecting nothing, precisely.** In the audit trail the ordering check guards a
+real claim: that an answer was given after the question was asked, which is what
+makes a recorded consent evidence. Here the revocation is identified by `revokes`,
+liveness is computed from that pointer, and nothing in this contract compares two
+instants — so dropping the check removes a lockout and costs no property. What is
+left is a record whose `recent` ordering can put a revocation beside or above the
+grant it revokes when the clock moved, which is a display oddity a surface can
+render honestly and never a wrong answer to "is this source granted".
+
+**A monotonic sequence was considered and refused.** It would restore a total
+order over records, and it would be new durable state and a new mechanism, added
+to make a display ordering pretty in a case the tree has never hit. No decision
+here rests on order; ADR-0021 §4 lives with wall-clock ordering for a store with
+far more of it. If a consumer ever needs a total order it owes its own decision,
+and §12 records the trigger.
 
 **This answers "are granting and revoking audited" by construction rather than by
 adding a log.** The record *is* the audit record: a store in which the only writes
@@ -464,6 +496,29 @@ needs a lock.
 > whose grant is no longer live at that moment is **discarded**: nothing is
 > proposed from it, no facet is contributed from it, and the driver refuses under
 > §5's outcomes.
+
+> **Normative.** A driver **fails closed on an unanswerable check**. A `live()`
+> that raises `GrantError` is not a grant: before the read nothing is opened, and
+> after the read the reading is discarded exactly as a withdrawn grant is. No
+> driver may proceed on a stale answer, on the earlier of two lookups, or on an
+> absent one.
+
+> **Normative.** A `GrantError` **propagates** from an ingestion driver rather
+> than being converted into `SourceNotGrantedError`; on the facet path it leaves
+> the facet absent, as every optional-source fault does. A store fault and a
+> withdrawn grant are different facts and an operator must be able to tell them
+> apart.
+
+**Failing closed is stated rather than assumed, because the tempting reading is
+the other one.** A store that cannot be read is a fault, and "the check failed, so
+carry on with what we already knew" is what an implementer writes when the
+alternative looks like losing a scheduled run. It is the wrong trade twice over:
+the thing being protected is the user's personal files, and the corpus already
+rules this direction for the neighbouring case — ADR-0016 §4's `UNKNOWN` cost is
+"the author does not know, so policy must fail closed", which ADR-0021 §5 turned
+into a floor. An unanswerable grant check is that sentence with "the store" in
+place of "the author". A missed ingestion tick costs one interval; a read on a
+revocation nobody could see costs the property this ADR exists to hold.
 
 **The first clause is sufficient for the window the finding names, and it is
 sufficient because of how the loop actually schedules.** Awaiting a coroutine does
@@ -883,9 +938,14 @@ Protocol"); both Protocols' triads are that one change, not two:**
    - After a revoking record, `live` returns `None` for every use of that source,
      and the revoked grant is **still** returned by `recent` and `export` (§4, §6).
    - A revocation naming an absent grant, an already-revoked grant, another
-     revocation, a different `source`, a different `scope`, or timestamped before
-     the grant it revokes, raises `InvalidGrantError` (§4). Six cases, enumerated
-     so a lane writes all six rather than the one easiest to provoke.
+     revocation, a different `source`, or a different `scope`, raises
+     `InvalidGrantError` (§4). Five cases, enumerated so a lane writes all five
+     rather than the one easiest to provoke.
+   - **A revocation timestamped *before* the grant it revokes is accepted**, and
+     `live` returns `None` for that source afterwards (§4). The inverse of the
+     clause above and written as its own case, because it is the one a lane copying
+     `AuditTrail`'s shape will get backwards — and getting it backwards is what
+     makes a grant unrevokable across a clock correction.
    - `record` is write-once: a duplicate id raises rather than overwriting (§4).
    - Every query returns a **detached** snapshot, ADR-0018 §3's rule applied to a
      third store and for ADR-0021 §4's reason — a caller holding a store's own
@@ -897,9 +957,17 @@ Protocol"); both Protocols' triads are that one change, not two:**
 3. **Two canonical fakes in `ai_assistant.testing`** — `FakeSourceGrants` and
    `FakeSourceGrantStore`, the names
    `tests/core/test_protocol_triad.py` requires. Each is scriptable to hold a live
-   grant, to hold a revoked grant, and — for the store — to have `record` raise:
-   the three states a driver's §5 gate must be tested against, so a consumer can
-   test its own refusal path.
+   grant, to hold a revoked grant, to raise `GrantError` **from `live()`**, and —
+   for the store — to have `record` raise: the states a driver's §5 gate must be
+   tested against, so a consumer can test its own refusal paths.
+
+   **The raising `live()` is required of both fakes and is not decoration.** §5a's
+   fail-closed clause is otherwise untestable: without it a driver's `GrantError`
+   branch is unreachable from any test, and an implementation that caught the error
+   and carried on with the earlier lookup would pass everything while writing
+   beliefs after its authorisation stopped being checkable. That is the same class
+   of vacuous pass ADR-0093 §10 refused when it required its own fake's suspension
+   gate.
 
    > **Normative.** The `SourceGrants` conformance suite is bound against **both**
    > fakes. `FakeSourceGrantStore` is the wider seam's fake and satisfies the
@@ -925,11 +993,13 @@ surface:
   adapter's own tests, alongside the required constructor argument that makes
   omitting the gate a type error.
 
-  > **Normative.** Each driver's own tests cover the three cases §5 and §5a
-  > distinguish: no live grant at the check (nothing is opened), a grant revoked
-  > between the check and the return of `read()` (the reading is discarded), and a
-  > grant live throughout (the reading is used). The second is written against the
-  > driver, using the canonical fake's scripted revocation, and is not a store
+  > **Normative.** Each driver's own tests cover the five cases §5 and §5a
+  > distinguish: no live grant at the check (nothing is opened); a `live()` that
+  > raises before the read (nothing is opened); a grant revoked between the check
+  > and the return of `read()` (the reading is discarded); a `live()` that raises
+  > on the re-check (the reading is discarded); and a grant live throughout (the
+  > reading is used). All five are written against the driver, using the canonical
+  > fake's scripted revocation and its scripted failure, and none is a store
   > conformance clause.
 
 - **§7's prohibition on citing a grant as `authorised_by`.** A statement about
@@ -1026,6 +1096,12 @@ changes**. The places where the opposite reading is available:
   give. Fires with the first surface that asks "under which authorisation was this
   written" — the likeliest is the belief inspection surface ADR-0073 §4 governs, if
   it ever renders more than the band and the source.
+- **A total order over grant records** — a monotonic sequence beside
+  `decided_at`, so `recent` cannot show a revocation above the grant it revokes
+  after a clock correction. Refused as a mechanism today in §4, where liveness is
+  derived from the `revokes` relation and nothing compares two instants. Fires
+  when a consumer needs a total order for something other than display, which
+  would also be the first thing in this system to need one.
 - **Who granted.** No user identity exists (#113, ADR-0036 §3). Fires with the
   first multi-user deployment, as an optional field.
 - **A grant for something that is not a `Reader`** — a spoke reporting beliefs
