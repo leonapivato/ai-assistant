@@ -786,6 +786,33 @@ class SourceGrantStoreContract(SourceGrantsContract):
         with pytest.raises(ValueError, match="limit"):
             await store.recent(limit=limit)
 
+    async def test_a_limit_wider_than_a_backing_store_can_bind_still_answers(
+        self, store: SourceGrantStore
+    ) -> None:
+        """A bound above any possible row count means "all of them", not an error.
+
+        ``limit`` is a Python ``int`` and has no width, so ``2**63`` is a
+        perfectly valid strictly-positive request. Binding one that wide into
+        SQLite raises ``OverflowError`` — neither ``ValueError`` nor
+        ``GrantError``, so it leaves the seam's error boundary through a hole
+        while every other clause here still passes.
+
+        **A convention carried across rather than a decision made here.**
+        ``SqliteAuditTrail.recent`` already clamps this exact boundary, and its
+        own comment gives the reason it is not the ``limit=-1`` case: "a bound
+        above any possible row count means 'all of them', which is what the query
+        then returns", where clamping a negative limit "would have served
+        something the caller did not ask for". The clause is written into *this*
+        suite because ADR-0097 §10 puts the concrete store in a later lane, so
+        this is the one member of the family where the behaviour can be pinned
+        before an implementation exists rather than after. **#679** tracks its
+        absence from the sibling suites, where the behaviour is implemented and
+        nothing pins it.
+        """
+        await store.record(source_grant(SOURCE, grant_id="g-1"))
+
+        assert [each.id for each in await store.recent(limit=2**63)] == ["g-1"]
+
     async def test_an_empty_store_answers_emptily(self, store: SourceGrantStore) -> None:
         assert await store.recent() == []
         assert await store.export() == []
