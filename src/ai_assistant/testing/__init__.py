@@ -17,6 +17,14 @@ from ai_assistant.testing.conversations import FakeConversationStore
 from ai_assistant.testing.deferrals import FakeDeferralStore
 from ai_assistant.testing.embeddings import FakeEmbedder
 from ai_assistant.testing.engine import FakeAssistantEngine
+from ai_assistant.testing.grants import (
+    DEFAULT_DECIDED_AT,
+    DEFAULT_GRANTED_SOURCE,
+    FakeSourceGrants,
+    FakeSourceGrantStore,
+    revocation_of,
+    source_grant,
+)
 from ai_assistant.testing.invoker import FakeToolImplementation, FakeToolInvoker, succeeds
 from ai_assistant.testing.learning import FakeFeedbackProcessor
 from ai_assistant.testing.memory import FakeMemoryStore
@@ -40,6 +48,8 @@ from ai_assistant.testing.tools import FakeToolRegistry
 from ai_assistant.testing.writer import FakeMemoryWriter
 
 __all__ = [
+    "DEFAULT_DECIDED_AT",
+    "DEFAULT_GRANTED_SOURCE",
     "DEFAULT_MAX_BATCH_SIZE",
     "DEFAULT_MAX_PROPOSALS",
     "DEFAULT_READER_NAME",
@@ -59,6 +69,8 @@ __all__ = [
     "FakePlanStore",
     "FakePlanner",
     "FakeReader",
+    "FakeSourceGrantStore",
+    "FakeSourceGrants",
     "FakeToolImplementation",
     "FakeToolInvoker",
     "FakeToolRegistry",
@@ -67,5 +79,7 @@ __all__ = [
     "ObservedBelief",
     "PolicyCall",
     "attested_proposal",
+    "revocation_of",
+    "source_grant",
     "succeeds",
 ]
