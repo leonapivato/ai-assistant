@@ -495,15 +495,52 @@ policy. Both sites are the ones already holding the reader:
 `IngestionStage.__init__` takes it today, and ADR-0093 §3 rules that "A
 `ContextSource` in `context/` holds a `Sensor`".
 
-#### 5a. The check and the read are one step, and a revocation beats an in-flight read
+#### 5a. What the gate guarantees, stated as a boundary rather than as "nothing is read"
 
 A gate spelled "ask the store, then read" is a check followed by a use, and
 ADR-0021 §4 names that shape as a hazard in this system's own terms: "'The system
 composes on one event loop' is precisely the setting in which an `await` between a
 check and a write is an interleaving point." A revocation arrives over the local
 API and is handled on that same loop, so a driver that suspends between the two
-can open a source the user revoked in between. Two clauses close it, and neither
-needs a lock.
+can start a read on a source the user revoked in between.
+
+**The guarantee available is bounded, and it is stated first so that nothing below
+reads as a stronger one.**
+
+> **Normative.** The gate guarantees that every read is **authorised at the
+> instant it starts**, and that nothing produced by a read whose grant has gone by
+> the time it returns is used. It is **not** a guarantee that no byte of a source
+> is read after a revocation is recorded: a read already in flight completes, and
+> §5's "nothing is opened" governs the case where the check fails, never a read
+> already begun.
+
+**Why a stronger guarantee is not available without reopening a ratified
+decision.** `CalendarReader.read` hands `_read_source` to a worker and awaits it,
+because ADR-0093 §7 requires that "**The whole of a read runs off the event
+loop** — resolving the path, opening it, reading it, parsing it, and expanding
+recurrences alike … on a worker the **sensor owns**". So the `open()` happens on
+another thread and genuinely races the loop: the driver can decide to read, the
+worker can be scheduled a moment later, and a revocation handled in between is
+handled *after* the read was authorised and *before* the file was touched. Nothing
+a driver holds can stop that worker — §7 rules that a reader "gains **no lifecycle
+method**. There is no `close`, no `aclose`, and nothing for a caller to await at
+shutdown", and argues at length that adding one would re-create the shutdown hang
+it exists to remove. Linearising the grant check with the file's acquisition
+therefore means giving `Reader` a new seam, which is a `core/protocols.py` change
+owing its own ADR (golden rule 5) and reopening §7's worker design to buy a
+narrower race.
+
+**And the residual is small in exactly the way this subject makes it small.** What
+happens in the worst case is that bytes of a file the user just revoked are read
+into a worker's memory and then dropped. Nothing is stored, nothing reaches a
+prompt, nothing leaves the device — which is `VISION.md`'s own scope for a reader,
+"it changes nothing outside the assistant". It is bounded twice over: ADR-0093 §7
+allows a reader "**at most one outstanding worker**", and the reader's own
+`calendar_read_timeout` — ten seconds by default (§7a) — bounds how long it can
+last. §12 records the condition under which a linearising mechanism would be worth
+its cost.
+
+Two clauses hold the guarantee that *is* available, and neither needs a lock.
 
 > **Normative.** No `await` may occur between the `live()` result a driver gates
 > on and its call to `Reader.read()`. The check and the start of the read are one
@@ -537,22 +574,24 @@ into a floor. An unanswerable grant check is that sentence with "the store" in
 place of "the author". A missed ingestion tick costs one interval; a read on a
 revocation nobody could see costs the property this ADR exists to hold.
 
-**The first clause is sufficient for the window the finding names, and it is
-sufficient because of how the loop actually schedules.** Awaiting a coroutine does
-not yield to the event loop; it runs that coroutine's body until *its* first
-suspension. So with no intervening `await`, the code that decides to read and the
-code that starts the read are one uninterruptible step, and no revocation can land
-between them. This is a rule about the driver's body rather than a mechanism, and
-that is deliberate: it costs a line and a test, where a mechanism would cost a
-contract.
+**The first clause closes the *driver's* window, which is the unbounded one.**
+Awaiting a coroutine does not yield to the event loop; it runs that coroutine's
+body until *its* first suspension. So with no intervening `await`, the driver
+cannot sit on a stale answer at all — whereas a driver free to await anything
+between the check and the call could hold one for arbitrarily long, which is the
+difference between a race bounded by a worker's scheduling and one bounded by
+nothing. It buys exactly that and no more: the worker-side race above survives it,
+which is why the boundary clause is stated before these two rather than after.
+This is a rule about the driver's body rather than a mechanism, and that is
+deliberate: it costs a line and a test, where a mechanism would cost a contract.
 
 **The second clause is what makes a revocation *win* rather than merely arrive.**
-It cannot be closed by the first, because a read legitimately begun while granted
-takes real time — up to `calendar_read_timeout`, which ADR-0093 §7a defaults to ten
-seconds — and a revocation may land inside it. The residual after both clauses is
-therefore exactly one already-started read per source, bounded by the reader's own
-deadline, whose bytes are **discarded rather than used**: nothing is proposed, no
-facet is contributed, and nothing durable records that the read happened.
+A read legitimately begun while granted takes real time — up to
+`calendar_read_timeout` — and a revocation may land inside it. The residual after
+both clauses is therefore at most one already-started read per source, bounded by
+the reader's own deadline, whose bytes are **discarded rather than used**: nothing
+is proposed, no facet is contributed, and nothing durable records that the read
+happened.
 
 **A lease held across the read was considered and refused**, which is the shape the
 alternative takes. Holding a source-scoped guard from the check to the return of
@@ -1138,6 +1177,14 @@ changes**. The places where the opposite reading is available:
   give. Fires with the first surface that asks "under which authorisation was this
   written" — the likeliest is the belief inspection surface ADR-0073 §4 governs, if
   it ever renders more than the band and the source.
+- **A mechanism linearising the grant check with the source's acquisition**, which
+  would shrink §5a's residual from "a read already in flight completes" to "no byte
+  is read after a revocation". It needs a new seam on `Reader` — a lease, a
+  cancellation handle, or an acquisition callback — which is a `core/protocols.py`
+  change owing its own ADR and reopening ADR-0093 §7's no-lifecycle-method ruling.
+  Fires when a source arrives whose *read itself* has an effect the user would care
+  about having happened — a fetch that marks messages seen, a source that bills per
+  read — because today the residual act is bytes read and dropped.
 - **A total order over grant records** — a monotonic sequence beside
   `decided_at`, so `recent` cannot show a revocation above the grant it revokes
   after a clock correction. Refused as a mechanism today in §4, where liveness is
@@ -1179,13 +1226,15 @@ changes**. The places where the opposite reading is available:
   logs a refusal on every scheduler tick until the operator unsets the interval.
   That is configuration and consent disagreeing, and making it quiet would make it
   invisible.
-- **Two residuals are named rather than closed, and both are bounded.** A
-  revocation landing inside an in-flight read leaves at most one already-started
-  read per source, bounded by the reader's own deadline, whose bytes are discarded
-  (§5a) — the price of not letting a read hold a revocation hostage. And a belief
+- **Two residuals are named rather than closed, and both are bounded.** The gate
+  guarantees a read is authorised *when it starts*, not that no byte is read after
+  a revocation lands: ADR-0093 §7 puts the whole read on an unstoppable worker, so
+  a read already in flight completes — at most one per source, bounded by the
+  reader's deadline, with everything it produces discarded (§5a). And a belief
   resolves to its source's grant history, not to the one grant it was read under
   (§1) — the price of not adding a field to a ratified `core` type for a question
-  no surface asks.
+  no surface asks. Both are stated as boundaries so that no later lane claims the
+  stronger property this ADR does not deliver.
 - **Two lanes are unblocked and one is created.** The triad and the `permissions/`
   implementation can start; the `context/` adapter and the ingestion gate know what
   they must hold; and the client surface (§9) is a new contract ADR that did not
