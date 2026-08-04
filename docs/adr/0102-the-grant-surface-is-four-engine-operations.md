@@ -748,6 +748,14 @@ the answers differ between these four.
   > skipping the disclosure. Raising `hub_max_frame_bytes` is the operator's
   > remedy and the only one this ADR offers.
 
+  **The blast radius is the whole response, not the one row.** ADR-0085 §8c
+  bounds the payload rather than a value, so an oversized `grantable_sources`
+  result refuses the *call*: no source is enumerated, not merely the one with
+  the long path. Today that is a distinction without a difference — the tree
+  holds one source — and it stops being one the moment a second exists, which is
+  a further reason the registry lane owes the re-derivation the clause above
+  requires of it.
+
   **Fail-closed is the right direction here and the alternative is the one §6
   already refused.** Granting without the disclosure is the uninformed grant
   ADR-0097 §9a exists to prevent, arriving through a size limit instead of
@@ -1077,10 +1085,11 @@ touched.
   what would fire a contract that survives both without one.
 - **Granting is asymmetric with withdrawing, and the asymmetry runs the safe
   way.** Withdrawing needs one request and one small result; granting needs the
-  disclosure first, so a frame too small to carry a configured path leaves a
-  source enumerable-but-ungrantable (§10) where the same frame still lets the
-  user withdraw. A surface that failed the other way round would be one that
-  could take consent it could not give back.
+  disclosure first, so a frame too small to carry a configured path takes the
+  whole enumeration down and leaves every source unenumerable and ungrantable
+  (§10), while the same frame still lets the user withdraw what they already
+  granted. A surface that failed the other way round would be one that could
+  take consent it could not give back.
 - **The data directory holds six databases, and ten modules say five.** Named in
   §12 so the correction is a checklist item rather than a discovery.
 - **What gets harder:** four methods are four conformance-suite obligations,
