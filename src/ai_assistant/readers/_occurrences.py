@@ -595,6 +595,17 @@ def _zone_label(instant: datetime) -> str:
     ``DTSTART`` would state the old one for every later occurrence. An IANA key
     does not have that problem — it names the zone, not the offset — so it is
     preferred where there is one, and it is what a user recognises.
+
+    **Seconds are rendered when the offset carries them**, because an offset is
+    not always a whole number of minutes and a label that drops the remainder
+    names a *different* instant than the one beside it. A ``TZOFFSETTO`` of
+    ``+005328`` puts a 12:00 local start at 11:06:32Z, and ``UTC+00:53`` denotes
+    11:07:00Z — an offset the source did not declare, stated as if it had. Only
+    the label was ever wrong: ``start`` and ``end`` come from the tzinfo itself,
+    so the window decision, the ordering and the entry cap were exact throughout.
+    The suffix is emitted only when it is non-zero, so the ordinary whole-minute
+    zone is unchanged, and the widest form (``UTC+00:53:28``) is 12 characters —
+    still far inside ``_MAX_ZONE_LABEL`` and still bounded by construction.
     """
     zone = instant.tzinfo
     if isinstance(zone, ZoneInfo):
@@ -602,10 +613,12 @@ def _zone_label(instant: datetime) -> str:
         if key and len(key) <= _MAX_ZONE_LABEL and key.isprintable():
             return key
     offset = instant.utcoffset() or timedelta(0)
-    seconds = int(offset.total_seconds())
-    sign = "-" if seconds < 0 else "+"
-    seconds = abs(seconds)
-    return f"UTC{sign}{seconds // 3600:02d}:{seconds % 3600 // 60:02d}"
+    total = int(offset.total_seconds())
+    sign = "-" if total < 0 else "+"
+    hours, rest = divmod(abs(total), 3600)
+    minutes, seconds = divmod(rest, 60)
+    label = f"UTC{sign}{hours:02d}:{minutes:02d}"
+    return label if seconds == 0 else f"{label}:{seconds:02d}"
 
 
 def _dates(component: Any, name: str, zone: tzinfo) -> tuple[datetime, ...]:
