@@ -50,6 +50,7 @@ from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import ReaderError
 from ai_assistant.core.types import (
     Attestation,
+    CalendarFacet,
     DataTier,
     MemorySource,
     MemoryUpdateProposal,
@@ -363,6 +364,64 @@ class CalendarReader:
             # ADR-0092 §3).
             as_of=None,
             proposals=self._propose(occurrences, read_at),
+            # The other consumer's half of the same read, from the same
+            # occurrences and the same acquisition instant (ADR-0096 §5). It is
+            # built here rather than by the `context/` adapter because an adapter
+            # that built its own would be stamping a value with instants it did
+            # not observe, and `SourceReading`'s validator refuses exactly that.
+            facet=self._facet(occurrences, read_at, window_end),
+        )
+
+    def _facet(
+        self, occurrences: Sequence[Occurrence], read_at: datetime, window_end: datetime
+    ) -> CalendarFacet:
+        """The situational view of this read: what is happening, and what is next.
+
+        ADR-0096 §6's three scalars, and **no entry text at all** — no summary,
+        location, description, organiser, attendee or identifier. The same read's
+        proposals already carry the occurrences into memory as ``ATTESTED``
+        beliefs, so putting them here too would ship one content into one prompt by
+        two routes carrying two different stamps, which is the "neither is mistaken
+        for the other" hazard ADR-0093 §3 names — manufactured by us rather than
+        found. What the beliefs cannot answer at request time without a scan is
+        exactly this: is something happening right now, and when is the next thing.
+
+        **It counts occurrences the proposals skip, and that is the design.** An
+        occurrence with no ``DTSTAMP`` is skipped by :meth:`_propose`, because
+        ADR-0092 §3 permits no substitute for a report time the source did not make
+        — but the facet makes no attestation and owes no report time, so it counts
+        it. ADR-0096 §5 rules that the two halves describing overlapping-but-unequal
+        sets is the design rather than an error, and states it so nobody "fixes" it
+        by making the facet skip the same entries.
+
+        Args:
+            occurrences: The in-window occurrences, as the proposals see them.
+            read_at: Our own clock at acquisition — the single anchor §7b fixes,
+                and the instant membership below is evaluated at.
+            window_end: The window's **exclusive** upper edge, already saturated by
+                :func:`saturating_add`, which is what makes ``covers_until`` an
+                always-representable instant.
+
+        Returns:
+            The facet, stamped exactly as the reading that will carry it —
+            ``source`` and ``read_at`` from this read, and ``as_of`` ``None``
+            because a local ``.ics`` declares none.
+        """
+        later = [occurrence.start for occurrence in occurrences if occurrence.start > read_at]
+        return CalendarFacet(
+            source=self.name,
+            read_at=read_at,
+            # The reading's own, and the validator on `SourceReading` refuses any
+            # other value — so the two cannot drift apart by an edit here.
+            as_of=None,
+            entries_in_progress=sum(
+                1 for occurrence in occurrences if _in_progress_at(occurrence, read_at)
+            ),
+            # `min` rather than "the first one after `read_at`": the occurrences
+            # arrive in ascending start order today, and a fact this value depends
+            # on is one worth not depending on.
+            next_starts_at=min(later, default=None),
+            covers_until=window_end,
         )
 
     def _propose(
@@ -433,6 +492,21 @@ class CalendarReader:
             # exists to prevent (ADR-0093 §4).
             sensitivity=DataTier.PERSONAL,
         )
+
+
+def _in_progress_at(occurrence: Occurrence, instant: datetime) -> bool:
+    """Whether ``occurrence`` is in progress at ``instant`` (ADR-0096 §6).
+
+    ADR-0093 §7b's half-open membership, evaluated at an instant rather than over a
+    window: ``start <= instant < end``. The zero-duration arm exists for §7b's own
+    reason — a half-open interval of zero width contains nothing, so a reminder
+    expressed as an instant would be *never* in progress rather than in progress
+    for a moment, which is the entry vanishing rather than the boundary being
+    debatable.
+    """
+    if occurrence.start == occurrence.end:
+        return occurrence.start == instant
+    return occurrence.start <= instant < occurrence.end
 
 
 def _mint(factory: Callable[[], str] | None) -> str:
