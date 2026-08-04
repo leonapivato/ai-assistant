@@ -964,8 +964,14 @@ support.
   surface's dropped `Attestation` — is the weaker one and is deferred rather than
   blocking: §8's first clause is met by the band today, and the named half **fires
   with the second reader**, when "attested" stops identifying the source by
-  elimination — ADR-0093 §11's trigger for the source registry and the
-  display label, and plausibly one decision with them.
+  elimination. **That trigger is this ADR's own and is independent of ADR-0093
+  §11's two**, which an earlier draft of this bullet ran together with it. §11
+  revisits the **source registry** "at the third source", and its **configurable
+  display label** "acquires a subject at the second instance of one source type" —
+  both later than, and conditioned differently from, a second *distinct* reader.
+  A lane taking the projection work must not read this bullet as licence to
+  introduce registry or label surface, neither of which ADR-0093 says is owed at
+  two sources.
 - **A presentation state for an inference that rests on external evidence.** Not a
   §7 case — §1 makes external content a property of a span's recorded origin, and a
   derived proposal's text is the assistant's own — but a real legibility question:
