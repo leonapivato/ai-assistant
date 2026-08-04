@@ -40,7 +40,8 @@
   §5's sequence.
 - **It records three findings about the tree, and two of them change what the
   implementing lane owes.** The wire is derived from the Protocol rather than
-  transcribed, so four methods and one error class cost `wire/` nothing (§10);
+  transcribed, so four methods and one error class cost the wire's server half
+  and its error registry nothing and cost its client four thin methods (§12);
   the grant store makes a **sixth** database in a directory seven modules and
   three test modules describe as holding five (§12); and #675's lane-3 second
   bullet — "whether granting and revoking are audited" — was already answered by
@@ -107,8 +108,13 @@ expensive. `wire/surface.py` derives `METHODS` by reflection over
 exception type's own class name" as the error code, resolved with `getattr` over
 `core.errors`. Both were written to make the mapping "total by construction
 rather than by a registry someone maintains". So four methods and one error
-class cost the `wire` package nothing, and this ADR can spend its budget on
-shapes rather than on plumbing.
+class cost the wire's server half and its error registry nothing. What they do
+cost is four methods on `HubEngineClient`, which implements the fifteen
+explicitly, and that cost is unavoidable rather than overlooked: a client is the
+second implementation ADR-0042 §1's trigger named, and `tests/wire/test_client_contract.py`
+binds it to the shared `AssistantEngineContract`, so a Protocol method it lacks
+is a red gate rather than a deferrable follow-up. The budget this ADR does not
+have to spend is on plumbing.
 
 ### The knot: a check that cannot live where the data lives
 
@@ -705,9 +711,9 @@ the answers differ between these four.
   `CALENDAR_READER_NAME` and whose ids are UUID strings encodes to on the order
   of 150 to 200 bytes — two identifiers, a short declared source, at most two
   enum values and an instant, in ADR-0087 §2's forms — against the 512-byte
-  payload budget a 1024-byte frame leaves. So on this tree a user can grant and
-  withdraw consent at any frame size the configuration admits, which is the
-  property worth having.
+  payload budget a 1024-byte frame leaves. So neither *result* is what limits
+  granting on any frame size the configuration admits — but the third bullet
+  below is, and the claim is confined to the results for that reason.
 
   **It is not promised for every conforming input, and stating it as a promise
   would be false.** `Identifier` and `DurableIdentifier` carry no maximum
@@ -728,6 +734,29 @@ the answers differ between these four.
   length**, and the path is the only unbounded factor. With the tree's one
   source it is one row; at the 1024-byte floor a long configured path can exceed
   the budget, and the declared failure is the answer there too.
+
+  **This is the one place a frame size decides whether a source can be granted
+  at all, and it is worth stating rather than leaving to be met.**
+  `grantable_sources` is the carrier of §6's disclosure, and §6's third clause
+  forbids a client that cannot show the location from sending `grant`. So a
+  deployment whose configured path does not fit its configured frame has a
+  source it can enumerate nothing about and therefore may not grant, even though
+  `grant`'s own request and result would fit.
+
+  > **Normative.** A source whose disclosure does not fit the configured frame
+  > is not grantable through a conforming client, and no client may grant it by
+  > skipping the disclosure. Raising `hub_max_frame_bytes` is the operator's
+  > remedy and the only one this ADR offers.
+
+  **Fail-closed is the right direction here and the alternative is the one §6
+  already refused.** Granting without the disclosure is the uninformed grant
+  ADR-0097 §9a exists to prevent, arriving through a size limit instead of
+  through an encoding; refusing the configuration outright at load would put a
+  frame-size arithmetic in `Settings` validation, where it would have to know a
+  path length it is not given. What is left is a legible failure with a setting
+  that fixes it, and `hub_max_frame_bytes` defaults to 16 MiB — four orders of
+  magnitude above any pathname — so the reachable population is an operator who
+  deliberately configured the floor.
 
 > **Normative.** The lane that introduces a source registry (ADR-0093 §11) owes
 > a re-derivation of `grantable_sources`' worst case in the same change, because
@@ -808,11 +837,18 @@ read as the Protocol *change* it is rather than a new triad):
 3. **The canonical fake gains the four methods**, scriptable to hold grantable
    sources with and without a location and with and without a live grant, so a
    client's own refusal paths are reachable from a test.
-4. **`wire/` needs no change.** `METHODS` is derived from the Protocol,
-   arguments and results are validated from the annotations, and an error code
-   is the exception class's own name resolved over `core.errors`. This is
-   recorded so the lane does not go looking for a table to update, and so a
-   reviewer can check the claim.
+4. **Four methods on `HubEngineClient`, in the same change**, each a `_call`
+   plus the local refusals ADR-0085 §9 requires — §2a's `ValueError` cases and
+   §10's `limit` rule — so the client refuses what the hub would and never sends
+   a call it knows is malformed. They land with the Protocol rather than after
+   it, because `tests/wire/test_client_contract.py` binds `HubEngineClient` to
+   `AssistantEngineContract` and a missing method is a red gate.
+5. **Nothing else in `wire/` changes**, and this is recorded so the lane does not
+   go looking for a table to update and so a reviewer can check the claim:
+   `METHODS` is derived from the Protocol by reflection, arguments and results
+   are validated from the annotations, and an error code is the exception
+   class's own name resolved over `core.errors`. The server half and the error
+   registry are total by construction.
 
 **The wiring lane** (#684): `build_engine` opens the store and passes one object
 to both seams, its `grants` parameter goes, and the grant operations are
@@ -1005,10 +1041,11 @@ touched.
   closes.
 - **The engine surface grows by a quarter and the wire by nothing.** Fifteen
   methods become nineteen and twenty-four promoted types become twenty-five; the
-  `wire` package needs no edit at all, because `METHODS`, the argument and
-  result adapters and the error code are all derived from the contract. That
-  asymmetry is the payoff of two decisions made earlier, and it is worth
-  recording as evidence they were right.
+  wire's server half and its error registry need no edit at all, because
+  `METHODS`, the argument and result adapters and the error code are all derived
+  from the contract; only `HubEngineClient`, which spells its methods out, gains
+  four. That asymmetry is the payoff of two decisions made earlier, and it is
+  worth recording as evidence they were right.
 - **A grant is chosen rather than typed, and the store gains no free-text
   route.** The admissible set is the set of declared constants, which is
   ADR-0093 §7's property one layer up, and no path or address can enter a
@@ -1022,6 +1059,12 @@ touched.
   `OversizedValueError` like any other. Bounding it is a `core` change this ADR
   does not own, the operator's remedy is `hub_max_frame_bytes`, and §14 records
   what would fire a contract that survives both without one.
+- **Granting is asymmetric with withdrawing, and the asymmetry runs the safe
+  way.** Withdrawing needs one request and one small result; granting needs the
+  disclosure first, so a frame too small to carry a configured path leaves a
+  source enumerable-but-ungrantable (§10) where the same frame still lets the
+  user withdraw. A surface that failed the other way round would be one that
+  could take consent it could not give back.
 - **The data directory holds six databases, and ten modules say five.** Named in
   §12 so the correction is a checklist item rather than a discovery.
 - **What gets harder:** four methods are four conformance-suite obligations,
