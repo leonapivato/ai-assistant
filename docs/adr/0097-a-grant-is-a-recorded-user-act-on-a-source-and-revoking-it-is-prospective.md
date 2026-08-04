@@ -1008,9 +1008,12 @@ surface:
   absence from this suite does not read as its absence from the contract.
 
 **What later lanes owe, and this ADR does not:** the `permissions/` implementation
-and its schema; the two caller-side gates, their required constructor arguments and
-§5a's three-case tests; the client surface ADR §9 names and the CLI commands behind
-it; and the operator log line §8 requires.
+and its schema; the two caller-side gates, their required `SourceGrants`
+constructor arguments, and **all five** of the driver cases §5 and §5a name — no
+live grant, a raising `live()` before the read, a revocation between the check and
+the return, a raising `live()` on the re-check, and a grant live throughout; the
+client surface ADR §9 names and the CLI commands behind it; and the operator log
+line §8 requires.
 
 ### 11. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
