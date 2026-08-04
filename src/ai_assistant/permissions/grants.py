@@ -764,6 +764,15 @@ def _revalidated(grant: SourceGrant) -> SourceGrant:
     closed here is the narrower and real case — a *sanctioned* extension point
     sitting between the object and its snapshot.
 
+    **The refusal names the id out of the same mapping**, never through
+    ``grant.id``. A record whose ``__dict__`` is missing a field — the deletion
+    beside the substitution this function exists to catch — has no ``id``
+    attribute at all, so composing the message from one would raise a bare
+    ``AttributeError`` out of the handler and replace the refusal this layer owes
+    with a builtin escaping its error boundary. ``fields.get`` answers ``None``
+    for the field that is gone and still names the record when it is present,
+    which is the whole of what the message is for.
+
     Raises:
         InvalidGrantError: If the record does not satisfy its own model. The
             subclass rather than the ``GrantError`` base: here the base is the
@@ -771,10 +780,11 @@ def _revalidated(grant: SourceGrant) -> SourceGrant:
             which is the distinction ADR-0097 §5a keeps alive when it has a driver
             fail closed on one and refuse on the other.
     """
+    fields = dict(object.__getattribute__(grant, "__dict__"))
     try:
-        return SourceGrant.model_validate(dict(object.__getattribute__(grant, "__dict__")))
+        return SourceGrant.model_validate(fields)
     except ValidationError as exc:
-        msg = f"grant {grant.id!r} is not a valid record: {exc}"
+        msg = f"grant {fields.get('id')!r} is not a valid record: {exc}"
         raise InvalidGrantError(msg) from exc
 
 
