@@ -25,7 +25,12 @@ from itertools import count
 from typing import TYPE_CHECKING
 
 import pytest
-from assistant_engine_contract import _SOURCE, _TINY_LIMIT, AssistantEngineContract
+from assistant_engine_contract import (
+    _SOURCE,
+    _TINY_LIMIT,
+    AssistantEngineContract,
+    backwards_clock,
+)
 
 from ai_assistant.core.types import (
     ActionPlan,
@@ -174,6 +179,7 @@ def _wire(
     max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
     parks: bool = False,
     sources: Sequence[HeldSource] = (),
+    grant_clock: Callable[[], datetime] | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -250,7 +256,7 @@ def _wire(
             store=FakeSourceGrantStore(),
             sources=sources,
             id_factory=_counter("grant"),
-            clock=lambda: AT,
+            clock=grant_clock if grant_clock is not None else (lambda: AT),
         ),
         id_factory=_counter("tok"),
         max_payload_bytes=max_payload_bytes,
@@ -291,6 +297,24 @@ class TestEngineContract(AssistantEngineContract):
         would be a free-text route into the store by another name.
         """
         built = _wire(sources=[HeldSource(_GRANTABLE, location="/srv/calendar.ics")])
+        await built.start()
+        try:
+            yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def back_dated_engine(self) -> AsyncIterator[AssistantEngine]:
+        """The same engine, with a clock that steps **backwards** on every reading.
+
+        Injected at the composition seam ADR-0102 §5 puts it at, which is the point:
+        the clock is the *implementation's* and no client supplies one, so this is
+        the only place the state ADR-0097 §4 permits can be arranged.
+        """
+        built = _wire(
+            sources=[HeldSource(_GRANTABLE, location="/srv/calendar.ics")],
+            grant_clock=backwards_clock(),
+        )
         await built.start()
         try:
             yield built

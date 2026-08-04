@@ -76,6 +76,7 @@ from ai_assistant.core.types import (
     TimeOfDay,
     TurnOutcome,
     TurnResult,
+    encodable_text,
 )
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
@@ -89,7 +90,7 @@ from ai_assistant.orchestration.payloads import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.types import (
         EncodableText,
@@ -171,6 +172,22 @@ class FakeAssistantEngine:
         #: recorded them. Both kinds live here, because revocation is an **append**
         #: and never a mutation (ADR-0097 §4).
         self.grants_recorded: list[SourceGrant] = []
+        #: What stamps ``decided_at`` on a grant or a revocation. Scriptable, and
+        #: **that is what makes ADR-0102 §3's second clause testable at all**: the
+        #: case that distinguishes a stated liveness from a derived one is a
+        #: revocation timestamped *earlier* than the grant it revokes, which
+        #: ADR-0097 §4 permits explicitly — and no sequence of surface calls can
+        #: produce it, because the engine reads the clock. A test hands over one
+        #: that runs backwards.
+        #:
+        #: **Fixed rather than ticking**, unlike the conversation activity stamp: a
+        #: grant's ``decided_at`` is not an ordering invariant of anything (ADR-0097
+        #: §4 derives liveness from ``revokes`` alone and never compares two
+        #: instants), so a fake that advanced it would be asserting a sequence the
+        #: contract does not have — and would put every record at its own instant,
+        #: which is exactly where ``recent``'s ``id`` tie-break stops being
+        #: exercised.
+        self.grant_clock: Callable[[], datetime] = lambda: _AT
         #: Every call, in order, as ``(method, arguments)`` — so a test can assert
         #: what reached the engine without reaching into its state.
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -467,7 +484,12 @@ class FakeAssistantEngine:
     # --- the grant surface (ADR-0102 §1) -----------------------------------
 
     async def grantable_sources(self) -> tuple[GrantableSource, ...]:
-        """List the held sources, each with its location and its live grant."""
+        """List the held sources, each with its location and its live grant.
+
+        Every held source is enumerated, because :meth:`hold_source` refuses to
+        hold one that could not be — see its own docstring for why the
+        inadmissible cases are refused at the setter rather than modelled here.
+        """
         self.calls.append(("grantable_sources", {}))
         return self._checked(
             tuple(
@@ -507,7 +529,7 @@ class FakeAssistantEngine:
             id=f"grant-{len(self.grants_recorded) + 1}",
             source=named,
             scope=uses,
-            decided_at=self._tick(),
+            decided_at=self.grant_clock(),
         )
         self.grants_recorded.append(record)
         return self._checked(record, "grant")
@@ -529,7 +551,7 @@ class FakeAssistantEngine:
             id=f"grant-{len(self.grants_recorded) + 1}",
             source=live.source,
             scope=live.scope,
-            decided_at=self._tick(),
+            decided_at=self.grant_clock(),
             revokes=live.id,
         )
         self.grants_recorded.append(record)
@@ -540,9 +562,14 @@ class FakeAssistantEngine:
         positive_page_argument(limit, name="limit")
         check_arguments("recent_grants", max_bytes=self._max_payload_bytes, limit=limit)
         self.calls.append(("recent_grants", {"limit": limit}))
-        ordered = sorted(
-            self.grants_recorded, key=lambda record: (record.decided_at, record.id), reverse=True
-        )
+        # **Two sorts rather than one reversed key** (``SourceGrantStore.recent``):
+        # the order is ``decided_at`` *descending* with ties broken by ``id``
+        # *ascending*, and ``reverse=True`` over a compound key reverses **both**
+        # — which puts ``grant-2`` above ``grant-1`` at one instant, the opposite
+        # of what the contract states. Python's sort is stable, so sorting by the
+        # tie-break first and the primary key second composes them correctly.
+        by_id = sorted(self.grants_recorded, key=lambda record: record.id)
+        ordered = sorted(by_id, key=lambda record: record.decided_at, reverse=True)
         return self._checked(tuple(ordered[:limit]), "recent_grants")
 
     def _live_grant(self, source: str) -> SourceGrant | None:
@@ -641,19 +668,52 @@ class FakeAssistantEngine:
         return conversation_id
 
     def hold_source(self, identity: str, *, location: str | None = None) -> None:
-        """Make one source grantable, with or without a configured location.
+        """Make one source **grantable**, with or without a configured location.
 
-        The scriptable half ADR-0102 §12 item 3 asks for. A source held **without** a
+        The scriptable half ADR-0102 §12 item 3 asks for. A source held *without* a
         location is the case §6 makes grantable with ``location`` absent — nothing
         configured means the disclosure obligation is vacuous — and it is the case a
         client's "show it before you grant" test needs to distinguish from a source
         that has one.
 
+        **The inadmissible cases are refused here rather than modelled** (ADR-0102
+        §4, §6): an identity not in canonical form, and a location with no UTF-8
+        encoding. Both are defects in a **reader**, and a fake engine has no readers
+        — :class:`~ai_assistant.orchestration.grants.GrantOperations` must handle
+        them because a real composition root can build such a reader, and its own
+        tests reach them by constructing it directly.
+
+        Refusing beats the two alternatives. **Modelling them** would put a second
+        copy of §4's and §6's rules in a fake that no suite holds to them, which is
+        the silent drift a canonical fake exists to prevent; and from a client's
+        side both cases are observationally just "absent from the enumeration",
+        which a test reaches by not holding the source at all. **Ignoring them** is
+        worse still, and is what this refusal replaces: holding a location with no
+        encoding made :meth:`grantable_sources` raise a ``ValidationError`` that no
+        method on this surface declares, and holding ``" calendar "`` enumerated a
+        stripped ``calendar`` that :meth:`grant` then refused — a fake advertising
+        what it cannot do.
+
         Args:
             identity: The declared identity, as a reader's ``name`` would return it.
             location: Where the source reads from, or ``None`` where nothing is
                 configured.
+
+        Raises:
+            ValueError: If ``identity`` is not admissible under ADR-0102 §4, or
+                either value has no UTF-8 encoding. A test error rather than a state
+                to model, so it is reported where it was made.
         """
+        if not identity.strip() or identity != identity.strip():
+            msg = (
+                f"a grantable identity is non-blank and equals its own str.strip() "
+                f"(ADR-0102 §4); {identity!r} is a reader defect, and a fake engine has "
+                f"no readers — GrantOperations is what models that case"
+            )
+            raise ValueError(msg)
+        encodable_text(identity)
+        if location is not None:
+            encodable_text(location)
         self.sources_held[identity] = location
 
     def hold_grant(

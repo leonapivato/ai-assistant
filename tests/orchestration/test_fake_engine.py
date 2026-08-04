@@ -23,6 +23,7 @@ from assistant_engine_contract import (
     _SOURCE,
     _TINY_LIMIT,
     AssistantEngineContract,
+    backwards_clock,
     page_after_mutating_the_filter,
 )
 
@@ -64,6 +65,14 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         """One fake engine holding a single grantable source with a location."""
         engine = FakeAssistantEngine()
         engine.hold_source(_SOURCE, location="/srv/calendar.ics")
+        return engine
+
+    @pytest.fixture
+    def back_dated_engine(self) -> AssistantEngine:
+        """The same fake, with a clock that steps **backwards** on every reading."""
+        engine = FakeAssistantEngine()
+        engine.hold_source(_SOURCE, location="/srv/calendar.ics")
+        engine.grant_clock = backwards_clock()
         return engine
 
     @pytest.fixture

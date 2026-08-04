@@ -54,6 +54,7 @@ from assistant_engine_contract import (
     _SOURCE,
     _TINY_LIMIT,
     AssistantEngineContract,
+    backwards_clock,
 )
 
 from ai_assistant.testing import FakeAssistantEngine
@@ -167,6 +168,20 @@ class TestHubEngineClientContract(AssistantEngineContract):
         """
         backing = FakeAssistantEngine()
         backing.hold_source(_SOURCE, location="/srv/calendar.ics")
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield client
+
+    @pytest.fixture
+    async def back_dated_engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """A client of a hub whose clock steps **backwards** on every reading.
+
+        The clock lives entirely hub-side, which is ADR-0102 §5's whole point — a
+        client supplies no ``decided_at`` — so this fixture arranges the state on the
+        backing engine and the client observes it through the wire like any other.
+        """
+        backing = FakeAssistantEngine()
+        backing.hold_source(_SOURCE, location="/srv/calendar.ics")
+        backing.grant_clock = backwards_clock()
         async with serving(backing, tmp_path / "hub.sock") as client:
             yield client
 

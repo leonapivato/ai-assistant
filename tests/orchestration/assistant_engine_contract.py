@@ -63,6 +63,7 @@ import asyncio
 import inspect
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
+from itertools import count
 from typing import TYPE_CHECKING
 
 import pytest
@@ -155,6 +156,24 @@ class AssistantEngineContract(ABC):
         It must hold no grant on that source, so the first ``grant`` in each test
         below is the first grant. It must carry a configured location for it, so
         §6's disclosure is a value a client can render.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def back_dated_engine(self) -> AssistantEngine:
+        """:attr:`granting_engine`'s subject, whose clock runs **backwards**.
+
+        Each record it mints is stamped *earlier* than the one before, so a
+        ``grant`` followed by a ``revoke`` produces the pair ADR-0102 §12's
+        normative clause requires: a revocation whose ``decided_at`` predates the
+        grant it revokes.
+
+        **A fixture because no sequence of surface calls can produce it.** ADR-0102
+        §5 puts the clock on the implementation and keeps it away from every client,
+        which is what stops a caller backdating a user act — so the only way to
+        reach the state ADR-0097 §4 explicitly permits is to hand an implementation
+        a clock that has been corrected backwards, which is exactly the deployment
+        the clause is about.
         """
 
     @pytest.fixture
@@ -867,33 +886,69 @@ class AssistantEngineContract(ABC):
         assert len(await granting_engine.recent_grants()) == 2
 
     async def test_liveness_is_stated_rather_than_derived_from_the_page(
-        self, granting_engine: AssistantEngine
+        self, back_dated_engine: AssistantEngine
     ) -> None:
         """ADR-0102 §12's normative clause, and **nothing else in this list reaches it**.
 
-        ADR-0097 §4 permits a revocation timestamped *before* the grant it revokes —
-        "a revocation is never refused for its timestamp" — and derives liveness
-        from the ``revokes`` relation alone. ``recent_grants`` is ordered newest
-        first by ``decided_at``, so after a clock correction a revoking record sorts
-        *below* the grant it revokes and can fall outside a page containing it. An
-        implementation computing ``live`` by walking that page would then report a
-        withdrawn grant as **live** — the one answer this whole contract exists to
-        get right — and would pass every other clause here, because every other
-        clause is about admission, refusal or paging.
+        ADR-0097 §4 derives liveness from the ``revokes`` relation alone and is
+        emphatic that "a revocation is never refused for its timestamp — including
+        one that predates the grant it revokes", because ``decided_at`` is
+        caller-supplied and a host clock corrected backwards would otherwise make a
+        grant permanently unrevokable. ``recent_grants`` is ordered newest first by
+        ``decided_at``, so on such a deployment a revoking record sorts **below** the
+        grant it revokes and can fall outside a page that contains it.
 
-        The scenario is reachable through the surface alone: the fixture's clock
-        need not be manipulated, because whichever order the two records carry, a
-        conforming implementation answers ``live=None`` and returns **both**
-        records. The case is written so that an implementation deriving liveness
-        from the page's *first* entry fails it.
+        An implementation computing ``live`` by walking that page would then report
+        a **withdrawn grant as live** — the one answer this whole contract exists to
+        get right — and would pass every other clause in this class, because every
+        other clause is about admission, refusal or paging. It would also fail only
+        on the deployment where a clock moved, which is the failure that never shows
+        up in a test unless a test is written for it.
+
+        So the two halves are asserted together: the source is not live, **and**
+        both records are still listed. Asserting only the first would pass against
+        an implementation that had dropped the revoked grant from the record, which
+        ADR-0097 §6 forbids — revocation retires nothing and the history stays whole.
         """
-        granted = await granting_engine.grant(_SOURCE, scope=[GrantScope.FACET])
-        withdrawn = await granting_engine.revoke(_SOURCE)
+        granted = await back_dated_engine.grant(_SOURCE, scope=[GrantScope.FACET])
+        withdrawn = await back_dated_engine.revoke(_SOURCE)
         assert withdrawn is not None
+        # The premise the fixture exists to establish. Asserted rather than assumed,
+        # because a fixture whose clock did *not* run backwards would leave every
+        # assertion below true of an implementation this case is written to fail.
+        assert withdrawn.decided_at < granted.decided_at
+        # And the page really is ordered the way that misleads: the grant sorts
+        # first, so an implementation reading liveness off the newest entry sees a
+        # granting record and answers "live".
+        page = await back_dated_engine.recent_grants()
+        assert [record.id for record in page] == [granted.id, withdrawn.id]
 
-        assert (await granting_engine.grantable_sources())[0].live is None
+        assert (await back_dated_engine.grantable_sources())[0].live is None
+
+    async def test_the_record_is_ordered_newest_first_with_ids_breaking_ties(
+        self, granting_engine: AssistantEngine
+    ) -> None:
+        """``SourceGrantStore.recent``'s order, as the surface relays it.
+
+        Descending by ``decided_at``, ties broken by ``id`` **ascending**. The
+        tie-break is what makes the order total rather than merely mostly
+        determined, and it is the half a one-line ``sorted(..., reverse=True)`` over
+        a compound key gets wrong: reversing the compound key reverses the tie-break
+        with it, so two records at one instant come back in the opposite order the
+        contract states. An implementation whose clock does not advance between two
+        records — a fixed test clock, or a real one at any resolution — reaches that
+        case immediately, and nothing else in this class would notice.
+        """
+        await granting_engine.grant(_SOURCE, scope=[GrantScope.FACET])
+        await granting_engine.revoke(_SOURCE)
         page = await granting_engine.recent_grants()
-        assert {record.id for record in page} == {granted.id, withdrawn.id}
+        assert len(page) == 2
+        # Composed as two stable sorts rather than one reversed compound key,
+        # because that compound key is precisely the wrong answer being checked
+        # for: ``reverse=True`` over ``(decided_at, id)`` reverses the tie-break
+        # too.
+        by_id = sorted(page, key=lambda record: record.id)
+        assert list(page) == sorted(by_id, key=lambda record: record.decided_at, reverse=True)
 
     # --- §2a and §10: the local refusals -----------------------------------
 
@@ -970,6 +1025,27 @@ class AssistantEngineContract(ABC):
         """ADR-0085 §3b: a caller that mutated a returned page changed nothing."""
         assert isinstance(await granting_engine.grantable_sources(), tuple)
         assert isinstance(await granting_engine.recent_grants(), tuple)
+
+
+def backwards_clock() -> Callable[[], datetime]:
+    """A clock whose every reading is **earlier** than the last.
+
+    What :attr:`AssistantEngineContract.back_dated_engine` is built on, shared so
+    the three bindings cannot arrange three different premises for one clause. It
+    models a host clock that has been corrected backwards — the deployment ADR-0097
+    §4 refuses to make a grant unrevokable on, and therefore the only deployment on
+    which a liveness derived from ``decided_at`` gives a wrong answer.
+
+    Steps by a whole second per reading, so the two records a grant/revoke pair
+    mints are unambiguously ordered rather than separated by a resolution a
+    serialiser might round away.
+
+    Returns:
+        A callable returning a strictly decreasing sequence of instants.
+    """
+    numbers = count(1)
+    origin = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    return lambda: origin - timedelta(seconds=next(numbers))
 
 
 async def page_after_mutating_the_filter(
