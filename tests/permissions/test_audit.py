@@ -27,7 +27,13 @@ from permission_builders import AT, action, decision, ruling, tool
 from ai_assistant.core.errors import AuditError, DuplicateDecisionError
 from ai_assistant.core.types import DataTier, PermissionOutcome
 from ai_assistant.permissions import SqliteAuditTrail
-from ai_assistant.testing.cancellation import ResourceLog, SuspendedMidWrite, ThreadSuspension
+from ai_assistant.permissions.audit import _run_to_completion
+from ai_assistant.testing.cancellation import (
+    ResourceLog,
+    SuspendedMidWrite,
+    ThreadSuspension,
+    worker_finished_before_the_first_check,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -1139,3 +1145,27 @@ async def test_cancelling_a_record_does_not_release_the_connection(tmp_path: Pat
     finally:
         release.set()
         trail.close()
+
+
+async def test_a_base_exception_from_the_worker_reaches_the_caller() -> None:
+    """ADR-0054's relay carries every failure, not only the ``Exception`` half (#680).
+
+    ``_run_to_completion`` answers out of its relay lists alone whenever the worker
+    finished before the wait loop's first check. A failure the relay never captured
+    leaves both lists empty, so the caller is answered from an empty ``outcome`` —
+    an ``IndexError`` standing in for the cause and not chained to it.
+
+    The lever forces that path every time. Without it, which of the two paths a
+    caller gets is a race, and a case that only sometimes reaches the defect is not
+    evidence about it. ``KeyboardInterrupt`` stands in for the class; ``SystemExit``
+    and a ``CancelledError`` raised by the work itself are the other members.
+
+    Its own copy of the helper, deliberately: ADR-0060 refuses this shape a shared
+    home, so each copy is a separate place the relay could be narrow (#680).
+    """
+
+    def aborts() -> None:
+        raise KeyboardInterrupt
+
+    with worker_finished_before_the_first_check(), pytest.raises(KeyboardInterrupt):
+        await _run_to_completion(aborts)

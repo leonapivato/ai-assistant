@@ -108,15 +108,23 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
     cancellation takes precedence over the worker's own result or failure and is
     re-raised once the thread has finished: the caller's task still cancels; what
     is prevented is connection reuse, not the cancellation itself.
+
+    Every failure the worker sees is relayed, ``BaseException`` included. A
+    narrower ``except Exception`` catches nothing when ``fn`` raises outside it, so
+    both lists stay empty while ``finally: done.set()`` still fires — and the
+    caller is then answered out of an empty ``outcome``, an ``IndexError`` standing
+    in for the cause rather than chained to it (#680). Which of the two waits below
+    runs decides whether the caller sees that or the real failure, which is why it
+    presented as an intermittent fault rather than a reproducible one.
     """
     done = threading.Event()
     outcome: list[T] = []
-    failure: list[Exception] = []
+    failure: list[BaseException] = []
 
     def worker() -> None:
         try:
             outcome.append(fn(*args))
-        except Exception as exc:  # relayed to the caller once the thread has finished
+        except BaseException as exc:  # relayed to the caller once the thread has finished
             failure.append(exc)
         finally:
             done.set()

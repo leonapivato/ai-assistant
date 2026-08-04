@@ -28,8 +28,13 @@ from conversation_store_contract import (
 
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import ParkedBinding
-from ai_assistant.memory.conversation_store import SqliteConversationStore
-from ai_assistant.testing.cancellation import ResourceLog, SuspendedMidWrite, ThreadSuspension
+from ai_assistant.memory.conversation_store import SqliteConversationStore, _run_to_completion
+from ai_assistant.testing.cancellation import (
+    ResourceLog,
+    SuspendedMidWrite,
+    ThreadSuspension,
+    worker_finished_before_the_first_check,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
@@ -1463,7 +1468,13 @@ async def test_a_transaction_is_rolled_back_even_for_a_base_exception(tmp_path: 
     try:
         conversation = await store.start()
 
-        with pytest.raises(asyncio.CancelledError):
+        # The lever, because the rollback is only half of what this case observes:
+        # the other half is that the caller learns *what* failed, and which of
+        # ``_run_to_completion``'s two waiting paths delivers that is otherwise a
+        # race. This case failed intermittently under load for exactly that reason
+        # (#680) — the losing path answered with an `IndexError` from an empty
+        # relay — so it now takes the path the defect lives on every time.
+        with worker_finished_before_the_first_check(), pytest.raises(asyncio.CancelledError):
             await store.mark_active(conversation.id)
 
         # The store is still usable: the failed transaction released the
@@ -1472,6 +1483,28 @@ async def test_a_transaction_is_rolled_back_even_for_a_base_exception(tmp_path: 
         assert marked.id == conversation.id
     finally:
         store.close()
+
+
+async def test_a_base_exception_from_the_worker_reaches_the_caller() -> None:
+    """ADR-0054's relay carries every failure, not only the ``Exception`` half (#680).
+
+    ``_run_to_completion`` answers out of its relay lists alone whenever the worker
+    finished before the wait loop's first check. A failure the relay never captured
+    leaves both lists empty, so the caller is answered from an empty ``outcome`` —
+    an ``IndexError`` standing in for the cause and not chained to it.
+
+    The lever forces that path every time. Without it, which of the two paths a
+    caller gets is a race, and a case that only sometimes reaches the defect is not
+    evidence about it. ``KeyboardInterrupt`` stands in for the class; ``SystemExit``
+    and a ``CancelledError`` raised by the work itself are the other members, and
+    the rollback case above is that last one end to end.
+    """
+
+    def aborts() -> None:
+        raise KeyboardInterrupt
+
+    with worker_finished_before_the_first_check(), pytest.raises(KeyboardInterrupt):
+        await _run_to_completion(aborts)
 
 
 @pytest.mark.integration

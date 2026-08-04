@@ -29,8 +29,17 @@ from deferral_store_contract import (
 )
 
 from ai_assistant.core.errors import DeferralStoreError
-from ai_assistant.memory.deferral_store import SqliteDeferralStore, _secret_claim_id
-from ai_assistant.testing.cancellation import ResourceLog, SuspendedMidWrite, ThreadSuspension
+from ai_assistant.memory.deferral_store import (
+    SqliteDeferralStore,
+    _run_to_completion,
+    _secret_claim_id,
+)
+from ai_assistant.testing.cancellation import (
+    ResourceLog,
+    SuspendedMidWrite,
+    ThreadSuspension,
+    worker_finished_before_the_first_check,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
@@ -372,3 +381,27 @@ def test_the_production_store_refuses_a_lifetime_the_queue_cannot_work_under(
             now=_fixed_now,
             retention=retention,  # type: ignore[arg-type]
         )
+
+
+async def test_a_base_exception_from_the_worker_reaches_the_caller() -> None:
+    """ADR-0054's relay carries every failure, not only the ``Exception`` half (#680).
+
+    ``_run_to_completion`` answers out of its relay lists alone whenever the worker
+    finished before the wait loop's first check. A failure the relay never captured
+    leaves both lists empty, so the caller is answered from an empty ``outcome`` —
+    an ``IndexError`` standing in for the cause and not chained to it.
+
+    The lever forces that path every time. Without it, which of the two paths a
+    caller gets is a race, and a case that only sometimes reaches the defect is not
+    evidence about it. ``KeyboardInterrupt`` stands in for the class; ``SystemExit``
+    and a ``CancelledError`` raised by the work itself are the other members.
+
+    Its own copy of the helper, deliberately: ADR-0060 refuses this shape a shared
+    home, so each copy is a separate place the relay could be narrow (#680).
+    """
+
+    def aborts() -> None:
+        raise KeyboardInterrupt
+
+    with worker_finished_before_the_first_check(), pytest.raises(KeyboardInterrupt):
+        await _run_to_completion(aborts)

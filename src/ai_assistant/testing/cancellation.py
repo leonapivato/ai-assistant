@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, final
 
@@ -52,6 +53,56 @@ if TYPE_CHECKING:
 #: Generous — it is only ever reached when a test has hung, and a hung suite that
 #: fails with a message beats one that fails with a timeout somewhere upstream.
 _WAIT_SECONDS = 5.0
+
+
+@final
+class _InlineExecutor(ThreadPoolExecutor):
+    """A ``ThreadPoolExecutor`` that runs the work before :meth:`submit` returns.
+
+    A ``ThreadPoolExecutor`` subclass rather than a bare ``Executor`` because
+    ``loop.set_default_executor`` refuses anything else. No thread is ever
+    started: :meth:`submit` never reaches the base implementation.
+    """
+
+    def submit[**P, T](self, fn: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> Future[T]:
+        """Run ``fn`` on the calling thread and hand back an already-settled future."""
+        settled: Future[T] = Future()
+        try:
+            settled.set_result(fn(*args, **kwargs))
+        except BaseException as exc:  # as ``concurrent.futures`` itself relays one
+            settled.set_exception(exc)
+        return settled
+
+
+@contextlib.contextmanager
+def worker_finished_before_the_first_check() -> Iterator[None]:
+    """Make ADR-0054's relay be read *after* its worker thread has already finished.
+
+    ``_run_to_completion`` submits its worker to the executor and then checks
+    ``while not done.is_set()`` with no ``await`` in between, so which of its two
+    paths runs is a race the caller does not control: usually the worker is still
+    running and the coroutine waits on the executor future, but if the worker
+    reaches its ``finally: done.set()`` first, the wait loop is skipped entirely
+    and the caller is answered **from the relay lists alone**.
+
+    That second path is the only one where a worker outcome the relay failed to
+    capture is observable, and reaching it by chance is what made #680 present as
+    an intermittent gate failure — it passed in isolation and failed under load.
+    Running the work inline closes the window deterministically: the worker has
+    physically finished before ``run_in_executor`` returns, so ``done`` is set at
+    the first check every time.
+
+    Scoped to the block, and the loop is left with an ordinary executor
+    afterwards, so nothing later in the same test inherits inline semantics.
+    """
+    loop = asyncio.get_running_loop()
+    inline = _InlineExecutor(max_workers=1)
+    loop.set_default_executor(inline)
+    try:
+        yield
+    finally:
+        loop.set_default_executor(ThreadPoolExecutor())
+        inline.shutdown(wait=False)
 
 
 async def settle(turns: int = 50) -> None:
