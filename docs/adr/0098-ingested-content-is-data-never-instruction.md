@@ -259,11 +259,11 @@ protecting nothing the user did not choose. §5 records what that costs.
 > presented to that model as third-party data, distinguishable from the system's
 > own instructions and from the user's own words.
 
-> **Normative.** That distinction is **not forgeable from inside the span**. No
-> sequence of characters within an external span may cause a reader of the
-> assembled prompt to attribute any part of that span to the system, to the user,
-> or to a different record. An assembler that embeds untrusted text in a syntax
-> that text can itself write does not conform, whatever labels it emits.
+> **Normative.** That distinction is **not forgeable from inside the span**. The
+> attribution the assembled prompt expresses — which span is whose — is a function
+> of the data the assembler held, and no sequence of characters inside a span may
+> change it. An assembler that embeds a span in a syntax the serialised span can
+> itself produce does not conform, whatever labels it emits.
 
 > **Normative.** The marking is derived from data the system holds about the span
 > — `Provenance.source`, an `Attestation`, a facet's source — and never from
@@ -291,10 +291,21 @@ as two distinct supports. **Delimiting untrusted text with a delimiter that
 untrusted text may contain is not a defence**, and the corpus should not acquire
 one that looks like it is.
 
-**Two admissible constructions, and the choice is the lane's.** Either transform
-the span so it provably cannot produce the container's syntax (escape or replace
-it, the terminal adapter's approach), or choose a container whose terminator the
-span cannot guess. Both are implementable against a flat `EncodableText` today.
+**One admissible construction, and it is deterministic.** The span is transformed on
+render so that the container's syntax is **unrepresentable** in the serialised
+result — escaped, replaced, or encoded — which is the terminal adapter's approach in
+`interfaces.cli._safe` and is implementable against a flat `EncodableText` today.
+
+**An unguessable terminator is not the second option, and adversarial review was
+right to say so.** An earlier draft offered "a container whose terminator the span
+cannot guess" as an alternative. A random nonce makes a collision *unlikely*; the
+clause above admits no character sequence at all, so the two do not meet. Offering
+it would have let an implementing lane reintroduce delimiter injection while
+believing it conformed — the exact failure this section exists to name — and a
+nonce scheme that additionally escapes a span containing the nonce is just the
+deterministic construction with extra machinery. The probabilistic option is
+therefore removed rather than qualified.
+
 Expressing the distinction structurally instead — content parts, a trust-carrying
 field — is not available at the `ModelProvider` seam: `Message` has `role`, a flat
 `content`, and a `name` no producer sets and `models.provider._to_model_messages`
@@ -315,13 +326,41 @@ conveyance must have; the lane that finally lands still owns the phrasing of bot
 
 ### 3. Instructions inside external content are data, and external content may not be the authority for an action
 
-> **Normative.** Imperative text inside external content is data — to be
-> summarised, quoted, or ignored — and no consumer of this system treats it as an
-> instruction to this system.
+> **Normative.** Imperative text inside external content is **data**. No component
+> of this system acts on it as an instruction: it may not select a code path, set or
+> alter a parameter, change a policy decision, or determine what any subsequent call
+> does.
 
-> **Normative.** No prompt places external content where a model would read it as
-> an instruction from the system or from the user. This is §2's marking obligation
-> read on position rather than on labelling, and both must hold.
+> **Normative.** External content is never placed in a message the prompt's own
+> structure attributes to the system or to the user — never in a `Role.SYSTEM`
+> message, and never inside the region a `Role.USER` message presents as the user's
+> own words. This is §2's obligation read on position rather than on labelling, and
+> both must hold.
+
+**Neither clause obliges anyone to guarantee how a model behaves, and an earlier
+draft of both did.** They said that "no consumer of this system treats it as an
+instruction" and that no prompt places content "where a **model would read it** as
+an instruction" — conditions whose truth depends on an inference nobody can make
+deterministically, over a `Message.content` that is one undifferentiated string.
+Adversarial review found it on round 2, and it is the same defect the architecture
+reviewer found in this section's actuator clause on round 1: **a bound stated over
+something this system cannot obtain.** That is the discipline §5's clause and §6's
+second clause each impose about detection, read here on model obedience — and this
+section broke it twice before either reviewer arrived, which is the best evidence
+available that the pull toward it is a property of the subject rather than of any
+draft. Both clauses are now stated over what a serialiser and a caller do, which is
+checkable in a test.
+
+**What is therefore *not* promised, said plainly.** A model that reads a
+well-marked, correctly positioned external span may still follow an instruction
+inside it. Marking, escaping and positioning make that less likely and make the
+system's own conduct correct; they do not make the model obedient, and no wording
+in this ADR should be read as claiming they do. **That is the reason §4's ceilings
+and this section's actuator clause exist at all**: they hold whether or not the
+model was fooled, which is what "bounded blast radius by construction" means.
+A posture that needed the model to resist would be VISION §Principle 3's "Trust
+cannot depend only on a prompt telling the model to be careful" with the prompt on
+the other side.
 
 > **Normative.** No actuator is selected, parameterised, or confirmed by external
 > content.
@@ -586,15 +625,24 @@ over it with a channel that does not exist. ADR-0021's trail is typed on
 ### 9. What the implementing lanes owe
 
 No lane is owed by this ADR alone; each of these rides with the lane that would
-otherwise breach a clause.
+otherwise breach a clause. **The test below is marked, and the rest of this section
+is not**, for a reason adversarial review had to point out: §11 puts this ADR in
+ADR-0089's marked regime, where unmarked text supplies no obligation at all. An
+earlier draft stated the injection-regression test in this section's first bullet
+and called it "the clause" — which, under this ADR's own declared regime, obliged
+nobody. A prompt-assembly lane could have shipped with no such test and conformed.
+It is now a clause, at column 0, because ADR-0089 §2 also rules that a normative
+clause "cannot live inside a list item".
+
+> **Normative.** A lane that implements §2 for a prompt assembler ships a test
+> that renders a record whose `content` contains that assembler's own container
+> syntax — its bullet, label, header, and newline structure — and asserts that the
+> assembled prompt's attribution of every span is unchanged by it. A test asserting
+> only that a label is present does not satisfy this clause.
 
 - **The prompt-assembly lane** (ADR-0072 §6's, still unbuilt; filed as **#672**)
-  owes §2 in full for `planner._render_request` and `observer._render_batch`: the
-  marking, and a test
-  that feeds a record whose `content` contains the assembler's own bullet, label,
-  and header syntax and asserts that the assembled prompt still attributes every
-  span correctly. That test is the clause; a test asserting only that a label is
-  present tests the part that already passes.
+  owes §2 in full for `planner._render_request` and `observer._render_batch`,
+  including the clause above.
 - **The same lane** owes the observer's label scheme the same property, and should
   record that the `INFERRED` support count rests on it (ADR-0077 §5).
 - **Whoever lands ADR-0096's `ContextFacet`** owes §2 for any facet field that is
