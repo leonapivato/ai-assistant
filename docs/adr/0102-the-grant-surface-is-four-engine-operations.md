@@ -363,15 +363,22 @@ preserves ADR-0085 §5's boundary exactly — nothing new leaves `core`, and
 
 ### 4. The source is admitted, never trusted — and a revocation is never admitted away
 
-> **Normative.** `grant` admits a `source` **only** when it equals, exactly, the
-> declared `name` of a reader the hub holds **and** that name validates as
-> `Identifier` and equals its own `str.strip()`. Any other value raises
-> `UngrantableSourceError`, no `SourceGrant` is constructed from it, and the
-> value reaches no store and no log.
+> **Normative.** Argument validation and admission are two steps in that order,
+> and neither substitutes for the other. §2's `NonBlankEncodableText` refuses a
+> blank or unwritable `source` as `ValueError` (§2a), on `grant` and `revoke`
+> alike, before either applies any rule in this section; every clause below
+> governs only a `source` that has passed it.
 
-> **Normative.** `revoke` applies no such admission check. A revocation is
-> refused for no property of the source's name, and in particular is not refused
-> because no reader currently declares it.
+> **Normative.** `grant` admits a validated `source` **only** when it equals,
+> exactly, the declared `name` of a reader the hub holds **and** that name
+> validates as `Identifier` and equals its own `str.strip()`. Any other
+> validated value raises `UngrantableSourceError`, no `SourceGrant` is
+> constructed from it, and the value reaches no store and no log.
+
+> **Normative.** `revoke` applies no admission check. Beyond the argument
+> validation above, a revocation is refused for no property of the source's
+> name, and in particular is not refused because no reader currently declares
+> it.
 
 > **Normative.** No refusal raised by any of the four operations carries a
 > filesystem path, and none writes a caller-supplied `source` value to a log.
