@@ -1,7 +1,35 @@
 # 97. A grant is a recorded user act on a source; revoking it stops the reading and does not unwrite the beliefs
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-03
+- **Note (2026-08-03): ratified, and §11's present-tense premise about ADR-0096's
+  status was corrected in place at that moment.** `Proposed` → `Accepted`, in the
+  separate lane #633 requires, after **both** required reviews came back green on
+  the content this ADR merged with: adversarial **APPROVE with no findings** and
+  architecture **APPROVE with no findings**, both at tree `b4e7c5c57c3b`, round
+  15, churn ratio 1.3, each posted to the PR by `just ship`. That is the outcome
+  ADR-0070 §1 requires the ratifying edit to record.
+
+  **What was corrected:** §11's ADR-0096 bullet said "ADR-0096 stands `Proposed`",
+  a present-tense premise that this same lane falsified by ratifying ADR-0096
+  alongside this ADR. Ratified unaltered, an `Accepted` ADR-0097 would assert
+  permanently that a ratified ADR is unratified — #622's failure mode stated as
+  fact in live text — and it already sat two lines below that bullet's own
+  description of ADR-0096 §4's clause as "ratified". **The correction was made in
+  place rather than appended because this ADR still stood `Proposed`**: ADR-0070
+  §1 scopes its no-rewrite rule to "**ratified** decision text", and ADR-0095 §7
+  states that adjudication in full. **No decision changes.** The bullet's
+  operative claim — that this ADR touches neither ADR-0096's text nor its status —
+  is untouched and stays true; only the premise it opened with moves into the past
+  tense. The tense of the header bullet naming the review set moves with the flip
+  for the same reason, and nothing else in the document is edited.
+
+  The document was re-read whole at this moment. Its remaining claims about the
+  tree all hold at `main` — nothing merged between its authoring and its
+  ratification but ADR-0096's own ratification — and its header's "the two things
+  a grant has to gate both exist as ratified surfaces" is made true rather than
+  false by that flip. **ADR-0070 §1's no-rewrite rule now protects this text**, so
+  any later correction is an appended dated note.
 - **Decides `core` contract surface and implements none of it.** It adds **two**
   Protocols to `core/protocols.py` (`SourceGrants`, `SourceGrantStore` — split by
   capability, §3), two types to `core/types.py` (`GrantScope`, `SourceGrant`), and
@@ -16,9 +44,10 @@
   surface, which is the ground ADR-0093, ADR-0094, ADR-0095 and ADR-0096 each took
   the same set for, and which `CONTRIBUTING.md` → "Stop when the required reviews
   are green" states directly: a change is contract-surface "when it is the ADR
-  deciding that surface". It is **reviewed while `Proposed` and ratified only
+  deciding that surface". It was **reviewed while `Proposed` and ratified only
   after**, in a separate lane (`CONTRIBUTING.md` → "Contract ADRs land before
-  their implementation"; #633 records why the flip cannot ride in this PR).
+  their implementation"; #633 records why the flip could not ride in the PR that
+  carried it).
 - **Discharges ADR-0093 §11's first deferral** — "a revocable permission-grant
   model", whose firing condition is "when a second source exists **or when leg 6's
   exit test is evaluated against its own wording**" — and ADR-0092 §10's "the
@@ -1310,8 +1339,10 @@ changes**. The places where the opposite reading is available:
   state rather than editing the clause, and ADR-0096's text stays true as written:
   a reader holding only ADR-0096 is obliged to exactly what it obliged them to
   before. A new obligation added beside a ratified one is an addition, which is
-  ADR-0070 §1's test unmet. **ADR-0096 stands `Proposed` and this ADR does not
-  touch it** — not its text, not its status; #633's sequencing is its own lane's.
+  ADR-0070 §1's test unmet. **ADR-0096 stood `Proposed` when this ADR was
+  written, and this ADR does not touch it** — not its text, not its status;
+  #633's sequencing is its own lane's, and that lane ratified ADR-0096 alongside
+  this ADR on 2026-08-03.
 - **ADR-0021 §3, §5 and §6.** §3 defers "gating direct Tier 0/1 data access" and,
   in the same section, names the shape it should take. This ADR builds that shape
   for one subject — a connected source — and answers neither of §3's stated
