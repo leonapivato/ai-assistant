@@ -158,10 +158,17 @@ async def test_the_lever_leaves_the_default_executor_exactly_as_it_found_it() ->
 
     assert loop._default_executor is found  # type: ignore[attr-defined]
 
-    with ThreadPoolExecutor(max_workers=1) as installed:
-        loop.set_default_executor(installed)
-
+    installed = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(installed)
+    try:
         with worker_finished_before_the_first_check():
             pass
 
         assert loop._default_executor is installed  # type: ignore[attr-defined]
+    finally:
+        # This case has to leave the loop as *it* found it for the same reason the
+        # lever does. Closing `installed` while the loop still points at it hands
+        # the next `to_thread` a shut-down pool — harmless under a per-test loop,
+        # a `RuntimeError` under a wider-scoped one — so the restore comes first.
+        loop._default_executor = found  # type: ignore[attr-defined]
+        installed.shutdown(wait=False)
