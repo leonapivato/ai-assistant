@@ -17,14 +17,22 @@ assertion vacuous.
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
+import textwrap
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
 
-from ai_assistant.core.errors import MemoryStoreError, ReaderError
-from ai_assistant.core.types import DataTier, MemoryDecisionKind
+from ai_assistant.core.errors import (
+    GrantError,
+    MemoryStoreError,
+    ReaderError,
+    SourceNotGrantedError,
+)
+from ai_assistant.core.types import DataTier, GrantScope, MemoryDecisionKind
 from ai_assistant.orchestration import IngestionStage, MemoryWriteStage
 from ai_assistant.testing import (
     FakeDeferralStore,
@@ -32,13 +40,21 @@ from ai_assistant.testing import (
     FakeMemoryStore,
     FakeMemoryWriter,
     FakeReader,
+    FakeSourceGrants,
     attested_proposal,
+    source_grant,
 )
 from ai_assistant.testing.readers import DEFAULT_READER_NAME
 
 if TYPE_CHECKING:
-    from ai_assistant.core.protocols import MemoryWriter, Reader
-    from ai_assistant.core.types import MemoryIngestResult, MemoryUpdateProposal
+    from collections.abc import Callable
+
+    from ai_assistant.core.protocols import MemoryWriter, Reader, SourceGrants
+    from ai_assistant.core.types import (
+        MemoryIngestResult,
+        MemoryUpdateProposal,
+        SourceGrant,
+    )
 
 #: The instant every store fake in this module reads its clock at. Deliberately
 #: *after* ``FakeReader``'s own default ``read_at``: the reading's instant is the
@@ -64,6 +80,51 @@ class _FailingWriter:
         return await self._inner.ingest(proposal)
 
 
+def _awaited_names(func: Callable[..., object]) -> list[str]:
+    """The attribute names this function awaits, in source order.
+
+    ADR-0097 §5a's first clause — "No ``await`` may occur between the ``live()``
+    result a driver gates on and its call to ``Reader.read()``" — is a rule about
+    the driver's *body*, stated as a rule rather than bought with a mechanism
+    because "it costs a line and a test". This is that test's instrument: reading
+    the awaits off the source is what makes the property checkable at all, since
+    an interleaving that never happens to be exercised is indistinguishable at run
+    time from one that cannot happen.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    found: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Await):
+            continue
+        call = node.value
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute):
+            found.append((node.lineno, node.col_offset, call.func.attr))
+    # Sorted by position, because ``ast.walk`` is breadth-first: reading it in its
+    # own order would assert on the tree's shape rather than on the sequence the
+    # event loop actually sees, which is the whole subject.
+    return [name for _, _, name in sorted(found)]
+
+
+class _FailsOnTheRecheck:
+    """A ``SourceGrants`` that answers once and raises from every later ``live``.
+
+    A thin scripted wrapper around the canonical fake, for :class:`_FailingWriter`'s
+    reason: the fake is ``@final`` and its own ``fail_live`` script is armed for
+    *every* call, while the case under test needs the failure to arrive **between**
+    two of them. Everything the driver actually observes is the canonical fake's;
+    what is scripted here is only when the arming happens.
+    """
+
+    def __init__(self, inner: FakeSourceGrants) -> None:
+        self._inner = inner
+
+    async def live(self, *, source: str, use: GrantScope) -> SourceGrant | None:
+        """Delegate, then arm the fake so the next call raises."""
+        answer = await self._inner.live(source=source, use=use)
+        self._inner.fail_live()
+        return answer
+
+
 class Harness:
     """A wired :class:`IngestionStage` and the fakes behind it, for assertions."""
 
@@ -73,6 +134,7 @@ class Harness:
         reader: Reader | None = None,
         writer: MemoryWriter | None = None,
         policy: FakeMemoryPolicy | None = None,
+        grants: SourceGrants | None = None,
     ) -> None:
         self.now: datetime = _AT
         self.memory = FakeMemoryStore(now=lambda: self.now)
@@ -88,7 +150,15 @@ class Harness:
         self.deferrals = FakeDeferralStore(now=lambda: self.now)
         self.writes = MemoryWriteStage(writer=self.writer, deferrals=self.deferrals)
         self.reader: Reader = reader if reader is not None else FakeReader()
-        self.stage = IngestionStage(reader=self.reader, writes=self.writes)
+        # Granted throughout unless a case scripts otherwise. Every case in this
+        # module other than the gate's own is about what the stage does with a
+        # reading it was *permitted* to take, so the default has to be the granted
+        # one — an ungranted default would make every other assertion here
+        # vacuous, which is the shape ADR-0093 §10 refused for its own fake.
+        self.grants: SourceGrants = (
+            grants if grants is not None else FakeSourceGrants([source_grant(self.reader.name)])
+        )
+        self.stage = IngestionStage(reader=self.reader, writes=self.writes, grants=self.grants)
 
 
 def _proposals(count: int, *, name: str = DEFAULT_READER_NAME) -> list[MemoryUpdateProposal]:
@@ -301,6 +371,7 @@ async def test_a_deferral_the_full_queue_refuses_is_still_counted_as_deferred() 
     stage = IngestionStage(
         reader=harness.reader,
         writes=MemoryWriteStage(writer=harness.writer, deferrals=harness.deferrals),
+        grants=harness.grants,
     )
 
     report = await stage.ingest()
@@ -350,7 +421,9 @@ async def test_a_writer_failure_leaves_the_earlier_proposals_applied() -> None:
     harness = Harness()
     failing = _FailingWriter(harness.real_writer, fail_on=2)
     harness.writes = MemoryWriteStage(writer=failing, deferrals=harness.deferrals)
-    stage = IngestionStage(reader=FakeReader(_proposals(3)), writes=harness.writes)
+    stage = IngestionStage(
+        reader=FakeReader(_proposals(3)), writes=harness.writes, grants=harness.grants
+    )
 
     with pytest.raises(MemoryStoreError):
         await stage.ingest()
@@ -377,3 +450,171 @@ async def test_a_second_pass_re_reads_and_destroys_nothing_the_first_stored() ->
     assert first.stored == 1
     assert second.stored == 1
     assert len(await harness.memory.search("reported one thing", limit=10)) == 2
+
+
+# --- the gate: all five cases ADR-0097 §5 and §5a distinguish ---------------
+#
+# ADR-0097 §10 marks the enumeration normative and says why it is not a store
+# conformance clause: all five are obligations on *this* stage, and no store
+# implementation exhibits any of them. They are written against the driver, using
+# the canonical fake's scripted revocation and its scripted failure.
+
+
+async def test_an_ungranted_source_is_not_read_at_all() -> None:
+    """Case one: no live grant at the check, so nothing is opened.
+
+    **Refuse to read, not read-and-discard, and the difference is the whole
+    point.** Opening the user's calendar is the act the grant is about; a design
+    that read the file and then declined to propose from it would already have
+    done the thing it was not permitted to do — and it would do it on the
+    schedule. The assertion that carries this is ``call_count == 0``, not the
+    empty store.
+    """
+    reader = FakeReader(_proposals(2))
+    harness = Harness(reader=reader, grants=FakeSourceGrants())
+
+    with pytest.raises(SourceNotGrantedError):
+        await harness.stage.ingest()
+
+    assert reader.call_count == 0
+    assert harness.policy.calls == []
+
+
+async def test_a_grant_for_another_use_does_not_authorise_ingestion() -> None:
+    """A use a grant does not name is not authorised by it (ADR-0097 §2).
+
+    ``FACET`` and ``INGEST`` differ in the one way a user would care about: the
+    facet is transient and advisory, while ingestion writes durable beliefs that
+    outlive the turn and reach ``export``. "You may look at my calendar to answer
+    what I am asking now, but do not remember it" is a coherent sentence, and this
+    is the stage that has to honour it.
+    """
+    reader = FakeReader(_proposals(1))
+    grants = FakeSourceGrants([source_grant(reader.name, scope=[GrantScope.FACET])])
+    harness = Harness(reader=reader, grants=grants)
+
+    with pytest.raises(SourceNotGrantedError):
+        await harness.stage.ingest()
+
+    assert reader.call_count == 0
+
+
+async def test_an_unanswerable_check_before_the_read_opens_nothing() -> None:
+    """Case two: a ``live()`` that raises, so nothing is opened (ADR-0097 §5a).
+
+    **Failing closed is stated rather than assumed, because the tempting reading
+    is the other one.** "The check failed, so carry on with what we already knew"
+    is what an implementer writes when the alternative looks like losing a
+    scheduled run; a missed tick costs one interval, and a read on a revocation
+    nobody could see costs the property the grant exists to hold.
+    """
+    reader = FakeReader(_proposals(2))
+    grants = FakeSourceGrants([source_grant(reader.name)])
+    grants.fail_live()
+    harness = Harness(reader=reader, grants=grants)
+
+    with pytest.raises(GrantError):
+        await harness.stage.ingest()
+
+    assert reader.call_count == 0
+
+
+async def test_a_revocation_between_the_check_and_the_return_discards_the_reading() -> None:
+    """Case three: the revocation wins, and nothing is proposed from the reading.
+
+    A read legitimately begun while granted takes real time, and a revocation may
+    land inside it. What the re-check buys is that the revocation *wins* rather
+    than merely arrives: the reading's bytes are discarded rather than used —
+    nothing is proposed, nothing reaches memory, and nothing durable records that
+    the read happened.
+    """
+    reader = FakeReader(_proposals(3))
+    grants = FakeSourceGrants([source_grant(reader.name)])
+    grants.revoke_after(1)  # the gate's check passes; the re-check does not
+    harness = Harness(reader=reader, grants=grants)
+
+    with pytest.raises(SourceNotGrantedError):
+        await harness.stage.ingest()
+
+    assert reader.call_count == 1  # the read really did happen
+    assert harness.policy.calls == []  # and nothing was proposed from it
+    assert await harness.memory.search("reported thing", limit=10) == []
+
+
+async def test_an_unanswerable_re_check_discards_the_reading_too() -> None:
+    """Case four: a ``GrantError`` after the read is treated as a withdrawn grant.
+
+    "No driver may proceed on a stale answer, on the earlier of two lookups, or on
+    an absent one" (ADR-0097 §5a). An implementation that caught the error and
+    carried on with the *first* lookup would pass every other test in this module
+    while writing beliefs after its authorisation stopped being checkable.
+    """
+
+    reader = FakeReader(_proposals(3))
+    grants = _FailsOnTheRecheck(FakeSourceGrants([source_grant(reader.name)]))
+    harness = Harness(reader=reader, grants=grants)
+
+    with pytest.raises(GrantError):
+        await harness.stage.ingest()
+
+    assert reader.call_count == 1
+    assert harness.policy.calls == []
+
+
+async def test_a_grant_live_throughout_lets_the_reading_be_used() -> None:
+    """Case five: the accepting case, without which the four refusals prove nothing.
+
+    A gate that refused everything would pass all four tests above.
+    """
+    reader = FakeReader(_proposals(2))
+    grants = FakeSourceGrants([source_grant(reader.name)])
+    harness = Harness(reader=reader, grants=grants)
+
+    report = await harness.stage.ingest()
+
+    assert report.stored == 2
+    assert grants.call_count == 2  # checked before the read and again after it
+
+
+async def test_the_refusal_names_the_identity_and_the_use_and_nothing_else() -> None:
+    """ADR-0097 §8's legibility clause, which the scheduler's log line rests on.
+
+    The scheduler logs a failed job's ``str(exc)`` verbatim (ADR-0083 §7), so this
+    message *is* the log line: a path or an entry's text here would be Tier 1 data
+    in an operational log, which ADR-0004 §5 forbids outright.
+    """
+    reader = FakeReader(_proposals(1, name="calendar"), name="calendar")
+    harness = Harness(reader=reader, grants=FakeSourceGrants())
+
+    with pytest.raises(SourceNotGrantedError) as caught:
+        await harness.stage.ingest()
+
+    message = str(caught.value)
+    assert "calendar" in message
+    assert GrantScope.INGEST.value in message
+
+
+async def test_the_stage_cannot_record_a_grant() -> None:
+    """§3's capability split, asserted where a widening would actually happen.
+
+    A stage handed the whole store is a scheduler job that can mint its own
+    authorisation, and nothing about the record would look wrong afterwards. The
+    static half is ``mypy --strict`` refusing to let this stage *name* ``record``;
+    what is checkable at run time is that the object it was given has no such
+    member to reach, which is what the narrow canonical fake models.
+    """
+    harness = Harness()
+
+    assert not hasattr(harness.grants, "record")
+
+
+def test_no_await_stands_between_the_check_and_the_read() -> None:
+    """ADR-0097 §5a's first clause, read off the stage's own body.
+
+    Awaiting a coroutine does not yield to the event loop, so with nothing between
+    the ``live()`` answer and ``read()`` this stage cannot sit on a stale answer at
+    all. The awaits are asserted **exhaustively and in order** — gate, read,
+    re-check, then the write loop — because an extra await anywhere in this body is
+    the defect whatever it happens to sit next to.
+    """
+    assert _awaited_names(IngestionStage.ingest) == ["live", "read", "live", "write"]

@@ -2220,8 +2220,9 @@ class CalendarFacet(ContextFacet):
 # --- reading: what one pass over a source produced (ADR-0093, ADR-0095) ------
 # The read-only seam's return value. Two instants rather than one, because the
 # clock that read a source and the clock that source reports on are different
-# clocks (ADR-0073 §4), and a value rather than a bare sequence of proposals,
-# because the facet half lands later as an optional field (ADR-0093 §3).
+# clocks (ADR-0073 §4), and a value rather than a bare sequence of proposals —
+# which is what let the facet half land additively above, exactly as ADR-0093 §3
+# said it would.
 
 
 class SourceReading(BaseModel):

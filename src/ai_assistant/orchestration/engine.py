@@ -921,7 +921,8 @@ class Engine:
         ruling, a write, possibly a parked question — and nobody is waiting for any
         of it, which is ADR-0077 §8's "Nothing is waiting on it, and a turn is."
         The facet read §3 permits at assembly time is a separate path that proposes
-        nothing, and §7a reserves it until ``CurrentContext`` grows the field.
+        nothing, runs on ``context``'s own reader instance, and is gated on its own
+        ``FACET`` grant (ADR-0096 §5, ADR-0097 §2).
 
         **Takes no argument, deliberately.** The reader is given its own source and
         its own bound (§1, §5), so ``read()`` takes none either: a caller able to
@@ -958,16 +959,24 @@ class Engine:
             RuntimeError: If the engine is shutting down. The scheduler treats this
                 as *stop* rather than as a job failure (ADR-0083 §8), which is what
                 :data:`ENGINE_SHUTTING_DOWN` exists for.
-            ConfigurationError: If this engine was built with no reader. Refusing
-                is the point: an empty report would be indistinguishable from a
-                source that had nothing to say, so a deployment whose reader failed
-                to wire would look healthy forever while ingesting nothing — the
-                shape ADR-0022 §4a refuses, and the same reason §8 makes a failed
-                *read* raise rather than return an empty reading. It is
-                unreachable from the scheduler, which arms this job only when an
-                interval is configured and ``Settings`` refuses an interval with no
-                source (§7a); it guards the second caller and the mis-wired
-                composition root.
+            ConfigurationError: If this engine was built with no ingestion stage —
+                no configured reader, or no grant seam to gate it on (ADR-0097 §5,
+                §9). Refusing is the point: an empty report would be
+                indistinguishable from a source that had nothing to say, so a
+                deployment whose stage failed to wire would look healthy forever
+                while ingesting nothing — the shape ADR-0022 §4a refuses, and the
+                same reason §8 makes a failed *read* raise rather than return an
+                empty reading. The message names **both** conditions, because they
+                are different facts and an operator told the wrong one looks in the
+                wrong place.
+            SourceNotGrantedError: If no live ``INGEST`` grant covers the source at
+                the moment of the read, or if one is revoked while the read is in
+                flight (ADR-0097 §5). Distinct from the error above: that one is a
+                deployment that cannot ask, this one is a user who has not said
+                yes. The scheduler logs it and retries at the next due instant, so
+                a revoked grant left beside a configured interval logs a refusal
+                every interval — configuration and consent disagreeing out loud,
+                which is the state ADR-0093 §7's clause exists to make visible.
             ReaderError: If the read could not complete because of its source. The
                 scheduler logs it with its class and retries at the next due
                 instant, and never takes the process down (§6, ADR-0083 §7) — a
@@ -984,8 +993,9 @@ class Engine:
         self._reject_if_closing()
         if self._ingestion is None:
             msg = (
-                "no reader is configured, so there is nothing to ingest; set "
-                "ASSISTANT_CALENDAR_READER_PATH to configure the source (ADR-0093 §7a)"
+                "no ingestion stage is wired, so there is nothing to ingest; it "
+                "needs both a configured source (ASSISTANT_CALENDAR_READER_PATH, "
+                "ADR-0093 §7a) and a grant seam to gate the read (ADR-0097 §5)"
             )
             raise ConfigurationError(msg)
         return await self._tracked(self._ingestion.ingest())

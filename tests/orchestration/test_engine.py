@@ -94,8 +94,10 @@ from ai_assistant.testing import (
     FakeObserver,
     FakePlanStore,
     FakeReader,
+    FakeSourceGrants,
     FakeToolInvoker,
     ObservationGate,
+    source_grant,
 )
 
 if TYPE_CHECKING:
@@ -295,12 +297,25 @@ class Harness:
         # by default, so the ordinary engine — and therefore almost every case in
         # this module — is built without one.
         self.reader = reader
+        # Granted for `INGEST`, because this module is about the *engine* rather
+        # than about ADR-0097 §5's gate: an ungranted default would make every
+        # ingestion case here refuse before reaching the code under test. The
+        # gate's own five cases live in `test_ingestion.py`, against the stage.
+        self.grants = FakeSourceGrants(
+            []
+            if reader is None
+            # `reader` is deliberately `object` here — the duck-typed fakes this
+            # module wires are not all `Reader`s — so the identity the grant has to
+            # cover is read the same way the stage reads it.
+            else [source_grant(str(reader.name))]  # type: ignore[attr-defined]
+        )
         self.ingestion = (
             None
             if reader is None
             else IngestionStage(
                 reader=reader,  # type: ignore[arg-type]  # a duck-typed fake stands in for the Protocol
                 writes=self.writes,
+                grants=self.grants,
             )
         )
         loop = LearningLoop(
