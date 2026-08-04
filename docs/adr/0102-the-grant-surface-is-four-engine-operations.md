@@ -484,8 +484,13 @@ wanted.
 > written to a `SourceGrant`, never returned by `recent_grants`, never written
 > to a log record, and never persisted by the hub.
 
-> **Normative.** Where a source's configured location has no UTF-8 encoding,
-> `location` is `None`. Enumeration is not refused for it.
+> **Normative.** `GrantableSource.location` is `None` only where the source has
+> **no** configured location at all.
+
+> **Normative.** A source whose configured location exists and has no UTF-8
+> encoding is **not grantable**: `grantable_sources` omits it, `grant` refuses it
+> with `UngrantableSourceError`, and enumeration is not refused for it. The
+> refusal and the operator log line name the reader and carry no path (§4).
 
 > **Normative.** A client renders `location` to the user, and takes an explicit
 > act from the user, before it sends `grant`. A client that cannot show the user
@@ -512,15 +517,26 @@ moment of granting" carrier §9a's *first* clause requires some response to be.
 reading the user's own configuration back to the user over ADR-0084 §1's `0600`
 Unix socket discloses it to nobody.
 
-**The encoding clause is a real case rather than a defensive one.** Linux
+**The encoding clauses are a real case rather than a defensive one.** Linux
 pathnames are bytes, and Python surfaces an undecodable one through
 `surrogateescape`, so `str(path)` can hold a lone surrogate that `EncodableText`
-refuses and ADR-0087's encoder cannot express. Without this clause a deployment
-with such a path would find `grantable_sources` raising a `ValidationError` from
+refuses and ADR-0087's encoder cannot express. Without a rule a deployment with
+such a path would find `grantable_sources` raising a `ValidationError` from
 inside the operation — enumeration broken by a path the user cannot see and did
-not ask about. Degrading to `None` costs the disclosure for that one source and
-keeps the surface working, which is ADR-0096 §4's single-absence treatment
-applied to a value rather than to a facet.
+not ask about.
+
+**Refusing grantability is the answer, and degrading `location` to `None` was
+the wrong one.** An earlier draft of this section did exactly that, and it made
+the two halves of §9a contradict each other: the source would be listed as
+grantable while no conforming client could ever grant it under the third clause
+below, and a client that ignored that clause could mint precisely the uninformed
+grant §9a exists to prevent. So the two cases are separated. **No configured
+location at all** makes §9a's obligation vacuous — there is nothing to show — and
+the source is grantable with `location` absent. **A configured location that
+cannot be shown** is the hazard itself, and it fails closed: nothing is offered
+and nothing is granted, which is ADR-0097 §8's posture rather than ADR-0096 §4's
+single-absence one. The remedy is an operator act on the operator's own
+filesystem, and the log line is what points at it.
 
 **The third clause is an obligation the hub cannot enforce, and saying so is
 part of stating it.** Nothing on the wire distinguishes a client that rendered
@@ -553,9 +569,31 @@ already configured, and a grant nobody was shown is one step from that.
 
 > **Normative.** The identities and locations the grant operations hold are
 > supplied by the composition root, each identity read from the reader object it
-> built. Entries are keyed by declared identity and deduplicated, so several
-> instances of one source contribute one entry. No member is added to `Reader`,
-> and no component reads a source's identity from anything but a `Reader`.
+> built, and entries are keyed by that identity and deduplicated — so several
+> instances of one source contribute one entry.
+
+> **Normative.** Several readers declaring one identity carry one configured
+> location. A composition supplying two that differ is a configuration error and
+> the engine does not build.
+
+> **Normative.** No member is added to `Reader`, and no component reads a
+> source's identity from anything but a `Reader`.
+
+**The equal-locations clause is what keeps deduplication honest, and the obvious
+alternative is unavailable.** `build_engine` builds two `CalendarReader`
+instances today — ADR-0096 §5 requires the separate instances, since ADR-0093 §7
+bounds a reader at one outstanding worker per instance — and both are configured
+from `calendar_reader_path`, so they agree by construction. Nothing said so,
+though, and two conforming readers named `calendar` at different paths would
+produce one entry showing one location while a grant on that identity authorised
+reads of both, which is §6's informed-consent property defeated by a wiring
+detail. Refusing to build is the cheap half of the fix. Giving each instance its
+own grantable identity is the other candidate and it is **foreclosed**: ADR-0093
+§7 makes an identity declared rather than configured, and ADR-0097 §9a places a
+named precondition on ADR-0093 §11's registry lane that "A second instance of one
+source type may not become grantable before that rule exists." So the only move
+available here is to refuse the state, and §14 leaves the rest where that
+precondition already put it.
 
 **`orchestration` is forced rather than chosen.** The operations are
 `AssistantEngine` methods (§1), `AssistantEngine` is provided by `orchestration`
@@ -761,8 +799,12 @@ read as the Protocol *change* it is rather than a new triad):
    grant raises `InvalidGrantError`; `revoke` with no live grant returns `None`;
    a revocation transcribes the revoked grant's `source` and `scope`; an
    `INGEST`-only grant is revocable; `recent_grants` refuses a non-positive
-   `limit` before any I/O; and `GrantableSource.location` is absent rather than
-   fatal for a location with no UTF-8 encoding.
+   `limit` before any I/O; a source whose configured location has no UTF-8
+   encoding is neither enumerated nor granted, and enumeration of the others is
+   unaffected by it; and a `source` differing from a held reader's `name` only by
+   surrounding whitespace is refused rather than matched — written against the
+   **wire** implementation as well, since that is the one the argument annotation
+   could have normalised (§2).
 3. **The canonical fake gains the four methods**, scriptable to hold grantable
    sources with and without a location and with and without a live grant, so a
    client's own refusal paths are reachable from a test.
@@ -1011,6 +1053,18 @@ touched.
   timestamped before the grant it revokes, `recent` orders by `decided_at`, so a
   clock correction puts the revoking record outside the page and the client
   reports a withdrawn grant as live.
+- **Degrade `location` to `None` when the configured path has no UTF-8 encoding,
+  and grant anyway.** The first draft of §6 did this, and it makes §9a's two
+  halves contradict each other: the source is offered while no conforming client
+  may grant it, and a client that ignored §6's third clause would mint the
+  uninformed grant §9a exists to prevent. Rejected in §6 for a fail-closed
+  refusal.
+- **Give each configured reader instance its own grantable identity, so two
+  same-named readers at two paths are two grants.** Not available rather than
+  rejected: ADR-0093 §7 makes an identity declared rather than configured, and
+  ADR-0097 §9a places a named precondition on ADR-0093 §11's registry lane that a
+  second instance of one source type may not become grantable before that lane
+  rules on it. §7 refuses the state instead.
 - **Put the grant operations in `service/` rather than `orchestration`.**
   Rejected in §7: they must be `AssistantEngine` methods to be addressable over
   the socket, and `AssistantEngine` is provided by `orchestration` (ADR-0085
