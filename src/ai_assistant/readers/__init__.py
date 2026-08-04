@@ -28,10 +28,24 @@ rejection the deployment change makes *more* load-bearing rather than less — a
 co-located fetcher is the pattern that most resembles a connector, and it is not
 one. The fetcher does the network; the reader reads its output off disk.
 
-The one reader today is :class:`~ai_assistant.readers.calendar.CalendarReader`.
-**It has no caller yet**, which is how ADR-0093 §10's closing paragraph sequences
-the work: the ``context/`` facet, the ingestion stage, the ``Engine`` operation
-and the scheduler job are each a later lane.
+The one reader here is :class:`~ai_assistant.readers.calendar.CalendarReader`, and
+a reading of it has the **two consumers ADR-0093 §3 gives one, reading at their
+own cadences**: the ``context/`` facet reads at assembly time, ingestion reads on
+its schedule, and neither derives its answer from the other's reading. The two are
+not meant to agree — a facet read at 10:00 and a belief written from an 09:00 run
+*should* state different things — which is what a reading's own instants are for.
+
+**Each consumer holds its own reader instance rather than sharing one**
+(ADR-0096 §5), because ADR-0093 §7 bounds a reader at one outstanding worker *per
+instance*: a shared one would let a scheduled ingestion read suppress the
+request-path facet for as long as it ran, coupling a request cadence to a periodic
+job in the direction that makes an advisory facet wait.
+
+Which objects hold those two ends is deliberately not named here. This package
+imports nothing above ``core`` and nothing imports it, so it cannot see its own
+callers — and a list of them here would be a snapshot, going stale silently rather
+than loudly (`CONTRIBUTING.md` → "No state claims in living documents"). Each side
+asserts its own wiring in its own tests.
 """
 
 from __future__ import annotations
