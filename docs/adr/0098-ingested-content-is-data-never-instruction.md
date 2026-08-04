@@ -225,9 +225,11 @@ unmarked text supplies none.
 > speech captured by a spoke are all external content, whatever subsystem carries
 > them and whatever type they are stored in.
 
-> **Normative.** The class is decided by **recorded origin**, never by inspecting
-> the text. `MemorySource.EXTERNAL` is external. Any `MemorySource` added later is
-> external unless the ADR adding it argues otherwise in its own text.
+> **Normative.** Membership of the class is decided by **recorded origin**, never
+> by inspecting the text.
+
+> **Normative.** `MemorySource.EXTERNAL` is external, and any `MemorySource` added
+> later is external unless the ADR adding it argues otherwise in its own text.
 
 **An allow-list, for ADR-0092 §4's reason.** That section widened the supersedable
 class to `{OBSERVED, INFERRED, EXTERNAL}` and insisted the set stay "enumerated
@@ -312,8 +314,12 @@ conveyance must have; the lane that finally lands still owns the phrasing of bot
 ### 3. Instructions inside external content are data, and external content may not be the authority for an action
 
 > **Normative.** Imperative text inside external content is data — to be
-> summarised, quoted, or ignored. No consumer treats it as an instruction to this
-> system, and no prompt places it where a model would read it as one.
+> summarised, quoted, or ignored — and no consumer of this system treats it as an
+> instruction to this system.
+
+> **Normative.** No prompt places external content where a model would read it as
+> an instruction from the system or from the user. This is §2's marking obligation
+> read on position rather than on labelling, and both must hold.
 
 > **Normative.** No actuator is selected, parameterised, or confirmed by external
 > content, nor by a model output produced from external content without an
@@ -400,15 +406,18 @@ The fourth clause of §4 says "recoverable at the ruling point", and this sectio
 why those four words are in it rather than a cleaner phrase.
 
 **At `87d9214` nothing on `main` can breach that clause, and nothing can enforce it
-either.** No episode is `EXTERNAL` — readers may not propose one (ADR-0093 §4) —
-so no derived belief cites external evidence, so the rule has no subject. And the
+either.** The only producer of `DERIVED` records is the observer, whose citations
+are episode ids (ADR-0077 §5), and no episode is `EXTERNAL` because a reader may
+not propose one (ADR-0093 §4). So no derived belief on `main` cites external
+evidence, and the clause has no subject to bite. And the
 seam that would give it one does not exist: `MemoryPolicy.decide` receives a
 proposal and a sequence of conflicting records, and holds no store, so it cannot
 resolve the ids in `Provenance.evidence` to see what they are. `MemoryIngestor`
 *does* resolve them — `_require_resolvable_evidence` reads each cited record — but
 it resolves them **before** the policy runs and may not re-rule afterwards: ADR-0081
 §3 is explicit that the writer refuses by raising rather than returning "a
-fabricated `REJECT`", because "a decision is the policy's to make (ADR-0005 §3)". A
+fabricated `REJECT`", because "a ruling is the policy's to make (ADR-0005 §3) and a
+writer inventing one puts a decision nobody made into the ingest result". A
 writer that converted an `ACCEPT` into a question would be inventing a ruling
 nobody made.
 
@@ -423,10 +432,11 @@ path is correct. **There is no field to read, and adding one would require
 re-deciding ADR-0075 §2's producer line**, which this ADR is not allowed to touch
 and would not want to: that line is what makes episodic capture possible at all.
 
-> **Normative.** Nothing in this corpus may state or imply that the posture detects
-> external content embedded in text whose recorded origin is not external. It does
-> not, and the containment for that case is §4's band ceilings, the producer floors
-> already ratified, and the user's correction — never detection.
+> **Normative.** No ADR, lane, or surface may state or imply that this posture
+> detects external content embedded in text whose recorded origin is not external.
+
+It does not, and the containment available for that case is §4's band ceilings, the
+producer floors already ratified, and the user's correction — never detection.
 
 **What does bound the undetectable case, honestly enumerated.** The belief lands in
 the `DERIVED` band, so a user assertion retires it (ADR-0038, ADR-0072 §4); its
@@ -439,9 +449,11 @@ containment and it is not a prevention. The distance between those two words is
 this ADR's accepted cost, and naming it is preferable to a rule that would look
 like it closed the gap.
 
-**Why the seam is deferred rather than specified now.** ADR-0073 §4's standing test
-— a decision about a producer is taken "with a producer in hand" — is not met.
-Specifying a taint field today would mean choosing between a producer-declared flag
+**Why the seam is deferred rather than specified now.** ADR-0073 §4 sets the
+standing test for a decision of this shape — whether a `Provenance` field is owed
+"is a `core` decision for that lane — **with a producer in hand** — not one to guess
+here" — and ADR-0094 §10 declined the same surface on the same ground. It is not met
+here. Specifying a taint field today would mean choosing between a producer-declared flag
 (which lets a producer decide its own standing, the move ADR-0094 §5 refuses) and a
 caller-stamped one (which needs a caller that mixes origins, and there is none)
 with no evidence about which the first real case wants. §12 defers it with the
@@ -684,7 +696,10 @@ support.
   channel question reaches first.
 - **The actuator and egress design** that §3's second clause constrains — ADR-0017
   §3's fourteen conditions, the approval and limit machinery of VISION §Principle 3,
-  and #241's ranking. **Fires with the first actuator.** §3 fixes what may never be
+  and **#241**'s open rule for choosing among several capable tools, which #668
+  names as inheriting this posture and which §3's second clause reaches directly: a
+  ranking influenced by content-derived text is content selecting the actuator.
+  **Fires with the first actuator.** §3 fixes what may never be
   its authority and nothing else.
 - **Spoke-borne external content.** A bystander's speech is external content by §1
   and inherits §2, §3 and §4; the submission path, the per-spoke band ceiling and
