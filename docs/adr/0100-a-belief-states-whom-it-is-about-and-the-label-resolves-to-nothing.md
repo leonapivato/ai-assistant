@@ -6,10 +6,10 @@
   that must ship with them.** `MemoryBase` gains an optional `about_person`;
   `FeedbackEvent` gains the same field and `assistant learn` gains a route into
   it (§7), so the one producer that already writes third-party beliefs can say
-  so; and a `DERIVED` proposal that states a subject is rejected at the gate
-  (§5), so the axis ships with the check ADR-0099 §5 fires it on rather than
-  after it. Nothing else moves: no Protocol signature changes, no band changes,
-  no supersession rule changes.
+  so; and the observation stage discards an observer proposal that states a
+  subject (§5), so the axis ships with the check ADR-0099 §5 fires it on rather
+  than after it. Nothing else moves: no Protocol surface and no Protocol
+  *behavioural* contract, no band changes, no supersession rule changes.
 - **Required review set: adversarial *and* architecture.** `ship.sh` gates the
   architecture review on `core/protocols.py` or `core/types.py` changing, and the
   PR carrying this ADR touches neither — it is prose only. The set is taken
@@ -122,9 +122,8 @@ enforced today by asking a language model nicely.
 **So the check ships with the field rather than after it, and §5 requires it.**
 A field whose consumer were optional would leave ADR-0099 §5's condition unfired
 while spending the surface, which is the refusal above with an extra step. §5
-makes the refusal of a `DERIVED` proposal that states a subject a rule the
-shipped policy makes and the conformance suite pins; §7 does the same for the
-user's route into the field. Both are preconditions of the field, in ADR-0073
+makes the observation stage discard a proposal that states a subject it was not
+entitled to state; §7 does the same for the user's route into the field. Both are preconditions of the field, in ADR-0073
 §4's "a precondition of that producer shipping" sense.
 
 The cost of continuing to wait is asymmetric, and it is the argument ADR-0099
@@ -358,19 +357,17 @@ already exists for exactly one producer, by ADR-0099's ruling and by shipped
 behaviour, and it exists for no other. The field makes an existing permission
 legible; it grants none.
 
-### 5. ADR-0077 §2 is untouched, and one specific breach becomes refusable
+### 5. ADR-0077 §2 is untouched, and its breach is discarded where the producer is known
 
 > **Normative.** ADR-0077 §2's warrant rule is unchanged by this ADR: what an
 > observer may propose is exactly what it was.
 
 > **Normative.** An observer proposal states no subject.
 
-> **Normative.** A proposal whose band is `DERIVED` and which states a subject is
-> **rejected**. `DefaultMemoryPolicy` returns `MemoryDecisionKind.REJECT` for it,
-> and the shared `MemoryPolicy` conformance suite pins the refusal, so no
-> alternative policy drops it silently.
+> **Normative.** The observation stage discards any proposal an `Observer`
+> returns that states a subject, and does not put it through the write path.
 
-> **Normative.** No lane may implement that refusal by having a writer substitute
+> **Normative.** No lane may implement that discard by having a writer substitute
 > a ruling the policy did not make (ADR-0081 §3, restated by ADR-0098 §5).
 
 **The check is required, not offered, and that is what makes the deferral's
@@ -380,27 +377,38 @@ whose only check were optional would ship the surface and leave the condition
 unfired — so the check lands in the same change, and §7's last clause does the
 same for the user's route. Neither is a follow-up.
 
-**The policy can make this ruling on what it already receives.** `decide` is
-handed a `MemoryUpdateProposal`, whose `proposed.provenance.source` classifies
-under `band_of`; nothing new reaches the gate. And the band is a faithful proxy
-for the producer *today* because ADR-0077 §2 makes `ModelBackedObserver` the only
-thing that writes `OBSERVED` or `INFERRED` — so "a `DERIVED` proposal stating a
-subject" is exactly "an observer that broke §5's second clause", with no
-inference about text.
+**It belongs at the stage because the stage is where the producer is known, and
+that is the whole of why it is not at the gate.** `ObservationStage` calls the
+injected `Observer` and holds the `ObservationOutcome` it returned, so "this came
+from an observer" is a fact it has rather than one it infers.
+`MemoryPolicy.decide` receives a proposal and conflicting records and no producer
+identity at all, so the only proxy available to it is the band — and a
+band-scoped refusal would say something this ADR does not mean. §2 holds the axis
+band-independent; a rule that no `DERIVED` proposal may state a subject would
+make it band-scoped in effect, bind every future derived producer including one
+that legitimately receives a structured subject, and turn ADR-0077 §2's
+*producer* restriction into a contract obligation on every `MemoryPolicy`
+implementation — a behavioural widening of a Protocol, which golden rule 5 puts
+behind its own ADR, bought to enforce a restriction that belongs to one producer.
+The stage costs none of that: it constrains no `core` contract, no band, and no
+producer other than the one ADR-0077 §2 already binds.
 
-**`REJECT` and not `ASK_USER`**, because this is a producer defect rather than a
-close call: a proposal from something not entitled to state a subject is not a
-belief the user should be asked to adjudicate, and asking would train the user to
-wave through the one signal this check exists to raise.
+**Discard rather than raise**, following ADR-0077's own posture — "A malformed
+response degrades; a model failure propagates". A proposal stating a subject is a
+producer defect in one entry, and failing the whole pass over it would lose the
+proposals that were fine.
 
-**It is a policy rule and not a validator, deliberately** — §9 argues the
-placement, and the difference is exactly its revisability. The day an ADR
-introduces a derived producer entitled to state a subject, this rule changes with
-that ADR and nothing already stored becomes unconstructable.
+**It holds today by construction and is written so it survives the next
+observer**, which is ADR-0098 §4's form for exactly this shape of clause.
+`ModelBackedObserver` builds every record itself from a fixed JSON envelope whose
+schema has no subject key, so the shipped observer *cannot* state one however the
+model answers. The clause therefore binds nothing today and is fail-closed
+against the second `Observer` implementation, which is the one the corpus cannot
+inspect.
 
 **What this buys, stated exactly, because overclaiming here would be the worst
 outcome available.** The observer's compliance with ADR-0077 §2 becomes
-*representable*, and one breach of it becomes refused at the gate rather than
+*representable*, and one breach of it is discarded deterministically rather than
 merely discouraged in a prompt.
 
 **It does not make ADR-0077 §2 enforceable, and this ADR does not claim it
@@ -551,7 +559,8 @@ subject and doesn't, which is the day this field ships.
 
 > **Normative.** No validator on `MemoryBase` or `Provenance` constrains
 > `about_person` by `source`, by band, or by kind. §4's and §5's obligations are
-> discharged by producers and at the policy gate — never by a model validator.
+> discharged by producers and by the stage that calls them — never by a model
+> validator.
 
 ADR-0092 §1 chose a validator for `attestation` because its rule is an `if and
 only if` that is true in both directions and forever: an attestation is meaningful
@@ -604,7 +613,8 @@ earlier ADR wrote — so the record belongs in this ADR and nowhere else. ADR-00
 §1's test is applied to the four places where the opposite reading is available.
 
 **ADR-0077 §2.** It rules the observer's warrant, in prose, with no field. §5
-adds a field the rule can be *stated* against and a check a policy may run. Does
+adds a field the rule can be *stated* against and a discard the observation
+stage makes. Does
 a reader holding only ADR-0077 now act differently, or read a clause of it more
 widely? No. The warrant is word-for-word what it was; §5's first clause says so;
 and the enforcement gap ADR-0077 §2 acknowledged of itself is still open, by §5's
@@ -662,6 +672,16 @@ already describes.
   argument rather than a paragraph here. Fires with the first lane that touches
   conflict detection, or with the first reported false supersession across
   subjects.
+- **Whether §5's discard is reported, and where.** `ObservationOutcome`'s two
+  counts are the *producer's*, "exhaustive and disjoint over what the model
+  emitted", and a proposal the stage refuses is not one of them — that count "is
+  the ingesting stage's". Whether the stage's refusal owes a count of its own is
+  not decided here, because adding one is a field on `ObservationReport`, which
+  ADR-0084 §5 promoted into `core` and which ADR-0077's own supersession note
+  records as therefore owing an ADR. Fires with the first `Observer` that
+  actually states a subject, or with any lane adding a count to that report; it
+  is a live question only for a second observer implementation, since §5's clause
+  binds nothing today (§5).
 - **The disclosure floor extended to the subject axis** — that a surface never
   renders the owner's belief about another person as that person's own word.
   ADR-0099 §4 already rules the floor; what is deferred is *rendering*: whether a
@@ -698,11 +718,11 @@ already describes.
   honest case is recordable. Neither becomes *enforceable* (§5), and the ADR says
   so rather than letting a later reader infer otherwise from the field's
   existence.
-- **The observer acquires a gate it did not have.** One breach of ADR-0077 §2 —
-  a derived proposal stating a subject — stops being a matter of the model's
-  compliance and becomes a `REJECT` the shipped policy makes and the conformance
-  suite pins (§5). The dishonest breach is still undetectable; the difference is
-  that it now requires lying about a field.
+- **The observer acquires a check it did not have, and no Protocol changes to
+  get it.** One breach of ADR-0077 §2 — an observer proposal stating a subject —
+  stops being a matter of the model's compliance and becomes a discard the
+  observation stage makes (§5). The dishonest breach is still undetectable; the
+  difference is that it now requires lying about a field.
 - **The next belief a user writes about someone else can say so**, because §7
   requires the route in the same change. This is the concrete gain, and it is the
   one that decays with delay: every such belief written before the field is a
@@ -735,8 +755,16 @@ already describes.
   ratified and already binding on shipped code, which is what the
   surface-with-no-consumer refusals (ADR-0045 §1, ADR-0028 §7, ADR-0092 §10,
   ADR-0097 §1) never had; and the cost of waiting is not deferral but loss (§8).
-- **Ship the field and leave the check to whoever wants it** — a policy *may*
-  refuse a derived proposal that states a subject. Rejected in §5. It is the
+- **Put the check at the policy gate** — every `MemoryPolicy` rejects a `DERIVED`
+  proposal that states a subject. Rejected in §5, and it is the shape this ADR
+  reached for first. `decide` receives no producer identity, so the band is the
+  only proxy it has; a band-scoped refusal contradicts §2's band-independent
+  axis, binds every future derived producer including one that legitimately
+  receives a structured subject, and widens `MemoryPolicy`'s behavioural contract
+  for every implementation — a breaking Protocol change under golden rule 5, owed
+  its own ADR, bought to enforce a restriction that belongs to one producer.
+- **Ship the field and leave the check to whoever wants it** — a check anything
+  downstream *may* make. Rejected in §5. It is the
   deferral's condition claimed and not met: an implementation could satisfy every
   other clause here, install no check, and arrive at exactly the state ADR-0099
   §5 held the field back from — new envelope surface, nothing distinguishing one
