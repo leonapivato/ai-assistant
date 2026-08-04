@@ -92,16 +92,26 @@ def worker_finished_before_the_first_check() -> Iterator[None]:
     physically finished before ``run_in_executor`` returns, so ``done`` is set at
     the first check every time.
 
-    Scoped to the block, and the loop is left with an ordinary executor
-    afterwards, so nothing later in the same test inherits inline semantics.
+    Scoped to the block: the loop's default executor is put back **exactly** as it
+    was found, so nothing later in the same test inherits inline semantics and
+    nothing that was there is displaced.
     """
     loop = asyncio.get_running_loop()
+    # Read the loop's own attribute, because ``set_default_executor`` is write-only
+    # and refuses ``None``: asyncio offers no way to ask what is installed, and no
+    # way to say "nothing is". Restoring a *fresh* pool instead of the prior one
+    # would look identical from inside the block and be wrong outside it. It would
+    # drop an executor a fixture installed to constrain or observe the loop's
+    # thread use — ``tests/testing/test_cancellation.py`` installs a single-worker
+    # one for exactly that — and it would strand a pool the loop had already built
+    # lazily, leaving its threads running with nothing holding it.
+    previous = loop._default_executor  # type: ignore[attr-defined]
     inline = _InlineExecutor(max_workers=1)
     loop.set_default_executor(inline)
     try:
         yield
     finally:
-        loop.set_default_executor(ThreadPoolExecutor())
+        loop._default_executor = previous  # type: ignore[attr-defined]
         inline.shutdown(wait=False)
 
 
