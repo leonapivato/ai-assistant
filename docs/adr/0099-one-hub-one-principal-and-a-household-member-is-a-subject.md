@@ -66,7 +66,7 @@ The phrase "world model" appears nowhere in `docs/`, `VISION.md` or `README.md`
 as of this ADR's date. The framing is load-bearing and unwritten, which is the
 condition this corpus treats as a defect rather than a convenience.
 
-### Third-party beliefs are not a future problem; two shipped paths write them
+### Third-party beliefs are not a future problem: one path writes them by design
 
 **The sanctioned path is `assistant learn`.** It takes free text, and
 `RuleBasedFeedbackProcessor` writes it with `source=MemorySource.USER_ASSERTED`
@@ -77,27 +77,32 @@ about someone who is not the owner. This is not a defect to close — under §1 
 is exactly right — but it means the store is *already* accumulating third-party
 beliefs deliberately, with no way to tell them from the rest.
 
-**The incidental path is `assistant observe`**, shipped in `interfaces/cli.py`,
-needing no configuration and no grant, defaulting to the most recently active
-conversation. Here the corpus has already tried to rule the question and could
-not carry the ruling: ADR-0077 §2 warrants a proposal "only when the belief is
-**about the user**" — an about-whom obligation stated in prose, with no field to
-express it, no gate to check it, and by §2's own admission "the half of that
-principle a gate cannot enforce". Say "my wife prefers window seats" in a
-conversation and run `observe`, and whatever lands is structurally
-indistinguishable from a belief about the owner, including to the rule that was
-supposed to prevent it.
+**The observer is not a second such path, and its gap is a different one.**
+ADR-0077 §2 warrants a proposal "only when the belief is **about the user**";
+that rule is in force, this ADR does not touch it, and the shipped observer
+prompt in `learning/observer.py` instructs it in as many words — "Propose a
+belief only when it is ABOUT THE USER". So `assistant observe` is **not**
+authorised to write about third parties, and nothing here authorises it.
 
-**That pair is the argument for writing this now.** The corpus does not lack an
-opinion about whom a belief is about — ADR-0077 §2 has one. What it lacks is
-anywhere to *put* the answer, so the opinion binds nobody and the sanctioned
-path ignores it by design. Read-only ingestion widens the channel; it does not
-open it.
+What is missing is any way to *represent or check* compliance. A model
+instruction is not a gate — ADR-0077 §2 says so of this very rule, calling it
+"the half of that principle a gate cannot enforce" — and with no subject field
+a proposal that breaks the rule is indistinguishable downstream from one that
+keeps it. The rule's own wording shows why that bites: it warrants "a durable
+fact about them **or their world**", and whether the owner's partner's seat
+preference is a fact about the owner's world is a question that sentence does
+not settle and no field records.
+
+**That contrast is the argument for writing this now.** The corpus does not lack
+an opinion about whom a belief is about — ADR-0077 §2 has one, and it binds.
+What it lacks is anywhere to *put* the answer: so the one producer bound by the
+rule cannot be checked against it, and the other producer is not bound by it at
+all. Read-only ingestion widens the channel; it does not open it.
 
 ### Three consequences follow, and only the first is this ADR's
 
 1. **Third-party beliefs are already being written**, per above, by a sanctioned
-   path and an incidental one. This ADR rules the frame they sit in.
+   path that no rule restrains. This ADR rules the frame they sit in.
 2. **Deletion and export by subject are unimplementable.** ADR-0007 §1's surface
    is `delete(record_id)`, `clear()` and `export()` — one record, everything, or
    the whole store. "Forget everything about Marta" has nothing to index on.
@@ -272,14 +277,16 @@ is a floor on what a surface may imply, discharged today by not implying it.
   type, with what identity, and what an absent subject means. It is the next
   ADR. **The producer half of ADR-0073 §4's "with a producer in hand" is already
   satisfied and this deferral does not rest on it**: `assistant learn` writes
-  third-party beliefs today and `observe` can (Context). What is missing is the
+  third-party beliefs today, by design (Context). What is missing is the
   **consumer** — something that must actually tell one subject from another, and
   whose need decides the field's shape. Adding the axis before that is the
   surface-with-no-consumer refusal ADR-0045 §1, ADR-0028 §7 and ADR-0092 §10
   each made in their own lane. **Fires with the first consumer that must
-  distinguish**, and three are visible: subject-scoped delete or export (below),
+  distinguish**, and four are visible: subject-scoped delete or export (below);
   a rendering that must satisfy §4's floor by naming the subject rather than by
-  declining to imply it, and speaker attribution on the voice leg (#665).
+  declining to imply it; speaker attribution on the voice leg (#665); and
+  anything that has to *check* ADR-0077 §2's "about the user" rule rather than
+  instruct it, which is the enforcement gap the Context describes.
 
   Two pointers for that lane, neither a ruling. **On placement:** ADR-0092 §1 put
   `Attestation` on `Provenance` because who-reported-it is a producer-set fact
