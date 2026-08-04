@@ -185,6 +185,32 @@ async def test_a_refusal_is_catchable_as_the_store_fault_too(
         await ephemeral.record(revocation_of(source_grant(SOURCE, grant_id="g-1")))
 
 
+@pytest.mark.parametrize("field", ["id", "source", "scope", "decided_at"])
+async def test_a_record_missing_a_field_is_refused_not_a_raw_attribute_error(
+    ephemeral: SqliteSourceGrantStore, field: str
+) -> None:
+    """A ``__dict__`` a field was *deleted* from is the case the suite does not reach.
+
+    The shared suite corrupts a record by *substituting* a value, which leaves
+    every attribute present. Deleting one is the other half of the same access —
+    ``frozen=True`` refuses neither — and it is where a refusal message composed
+    through ``grant.id`` stops being a refusal: the attribute is gone, so building
+    the message raises a bare ``AttributeError`` out of the handler and this
+    layer's error boundary leaks a builtin instead of saying the record was
+    refused.
+
+    ``id`` is the sharp one because it is what the message names; the other three
+    are here so the answer is about the shape rather than about one field.
+    """
+    corrupted = source_grant(SOURCE, grant_id="g-1")
+    object.__getattribute__(corrupted, "__dict__").pop(field)
+
+    with pytest.raises(InvalidGrantError, match="not a valid record"):
+        await ephemeral.record(corrupted)
+
+    assert await ephemeral.export() == []
+
+
 async def test_the_one_revocation_per_grant_rule_is_also_a_database_constraint(
     ephemeral: SqliteSourceGrantStore,
 ) -> None:
