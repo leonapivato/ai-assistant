@@ -27,12 +27,15 @@
   ADR-0059 scopes an issue the same way; ADR-0002 as merged decides
   "Local-first by default" and contains the word "user" nowhere. §6 states the
   finding, declines to fix another ADR's text from this lane, and files it.
-- **Decided with no producer in hand, deliberately — which is why it decides so
-  little.** ADR-0073 §4's "with a producer in hand" discipline is why §5 defers
-  the subject axis rather than inventing a field for it. What this ADR does is
-  fix the *frame* a later lane designs that field inside, because the frame is
-  the thing that gets fixed by default — by drift — if nobody fixes it on
-  purpose.
+- **Decides the frame and defers the field, and §5 names which half is
+  missing.** ADR-0073 §4's "with a producer in hand" discipline is only half
+  satisfied here, and not the half one would expect: the **producer** exists —
+  `assistant learn` writes third-party beliefs by design today — while the
+  **consumer** does not, nothing yet having to tell one subject from another.
+  Since it is the consumer that would decide the field's shape, this ADR fixes
+  the *frame* a later lane designs that field inside and leaves the field to it.
+  A frame left open does not stay open; it gets fixed by drift if nobody fixes
+  it on purpose.
 
 ## Context
 
@@ -418,7 +421,7 @@ to prevent.
   each is a change to a ratified invariant, and together they are a different
   product. It is also the shape reached by drift, which is why it is named and
   refused rather than left unmentioned.
-- **Decide nothing; wait for the producer.** This is the corpus's default
+- **Decide nothing; wait until something forces the question.** This is the corpus's default
   discipline (ADR-0073 §4) and it is right about *fields*, which is why §5
   defers the subject axis — on the missing *consumer*, since the producers have
   already shipped. It is wrong about *frames*: a frame left undecided does not
