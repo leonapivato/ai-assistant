@@ -534,11 +534,21 @@ narrower race.
 happens in the worst case is that bytes of a file the user just revoked are read
 into a worker's memory and then dropped. Nothing is stored, nothing reaches a
 prompt, nothing leaves the device — which is `VISION.md`'s own scope for a reader,
-"it changes nothing outside the assistant". It is bounded twice over: ADR-0093 §7
-allows a reader "**at most one outstanding worker**", and the reader's own
-`calendar_read_timeout` — ten seconds by default (§7a) — bounds how long it can
-last. §12 records the condition under which a linearising mechanism would be worth
-its cost.
+"it changes nothing outside the assistant".
+
+**The bound is on *concurrency*, not on duration, and saying otherwise would be
+false.** ADR-0093 §7 allows a reader "**at most one outstanding worker**", and that
+is the real bound: no second read starts behind an in-flight one, so the residual
+can never accumulate. What the reader's `calendar_read_timeout` bounds is the
+*coroutine* — "the deadline abandons it", because "a thread blocked in a stalled
+syscall cannot be killed" — so on a stalled mount the worker outlives the deadline
+by however long the syscall takes, which §7 declines to bound at all. An earlier
+draft of this paragraph claimed the ten-second figure as a duration bound on the
+residual; it is not one, and the abandonment §7 describes is exactly the case it
+was wrong about. The compensations are that the abandoned worker's reading is never
+returned to anyone — `read()` has already raised `ReaderError` — and that §7's
+reservation keeps the count at one until the kernel gives the thread back. §12
+records the condition under which a linearising mechanism would be worth its cost.
 
 Two clauses hold the guarantee that *is* available, and neither needs a lock.
 
@@ -586,22 +596,23 @@ This is a rule about the driver's body rather than a mechanism, and that is
 deliberate: it costs a line and a test, where a mechanism would cost a contract.
 
 **The second clause is what makes a revocation *win* rather than merely arrive.**
-A read legitimately begun while granted takes real time — up to
-`calendar_read_timeout` — and a revocation may land inside it. The residual after
-both clauses is therefore at most one already-started read per source, bounded by
-the reader's own deadline, whose bytes are **discarded rather than used**: nothing
-is proposed, no facet is contributed, and nothing durable records that the read
+A read legitimately begun while granted takes real time, and a revocation may land
+inside it. The residual after both clauses is therefore at most one already-started
+read per source, whose bytes are **discarded rather than used**: nothing is
+proposed, no facet is contributed, and nothing durable records that the read
 happened.
 
 **A lease held across the read was considered and refused**, which is the shape the
-alternative takes. Holding a source-scoped guard from the check to the return of
-`read()` would make a revocation either block for the reader's deadline or fail
-while a read is in flight — a permission withdrawal waiting on the thing it is
-withdrawing. The whole point of a revocation is that it takes effect at once; a
-mechanism that makes it queue behind a ten-second read has optimised the wrong
-side of the race. Discarding the reading gives the revocation its full effect at
-the only place it matters — nothing crosses into memory or into a prompt — without
-letting a read hold the user's decision hostage.
+alternative takes. Holding a source-scoped guard from the check until the read
+released it would make a revocation either block or fail while a read is in flight
+— a permission withdrawal waiting on the thing it is withdrawing. And it is worse
+than it looks: to be sound the guard would have to be released by the *worker*, not
+by the coroutine, for exactly the reason ADR-0093 §7 keys its own reservation to
+the worker — so a stalled mount would hold the user's revocation for as long as the
+kernel holds the thread, which §7 declines to bound. The whole point of a
+revocation is that it takes effect at once. Discarding the reading gives it full
+effect at the only place it matters — nothing crosses into memory or into a
+prompt — without letting a read hold the user's decision hostage.
 
 **Aborting the in-flight read is not available, and ADR-0093 §7 is why.** A
 reader's read runs on a worker the reader owns, which "a read blocked indefinitely
@@ -1226,11 +1237,13 @@ changes**. The places where the opposite reading is available:
   logs a refusal on every scheduler tick until the operator unsets the interval.
   That is configuration and consent disagreeing, and making it quiet would make it
   invisible.
-- **Two residuals are named rather than closed, and both are bounded.** The gate
-  guarantees a read is authorised *when it starts*, not that no byte is read after
-  a revocation lands: ADR-0093 §7 puts the whole read on an unstoppable worker, so
-  a read already in flight completes — at most one per source, bounded by the
-  reader's deadline, with everything it produces discarded (§5a). And a belief
+- **Two residuals are named rather than closed, and each is bounded in the way it
+  can be.** The gate guarantees a read is authorised *when it starts*, not that no
+  byte is read after a revocation lands: ADR-0093 §7 puts the whole read on a
+  worker nothing can stop, so a read already in flight completes — **at most one
+  per source**, with everything it produces discarded, and with **no duration
+  bound**, because §7's deadline abandons a stalled worker rather than ending it
+  (§5a). And a belief
   resolves to its source's grant history, not to the one grant it was read under
   (§1) — the price of not adding a field to a ratified `core` type for a question
   no surface asks. Both are stated as boundaries so that no later lane claims the
