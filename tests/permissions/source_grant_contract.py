@@ -861,12 +861,22 @@ class SourceGrantStoreContract(SourceGrantsContract):
         the write. And an **emptied scope** authorises nothing while still
         occupying the source's one live-grant slot, so the real grant could not be
         recorded until this one was revoked.
+
+        **The refusal is an ``InvalidGrantError`` specifically**, not the
+        ``GrantError`` base. This is where the grant errors part company with
+        ``AuditError``'s family, whose contract suite asserts the base: there the
+        base *is* the refusal ("a write to the trail was refused"), while here the
+        base is the **store fault** and only the subclass says "your record was
+        refused" (ADR-0097 §10). Asserting the base would let an implementation
+        collapse the two, and a caller would then be unable to tell a bad record
+        from a broken store — which is the very distinction §5a keeps alive when it
+        has a driver fail closed on one and refuse on the other.
         """
         await store.record(source_grant("other", grant_id="g-1"))
         corrupted = source_grant(SOURCE, grant_id="g-2")
         object.__setattr__(corrupted, attribute, value)
 
-        with pytest.raises(GrantError):
+        with pytest.raises(InvalidGrantError):
             await store.record(corrupted)
 
         assert [held.id for held in await store.export()] == ["g-1"]
@@ -915,16 +925,41 @@ class SourceGrantStoreContract(SourceGrantsContract):
 
         The obligation is therefore on the *declared* type: what the store keeps
         and returns is a ``SourceGrant``, whatever it was handed.
+
+        **``model_dump`` is the second overridable route and the sharper one**, so
+        the subject here lies through both. ``model_copy`` returning ``self`` costs
+        detachment; a ``model_dump`` that does not describe its own instance costs
+        *fidelity* — a store that snapshots through it appends a **wider grant than
+        the one it was handed**, here a ``FACET``-only record stored as covering
+        ``INGEST`` too, and the driver's next check authorises a use the user never
+        granted. That is not the caller-falsifies-its-own-record case ADR-0018 §3
+        puts outside a store's reach: the object presented is a valid narrow grant
+        and the record kept is a different one, which is what "stores a detached,
+        validated snapshot" of it denies (ADR-0097 §4). Rebuilding from the
+        instance's own field state rather than from a dispatched method is what
+        closes it, and it costs any implementation one line.
         """
 
         class _Sticky(SourceGrant):
             def model_copy(self, **kwargs: object) -> _Sticky:
                 return self
 
+            def model_dump(self, **kwargs: object) -> dict[str, object]:
+                return {
+                    "id": self.id,
+                    "source": self.source,
+                    "scope": (GrantScope.FACET, GrantScope.INGEST),
+                    "decided_at": self.decided_at,
+                    "revokes": self.revokes,
+                }
+
         original = source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET,))
         sticky = _Sticky.model_construct(**dict(original))
         await store.record(sticky)
 
+        assert await store.live(source=SOURCE, use=GrantScope.INGEST) is None, (
+            "the store kept a wider grant than the record it was handed"
+        )
         stored = await store.live(source=SOURCE, use=GrantScope.FACET)
         assert stored is not None
         object.__setattr__(stored, "scope", (GrantScope.FACET, GrantScope.INGEST))
