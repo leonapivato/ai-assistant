@@ -618,29 +618,47 @@ keeps this ADR free of `core` surface, and leaves a real residual rather than a
 pretended one: **a question cannot name its source.** §12 defers that with its
 trigger.
 
-**Which projected field carries the safety half depends on the proposal, and an
-earlier draft answered that too broadly.** It said `Question.band` carries it,
-because `ATTESTED` means a source reported it and the assistant did not conclude it.
-That is true of a **reader's own transcription** and false of the case §4's fourth
-clause exists for. A model-authored proposal carrying external evidence is
-`OBSERVED` or `INFERRED`, so its `band` is `DERIVED` — and a client rendering
-`DERIVED` faithfully says *the assistant inferred this*, which attributes an
-attacker-derived span to the assistant and is the precise thing §7's first clause
-forbids. Adversarial review found it on round 6. It is unreachable today for §5's
-reason — nothing on `main` can produce such a proposal — and it becomes reachable
-the moment §12's first deferral lands, which is why the obligation is put on that
-seam rather than left to be rediscovered by whoever builds it:
+**Which projected field carries the safety half depends on the proposal, and the
+two reviewers disagreed about it — the second was right.** Adversarial review argued
+on round 6 that `Question.band` cannot carry it for the case §4's fourth clause
+exists for: a model-authored proposal citing external evidence is `OBSERVED` or
+`INFERRED`, so its `band` is `DERIVED`, and a client rendering `DERIVED` faithfully
+says *the assistant inferred this* about a proposal an attacker's sentence helped
+produce. A clause was added requiring the externality marker to propagate into the
+projection. **Architecture review then found that clause incoherent, against this
+ADR's own §1, and it was removed rather than repaired.**
 
-> **Normative.** The seam of §12's first deferral propagates its externality marker
-> into whatever a user-facing surface projects from a proposal. `band` alone does
-> not satisfy §7's first clause for a `DERIVED` proposal carrying external evidence.
+**The reason it is incoherent is worth stating, because the mistake is easy and this
+document made it under review pressure.** §1 defines external content by the
+**recorded origin of the text**. A derived proposal's content is a sentence *our*
+model wrote; the attacker's text is nowhere in it. External evidence *warranted* the
+inference and did not *author* it — and §5 has already established that the
+influence is not recoverable in any case. So §7's first clause, which is about
+spans that are themselves external, does not reach that proposal's content, and a
+clause pretending it does would either misattribute assistant-authored text or
+smuggle in a provenance category this ADR never defined. **A finding is a hypothesis
+to check against the text**, and round 6's was accepted without checking it against
+§1 — which is the one process failure in this lane worth recording.
 
-**Three rounds running, this document reached past what the tree can supply** — §3's
-model-obedience clauses, §7's source attribution, and now §7's carrier — and every
-one was caught by a reviewer rather than by its author. That is worth recording
-rather than quietly fixing, for the reason ADR-0089 §2 records its own: the pull
-toward stating a property one layer further out than the data supports is a
-property of writing about this subject, not of any one draft.
+**The residual is real and is a different question, deferred rather than answered.**
+An inference that stands on external evidence is not third-party text, and it is
+also not quite an ordinary inference: its warrant came from outside, and a user
+inspecting it has an interest in knowing that. Naming that state is a *presentation*
+decision about evidence provenance — ADR-0073 §4's "why it is held" and §8's
+subject, not §7's — and it needs the seam of §12's first deferral to exist before
+there is anything to present. §12 defers it there, beside the marker it would read.
+
+**Where §7 does bite on such a surface, and it does**: a question rendering an
+external belief it would retire, or a rationale quoting the source, carries genuine
+external spans, and the first two clauses govern those exactly as written.
+
+**Four times across seven rounds this document reached past what the tree or its own
+definitions supply** — §3's two model-obedience clauses, §3's transitive limb, §7's
+source attribution, and §7's propagation clause — and every one was caught by a
+reviewer rather than by its author. That is recorded rather than quietly fixed, for
+the reason ADR-0089 §2 records its own defect: the pull toward stating a property
+one layer further out than the data supports is a property of writing about this
+subject, not of any one draft.
 
 **The division is ADR-0042 §4's, unchanged and deliberately re-stated rather than
 re-decided**: the engine carries the value verbatim, the adapter escapes for its
@@ -843,9 +861,7 @@ support.
   can be cited, an ADR that lets an ingested record be an `EpisodicMemory`
   (ADR-0093 §11's own deferral), or the first `orchestration` payload of mixed
   origin. The lane that takes it owes the caller-stamped/producer-declared argument
-  named in §9, **and owes §7's marked propagation clause**: the marker has to reach
-  the user-facing projection, because a `DERIVED` proposal carrying external evidence
-  is rendered as the assistant's own inference without it.
+  named in §9.
 - **Expressing the §2 distinction structurally rather than in-band** — content parts
   at the `ModelProvider` seam, or a trust-carrying field on `Message`. `Message.name`
   exists, is set by no producer in `src/`, and is discarded by
@@ -858,6 +874,13 @@ support.
   `PermissionDecision` and §8 is written not to assume one. **Fires with the first
   surface obliged to show that a proposal was refused or capped**, which #659's
   channel question reaches first.
+- **A presentation state for an inference that rests on external evidence.** Not a
+  §7 case — §1 makes external content a property of a span's recorded origin, and a
+  derived proposal's text is the assistant's own — but a real legibility question:
+  a warrant that came from outside is not the same as one that came from the user's
+  own behaviour, and ADR-0073 §4's "why it is held" is where it would be said. It
+  needs the marker of the deferral above to exist before there is anything to
+  present, so it **fires with that seam** and is plausibly one decision with it.
 - **A question that can name its source.** `core.types.Question` carries `band` and
   no `Attestation`, so the durable-question surface can say *attested* and not *from
   which source* — §7's third clause records that this is deliberate rather than
