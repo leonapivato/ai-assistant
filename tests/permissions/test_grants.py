@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -667,3 +668,60 @@ async def test_a_base_exception_from_the_worker_reaches_the_caller() -> None:
 
     with worker_finished_before_the_first_check(), pytest.raises(KeyboardInterrupt):
         await _run_to_completion(aborts)
+
+
+async def test_repeated_cancellation_does_not_consume_the_executor() -> None:
+    """Absorbing a cancellation costs one executor job, however many arrive (#697).
+
+    Each absorbed cancellation hands the loop something to wait on. A copy that
+    submits a fresh blocking ``done.wait`` per cancellation leaves every earlier
+    one running, because nothing can interrupt a thread parked in ``Event.wait``
+    before the worker sets it — so repeated cancellation of *one* blocked call
+    occupies the whole default pool and starves unrelated thread work, which turns
+    a single stalled store operation into a process that can run none.
+
+    The pool is deliberately small and the probe is the assertion: counting
+    threads would measure the executor's growth policy, while the probe measures
+    the property — that something else can still run. The cancellation is still
+    re-raised at the end, because a "fix" that stopped absorbing it would bound
+    the pool by abandoning ADR-0054's invariant instead.
+
+    The bounded executor is installed as this loop's default because the helper
+    submits to ``None``; pytest-asyncio gives each test its own loop, so the
+    substitution dies with the test and only the pool needs shutting down.
+    """
+    workers = 4
+    loop = asyncio.get_running_loop()
+    executor = ThreadPoolExecutor(max_workers=workers)
+    loop.set_default_executor(executor)
+    release = threading.Event()
+    entered = threading.Event()
+
+    def blocked() -> str:
+        entered.set()
+        if not release.wait(timeout=5):  # pragma: no cover - only on a hang
+            msg = "the blocked worker was never released"
+            raise AssertionError(msg)
+        return "done"
+
+    call = asyncio.ensure_future(_run_to_completion(blocked))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5), "worker never entered"
+        for _ in range(workers * 3):
+            call.cancel()
+            await _spin()
+
+        probe = loop.run_in_executor(executor, lambda: "probe")
+        finished, _ = await asyncio.wait([probe], timeout=1)
+        assert finished, "the absorbed cancellations consumed the whole executor"
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+    finally:
+        # Released and settled *before* the pool is shut down, so a failing run
+        # reports the assertion above rather than a "cannot schedule new futures
+        # after shutdown" from the helper still submitting into a closing pool.
+        release.set()
+        await asyncio.gather(call, return_exceptions=True)
+        executor.shutdown(wait=True)
