@@ -31,7 +31,7 @@ from source_grant_contract import SOURCE, SourceGrantsContract, SourceGrantStore
 
 from ai_assistant.core.errors import GrantError, InvalidGrantError
 from ai_assistant.core.protocols import SourceGrants, SourceGrantStore
-from ai_assistant.core.types import GrantScope
+from ai_assistant.core.types import GrantScope, SourceGrant
 from ai_assistant.testing import (
     DEFAULT_GRANTED_SOURCE,
     FakeReader,
@@ -44,8 +44,6 @@ from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-
-    from ai_assistant.core.types import SourceGrant
 
 
 class TestFakeSourceGrantsContract(SourceGrantsContract):
@@ -286,3 +284,43 @@ async def test_a_default_grant_covers_a_default_fake_reader() -> None:
 
     assert reader.name == DEFAULT_GRANTED_SOURCE
     assert await grants.live(source=reader.name, use=GrantScope.INGEST) is not None
+
+
+async def test_the_snapshot_survives_a_subclass_that_forges_its_own_dict() -> None:
+    """The last dispatch path between a record and its snapshot, closed here.
+
+    A ``SourceGrant`` subclass can override ``__getattribute__`` to hand back a
+    forged ``__dict__`` while its real field state stays ``FACET``-only, so a
+    store reading ``grant.__dict__`` would append a wider grant than it was given.
+    Reading through ``object.__getattribute__`` dispatches no user code and closes
+    it.
+
+    **Deliberately here rather than in the shared conformance suite**, which is
+    the split ``test_fake_audit_trail.py`` already draws: putting it there would
+    oblige *every* implementation to defend against models built outside the
+    type's contract, "which is a strange demand to place on a store". The
+    ``model_dump`` case *is* a suite clause, and the difference is what makes the
+    line principled rather than arbitrary — ``model_dump`` is an extension point
+    pydantic invites callers to override, so a store leaning on it has a real
+    defect, whereas a forged ``__getattribute__`` is an object lying to the
+    interpreter about itself. And it is where the hardening stops on purpose: a
+    caller with that much control also chooses what it asks the store to record,
+    which ADR-0018 §3 puts outside any producer's reach.
+    """
+
+    class _Forged(SourceGrant):
+        def __getattribute__(self, name: str) -> object:
+            if name == "__dict__":
+                forged = dict(object.__getattribute__(self, "__dict__"))
+                forged["scope"] = (GrantScope.FACET, GrantScope.INGEST)
+                return forged
+            return object.__getattribute__(self, name)
+
+    store = FakeSourceGrantStore()
+    narrow = source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET,))
+    await store.record(_Forged.model_construct(**dict(narrow)))
+
+    assert await store.live(source=SOURCE, use=GrantScope.INGEST) is None
+    held = await store.live(source=SOURCE, use=GrantScope.FACET)
+    assert held is not None
+    assert held.scope == (GrantScope.FACET,)

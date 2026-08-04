@@ -199,11 +199,24 @@ class _GrantLog:
         caller-falsifies-its-own-record case ADR-0018 §3 puts outside a store's
         reach: the object presented is a valid narrow grant and the record kept is
         a different one, which is precisely what "stores a … snapshot" denies.
-        ``__dict__`` is where pydantic keeps validated field state and dispatches
-        no user code, so reading it makes the snapshot a snapshot of the *object*
-        rather than of what the object says about itself. A subclass carrying extra
-        fields is refused here by ``extra="forbid"``, which is the same answer for
-        the same reason.
+        ``__dict__`` is where pydantic keeps validated field state, so reading it
+        makes the snapshot a snapshot of the *object* rather than of what the
+        object says about itself — and it is read through
+        ``object.__getattribute__`` so that the read itself dispatches no user
+        code either, which an ordinary ``grant.__dict__`` would still do. A
+        subclass carrying extra fields is refused here by ``extra="forbid"``,
+        which is the same answer for the same reason.
+
+        **Where this stops, stated rather than left to the next reader.** A caller
+        that controls ``__getattribute__`` also controls what it asks the store to
+        record in the first place, and ADR-0018 §3 draws that boundary in as many
+        words: a caller hand-constructing a record field by field "is a caller
+        falsifying its own audit trail rather than a policy subverting a gate, and
+        no producer can prevent it". What is closed here is the narrower and real
+        case — a *sanctioned* extension point (``model_dump``, which pydantic
+        invites callers to override) sitting between the object and its snapshot.
+        Hardening past that is cheap here and is taken, but it is not a property
+        any store can carry to the end.
 
         Raises:
             InvalidGrantError: If the record does not satisfy its own model, if
@@ -211,7 +224,7 @@ class _GrantLog:
                 a live grant, or if it revokes and fails any of §4's invariants.
         """
         try:
-            snapshot = SourceGrant.model_validate(dict(grant.__dict__))
+            snapshot = SourceGrant.model_validate(dict(object.__getattribute__(grant, "__dict__")))
         except ValidationError as exc:
             msg = f"grant {grant.id!r} is not a valid record: {exc}"
             raise InvalidGrantError(msg) from exc
