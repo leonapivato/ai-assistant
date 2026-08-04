@@ -2,10 +2,13 @@
 
 - Status: Proposed
 - Date: 2026-08-04
-- **Decides one axis and the two `core` fields that carry it.** `MemoryBase`
-  gains an optional `about_person`, `FeedbackEvent` gains the same field so the
-  one producer that already writes third-party beliefs can say so, and nothing
-  else moves. No Protocol changes, no method signature changes, no band changes,
+- **Decides one axis, the two `core` fields that carry it, and the two things
+  that must ship with them.** `MemoryBase` gains an optional `about_person`;
+  `FeedbackEvent` gains the same field and `assistant learn` gains a route into
+  it (§7), so the one producer that already writes third-party beliefs can say
+  so; and a `DERIVED` proposal that states a subject is rejected at the gate
+  (§5), so the axis ships with the check ADR-0099 §5 fires it on rather than
+  after it. Nothing else moves: no Protocol signature changes, no band changes,
   no supersession rule changes.
 - **Required review set: adversarial *and* architecture.** `ship.sh` gates the
   architecture review on `core/protocols.py` or `core/types.py` changing, and the
@@ -115,6 +118,14 @@ ADR-0097 §1's own deferred grant subject, which reasons that "adding a subject
 field now would be surface with no consumer" — each refused a field whose
 *obligation* did not yet exist. Here it does, in two places, and one of them is
 enforced today by asking a language model nicely.
+
+**So the check ships with the field rather than after it, and §5 requires it.**
+A field whose consumer were optional would leave ADR-0099 §5's condition unfired
+while spending the surface, which is the refusal above with an extra step. §5
+makes the refusal of a `DERIVED` proposal that states a subject a rule the
+shipped policy makes and the conformance suite pins; §7 does the same for the
+user's route into the field. Both are preconditions of the field, in ADR-0073
+§4's "a precondition of that producer shipping" sense.
 
 The cost of continuing to wait is asymmetric, and it is the argument ADR-0099
 made for ruling the frame early, read one level down. Every day the field does
@@ -354,21 +365,43 @@ legible; it grants none.
 
 > **Normative.** An observer proposal states no subject.
 
-A `MemoryPolicy` may therefore refuse an observer proposal that states one, and
-that refusal is a deterministic check on a field rather than a judgement about
-text. Nothing here *requires* a particular policy to make it — a permission, not
-an obligation, and the marked clause below is the only thing this section binds a
-lane to.
+> **Normative.** A proposal whose band is `DERIVED` and which states a subject is
+> **rejected**. `DefaultMemoryPolicy` returns `MemoryDecisionKind.REJECT` for it,
+> and the shared `MemoryPolicy` conformance suite pins the refusal, so no
+> alternative policy drops it silently.
 
-> **Normative.** No lane may implement that check by having a writer substitute a
-> ruling the policy did not make (ADR-0081 §3, restated by ADR-0098 §5).
+> **Normative.** No lane may implement that refusal by having a writer substitute
+> a ruling the policy did not make (ADR-0081 §3, restated by ADR-0098 §5).
+
+**The check is required, not offered, and that is what makes the deferral's
+firing condition honest.** ADR-0099 §5 fires the axis on "anything that has to
+*check* ADR-0077 §2's 'about the user' rule rather than instruct it". A field
+whose only check were optional would ship the surface and leave the condition
+unfired — so the check lands in the same change, and §7's last clause does the
+same for the user's route. Neither is a follow-up.
+
+**The policy can make this ruling on what it already receives.** `decide` is
+handed a `MemoryUpdateProposal`, whose `proposed.provenance.source` classifies
+under `band_of`; nothing new reaches the gate. And the band is a faithful proxy
+for the producer *today* because ADR-0077 §2 makes `ModelBackedObserver` the only
+thing that writes `OBSERVED` or `INFERRED` — so "a `DERIVED` proposal stating a
+subject" is exactly "an observer that broke §5's second clause", with no
+inference about text.
+
+**`REJECT` and not `ASK_USER`**, because this is a producer defect rather than a
+close call: a proposal from something not entitled to state a subject is not a
+belief the user should be asked to adjudicate, and asking would train the user to
+wave through the one signal this check exists to raise.
+
+**It is a policy rule and not a validator, deliberately** — §9 argues the
+placement, and the difference is exactly its revisability. The day an ADR
+introduces a derived producer entitled to state a subject, this rule changes with
+that ADR and nothing already stored becomes unconstructable.
 
 **What this buys, stated exactly, because overclaiming here would be the worst
 outcome available.** The observer's compliance with ADR-0077 §2 becomes
-*representable* and one breach of it becomes *refusable*: a `DERIVED` proposal
-arriving with a stated subject is a proposal from a producer that had no
-entitlement to state one, and that is a deterministic check on a field, not a
-judgement about text.
+*representable*, and one breach of it becomes refused at the gate rather than
+merely discouraged in a prompt.
 
 **It does not make ADR-0077 §2 enforceable, and this ADR does not claim it
 does.** A model that proposes "Marta prefers window seats" while leaving
@@ -461,9 +494,21 @@ sees. `_person` also does real work: it names the constraint §6's last clause
 imposes, so a writer reaching to store "email tone" in it notices at the
 keystroke rather than at review.
 
-> **Normative.** This ADR decides no CLI surface. The flag by which a user states
-> a subject is the implementing lane's, subject only to the fact that `--about`
-> and `-a` are taken.
+> **Normative.** `assistant learn` gains an input route that sets
+> `FeedbackEvent.about_person`, in the same change as the field. Its spelling is
+> the implementing lane's, constrained only by the fact that `--about` and `-a`
+> already carry the scope axis.
+
+**The route is a precondition of the field shipping, in ADR-0073 §4's sense, not
+a follow-up.** `assistant learn` is the only route by which a non-owner subject
+enters the store (§4), and today the command's only optional input is `--about`,
+which populates `FeedbackEvent.subject` and lands as `PreferenceMemory.context`.
+Ship the field and the processor copy without a route and every `assistant learn
+"Marta prefers window seats"` still constructs `about_person=None` — so §3 reads
+it as the owner's, and the field's arrival would make a *false* record of exactly
+the case it was added for. The spelling stays the lane's because
+`CONTRIBUTING.md` and golden rule 3 keep `interfaces/` thin; the *existence* of
+the route cannot be, because §8's honest limit depends on it.
 
 ### 8. Migration, and what the backfill can honestly promise
 
@@ -505,9 +550,8 @@ subject and doesn't, which is the day this field ships.
 ### 9. No validator ties the subject to a band or a source
 
 > **Normative.** No validator on `MemoryBase` or `Provenance` constrains
-> `about_person` by `source`, by band, or by kind. The producer obligations in §4
-> and §5 are enforced by producers and, where a deployment chooses, at the policy
-> gate — never by a model validator.
+> `about_person` by `source`, by band, or by kind. §4's and §5's obligations are
+> discharged by producers and at the policy gate — never by a model validator.
 
 ADR-0092 §1 chose a validator for `attestation` because its rule is an `if and
 only if` that is true in both directions and forever: an attestation is meaningful
@@ -651,13 +695,18 @@ already describes.
 
 - **Two ratified rules acquire a place to put their answer.** ADR-0077 §2 and
   ADR-0098 §4's fourth ceiling are both phrased on this axis; after this ADR the
-  honest case is recordable. Neither becomes enforceable (§5), and the ADR says
+  honest case is recordable. Neither becomes *enforceable* (§5), and the ADR says
   so rather than letting a later reader infer otherwise from the field's
   existence.
-- **The next belief a user writes about someone else can say so.** This is the
-  concrete gain, and it is the one that decays with delay: every such belief
-  written before the field is a subject nobody but the user can ever recover
-  (§8).
+- **The observer acquires a gate it did not have.** One breach of ADR-0077 §2 —
+  a derived proposal stating a subject — stops being a matter of the model's
+  compliance and becomes a `REJECT` the shipped policy makes and the conformance
+  suite pins (§5). The dishonest breach is still undetectable; the difference is
+  that it now requires lying about a field.
+- **The next belief a user writes about someone else can say so**, because §7
+  requires the route in the same change. This is the concrete gain, and it is the
+  one that decays with delay: every such belief written before the field is a
+  subject nobody but the user can ever recover (§8).
 - **`assistant learn` gains an affordance and no new authority.** §4's last
   clause is written as a prohibition on *citing this ADR*, because the citation
   is the specific failure it would otherwise cause.
@@ -686,6 +735,18 @@ already describes.
   ratified and already binding on shipped code, which is what the
   surface-with-no-consumer refusals (ADR-0045 §1, ADR-0028 §7, ADR-0092 §10,
   ADR-0097 §1) never had; and the cost of waiting is not deferral but loss (§8).
+- **Ship the field and leave the check to whoever wants it** — a policy *may*
+  refuse a derived proposal that states a subject. Rejected in §5. It is the
+  deferral's condition claimed and not met: an implementation could satisfy every
+  other clause here, install no check, and arrive at exactly the state ADR-0099
+  §5 held the field back from — new envelope surface, nothing distinguishing one
+  subject from another. A permission is not a consumer.
+- **Ship the field and leave the user's route to a follow-up lane**, on the
+  ground that `interfaces/` is thin and a flag is not an ADR's business. Rejected
+  in §7. The spelling is indeed not this ADR's; the *existence* of a route is,
+  because without one `assistant learn "Marta prefers window seats"` still writes
+  `about_person=None` and §3 then reads it as the owner's — the field's first act
+  would be to make a false record of the case it was added for.
 - **Put it on `Provenance`, beside `Attestation`.** Rejected in §2. It reads
   well on authorship — a subject is producer-set, as an attestation is — and it
   fails on subject-matter, which is the criterion both precedents actually used.
