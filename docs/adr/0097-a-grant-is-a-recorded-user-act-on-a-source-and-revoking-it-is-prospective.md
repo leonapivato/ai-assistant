@@ -1199,6 +1199,18 @@ surface:
   > declared `name` is refused, no `SourceGrant` is constructed, and the value
   > never reaches `recent` or `export`.
 
+- **§9a's configured-location disclosure**, which is the *permitted* half of the
+  same rule and needs its own tests for the opposite reason. The location is
+  legitimately rendered into the grant prompt, so no test that rejects a
+  caller-supplied path touches it, and an implementation could route it onward
+  while passing everything above.
+
+  > **Normative.** The grant lane's tests pin the disclosure's boundary against a
+  > reader whose configured location is a recognisable path: it appears in the
+  > grant prompt, and it appears **nowhere else** — not in any log record the
+  > operation emits, not on the constructed `SourceGrant`, not in the operation's
+  > return value, and not in any grant listing, `recent` or `export` result.
+
 **What later lanes owe, and this ADR does not:** the `permissions/` implementation
 and its schema; the two caller-side gates, their required `SourceGrants`
 constructor arguments, and **all five** of the driver cases §5 and §5a name — no
