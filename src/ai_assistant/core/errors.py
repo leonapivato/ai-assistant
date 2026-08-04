@@ -528,6 +528,86 @@ class InvalidResolutionError(AuditError):
     """
 
 
+class GrantError(AssistantError):
+    """A source-grant store could not be read or written (ADR-0097 §10).
+
+    The store fault, and the base for the refusal below, so a caller that only
+    wants "the grant store could not answer" gets one handler.
+
+    **A driver that cannot get an answer fails closed**, which is stated on the
+    error because the tempting reading is the other one (ADR-0097 §5a). A
+    :meth:`~ai_assistant.core.protocols.SourceGrants.live` that raises this is not
+    a grant: before a read nothing is opened, and after a read the reading is
+    discarded exactly as a withdrawn grant is. No driver may proceed on a stale
+    answer, on the earlier of two lookups, or on an absent one. "The check failed,
+    so carry on with what we already knew" is what an implementer writes when the
+    alternative looks like losing a scheduled run, and it is the wrong trade twice
+    over — the thing being protected is the user's personal files, and ADR-0016
+    §4's ``UNKNOWN`` cost already rules this direction for the neighbouring case.
+
+    **It propagates rather than being converted into**
+    :class:`SourceNotGrantedError` (ADR-0097 §5a). A store fault and a withdrawn
+    grant are different facts, and an operator must be able to tell them apart.
+    """
+
+
+class InvalidGrantError(GrantError):
+    """A source-grant store refused the record it was handed (ADR-0097 §4, §10).
+
+    Raised when ``record`` refuses: a duplicate id (the store is write-once), a
+    second live grant for a source that already has one, a record that does not
+    satisfy its own model, or a revocation failing any of ADR-0097 §4's
+    invariants — naming a grant that is absent, is itself a revocation, is
+    already revoked, names a different ``source``, or transcribes a different
+    ``scope``.
+
+    **One class rather than three**, deliberately unlike :class:`AuditError`'s
+    split into :class:`DuplicateDecisionError` and
+    :class:`InvalidResolutionError`. Those are separate because a replayed write
+    and a substituted subject call for different handling; here the caller's
+    recourse is identical in every case — read the store and construct a
+    different record — so a family would be three names for one response
+    (ADR-0097 §10).
+
+    A **timestamp is never a ground for this refusal**, including a revocation
+    that predates the grant it revokes. ``decided_at`` is caller-supplied and the
+    store reads no clock, so a host clock corrected backwards would otherwise make
+    a grant permanently unrevokable — the one property this contract exists to
+    deliver, defeated by an invariant that was protecting nothing (ADR-0097 §4).
+    """
+
+
+class SourceNotGrantedError(AssistantError):
+    """A source was read for a use no live grant covers (ADR-0097 §5, §10).
+
+    Raised by a **driver** — `orchestration`'s ingestion stage — not by the
+    store, when an ingestion pass finds no live ``INGEST`` grant for the reader it
+    was about to run. Nothing is opened: the source is not resolved, not opened
+    and not parsed, because opening the user's calendar is the act the grant is
+    about (ADR-0097 §5).
+
+    **Never reported as a successful pass.** An ungranted pass reported as zero
+    proposals is indistinguishable from "the source had nothing to say within the
+    bound", which ADR-0093 §8 rules a *success* — so a deployment whose grant was
+    revoked would look healthy while ingesting nothing.
+
+    **And never a** :class:`ReaderError`, which means "the source could not be
+    read": an operator debugging a missing calendar should not be sent to the
+    filesystem for a fault that lives in the grant store.
+
+    **Not** :class:`PermissionDeniedError`, whose docstring scopes it to an action
+    blocked by the permission/policy layer and which ``orchestration/runner.py``
+    raises when a confirmation was refused. ADR-0097 §7's whole content is that a
+    source refusal and an action refusal are different subjects, and a caller that
+    cannot tell them apart is one that will report "you declined to send that
+    email" when the calendar was never granted.
+
+    The facet path raises nothing: a facet whose source has no live ``FACET``
+    grant is simply **absent**, as every optional-source fault is, and
+    ``CurrentContext`` says nothing about why (ADR-0097 §5, ADR-0096 §4).
+    """
+
+
 class PlanningError(AssistantError):
     """A request could not be turned into an executable plan.
 

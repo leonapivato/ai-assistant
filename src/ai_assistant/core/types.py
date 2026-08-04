@@ -4282,6 +4282,195 @@ class PermissionDecision(BaseModel):
         return self
 
 
+# --- permissions: what the user granted a source, and what they withdrew -----
+# ADR-0004 §7 charters `permissions/` for two things — "Access to Tier 0/1 data
+# **and** every side-effecting tool call" — and only the second was ever built.
+# These two types are the first half arriving (ADR-0097). They govern *reading*,
+# which `VISION.md` keeps governed separately from acting rather than collapsed
+# into one notion of "integration"; nothing here touches `ActionPolicy`,
+# `ActionRequest`, `PermissionRuling` or `PermissionDecision` (ADR-0097 §3).
+
+
+class GrantScope(StrEnum):
+    """A use of a source that a grant authorises (ADR-0097 §2).
+
+    Exactly two members, and neither is speculative. The axis is ADR-0093 §3's,
+    promoted to something the user can answer: a reading has "two legitimate
+    consumers … at their own cadence", and they differ in the one way a user
+    would care about. ``FACET`` is transient, advisory and never stored (ADR-0008
+    §4, ADR-0096 §4); ``INGEST`` writes durable beliefs that outlive the turn and
+    reach ``export``. "You may look at my calendar to answer what I am asking now,
+    but do not remember it" is a coherent sentence, it is one a person actually
+    means, and it is the only scope distinction the ratified surfaces can honour
+    today.
+
+    **Not ordered**, and that is a decision rather than an omission (ADR-0097
+    §10). :class:`PermissionOutcome` is a :class:`_SeverityScale` because outcomes
+    are *ranked* by severity and that scale combines them; two uses of a source
+    are not comparable, and an order would invite a ``max()`` that means nothing.
+    So this is a plain ``StrEnum``, :class:`DataTier`'s shape. Where a canonical
+    order over the members is needed — :attr:`SourceGrant.scope`, so two
+    implementations serialise one grant identically — it is **declaration**
+    order, read off the declaration rather than off the member values.
+
+    **Content-level scope is deliberately absent** — which entries, which fields,
+    which of several calendars. Nothing today can express a sub-source selector:
+    ADR-0093 §7 configures exactly one source with no registry, and ADR-0096 §6
+    gives the calendar facet three scalars. A member enumerating entry kinds would
+    be a schema with no reader on either side of it, so ADR-0097 §12 defers it
+    with the condition that fires it, to land as an optional field under ADR-0008
+    §1's additive pattern.
+    """
+
+    FACET = "facet"
+    INGEST = "ingest"
+
+
+#: Grant scopes ranked by declaration, for the reason ``_TIER_ORDER`` exists on
+#: :class:`DataTier`: ``sorted`` on the raw members orders by *string value*,
+#: which is only coincidentally declaration order today and stops being so the
+#: moment a member is added out of alphabetical sequence. One convention in
+#: ``core`` for "declaration order", rather than two spellings that can disagree.
+_SCOPE_ORDER: Mapping[GrantScope, int] = {use: index for index, use in enumerate(GrantScope)}
+
+
+def _grant_scope(value: tuple[GrantScope, ...]) -> tuple[GrantScope, ...]:
+    """Refuse an empty or duplicated scope, and put the rest in declaration order.
+
+    The three properties ADR-0097 §10 fixes on :attr:`SourceGrant.scope`, and the
+    two halves are deliberately different kinds of rule:
+
+    * **Empty is refused.** A grant naming no use authorises nothing and would
+      still *read* as a grant — and worse, it would occupy ADR-0097 §4's
+      one-live-grant-per-source slot, so the real grant could not be recorded
+      until it was revoked. ADR-0097 §2 refuses it at construction for that
+      reason.
+    * **A repeated member is refused**, not silently folded away. ``(FACET,
+      FACET)`` is a caller that has lost track of what it is asking for, and
+      ADR-0097 §10 spells the outcome as a refusal.
+    * **Order is normalised** rather than refused. ADR-0097 §10 gives one reason
+      for the ordering — "so two implementations serialise one grant
+      identically", under ADR-0087's canonical wire encoding, which is why the
+      field is a tuple and not a ``frozenset`` — and normalising delivers that
+      reason for every caller instead of only for the ones that already sorted.
+      §10 enumerates the refusals it wants (empty, duplicated) and does not
+      enumerate this one.
+
+    Args:
+        value: The uses as the caller supplied them.
+
+    Returns:
+        The same uses, in declaration order.
+
+    Raises:
+        ValueError: If ``value`` is empty or names a use twice.
+    """
+    if not value:
+        msg = (
+            "a grant's scope must name at least one use: a grant authorising "
+            "nothing still reads as a grant, and still occupies the source's one "
+            "live-grant slot (ADR-0097 §2)"
+        )
+        raise ValueError(msg)
+    if len(set(value)) != len(value):
+        msg = f"a grant's scope names each use at most once, got {value!r} (ADR-0097 §10)"
+        raise ValueError(msg)
+    return tuple(sorted(value, key=lambda use: _SCOPE_ORDER[use]))
+
+
+class SourceGrant(BaseModel):
+    """One recorded user act about one source — a grant, or its revocation (ADR-0097 §1).
+
+    The record a :class:`~ai_assistant.core.protocols.SourceGrantStore` appends
+    and a :class:`~ai_assistant.core.protocols.SourceGrants` answers with. A
+    grant says the user connected a source and named what may be read from it; a
+    revocation is a **second record** naming the first, never a mutation of it,
+    which is what keeps the store's history equal to what actually happened
+    (ADR-0097 §4).
+
+    **One type for both acts**, on :attr:`PermissionDecision.resolves`'s shape and
+    for its reason: it keeps the store's rows homogeneous and its wire encoding
+    undiscriminated, where a separate ``GrantRevocation`` would make every query
+    return a union ADR-0096 §5 would then require to be explicitly discriminated
+    on the wire (ADR-0097 §10).
+
+    **A revoking record transcribes what it withdraws.** It carries the
+    :attr:`source` and :attr:`scope` of the grant it revokes, verbatim, so the
+    record says what was withdrawn without a join — ADR-0021 §1's reason for
+    embedding a whole declaration rather than a name. The store verifies the
+    transcription; nothing here can, because a record in isolation cannot see the
+    record it names (ADR-0097 §4).
+
+    **Frozen and boundary-crossing** (ADR-0068). ``frozen=True`` refuses
+    ``grant.scope = …`` and does *not* refuse ``grant.__dict__["scope"] = …``,
+    which is why the store's obligation is a detached, validated snapshot on both
+    the read and the write path rather than a reliance on this config.
+
+    **A grant is keyed to a source, and to nothing else.** Not to a user — there
+    is no user identity anywhere in this system (ADR-0036 §3, #113) — and not to a
+    belief: ADR-0097 §1 rules that no belief carries the id of the grant that
+    authorised the read that produced it, and the resolvable relation is belief →
+    source → that source's grant history.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: DurableIdentifier = Field(
+        description=(
+            "This record's own id, minted by the caller that records it, as "
+            ":attr:`PermissionDecision.id` is — a store neither mints ids nor "
+            "reads a clock (ADR-0021 §3)."
+        )
+    )
+    source: Identifier = Field(
+        description=(
+            "The reader's declared identity — the value "
+            ":attr:`~ai_assistant.core.protocols.Reader.name` returns, which "
+            ":attr:`SourceReading.source` equals and which reaches a stored belief "
+            "as :attr:`Attestation.reported_by` (ADR-0097 §1). It is **Tier 2 / "
+            "operational** and must stay that way: this record is rendered to the "
+            "user, kept forever, and survives into ``export``, so a path, "
+            "filename, address or account identifier may never be used as one "
+            "(ADR-0093 §7). :data:`Identifier` refuses only a blank string, so "
+            "that rule is held where it can be — the grant surface admits a "
+            "``source`` only when it equals the ``name`` of a ``Reader`` the hub "
+            "actually holds, which makes the admissible set the set of declared "
+            "constants (ADR-0097 §9)."
+        )
+    )
+    scope: Annotated[tuple[GrantScope, ...], AfterValidator(_grant_scope)] = Field(
+        description=(
+            "The uses this record authorises, or — on a revoking record — the "
+            "uses the grant it revokes authorised, transcribed verbatim. "
+            "Non-empty, without duplicates, and in declaration order (see "
+            ":func:`_grant_scope`). A tuple rather than a ``frozenset`` because "
+            "ADR-0087 fixes a canonical wire encoding and a set has no canonical "
+            "order. A use this does not name is not authorised by it "
+            "(ADR-0097 §2)."
+        )
+    )
+    decided_at: UtcInstant = Field(
+        description=(
+            "When the user decided; timezone-aware, stored as UTC. Naive is "
+            "refused for :attr:`PermissionDecision.decided_at`'s reason — the "
+            "store is durable *and* ordered. It is **not** an ordering invariant "
+            "between records: ADR-0097 §4 derives liveness from ``revokes`` alone "
+            "and never refuses a revocation for its timestamp, including one that "
+            "predates the grant it revokes."
+        )
+    )
+    revokes: DurableIdentifier | None = Field(
+        default=None,
+        description=(
+            "The grant this record revokes; ``None`` on a granting record. "
+            ":attr:`PermissionDecision.resolves`'s shape, chosen for its reason. "
+            "A revocation revokes a grant **whole** — there is no partial "
+            "revocation and no in-place narrowing, and changing a grant's scope is "
+            "a revocation followed by a new grant, both kept (ADR-0097 §2)."
+        ),
+    )
+
+
 # --- the invocation seam: result, failure, authorised call (ADR-0029) --------
 # Failure is *returned* as data, never raised, because `INDETERMINATE` cannot
 # be an exception. An unauthorised `ToolCall` is unconstructable.

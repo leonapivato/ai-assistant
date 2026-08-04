@@ -136,6 +136,7 @@ if TYPE_CHECKING:
         FeedbackEvent,
         Goal,
         GoalDeletion,
+        GrantScope,
         Identifier,
         LearnOutcome,
         MemoryDecision,
@@ -152,6 +153,7 @@ if TYPE_CHECKING:
         PermissionRuling,
         PlanExport,
         Question,
+        SourceGrant,
         SourceReading,
         StepTransition,
         ToolCall,
@@ -1864,6 +1866,294 @@ class AuditTrail(Protocol):
         Wholesale erasure is a different act from selective deletion: it
         destroys the trail visibly and completely, which is what a data-rights
         operation should look like (ADR-0004 §6).
+        """
+        ...
+
+
+@runtime_checkable
+class SourceGrants(Protocol):
+    """Answers what a source may be read for, and can create nothing (ADR-0097 §3).
+
+    The query half of the grant seam. **Anything that drives a reader holds this
+    and only this** — `orchestration`'s ingestion stage for
+    :attr:`~ai_assistant.core.types.GrantScope.INGEST`, `context`'s reader adapter
+    for :attr:`~ai_assistant.core.types.GrantScope.FACET` — as a **required
+    constructor argument with no default**, so a composition that omits the gate
+    does not type-check (ADR-0097 §5). The obligation stated in prose and honoured
+    by review is the shape ``IngestionStage``'s own docstring already calls "a
+    composition-root obligation no type can express"; this one *can* be expressed,
+    so it is.
+
+    **The split from :class:`SourceGrantStore` is what makes "only a user act
+    creates a grant" a type rather than a promise.** A driver handed the whole
+    store is a scheduler job that can mint its own authorisation: the ingestion
+    stage runs on ADR-0083 §7's timer, and a ``record`` on the object in its hand
+    is a valid ``SourceGrant`` away from authorising itself, with nothing about
+    the resulting record looking wrong afterwards. So the capability is removed
+    from the type the driver names — the move ADR-0077 §1 made for the same
+    reason, and ADR-0093 §1 repeated for the reader.
+
+    **It is a static guarantee and is stated as one.** Structural typing means a
+    concrete store satisfies this Protocol, so a composition root may legitimately
+    pass one object to both seams; what a driver cannot do is *name* ``record``,
+    because ``mypy --strict`` runs over ``src`` and ``tests`` and the attribute is
+    not on the annotated type. Overstating it as a runtime capability removal
+    would be false.
+
+    **A source grant is not an action authorisation.** It may never be cited as
+    :attr:`~ai_assistant.core.types.PermissionRuling.authorised_by`, and no
+    :class:`ActionPolicy` implementation may consult one. ADR-0021 §5's disclosure
+    floor is neither relaxed nor satisfied by anything here, and its deferred
+    standing grants for *actions* stay deferred (ADR-0097 §7).
+
+    Cancelling :meth:`live` is governed by this module's cancellation clause
+    (ADR-0060). Its input-observation clause (ADR-0065) is **vacuous** here and is
+    meant to stay that way: the arguments are a ``str`` and an enum member, so
+    there is no caller-owned container for a result to be torn across.
+    """
+
+    async def live(self, *, source: str, use: GrantScope) -> SourceGrant | None:
+        """The live grant covering ``source`` for ``use``, or ``None``.
+
+        **Returns the record rather than a boolean**, so a caller can name what
+        authorised the read instead of merely knowing that something did
+        (ADR-0097 §10).
+
+        **``source`` is matched exactly.** No implementation may strip, case-fold
+        or otherwise normalise at lookup: a store that was "helpful" here would
+        change what a grant covers, and the grant surface already guarantees the
+        admissible set is the set of readers' declared names (ADR-0097 §9).
+
+        **Liveness is derived from the ``revokes`` relation alone.** A grant is
+        live when no recorded revocation names it; no implementation may decide
+        liveness by comparing ``decided_at`` values, and at most one live grant
+        exists per source at any instant, so the answer is unique (ADR-0097 §4).
+
+        **The answer is a detached snapshot**, which matters more here than on any
+        other read in this file. This is the *only* member of the narrow seam and
+        the one answer ADR-0097 §5's gate rests on, and ``frozen=True`` does not
+        close the bypass: a caller granted ``FACET`` alone could mutate ``scope``
+        on the returned object through ``__dict__`` to include ``INGEST``, and the
+        driver's next check would authorise ingestion the user never granted —
+        the gate defeated through its own answer.
+
+        ``None`` means **no live grant covers this**, and never "the store could
+        not be read"; an unreadable store raises.
+
+        **What a driver owes around this call**, stated here because the seam is
+        what those obligations are written against (ADR-0097 §5a). The guarantee
+        available is that every read is *authorised at the instant it starts* —
+        not that no byte of a source is read after a revocation is recorded, since
+        ADR-0093 §7 puts the whole of a read on a worker nothing can stop. Three
+        rules hold what is available, and none of them needs a lock:
+
+        * **No ``await`` between this result and the call to
+          :meth:`Reader.read`.** The check and the start of the read are one
+          synchronous step, which closes the driver's window — the unbounded one.
+        * **Re-check when ``read()`` returns.** A reading whose grant is no longer
+          live at that moment is **discarded**: nothing is proposed from it, no
+          facet is contributed from it.
+        * **Fail closed on an unanswerable check.** A ``live`` that raises is not
+          a grant; see :class:`~ai_assistant.core.errors.GrantError`.
+
+        Args:
+            source: The reader's declared identity, matched exactly.
+            use: The use being gated.
+
+        Returns:
+            The live grant covering that source and use as a detached snapshot,
+            or ``None`` if none does.
+
+        Raises:
+            GrantError: If the store cannot be read. Never returned as ``None``:
+                a fault and a withdrawn grant are different facts, and a driver
+                that cannot tell them apart is one that proceeds on silence.
+        """
+        ...
+
+
+@runtime_checkable
+class SourceGrantStore(Protocol):
+    """The append-only record of what the user granted and withdrew (ADR-0097 §4).
+
+    The writing half of the grant seam, and the wider of the two. **Nothing but
+    the hub's grant operations holds one** — no scheduler job, no pipeline stage,
+    no ``context`` source and no reader driver (ADR-0097 §3, §9). It satisfies
+    :class:`SourceGrants` structurally, so one implementation serves both seams
+    and a composition root may pass one object to each.
+
+    A **Tier 1 local store** by ADR-0004 §7's own words, so ADR-0004 §2's
+    residency clause governs it: implementations persist locally only, under
+    ``Settings.data_dir`` and owner-only, and none of this may be written to a
+    remote service.
+
+    **Append-only, and a revocation is a record rather than a mutation.** No
+    record is ever updated or individually deleted; erasure is wholesale only.
+    This answers "are granting and revoking audited" by construction rather than
+    by adding a log — a store in which the only writes are appends, in which
+    revocation is an append, and in which nothing may be edited or selectively
+    removed, cannot hold a history that differs from what happened. ADR-0021 §4's
+    argument is taken over whole: the user may burn the book, and nobody may tear
+    out a page.
+
+    **There is no ``get(id)`` and no ``delete(id)``**, each declined for its own
+    reason (ADR-0097 §10). A selective delete is the page torn out of the book. A
+    ``get`` has no consumer — the revocation invariant is checked *inside*
+    :meth:`record`, and a belief's join runs through ``source`` rather than
+    through an id — so it would be surface with no consumer. Both are additive
+    later.
+
+    **Nothing mints a grant from what is already configured** (ADR-0097 §8). No
+    grant is created from a ``Settings`` value, an existing source path, an
+    already-ingested belief, an upgrade, a migration, or a first run; an
+    installation that has been reading a source stops reading it until the user
+    grants. Backfilling one would be configuration presenting itself as consent,
+    performed once and invisibly, which is the single way ADR-0093 §7 says the
+    decision must not be made.
+
+    **Revoking is prospective.** It retires no belief, closes no validity window,
+    deletes no record and alters no stored record; its whole effect is that
+    :meth:`live` stops answering. A revocation is never presented as, and never
+    produces, a retraction or an absence claim about what the source reported
+    (ADR-0097 §6).
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060). Its input-observation clause (ADR-0065) is **vacuous**, as it is
+    for :class:`AuditTrail` and for the same reason: the one caller-owned argument
+    is a :class:`~ai_assistant.core.types.SourceGrant`, which is immutable all the
+    way down. What a caller *can* still do is write past the frozen model through
+    ``__dict__``, which is what :meth:`record`'s detachment obligation closes.
+    """
+
+    async def record(self, grant: SourceGrant) -> str:
+        """Append ``grant`` to the store and return its id.
+
+        **Write-once**: re-recording an id already present raises rather than
+        overwriting, for :meth:`AuditTrail.record`'s reason — a store that upserts
+        is one where history can be rewritten by replaying a write.
+
+        **Atomic**: the duplicate-id check, the live-grant check, the revocation
+        invariants and the append are one operation, not a read followed by a
+        write. Without that the one-live-grant guarantee is a race — two
+        concurrent grants for one source each observe none live, each append, and
+        the source now has two authorisations where the contract says one.
+
+        **Stores a detached, validated snapshot**, recursively over reachable
+        state, and never retains the caller's object. Both halves matter and the
+        write-side one is the half that is easy to drop: ``frozen=True`` refuses
+        ``grant.scope = …`` and does not refuse ``grant.__dict__["scope"] = …``,
+        so a store keeping the caller's object would let a grant be rewritten
+        *after* it was appended, through a store whose entire premise is that its
+        records are not rewritten (ADR-0018 §4, ADR-0021 §4). Validating matters
+        for its own reason: a record corrupted past its own model — a naive
+        ``decided_at``, an emptied ``scope`` — would be stored and then make every
+        later read incoherent, and the construction invariants would have been
+        checked on an object nobody kept.
+
+        **At most one live grant per source.** A grant recorded for a source that
+        already has a live one is refused; narrowing or widening is a revocation
+        followed by a new grant, and both records are kept (ADR-0097 §2, §4).
+
+        **The revocation invariants**, checked here because this is the only place
+        both records are in hand. A record whose ``revokes`` is set is refused
+        unless the named grant is present, is itself a granting record rather than
+        a revocation, is not already revoked, names the same ``source``, and
+        carries the same ``scope`` transcribed verbatim.
+
+        **A revocation is never refused for its timestamp**, including one that
+        predates the grant it revokes — the one place this contract departs from
+        :meth:`AuditTrail.record`'s shape on purpose. ``decided_at`` is
+        caller-supplied and this store reads no clock (ADR-0021 §3's rule, kept
+        here), so a host clock corrected backwards would otherwise make every
+        truthfully-timestamped revocation refusable until wall-clock time caught
+        up — and a large enough correction would make a grant **permanently
+        unrevokable**, which is the one property this contract exists to deliver.
+        The ordering check protects nothing here: liveness is computed from
+        ``revokes`` and nothing in this contract compares two instants. What is
+        left is that :meth:`recent` can put a revocation beside or above the grant
+        it revokes when the clock moved, which is a display oddity a surface can
+        render honestly and never a wrong answer to "is this source granted"
+        (ADR-0097 §4).
+
+        Args:
+            grant: The record to append — a grant, or the revocation of one.
+
+        Returns:
+            The recorded id.
+
+        Raises:
+            InvalidGrantError: If the id is already recorded, if the source
+                already has a live grant, if the record does not satisfy its own
+                model, or if ``revokes`` fails any invariant above.
+            GrantError: If the store cannot be written.
+        """
+        ...
+
+    async def live(self, *, source: str, use: GrantScope) -> SourceGrant | None:
+        """The live grant covering ``source`` for ``use``, or ``None``.
+
+        Exactly :meth:`SourceGrants.live`'s semantics — the same member, on the
+        wider seam. Matched exactly, liveness derived from the ``revokes``
+        relation alone, and the answer is a detached snapshot; ``None`` means no
+        live grant covers this and never that the store could not be read.
+
+        Raises:
+            GrantError: If the store cannot be read.
+        """
+        ...
+
+    async def recent(self, *, limit: int = 50) -> list[SourceGrant]:
+        """Return the most recent records, newest first.
+
+        Ordered by ``decided_at`` **descending**, ties broken by ``id``
+        ascending, for :meth:`AuditTrail.recent`'s reason: "newest first" is
+        ambiguous between insertion order and decision time, which disagree
+        whenever records are appended out of order, and an ``id`` tie-break makes
+        the order total rather than merely mostly determined.
+
+        Bounded because every read of a Tier 1 store in this corpus is (ADR-0021
+        §4, ADR-0073 §2), and the row count grows with grant churn rather than
+        with the number of sources.
+
+        **Revoked grants are still returned.** Revocation retires nothing, and a
+        source that has been revoked keeps its complete grant history on file
+        (ADR-0097 §6). Both the grant and the revocation are records here.
+
+        Args:
+            limit: Maximum number of records to return; must be strictly
+                positive.
+
+        Raises:
+            ValueError: If ``limit`` is not strictly positive. Raised rather than
+                clamped or passed through, for :meth:`AuditTrail.recent`'s reason
+                — a store issuing ``LIMIT ?`` against SQLite turns ``limit=-1``
+                into no limit at all.
+            GrantError: If the store cannot be read.
+        """
+        ...
+
+    async def export(self) -> list[SourceGrant]:
+        """Return every record, in :meth:`recent`'s order (ADR-0007 §3, ADR-0004 §6).
+
+        The user's export right, on ``AuditTrail.export``'s shape. Revoked grants
+        and revocations alike are included: what this store is *for* is saying,
+        completely and in order, what the user granted and withdrew for a source.
+
+        Raises:
+            GrantError: If the store cannot be read.
+        """
+        ...
+
+    async def clear(self) -> int:
+        """Delete every record, returning the number removed.
+
+        Wholesale erasure only, for :meth:`AuditTrail.clear`'s reason: it destroys
+        the history visibly and completely, which is what a data-rights operation
+        should look like, where a selective delete would be indistinguishable from
+        tampering (ADR-0004 §6, ADR-0021 §4).
+
+        Raises:
+            GrantError: If the store cannot be written.
         """
         ...
 
