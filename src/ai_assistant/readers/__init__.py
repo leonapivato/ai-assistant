@@ -41,11 +41,13 @@ instance*: a shared one would let a scheduled ingestion read suppress the
 request-path facet for as long as it ran, coupling a request cadence to a periodic
 job in the direction that makes an advisory facet wait.
 
-Which objects hold those two ends is deliberately not named here. This package
-imports nothing above ``core`` and nothing imports it, so it cannot see its own
-callers — and a list of them here would be a snapshot, going stale silently rather
-than loudly (`CONTRIBUTING.md` → "No state claims in living documents"). Each side
-asserts its own wiring in its own tests.
+Which objects hold those two ends is deliberately not named here. The leaf
+contract runs one way only — this package may import ``core`` and nothing else —
+so it cannot name a caller even where it wanted to; the two instances are
+assembled above it, by the composition root that is the one importer no subsystem
+contract forbids. A list of them here would be a snapshot besides, going stale
+silently rather than loudly (`CONTRIBUTING.md` → "No state claims in living
+documents"). Each side asserts its own wiring in its own tests.
 """
 
 from __future__ import annotations
