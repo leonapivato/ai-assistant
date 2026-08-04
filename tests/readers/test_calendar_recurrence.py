@@ -672,11 +672,13 @@ async def test_a_dtstart_the_rule_does_not_generate_is_still_part_of_the_set(
     ]
 
 
-def _custom_timezone(tzid: str, *, dst: bool = False) -> str:
+def _custom_timezone(tzid: str, *, dst: bool = False, offset: str = "+0000") -> str:
     """A ``VTIMEZONE`` whose ``TZID`` is whatever the case wants it to be.
 
     With ``dst``, it also carries a March transition, so a recurrence crossing it
-    changes offset the way a real zone's would.
+    changes offset the way a real zone's would. ``offset`` sets the standard
+    offset in ``TZOFFSETTO`` form, which RFC 5545 allows to carry seconds; it is
+    ignored under ``dst``, whose two offsets are the transition's point.
     """
     daylight = (
         [
@@ -698,8 +700,8 @@ def _custom_timezone(tzid: str, *, dst: bool = False) -> str:
             "BEGIN:STANDARD",
             "DTSTART:19701101T020000",
             "RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU",
-            "TZOFFSETFROM:-0400" if dst else "TZOFFSETFROM:+0000",
-            "TZOFFSETTO:-0500" if dst else "TZOFFSETTO:+0000",
+            "TZOFFSETFROM:-0400" if dst else f"TZOFFSETFROM:{offset}",
+            "TZOFFSETTO:-0500" if dst else f"TZOFFSETTO:{offset}",
             f"TZNAME:{tzid}-ST",
             "END:STANDARD",
             *daylight,
@@ -744,6 +746,44 @@ async def test_a_source_supplied_zone_name_never_reaches_the_rendering(tmp_path:
     with pytest.raises(ReaderError) as raised:
         await reader(path, max_content_bytes=1).read()
     assert isinstance(raised.value.__cause__, ContentBudgetExhaustedError)
+
+
+async def test_a_sub_minute_zone_offset_keeps_its_seconds_in_the_label(tmp_path: Path) -> None:
+    """``UTC±HH:MM`` is exact only while the offset is a whole number of minutes.
+
+    RFC 5545's ``TZOFFSETTO`` carries seconds, and a label that drops them names a
+    *different* instant from the one printed beside it: ``+005328`` puts a 13:00
+    local start at 12:06:32Z, which ``UTC+00:53`` renders as 12:06:00Z — an offset
+    the source never declared, stated as if it had. That is the worse of the two
+    ways to be wrong, because the label and the local time still look consistent.
+
+    Only the label was ever affected — ``start`` and ``end`` come from the tzinfo
+    itself — so the case pins **both**: the rendered label and the instant the
+    facet reports for the same occurrence, which agree only if the seconds survive.
+
+    An IANA zone cannot reach this path, since it is named by its key, so it takes
+    a hand-written ``VTIMEZONE``. Sub-minute offsets are not contrived: LMT offsets
+    carry them (``Asia/Kolkata`` was ``+05:53:28`` in 1900), they just arrive as
+    ``ZoneInfo`` and take the key path.
+    """
+    raw = calendar(
+        _custom_timezone("Corp/LMT", offset="+005328"),
+        vevent(
+            "DTSTART;TZID=Corp/LMT:20260803T130000",
+            "DURATION:PT1H",
+            "SUMMARY:x",
+            uid="one",
+        ),
+    )
+
+    reading = await reader(source(tmp_path, raw)).read()
+
+    (proposal,) = reading.proposals
+    assert proposal.proposed.content == (
+        'Calendar entry "x", on 2026-08-03 from 13:00 to 14:00 (UTC+00:53:28).'
+    )
+    assert reading.facet is not None
+    assert reading.facet.next_starts_at == datetime(2026, 8, 3, 12, 6, 32, tzinfo=UTC)
 
 
 async def test_a_recurrence_across_a_dst_transition_labels_each_occurrence_itself(
