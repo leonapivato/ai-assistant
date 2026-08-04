@@ -18,7 +18,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ai_assistant.testing.cancellation import ThreadSuspension, settle
+from ai_assistant.testing.cancellation import (
+    ThreadSuspension,
+    settle,
+    worker_finished_before_the_first_check,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -128,3 +132,36 @@ async def test_release_before_arrival_still_ends_a_reached_wait() -> None:
     suspension.release()
 
     await asyncio.wait_for(waiting, timeout=_PROMPT_SECONDS)
+
+
+async def test_the_lever_leaves_the_default_executor_exactly_as_it_found_it() -> None:
+    """``worker_finished_before_the_first_check``'s scope claim, on both states.
+
+    Restoring a *fresh* pool rather than the prior one looks identical from inside
+    the block and is wrong outside it: an executor a fixture installed to constrain
+    or observe the loop's thread use would be silently dropped — ``_single_worker_pool``
+    above installs exactly that — and a pool the loop had already built lazily for
+    an earlier call would be stranded with its threads running and nothing holding
+    it. Every store case that uses this lever does some store work first, so the
+    second is the ordinary case rather than the exotic one.
+
+    Asserted against whatever the loop was carrying rather than against ``None``,
+    because the property is "as it found it" and the initial state is the fixture's
+    business. ``set_default_executor`` is write-only and refuses ``None``, so the
+    loop's own attribute is the only way to observe either side of this.
+    """
+    loop = asyncio.get_running_loop()
+    found = loop._default_executor  # type: ignore[attr-defined]
+
+    with worker_finished_before_the_first_check():
+        assert loop._default_executor is not found  # type: ignore[attr-defined]
+
+    assert loop._default_executor is found  # type: ignore[attr-defined]
+
+    with ThreadPoolExecutor(max_workers=1) as installed:
+        loop.set_default_executor(installed)
+
+        with worker_finished_before_the_first_check():
+            pass
+
+        assert loop._default_executor is installed  # type: ignore[attr-defined]
