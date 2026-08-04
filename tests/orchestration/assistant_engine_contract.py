@@ -2,7 +2,7 @@
 
 Every ``AssistantEngine`` implementation must pass this suite (CONTRIBUTING,
 "Protocol conformance suites"). A concrete test subclasses
-:class:`AssistantEngineContract` and overrides the two fixtures.
+:class:`AssistantEngineContract` and overrides its four fixtures.
 
 **This suite is why the Protocol is worth having.** ADR-0084 §4 promotes the
 engine surface so that a client over a transport and the in-process engine are
@@ -31,6 +31,19 @@ prose would leave a reader unsure whether the guarantee exists: the listing
 returns :class:`~ai_assistant.core.types.BeliefSummary` and therefore cannot ship
 a citation's content (§4a), and every enumeration returns a tuple (§3b).
 
+**The grant surface adds a second list of behavioural clauses** (ADR-0102 §12
+item 2): "the ``AssistantEngine`` conformance suite gains a clause per ruling above
+that a store cannot exhibit, which is the whole of §4, §5 and §10's local-refusal
+clause". They live here for the same reason the six above do — each is a way two
+implementations could answer one call differently while both looking correct — and
+two of them are worth naming as the ones nothing else would catch. A ``source``
+differing from a held reader's name only by whitespace must be **refused rather
+than matched**, which the wire implementation alone could have got wrong, since it
+validates each argument against the Protocol's own annotation before dispatch. And
+a grant revoked by a record timestamped *earlier* than itself must read as
+withdrawn, which an implementation deriving liveness from a time-ordered page gets
+wrong on the one deployment where a clock moved.
+
 **Lifecycle is deliberately not asserted.** ``start`` and ``aclose`` are not on
 the Protocol (ADR-0084 §5, ADR-0083 §8) — a client that could call ``aclose()``
 could shut down the hub from a spoke — so an implementation without a lifecycle
@@ -57,7 +70,9 @@ import pytest
 from ai_assistant.core import errors as error_module
 from ai_assistant.core.errors import (
     AssistantError,
+    InvalidGrantError,
     OversizedValueError,
+    UngrantableSourceError,
     UnknownContinuationError,
     UnknownConversationError,
     UnresolvedEvidenceError,
@@ -72,6 +87,7 @@ from ai_assistant.core.types import (
     Disposition,
     FeedbackEvent,
     FeedbackKind,
+    GrantScope,
     MemoryKind,
 )
 
@@ -91,6 +107,11 @@ _PATIENT = timedelta(seconds=30)
 #: its result check entirely would still pass. At 512 the argument object of every
 #: setup call is comfortably inside the bound and only the *page* crosses it.
 _TINY_LIMIT = 512
+
+#: The one grantable identity every ``granting_engine`` fixture holds. A declared
+#: constant, which is what a reader's ``name`` is (ADR-0093 §7) and therefore what
+#: the admissible set is made of.
+_SOURCE = "calendar"
 
 
 def _feedback(content: str) -> FeedbackEvent:
@@ -119,6 +140,21 @@ class AssistantEngineContract(ABC):
         A separate subject rather than a knob on the first, because the limit is a
         construction-time property of an implementation — a deployment's frame size
         — and not something a caller changes mid-flight.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def granting_engine(self) -> AssistantEngine:
+        """A subject holding **exactly one** grantable source, named :data:`_SOURCE`.
+
+        A separate subject rather than a step in a test, for ``parked_engine``'s
+        reason: which sources exist is a property of what the composition root
+        *built* (ADR-0102 §7), not something the surface can be asked to change. An
+        implementation has to be handed to the suite already holding one.
+
+        It must hold no grant on that source, so the first ``grant`` in each test
+        below is the first grant. It must carry a configured location for it, so
+        §6's disclosure is a value a client can render.
         """
 
     @pytest.fixture
@@ -158,7 +194,7 @@ class AssistantEngineContract(ABC):
         """ADR-0085 §3b: a caller that mutated a returned page changed nothing.
 
         ``pending_confirmations`` is the one this pins: it returned a ``list``
-        before, and a fifteen-method surface with one method returning a mutable
+        before, and a surface this size with one method returning a mutable
         page is a wart a spoke author has to remember.
         """
         assert isinstance(await engine.beliefs(), tuple)
@@ -697,6 +733,243 @@ class AssistantEngineContract(ABC):
         """
         with pytest.raises(ValueError, match="UTF-8 encoding"):
             build()
+
+    # --- §4: admission, and what it never applies to -----------------------
+
+    async def test_the_enumeration_offers_the_source_with_its_location(
+        self, granting_engine: AssistantEngine
+    ) -> None:
+        """ADR-0097 §9: a client offers a choice among declared identities.
+
+        And ADR-0102 §6: this response is the **only** carrier of a source's
+        configured location, so a client has something to render before it grants.
+        """
+        offered = await granting_engine.grantable_sources()
+        assert [one.source for one in offered] == [_SOURCE]
+        assert offered[0].location
+        assert offered[0].live is None
+
+    async def test_a_source_no_reader_declares_is_ungrantable(
+        self, granting_engine: AssistantEngine
+    ) -> None:
+        """§4: any validated value that is not a held identity raises, and nothing is built.
+
+        :class:`~ai_assistant.core.errors.UngrantableSourceError` specifically, and
+        **not** ``InvalidGrantError``: ADR-0097 §10 scopes that class to "the store
+        refused the record", and this refusal happens before a record exists. A
+        caller given the wrong one is told to construct a different record when the
+        actual remedy is to pick a different source.
+        """
+        with pytest.raises(UngrantableSourceError):
+            await granting_engine.grant("no-such-source", scope=[GrantScope.FACET])
+        assert await granting_engine.recent_grants() == ()
+
+    async def test_a_source_differing_only_by_whitespace_is_refused_not_matched(
+        self, granting_engine: AssistantEngine
+    ) -> None:
+        """ADR-0097 §10, and the reason ``source`` is not :data:`Identifier` (§2).
+
+        **This is the clause the wire implementation could have failed alone**, and
+        ADR-0102 §12 item 2 says so in as many words: ``wire/surface.py`` validates
+        each argument against the Protocol's own annotation before dispatch, so an
+        ``Identifier`` annotation would have arrived at the operation already
+        stripped and *matched* — while the in-process engine, handed the string
+        unvalidated, refused the same call. Two observable contracts for one call is
+        the substitutability failure ADR-0084 §4 promotes this surface to prevent.
+        """
+        with pytest.raises(UngrantableSourceError):
+            await granting_engine.grant(f"  {_SOURCE}  ", scope=[GrantScope.FACET])
+        assert await granting_engine.recent_grants() == ()
+
+    async def test_revoking_a_source_no_reader_declares_is_not_refused_for_that(
+        self, granting_engine: AssistantEngine
+    ) -> None:
+        """§4: ``revoke`` applies **no** admission check.
+
+        A grant whose reader is later unconfigured must stay revocable — otherwise a
+        configuration edit makes it permanently unrevokable, which is the failure
+        ADR-0097 §4 refused when it declined an ordering invariant on ``decided_at``.
+        Nothing leaks through the opening: the value finds no live grant, constructs
+        nothing and records nothing.
+        """
+        assert await granting_engine.revoke("no-such-source") is None
+        assert await granting_engine.recent_grants() == ()
+
+    # --- §5: who mints, and the store as arbiter ---------------------------
+
+    async def test_a_second_grant_on_a_live_source_is_refused(
+        self, granting_engine: AssistantEngine
+    ) -> None:
+        """§5: the store is the arbiter, and its refusal propagates.
+
+        Never retried and never converted into a success. ADR-0097 §10 makes
+        ``record`` atomic over the live-grant check, so a lost race is a typed
+        refusal rather than a second live grant, and the client's remedy is to
+        re-read ``grantable_sources``.
+        """
+        await granting_engine.grant(_SOURCE, scope=[GrantScope.FACET])
+        with pytest.raises(InvalidGrantError):
+            await granting_engine.grant(_SOURCE, scope=[GrantScope.INGEST])
+
+    async def test_revoking_with_no_live_grant_returns_none(
+        self, granting_engine: AssistantEngine
+    ) -> None:
+        """§5: where no member of ``GrantScope`` answers, nothing is recorded."""
+        assert await granting_engine.revoke(_SOURCE) is None
+        assert await granting_engine.recent_grants() == ()
+
+    async def test_a_revocation_transcribes_the_grant_it_withdraws(
+        self, granting_engine: AssistantEngine
+    ) -> None:
+        """§5: the revoking record carries the grant's ``source`` and ``scope`` verbatim.
+
+        ADR-0021 §1's reason for embedding a declaration rather than a name: the
+        record says what was withdrawn without a join. The store verifies the
+        transcription, which is why an implementation that got it wrong would be
+        refused rather than silently recording a lie.
+        """
+        granted = await granting_engine.grant(_SOURCE, scope=[GrantScope.INGEST])
+        withdrawn = await granting_engine.revoke(_SOURCE)
+        assert withdrawn is not None
+        assert withdrawn.revokes == granted.id
+        assert withdrawn.source == granted.source
+        assert withdrawn.scope == granted.scope
+
+    async def test_an_ingest_only_grant_is_revocable(
+        self, granting_engine: AssistantEngine
+    ) -> None:
+        """§5's sweep, and the wrong version passes every other test here.
+
+        ``SourceGrants.live`` takes a ``use``, so an implementation querying only
+        ``FACET`` resolves a ``FACET``-scoped grant and silently fails to find this
+        one — leaving it unrevokable while ``revoke`` reports success by returning
+        ``None``. Written over the enum rather than over its members, so it stays
+        total as ``GrantScope`` grows.
+        """
+        await granting_engine.grant(_SOURCE, scope=[GrantScope.INGEST])
+        assert await granting_engine.revoke(_SOURCE) is not None
+
+    async def test_a_grant_reaches_the_enumeration_as_live_and_a_revocation_clears_it(
+        self, granting_engine: AssistantEngine
+    ) -> None:
+        """The round trip, without which every refusal above proves nothing.
+
+        A suite that only asserted refusals would pass against an implementation
+        that refused everything.
+        """
+        await granting_engine.grant(_SOURCE, scope=[GrantScope.FACET])
+        live = (await granting_engine.grantable_sources())[0].live
+        assert live is not None
+        assert live.scope == (GrantScope.FACET,)
+
+        await granting_engine.revoke(_SOURCE)
+        assert (await granting_engine.grantable_sources())[0].live is None
+        assert len(await granting_engine.recent_grants()) == 2
+
+    async def test_liveness_is_stated_rather_than_derived_from_the_page(
+        self, granting_engine: AssistantEngine
+    ) -> None:
+        """ADR-0102 §12's normative clause, and **nothing else in this list reaches it**.
+
+        ADR-0097 §4 permits a revocation timestamped *before* the grant it revokes —
+        "a revocation is never refused for its timestamp" — and derives liveness
+        from the ``revokes`` relation alone. ``recent_grants`` is ordered newest
+        first by ``decided_at``, so after a clock correction a revoking record sorts
+        *below* the grant it revokes and can fall outside a page containing it. An
+        implementation computing ``live`` by walking that page would then report a
+        withdrawn grant as **live** — the one answer this whole contract exists to
+        get right — and would pass every other clause here, because every other
+        clause is about admission, refusal or paging.
+
+        The scenario is reachable through the surface alone: the fixture's clock
+        need not be manipulated, because whichever order the two records carry, a
+        conforming implementation answers ``live=None`` and returns **both**
+        records. The case is written so that an implementation deriving liveness
+        from the page's *first* entry fails it.
+        """
+        granted = await granting_engine.grant(_SOURCE, scope=[GrantScope.FACET])
+        withdrawn = await granting_engine.revoke(_SOURCE)
+        assert withdrawn is not None
+
+        assert (await granting_engine.grantable_sources())[0].live is None
+        page = await granting_engine.recent_grants()
+        assert {record.id for record in page} == {granted.id, withdrawn.id}
+
+    # --- §2a and §10: the local refusals -----------------------------------
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\t"])
+    @pytest.mark.parametrize("call", ["grant", "revoke"])
+    async def test_a_blank_source_is_refused_locally(
+        self, granting_engine: AssistantEngine, call: str, blank: str
+    ) -> None:
+        """§2a: a caller programming error, refused before any I/O.
+
+        ``ValueError`` and deliberately not an ``AssistantError``, exactly as a
+        blank identifier is on the rest of the surface.
+        """
+        arguments = {"scope": [GrantScope.FACET]} if call == "grant" else {}
+        with pytest.raises(ValueError, match=r"\w"):
+            await getattr(granting_engine, call)(blank, **arguments)
+
+    async def test_an_empty_or_duplicated_scope_is_refused_locally(
+        self, granting_engine: AssistantEngine
+    ) -> None:
+        """§2a, over ADR-0097 §2 and §10's two refusals.
+
+        A grant naming no use authorises nothing and would still *read* as a grant —
+        and worse, would occupy the source's one live-grant slot. A repeated member
+        is a caller that has lost track of what it is asking for.
+        """
+        with pytest.raises(ValueError, match=r"\w"):
+            await granting_engine.grant(_SOURCE, scope=[])
+        with pytest.raises(ValueError, match=r"\w"):
+            await granting_engine.grant(_SOURCE, scope=[GrantScope.FACET, GrantScope.FACET])
+        assert await granting_engine.recent_grants() == ()
+
+    @pytest.mark.parametrize("bad", [0, -1, 2**63])
+    async def test_recent_grants_refuses_a_non_positive_limit_locally(
+        self, granting_engine: AssistantEngine, bad: int
+    ) -> None:
+        """§10's local-refusal clause, and ``0`` is the case it exists for.
+
+        ADR-0085 §9 admits a page argument in ``[0, 2**63)`` and
+        ``SourceGrantStore.recent`` requires a strictly positive ``limit``, so
+        ``recent_grants(limit=0)`` is well-formed under the surface rule and refused
+        by the store. Refusing it locally in **both** implementations is §9's own
+        clause — "neither is silently more permissive" — applied to the one argument
+        where the two ranges do not coincide.
+        """
+        with pytest.raises(ValueError, match=r"\w"):
+            await granting_engine.recent_grants(limit=bad)
+
+    @pytest.mark.parametrize("bad", [1.5, True, "1", None])
+    async def test_a_limit_that_is_not_an_integer_is_refused_locally(
+        self, granting_engine: AssistantEngine, bad: object
+    ) -> None:
+        """The type before the range, for :meth:`beliefs`' reason.
+
+        ``0 < 1.5 < 2**63`` is true, so a range check alone admits a float; and
+        ``True`` is an ``int`` that would silently mean a page of one, which is a
+        wrong answer rather than a refusal.
+        """
+        with pytest.raises(TypeError, match=r"\w"):
+            # The wrong *type* is the point of the case, so the annotation is
+            # deliberately violated here.
+            await granting_engine.recent_grants(limit=bad)  # type: ignore[arg-type]
+
+    def test_the_grant_page_size_default_is_the_declared_one(
+        self, granting_engine: AssistantEngine
+    ) -> None:
+        """ADR-0085 §3a reaches ``recent_grants`` like every other paging method."""
+        parameter = inspect.signature(granting_engine.recent_grants).parameters["limit"]
+        assert parameter.default == DEFAULT_PAGE_SIZE
+
+    async def test_every_grant_enumeration_returns_a_tuple(
+        self, granting_engine: AssistantEngine
+    ) -> None:
+        """ADR-0085 §3b: a caller that mutated a returned page changed nothing."""
+        assert isinstance(await granting_engine.grantable_sources(), tuple)
+        assert isinstance(await granting_engine.recent_grants(), tuple)
 
 
 async def page_after_mutating_the_filter(

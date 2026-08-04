@@ -29,8 +29,9 @@ from ai_assistant.core.errors import (
     DeferralStoreError,
     ModelError,
     ReaderError,
+    SourceNotGrantedError,
 )
-from ai_assistant.core.types import Reversibility, RiskLevel
+from ai_assistant.core.types import GrantScope, Reversibility, RiskLevel
 from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.memory import MemoryIngestor, SqliteDeferralStore, SqliteMemoryStore
 from ai_assistant.memory import deferral_store as deferral_store_module
@@ -39,7 +40,6 @@ from ai_assistant.orchestration import Engine
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.readers import CALENDAR_READER_NAME
-from ai_assistant.testing import FakeSourceGrants, source_grant
 from ai_assistant.tools import InMemoryToolRegistry
 
 
@@ -1034,30 +1034,38 @@ def _calendar_sources(engine: Engine) -> list[CalendarContextSource]:
     return [source for source in provider._sources if isinstance(source, CalendarContextSource)]
 
 
-def _calendar_grants() -> FakeSourceGrants:
-    """A grant seam holding a live grant for the one reader this tree has.
+async def _grant_the_calendar(engine: Engine) -> None:
+    """Grant the one source this tree has, through the surface a user uses.
+
+    **Through the surface rather than through an injected fake**, which is the
+    change ADR-0102 §7 makes possible and is the point of it: ``build_engine`` now
+    opens the grant store itself, so a test no longer hands the drivers a
+    ``SourceGrants`` nothing in production would have handed them. What is
+    exercised below is therefore the path a person actually takes — enumerate,
+    grant, then read — and leg 6's exit test becomes reachable by a user rather
+    than by a fake (#684).
 
     ``CALENDAR_READER_NAME`` rather than a literal, because ADR-0097 §1 keys a
     grant to the reader's **declared** identity and a grant naming anything else
-    covers nothing — the join this fake would otherwise silently get wrong.
+    covers nothing.
     """
-    return FakeSourceGrants([source_grant(CALENDAR_READER_NAME)])
+    await engine.grant(CALENDAR_READER_NAME, scope=[GrantScope.FACET, GrantScope.INGEST])
 
 
-async def test_build_engine_wires_neither_driver_without_a_grant_seam(
+async def test_build_engine_wires_both_drivers_on_a_configured_path(
     tmp_path: Path,
 ) -> None:
-    """A configured source is not enough: ADR-0097 §5 needs something to ask.
+    """A configured source is now enough to *wire*, and never enough to *read*.
 
-    §9 puts the only holder of a ``SourceGrantStore`` in the hub's grant
-    operations, which do not exist yet — so no deployment today passes ``grants``
-    and no deployment today reads a calendar. That is ADR-0097 §8's own stated
-    consequence rather than a gap: "An installation that has been reading a source
-    stops reading it until the user grants."
+    Until ADR-0102 §7 this needed two conditions: a path, and a ``SourceGrants``
+    the composition root was handed — which nothing in production ever handed it,
+    so ``build_engine`` wired neither driver and no deployment read a calendar
+    (#684). The store is opened here now, so the seam is always present and only
+    the *grant* decides whether anything is read.
 
-    Both drivers are covered here, because the property that matters is that
-    *neither* half of leg 6 reads the file: the stage is unwired, and the context
-    source is not registered at all.
+    Both halves are covered because the property that matters is that neither
+    reads the file before the user says so: the stage exists and refuses, and the
+    context source is registered and contributes nothing.
     """
     settings = Settings(
         embedder=EmbedderKind.HASHING,
@@ -1065,25 +1073,125 @@ async def test_build_engine_wires_neither_driver_without_a_grant_seam(
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        assert engine._ingestion is None
-        assert not _calendar_sources(engine)
-        with pytest.raises(ConfigurationError, match="grant seam"):
+        assert engine._ingestion is not None
+        assert len(_calendar_sources(engine)) == 1
+        # ADR-0097 §8: an installation that has been reading a source stops
+        # reading it until the user grants. Nothing is minted from configuration.
+        with pytest.raises(SourceNotGrantedError):
             await engine.ingest()
+        assert (await engine._loop._context.assemble()).calendar is None
     finally:
         await engine.aclose()
 
 
-async def test_build_engine_registers_the_calendar_source_when_both_are_present(
+async def test_build_engine_offers_the_configured_source_with_its_location(
     tmp_path: Path,
 ) -> None:
-    """The facet half of leg 6, wired on the path and the grant seam (ADR-0096 §8)."""
+    """ADR-0102 §7's identities and locations, read off the readers this layer built.
+
+    The identity comes from the reader object rather than from a setting (§7's
+    clause), and the location is the configured path — carried by this response and
+    by no durable record anywhere (§6, ADR-0097 §9a). The two ``CalendarReader``
+    instances ADR-0096 §5 requires deduplicate to **one** entry, which is the other
+    half of §7's rule.
+    """
+    source = _one_event_calendar(tmp_path)
+    settings = Settings(embedder=EmbedderKind.HASHING, calendar_reader_path=source)
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        offered = await engine.grantable_sources()
+
+        assert [one.source for one in offered] == [CALENDAR_READER_NAME]
+        assert offered[0].location == str(source)
+        assert offered[0].live is None
+    finally:
+        await engine.aclose()
+
+
+async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
+    tmp_path: Path,
+) -> None:
+    """ADR-0102 §7 and §12: opened here, under ``Settings.data_dir``, owner-only.
+
+    Asserted as a file on disk rather than through the object graph, because the
+    claim ADR-0102 §12's normative clause makes is about the *directory* — the hub
+    owns six databases exclusively (ADR-0083 ruling 4), and the sixth obeys that
+    ruling by living inside the directory the instance lock already covers.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        # The directory listing is a synchronous read of a temporary directory this
+        # test owns, not an I/O path the event loop can be starved by.
+        databases = sorted(path.name for path in tmp_path.glob("*.db"))  # noqa: ASYNC240
+        assert databases == [
+            "audit.db",
+            "conversations.db",
+            "deferrals.db",
+            "grants.db",
+            "memory.db",
+            "plans.db",
+        ]
+        assert stat.S_IMODE((tmp_path / "grants.db").stat().st_mode) == 0o600
+    finally:
+        await engine.aclose()
+
+
+async def test_the_drivers_and_the_grant_operations_share_one_store(
+    tmp_path: Path,
+) -> None:
+    """ADR-0102 §7: the *same object*, passed twice.
+
+    A second store would let a user grant a source the gate then reads a different
+    answer about — the failure mode that looks like nothing at all, because both
+    halves work and disagree. Structural typing is what makes one object serve
+    both seams (ADR-0097 §3), and the narrowing is the annotation on the driver's
+    constructor rather than anything the composition root does.
+    """
     settings = Settings(
         embedder=EmbedderKind.HASHING,
         calendar_reader_path=_one_event_calendar(tmp_path),
     )
-    engine = build_engine(settings, data_dir=tmp_path, grants=_calendar_grants())
+    engine = build_engine(settings, data_dir=tmp_path)
     try:
-        assert len(_calendar_sources(engine)) == 1
+        stage = engine._ingestion
+        assert stage is not None
+        (facet_source,) = _calendar_sources(engine)
+        assert stage._grants is engine._grants._store
+        assert facet_source._grants is engine._grants._store
+    finally:
+        await engine.aclose()
+
+
+async def test_a_granted_source_becomes_readable_and_a_revocation_stops_it(
+    tmp_path: Path,
+) -> None:
+    """Leg 6's exit test, reachable by a user rather than by a fake (#684).
+
+    The whole loop through the real surface: nothing is read, the user grants,
+    ingestion runs, the user revokes, and ingestion stops. What ADR-0102 §7 buys is
+    that every step here is one a person can take at a terminal.
+
+    **Revoking retires nothing**, which is asserted rather than assumed: ADR-0097
+    §6 makes revocation prospective, so the belief the granted read produced is
+    still held afterwards. A test that only checked the refusal would pass against
+    an implementation that deleted what it had ingested.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        calendar_reader_path=_one_event_calendar(tmp_path),
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        with pytest.raises(SourceNotGrantedError):
+            await engine.ingest()
+
+        await _grant_the_calendar(engine)
+        assert (await engine.ingest()).stored == 1
+
+        assert await engine.revoke(CALENDAR_READER_NAME) is not None
+        with pytest.raises(SourceNotGrantedError):
+            await engine.ingest()
+        assert len(await engine.beliefs()) == 1
     finally:
         await engine.aclose()
 
@@ -1097,7 +1205,7 @@ async def test_build_engine_registers_no_calendar_source_without_a_path(
     registered on the path rather than unconditionally.
     """
     settings = Settings(embedder=EmbedderKind.HASHING)
-    engine = build_engine(settings, data_dir=tmp_path, grants=_calendar_grants())
+    engine = build_engine(settings, data_dir=tmp_path)
     try:
         assert not _calendar_sources(engine)
     finally:
@@ -1150,8 +1258,9 @@ async def test_a_granted_calendar_reaches_the_assembled_context_as_a_facet(
         embedder=EmbedderKind.HASHING,
         calendar_reader_path=_in_progress_calendar(tmp_path),
     )
-    engine = build_engine(settings, data_dir=tmp_path, grants=_calendar_grants())
+    engine = build_engine(settings, data_dir=tmp_path)
     try:
+        await _grant_the_calendar(engine)
         context = await engine._loop._context.assemble()
 
         assert context.calendar is not None
@@ -1177,7 +1286,7 @@ async def test_an_ungranted_calendar_reaches_the_context_as_nothing_at_all(
         embedder=EmbedderKind.HASHING,
         calendar_reader_path=_in_progress_calendar(tmp_path),
     )
-    engine = build_engine(settings, data_dir=tmp_path, grants=FakeSourceGrants())
+    engine = build_engine(settings, data_dir=tmp_path)
     try:
         context = await engine._loop._context.assemble()
 
@@ -1200,7 +1309,7 @@ async def test_the_two_consumers_hold_separate_reader_instances(
         embedder=EmbedderKind.HASHING,
         calendar_reader_path=_one_event_calendar(tmp_path),
     )
-    engine = build_engine(settings, data_dir=tmp_path, grants=_calendar_grants())
+    engine = build_engine(settings, data_dir=tmp_path)
     try:
         stage = engine._ingestion
         assert stage is not None
@@ -1247,7 +1356,7 @@ async def test_build_engine_wires_the_ingestion_stage_over_the_one_memory_store(
         embedder=EmbedderKind.HASHING,
         calendar_reader_path=_one_event_calendar(tmp_path),
     )
-    engine = build_engine(settings, data_dir=tmp_path, grants=_calendar_grants())
+    engine = build_engine(settings, data_dir=tmp_path)
     try:
         stage = engine._ingestion
         assert stage is not None
@@ -1271,8 +1380,9 @@ async def test_an_ingested_belief_is_readable_through_the_surface_the_user_has(
         embedder=EmbedderKind.HASHING,
         calendar_reader_path=_one_event_calendar(tmp_path),
     )
-    engine = build_engine(settings, data_dir=tmp_path, grants=_calendar_grants())
+    engine = build_engine(settings, data_dir=tmp_path)
     try:
+        await _grant_the_calendar(engine)
         report = await engine.ingest()
 
         assert report.source == "calendar"
@@ -1301,9 +1411,14 @@ async def test_a_configured_but_missing_source_fails_at_run_time_and_not_at_buil
         embedder=EmbedderKind.HASHING,
         calendar_reader_path=tmp_path / "nowhere.ics",
     )
-    engine = build_engine(settings, data_dir=tmp_path, grants=_calendar_grants())
+    engine = build_engine(settings, data_dir=tmp_path)
     try:
         assert engine._ingestion is not None
+        # Granted first, so the failure this reaches is the *read* rather than the
+        # gate: ADR-0097 §5 refuses before the source is resolved, so an ungranted
+        # engine would raise ``SourceNotGrantedError`` and prove nothing about a
+        # missing file.
+        await _grant_the_calendar(engine)
         with pytest.raises(ReaderError):
             await engine.ingest()
     finally:

@@ -651,7 +651,7 @@ class Settings(BaseSettings):
     data_dir: Path = Field(
         default_factory=lambda: Path.home() / _DEFAULT_DATA_DIRNAME,
         description=(
-            "Directory the hub owns exclusively: the five SQLite stores, the "
+            "Directory the hub owns exclusively: the six SQLite stores, the "
             "instance lock, and any transport-local artefact (ADR-0083 §1, §2). "
             "Must be absolute; it is canonicalised at load (ADR-0084 §1)."
         ),

@@ -25,7 +25,7 @@ from itertools import count
 from typing import TYPE_CHECKING
 
 import pytest
-from assistant_engine_contract import _TINY_LIMIT, AssistantEngineContract
+from assistant_engine_contract import _SOURCE, _TINY_LIMIT, AssistantEngineContract
 
 from ai_assistant.core.types import (
     ActionPlan,
@@ -43,6 +43,8 @@ from ai_assistant.orchestration import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     ConversationLifecycle,
     Engine,
+    GrantOperations,
+    HeldSource,
     LearningLoop,
     MemoryWriteStage,
     ObservationStage,
@@ -62,6 +64,7 @@ from ai_assistant.testing import (
     FakeMemoryWriter,
     FakeObserver,
     FakePlanStore,
+    FakeSourceGrantStore,
     FakeToolInvoker,
 )
 
@@ -75,6 +78,12 @@ AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
 RETENTION = timedelta(days=30)
 OBSERVATION_BATCH = 20
 OBSERVER_ROUTE = "anthropic:claude-opus-4-8"
+
+#: The one grantable identity the ``granting_engine`` fixture holds. It must equal
+#: the suite's own ``_SOURCE``: the suite names the source it grants, and a fixture
+#: holding a different one would make every clause below vacuously pass on an
+#: ungrantable name. Imported rather than repeated for that reason.
+_GRANTABLE = _SOURCE
 
 
 CAPABILITY = "send_email"
@@ -160,12 +169,21 @@ async def _succeeds(parameters: object, *, idempotency_key: str | None) -> None:
     """A tool that does nothing and succeeds."""
 
 
-def _wire(*, max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES, parks: bool = False) -> Engine:
+def _wire(
+    *,
+    max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+    parks: bool = False,
+    sources: Sequence[HeldSource] = (),
+) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
     ``parks`` swaps in a one-step plan over a tool the policy confirms, which is
     the only way to reach the resume path: parking is the permission stage's
     ruling and no call on the surface asks for it.
+
+    ``sources`` is what the composition root would have read off the readers it
+    built (ADR-0102 §7). Empty by default, which is the ordinary deployment: a
+    reader ships disabled, so nothing is grantable until one is configured.
     """
     # **The conversation store's clock advances**, because ADR-0074 §2's sort key
     # is activity and a frozen clock cannot express "more recently active" at all —
@@ -225,6 +243,15 @@ def _wire(*, max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES, parks: bool = F
         conversations=conversations,
         observation=observation,
         questions=questions,
+        # The **same** store object the drivers would be given, and the only holder
+        # of the wide seam (ADR-0097 §3). A second store here would let a grant land
+        # somewhere the gate never reads.
+        grant_operations=GrantOperations(
+            store=FakeSourceGrantStore(),
+            sources=sources,
+            id_factory=_counter("grant"),
+            clock=lambda: AT,
+        ),
         id_factory=_counter("tok"),
         max_payload_bytes=max_payload_bytes,
     )
@@ -247,6 +274,23 @@ class TestEngineContract(AssistantEngineContract):
     async def tiny_engine(self) -> AsyncIterator[AssistantEngine]:
         """The same implementation, with the limit small enough to reach."""
         built = _wire(max_payload_bytes=_TINY_LIMIT)
+        await built.start()
+        try:
+            yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def granting_engine(self) -> AsyncIterator[AssistantEngine]:
+        """One wired engine holding a single grantable source with a location.
+
+        The source is handed in the way ADR-0102 §7 says a real one arrives — read
+        off a reader the composition root built — rather than registered through the
+        surface, which has no such operation and must not grow one: what may be
+        granted is a property of what was built, and a surface that could add to it
+        would be a free-text route into the store by another name.
+        """
+        built = _wire(sources=[HeldSource(_GRANTABLE, location="/srv/calendar.ics")])
         await built.start()
         try:
             yield built

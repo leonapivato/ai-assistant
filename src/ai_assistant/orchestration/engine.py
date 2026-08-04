@@ -115,8 +115,11 @@ from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     check_arguments,
     check_payload,
+    grant_scope,
     identifier,
+    non_blank_text,
     page_argument,
+    positive_page_argument,
 )
 from ai_assistant.orchestration.questions import question_state
 
@@ -134,14 +137,19 @@ if TYPE_CHECKING:
         EncodableText,
         FeedbackEvent,
         FrozenJsonMapping,
+        GrantableSource,
+        GrantScope,
         Identifier,
         MemoryRecord,
+        NonBlankEncodableText,
         ObservationReport,
         PermissionDecision,
         Question,
+        SourceGrant,
         TurnResult,
     )
     from ai_assistant.orchestration.conversations import ConversationLifecycle
+    from ai_assistant.orchestration.grants import GrantOperations
     from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
     from ai_assistant.orchestration.loop import LearningLoop
     from ai_assistant.orchestration.observation import ObservationStage
@@ -575,6 +583,7 @@ class Engine:
         conversations: ConversationLifecycle,
         observation: ObservationStage,
         questions: QuestionStage,
+        grant_operations: GrantOperations,
         ingestion: IngestionStage | None = None,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
@@ -674,6 +683,30 @@ class Engine:
                 ``conversations`` is: an engine that could be built without it is an
                 engine where a deferred question reaches nobody, which is the exact
                 failure ADR-0078 exists to end.
+            grant_operations: The four grant operations (ADR-0102 §1, §7) — the
+                **only** object in the system holding a
+                :class:`~ai_assistant.core.protocols.SourceGrantStore` (ADR-0097
+                §3, §9), which is why it is injected rather than assembled here.
+                The façade delegates ``grantable_sources``, ``grant``, ``revoke``
+                and ``recent_grants`` to it, keeping this class's own job the
+                argument validation, the size measurement and the drain-tracking
+                every other method on the surface gets.
+
+                **Required, where ``ingestion`` below is optional, and the
+                asymmetry is the Protocol.** These four are ``AssistantEngine``
+                methods and the shared conformance suite runs against this class,
+                so an engine that could be built without them is one whose surface
+                is conditionally present — which is what ADR-0102 §7's "no
+                production path may build an engine with the store unopened" is
+                aimed at. Its sibling stages ``conversations``, ``observation`` and
+                ``questions`` are required for the same reason.
+
+                **Spelled ``grant_operations`` and not ``grants``** because
+                ``grants`` already means a
+                :class:`~ai_assistant.core.protocols.SourceGrants` on every driver
+                in this package, and ADR-0102 §2 records that reusing a word for a
+                different type one constructor over is how two things come to be
+                confused at a glance.
             ingestion: The read-only ingestion stage (ADR-0093 §6), or ``None``
                 where this deployment configured no source. It writes through the
                 *same* write stage the learn leg and ``observation`` use — the
@@ -779,6 +812,7 @@ class Engine:
         self._conversations = conversations
         self._observation = observation
         self._questions = questions
+        self._grants = grant_operations
         self._ingestion = ingestion
         self._closers = tuple(closers)
         self._id_factory = id_factory
@@ -959,9 +993,17 @@ class Engine:
             RuntimeError: If the engine is shutting down. The scheduler treats this
                 as *stop* rather than as a job failure (ADR-0083 §8), which is what
                 :data:`ENGINE_SHUTTING_DOWN` exists for.
-            ConfigurationError: If this engine was built with no ingestion stage —
-                no configured reader, or no grant seam to gate it on (ADR-0097 §5,
-                §9). Refusing is the point: an empty report would be
+            ConfigurationError: If this engine was built with no ingestion stage,
+                which after ADR-0102 §7 means exactly one thing: no configured
+                reader. **The message named two conditions until ADR-0102**, the
+                second being "no grant seam to gate it on" — a real state while
+                nothing could construct a ``SourceGrantStore`` and ``build_engine``
+                took a ``grants`` parameter its one production caller never filled
+                (#684). ``build_engine`` now opens the store itself, so an engine
+                either has a grant seam or does not build, and naming that
+                condition here would send an operator looking for something that
+                cannot be missing. Refusing is still the point: an empty report
+                would be
                 indistinguishable from a source that had nothing to say, so a
                 deployment whose stage failed to wire would look healthy forever
                 while ingesting nothing — the shape ADR-0022 §4a refuses, and the
@@ -994,8 +1036,9 @@ class Engine:
         if self._ingestion is None:
             msg = (
                 "no ingestion stage is wired, so there is nothing to ingest; it "
-                "needs both a configured source (ASSISTANT_CALENDAR_READER_PATH, "
-                "ADR-0093 §7a) and a grant seam to gate the read (ADR-0097 §5)"
+                "needs a configured source (ASSISTANT_CALENDAR_READER_PATH, "
+                "ADR-0093 §7a). Configuration says where a source is; a grant says "
+                "whether it may be read, and neither stands in for the other"
             )
             raise ConfigurationError(msg)
         return await self._tracked(self._ingestion.ingest())
@@ -1813,6 +1856,105 @@ class Engine:
             if pending is None:
                 self._parked.pop(handle, None)
 
+    # --- the grant surface (ADR-0102 §1) -----------------------------------
+
+    async def grantable_sources(self) -> tuple[GrantableSource, ...]:
+        """Enumerate what the user may grant, with each source's current state.
+
+        Delegated whole to the grant operations (ADR-0102 §7); what this layer adds
+        is the drain tracking and the result measurement every read on this surface
+        gets. The **one** place a frame size decides whether a source can be granted
+        at all is here (ADR-0102 §10): this response carries §6's disclosure, and a
+        deployment whose configured path does not fit its configured frame has a
+        source it can enumerate nothing about and therefore may not grant, even
+        though ``grant``'s own request and result would fit. The blast radius is the
+        whole response rather than the one row, because ADR-0085 §8c bounds the
+        *payload*; raising ``hub_max_frame_bytes`` is the operator's remedy and the
+        only one offered.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            GrantError: If the grant store cannot be read.
+            OversizedValueError: If the enumeration does not fit the contract limit.
+        """
+        self._reject_if_closing()
+        return self._checked(
+            await self._tracked(self._grants.grantable_sources()), "grantable_sources"
+        )
+
+    async def grant(
+        self, source: NonBlankEncodableText, *, scope: Sequence[GrantScope]
+    ) -> SourceGrant:
+        """Record the user's grant of one source for the uses ``scope`` names.
+
+        **Argument validation happens here and admission happens below**, in that
+        order, and neither substitutes for the other (ADR-0102 §4). ``source`` is
+        refused blank or unwritable and **normalised by nothing** — the whole point
+        of :data:`~ai_assistant.core.types.NonBlankEncodableText` on this argument
+        (ADR-0102 §2) — and ``scope`` is materialised before the first ``await`` and
+        refused empty or duplicated. Both are local refusals before any I/O
+        (ADR-0085 §9), so a wire client refuses exactly what this refuses.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``source`` is blank or unwritable, or ``scope`` is empty
+                or names a use twice.
+            TypeError: If a ``scope`` member is not a ``GrantScope``.
+            UngrantableSourceError: If the validated source is not admissible.
+            GrantError: If the store cannot be read or written.
+            InvalidGrantError: If the store refused the record.
+            OversizedValueError: If the arguments or the record exceed the limit.
+        """
+        self._reject_if_closing()
+        named = non_blank_text(source, name="source")
+        uses = grant_scope(scope, name="scope")
+        check_arguments("grant", max_bytes=self._max_payload_bytes, source=named, scope=uses)
+        return self._checked(await self._tracked(self._grants.grant(named, scope=uses)), "grant")
+
+    async def revoke(self, source: NonBlankEncodableText) -> SourceGrant | None:
+        """Withdraw the live grant on one source, or report that there was none.
+
+        **No admission check, deliberately** (ADR-0102 §4): revocation is the user's
+        whole remedy under ADR-0097 §6, and a check here would make a grant whose
+        reader was later unconfigured permanently unrevokable. Only the argument
+        validation above applies.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``source`` is blank or unwritable.
+            GrantError: If the store cannot be read or written.
+            InvalidGrantError: If the store refused the revoking record.
+            OversizedValueError: If the argument or the record exceeds the limit.
+        """
+        self._reject_if_closing()
+        named = non_blank_text(source, name="source")
+        check_arguments("revoke", max_bytes=self._max_payload_bytes, source=named)
+        return self._checked(await self._tracked(self._grants.revoke(named)), "revoke")
+
+    async def recent_grants(self, *, limit: int = DEFAULT_PAGE_SIZE) -> tuple[SourceGrant, ...]:
+        """List what the user granted and withdrew, newest first (ADR-0097 §6).
+
+        ``limit`` is refused when it is **not strictly positive**, which is stricter
+        than every other paging method on this surface and is ADR-0102 §10's own
+        clause: ADR-0085 §9 admits ``[0, 2**63)`` and ``SourceGrantStore.recent``
+        requires a positive limit, so ``limit=0`` is well-formed under the surface
+        rule and refused by the store — and §9 forbids either implementation from
+        being silently more permissive than the other.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+            GrantError: If the store cannot be read.
+            OversizedValueError: If the page exceeds the contract limit.
+        """
+        self._reject_if_closing()
+        positive_page_argument(limit, name="limit")
+        check_arguments("recent_grants", max_bytes=self._max_payload_bytes, limit=limit)
+        return self._checked(
+            await self._tracked(self._grants.recent_grants(limit=limit)), "recent_grants"
+        )
+
     async def aclose(self) -> None:
         """Stop accepting work, drain what is in flight, then close owned resources.
 
@@ -1912,7 +2054,7 @@ class Engine:
 
         * **Cancelling is not abandoning.** ADR-0054 makes a cancelled store call
           keep its connection until its worker thread physically finishes and
-          re-raise only then, uniformly across all five stores. So a cancelled
+          re-raise only then, uniformly across all six stores. So a cancelled
           task's ``CancelledError`` arrives *after* the connection is free, and
           awaiting it is still ADR-0042 §2's "awaits every tracked underlying
           operation to quiescence… before closing", satisfied literally.

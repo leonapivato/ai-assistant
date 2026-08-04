@@ -4994,9 +4994,13 @@ class ToolCall(BaseModel):
 
 
 # --- the promoted engine surface (ADR-0084 §4, ADR-0085) ---------------------
-# The twenty-four types :class:`~ai_assistant.core.protocols.AssistantEngine`'s
-# fifteen methods name, and the complete transitive closure of what their fields
-# reach (ADR-0085 §5). They lived in `orchestration` while one concrete engine
+# The twenty-five types :class:`~ai_assistant.core.protocols.AssistantEngine`'s
+# nineteen methods name, and the complete transitive closure of what their fields
+# reach (ADR-0085 §5). ADR-0085 promoted twenty-four for fifteen methods; ADR-0102
+# §3 adds `GrantableSource` for the four grant operations, and §13 records why
+# ADR-0085 §1's "and nothing else" is not thereby falsified — what that exclusion
+# excludes is *lifecycle*, and the closed graph its title claims is preserved
+# rather than moved. They lived in `orchestration` while one concrete engine
 # and one class of consumer was the whole story (ADR-0042 §1); ADR-0084 §5 rules
 # that a client satisfying the same surface over a transport *is* the second
 # implementation ADR-0042's own revisit clause named, so the surface is a
@@ -6103,3 +6107,83 @@ class ObservationReport(BaseModel):
     def discarded(self) -> int:
         """How much was thrown away in total, by the producer and by the write path."""
         return self.discarded_unusable + self.discarded_over_limit + self.dropped_unsupported
+
+
+class GrantableSource(BaseModel):
+    """One source a user may grant, and what is currently true of it (ADR-0102 §3).
+
+    What ``AssistantEngine.grantable_sources`` returns one of per held reader, so a
+    client "offers a choice among declared identities rather than a free-text field"
+    (ADR-0097 §9). Three fields and no fourth.
+
+    **:attr:`live` is computed hub-side, from the store, and no client may derive a
+    grant's liveness from ``recent_grants``** (§3). The derivation is *unsound*
+    rather than merely redundant: ADR-0097 §4 derives liveness from the ``revokes``
+    relation alone and never refuses a revocation for its timestamp, "including one
+    that predates the grant it revokes". ``recent`` orders newest-first by
+    ``decided_at``, so after a clock correction a revoking record can sort *below*
+    the grant it revokes and fall outside a page that contains it — and a client
+    walking that page would report a withdrawn grant as live, on the one question
+    this contract exists to get right, only on the deployment where a clock moved.
+
+    **A fourth field was considered and refused.** An earlier draft carried
+    ``grantable: bool`` so a reader whose declared name is inadmissible (§4) could
+    be listed as unavailable rather than absent. It is surface with no consumer —
+    the refusal ADR-0045 §1, ADR-0028 §7 and ADR-0092 §10 each made: a
+    non-admissible declared name is a defect in a reader, not a state a user can act
+    on, and every user-visible consequence is already carried by the enumeration
+    omitting it and by §4's refusal naming it. The diagnosis goes to the operator
+    log, where ADR-0097 §8's refusal line already goes.
+
+    **The closure stays closed** (ADR-0085 §5). Walking the declared field types:
+    :data:`Identifier` and :data:`EncodableText` are `core` aliases, and
+    :class:`SourceGrant` is a `core` model whose own fields reach
+    :data:`DurableIdentifier`, :data:`Identifier`, :class:`GrantScope` and
+    :data:`UtcInstant` — all `core`. Nothing new leaves `core` and ``lint-imports``
+    sees no new edge.
+
+    Attributes:
+        source: The reader's declared identity, and the only value ``grant`` admits
+            for this source (§4). :data:`Identifier` rather than
+            :data:`NonBlankEncodableText` because this is constructed **hub-side**
+            from a name §4 has already required to equal its own ``str.strip()``, so
+            the normalising validator is a no-op on every value that can reach it —
+            unlike ``grant``'s *argument*, where normalising one layer below the
+            comparison is what ADR-0102 §2 refuses.
+        location: The source's current configured location, or ``None``. **This
+            field is the only place in the system that carries it** (§6): it is
+            computed per call, never written to a :class:`SourceGrant`, never
+            returned by ``recent_grants``, never written to a log record and never
+            persisted. ``None`` means the source has **no** configured location at
+            all — a location that exists and cannot be encoded makes the source
+            ungrantable rather than making this ``None``, because the alternative
+            offers a source no conforming client may grant (§6).
+        live: The grant covering this source at the moment the response was
+            computed, or ``None``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: Identifier = Field(
+        description=(
+            "The reader's declared identity — the value "
+            ":attr:`~ai_assistant.core.protocols.Reader.name` returns, and the only "
+            "value ``grant`` admits for this source (ADR-0102 §4)."
+        )
+    )
+    location: EncodableText | None = Field(
+        default=None,
+        description=(
+            "Where this source currently reads from, for the user to see before "
+            "they grant, and ``None`` only where nothing is configured. Held by no "
+            "durable record anywhere (ADR-0097 §9a, ADR-0102 §6)."
+        ),
+    )
+    live: SourceGrant | None = Field(
+        default=None,
+        description=(
+            "The grant covering this source when the response was computed, or "
+            "``None``. Computed hub-side from the store; never derived by a client "
+            "from ``recent_grants`` (ADR-0102 §3)."
+        ),
+    )

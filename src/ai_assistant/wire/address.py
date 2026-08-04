@@ -11,7 +11,7 @@ which is what makes "the same field" mean the same directory.
 **The path is length-checked at startup, and this closes #554.** A pathname
 ``AF_UNIX`` socket is bounded by ``sun_path``, and a perfectly writable, perfectly
 valid data directory can have a path no socket can be bound inside. Left unchecked
-that failure lands at ADR-0083 §3's **step 6** — after the lock is held, the five
+that failure lands at ADR-0083 §3's **step 6** — after the lock is held, the six
 stores are open and the start-up sweeps have run — "the latest and least legible
 moment available, and a hub that is down for a reason buried in a ``bind`` errno is
 ruling 4's failure".

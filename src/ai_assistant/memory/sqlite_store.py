@@ -15,7 +15,7 @@ against a second *process* on the same file and not merely against another
 coroutine on this loop. This is the discipline the other four SQLite stores
 already keep, and ADR-0083 §12 rules its adoption here **consistency work rather
 than a defect fix**: under the hub's exclusivity there is one writing process, so
-worth doing so five stores read the same way, not worth blocking the hub on. The
+worth doing so six stores read the same way, not worth blocking the hub on. The
 section also names the one condition that makes it urgent again — exclusivity
 being relaxed — which is the case ``tests/memory/test_sqlite_store.py``'s forked
 cases construct deliberately. Journal mode is untouched: ADR-0083 §12 defers WAL

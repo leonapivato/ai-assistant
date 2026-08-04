@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from io import StringIO
+from itertools import count
 from typing import TYPE_CHECKING
 
 import pytest
@@ -39,6 +40,7 @@ from ai_assistant.core.types import (
     ExecutionState,
     FeedbackEvent,
     FeedbackKind,
+    GrantScope,
     Idempotency,
     IngestSummary,
     LearnDecision,
@@ -68,6 +70,8 @@ from ai_assistant.interfaces import cli
 from ai_assistant.orchestration import (
     ConversationLifecycle,
     Engine,
+    GrantOperations,
+    HeldSource,
     LearningLoop,
     MemoryWriteStage,
     ObservationStage,
@@ -77,6 +81,7 @@ from ai_assistant.orchestration import (
 )
 from ai_assistant.testing import (
     FakeActionPolicy,
+    FakeAssistantEngine,
     FakeAuditTrail,
     FakeContextProvider,
     FakeConversationStore,
@@ -87,6 +92,7 @@ from ai_assistant.testing import (
     FakeMemoryWriter,
     FakeObserver,
     FakePlanStore,
+    FakeSourceGrantStore,
     FakeToolInvoker,
 )
 from ai_assistant.wire.address import sun_path_limit
@@ -98,6 +104,30 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
 
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+
+
+def _grant_ids() -> Callable[[], str]:
+    """Ids that differ per call, so a second record is never a duplicate."""
+    numbers = count(1)
+    return lambda: f"grant-{next(numbers)}"
+
+
+def _grant_operations(sources: Sequence[HeldSource] = ()) -> GrantOperations:
+    """The grant collaborator every ``Engine`` needs (ADR-0102 §7).
+
+    Required rather than optional on the façade, like ``questions`` and
+    ``observation``: the four grant methods are on the Protocol, so an engine that
+    could be built without them is one whose surface is conditionally present. Empty
+    ``sources`` is the ordinary deployment — a reader ships disabled, so nothing is
+    grantable until one is configured (ADR-0093 §7).
+    """
+    return GrantOperations(
+        store=FakeSourceGrantStore(),
+        sources=sources,
+        id_factory=_grant_ids(),
+        clock=lambda: AT,
+    )
+
 
 #: The route the harness's observation stage reports (ADR-0077 §3). In production
 #: the composition root supplies it from ``Settings``; here it is fixed so a case
@@ -220,6 +250,7 @@ def _engine(
     )
     conversations = FakeConversationStore(now=lambda: AT)
     return Engine(
+        grant_operations=_grant_operations(),
         loop=loop,
         runner=runner,
         plans=plans,
@@ -1315,6 +1346,7 @@ def _conversation_engine() -> tuple[Engine, FakeConversationStore]:
     )
     conversations = FakeConversationStore(now=lambda: AT)
     engine = Engine(
+        grant_operations=_grant_operations(),
         loop=loop,
         runner=runner,
         plans=plans,
@@ -2490,3 +2522,230 @@ def test_every_non_successful_status_reads_as_one(
     assert headline in rendered
     assert "the tool raised" in rendered
     assert "Done" not in rendered
+
+
+# --- the grant surface (ADR-0102 §1, §6, §9) --------------------------------
+# Two of these clauses are the *client's* and are unenforceable from the hub's
+# side (ADR-0098 §5): §6's disclosure-before-grant, and §9's rule about what a
+# revocation may be said to have done. ADR-0102 §12's client lane owes exactly
+# these tests, and they can live nowhere else.
+
+
+def _granting_engine(*, location: str | None = "/srv/calendar.ics") -> FakeAssistantEngine:
+    """A fake hub holding one grantable source, granted by nothing yet."""
+    engine = FakeAssistantEngine()
+    engine.hold_source("calendar", location=location)
+    return engine
+
+
+def test_sources_lists_each_source_with_where_it_reads_from(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0097 §9: a client offers a choice among declared identities.
+
+    And the location is rendered, because this response is the only place it exists
+    (ADR-0102 §6) — a listing that hid it would leave the user choosing between
+    names with nothing to judge.
+    """
+    _wire(monkeypatch, _granting_engine())
+
+    result = CliRunner().invoke(cli.app, ["sources"])
+    assert result.exit_code == 0
+    rendered = output.getvalue()
+    assert "calendar" in rendered
+    assert "/srv/calendar.ics" in rendered
+    assert "not granted" in rendered
+
+
+def test_grant_shows_the_location_before_it_asks_and_sends_nothing_if_refused(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0102 §6's third clause, in the order that is the whole of it.
+
+    **The location is rendered before consent is taken**, and a refusal sends no
+    ``grant`` at all. The two halves are asserted together because either alone is
+    satisfiable by a wrong implementation: one that asked first and rendered after
+    would pass a "the path appears" check, and one that rendered and granted
+    regardless would pass an "it was shown" check.
+    """
+    engine = _granting_engine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["grant", "calendar", "--scope", "facet"], input="n\n")
+    assert result.exit_code == 0
+    rendered = output.getvalue()
+    assert "/srv/calendar.ics" in rendered
+    assert not [call for call in engine.calls if call[0] == "grant"]
+    assert not engine.grants_recorded
+
+
+def test_grant_records_the_grant_once_the_user_agrees(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The discriminating half: the refusal above is about the answer, not the flow."""
+    engine = _granting_engine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(
+        cli.app, ["grant", "calendar", "--scope", "facet", "--scope", "ingest"], input="y\n"
+    )
+    assert result.exit_code == 0
+    assert [record.scope for record in engine.grants_recorded] == [
+        (GrantScope.FACET, GrantScope.INGEST)
+    ]
+    assert "Granted" in output.getvalue()
+
+
+def test_yes_supplies_the_answer_and_never_the_rendering(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0073 §5's rule, applied to consent for a *read* rather than a deletion.
+
+    A non-interactive approval must not connect a source the user never saw: `--yes`
+    answers the question, and ADR-0102 §6's disclosure happens either way. This is
+    the case a "skip the prompt" flag gets wrong by skipping the render with it.
+    """
+    _wire(monkeypatch, _granting_engine())
+
+    result = CliRunner().invoke(cli.app, ["grant", "calendar", "--scope", "facet", "--yes"])
+    assert result.exit_code == 0
+    assert "/srv/calendar.ics" in output.getvalue()
+
+
+def test_a_source_the_enumeration_does_not_carry_is_never_granted(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0102 §6: "a client that cannot show the user the location does not send grant".
+
+    The hub would refuse this call anyway — that is §4, and the shared conformance
+    suite holds it. What is asserted here is the *client's* half: nothing is sent at
+    all, so the rule holds for the case where the hub's refusal is not what stops
+    it — a reader whose configured location has no UTF-8 encoding, which is absent
+    from the enumeration for a reason the client cannot see and must not guess at.
+    """
+    engine = _granting_engine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["grant", "notes", "--scope", "facet", "--yes"])
+    assert result.exit_code == 1
+    assert not [call for call in engine.calls if call[0] == "grant"]
+    rendered = output.getvalue()
+    assert "cannot offer" in rendered
+    assert "calendar" in rendered  # the remedy is the list, not an echo
+
+
+def test_a_source_with_no_configured_location_says_so_and_is_still_grantable(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0102 §6: ``None`` means nothing is configured, so the obligation is vacuous.
+
+    Said plainly rather than rendered as a blank, because "reads from:" followed by
+    nothing is the shape a user reads as a bug — and this is the case a client must
+    distinguish from a source that is absent altogether.
+    """
+    engine = _granting_engine(location=None)
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["grant", "calendar", "--scope", "facet", "--yes"])
+    assert result.exit_code == 0
+    assert "no configured location" in output.getvalue()
+    assert len(engine.grants_recorded) == 1
+
+
+def test_revoke_neither_prompts_nor_enumerates_first(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0102 §4: nothing may stand between the user and their remedy.
+
+    **No prompt**, because revoking destroys nothing and is not the ceremony
+    ADR-0073 §5 requires of a deletion. **No enumeration**, because that would
+    reintroduce client-side exactly the admission check §4 removed — and would fail
+    for the one case the removal exists for: a grant whose reader has since been
+    unconfigured, which is unrevokable the moment anything checks.
+    """
+    engine = _granting_engine()
+    engine.hold_grant("calendar", scope=[GrantScope.FACET])
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["revoke", "calendar"])
+    assert result.exit_code == 0
+    assert [call[0] for call in engine.calls] == ["revoke"]
+    assert "Withdrawn" in output.getvalue()
+
+
+def test_revoke_never_claims_to_have_stopped_a_read(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0102 §9, and the sentence a person writes is the one being refused.
+
+    "Your calendar is no longer being read" overclaims: ADR-0097 §5a guarantees
+    every read is authorised at the instant it *starts*, and a read already running
+    completes on a worker nothing can stop. What is true is that no further read
+    starts and nothing a running read produces is used, and the corpus explicitly
+    declines to promise more — so the client may not either.
+    """
+    engine = _granting_engine()
+    engine.hold_grant("calendar", scope=[GrantScope.FACET])
+    _wire(monkeypatch, engine)
+
+    CliRunner().invoke(cli.app, ["revoke", "calendar"])
+    rendered = output.getvalue().lower()
+    assert "no further read" in rendered
+    assert "still running" in rendered
+    assert "no longer being read" not in rendered
+
+
+def test_revoking_what_is_not_granted_says_so_without_claiming_anything_about_reads(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0102 §9: ``None`` is not silence about reads either.
+
+    It means the source had no live grant at the moment the operation ran, and says
+    nothing about what was or was not happening — so "nothing was happening" would
+    invent the same overclaim from the other side.
+    """
+    _wire(monkeypatch, _granting_engine())
+
+    result = CliRunner().invoke(cli.app, ["revoke", "calendar"])
+    assert result.exit_code == 1
+    rendered = output.getvalue().lower()
+    assert "nothing to withdraw" in rendered
+    assert "nothing was happening" not in rendered
+
+
+def test_grants_lists_both_acts_and_points_liveness_elsewhere(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0097 §6 and ADR-0102 §3.
+
+    Both acts are on the record because revoking is an **append**, and the listing
+    must not be read as a standing: ADR-0097 §4 permits a revocation timestamped
+    before the grant it revokes, so a page ordered by ``decided_at`` can put the two
+    out of order. Pointing at ``assistant sources`` is what keeps that a display
+    oddity rather than a wrong answer.
+    """
+    engine = _granting_engine()
+    granted = engine.hold_grant("calendar", scope=[GrantScope.FACET])
+    engine.hold_grant("calendar", scope=[GrantScope.FACET], revokes=granted.id)
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["grants"])
+    assert result.exit_code == 0
+    rendered = output.getvalue()
+    assert "granted" in rendered
+    assert "withdrew" in rendered
+    assert "assistant sources" in rendered
+
+
+def test_a_non_positive_grants_limit_is_a_usage_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR-0102 §10: the store requires a strictly positive limit.
+
+    Caught at Typer's parse boundary, so it is exit code 2 rather than a
+    ``ValueError`` escaping the command's error boundary as a traceback — the same
+    treatment ``--limit 0`` gets nowhere else on this surface, because nowhere else
+    is 0 illegal.
+    """
+    _wire(monkeypatch, _granting_engine())
+
+    result = CliRunner().invoke(cli.app, ["grants", "--limit", "0"])
+    assert result.exit_code == 2
