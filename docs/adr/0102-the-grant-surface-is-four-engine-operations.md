@@ -834,6 +834,22 @@ read as the Protocol *change* it is rather than a new triad):
    surrounding whitespace is refused rather than matched — written against the
    **wire** implementation as well, since that is the one the argument annotation
    could have normalised (§2).
+
+   > **Normative.** The suite pins §3's second clause with the case that
+   > distinguishes a stated liveness from a derived one: a grant recorded at one
+   > instant and revoked by a record whose `decided_at` is **earlier** than the
+   > grant's leaves `grantable_sources` answering `live=None` for that source,
+   > while `recent_grants` still returns both records.
+
+   **That case is the whole of §3's second clause and nothing else reaches
+   it.** ADR-0097 §4 permits a revocation timestamped before the grant it
+   revokes and derives liveness from `revokes` alone, so an implementation that
+   computed `live` by walking a `recent_grants` page ordered by `decided_at`
+   would return the revoked grant as live — and would pass every other clause in
+   this list, because every other clause is about admission, refusal or paging.
+   Written as a required case rather than left to the prose above for the reason
+   ADR-0097 §10 required its own fakes to be scriptable: a test that cannot reach
+   the code a clause forbids is worse than no test.
 3. **The canonical fake gains the four methods**, scriptable to hold grantable
    sources with and without a location and with and without a live grant, so a
    client's own refusal paths are reachable from a test.
