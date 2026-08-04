@@ -327,9 +327,8 @@ conveyance must have; the lane that finally lands still owns the phrasing of bot
 ### 3. Instructions inside external content are data, and external content may not be the authority for an action
 
 > **Normative.** Imperative text inside external content is **data**. No component
-> of this system acts on it as an instruction: it may not select a code path, set or
-> alter a parameter, change a policy decision, or determine what any subsequent call
-> does.
+> of this system acts on a **recorded external span** as an instruction: the span
+> may not select a code path, set or alter a parameter, or change a policy decision.
 
 > **Normative.** External content is never placed in a message the prompt's own
 > structure attributes to the system or to the user — never in a `Role.SYSTEM`
@@ -337,11 +336,22 @@ conveyance must have; the lane that finally lands still owns the phrasing of bot
 > own words. This is §2's obligation read on position rather than on labelling, and
 > both must hold.
 
-**Neither clause obliges anyone to guarantee how a model behaves, and an earlier
-draft of both did.** They said that "no consumer of this system treats it as an
-instruction" and that no prompt places content "where a **model would read it** as
-an instruction" — conditions whose truth depends on an inference nobody can make
-deterministically, over a `Message.content` that is one undifferentiated string.
+**Both clauses are stated on the *span* — the text whose origin is recorded — and
+earlier drafts of both reached past it.** They said that "no consumer of this system
+treats it as an instruction" and that no prompt places content "where a **model
+would read it** as an instruction" — conditions whose truth depends on an inference
+nobody can make deterministically, over a `Message.content` that is one
+undifferentiated string. A third draft of the first clause still forbade a span from
+determining "what any subsequent call does", which is the same overreach one hop
+further out: once a planner's model has read a span and returned an `ActionPlan`,
+tool selection receives the model's output and not the span, and §5 establishes that
+nothing recovers the link. Architecture review named that on round 3, and the limb
+was removed rather than qualified — an unbounded transitive prohibition over a
+relation nobody can evaluate is not a weaker rule than the direct one, it is an
+unenforceable one wearing the direct one's clothes. **The indirect case is not left
+uncovered; it is covered by the things that do not need the link**: §4's ceilings on
+what the resulting belief may become, and this section's actuator clause on what may
+authorise an action.
 Adversarial review found it on round 2, and it is the same defect the architecture
 reviewer found in this section's actuator clause on round 1: **a bound stated over
 something this system cannot obtain.** That is the discipline §5's clause and §6's
