@@ -908,12 +908,21 @@ support.
   different weight: **origin at all** — enough for a surface to know a span is not
   the assistant's, which is §7's safety half and which `Retirement` lacks entirely —
   and **which source**, which is §8's legibility half and which `Question` lacks.
-  Neither is reachable as a live defect today: nothing on `main` routes an external
-  span into either without something beside it in the same view that says where it
-  came from. **Fires with the ADR that next revises either**, and with the second
-  reader, which is the moment "attested" stops identifying the source by
-  elimination — ADR-0093 §11's trigger for the source registry and the display
-  label, and plausibly one decision with them.
+  **`Retirement`'s gap is live, not deferred, and an earlier draft of this bullet
+  said the opposite.** That draft claimed neither was reachable without something
+  beside it naming the origin; adversarial review falsified it on round 9 and the
+  path is short. Arm the calendar reader, then assert something that conflicts with
+  both an attested entry and an earlier assertion: `DefaultMemoryPolicy` rules
+  `ASK_USER` on the prior assertion, `QuestionStage` resolves **every** frozen
+  conflict into `Retirement(record_id, content)`, and `interfaces.cli` renders each
+  as `_safe(retirement.content)` with the id — no band, no source, nothing. The
+  question's own `band` describes the *proposal*, not the retirements, so there is
+  no marker beside it either. Verified in `orchestration/questions.py` and
+  `interfaces/cli.py`. **Filed as #673, and it fires now** rather than on a future
+  revision. `Question`'s missing `reported_by` is the weaker, genuinely deferred
+  half: it **fires with the second reader**, when "attested" stops identifying the
+  source by elimination — ADR-0093 §11's trigger for the source registry and the
+  display label, and plausibly one decision with them.
 - **A presentation state for an inference that rests on external evidence.** Not a
   §7 case — §1 makes external content a property of a span's recorded origin, and a
   derived proposal's text is the assistant's own — but a real legibility question:
