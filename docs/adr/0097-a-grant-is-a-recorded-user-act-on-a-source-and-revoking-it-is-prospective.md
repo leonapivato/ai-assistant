@@ -825,9 +825,9 @@ only defect is their date.
 
 > **Normative.** The grant operation accepts a `source` **only** when it equals
 > the declared `name` of a `Reader` the hub holds. A source naming no such reader
-> is refused, and no `SourceGrant` is constructed from it. The operation also
-> answers what the grantable sources are, so a client offers a choice among
-> declared identities rather than a free-text field.
+> is refused, and no `SourceGrant` is constructed from it. A companion **preview**
+> operation answers what the grantable sources are (§9a), so a client offers a
+> choice among declared identities rather than a free-text field.
 
 > **Normative.** A refusal under the clause above names no path and echoes no
 > caller-supplied string beyond what the client already sent, so a mistyped value
@@ -877,12 +877,27 @@ beliefs indistinguishable by `reported_by`, with or without this ADR.
 
 **Two things follow, and both are decided here rather than left open.**
 
-> **Normative.** The client renders, at the moment of granting, the source's
-> **current configured location**, so the user grants an informed act rather than a
-> bare name. That value is shown to the user and is **never** written to the grant,
-> never logged, and never exported — it is the user's own data rendered back to
-> them on their own machine, which is not the disclosure ADR-0004 §5 and ADR-0093
-> §7 forbid.
+> **Normative.** The grant surface offers a distinct, read-only **preview**
+> operation — the same one §9 requires to answer what the grantable sources are —
+> whose response carries, per grantable source, its declared identity and its
+> **current configured location**. A client renders that at the moment of granting,
+> so the user grants an informed act rather than a bare name.
+
+> **Normative.** The preview response is the **only** place a source's configured
+> location crosses the wire or leaves the hub. It is not persisted, not logged, not
+> carried on any `SourceGrant`, and not returned by the operation that records a
+> grant, by a grant listing, by `recent` or by `export`.
+
+**A transient carrier is named because the alternative is unimplementable, and an
+earlier draft of this clause was.** A wire client holds no `Reader` and no
+`Settings` — §9 puts both hub-side — so "the client renders the location" and "the
+location appears in no response" cannot both hold. The resolution is not to weaken
+the prohibition but to say *which* response may carry it, once, for the purpose it
+is for. Reading the user's own configuration back to the user over ADR-0084 §1's
+`0600` Unix socket discloses it to nobody, which is why the preview is admissible
+at all; what ADR-0004 §5 and ADR-0093 §7 forbid is the value coming to rest — in a
+log, on a durable record, in an export — and the second clause is exactly that
+prohibition, now stated over the places it can actually reach.
 
 > **Normative.** A grant is keyed to a source **identity**, so repointing a
 > configured reader at a different location leaves the existing grant standing over
@@ -1207,9 +1222,10 @@ surface:
 
   > **Normative.** The grant lane's tests pin the disclosure's boundary against a
   > reader whose configured location is a recognisable path: it appears in the
-  > grant prompt, and it appears **nowhere else** — not in any log record the
-  > operation emits, not on the constructed `SourceGrant`, not in the operation's
-  > return value, and not in any grant listing, `recent` or `export` result.
+  > **preview** response, and it appears **nowhere else** — not in any log record
+  > the lane emits, not on the constructed `SourceGrant`, not in the return value
+  > of the operation that records the grant, and not in any grant listing, `recent`
+  > or `export` result.
 
 **What later lanes owe, and this ADR does not:** the `permissions/` implementation
 and its schema; the two caller-side gates, their required `SourceGrants`
