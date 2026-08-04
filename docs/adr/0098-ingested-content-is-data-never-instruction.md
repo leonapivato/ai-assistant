@@ -567,8 +567,11 @@ implied.
 ### 7. The escalation surface is a rendering target too
 
 > **Normative.** A surface that presents a proposal, a question, a ruling, or a
-> belief to the user renders any external span within it under §2's non-forgeability
-> property, read against that surface's own syntax.
+> belief to the user presents every external span within it as third-party content,
+> attributed to its source rather than to the assistant or to the user.
+
+> **Normative.** That attribution holds under §2's non-forgeability property, read
+> against the presenting surface's own syntax.
 
 **Every mitigation in this ADR terminates at a human, and that is where the text
 arrives least examined.** §4's fourth clause routes a suspect proposal to a user
@@ -579,11 +582,22 @@ own framing — "the assistant would like to record that…" — which is precis
 voice a phishing payload wants to borrow. **Escalating to the user is not a
 mitigation if the escalation is where the attacker's sentence is read as ours.**
 
+**Attribution and non-forgeability are two clauses because an earlier draft had
+only the second, and the second alone does not close the case this section names.**
+That draft required a §7 surface to render an external span "under §2's
+non-forgeability property" and nothing more — which a surface satisfies by escaping
+markup and control characters while still printing *The assistant would like to
+record: <escaped attacker prose>*. The span is then unable to break the frame and is
+still wearing the assistant's voice, which is the whole of the phishing case.
+Adversarial review found it on round 4. **§8 does not cover the gap either**: its
+attribution clause is scoped to a *stored belief* on the inspection surface, and a
+question, a proposal and a ruling are none of those. So §2's two halves are now both
+read on the human-facing target, as they are on the model-facing one.
+
 **The division is ADR-0042 §4's, unchanged and deliberately re-stated rather than
 re-decided**: the engine carries the value verbatim, the adapter escapes for its
-target. `interfaces.cli._safe` already does the terminal half. What this clause adds
-is that the property §2 requires of a prompt is required of a human-facing surface
-too, and for the same reason: a label the data can write is not a label.
+target. `interfaces.cli._safe` already does the escaping half for the terminal, and
+does not do the attribution half, because nothing until now asked it to.
 
 **It does not restate ADR-0073 §4.** That floor governs what the band-scoped
 inspection surface must *convey* per belief — band, confidence, kind, content, why
@@ -662,8 +676,9 @@ clause "cannot live inside a list item".
 - **The lane that builds the seam of §5** owes §4's fourth clause its enforcement
   point, and owes the choice between a caller-stamped and a producer-declared
   marker an argument against ADR-0094 §5.
-- **Every client surface** owes §7 for its own target, on ADR-0042 §4's division.
-  `interfaces.cli._safe` is the model.
+- **Every client surface** owes §7's **both** clauses for its own target, on
+  ADR-0042 §4's division. `interfaces.cli._safe` is the model for the escaping
+  half and supplies nothing for the attribution half.
 - **The first actuator lane** owes §3, and owes it in its own tests rather than in
   prose.
 
