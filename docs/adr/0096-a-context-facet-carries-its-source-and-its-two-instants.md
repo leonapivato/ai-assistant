@@ -1,7 +1,21 @@
 # 96. A context facet carries its source and its two instants; staleness is legible, and an absent facet says nothing more
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-03
+- **Note (2026-08-03): ratified.** `Proposed` → `Accepted`, in the separate lane
+  #633 requires, after **both** required reviews came back green on the content
+  this ADR merged with: adversarial **APPROVE with no findings** and architecture
+  **APPROVE with no findings**, both at tree `85df2870dc15`, round 7, churn ratio
+  1.2, each posted to the PR by `just ship`. That is the outcome ADR-0070 §1
+  requires the ratifying edit to record. Beyond the `Status` line, the only edit
+  is the tense of the header bullet below that names the review set — **no
+  decision text is touched and no normative clause acquires, loses or alters an
+  obligation**, which is ADR-0070 §1's own test applied to the ratifying edit
+  first. The document was re-read whole at this moment and nothing else in it had
+  gone stale: every claim it makes about the tree still holds at `main`, because
+  nothing merged between its authoring and its ratification but this ADR and
+  ADR-0097. **ADR-0070 §1's no-rewrite rule now protects this text**, so any
+  later correction is an appended dated note.
 - **Decides `core` surface and implements none of it.** It adds a base model and
   one facet type to `core/types.py`, one optional field to `CurrentContext`, and one
   optional field to `SourceReading` with a model validator on it. **No `Settings`
@@ -14,10 +28,10 @@
   carrying it is prose only. It decides `core/types.py` surface, which is the
   ground ADR-0093, ADR-0094 and ADR-0095 each took the same set for, and which
   `CONTRIBUTING.md` → "Stop when the required reviews are green" states directly:
-  a change is contract-surface "when it is the ADR deciding that surface". It is
+  a change is contract-surface "when it is the ADR deciding that surface". It was
   **reviewed while `Proposed` and ratified only after**, in a separate lane
   (`CONTRIBUTING.md` → "Contract ADRs land before their implementation"; #633
-  records why the flip cannot ride in this PR).
+  records why the flip could not ride in the PR that carried it).
 - **Discharges ADR-0093 §11's context-facet deferral and meets ADR-0093 §7a's
   stated condition**, which lifts the reserved facet-only enablement state by
   satisfying it rather than by editing it. It **amends no earlier ADR and
