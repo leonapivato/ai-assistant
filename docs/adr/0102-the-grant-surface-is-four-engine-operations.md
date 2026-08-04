@@ -981,6 +981,17 @@ touched.
   cannot show the user a location — a voice spoke under ADR-0094 is the nearest
   candidate — because §6's clause then refuses every grant from it rather than
   degrading.
+- **A revocability guarantee that survives an unbounded source identity.**
+  `Identifier` has no maximum length, so `revoke`'s request payload is bounded
+  only by the identity a reader declares, and a long enough one exceeds a small
+  configured frame (§10). Today the admissible identities are the declared
+  constants of the readers the hub holds — one of them, eight bytes — so the
+  exposure is an operator declaring a very long name in their own code, whose
+  remedy is `hub_max_frame_bytes`. Fires with the first bound on `Identifier`, or
+  with ADR-0093 §11's registry, where identities stop being a handful of literals
+  a reviewer can read; and closing it means either a length bound on a ratified
+  `core` alias or a revocation shape that carries no identity, both of which are
+  contract changes this ADR does not own.
 - **A grant naming anything but a source**, and **who granted**. ADR-0097 §12's,
   unchanged; the second is #691's and ADR-0099 §1's, and nothing on this surface
   carries a principal.
@@ -1002,10 +1013,15 @@ touched.
   route.** The admissible set is the set of declared constants, which is
   ADR-0093 §7's property one layer up, and no path or address can enter a
   durable, exportable, user-rendered record.
-- **A user can always withdraw.** Granting is refused for a dozen reasons;
-  revoking is refused for none of them (§4), fits the smallest frame the
-  configuration admits (§10), and never waits on the read it is withdrawing
-  (§9).
+- **Withdrawal is the operation this surface protects.** Revoking is refused for
+  none of the reasons granting is (§4), never waits on the read it is
+  withdrawing (§9), and on this tree's figures fits the smallest frame the
+  configuration admits (§10). The last is a measurement and not a guarantee:
+  `Identifier` carries no maximum length, so a sufficiently long reader identity
+  makes a `revoke` request payload exceed a small frame and raise
+  `OversizedValueError` like any other. Bounding it is a `core` change this ADR
+  does not own, the operator's remedy is `hub_max_frame_bytes`, and §14 records
+  what would fire a contract that survives both without one.
 - **The data directory holds six databases, and ten modules say five.** Named in
   §12 so the correction is a checklist item rather than a discovery.
 - **What gets harder:** four methods are four conformance-suite obligations,
