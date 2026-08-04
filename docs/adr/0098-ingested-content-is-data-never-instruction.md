@@ -3,10 +3,12 @@
 - Status: Proposed
 - Date: 2026-08-03
 - **Decides a posture and adds no `core` surface.** No Protocol, no type, no error
-  class, no field. That is a finding rather than a restraint: §5 shows that the one
-  seam this posture would need — a record from which externality is recoverable at
-  the ruling point — cannot be specified honestly until a producer exists that can
-  breach it, and §12 defers it with its trigger. Golden rule 5 and ADR-0015 §5 put
+  class, no field. That is a finding rather than a restraint. **Two** seams this
+  posture could have used are absent, and each is deferred in §12 with its trigger
+  rather than specified here: a record from which externality is recoverable at the
+  ruling point (§5 argues why it cannot be specified until a producer can breach the
+  rule), and a `Question` that can name its source (§7 argues why the safety half of
+  that obligation does not need it). Golden rule 5 and ADR-0015 §5 put
   a contract ADR in its own PR ahead of any implementation, and this PR carries no
   code for the separate reason that it *rules* on `orchestration`, `planning`,
   `learning` and `interfaces` without touching them.
@@ -19,8 +21,8 @@
   grounds: the decision constrains prompt assembly across `planning`, `learning`
   and `orchestration` at once; it binds the later ADR that designates an actuation
   seam (§3); and it is a security posture, where a second independent lens is worth
-  more than the convention's minimum. It was **reviewed
-  while `Proposed` and is ratified only afterwards**, in a separate lane (#633).
+  more than the convention's minimum. It was **reviewed while `Proposed` and is
+  ratified only afterwards**, in a separate lane (#633).
 - **Filed as #668.** It **folds the downstream half of #641** and leaves that
   issue's reader-side half open; it **leaves #659** and takes a dependency on it
   (§8, §12); it **touches #663 without discharging it** and adds one named input to
@@ -567,11 +569,15 @@ implied.
 ### 7. The escalation surface is a rendering target too
 
 > **Normative.** A surface that presents a proposal, a question, a ruling, or a
-> belief to the user presents every external span within it as third-party content,
-> attributed to its source rather than to the assistant or to the user.
+> belief to the user presents every external span within it as **third-party
+> content**: words the surface does not attribute to the assistant and does not
+> attribute to the user.
 
-> **Normative.** That attribution holds under §2's non-forgeability property, read
+> **Normative.** That presentation holds under §2's non-forgeability property, read
 > against the presenting surface's own syntax.
+
+> **Normative.** Naming **which** source is §8's obligation, and is owed only on a
+> surface that holds the source. This clause is met without it.
 
 **Every mitigation in this ADR terminates at a human, and that is where the text
 arrives least examined.** §4's fourth clause routes a suspect proposal to a user
@@ -582,17 +588,39 @@ own framing — "the assistant would like to record that…" — which is precis
 voice a phishing payload wants to borrow. **Escalating to the user is not a
 mitigation if the escalation is where the attacker's sentence is read as ours.**
 
-**Attribution and non-forgeability are two clauses because an earlier draft had
-only the second, and the second alone does not close the case this section names.**
-That draft required a §7 surface to render an external span "under §2's
-non-forgeability property" and nothing more — which a surface satisfies by escaping
-markup and control characters while still printing *The assistant would like to
-record: <escaped attacker prose>*. The span is then unable to break the frame and is
-still wearing the assistant's voice, which is the whole of the phishing case.
-Adversarial review found it on round 4. **§8 does not cover the gap either**: its
-attribution clause is scoped to a *stored belief* on the inspection surface, and a
-question, a proposal and a ruling are none of those. So §2's two halves are now both
-read on the human-facing target, as they are on the model-facing one.
+**Third-party presentation and non-forgeability are separate clauses because an
+earlier draft had only the second, and the second alone does not close the case
+this section names.** That draft required a §7 surface to render an external span
+"under §2's non-forgeability property" and nothing more — which a surface satisfies
+by escaping markup and control characters while still printing *The assistant would
+like to record: &lt;escaped attacker prose&gt;*. The span is then unable to break the
+frame and is still wearing the assistant's voice, which is the whole of the phishing
+case. Adversarial review found it on round 4. **§8 does not cover the gap either**:
+its attribution clause is scoped to a *stored belief* on the inspection surface, and
+a question, a proposal and a ruling are none of those.
+
+**The third clause exists because the round-4 repair over-reached, and the tree
+said so.** That repair required the span to be "attributed to its source", and
+adversarial review found on round 5 that **the durable-question path cannot satisfy
+it**: `DefaultMemoryPolicy` rules `ASK_USER` on a proposal conflicting with a user
+assertion, `QuestionStage` projects it into `core.types.Question`, and that model —
+`extra="forbid"`, `frozen=True` — carries `content`, `kind`, `band`, `rationale`,
+`reason` and no `Attestation` and no `reported_by`. A client can say *attested* and
+cannot say *from your calendar*. Verified against `core/types.py`; the finding
+holds.
+
+**The repair is to state the obligation at the granularity that carries the safety
+property, not at the one that reads best.** What defeats the phishing case is the
+user knowing the words are **somebody else's** — and `Question.band` already carries
+exactly that, because `ATTESTED` means a source reported it and the assistant did
+not conclude it. Naming the source is *legibility*, which is §8's subject and which
+§8 already bounds to source granularity and no finer. Splitting them that way keeps
+the safety half binding on every surface today, keeps this ADR free of `core`
+surface, and leaves a real residual rather than a pretended one: **a question cannot
+name its source.** §12 defers that with its trigger. Requiring it here would have
+been an obligation no conforming implementation could meet — the third time this
+document reached past what the tree can supply, and the third time a reviewer was
+right to say so.
 
 **The division is ADR-0042 §4's, unchanged and deliberately re-stated rather than
 re-decided**: the engine carries the value verbatim, the adapter escapes for its
@@ -676,9 +704,11 @@ clause "cannot live inside a list item".
 - **The lane that builds the seam of §5** owes §4's fourth clause its enforcement
   point, and owes the choice between a caller-stamped and a producer-declared
   marker an argument against ADR-0094 §5.
-- **Every client surface** owes §7's **both** clauses for its own target, on
-  ADR-0042 §4's division. `interfaces.cli._safe` is the model for the escaping
-  half and supplies nothing for the attribution half.
+- **Every client surface** owes §7 for its own target, on ADR-0042 §4's division:
+  the third-party presentation *and* the non-forgeability, which are two clauses
+  because either without the other leaves the phishing case open.
+  `interfaces.cli._safe` is the model for the escaping half and supplies nothing for
+  the presentation half.
 - **The first actuator lane** owes §3, and owes it in its own tests rather than in
   prose.
 
@@ -806,6 +836,15 @@ support.
   `PermissionDecision` and §8 is written not to assume one. **Fires with the first
   surface obliged to show that a proposal was refused or capped**, which #659's
   channel question reaches first.
+- **A question that can name its source.** `core.types.Question` carries `band` and
+  no `Attestation`, so the durable-question surface can say *attested* and not *from
+  which source* — §7's third clause records that this is deliberate rather than
+  overlooked. It is `core` surface (a field on `Question` and whatever `QuestionStage`
+  projects it from) and it is **legibility, not safety**: the phishing defence rides
+  on `band`, which is already there. **Fires when a second reader exists**, which is
+  the first moment "attested" stops identifying the source by elimination — the same
+  trigger ADR-0093 §11 gives the source registry and the display label, and plausibly
+  one decision with them.
 - **The actuator and egress design** — ADR-0017 §3's fourteen conditions, the
   approval and limit machinery of VISION §Principle 3, and **#241**'s open rule for
   choosing among several capable tools, which #668 names as inheriting this posture
