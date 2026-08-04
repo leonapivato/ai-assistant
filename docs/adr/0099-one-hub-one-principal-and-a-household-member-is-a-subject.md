@@ -418,10 +418,13 @@ to prevent.
   stay open, it gets fixed by whatever the first implementer assumes, and
   `assistant learn` has been writing third-party beliefs under an unwritten
   frame since it shipped.
-- **Rule the frame and the subject field together, in one ADR.** Rejected for
-  the reason ADR-0073 §4 gives — no producer is in hand, so the field would be
-  guessed at — and because bundling them puts a contract-surface decision behind
-  a scoping one and lets a disagreement about the field block the frame.
+- **Rule the frame and the subject field together, in one ADR.** Rejected on §5's
+  reason, which is the consumer and not the producer: nothing yet has to tell one
+  subject from another, so the field's shape would be guessed at even though the
+  producers have shipped. And because bundling them puts a contract-surface
+  decision behind a scoping one, lets a disagreement about the field block the
+  frame, and would make this a `core/types.py` change owing golden rule 5's
+  separate merged ADR before anything implements against it.
 - **A subject-conditional supersession rule** — an attested belief from a person
   about themselves outranking the owner's assertion about them. Rejected in §4.
   It presumes the store adjudicates facts about third parties, which §1 rules it
