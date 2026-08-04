@@ -37,15 +37,23 @@
   and they hold for a mechanical reason**: nothing has merged since the commit
   this ADR was written against (`87d9214`) but this ADR's own commits, so
   `git diff --name-only 87d9214..main` names this file and nothing else. Both
-  projections §12 records as defective are still exactly as recorded. **Nothing
-  has fired that this document does not already write as fired**: §12's first
-  bullet records the mixed-origin planner payload as fired, its fifth records
-  `Retirement`'s gap as firing now (#673), and §10 records ADR-0072 §5's own
-  trigger as fired (#663) — those three, and no others. What remains unfired
-  remains so: `readers/` holds one reader, no actuator exists, no tool returns
-  text, and no mixed-origin payload reaches a producer `MemoryPolicy` rules on.
-  **ADR-0070 §1's no-rewrite rule now protects this text**, so any later
-  correction is an appended dated note.
+  projections §12 records as defective are still exactly as recorded, and
+  **nothing has fired since that this document does not already write as
+  fired**: §12's first bullet records the mixed-origin planner payload as fired,
+  its fifth records `Retirement`'s gap as firing now (#673), and §10 records
+  ADR-0072 §5's own trigger as fired (#663). The conditions checked at this
+  moment and still unmet: `readers/` holds one reader, no actuator exists, no
+  ADR lets an ingested record be an `EpisodicMemory`, leg 7 is unbuilt, and no
+  mixed-origin payload reaches a producer `MemoryPolicy` rules on. **One reading
+  was filed rather than settled here (#678)**: `tools/builtin.py` ships
+  `current_time` and `recall_memory`, so §12's "the first tool that returns
+  text" is met on its literal words, while the external content that bullet is
+  about — a third party's text arriving through a tool or MCP result — has not
+  arrived, and no tool result reaches a model call at all. Narrowing a
+  deferral's trigger would change when a later lane acts, which is not a
+  ratifying edit's to do. **ADR-0070 §1's no-rewrite rule now protects this
+  text**, so any later correction — including that one — is an appended dated
+  note.
 - **Decides a posture and adds no `core` surface.** No Protocol, no type, no error
   class, no field. That is a finding rather than a restraint. **Two** seams this
   posture could have used are absent, and each is deferred in §12 with its trigger
