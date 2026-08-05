@@ -1,7 +1,102 @@
 # 103. Confidence is two quantities — the evidence for a belief, and whether it still holds
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-05
+- **Note (2026-08-05): ratified.** `Proposed` → `Accepted`, in the separate lane
+  #633 requires, after **both** required reviews came back green on the content
+  this ADR merged with: adversarial **APPROVE with no findings** and architecture
+  **APPROVE with no findings**, both at tree `5ece8d975591`, round 10, churn ratio
+  1.3, each posted to PR #732 by `just ship`. That is the outcome ADR-0070 §1
+  requires the ratifying edit to record — "the ratifying edit records that
+  review's outcome, it does not replace it" — and it is taken from that comment
+  rather than from a report. **The anchor is not the merged head here, and the
+  identity is established through the tree rather than assumed**: the comment's
+  `<!-- ship:afe4c2c0c7a7 -->` anchor is the pre-merge branch head, which
+  `git merge-base --is-ancestor` shows is *not* an ancestor of `main` because #732
+  was rebase-merged, so `git rev-parse` was used on both — `afe4c2c0c7a7^{tree}`
+  and `5740b08^{tree}` are the same tree, the one named above. The content the two
+  reviews read is therefore the content that landed, notwithstanding the rewritten
+  hash. **Beyond the `Status` line and this appended note, not one word of the
+  text this ADR merged with is edited** — not a clause, not a tense — which is
+  ADR-0070 §1's own test applied to the ratifying edit first, in its strongest
+  available form: no decision text is touched and no normative clause acquires,
+  loses or alters an obligation.
+
+  **That no pre-existing text needed editing is a swept result, not an
+  omission.** The sweep
+  the ratifications before this one had to make — for a sentence true only while
+  the document stands `Proposed`, or asserting a neighbouring ADR's `Status` as of
+  a moment — was run site by site and comes back empty, and the sites are named so
+  a later reader can check the claim rather than trust it. **No clause anywhere in
+  this ADR mentions any ADR's `Status`**: every reference to a neighbour names its
+  *text* or its ruling — ADR-0040 §1 and §5a, ADR-0028 §8, ADR-0072 §3, §4, §5,
+  §6 and §10, ADR-0077 §5 and §7, ADR-0086 §1 and §3, ADR-0092 §1 and §3,
+  ADR-0045 §3 and §5, ADR-0038 §2a and §3, ADR-0007 §1, §2 and §5, ADR-0006 §1,
+  ADR-0078, ADR-0015 §5, ADR-0070 §1 and ADR-0082 §1 — and §10's judgement is
+  about which of those clauses are *amended*, which the flip of this document's
+  own status cannot change. "Max-merge was never ratified" (§Context) is a claim
+  about what ADR-0040's text says, not about where it stands, and it reads the
+  same today. The three clauses whose truth *depends* on this ratification —
+  §5's heading "the semantics are ratified now", its first normative sentence
+  "This ADR ratifies the two quantities' semantics and no numbers", and the
+  Consequences bullet "the decay half of ADR-0072 §10's deferral closes" — were
+  written forward, and this edit is the event that makes them true rather than
+  anything that could falsify them. None of the three is touched.
+
+  **One merge landed between this ADR's review and its ratification, so the
+  staleness check was run rather than recited — and it is stated at the reviewed
+  commit rather than at the authoring base**, which is the error #704's
+  adversarial review caught in ADR-0101's ratification note and which is not
+  repeated here. Ratified against `4cbcb34`, where `git diff --name-only 5740b08
+  4cbcb34` — `5740b08` being the commit this ADR merged as, whose tree is the
+  reviewed one named above — names ADR-0104, `pyproject.toml`, three test modules
+  under `tests/`, and four modules which git prints at their full repository paths
+  and which this note names in the `src/ai_assistant/`-relative form the rest of
+  the corpus uses: `app/__init__.py`, `app/composition.py`, `memory/reembed.py`
+  and `service/reembed.py`. Nothing else. That is the whole of #730, the
+  re-embedding lane, and it reaches no file this ADR cites: neither
+  `memory/ingest.py` nor `core/types.py` is in the set.
+
+  **ADR-0104 is the merge that could have disturbed something and does not.** It
+  is a leg 7 decision, so §1 binds it, and it is the first test of that clause by
+  a lane other than this one. It complies rather than carves an exception: it
+  copies every row including expired ones, on §1's ground in as many words, and
+  retains the pre-migration store rather than deleting it to save a copy's worth
+  of disk. It cites §1 and §2 by their content and nowhere by their status, so it
+  needed no edit at this flip and got none — this ratification touches one file.
+
+  **The tree claims were re-read at `4cbcb34` rather than inferred from the file
+  set.** `_merge` in `memory/ingest.py` still takes
+  `source=incoming.provenance.source` and `confidence=max(target…, incoming…)`,
+  which is the fold §6 rules and the defect #646 reports; `_refuse_unsafe_fold`'s
+  second clause is still gated on the *incoming* record being `USER_ASSERTED`, so
+  it still does not catch that fold; and `Provenance._user_asserted_is_certain`
+  and `Provenance._derived_is_never_certain` are both still on `core/types.py`,
+  binding what §2 says they bind. #733, filed by §6, is open, as are #646 and
+  #729.
+
+  **No deferral of this ADR has fired.** §5's parameters wait on leg 8, which has
+  not started; §7's question of whether any clause becomes a conformance
+  obligation, and §9's representation choice, both belong to the #646 implementing
+  lane, which is open and blocked on this ratification — that is ADR-0015 §5's
+  sequence working rather than a claim going stale; and §8's retrieval-side
+  question belongs to the retrieval-ranking lane, which has not been opened.
+
+  **Two present-tense clauses were checked and deliberately left.** §9's prose
+  says "the decision lands as its own PR before anything implements against it
+  (ADR-0015 §5)", which states the sequence golden rule 5 mandates rather than
+  this document's status, and is what happened — #732 carried the decision alone,
+  and nothing implements against it until the lane behind this flip does. And the
+  Consequences bullet naming the review set reads "a contract-surface decision
+  reviewed under both the adversarial and the architecture lens even though the
+  diff is prose", which was verified against PR #732's posted comment rather than
+  assumed and is true in the past tense it is already written in. The dated
+  observations about today's fold — §Context's "implements them today with
+  `_merge`", §2's "both `core` validators keep binding exactly what they bind
+  today", and §6's "today's `max`" — are arguments about the tree this ADR argues
+  against, and the implementing lane is the thing that will date them. **ADR-0070
+  §1's no-rewrite rule now protects this text**, so any later correction to any of
+  it is an appended dated note.
 
 ## Context
 
