@@ -789,16 +789,130 @@ def _installed(record: MemoryRecord) -> MemoryRecord:
     return record.model_copy(update={"provenance": bounded})
 
 
+def _corroborates(target: MemoryRecord, incoming: MemoryRecord) -> bool:
+    """Is this the fold ADR-0103 §6 rules — an ``ATTESTED`` target, a ``DERIVED`` proposal?
+
+    **Keyed on both bands, and on neither record's confidence.** The clause reads
+    "where a ``REINFORCE``'s target is in the ``ATTESTED`` band and its incoming
+    record is in the ``DERIVED`` band", so it is the pairing that selects the arm,
+    not the arithmetic — the same fold at ``0.7`` and at ``1.0`` folds the same
+    way. Only the ``1.0`` case is #646's crash (the maximum lands a derived source
+    at full confidence and ``Provenance._derived_is_never_certain`` refuses it,
+    ADR-0077 §7); the rest is the trade ADR-0103 §6 names in terms — "where the
+    derived incoming record's strength happens to exceed the attested target's,
+    today's ``max`` would raise the survivor's number and this clause does not".
+    A crash-keyed guard would have fixed the exception and left the rule the
+    exception was a symptom of.
+
+    **Naming ``ATTESTED`` on the target side keeps the rule inside the reachable
+    set** (ADR-0103 §6). The wider "a ``DERIVED`` proposal onto any target" would
+    sweep in the ``ASSERTED`` target, and nothing folds onto an assertion at all
+    (:func:`_refuse_unsafe_fold` clause 1, ADR-0045 §5) — so it would prescribe
+    how to fold a fold that may not happen. The other pairings are left exactly as
+    they stand: a ``USER_ASSERTED`` proposal is not in the ``DERIVED`` band, so the
+    assertion still wins at 1.0; a ``DERIVED`` target reinforced by an ``EXTERNAL``
+    record still folds to ``EXTERNAL`` at the maximum, which the ``ATTESTED`` band
+    admits (ADR-0038 §2a) and §6's first clause therefore permits — the
+    misattribution that leaves behind is filed as #733 and is deliberately not
+    fixed here; and same-band folds are untouched.
+
+    Args:
+        target: The stored record the ruling folds into.
+        incoming: The proposed record being folded in.
+
+    Returns:
+        Whether ADR-0103 §6's second clause governs this fold.
+    """
+    return (
+        band_of(target.provenance.source) is BeliefBand.ATTESTED
+        and band_of(incoming.provenance.source) is BeliefBand.DERIVED
+    )
+
+
 def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     """Fold ``incoming`` into ``target``, keeping the target's id.
 
     Newer content wins; evidence is unioned and confidence taken as the maximum,
-    so a merge strengthens rather than weakens what is known.
+    so a merge strengthens rather than weakens what is known — **except** for the
+    one pairing ADR-0103 §6 rules, where the incoming record corroborates rather
+    than accumulates (:func:`_corroborates`, below).
 
     **Reinforcement only.** Both halves of that — the union and the maximum —
     assume the two records *agree*. Only a ``REINFORCE`` ruling reaches this
     function (ADR-0040 §3): a contradiction is a ``SUPERSEDE``, which
     :meth:`MemoryIngestor._apply` routes to :func:`_supersede` instead.
+
+    **A derived record folded onto an attested one contributes its evidence and
+    nothing else** (ADR-0103 §6). The survivor keeps the target's ``source``,
+    ``attestation``, content and confidence; only the evidence union and the
+    transaction stamp move. Two rules that are each right on their own produced
+    #646 between them — "take the maximum" is right about *evidence* and wrong
+    about *what a derived source can warrant* — and the survivor was a
+    ``Provenance`` ``core`` refuses, so the fold raised a ``ValidationError`` and
+    nothing was written at all. Agreement between a derived observation and a
+    better-warranted record is real information, but it is information about
+    whether the belief still holds, not about how much warrant it has: the
+    observation supplies no warrant the target did not already have. So the
+    agreement is recorded where ADR-0103 §6 puts it — in the unioned evidence,
+    which retains the episode the observation stands on — and not in a number that
+    would claim the attested source said something it did not.
+
+    **The whole target record survives, not only its provenance.** ADR-0103 §6
+    gives the incoming record exactly two contributions, so its content, its
+    ``validity`` window and its ``expires_at`` are all left behind with its
+    confidence. Keeping the content is required rather than tidy: an
+    ``attestation`` is present exactly when the band is ``ATTESTED`` (ADR-0092 §1),
+    so a survivor that kept the target's attestation while carrying the incoming
+    record's text would attribute to an external system words it never reported,
+    and one that dropped the band to keep the text would drop the record of who
+    reported the belief and when — a disclosure obligation (ADR-0073 §4), not a
+    nicety.
+
+    **``last_updated`` still comes from the incoming record on both arms, and that
+    is not a third contribution.** It is transaction time — "the clock of the store
+    changing its mind" (ADR-0045 §3, ADR-0103 §9) — and the store is changing its
+    mind here, because the survivor's evidence is not the evidence the target was
+    stored with. What ADR-0103 §6 withholds from the incoming record are the
+    belief's own properties, which it enumerates; a stamp saying when *we* last
+    revised the record is not one of them, and keeping the target's would claim a
+    write that just happened never did.
+
+    **Currency is not written here, because nothing represents it yet.** ADR-0103
+    §6's third contribution — that the survivor's currency is measured from the
+    later of the two records' usable confirming instants — is a rule about a
+    quantity §9 leaves to a lane with a consumer to read it, and this fold does not
+    lose the input that rule needs: the derived record's confirming instant is the
+    latest ``occurred_at`` among the episodes it cites (§9), and those citations are
+    exactly what the union retains, newest-appended and therefore the last to be
+    displaced by the bound.
+
+    **The union is bounded here, before the ``Provenance`` is constructed**, so
+    the constructor's validators run on the value that is stored — the surrounding
+    ``model_copy(update=...)`` skips them (ADR-0026 §2). ADR-0040 §5a's "retains
+    **both** records' evidence" holds up to :data:`MAX_EVIDENCE_CITATIONS` and is
+    partially superseded beyond it (ADR-0086 §3, §11): the oldest are displaced and
+    counted. The fold is the one install drawing from **two** sources, so both
+    records' ``evidence_elided`` are summed — including when the union fits and
+    nothing is displaced, since an incoming record carrying a count of its own
+    would otherwise have that history dropped (ADR-0086 §4). Both arms union and
+    bound identically; ADR-0103 §6 changes what the survivor *warrants*, never what
+    it cites.
+
+    **On the ordinary arm the ``attestation`` is the incoming one** (ADR-0092 §6),
+    and this is required rather than optional: the ``Provenance`` below is built
+    field by field, so ``Provenance``'s iff validator would raise on an attested
+    fold that carried none. The rule follows that arm's own shape — ``source`` and
+    ``last_updated`` already come from the incoming record because newer content
+    wins, and the attestation describes the content that survived. It therefore
+    never disagrees with the ``source`` beside it, including in the awkward case
+    where one source's record is reinforced by another's report: the survivor
+    honestly says who reported the text it now holds. **The corroboration arm keeps
+    that property by keeping the target's attestation**, which is the same rule
+    read against ADR-0103 §6's content ruling rather than a departure from it: the
+    attestation still describes the content that survived and still agrees with the
+    ``source`` beside it. Taking the incoming attestation there is not merely
+    wrong but impossible — a ``DERIVED`` record carries none, and an ``EXTERNAL``
+    survivor without one is refused by the same iff validator.
 
     **The union is bounded here, before the ``Provenance`` is constructed**, so
     the constructor's validators run on the value that is stored — the surrounding
@@ -825,6 +939,16 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
         union,
         elided=target.provenance.evidence_elided + incoming.provenance.evidence_elided,
     )
+    if _corroborates(target, incoming):
+        corroborated = Provenance(
+            source=target.provenance.source,
+            confidence=target.provenance.confidence,
+            evidence=evidence,
+            evidence_elided=elided,
+            last_updated=incoming.provenance.last_updated,
+            attestation=target.provenance.attestation,
+        )
+        return target.model_copy(update={"provenance": corroborated})
     provenance = Provenance(
         source=incoming.provenance.source,
         confidence=max(target.provenance.confidence, incoming.provenance.confidence),
