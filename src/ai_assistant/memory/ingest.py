@@ -807,8 +807,10 @@ def _corroborates(target: MemoryRecord, incoming: MemoryRecord) -> bool:
     **Naming ``ATTESTED`` on the target side keeps the rule inside the reachable
     set** (ADR-0103 §6). The wider "a ``DERIVED`` proposal onto any target" would
     sweep in the ``ASSERTED`` target, and nothing folds onto an assertion at all
-    (:func:`_refuse_unsafe_fold` clause 1, ADR-0045 §5) — so it would prescribe
-    how to fold a fold that may not happen. The other pairings are left exactly as
+    (:func:`_refuse_unsafe_fold` clause 1, ADR-0045 §5) — whatever a confirmation
+    says, since :func:`_confirmation_covers` check 1 admits only a ``SUPERSEDE``,
+    which retires rather than folds — so it would prescribe how to fold a fold
+    that may not happen. The other pairings are left exactly as
     they stand: a ``USER_ASSERTED`` proposal is not in the ``DERIVED`` band, so the
     assertion still wins at 1.0; a ``DERIVED`` target reinforced by an ``EXTERNAL``
     record still folds to ``EXTERNAL`` at the maximum, which the ``ATTESTED`` band
