@@ -90,9 +90,18 @@ class _Hub:
     turned away. ADR-0102 §6 distinguishes those two, and this is where they differ.
     """
 
-    def __init__(self, settings: Settings, data_dir: Path) -> None:
+    def __init__(
+        self, settings: Settings, data_dir: Path, *, patience: timedelta = _PATIENT
+    ) -> None:
+        """Build the loop and its thread; ``start`` is what brings the hub up.
+
+        ``patience`` is a parameter only so the test *of the teardown* need not wait
+        the full :data:`_PATIENT` to watch it give up. Every other construction takes
+        the default.
+        """
         self._settings = settings
         self._data_dir = data_dir
+        self._patience = patience
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._engine: Engine | None = None
@@ -102,7 +111,7 @@ class _Hub:
     def run(self, coro: Coroutine[Any, Any, _T]) -> _T:
         """Run one coroutine on the hub's loop and wait for it, from this thread."""
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result(
-            timeout=_PATIENT.total_seconds()
+            timeout=self._patience.total_seconds()
         )
 
     @property
@@ -153,9 +162,36 @@ class _Hub:
             if self._engine is not None:
                 self.run(self._engine.aclose())
         finally:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            self._thread.join(timeout=_PATIENT.total_seconds())
-            self._loop.close()
+            self._halt()
+
+    def _halt(self) -> None:
+        """Stop the loop and join its thread, closing only once the thread is gone.
+
+        **The join's result is checked rather than discarded** (#718). ``join`` takes
+        a timeout, so returning proves nothing; and ``close()`` on a loop still
+        inside ``run_forever`` raises ``RuntimeError: Event loop is running``, which
+        then *replaces* whatever went wrong with a report about the cleanup. That is
+        the worst of both: the diagnosis is lost, and the daemon thread with the six
+        SQLite connections it holds survives the test that was supposed to end it.
+
+        Raising here rather than falling through is the same argument the shutdown
+        it imitates makes: a stop that failed is a fact, and a teardown that
+        swallowed it would hide the next defect of this shape too. When something
+        has already failed in :meth:`stop`, this raises from a ``finally`` and Python
+        chains the original as ``__context__`` — so the wedge is named *and* the
+        cause it followed from is still in the traceback.
+        """
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=self._patience.total_seconds())
+        if self._thread.is_alive():
+            msg = (
+                f"the hub's loop was still running {self._patience.total_seconds():g}s after it "
+                f"was asked to stop, so a callback on it is wedged; its thread and the store "
+                f"connections it holds now outlive this test, and the loop is left open rather "
+                f"than closed out from under them"
+            )
+            raise RuntimeError(msg)
+        self._loop.close()
 
 
 def _calendar(directory: Path) -> Path:
@@ -387,3 +423,38 @@ def test_a_closed_door_is_reported_rather_than_worked_around(
     assert "ai-assistant-hub" in _flat(console_output.getvalue())
     with contextlib.suppress(FileNotFoundError):
         assert not list(tmp_path.glob("*.db"))
+
+
+def test_a_loop_that_will_not_stop_is_named_rather_than_closed_out_from_under(
+    tmp_path: Path,
+) -> None:
+    """#718: the fixture's teardown observes the join instead of discarding it.
+
+    ``Thread.join`` takes a timeout, so returning proves nothing — and ``close()``
+    on a loop still inside ``run_forever`` raises ``RuntimeError: Event loop is
+    running``, a message about the cleanup that replaces the message about the
+    wedge. The failure that matters is then invisible and the daemon thread with its
+    SQLite connections survives anyway.
+
+    Driven without the ``hub`` fixture and without an engine: the subject is the
+    loop and its thread, and standing up six databases to wedge a callback would
+    only make the test slower and the wedge harder to place. The patience is
+    shortened for the same reason — waiting the full :data:`_PATIENT` to watch a
+    teardown give up would put ten seconds into every run of the suite.
+    """
+    settings = Settings(data_dir=tmp_path, embedder=EmbedderKind.HASHING)
+    running = _Hub(settings, tmp_path, patience=timedelta(milliseconds=100))
+    released = threading.Event()
+    # The loop alone: `start()` would build the engine this test has no use for.
+    running._thread.start()
+    # Queued before the stop `_halt` posts, so it is certainly the callback in
+    # progress when the loop is asked to finish.
+    running._loop.call_soon_threadsafe(released.wait)
+
+    try:
+        with pytest.raises(RuntimeError, match="wedged"):
+            running.stop()
+    finally:
+        released.set()
+        running._thread.join(timeout=_PATIENT.total_seconds())
+        running._loop.close()
