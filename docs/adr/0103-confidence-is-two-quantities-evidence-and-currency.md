@@ -333,12 +333,21 @@ currency ranks nor claims it never will.
 > silently reinterpreted; and no migration of an existing record fabricates a
 > currency decline that was never measured.
 
-> **Normative.** Where currency is computed rather than stored, it is computed
-> from the instant the belief was last **confirmed**. `Provenance.last_updated` is
-> not that instant and may not stand in for it: it is transaction time, the clock
-> of the system revising its own belief (ADR-0045 §3). The implementing lane names
-> the confirmation instant it reads for each band, and stores one where the record
-> carries none.
+> **Normative.** Currency is measured from the instant of the most recent event
+> that **confirmed** the belief. `Provenance.last_updated` is not that instant and
+> may not stand in for it: it is transaction time, the clock of the system
+> revising its own belief (ADR-0045 §3).
+
+> **Normative.** Which events confirm a belief is ruled here; which field carries
+> an event's instant, and whether it is stored or resolved on demand, is the
+> implementing lane's. A belief is confirmed by the event that establishes it in
+> its band — for `ASSERTED`, the user stating it, or answering §4's
+> re-confirmation; for `ATTESTED`, the reporting source's report, whose instant is
+> `Attestation.reported_at` (ADR-0092 §3) and never our ingestion of it; for
+> `DERIVED`, the most recent observation supporting it, the latest `occurred_at`
+> among the episodes `Provenance.evidence` cites, and never the moment of
+> derivation. It is also confirmed by an agreeing record folded onto it under §6,
+> whatever band that record came from.
 
 > **Normative.** Currency's domain carries an explicit **unknown**, distinct from
 > every value it can take. A belief whose confirmation instant the store does not
@@ -362,10 +371,9 @@ test — a second implementation choosing a different one is a rename, and the
 conformance question is whether the quantity is readable at all, which the first
 clause pins. The *domain* can fail it, and does: a lane that reads a migrated
 record as fully current and a lane that reads it as unknown have made different
-decisions about what the system claims to know, and both would have satisfied this
-section as it stood before the third clause was added. So the domain is ruled here
-and the representation is not, and the third clause exists because that is
-precisely where the deferral was too wide.
+decisions about what the system claims to know, and an earlier draft of this
+section admitted both. So the domain is ruled here and the representation is not,
+and the two clauses above exist at exactly the places the deferral was too wide.
 
 **Unknown is a distinct state because an unmeasured currency and a fresh one are
 different facts.** This is ADR-0086 §4's distinction one quantity over: an elision
@@ -373,27 +381,43 @@ different facts.** This is ADR-0086 §4's distinction one quantity over: an elis
 renders them alike "tells the user their data was lost when it was not". Reading
 a legacy record as current tells the user the assistant confirmed something it
 never confirmed — the same error, in the direction that flatters the system. And
-the alternative failure is real too, which is why the third constraint on the
-first clause stays: reading it as *stale* would fabricate a decline nobody
-measured. Neither invention is available, so the honest value is neither, and a
-domain with only numbers in it has nowhere to put that.
+the opposite invention is refused too, which is what the first clause's third
+constraint is for: reading a migrated record as *stale* would manufacture a
+decline from a rate nobody has measured (§5), and §4 would then start asking the
+user to re-confirm things on the strength of an invented number. Neither invention
+is available, so the honest value is neither, and a domain with only numbers in it
+has nowhere to put that.
 
-The third constraint is the one worth stating out loud. A store migrated forward
-holds records whose currency was never observed; deriving a decline for them from
-a rate nobody has measured (§5) would manufacture staleness the system never saw,
-and §4 would then start asking the user to re-confirm things on the strength of an
-invented number.
+**The confirming events are ruled and not deferred, because they fail the same
+test.** Two lanes reading "last confirmed" differently — one treating an
+`EXTERNAL` record's ingestion as the confirmation, the other its
+`Attestation.reported_at` — would ship different answers to "does the assistant
+still believe this?" while both satisfying a clause that named neither. What is
+left to the lane is where an instant lives, which is a rename-class choice.
 
-**The confirmation clock is a separate clause because the obvious field is the
-wrong one.** `Provenance.last_updated` is the instant a currency computation would
-reach for, and it is transaction time — "the clock of the store changing its mind,
-not the clock of when the belief holds". The `ATTESTED` band makes the gap
-concrete rather than theoretical: ADR-0092 §3 rules that `Attestation.reported_at`
-is the source's own clock, that it is "never reconciled with ours", and that
-"`reported_at` earlier than `last_updated` is the normal case, not an anomaly". A
-calendar's months-old report imported this morning has a `last_updated` of this
-morning, so a currency read off transaction time would call it perfectly fresh —
-which is not a rounding error but the exact inversion of what §3 defines currency
+**Each band's event follows from a rule already ratified, not from taste.**
+`ATTESTED` is the sharp case: ADR-0092 §3 rules that `reported_at` is the source's
+own clock, that it is "never reconciled with ours", and that "`reported_at`
+earlier than `last_updated` is the normal case, not an anomaly". Ingesting a
+report is not the source repeating it, so importing a months-old calendar entry
+this morning confirms nothing this morning. `DERIVED` is the same rule from
+ADR-0077 §5's direction: confidence is deterministic on the supporting episodes
+precisely so that "**re-observing the same episodes cannot inflate a belief**", and
+a derivation that refreshed currency without a new observation would inflate it
+through the other quantity. And `ASSERTED` needs the user, because §4 already
+rules that the answer to a lapsed assertion is a question — so what resets its
+clock is the answer, not our own revision of the record.
+
+**`Provenance.last_updated` is refused as the clock for all three, including where
+it coincides.** It is the instant a currency computation would reach for, and it
+is transaction time — "the clock of the store changing its mind, not the clock of
+when the belief holds". For a live `ASSERTED` record it happens to sit very close
+to the user's own utterance today, and relying on that is exactly the kind of
+coincidence that breaks silently when some later write path revises an assertion
+for an unrelated reason. A calendar's months-old report imported this morning has
+a `last_updated` of this morning, so a currency read off transaction time would
+call it perfectly fresh — which is not a rounding error but the exact inversion of
+what §3 defines currency
 to measure. Where a band's confirmation instant is not on the record at all, the
 lane stores one rather than substituting the nearest field that is.
 
