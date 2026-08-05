@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -243,6 +243,188 @@ async def test_an_unreadable_source_is_logged_by_class_and_never_by_path(
     rendered = repr(captured)
     assert "calendar.ics" not in rendered
     assert str(tmp_path) not in rendered
+
+
+def _write_one_event_calendar(path: Path) -> None:
+    """Put one event an hour from now at ``path`` — a source a granted job can read.
+
+    Duplicated from ``tests/app/test_composition.py`` rather than shared, and
+    deliberately: a test of the *scheduler* should not reach into the composition
+    root's test module for its fixture, and the two subjects happen to need the
+    same three lines of iCalendar rather than sharing a concern.
+
+    **Anchored on the real clock, which is a known dependency rather than an
+    oversight (#658).** ``CalendarReader``'s window is clock-relative by definition
+    (ADR-0093 §5) and the composition root deliberately injects no clock into it —
+    nothing at that layer has a second clock to hand it, and inventing one would be
+    the second time source ADR-0093 §7b refuses. So an hour's lead inside the
+    seven-day default window (§7a) is a margin and not a guarantee, and only a
+    suspension longer than that between writing the file and the tick can breach
+    it. The eventual fix is a clock seam in ``build_engine``, which is a design
+    change owing its own decision; #658 names this site among those that move with
+    it.
+    """
+    begins = datetime.now(UTC) + timedelta(hours=1)
+    ends = begins + timedelta(minutes=30)
+    stamp = "%Y%m%dT%H%M%SZ"
+    path.write_bytes(
+        (
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//ai-assistant tests//EN\r\n"
+            "BEGIN:VEVENT\r\nUID:e1\r\nDTSTAMP:20260101T000000Z\r\n"
+            f"DTSTART:{begins.strftime(stamp)}\r\nDTEND:{ends.strftime(stamp)}\r\n"
+            "SUMMARY:Dentist\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        ).encode()
+    )
+
+
+def _armed_calendar_job(engine: Engine, settings: Settings) -> Job:
+    """The ``calendar_reader`` job ``jobs_for`` actually builds, for driving.
+
+    Taken from the real table rather than assembled here, so what the loop below
+    runs is the **bound ``Engine.ingest``** a deployment arms and not a stand-in
+    that happens to share its name (ADR-0083 §8).
+    """
+    return {job.name: job for job in jobs_for(engine, settings)}["calendar_reader"]
+
+
+async def test_the_armed_job_ingests_a_granted_source_and_reports_completion(
+    tmp_path: Path,
+) -> None:
+    """Leg 6's exit test with the **scheduler** in the chain, not just the engine.
+
+    ``tests/app/test_composition.py`` already proves that a granted source becomes
+    a belief when ``Engine.ingest`` is called directly. What nothing exercised is
+    the leg between: that the job ADR-0083 §7 arms, driven by the real loop on a
+    real interval, gets from an ``.ics`` on disk to a belief the user can read.
+    That is the whole of what "the assistant knows something true about the user's
+    day it was never told" needs a *hub* for, and it is the one step of the chain a
+    person exercises without ever calling an engine method.
+
+    The success half is asserted as well as the outcome — ``hub_scheduler_job_completed``
+    and **no** ``hub_scheduler_job_failed`` — because a job that raised and was
+    absorbed would leave the belief count unchanged and look identical to one that
+    never ran (ADR-0022 §4a's shape, at the scheduler).
+
+    **A second tick is awaited rather than one**, for the sibling case's reason:
+    the completion log is written after the body returns, so waiting for attempt
+    two is what makes attempt one's log certainly present rather than racing the
+    cancellation in ``aclose``. It buys a second property free — a re-read folds
+    into the record it already wrote rather than duplicating it (ADR-0093 §5's
+    "nothing the store holds is destroyed by a re-read", from the other side).
+    """
+    settings = _reader_settings(tmp_path, interval=_TICK)
+    _write_one_event_calendar(tmp_path / "calendar.ics")
+    engine = build_engine(settings, data_dir=tmp_path)
+    # Through the surface a user uses, never an injected fake seam: ADR-0102 §7
+    # opens the store in the composition root, so the grant this job is gated on is
+    # a real row in ``grants.db`` (ADR-0097 §1's declared identity as the key).
+    await engine.grant(CALENDAR_READER_NAME, scope=[GrantScope.INGEST])
+    armed = _armed_calendar_job(engine, settings)
+    twice = asyncio.Event()
+    attempts = 0
+
+    async def counting() -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts >= 2:
+            twice.set()
+        return await armed.run()
+
+    try:
+        with structlog.testing.capture_logs() as captured:
+            await _drive(Scheduler([_job("calendar_reader", counting)]), until=twice)
+        beliefs = await engine.beliefs()
+    finally:
+        await engine.aclose()
+
+    assert not [entry for entry in captured if entry["event"] == "hub_scheduler_job_failed"], (
+        _events(captured)
+    )
+    completed = [entry for entry in captured if entry["event"] == "hub_scheduler_job_completed"]
+    assert completed, _events(captured)
+    assert completed[0]["job"] == "calendar_reader"
+    assert len(beliefs) == 1
+    assert "Dentist" in beliefs[0].content
+
+
+async def test_an_ungranted_source_is_refused_every_interval_and_never_by_path(
+    tmp_path: Path,
+) -> None:
+    """ADR-0097 §5's ruled behaviour, and §8's legibility clause **at the log**.
+
+    §5 settles what an armed job over an ungranted source does, in as many words:
+    "A deployment that revokes a grant while leaving ``calendar_reader_interval``
+    set therefore logs a refusal every interval, and that is the correct behaviour
+    rather than a defect to design around: it is configuration and consent
+    disagreeing out loud." The operator's fix is to unset the interval — a
+    configuration act answering a configuration fact.
+
+    **This is the test that fails if anyone re-implements "the job arms when
+    configured *and* granted".** That reading is live in #675's lane-4 bullet,
+    which predates ADR-0097 and contradicts it; a scheduler that consulted the
+    grant before arming would emit no log line here at all, and §8's marked clause
+    — "the refusal is legible to an operator: the log line names the source's
+    identity and the use that was refused" — would have nothing to be satisfied by.
+    Silence would then be indistinguishable from a healthy deployment reading
+    nothing, which is exactly the failure ADR-0022 §4a refuses and §5's choice of
+    ``SourceNotGrantedError`` over an empty success exists to prevent.
+
+    **Asserted against the log the scheduler actually writes rather than against
+    the exception, because the log is where the harm would land** — the sibling
+    case's argument, and it transfers whole. ``tests/orchestration/test_ingestion.py``
+    already pins the message on ``SourceNotGrantedError`` itself; nothing pinned
+    what reaches an operational log, which is the place ADR-0004 §5 forbids Tier 1
+    data outright.
+
+    **The source exists and is readable here**, unlike the sibling case's missing
+    file, so the refusal is provably the *grant* and not the source: ADR-0097 §5
+    requires that nothing be opened at all, and a test over an unreadable file
+    could not tell the two refusals apart.
+    """
+    settings = _reader_settings(tmp_path, interval=_TICK)
+    _write_one_event_calendar(tmp_path / "calendar.ics")
+    # Nothing is granted. ADR-0097 §8: no grant is minted from configuration, an
+    # existing path included — "an installation that has been reading a source
+    # stops reading it until the user grants".
+    engine = build_engine(settings, data_dir=tmp_path)
+    armed = _armed_calendar_job(engine, settings)
+    twice = asyncio.Event()
+    attempts = 0
+
+    async def counting() -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts >= 2:
+            twice.set()
+        return await armed.run()
+
+    try:
+        with structlog.testing.capture_logs() as captured:
+            await _drive(Scheduler([_job("calendar_reader", counting)]), until=twice)
+        beliefs = await engine.beliefs()
+    finally:
+        await engine.aclose()
+
+    # "Every interval", which is the half a one-shot assertion would miss: the
+    # refusal is retried at the next due instant and never takes the loop down.
+    assert attempts >= 2, "the job was not retried after its grant was refused"
+    failures = [entry for entry in captured if entry["event"] == "hub_scheduler_job_failed"]
+    assert failures, _events(captured)
+    assert failures[0]["job"] == "calendar_reader"
+    # Never a ``ReaderError``: an operator debugging a missing calendar must not be
+    # sent to the filesystem for a fault that lives in the grant store (§5).
+    assert failures[0]["error_class"] == "SourceNotGrantedError"
+    # §8's two halves: the identity and the use that was refused...
+    cause = str(failures[0]["cause"])
+    assert CALENDAR_READER_NAME in cause
+    assert GrantScope.INGEST.value in cause
+    # ...and nothing else. A declared identity is safe by construction (ADR-0093
+    # §7); a path is the Tier 1 leak the clause exists to prevent.
+    rendered = repr(captured)
+    assert "calendar.ics" not in rendered
+    assert str(tmp_path) not in rendered
+    # Nothing was opened, so nothing was proposed and nothing was written (§5).
+    assert not beliefs, beliefs
 
 
 @pytest.mark.parametrize("bad", [timedelta(0), timedelta(seconds=-1)])
