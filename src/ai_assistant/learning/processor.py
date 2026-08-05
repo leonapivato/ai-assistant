@@ -70,6 +70,17 @@ class RuleBasedFeedbackProcessor:
 
         A new id and provenance are minted only for a *supported* target, so a
         deferred kind does not consume an id from an allocating factory.
+
+        **Both branches carry ``about_person`` across, and the field it sits
+        beside is not it** (ADR-0100 §7). ``event.subject`` is a preference
+        *scope*: it lands as ``context`` on the preference branch and the semantic
+        branch discards it, having nowhere to put a scope, exactly as ADR-0009 §1
+        decided. The subject axis is not scoped that way — an asserted *fact* about
+        someone else is as much about them as a preference is — so dropping it on
+        the semantic branch would write ``None`` over a subject the user had just
+        stated, and ADR-0100 §3 reads that ``None`` as *the owner's*. That is the
+        false record §7 requires the input route in order to avoid, reintroduced
+        one layer further down.
         """
         match event.memory_kind:
             case MemoryKind.PREFERENCE:
@@ -78,6 +89,7 @@ class RuleBasedFeedbackProcessor:
                     content=event.content,
                     preference=event.content,
                     context=event.subject,
+                    about_person=event.about_person,
                     provenance=self._provenance(event),
                 )
             case MemoryKind.SEMANTIC:
@@ -85,6 +97,7 @@ class RuleBasedFeedbackProcessor:
                     id=self._id_factory(),
                     content=event.content,
                     fact=event.content,
+                    about_person=event.about_person,
                     provenance=self._provenance(event),
                 )
             case _:  # PROCEDURAL, EPISODIC — need richer structure (deferred, ADR-0009 §6)

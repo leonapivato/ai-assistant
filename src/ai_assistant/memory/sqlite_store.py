@@ -285,7 +285,7 @@ class SqliteMemoryStore:
                 "CREATE TABLE IF NOT EXISTS records("
                 "rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
                 "kind TEXT NOT NULL, data TEXT NOT NULL, "
-                "expires_at INTEGER, valid_until INTEGER)"
+                "expires_at INTEGER, valid_until INTEGER, about_person TEXT)"
             )
             self._migrate_records(conn)
             self._verify_or_init_meta(conn)
@@ -310,7 +310,26 @@ class SqliteMemoryStore:
         return conn
 
     def _migrate_records(self, conn: sqlite3.Connection) -> None:
-        """Bring ``expires_at`` and ``valid_until`` to INTEGER microsecond epochs.
+        """Bring the lifecycle columns to epochs, and add the subject column.
+
+        Two migrations, applied in that order because the first rebuilds the table
+        the second would otherwise alter.
+
+        **The subject column** (ADR-0100 §8) is a nullable ``about_person TEXT``
+        added to an existing table and backfilled ``NULL`` — which is what
+        ``ALTER TABLE ... ADD COLUMN`` does with no default, and it is the right
+        value rather than a placeholder: a record written before the field existed
+        states no subject, and ADR-0100 §8 forbids inferring one for it from
+        content, from ``participants`` or from a model. No re-derivation, no
+        behaviour change; ADR-0045 §9's shape.
+
+        **The blob stays the truth and the column is a derived index**, exactly as
+        ``expires_at`` and ``valid_until`` are: every read decodes the record from
+        ``data``, so nothing here can disagree with what was stored. Nothing
+        queries the column yet — ADR-0101 is the ADR that gives it a predicate, and
+        ADR-0100 §2 placed the field on the envelope partly so that predicate
+        lands on a column beside the two that already filter reads rather than
+        reaching through a nested object into JSON.
 
         Every legacy table shape is handled by one rebuild: a pre-ADR-0007 table
         (neither column), a post-ADR-0007 table (``expires_at REAL`` only), and
@@ -347,12 +366,19 @@ class SqliteMemoryStore:
         """
         info = {row[1]: str(row[2]).upper() for row in conn.execute("PRAGMA table_info(records)")}
         if info.get("expires_at") == "INTEGER" and info.get("valid_until") == "INTEGER":
-            return  # already on the microsecond-epoch schema; nothing to do
+            if "about_person" not in info:
+                # The epoch schema is already current, so only the subject column
+                # is outstanding. An in-place ``ADD COLUMN`` is enough here where
+                # the epoch migration needed a rebuild: this adds a column rather
+                # than changing an existing column's affinity, and the value every
+                # existing row takes is the one ``ADD COLUMN`` supplies.
+                conn.execute("ALTER TABLE records ADD COLUMN about_person TEXT")
+            return
         conn.execute(
             "CREATE TABLE records_migrated("
             "rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
             "kind TEXT NOT NULL, data TEXT NOT NULL, "
-            "expires_at INTEGER, valid_until INTEGER)"
+            "expires_at INTEGER, valid_until INTEGER, about_person TEXT)"
         )
         # Stream the source rows through a dedicated read cursor rather than
         # ``fetchall()``, so migrating a large legacy store does not
@@ -363,6 +389,9 @@ class SqliteMemoryStore:
         for rowid, id_, kind, data in read:
             expires = self._micros_from_json(data, "expires_at")
             valid_until = self._micros_from_json(data, "valid_until", nested="validity")
+            # ``about_person`` is left NULL rather than read out of ``data``: a
+            # table this old predates the field, so its blobs carry no subject to
+            # recover, and ADR-0100 §8 forbids deriving one from anything else.
             conn.execute(
                 "INSERT INTO records_migrated"
                 "(rowid, id, kind, data, expires_at, valid_until) VALUES (?, ?, ?, ?, ?, ?)",
@@ -603,17 +632,17 @@ class SqliteMemoryStore:
         row = conn.execute("SELECT rowid FROM records WHERE id = ?", (record.id,)).fetchone()
         if row is None:
             cursor = conn.execute(
-                "INSERT INTO records(id, kind, data, expires_at, valid_until) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (record.id, record.kind, data, expires, valid_until),
+                "INSERT INTO records(id, kind, data, expires_at, valid_until, about_person) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (record.id, record.kind, data, expires, valid_until, record.about_person),
             )
             rowid = cursor.lastrowid
         else:
             rowid = row[0]
             conn.execute(
-                "UPDATE records SET kind = ?, data = ?, expires_at = ?, valid_until = ? "
-                "WHERE rowid = ?",
-                (record.kind, data, expires, valid_until, rowid),
+                "UPDATE records SET kind = ?, data = ?, expires_at = ?, valid_until = ?, "
+                "about_person = ? WHERE rowid = ?",
+                (record.kind, data, expires, valid_until, record.about_person, rowid),
             )
             conn.execute("DELETE FROM vec_records WHERE rowid = ?", (rowid,))
         conn.execute("INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)", (rowid, blob))

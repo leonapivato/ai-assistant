@@ -915,6 +915,29 @@ class Observer(Protocol):
         though it were evidence. An observer distils evidence; it does not
         manufacture it.
 
+        **And it states no subject.** Every proposal leaves ``about_person``
+        unset; one that would state it is **not proposed**, and is counted in
+        ``discarded_unusable`` (ADR-0100 §5). This adds nothing to the bar below —
+        a belief warranted only when it is *about the user* never has a non-owner
+        subject to state, so the refusal excludes nothing a conforming observer
+        would have produced. What it changes is that the bar is now *checkable*:
+        an obligation that has been in this contract since ADR-0077 §2 with
+        nothing able to see it is pinned by the shared conformance suite. It does
+        not make that bar enforceable, and must not be read as though it did — a
+        model proposing "Marta prefers window seats" with ``about_person`` unset
+        is as undetectable after ADR-0100 as before. The difference is that the
+        honest case is now recordable and the dishonest one is a lie about a
+        field.
+
+        **The refusal is the producer's and stays there.** It is not implemented
+        by a caller dropping a returned proposal — the caller's obligation below
+        is to put *each* returned proposal through the write path, in order and
+        independently, and an exception to that clause is a change to this seam
+        rather than a use of it — nor by a policy rule keyed on the band, since
+        the axis is band-independent and ``MemoryPolicy.decide`` receives no
+        producer identity to key on. Either would buy this producer's discipline
+        by charging someone else's contract (ADR-0100 §5, ADR-0081 §3).
+
         **Every proposal is in the ``DERIVED`` band** — ``provenance.source`` is
         ``OBSERVED`` or ``INFERRED`` (ADR-0072 §2) — and the choice between them
         is ADR-0072 §3's test: whether the cited evidence *entails* the belief, or

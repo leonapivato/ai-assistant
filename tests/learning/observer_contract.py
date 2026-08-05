@@ -181,6 +181,49 @@ class ObserverContract:
             proposal.proposed.kind != MemoryKind.EPISODIC.value for proposal in outcome.proposals
         )
 
+    # --- the subject axis (ADR-0100 §5) -------------------------------------
+
+    async def test_no_proposal_states_a_subject(self, observer: Observer) -> None:
+        """An observer proposes only about the user, so it never names a subject.
+
+        The clause ADR-0100 §5 puts in this suite rather than in one
+        implementation: an observer's proposal leaves ``about_person`` unset, and
+        one that would state it is not proposed at all. It adds no obligation —
+        a belief warranted only when it is *about the user* (ADR-0077 §2) has no
+        non-owner subject to state — but until the field existed there was nowhere
+        for the obligation to be *seen*, so the bar could only be asserted in
+        prose and requested in a prompt.
+
+        **The batch is the provocation, not a neutral one.** Every episode names a
+        third party, so an implementation that reached for the obvious shortcut —
+        reading a name out of content and calling it the subject — fails here.
+        That is ADR-0100 §4's no-inference rule arriving through §5: a subject is
+        stated only from a subject actually received, and a name in a sentence is
+        scenery until someone says otherwise.
+
+        **It binds nothing about the shipped observer and everything about the
+        next one.** ``ModelBackedObserver`` builds every record itself from an
+        envelope whose schema has no subject key, so it *cannot* state one however
+        the model answers; the second ``Observer`` implementation is the one this
+        corpus cannot inspect, and this is where it fails closed.
+        """
+        episodes = [
+            episode("e0", content="Marta said she prefers a window seat"),
+            episode("e1", content="the user booked Marta an aisle seat by mistake"),
+            episode("e2", content="the user asked what Marta usually chooses"),
+        ]
+
+        outcome = await observer.observe(episodes)
+
+        assert outcome.proposals, "the subject proposed nothing, so this clause is vacuous"
+        for proposal in outcome.proposals:
+            stated = proposal.proposed.about_person
+            assert stated is None, (
+                f"an observer proposal states no subject, and this one states {stated!r}: "
+                "a proposal that would is not proposed at all, and is counted in "
+                "discarded_unusable (ADR-0100 §5)"
+            )
+
     # --- evidence discipline (ADR-0077 §5) ----------------------------------
 
     async def test_every_proposal_cites_only_episodes_from_the_batch(
@@ -385,6 +428,7 @@ def assert_conforms(outcome: ObservationOutcome, batch: Sequence[EpisodicMemory]
         provenance = proposal.proposed.provenance
         assert band_of(provenance.source) is BeliefBand.DERIVED
         assert proposal.proposed.kind != MemoryKind.EPISODIC.value
+        assert proposal.proposed.about_person is None
         assert provenance.confidence < _FULL_CONFIDENCE
         distinct = set(provenance.evidence)
         assert distinct
