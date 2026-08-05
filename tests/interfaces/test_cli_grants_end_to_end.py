@@ -53,7 +53,7 @@ from ai_assistant.readers import CALENDAR_READER_NAME
 from ai_assistant.service.transport import Listener
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine, Iterator
+    from collections.abc import Awaitable, Callable, Coroutine, Iterator
     from pathlib import Path
 
     from ai_assistant.orchestration import Engine
@@ -68,6 +68,11 @@ pytestmark = pytest.mark.integration
 #: enough that a genuinely wedged hub fails rather than hangs the suite.
 _PATIENT = timedelta(seconds=10)
 
+#: The engine calls the grant surface makes, recorded as the hub receives them.
+#: Enough to read the client's *whole* flow off the hub, which is the only vantage
+#: point from which "it did not send" differs from "it sent and was refused".
+_WATCHED = ("grantable_sources", "grant", "revoke", "recent_grants", "beliefs")
+
 
 class _Hub:
     """A running hub: a real engine behind a real socket, on its own loop.
@@ -75,6 +80,14 @@ class _Hub:
     The engine is built *inside* the background loop and every later call to it is
     submitted there, so the one-loop rule its stores depend on holds by
     construction rather than by the caller remembering it.
+
+    **It also records what arrives.** ``wire.server`` dispatches by
+    ``getattr(engine, method)`` at call time, so wrapping the bound methods on the
+    instance observes exactly the requests that crossed the socket — and nothing a
+    client did on its own side. A durable-state assertion cannot stand in for this:
+    a refused ``grant`` records nothing, so an empty grant table is equally
+    consistent with a client that never sent one and a client that sent one and was
+    turned away. ADR-0102 §6 distinguishes those two, and this is where they differ.
     """
 
     def __init__(self, settings: Settings, data_dir: Path) -> None:
@@ -84,6 +97,7 @@ class _Hub:
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._engine: Engine | None = None
         self._listener: Listener | None = None
+        self.received: list[str] = []
 
     def run(self, coro: Coroutine[Any, Any, _T]) -> _T:
         """Run one coroutine on the hub's loop and wait for it, from this thread."""
@@ -106,8 +120,29 @@ class _Hub:
 
         self._engine = self.run(_build())
         self.run(self.engine.start())
+        self._watch()
         self._listener = Listener(self.engine, self._settings, data_dir=self._data_dir)
         self.run(self._listener.start(build="test"))
+
+    def _watch(self) -> None:
+        """Wrap the grant surface so every arriving call names itself first.
+
+        After ``start()``, so the engine's own start-up sweeps are not mistaken for
+        a client's request.
+        """
+        for name in _WATCHED:
+            setattr(self._engine, name, self._recording(name, getattr(self._engine, name)))
+
+    def _recording(
+        self, name: str, original: Callable[..., Awaitable[Any]]
+    ) -> Callable[..., Awaitable[Any]]:
+        """One delegating wrapper, recording before it relays and never instead."""
+
+        async def _call(*args: Any, **kwargs: Any) -> Any:
+            self.received.append(name)
+            return await original(*args, **kwargs)
+
+        return _call
 
     def stop(self) -> None:
         """Close the door, then the engine, then the loop — ADR-0083 §4's order."""
@@ -218,6 +253,11 @@ def test_a_typed_grant_is_what_the_ingest_gate_reads(hub: _Hub, console_output: 
     **The revocation half is asserted the same way and for a stronger reason**: it
     is a remedy, and a remedy that is reported as done without being done is worse
     than one that is refused out loud.
+
+    **The sequence the hub received is asserted too**, because ADR-0102 §6's
+    ordering is a claim about what the client sends and in what order — the
+    enumeration precedes the grant, and ADR-0102 §4's revocation enumerates nothing
+    at all. Neither is visible in the output or in the store; both are visible here.
     """
     with pytest.raises(SourceNotGrantedError):
         hub.run(hub.engine.ingest())
@@ -227,13 +267,19 @@ def test_a_typed_grant_is_what_the_ingest_gate_reads(hub: _Hub, console_output: 
     )
     assert granted.exit_code == 0
     assert "Granted" in console_output.getvalue()
+    assert hub.received == ["grantable_sources", "grant"]
     assert hub.run(hub.engine.ingest()).stored == 1
 
     # No `--yes`, and none is accepted: ADR-0102 §4 puts nothing between a user and
     # their remedy, so a revocation that prompted would hang here rather than pass.
+    hub.received.clear()
     withdrawn = CliRunner().invoke(cli.app, ["revoke", CALENDAR_READER_NAME])
     assert withdrawn.exit_code == 0
     assert "Withdrawn" in console_output.getvalue()
+    # §4: no enumeration client-side either — that would reintroduce the admission
+    # check the clause removed, and would fail for a grant whose reader has since
+    # been unconfigured.
+    assert hub.received == ["revoke"]
     with pytest.raises(SourceNotGrantedError):
         hub.run(hub.engine.ingest())
 
@@ -298,20 +344,25 @@ def test_a_source_nobody_configured_is_refused_before_anything_is_sent(
 
     The hub would refuse this too (§4), which is exactly why the fake-backed suite
     cannot settle it: both a client that asked and a client that did not produce the
-    same refusal on the wire (ADR-0098 §5). What is asserted here is that the
-    *remedy* rendered is the real enumeration — the list this deployment actually
-    holds — rather than an echo of what the user typed.
+    same refusal on the wire (ADR-0098 §5).
+
+    **So the assertion is on what the hub received, and a durable-state assertion
+    would not have done.** An earlier draft checked that the grant record was empty
+    and adversarial review falsified it on round 1: a refused ``grant`` records
+    nothing, so a client that sent one, took the hub's rejection and rendered the
+    same remedy would have passed — which is precisely the client §6 forbids.
+    ``received`` holds the enumeration and nothing after it: the client asked what
+    could be offered, could not show a location for ``notes``, and stopped.
     """
     result = CliRunner().invoke(cli.app, ["grant", "notes", "--scope", "facet", "--yes"])
 
     assert result.exit_code == 1
     rendered = _flat(console_output.getvalue())
     assert "cannot offer" in rendered
+    # The remedy is this deployment's real list, not an echo of what was typed.
     assert CALENDAR_READER_NAME in rendered
 
-    # And nothing landed: the record is empty, which is the durable half of "does
-    # not send". A client that sent and swallowed the refusal would render the same
-    # message as one that never sent.
+    assert hub.received == ["grantable_sources"]
     assert hub.run(hub.engine.recent_grants()) == ()
 
 
