@@ -362,6 +362,35 @@ ambiguous unless someone says which way is up.
 > never `REJECT`. The contract ceiling above admits either; the default takes the
 > question.
 
+> **Normative.** That ruling's `reason` states that the proposal's warrant rests on
+> recorded external content. A question the user cannot tell apart from an ordinary
+> one does not discharge §6, and no consolidator ships while the question it raises
+> cannot say why it was raised.
+
+**The reason field is the presentation state ADR-0098 §12's deferral demands, and it
+exists already.** That bullet defers "a presentation state for an inference that
+rests on external evidence" and says it "**fires with that seam**" — this seam. The
+trigger has fired, and the substance of it is dischargeable now at no surface cost:
+`MemoryDecision.reason` is non-optional, `DeferredProposal` carries the ruling whose
+"non-optional `reason`" it names, and `Question.reason` is documented as "**Why the
+user is being asked**". The channel from the policy's ruling to the user's screen is
+built, and it is the system's own words rather than a span — so §7's forgeability
+question does not arise, and nothing here is bought from inspecting text.
+
+**Without it §6 is a worse rule than no rule.** The containment this ADR ships is
+the user's judgement, and #668's goal is "a visible, source-attributed proposal —
+spam, not poison". A user shown an unexplained question about a plausible-sounding
+belief will answer yes, and the gate will have converted a silent corruption into a
+solicited one. That is the failure mode the clause exists to close, and it is why it
+is a clause rather than guidance.
+
+**`Question.band` is not that channel and must not be read as one.** For a tainted
+consolidation it reads `DERIVED` — correct as what it documents, "the band the record
+**would** enter if accepted", and misleading as a statement about warrant, because
+`DERIVED` is glossed as "we worked it out". The band is a conditional about the
+record; the reason is the warrant. A surface that renders only the band tells the
+user this is the assistant's own inference at exactly the moment it is not entirely.
+
 > **Normative.** The ruling is the `MemoryPolicy`'s. No writer, applier, or
 > scheduler substitutes, upgrades, or downgrades it, and none of them may implement
 > this section by converting a ruling the policy made into a different one.
@@ -644,6 +673,10 @@ dispatch plan costs a lane, and this one has already been inherited twice.
 > ordering. Every other clause here supplies evidence, so none of them can fail on
 > that ordering.
 
+> **Normative.** The end-to-end test above also asserts that the `Question` reaching
+> the user carries a `reason` distinguishing a tainted proposal from an ordinary
+> one (§6). Asserting only that a question exists does not satisfy this clause.
+
 > **Normative.** The same lane ships an end-to-end test that a tainted consolidation
 > routed through the orchestration write stage leaves a `DeferredProposal`
 > enumerable from the `DeferralStore` afterwards, and that **answering it
@@ -735,14 +768,19 @@ into the regime by it.
 
 ### 12. Deferred, by name, each with the condition that fires it
 
-- **The presentation state for a belief that rests on external evidence.** ADR-0098
-  §12 defers it and says it "needs the marker of the deferral above to exist before
-  there is anything to present, so it **fires with that seam**". This ADR is that
-  seam, so the trigger fires here — but the surface it would land on is the one
-  ADR-0098 §8 records as lossy in three places already (**#568**, **#673**, the
-  dropped `Attestation`), and adding a fourth field to a projection that drops three
-  is the wrong order of work. **Fires with the lane that next revises `Belief` /
-  `BeliefSummary`**, which #568 and #624 already own.
+- **A *structured* presentation state — a field a surface can key on rather than
+  prose it must read.** ADR-0098 §12's deferral fired with this seam and §6
+  discharges its substance through the ruling's `reason`, which is the channel that
+  exists. What is **not** discharged is the machine-readable half: `Question`,
+  `Belief` and `BeliefSummary` carry no field saying a warrant rests on recorded
+  external content, so a surface cannot style it, filter on it, or refuse to render
+  it as the assistant's own inference — it can only pass through a sentence. Under
+  ADR-0098 §7's third clause those projections are "**defective in that respect**",
+  and this ADR names the defect rather than leaving it to be rediscovered. It does
+  not fix it here: the same projections already drop three other facts (**#568**,
+  **#673**, the dropped `Attestation`), and a fourth field added ahead of the lane
+  reconciling those three is the wrong order of work. **Owned by the lane that next
+  revises those projections**, which #568 and #624 already hold; filed as **#746**.
 - **Naming which external source a derived belief traces to.** Undischarged under
   ADR-0098 §8's second clause, whose own trigger is "the second reader", when
   "attested" stops identifying the source by elimination. Not reached by this ADR's
