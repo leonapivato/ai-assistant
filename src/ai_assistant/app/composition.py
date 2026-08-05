@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from ai_assistant.context import (
     AssemblingContextProvider,
@@ -27,6 +27,7 @@ from ai_assistant.memory import (
     SqliteMemoryStore,
 )
 from ai_assistant.memory.conversation_store import SqliteConversationStore
+from ai_assistant.memory.reembed import Reembedder
 from ai_assistant.models import (
     HashingEmbedder,
     PydanticAIProvider,
@@ -1005,3 +1006,74 @@ def _as_async(close: Callable[[], None]) -> Callable[[], Awaitable[None]]:
         close()
 
     return _aclose
+
+
+#: The :class:`EmbedderKind` members that embed on the user's own machine
+#: (ADR-0104 §4). **Enumerated by name, and fail-closed**: a member absent from
+#: this set is refused by :func:`build_reembedder` unless the operator explicitly
+#: authorises the egress, so a cloud embedder added later is refused until
+#: somebody puts it here deliberately. That is the point of a list rather than a
+#: predicate — a predicate on the ``Embedder`` would need new contract surface
+#: (golden rule 5) and would put the answer in the implementer's hands rather than
+#: the decision's, and `memory/` receives an ``Embedder`` and cannot tell where it
+#: runs. Both members are on-device today: ADR-0024's vendored ONNX model, and the
+#: dependency-free ``HashingEmbedder``.
+_ON_DEVICE_EMBEDDERS: Final = frozenset({EmbedderKind.ON_DEVICE, EmbedderKind.HASHING})
+
+
+def build_reembedder(
+    settings: Settings,
+    *,
+    data_dir: Path | None = None,
+    upload_entire_memory_store: bool = False,
+) -> Reembedder:
+    """Wire the configured embedder to the memory store's re-embedding migration.
+
+    The composition root's second function, and it is here for the reason the
+    first one is: it names two concretes — the ``Embedder`` from ``models/`` and
+    the ``Reembedder`` from ``memory/`` — and nothing else in the tree may name
+    both. The offline tool that calls it lives in ``ai_assistant/service/`` and
+    imports no subsystem, which ADR-0083 §8 requires and ADR-0104 §5 records.
+
+    **This is where the cloud refusal lives** (ADR-0104 §4). The decision is about
+    *which embedder the operator chose*, which is a configuration fact this layer
+    holds and the store does not: ``memory/`` receives an ``Embedder`` and cannot
+    tell whether it reaches the network. So the check is on
+    :attr:`Settings.embedder` against :data:`_ON_DEVICE_EMBEDDERS`, and it is
+    fail-closed — an unrecognised member is refused, not waved through.
+
+    The embedder is constructed **before** the store path is touched, matching
+    :func:`build_engine`'s above-disk contract (#372): an unbuildable on-device
+    model is a ``ConfigurationError`` before anything on disk is inspected.
+
+    Args:
+        settings: Loaded application settings — ``embedder`` selects the target
+            embedding space and ``data_dir`` locates the store.
+        data_dir: Overrides ``settings.data_dir`` when given, exactly as
+            :func:`build_engine`'s keyword does (ADR-0083 §2).
+        upload_entire_memory_store: The operator's explicit authorisation for a
+            target that is not on-device. Named for the act rather than the
+            mechanism, because what is being consented to is the size of the
+            egress and not the topology.
+
+    Returns:
+        A migration ready to :meth:`~ai_assistant.memory.reembed.Reembedder.plan`
+        or run against ``<data_dir>/memory.db``.
+
+    Raises:
+        ConfigurationError: If the configured embedder is not on-device and
+            ``upload_entire_memory_store`` is false, or if the embedder itself
+            cannot be constructed.
+    """
+    if settings.embedder not in _ON_DEVICE_EMBEDDERS and not upload_entire_memory_store:
+        msg = (
+            f"the configured embedder {settings.embedder.value!r} does not run on this "
+            f"machine, so re-embedding would upload every record in the memory store to "
+            f"its operator. Configuring it is not by itself consent to send the "
+            f"accumulated store: pass --upload-entire-memory-store to authorise that, or "
+            f"set ASSISTANT_EMBEDDER to an on-device option"
+        )
+        raise ConfigurationError(msg)
+    embedder = _build_embedder(settings)
+    directory = data_dir if data_dir is not None else settings.data_dir
+    return Reembedder(store=directory / "memory.db", embedder=embedder)

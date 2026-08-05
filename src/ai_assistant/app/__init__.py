@@ -20,11 +20,18 @@ doubles confined to tests — so it gains no licence those forbid (ADR-0042
 
 The entry point is :func:`build_engine`. :func:`ensure_model_credentials` sits
 beside it for the one caller that needs a startup answer ``build_engine``
-deliberately does not give (issue #530, ADR-0083 §3).
+deliberately does not give (issue #530, ADR-0083 §3), and
+:func:`build_reembedder` wires the offline re-embedding migration for the same
+reason ``build_engine`` exists — it is the only layer that may name both the
+``Embedder`` in ``models/`` and the migration in ``memory/`` (ADR-0104 §5).
 """
 
 from __future__ import annotations
 
-from ai_assistant.app.composition import build_engine, ensure_model_credentials
+from ai_assistant.app.composition import (
+    build_engine,
+    build_reembedder,
+    ensure_model_credentials,
+)
 
-__all__ = ["build_engine", "ensure_model_credentials"]
+__all__ = ["build_engine", "build_reembedder", "ensure_model_credentials"]

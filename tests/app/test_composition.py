@@ -13,13 +13,14 @@ import os
 import stat
 import sys
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 
 import ai_assistant
-from ai_assistant.app import build_engine, ensure_model_credentials
+from ai_assistant.app import build_engine, build_reembedder, ensure_model_credentials
 from ai_assistant.app import composition as composition_module
 from ai_assistant.context import AssemblingContextProvider, CalendarContextSource
 from ai_assistant.core.config import EmbedderKind, Settings, load_settings
@@ -41,6 +42,17 @@ from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.readers import CALENDAR_READER_NAME
 from ai_assistant.tools import InMemoryToolRegistry
+
+
+class _CloudKind(StrEnum):
+    """A stand-in for the cloud ``EmbedderKind`` ADR-0104 §4 rules about in advance.
+
+    None exists yet — that is the point of deciding the rule while the case is
+    hypothetical — so the refusal is exercised against a member the allow-list
+    cannot contain.
+    """
+
+    CLOUD = "somebody-elses-cloud"
 
 
 async def test_build_engine_returns_a_ready_engine(tmp_path: Path) -> None:
@@ -1591,3 +1603,61 @@ def test_the_sweep_guard_accepts_only_the_permitted_home(tmp_path: Path) -> None
         permitted.replace("_purge_expired", "_sweep_everything"), encoding="utf-8"
     )
     assert _sweep_call_sites(tmp_path) != _SWEEP_HOME
+
+
+class TestBuildReembedder:
+    """The composition root's second function, and ADR-0104 §4's refusal (#425)."""
+
+    def test_it_wires_the_configured_embedder_to_the_stores_migration(self, tmp_path: Path) -> None:
+        settings = Settings(embedder=EmbedderKind.HASHING, data_dir=tmp_path)
+
+        reembedder = build_reembedder(settings)
+
+        assert reembedder.store == tmp_path / "memory.db"
+
+    def test_the_data_dir_keyword_wins_over_the_setting(self, tmp_path: Path) -> None:
+        configured = tmp_path / "configured"
+        configured.mkdir()
+        passed = tmp_path / "passed"
+        settings = Settings(embedder=EmbedderKind.HASHING, data_dir=configured)
+
+        reembedder = build_reembedder(settings, data_dir=passed)
+
+        assert reembedder.store == passed / "memory.db"
+
+    def test_every_embedder_this_build_offers_is_on_device(self) -> None:
+        """The tripwire, and it is meant to fail loudly the day it stops being true.
+
+        ADR-0104 §4 refuses by an **enumerated** allow-list rather than a predicate,
+        so a cloud ``EmbedderKind`` added later is refused until somebody puts it in
+        the list deliberately. This is the other half of that: a member added and
+        *not* classified fails here, so the decision cannot be skipped by omission.
+        """
+        assert set(EmbedderKind) == composition_module._ON_DEVICE_EMBEDDERS
+
+    def test_an_off_device_target_is_refused_and_the_refusal_names_the_act(
+        self, tmp_path: Path
+    ) -> None:
+        settings = Settings(embedder=EmbedderKind.HASHING, data_dir=tmp_path)
+        cloud = settings.model_copy(update={"embedder": _CloudKind.CLOUD})
+
+        with pytest.raises(ConfigurationError) as caught:
+            build_reembedder(cloud)
+
+        message = str(caught.value)
+        # The refusal path is also the disclosure path (ADR-0104 §4).
+        assert "upload every record in the memory store" in message
+        assert "somebody-elses-cloud" in message
+        assert "--upload-entire-memory-store" in message
+
+    def test_an_off_device_target_proceeds_once_the_operator_authorises_it(
+        self, tmp_path: Path
+    ) -> None:
+        settings = Settings(embedder=EmbedderKind.HASHING, data_dir=tmp_path)
+        cloud = settings.model_copy(update={"embedder": _CloudKind.CLOUD})
+
+        # The flag lifts the §4 refusal and nothing else: what comes back is an
+        # ordinary migration against ``<data_dir>/memory.db``.
+        reembedder = build_reembedder(cloud, upload_entire_memory_store=True)
+
+        assert reembedder.store == tmp_path / "memory.db"
