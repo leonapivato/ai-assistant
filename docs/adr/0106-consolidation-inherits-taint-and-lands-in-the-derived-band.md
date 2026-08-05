@@ -304,14 +304,53 @@ ambiguous unless someone says which way is up.
 
 ### 6. The enforcement point: the gate rules, and it can see the fact without a store
 
-> **Normative.** A proposal carrying `derived_from_external` is not auto-accepted
-> into durable memory. Its terminal ruling is `ASK_USER` or `REJECT`. This is
-> ADR-0098 §4's fourth clause given its enforcement point, and adds no condition to
-> it.
+> **Normative.** A proposal carrying `derived_from_external` **and no
+> `UserConfirmation`** is not auto-accepted into durable memory. Its terminal ruling
+> is `ASK_USER` or `REJECT`. This is ADR-0098 §4's fourth clause given its
+> enforcement point, and adds no condition to it.
+
+> **Normative.** The rule above is an admissibility rule — a property of the
+> proposal alone, committing nothing — and sits in `DefaultMemoryPolicy`'s
+> admissibility floor beside the secret-tier deferral, ahead of every conflict rule.
+> A proposal carrying a `UserConfirmation` for the deferral this rule raised passes
+> it and is judged on the ordinary path.
 
 > **Normative.** The ruling is the `MemoryPolicy`'s. No writer, applier, or
 > scheduler substitutes, upgrades, or downgrades it, and none of them may implement
 > this section by converting a ruling the policy made into a different one.
+
+**The confirmation carve-out is what makes the question a question, and an earlier
+draft omitted it and thereby ruled the opposite of this ADR's own §5.** ADR-0078 §5
+is explicit that "the confirmed answer is a **re-ingest**": the coordinator rebuilds
+the proposal with a `UserConfirmation` and calls `MemoryWriter.ingest`, so "Conflict
+detection, the policy, the atomic applier and the full-set retirement rule all run
+unchanged." The taint marker rides along on that re-ingest. A rule stated without
+the carve-out therefore fires a second time on the confirmed proposal and defers it
+again — "The user answers, and is asked again", which is the failure ADR-0078 §3
+names in its own words — and a tainted consolidation could never land, contradicting
+§5 above and the Consequences below. Adversarial review found it on round 3.
+
+**The carve-out is what "auto" already means, not a relaxation of ADR-0098 §4.**
+That clause reads "never **auto**-accepted into durable memory. Its terminal ruling
+is a user question or a refusal." A ruling reached by asking the user and receiving
+their answer is not an automatic acceptance; and a question whose only admissible
+answer is "no" is not a question, which is the reading under which §4's second
+sentence would forbid the first sentence's own remedy. ADR-0098's posture is stated
+as "a real containment and it is not a prevention", and #668's goal that this ADR
+inherits is the conversion of a successful injection into "a visible,
+source-attributed proposal — spam, not poison". A user who reads a consolidated
+belief and says yes is the containment working.
+
+**The ordering is ADR-0078 §5a's, taken rather than re-derived.** That section put
+the confirmed rule "ahead of every conflict rule but behind the admissibility floor"
+because the floor's rulings "are properties of the proposal alone and neither commits
+anything, so nothing a confirmation says can make either safe to skip". Taint is a
+property of the proposal alone and commits nothing, so it belongs in the floor. It
+differs from the secret-tier rule in exactly one respect and the difference is
+principled: the secret rule is *never* satisfiable by a confirmation, because §1 of
+ADR-0078 refuses to queue a secret proposal at all and `MemoryUpdateProposal`'s
+validator makes the combination unconstructable — there is no question to answer. A
+tainted proposal *is* queued, so there is one, and answering it is the point.
 
 **This requires no Protocol change, which is the whole reason the marker is on the
 record.** ADR-0098 §5 could not site the enforcement because
@@ -462,11 +501,11 @@ dispatch plan costs a lane, and this one has already been inherited twice.
 > **Normative.** The lane landing `derived_from_external` on `Provenance` ships a
 > test that a record decoded without the field reads `False`.
 
-> **Normative.** The lane changing `memory`'s fold ships a test in which the
-> **existing target is tainted and the incoming record is not**, asserting the
-> folded result is still tainted (§4). A test with the taint on the incoming side
-> does not satisfy this clause: it passes an implementation that copies the incoming
-> field, which is the laundering §4 forbids.
+> **Normative.** The lane changing `memory`'s fold ships a test covering **both
+> positions of the tainted side** — tainted target with untainted incoming, and
+> untainted target with tainted incoming — asserting the folded result is tainted in
+> each (§4). One parametrised test over the two positions satisfies this clause;
+> either position alone does not.
 
 > **Normative.** The consolidation lane ships a test that a proposal built from an
 > input set containing an `ATTESTED` record reaches the gate carrying the marker
@@ -484,23 +523,29 @@ dispatch plan costs a lane, and this one has already been inherited twice.
 
 > **Normative.** The same lane ships an end-to-end test that a tainted consolidation
 > routed through the orchestration write stage leaves a `DeferredProposal`
-> enumerable from the `DeferralStore` afterwards (§6). A test that stops at the
-> policy's ruling does not satisfy this clause.
+> enumerable from the `DeferralStore` afterwards, and that **answering it
+> affirmatively lands a durable record still carrying the marker** (§4, §6). A test
+> that stops at the policy's ruling does not satisfy this clause.
 
-**Four clauses rather than one, because three of the four failures pass the first.**
-The producer-omits case is named because a test that only exercises a cooperative
-producer passes a fail-open implementation. The `DERIVED`-input case is the one that
-makes "inherits" mean anything past a single hop: an implementation checking
-`source is EXTERNAL` and nothing else is fail-open against exactly the second-order
-consolidation §4's monotonicity exists to stop, and it is invisible to a test whose
-tainted input is attested. The producer-emits case is the mirror, and its failure is
-merely noisy rather than unsafe — a merging implementation raises spurious questions
-— but §3 states discard as an obligation and an unwitnessed obligation decays. The
-end-to-end case is the one that would have caught this ADR's own round-1 defect
-(§6): the ruling was right and the question reached nobody. This is the discipline
-ADR-0098 §9 imposed on the prompt-assembly lane, whose clause insists on rendering
-"a record whose `content` contains that assembler's own container syntax" rather
-than merely asserting a label is present — the test has to be able to fail.
+**Each clause names the case that can fail, because every one of these has a wrong
+implementation the neighbouring test waves through.** The producer-omits case is
+named because a test exercising only a cooperative producer passes a fail-open
+selection step. The `DERIVED`-input case is what makes "inherits" mean anything past
+a single hop: a selection step checking `source is EXTERNAL` and nothing else is
+fail-open against exactly the second-order consolidation §4's monotonicity exists to
+stop, and it is invisible to a test whose tainted input is attested. The two fold
+positions are required together because `_merge` reads most of its `Provenance` from
+one side, so a test in either position alone passes an implementation that simply
+copies that side. The producer-emits case is the mirror of the omits case, and its
+failure is noisy rather than unsafe — a merging implementation raises spurious
+questions — but §3 states discard as an obligation and an unwitnessed obligation
+decays. The end-to-end case carries both of this ADR's own review defects: its
+first leg would have caught round 1's, where the ruling was right and the question
+reached nobody, and its second leg round 3's, where the question was raised and
+answering it yes could not land anything. This is the discipline ADR-0098 §9 imposed
+on the prompt-assembly lane, whose clause insists on rendering "a record whose
+`content` contains that assembler's own container syntax" rather than merely
+asserting a label is present — the test has to be able to fail.
 
 Unmarked, and owed by nobody as an obligation: the observer is unaffected. Its
 payload holds episodes and nothing else (ADR-0077 §1, §3), no episode is `EXTERNAL`
@@ -535,10 +580,14 @@ differently or read one of its clauses more widely.
 - **ADR-0086 §2, §3, §4.** Relied on as the reason the citation tuple cannot carry
   taint, and as the test that refuses a validator. Neither is read more widely.
   **Addition.**
-- **ADR-0078 §3.** Relied on exactly as written: §6's routing clause obliges a new
-  producer to use the write stage that §3 already designates as the enqueue point,
-  and takes no ruling about what that stage does. §3's `DataTier.SECRET` filter is
-  named rather than narrowed. **Addition.**
+- **ADR-0078 §3, §5 and §5a.** Relied on exactly as written. §6's routing clause
+  obliges a new producer to use the write stage §3 already designates as the enqueue
+  point, and takes no ruling about what that stage does; §3's `DataTier.SECRET`
+  filter is named rather than narrowed. §6's confirmation carve-out and its ordering
+  are §5's re-ingest and §5a's floor-then-confirmed sequence applied to one more
+  admissibility rule — §5a's own reason for that sequence ("properties of the
+  proposal alone… neither commits anything") is the reason taint sits in the floor,
+  and no rule of §5a's is read more widely. **Addition.**
 - **ADR-0022 §4 and ADR-0081 §8.** Named in §9 as constraints on a *different* lane,
   with no ruling taken over either. **Addition.**
 - **ADR-0103.** §8 above declines to touch it in either direction. **Addition.**
