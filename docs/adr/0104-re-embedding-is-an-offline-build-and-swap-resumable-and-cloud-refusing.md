@@ -1,7 +1,205 @@
 # 104. Re-embedding is an offline build-and-swap: resumable, verified, and cloud-refusing
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-05
+- **Note (2026-08-05): ratified.** `Proposed` → `Accepted`, in the separate lane
+  #633 requires, after the review this ADR required came back terminal on the
+  content it merged with: adversarial **APPROVE WITH NITS**, one `minor` finding
+  open, at tree `13e5e1f42f1b`, round 5, 2795 lines net across 8 commits, churn
+  reported as a lower bound of `≥1.0×` (2907 touched; history was rewritten, so
+  earlier rounds are not counted), posted to PR #730 by `just ship`. That is the
+  outcome ADR-0070 §1 requires the ratifying edit to record — "the ratifying edit
+  records that review's outcome, it does not replace it" — and it is taken from
+  that comment rather than from a report. **The verdict is recorded as it stands
+  rather than rounded up**: it is APPROVE WITH NITS, not APPROVE with no
+  findings, and the open `minor` is #738 — a damaged work store holding rows but
+  no cursor is treated as resumable and then fails on every retry instead of
+  being discarded, which is a defect in `memory/reembed.py`'s recovery path and
+  not in any clause below. It is filed rather than fixed, which is `CLAUDE.md`'s
+  triage rule, and ratifying this text neither closes it nor depends on it.
+
+  **One lens, and that is the rule rather than a shortfall.** ADR-0015 §5 binds
+  "a substantive contract ADR — one adding or changing a Protocol or a `core/`
+  type crossing subsystem boundaries" to ship as its own PR and be ratified ahead
+  of its implementation, and to carry the architecture lens. This ADR is neither:
+  `gh pr view 730 --json files` lists nine paths and **not one of them is under
+  `src/ai_assistant/core/`** — the ADR itself, `pyproject.toml`, `app/__init__.py`,
+  `app/composition.py`, `memory/reembed.py`, `service/reembed.py` and three test
+  modules. So the ratify-then-implement ordering did not bind it, shipping the
+  decision in the same PR as its implementation was compliant rather than a
+  breach of golden rule 5, and the adversarial lens alone was the required set.
+  The same clause exempts this ratifying edit — "trivial ADRs (amendments, status
+  changes, supersessions) are exempt" — so it too takes the adversarial lens only.
+
+  **The anchor is not the merged head here, and the identity is established
+  through the tree rather than assumed**: the comment's
+  `<!-- ship:d41d0757bf1b2c239493befaa8409251cd30fc7a -->` anchor is the
+  pre-merge branch head, which `git merge-base --is-ancestor` shows is *not* an
+  ancestor of `main` because #730 was rebase-merged. Both were resolved with
+  `git rev-parse` against `refs/pull/730/head` rather than trusted:
+  `d41d0757bf1b^{tree}` and `4cbcb34^{tree}` are the same tree, `13e5e1f42f1b`,
+  the one named above. The content the review read is therefore the content that
+  landed, notwithstanding the rewritten hash.
+
+  **Beyond the `Status` line and this appended note, not one word of the text
+  this ADR merged with is edited** — not a clause, not a tense — which is
+  ADR-0070 §1's own test applied to the ratifying edit first, in its strongest
+  available form: no decision text is touched and no normative clause acquires,
+  loses or alters an obligation. It is also the only in-place form §1 permits,
+  which allows a header-line edit at ratification and holds that "ratified
+  decision text — the Context, Decision and Consequences — is never rewritten".
+
+  **That no pre-existing text needed editing is a swept result, not an
+  omission — and it was swept without an advance assertion to lean on.** Unlike
+  ADR-0102, this ADR carries no header bullet claiming that every reference below
+  is to a neighbour's text as merged, and unlike ADR-0096 through ADR-0102 it
+  carries no header bullet naming its review set, so the tense edit each of those
+  ratifications made is not owed here — there is no such bullet to put in the
+  past tense. The sweep was therefore run site by site over the whole document,
+  and the sites are named so a later reader can check the claim rather than trust
+  it. **No clause anywhere in this ADR mentions this ADR's own `Status`**, and
+  exactly one sentence mentions a neighbour's: §Context's "**Placement is already
+  ratified and is not reopened here**", of ADR-0083 §10. It was checked and
+  deliberately left. ADR-0083 stands `Accepted` today, so the sentence is true as
+  it reads; this document's flip cannot change where ADR-0083 stands; and the
+  only event that could falsify it — ADR-0083 being superseded — is one ADR-0070
+  §1 already handles on ADR-0083's own Status line. Rewriting it would touch
+  Context text for no gain, which §1 forbids outright.
+
+  **Every other reference to a neighbour names its *text* or its ruling**, and
+  the three load-bearing quotations were re-read at the cited documents rather
+  than recognised: ADR-0083 §10's "an offline tool — the re-embedding migration
+  (#425) is the first and for now the only one — takes the same instance lock,
+  which serialises it against the hub by construction and needs no new mechanism"
+  is verbatim at `0083-…:682`; ADR-0006 §4's "drive that migration" is verbatim at
+  `0006-…:92`; and ADR-0103 §1's "delete, expire, elide or weaken a belief, or
+  the evidence behind a belief, in order to reclaim storage" is verbatim at
+  `0103-…:204`. The remaining citations — ADR-0083 §1, §6, §8 and §12, ADR-0084
+  §6, ADR-0024, ADR-0017 §1, ADR-0007 §3, ADR-0006 §1 and §2, ADR-0004 §2, §6 and
+  §7, and ADR-0103 §1 and §2 — each name a clause's content. **The ADR-0103
+  citations were the ones most at risk and they hold**: this ADR was written while
+  ADR-0103 stood `Proposed`, and §1's "ADR-0103 §1 binds every leg 7 decision",
+  §3's "the only reading ADR-0103 §1 leaves open" and the Consequences' "Nothing
+  in ADR-0103 is disturbed" each turn on what that clause *says*, never on where
+  it stood. ADR-0103 was ratified at `c5f3249`, three commits before this flip,
+  and none of the three sentences needed an edit as a result.
+
+  **Three merges landed between this ADR's review and its ratification, so the
+  staleness check was run rather than recited — and it is stated at the base this
+  edit actually lands on rather than at the authoring base**, which is the error
+  #704's adversarial review caught in ADR-0101's ratification note. Ratified
+  against `553c52d`, where `git diff --name-only 4cbcb34 553c52d` — `4cbcb34`
+  being the commit this ADR merged as, whose tree is the reviewed one named above
+  — names six paths across 22 commits: `docs/adr/0103-…`, `docs/adr/0106-…`, and
+  four modules which git prints at their full repository paths and which this
+  note names in the `src/ai_assistant/`-relative form the rest of the corpus
+  uses — `memory/ingest.py` and `testing/writer.py`, plus
+  `tests/memory/test_fake_writer.py` and `tests/memory/test_ingest.py`.
+  Nothing else. That is #739, ADR-0103's ratification; #742, the #646 fold lane;
+  and #740, ADR-0106 — and it reaches no file this ADR cites: neither
+  `memory/sqlite_store.py`, `memory/reembed.py`, `app/composition.py`,
+  `service/reembed.py` nor `core/config.py` is in the set. **ADR-0106's merge is
+  prose only** — the one file, no `src/` and no `tests/` — and it neither cites
+  this ADR nor reaches its subject: its two uses of the word "migration" are
+  about marking legacy derived records tainted, not about re-embedding. Nothing
+  below is disturbed by it.
+
+  **This note's own base moved once, and the round that cost is recorded rather
+  than absorbed.** The review named above was conducted at base `404e07f`; #740
+  then merged, and because `docs/adr/**` is inside ADR-0027 §3's floor, a base
+  move landing anywhere in that subtree costs a fresh round no matter whose file
+  it is — `ship.sh`'s `_is_floor_path` matches `docs/adr/*` as a `case` glob that
+  spans `/`, and never compares the move against the branch's own diff. A
+  different file is not a cleared floor. So the rebase onto `553c52d` was
+  re-gated and re-reviewed rather than shipped on the earlier artifact, and every
+  figure in this note is restated at the new base rather than carried over from
+  the old one.
+
+  **That re-review raised a `blocker` against §3, and it is waived here on the
+  record rather than only in a pull request.** The finding is that §3's contract
+  still permits a concurrent writer's commit, landing between the final
+  fingerprint read and the `rename`, to be discarded with nothing reporting it.
+  **The finding is accurate and it is not a discovery**: §3 states that residual
+  itself — "it does not close it, and it is not offered as closing it" — and the
+  finding's own grounding concedes the ADR acknowledges the gap. So it is not a
+  defect found in this text; it is a disagreement with a disclosed, reasoned
+  trade-off that PR #730's adversarial lens already read and passed. It is waived
+  for a reason that is structural rather than a judgement that the risk is
+  nil: **a ratifying edit cannot make this change even if it should be made.**
+  ADR-0070 §1 confines an amendment to an appended dated note plus a header line
+  and holds that decision text "is never rewritten", while altering the swap
+  protocol is a change to what was decided — "anything a reader would act on
+  differently" — which §1 routes to a **new ADR that supersedes §3**. Ratifying
+  the text as it stands and filing the question is therefore the only disposition
+  available to this lane, and it is the honest one: the alternative is leaving a
+  decision `Proposed` indefinitely while its implementation is merged and in use.
+  Filed as **#750**, which records the residual, the reason it was not fixed
+  here, and why the reviewer's suggested remedy — an exclusive lock held across
+  verify, fingerprint and rename — is not obviously sufficient, since a rename
+  over an open file strands a prior opener on the retained inode rather than
+  excluding it. **This note claims nothing §3 does not.** It does not assert that
+  §3 closes that window, and nothing above depends on its being closed.
+
+  **Every claim this ADR makes about the tree was re-read at `553c52d` rather
+  than read for plausibility, and all hold.** `EmbedderKind` still has exactly
+  two members, `ON_DEVICE` and `HASHING`, both on-device, so §Context's "no cloud
+  `Embedder` exists in the tree today" and §4's decision-while-hypothetical still
+  stand; `Settings.embedder` still defaults to `EmbedderKind.ON_DEVICE`, which is
+  what makes #425's hashing-tagged store unstartable. `SqliteMemoryStore` still
+  runs `_verify_or_init_meta` during construction — `__init__` calls `_setup`,
+  which calls it — and still raises `IncompatibleStateError` from it;
+  `_migrate_records` still backfills the derived columns from the blob and still
+  states "**The blob stays the truth and the column is a derived index**"; the
+  `records` schema still declares `rowid INTEGER PRIMARY KEY` explicitly, which is
+  what §2's no-sentinel clause turns on, and carries `expires_at`, `valid_until`
+  and `about_person` as the later columns §1 re-derives; and `export` still ends
+  its query `ORDER BY rowid`, which is the reason §1 preserves it. §5's placement
+  claims are all three true on the ground: `memory/reembed.py`,
+  `app/composition.py`'s wiring and `service/reembed.py`, with `service/lock.py`
+  holding the instance lock, `pyproject.toml` declaring
+  `ai-assistant-reembed = "ai_assistant.service.reembed:main"`, and the
+  `lint-imports` contract still named "nothing imports the service".
+
+  **§3's and §4's two round-fixed clauses describe the code as it landed, not the
+  behaviour that was fixed.** The round-3 blocker was that `Path.stat()` follows
+  symlinks, so a symlinked backup reported the live store's inode and was accepted
+  as a prior attempt's hard link; §3 as merged already rules "a symbolic link is
+  refused, never followed" and already says "the check is therefore `lstat`", and
+  `memory/reembed.py:751` calls `self._backup.lstat()` and compares `st_dev` with
+  `st_ino`. The round-4 major was that `_build_embedder` treated every
+  unrecognised `EmbedderKind` as the on-device default, so the flag would have
+  lifted the refusal onto a substitution; §4 as merged already carries the
+  exhaustive-construction clause and its "narrows the refusal to `Never`"
+  reasoning, and `app/composition.py` reaches `assert_never(settings.embedder)`
+  with `_ON_DEVICE_EMBEDDERS` enumerated beside it. **No clause below describes a
+  pre-fix behaviour**, so nothing was repaired under cover of this ratification.
+
+  **The issue claims were checked against GitHub, and one Consequence has no
+  issue behind it.** #425 is **closed**, as its bullet says it would be; #136 and
+  #505 are both **open** and untouched, as their bullets say; #737, which the
+  round-4 fix closed, is **closed**. But the §4 bullet's "**Filed** as a follow-up
+  to settle if and when a cloud `Embedder` is actually built", of the audit-trail
+  residue, names no number and **no such issue exists** — searches for the audit
+  residue and for ADR-0104 return only #729, #738 and #737. The gap is recorded
+  here rather than closed by an edit: correcting the sentence would rewrite a
+  Consequence, and filing the issue now would not make the past-tense claim true
+  as of the day it was written. **#747** is filed in this lane instead, so the
+  residue the bullet describes is actually tracked.
+
+  **No deferral of this ADR has fired.** §4's rule stays hypothetical while
+  `EmbedderKind` has no cloud member; the Revisit clause's three conditions —
+  exclusivity relaxed (ADR-0083 §12, #505), a cloud `Embedder` implemented, and a
+  store too large for a second copy — are none of them met.
+
+  **Two present-tense clauses were checked and deliberately left.** §Context's
+  "there is no migration to drive" was true when written and is **false on `main`
+  today**, because this ADR's own implementing PR landed the migration in the same
+  commit range — the one dating event no later lane could cause and no ratifying
+  edit may repair, since ADR-0070 §1 forbids rewriting Context. It reads as what
+  it is: the gap the decision below was taken to close. And §Context's dated
+  observation that `EmbedderKind` "has exactly two members" was verified above
+  rather than assumed. **ADR-0070 §1's no-rewrite rule now protects this text**,
+  so any later correction to any of it is an appended dated note.
 
 ## Context
 
