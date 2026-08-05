@@ -365,13 +365,28 @@ for `ASSERTED` and `ATTESTED` today, §2 is out of scope by band and this clause
 out of scope by rendering, so ADR-0086 §4's record-and-`export` disclosure remains
 exactly what it always was, with §3's field on the DTO besides.
 
-**Stating the two scopes separately is the point.** An earlier draft of §2 was
-unconditional over bands while this clause exempted a no-count surface, which is
-one obligation written twice at two widths — the defect ADR-0089 §3 exists to
-prevent and #477 is the record of. It was caught by adversarial review of this
-ADR and is recorded rather than quietly repaired, for the reason ADR-0091 §1 gave
-when it recorded its own instance: the drift is a property of the form, not of any
-author's care.
+**Stating the two scopes separately is the point.** Earlier drafts of §2 and §7
+each stated an obligation unconditionally over bands while this clause exempted a
+no-count surface — one obligation written twice at two widths, twice, which is the
+defect ADR-0089 §3 exists to prevent and #477 is the record of. Both were found by
+adversarial review of this ADR, in successive rounds, and both are recorded rather
+than quietly repaired, for the reason ADR-0091 §1 gave when it recorded its own
+instance: **the drift is a property of the form, not of any author's care** — and
+two instances inside one ADR whose author was already arguing against the form is
+the strongest evidence of that yet.
+
+**So every clause in this ADR is stated with its width, checked one by one.** Two
+recurrences were enough to make the check explicit rather than assumed:
+
+| Clause | Scope | Why that width |
+| --- | --- | --- |
+| §1 | the corpus | reads ADR-0086 §10; no band or surface dimension |
+| §2 | `DERIVED` beliefs | ADR-0073 §4 puts the citation-count floor in that bullet alone |
+| §3 | **every** band | the DTO carries what the record holds; `export`-parity |
+| §4 | both types | a structural refusal to add a validator; no band dimension |
+| §5 | any surface **that renders a count** | keyed on rendering, not on band |
+| §6 | both types | the field's meaning and its documentation, not a rendering |
+| §7 | prohibition every band; obligation rides on §2's | forbidding a false statement costs a silent surface nothing |
 
 *Illustrative and not normative* (ADR-0089 §3): a derived belief carrying
 sixty-four citations with none lost and nine hundred elided reads as "I worked it
@@ -405,10 +420,21 @@ is now two fields.
 
 > **Normative.** `unsupported` is unchanged on both types — `evidence_count > 0
 > and lost_evidence == evidence_count`, one definition everywhere (ADR-0085 §4a).
-> A surface rendering an `unsupported` belief whose `evidence_elided` is above
-> zero does not state that nothing supports the belief; it states that every
-> citation the belief still carries has gone, and that up to `evidence_elided`
-> further citations stood behind it whose fate this surface cannot report.
+> **On any band, no surface states that nothing supports a belief whose
+> `evidence_elided` is above zero** — the elided episodes may be intact, so the
+> statement is false. Where §2 owes a `DERIVED` belief a disclosure and that
+> belief is `unsupported`, the disclosure says that every citation it still
+> carries has gone **and** that up to `evidence_elided` further citations stood
+> behind it whose fate this surface cannot report. A surface that renders no such
+> line for a belief is not made to render one by this clause.
+
+**The two halves have two widths deliberately, and this is the same seam §5
+names.** The prohibition binds every band because it forbids a *statement*, and a
+surface that says nothing cannot breach it — so scoping it would buy nothing and
+would leave a future attested renderer free to say the false thing. The positive
+obligation rides on §2's, so it reaches exactly the band §2 reaches and adds no
+disclosure of its own; `interfaces/cli.py`'s `ASSERTED` and `ATTESTED` branches
+stay unchanged under both halves, which is what §8 item 4 records.
 
 **The predicate is right and the sentence built on it is not.** `interfaces/cli.py`'s
 `_why` renders an unsupported derived belief as "…none of which still exists. I
