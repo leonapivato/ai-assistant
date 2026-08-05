@@ -318,9 +318,11 @@ ambiguous unless someone says which way is up.
 
 > **Normative.** The rule is an admissibility rule — a property of the proposal
 > alone, committing nothing — so in `DefaultMemoryPolicy` it sits in the
-> admissibility floor, **behind** the secret-tier deferral and ahead of every
-> conflict rule. A proposal carrying a `UserConfirmation` for the deferral this rule
-> raised passes it and is judged on the ordinary path.
+> admissibility floor, **behind both of that floor's existing rulings** — the
+> secret-tier deferral and ADR-0077 §5's rejection of a derived belief citing no
+> evidence — and ahead of every conflict rule. A proposal carrying a
+> `UserConfirmation` for the deferral this rule raised passes it and is judged on
+> the ordinary path.
 
 > **Normative.** `DefaultMemoryPolicy`'s ruling under that rule is **`ASK_USER`**,
 > never `REJECT`. The contract ceiling above admits either; the default takes the
@@ -375,11 +377,27 @@ path destroys the consolidation, tells nobody, and leaves the user unable to kee
 summary they would have wanted. That is a worse outcome than a question, and under
 ADR-0098 §8 it would additionally reach nobody at all.
 
-**Behind the secret-tier rule rather than beside it**, which is ADR-0078 §5a's
-ordering taken exactly: the secret ceiling "precede[s] any conflict reasoning" and
-nothing may make it skippable, and a proposal that is both secret and tainted must
-take the secret path — unqueued — rather than this one. Stating the order removes
-the only case where the two floors could disagree about what to return.
+**Behind the whole floor rather than beside part of it**, which is ADR-0078 §5a's
+ordering taken exactly. That floor holds two rulings that "precede any conflict
+reasoning": the secret-tier deferral, and ADR-0077 §5's rejection of a derived
+belief citing no evidence. Both outrank taint, and each for its own reason.
+
+- A proposal that is both secret and tainted takes the **secret** path — unqueued —
+  because §1 of ADR-0078 refuses to queue a secret proposal at all, and a taint rule
+  ordered first would queue one.
+- A tainted derived proposal citing **nothing** is a `REJECT` and not a question. A
+  taint rule ordered first would return `ASK_USER` and put an unwarranted belief in
+  front of the user as though answering it could make it admissible; ADR-0077 §5
+  rejects it whatever the user says.
+
+ADR-0078 §5a made the same call for the confirmed rule and gave the reason for
+stating it rather than relying on the case being unreachable: "a floor that holds
+only while a coincidence holds is not a floor." Here it is not even a coincidence.
+§5a could observe that a derived belief citing nothing "is rejected at its first
+ingest, so it is never deferred and never confirmed"; a consolidator's *first*
+ingest is exactly where a citation-less proposal would arrive, so the case is live
+rather than unreachable. Adversarial review found the missing half of the ordering
+on round 7.
 
 **The confirmation carve-out is what makes the question a question, and an earlier
 draft omitted it and thereby ruled the opposite of this ADR's own §5.** ADR-0078 §5
@@ -586,6 +604,11 @@ dispatch plan costs a lane, and this one has already been inherited twice.
 > **Normative.** The same lane ships a test in which every selected input is
 > untainted and the producer emits `derived_from_external=True`, asserting the
 > proposal reaching the gate carries `False` (§3's discard-not-merge).
+
+> **Normative.** The same lane ships a test that a tainted, unconfirmed, derived
+> proposal citing **no evidence** is rejected rather than queued, pinning §6's floor
+> ordering. Every other clause here supplies evidence, so none of them can fail on
+> that ordering.
 
 > **Normative.** The same lane ships an end-to-end test that a tainted consolidation
 > routed through the orchestration write stage leaves a `DeferredProposal`
