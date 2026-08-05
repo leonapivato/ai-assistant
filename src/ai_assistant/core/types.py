@@ -5637,8 +5637,12 @@ class BeliefSummary(BaseModel):
 
     **ADR-0073 §4's floor becomes a static guarantee rather than a convention**: a
     client holding one of these cannot render a citation as evidence, because it
-    holds no citations. It holds how many there are and how many are gone, which is
-    what §4 asked the listing to convey.
+    holds no citations. What it holds is how many it *carries*, how many of those
+    are gone, and — since ADR-0107 §3 — an upper bound on how many further ones
+    stood behind the belief and are no longer carried. **§4's question is answered
+    by the pair** ``evidence_count`` and ``evidence_elided``, never by
+    ``evidence_count`` alone (ADR-0107 §6): before ADR-0086 §1's bound the two
+    numbers could not differ, and after it they can.
 
     Attributes:
         id: The record's id, opaque, and what ``forget`` names.
@@ -5652,15 +5656,22 @@ class BeliefSummary(BaseModel):
         last_updated: The transaction stamp — when *the assistant* last revised
             this belief (ADR-0045 §3) — which is also the enumeration's sort key.
             It is **our** clock and not a source's.
-        evidence_count: How many citations stand behind it, resolved or not. A
-            **field** here rather than a property, because this type carries no
-            evidence to derive it from.
+        evidence_count: How many citations the belief **carries**, resolved or not.
+            A **field** here rather than a property, because this type carries no
+            evidence to derive it from. Not on its own the answer to "how many
+            stand behind it" — read it with ``evidence_elided`` (ADR-0107 §6).
         lost_evidence: How many of those citations no longer resolve. A field for
             the same reason.
         valid_until: The end of the belief's validity window, where one is set;
             ``None`` where the window is open. Every listed belief is live by
             construction, so an open window carries no information and a set end
             does.
+        evidence_elided: :attr:`Provenance.evidence_elided` **as stored** — an
+            upper bound on how many further citations stood behind the belief and
+            are no longer carried. Carried on **every** band, never zeroed or
+            clamped by band, because the DTO reports what the record holds
+            (ADR-0107 §3); whether a *rendering* is owed is a separate question
+            §2 scopes to ``DERIVED``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -5676,13 +5687,21 @@ class BeliefSummary(BaseModel):
         description="When the assistant last revised this belief (ADR-0045 §3)."
     )
     evidence_count: int = Field(
-        default=0, ge=0, description="How many citations stand behind it, resolved or not."
+        default=0, ge=0, description="How many citations the belief carries, resolved or not."
     )
     lost_evidence: int = Field(
         default=0, ge=0, description="How many of those citations no longer resolve."
     )
     valid_until: UtcInstant | None = Field(
         default=None, description="The end of the belief's validity window, where one is set."
+    )
+    evidence_elided: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "An upper bound on how many further citations stood behind it and are "
+            "no longer carried, as stored (ADR-0107 §3)."
+        ),
     )
 
     @model_validator(mode="after")
@@ -5693,6 +5712,17 @@ class BeliefSummary(BaseModel):
         disagree with the evidence because they are computed from it; moving them
         to fields buys the listing its shape at the cost of the one constraint the
         model must now assert for itself.
+
+        **``evidence_elided`` is deliberately outside this rule, and no validator
+        relates it to either count** (ADR-0107 §4). There is no true relation to
+        assert: it counts displacements over the record's whole history, over a
+        different population than the retained tuple and double-counting in the two
+        cases ADR-0086 §4 names, so it may exceed ``evidence_count`` and may be
+        non-zero while ``evidence_count`` is zero. Asserting one anyway would invent
+        a *read-path* failure — the same argument :class:`Provenance` makes for
+        refusing a ``max_length`` on ``evidence`` — turning a legitimately-held
+        belief into an unconstructable DTO. This invariant is safe precisely because
+        both of its counts are taken over one tuple at one instant.
         """
         if self.lost_evidence > self.evidence_count:
             msg = (
@@ -5749,6 +5779,12 @@ class Belief(BaseModel):
         last_updated: The transaction stamp (ADR-0045 §3), our clock and not a
             source's.
         valid_until: The end of the belief's validity window, where one is set.
+        evidence_elided: :attr:`Provenance.evidence_elided` **as stored** — an
+            upper bound on how many further citations stood behind the belief and
+            are no longer carried. **A field and not a property**, unlike the two
+            counts below: an elision counts citations ``evidence`` no longer
+            contains, so no function of that tuple yields it (ADR-0107 §3). Carried
+            on **every** band, never zeroed or clamped by band.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -5769,10 +5805,26 @@ class Belief(BaseModel):
     valid_until: UtcInstant | None = Field(
         default=None, description="The end of the belief's validity window, where one is set."
     )
+    evidence_elided: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "An upper bound on how many further citations stood behind it and are "
+            "no longer carried, as stored (ADR-0107 §3)."
+        ),
+    )
 
     @property
     def evidence_count(self) -> int:
-        """How many citations stand behind it, resolved or not."""
+        """How many citations it **carries**, resolved or not.
+
+        Its value is unchanged and every consumer of it is correct — the presented
+        confidence is a function of how many *carried* citations resolved
+        (ADR-0077 §6). What it is not is the whole of ADR-0073 §4's "how many stand
+        behind it": after a displacement more stand behind the belief than it
+        carries, and the pair with :attr:`evidence_elided` is what answers the floor
+        (ADR-0107 §6).
+        """
         return len(self.evidence)
 
     @property

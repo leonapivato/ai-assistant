@@ -286,7 +286,24 @@ class TestComposites:
         assert one == other
 
     def test_a_belief_shaped_model(self) -> None:
-        """§5e's composite vector: nested models, an optional in a tuple, an enum, a float."""
+        """§5e's composite vector: nested models, an optional in a tuple, an enum, a float.
+
+        ``evidence_elided`` is in the bytes because ADR-0107 §3 put it on the type,
+        and it sorts between ``evidence`` and ``id`` — §2's member sort doing its job
+        on a field nobody chose the position of. **ADR-0087 §5 wrote this case's
+        disposition in advance**: §5e's composite vectors "state the field set they
+        were built over inline, so that a vector remains verifiable whatever the
+        surface ADR settles", and they "stay verifiable if a field is later selected
+        differently". The vector witnesses the *encoding rules*, not a frozen field
+        list, and every rule it was built for still shows here. ADR-0107 §11 reaches
+        the same place from the other side, finding no record owed on ADR-0087
+        because it "fixes the encoding an integer already had".
+
+        Left at the default ``0`` deliberately, unlike every case ADR-0107 §8 item 6
+        governs: what this vector is for is the byte shape, and the field appearing
+        *at* its default is the stronger witness that the codec projects generically
+        over the whole model rather than over a chosen subset.
+        """
         belief = Belief(
             id="b-1",
             band=BeliefBand.ASSERTED,
@@ -298,8 +315,9 @@ class TestComposites:
         )
         assert _encoded(belief) == (
             '{"band":"asserted","confidence":0.9,"content":"prefers dark mode",'
-            '"evidence":[{"content":"said so"},{"content":null}],"id":"b-1",'
-            '"kind":"preference","last_updated":"2026-08-01T12:00:00Z","valid_until":null}'
+            '"evidence":[{"content":"said so"},{"content":null}],"evidence_elided":0,'
+            '"id":"b-1","kind":"preference","last_updated":"2026-08-01T12:00:00Z",'
+            '"valid_until":null}'
         )
 
     def test_a_confirmation_shaped_model_sorts_a_frozen_mapping_s_keys(self) -> None:
