@@ -147,10 +147,13 @@ unmarked text supplies none.
 ### 1. What "rests on external content" means, as a predicate over a stored record
 
 > **Normative.** A record **rests on recorded external content** when `band_of`
-> places it in the `ATTESTED` band, or when its `Provenance` carries the
-> derived-taint marker of §2. External content is ADR-0098 §1's class, unchanged and
-> not re-decided here, and membership stays decided by **recorded origin** as §1
-> rules — never by inspecting text.
+> places it in the `ATTESTED` band, or when `band_of` places it in the `DERIVED`
+> band **and** its `Provenance` carries the derived-taint marker of §2. §2's
+> `rests_on_recorded_external_content` is this clause and nothing else; where a
+> reading of one appears to differ from the other, the function is the definition.
+> External content is ADR-0098 §1's class, unchanged and not re-decided here, and
+> membership stays decided by **recorded origin** as §1 rules — never by inspecting
+> text.
 
 > **Normative.** The predicate above is not a claim that a record carrying `False`
 > was uninfluenced by external content. It tracks what was *recorded*, and it
