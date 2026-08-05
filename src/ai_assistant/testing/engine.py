@@ -616,11 +616,18 @@ class FakeAssistantEngine:
         content: str,
         kind: MemoryKind = MemoryKind.SEMANTIC,
         band: BeliefBand = BeliefBand.ASSERTED,
+        evidence_elided: int = 0,
     ) -> Belief:
         """Put one belief in memory, and return it.
 
         The confidence is fixed and unadjusted: nothing here loses evidence, so
         there is no lost support for a presented value to have fallen with.
+
+        ``evidence_elided`` is a knob because :func:`_summary_of` has to carry it
+        (ADR-0107 §8 item 5) and a state no caller can script is a guarantee nobody
+        can check. It is deliberately **not** derived from anything: it counts
+        citations the belief no longer carries, on any band, and is independent of
+        the confidence this fake fixes.
         """
         held = Belief(
             id=record_id,
@@ -629,6 +636,7 @@ class FakeAssistantEngine:
             content=content,
             confidence=1.0 if band is BeliefBand.ASSERTED else _CONFIDENCE,
             last_updated=_AT,
+            evidence_elided=evidence_elided,
         )
         self.beliefs_held[record_id] = held
         return held

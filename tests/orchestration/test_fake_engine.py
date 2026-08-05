@@ -111,6 +111,31 @@ async def test_a_held_belief_is_listed_and_readable() -> None:
     assert detail.content == "the office is in Boston"
 
 
+async def test_the_fake_s_listing_discloses_the_same_elision_as_its_detail_view() -> None:
+    """ADR-0107 §8 item 5: the canonical fake and the real projection agree.
+
+    ``_summary_of`` is the fake's counterpart to
+    :func:`~ai_assistant.orchestration.engine.belief_summary_from_record`, and a fake
+    that dropped the field would let a consumer's suite pass against a listing that
+    discloses **less** than the detail view it was drilled into — exactly the
+    inversion of ADR-0077 §6's split that ADR-0107 §3 refused when it declined to put
+    the field on ``BeliefSummary`` alone.
+
+    Asserted at a non-default value on both surfaces, per §8 item 6: at ``0`` the two
+    would agree whether the field were carried or silently dropped.
+    """
+    engine = FakeAssistantEngine()
+    engine.hold("rec-1", content="the office is in Boston", evidence_elided=900)
+
+    page = await engine.beliefs()
+    assert [summary.evidence_elided for summary in page] == [900]
+
+    detail = await engine.belief("rec-1")
+    assert detail is not None
+    assert detail.evidence_elided == 900
+    assert page[0].evidence_elided == detail.evidence_elided
+
+
 async def test_the_two_question_enumerations_stay_disjoint() -> None:
     """ADR-0078 §8: an interrupted question is a second list all the way up.
 
