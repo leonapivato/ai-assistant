@@ -26,8 +26,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 from assistant_engine_contract import (
+    _NOT_CANONICAL,
     _SOURCE,
     _TINY_LIMIT,
+    _UNWRITABLE_LOCATION,
+    _UNWRITABLE_SOURCE,
     AssistantEngineContract,
     backwards_clock,
 )
@@ -297,6 +300,27 @@ class TestEngineContract(AssistantEngineContract):
         would be a free-text route into the store by another name.
         """
         built = _wire(sources=[HeldSource(_GRANTABLE, location="/srv/calendar.ics")])
+        await built.start()
+        try:
+            yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def defective_source_engine(self) -> AsyncIterator[AssistantEngine]:
+        """One wired engine holding a grantable source and two that are not.
+
+        Supplied the way a real one arrives — read off the readers a composition
+        root built (ADR-0102 §7) — because that is the only way such a source can
+        exist at all: nothing on the surface adds to the held set, and nothing may.
+        """
+        built = _wire(
+            sources=[
+                HeldSource(_GRANTABLE, location="/srv/calendar.ics"),
+                HeldSource(_UNWRITABLE_SOURCE, location=_UNWRITABLE_LOCATION),
+                HeldSource(_NOT_CANONICAL, location="/srv/mail"),
+            ]
+        )
         await built.start()
         try:
             yield built

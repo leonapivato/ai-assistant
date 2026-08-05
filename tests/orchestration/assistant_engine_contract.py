@@ -114,6 +114,18 @@ _TINY_LIMIT = 512
 #: the admissible set is made of.
 _SOURCE = "calendar"
 
+#: A held source whose configured location has no UTF-8 encoding. Linux pathnames
+#: are bytes and Python surfaces an undecodable one through ``surrogateescape``, so
+#: ``str(path)`` really can hold a lone surrogate — which is why ADR-0102 §6 calls
+#: its encoding clauses "a real case rather than a defensive one".
+_UNWRITABLE_SOURCE = "notes"
+_UNWRITABLE_LOCATION = "/srv/\udce9notes.md"
+
+#: A held source whose *declared identity* is not in canonical form (ADR-0102 §4).
+#: A caller can name it exactly — ``NonBlankEncodableText`` does not strip — which
+#: is what makes the refusal reachable rather than theoretical.
+_NOT_CANONICAL = "  mail  "
+
 
 def _feedback(content: str) -> FeedbackEvent:
     """One piece of feedback, as an adapter hands it over."""
@@ -156,6 +168,24 @@ class AssistantEngineContract(ABC):
         It must hold no grant on that source, so the first ``grant`` in each test
         below is the first grant. It must carry a configured location for it, so
         §6's disclosure is a value a client can render.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def defective_source_engine(self) -> AssistantEngine:
+        """A subject holding :data:`_SOURCE` **and** two sources that are not grantable.
+
+        One whose configured location has no UTF-8 encoding (:data:`_UNWRITABLE`),
+        and one whose declared identity is not in canonical form
+        (:data:`_NOT_CANONICAL`). Both are states a real hub can be built into —
+        Linux pathnames are bytes, and a reader may declare whatever it likes — and
+        neither is reachable through the surface, so an implementation has to be
+        handed to the suite already holding them.
+
+        :data:`_SOURCE` is held alongside them because the clause has two halves and
+        the second is the one an over-eager implementation fails: enumeration of the
+        others must be **unaffected**, so one defective source may not take the whole
+        response down.
         """
 
     @pytest.fixture
@@ -813,6 +843,53 @@ class AssistantEngineContract(ABC):
         """
         assert await granting_engine.revoke("no-such-source") is None
         assert await granting_engine.recent_grants() == ()
+
+    async def test_a_source_that_cannot_be_shown_is_neither_enumerated_nor_granted(
+        self, defective_source_engine: AssistantEngine
+    ) -> None:
+        """ADR-0102 §12 item 2's clause, and §6 is what it enforces.
+
+        A configured location with no UTF-8 encoding is the hazard itself and fails
+        **closed**: the source is omitted and ``grant`` refuses it. Degrading
+        ``location`` to ``None`` and granting anyway was ADR-0102 §6's first draft
+        and is refused there, because it makes ADR-0097 §9a's two halves contradict
+        each other — the source would be offered while no conforming client could
+        grant it, and a client that ignored the disclosure clause would mint
+        precisely the uninformed grant §9a exists to prevent.
+
+        **A source whose declared identity is not in canonical form is covered by
+        the same case** (§4), because it has the same two-sided answer and would
+        otherwise need a fixture of its own for one assertion.
+
+        The second half is the one an over-eager implementation fails: enumeration
+        of the *others* is unaffected, so a defective source is omitted rather than
+        taking the whole response down. An implementation that refused the call
+        would pass the first half and fail here.
+
+        Held in the **shared** suite rather than in the concrete implementation's
+        own tests, which is where an earlier round of this lane put it: a future
+        engine or spoke could breach the contract and still come back green, and
+        the wire implementation is reachable only from here.
+        """
+        offered = await defective_source_engine.grantable_sources()
+
+        assert [one.source for one in offered] == [_SOURCE]
+        for ungrantable in (_UNWRITABLE_SOURCE, _NOT_CANONICAL):
+            with pytest.raises(UngrantableSourceError):
+                await defective_source_engine.grant(ungrantable, scope=[GrantScope.FACET])
+        assert await defective_source_engine.recent_grants() == ()
+
+    async def test_the_good_source_beside_a_defective_one_still_grants(
+        self, defective_source_engine: AssistantEngine
+    ) -> None:
+        """The discriminating half: the omissions above are not "everything is refused".
+
+        Without this an implementation that answered every enumeration empty and
+        refused every grant would satisfy the case above completely.
+        """
+        recorded = await defective_source_engine.grant(_SOURCE, scope=[GrantScope.FACET])
+        assert recorded.source == _SOURCE
+        assert (await defective_source_engine.grantable_sources())[0].live is not None
 
     # --- §5: who mints, and the store as arbiter ---------------------------
 

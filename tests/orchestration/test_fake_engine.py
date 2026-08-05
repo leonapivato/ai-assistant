@@ -20,8 +20,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 from assistant_engine_contract import (
+    _NOT_CANONICAL,
     _SOURCE,
     _TINY_LIMIT,
+    _UNWRITABLE_LOCATION,
+    _UNWRITABLE_SOURCE,
     AssistantEngineContract,
     backwards_clock,
     page_after_mutating_the_filter,
@@ -65,6 +68,15 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         """One fake engine holding a single grantable source with a location."""
         engine = FakeAssistantEngine()
         engine.hold_source(_SOURCE, location="/srv/calendar.ics")
+        return engine
+
+    @pytest.fixture
+    def defective_source_engine(self) -> AssistantEngine:
+        """The same fake, holding one grantable source and two that are not."""
+        engine = FakeAssistantEngine()
+        engine.hold_source(_SOURCE, location="/srv/calendar.ics")
+        engine.hold_source(_UNWRITABLE_SOURCE, location=_UNWRITABLE_LOCATION)
+        engine.hold_source(_NOT_CANONICAL, location="/srv/mail")
         return engine
 
     @pytest.fixture

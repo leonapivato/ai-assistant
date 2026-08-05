@@ -484,17 +484,21 @@ class FakeAssistantEngine:
     # --- the grant surface (ADR-0102 §1) -----------------------------------
 
     async def grantable_sources(self) -> tuple[GrantableSource, ...]:
-        """List the held sources, each with its location and its live grant.
+        """List the **grantable** held sources, each with its location and live grant.
 
-        Every held source is enumerated, because :meth:`hold_source` refuses to
-        hold one that could not be — see its own docstring for why the
-        inadmissible cases are refused at the setter rather than modelled here.
+        A source whose declared identity is not in canonical form (ADR-0102 §4), or
+        whose configured location has no UTF-8 encoding (§6), is omitted — and the
+        enumeration is **not refused** for it, so the others still answer. Both
+        rules are implemented rather than assumed away, because a canonical fake is
+        an implementation of this contract and the shared suite holds it to the same
+        clause it holds every other implementation to.
         """
         self.calls.append(("grantable_sources", {}))
         return self._checked(
             tuple(
                 GrantableSource(source=identity, location=location, live=self._live_grant(identity))
                 for identity, location in self.sources_held.items()
+                if _is_grantable(identity, location)
             ),
             "grantable_sources",
         )
@@ -514,7 +518,12 @@ class FakeAssistantEngine:
         uses = grant_scope(scope, name="scope")
         check_arguments("grant", max_bytes=self._max_payload_bytes, source=named, scope=uses)
         self.calls.append(("grant", {"source": named, "scope": uses}))
-        if named not in self.sources_held:
+        if named not in self.sources_held or not _is_grantable(named, self.sources_held[named]):
+            # **One refusal for all three causes** — no such source, an
+            # inadmissible declared name, an unshowable location. ADR-0102 §4 gives
+            # them one class because the caller's recourse is identical: call
+            # ``grantable_sources`` and pick from what it returns. The message
+            # echoes no caller-supplied value (ADR-0097 §9).
             msg = (
                 "no source by that name can be granted; call grantable_sources() and "
                 "choose one of the identities it returns (ADR-0097 §9)"
@@ -668,52 +677,36 @@ class FakeAssistantEngine:
         return conversation_id
 
     def hold_source(self, identity: str, *, location: str | None = None) -> None:
-        """Make one source **grantable**, with or without a configured location.
+        r"""Make one source known to this engine, grantable or not.
 
-        The scriptable half ADR-0102 §12 item 3 asks for. A source held *without* a
-        location is the case §6 makes grantable with ``location`` absent — nothing
-        configured means the disclosure obligation is vacuous — and it is the case a
-        client's "show it before you grant" test needs to distinguish from a source
-        that has one.
+        The scriptable half ADR-0102 §12 item 3 asks for, and it accepts the
+        **defective** states as well as the ordinary ones, because those are
+        legitimate states of a *hub* rather than test errors: a reader really can
+        declare a name that is not in canonical form, and a configured path really
+        can have no UTF-8 encoding (Linux pathnames are bytes and Python surfaces an
+        undecodable one through ``surrogateescape``). What ADR-0102 §4 and §6 then
+        require is that such a source is **neither enumerated nor granted**, and
+        ADR-0102 §12 item 2 puts that clause in the *shared* conformance suite — so
+        this fake has to be able to be put into the state the suite then checks.
 
-        **The inadmissible cases are refused here rather than modelled** (ADR-0102
-        §4, §6): an identity not in canonical form, and a location with no UTF-8
-        encoding. Both are defects in a **reader**, and a fake engine has no readers
-        — :class:`~ai_assistant.orchestration.grants.GrantOperations` must handle
-        them because a real composition root can build such a reader, and its own
-        tests reach them by constructing it directly.
+        **An earlier draft of this fake refused those inputs instead**, on the
+        argument that they are defects in a reader and a fake engine has no readers.
+        That is the wrong shape twice over: a canonical fake is an *implementation*,
+        so implementing a rule is its job rather than duplication to be avoided; and
+        refusing here would leave the suite unable to reach the clause at all, which
+        is precisely how a future engine or spoke could breach the contract and
+        still come back green.
 
-        Refusing beats the two alternatives. **Modelling them** would put a second
-        copy of §4's and §6's rules in a fake that no suite holds to them, which is
-        the silent drift a canonical fake exists to prevent; and from a client's
-        side both cases are observationally just "absent from the enumeration",
-        which a test reaches by not holding the source at all. **Ignoring them** is
-        worse still, and is what this refusal replaces: holding a location with no
-        encoding made :meth:`grantable_sources` raise a ``ValidationError`` that no
-        method on this surface declares, and holding ``" calendar "`` enumerated a
-        stripped ``calendar`` that :meth:`grant` then refused — a fake advertising
-        what it cannot do.
+        A source held **without** a location is a third case and not a defect at
+        all: §6 makes it grantable with ``location`` absent, because with nothing
+        configured the disclosure obligation is vacuous.
 
         Args:
             identity: The declared identity, as a reader's ``name`` would return it.
+                Not required to be admissible.
             location: Where the source reads from, or ``None`` where nothing is
-                configured.
-
-        Raises:
-            ValueError: If ``identity`` is not admissible under ADR-0102 §4, or
-                either value has no UTF-8 encoding. A test error rather than a state
-                to model, so it is reported where it was made.
+                configured. Not required to be encodable.
         """
-        if not identity.strip() or identity != identity.strip():
-            msg = (
-                f"a grantable identity is non-blank and equals its own str.strip() "
-                f"(ADR-0102 §4); {identity!r} is a reader defect, and a fake engine has "
-                f"no readers — GrantOperations is what models that case"
-            )
-            raise ValueError(msg)
-        encodable_text(identity)
-        if location is not None:
-            encodable_text(location)
         self.sources_held[identity] = location
 
     def hold_grant(
@@ -780,6 +773,26 @@ class FakeAssistantEngine:
         page_argument(offset, name="offset")
         check_arguments(method, max_bytes=self._max_payload_bytes, limit=limit, offset=offset)
         self.calls.append((method, {"limit": limit, "offset": offset}))
+
+
+def _is_grantable(identity: str, location: str | None) -> bool:
+    """Whether a held source may be enumerated and granted (ADR-0102 §4, §6).
+
+    Canonical, non-blank, encodable identity; and a configured location that can be
+    shown, where there is one. **Absent is not the same as unshowable**: nothing
+    configured makes ADR-0097 §9a's disclosure obligation vacuous and leaves the
+    source grantable, while a location that exists and cannot be written down fails
+    closed — offering it would advertise a source no conforming client may grant.
+    """
+    if not identity.strip() or identity != identity.strip():
+        return False
+    try:
+        encodable_text(identity)
+        if location is not None:
+            encodable_text(location)
+    except ValueError:
+        return False
+    return True
 
 
 def _summary_of(belief: Belief) -> BeliefSummary:
