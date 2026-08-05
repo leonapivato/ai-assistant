@@ -2549,6 +2549,87 @@ def _when(instant: datetime) -> str:
     return instant.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
+def _elision_ceiling(elided: int) -> str:
+    """The ceiling ADR-0107 §5 owes beside a rendered citation count, or nothing.
+
+    Empty where nothing was displaced, which is every belief in a deployment that
+    has never hit ADR-0086 §1's bound — so this adds a clause exactly when there is
+    a fact to add and is silent otherwise.
+
+    **The shape is ADR-0086 §4's, and both halves of it are obligatory.** The count
+    is an *upper bound* over the record's whole history and not a total, so it is
+    rendered as "up to" and never as a figure to be added to the one beside it. And
+    an elision is **not a tombstone**: the episode may be perfectly intact, and the
+    line says the reference was dropped rather than that the data was lost. Getting
+    that half wrong tells a user their data is gone when it is not — the failure
+    ADR-0091 §1's second clause exists to prevent, and the reason
+    :func:`_render_evidence` must never grow an entry for this.
+    """
+    if elided <= 0:
+        return ""
+    return (
+        f" Up to {elided} more piece(s) stood behind it that I no longer keep a "
+        "reference to — those may still exist; I stopped carrying them, they were "
+        "not lost."
+    )
+
+
+def _why_derived(belief: Belief | BeliefSummary) -> str:
+    """Why a **derived** belief is held: the count, what is gone, and the ceiling.
+
+    Split out of :func:`_why` so the ceiling is appended **once, on every path**
+    rather than per branch. That is the structural point: ADR-0107 §5 owes the
+    ceiling wherever this surface renders a citation count, and this branch renders
+    one in all four of its states — including the state that renders it as *none*.
+    A per-branch append would let a fifth state be added later with the clause
+    forgotten, and the belief that elided nine hundred citations is exactly the one
+    that would go unmentioned.
+
+    **Two of the four states say something that stops being true once anything has
+    been displaced, and both are repaired here rather than qualified.**
+
+    * "no supporting evidence was recorded" claims nothing was ever there. For a
+      belief whose history displaced citations that is false — evidence *was*
+      recorded and the reference to it was dropped — and it is the statement
+      ADR-0107 §7 prohibits on every band.
+    * "nothing supports it any more" is the sentence ADR-0107 §7 names by name.
+      Every citation the belief still carries has gone, which the line keeps
+      saying; but the elided episodes may be intact and still supporting it, so
+      the flat claim is false in the direction ADR-0073 §4 forgives least. The
+      ceiling replaces it with what can honestly be said — that more stood behind
+      it and this surface cannot report their fate.
+
+    **The predicate itself is untouched** (ADR-0107 §7): ``unsupported`` keeps
+    ADR-0085 §4a's one definition on both types. Adding ``and evidence_elided == 0``
+    to it would answer "does anything support this" with a confident ``False``,
+    which is no better founded than the confident ``True`` — nothing on the record
+    says whether an elided citation still resolves. "We cannot say" is expressible
+    in a sentence and not in a boolean, so the repair is here.
+    """
+    ceiling = _elision_ceiling(belief.evidence_elided)
+    if belief.evidence_count == 0:
+        head = (
+            "I worked it out, and I carry no evidence for it now."
+            if ceiling
+            else "I worked it out, and no supporting evidence was recorded."
+        )
+    elif belief.unsupported:
+        head = (
+            f"I worked it out from {belief.evidence_count} piece(s) of evidence, "
+            "none of which still exists. I still hold it — I have not unlearnt it "
+            "because the evidence went"
+        ) + ("." if ceiling else " — but nothing supports it any more.")
+    elif belief.lost_evidence:
+        head = (
+            f"I worked it out from {belief.evidence_count} piece(s) of evidence, "
+            f"{belief.lost_evidence} of which no longer exists. The confidence "
+            "below reflects what is left."
+        )
+    else:
+        head = f"I worked it out from {belief.evidence_count} piece(s) of evidence."
+    return head + ceiling
+
+
 def _why(belief: Belief | BeliefSummary) -> str:
     """Why this belief is held — band-dependent (ADR-0073 §4).
 
@@ -2560,9 +2641,10 @@ def _why(belief: Belief | BeliefSummary) -> str:
     The answer is complete for one band and owed for two, and the wording keeps
     ADR-0073 §4's two floors:
 
-    * **Derived** — the citations are counted, and the ones that no longer resolve
-      are counted **separately and out loud** (ADR-0077 §6). They are never rendered
-      as ids; the ids are not even carried to this module
+    * **Derived** — :func:`_why_derived`, which counts the citations, counts the
+      ones that no longer resolve **separately and out loud** (ADR-0077 §6), and
+      states the elision ceiling ADR-0107 §5 owes beside any rendered count. They
+      are never rendered as ids; the ids are not even carried to this module
       (:class:`~ai_assistant.orchestration.Belief` holds resolved content or a
       tombstone), so no renderer here can pass one off as the warrant. A belief whose
       support is *entirely* gone says so, and says that it is still held — because it
@@ -2572,38 +2654,37 @@ def _why(belief: Belief | BeliefSummary) -> str:
       the user's word nor the assistant's inference, and the line says outright that
       ``Last revised`` is the assistant's clock rather than the source's.
 
-    **The attested line states a limit of this surface, never a limit of the store**
-    (#711). Which source spoke, and when, are *held*: an attested belief carries an
+    **The asserted and attested lines are unchanged by ADR-0107, and that is its §2
+    applied rather than an omission.** §2 scopes the elision disclosure to
+    ``DERIVED`` because that is the band ADR-0073 §4 put the citation-count floor
+    in: an assertion's warrant is the user's own word and an attestation's is the
+    source's report, so neither line renders a citation count and neither owes a
+    ceiling beside one (ADR-0107 §5 requires nothing of a surface that renders no
+    count). Both still carry the number on their DTO (§3) — the silence is about
+    rendering, and only about rendering. Whether either band's line *should* render
+    a count at all is ADR-0073 §4's own ``ATTESTED`` gate, left to the lane holding
+    leg 6's first ``EXTERNAL`` producer (ADR-0107 §10).
+
+    **The attested line states a limit of this surface, never a limit of the store.**
+    Which source spoke, and when, are *held*: an attested belief carries an
     :class:`~ai_assistant.core.types.Attestation` by construction, since
     :class:`~ai_assistant.core.types.Provenance` makes one mandatory exactly on this
     band (ADR-0092 §1). What drops them is the projection — neither
     :class:`~ai_assistant.core.types.Belief` nor
-    :class:`~ai_assistant.core.types.BeliefSummary` has anywhere to put one (#568,
-    #711). So "not recorded" would err in the direction ADR-0073 §4 forgives least:
-    a user auditing what is held about them would read it as "you did not keep it",
-    the inverse of the truth, on the one band whose whole purpose is provenance.
-    ADR-0098 §8 reads this branch as evidence that the belief surface carries no
-    attestation — and it still is, in words that are also true of the store.
+    :class:`~ai_assistant.core.types.BeliefSummary` has anywhere to put one (**#754**;
+    its predecessors #711 and #568 are both closed, the second by ADR-0107, whose §10
+    keeps this question open by name). So "not recorded" would err in the direction
+    ADR-0073 §4 forgives least: a user auditing what is held about them would read it
+    as "you did not keep it", the inverse of the truth, on the one band whose whole
+    purpose is provenance. ADR-0098 §8 reads this branch as evidence that the belief
+    surface carries no attestation — and it still is, in words that are also true of
+    the store.
     """
     match belief.band:
         case BeliefBand.ASSERTED:
             return "you told me, and your own word is the whole of it."
         case BeliefBand.DERIVED:
-            if belief.evidence_count == 0:
-                return "I worked it out, and no supporting evidence was recorded."
-            if belief.unsupported:
-                return (
-                    f"I worked it out from {belief.evidence_count} piece(s) of evidence, "
-                    "none of which still exists. I still hold it — I have not unlearnt it "
-                    "because the evidence went — but nothing supports it any more."
-                )
-            if belief.lost_evidence:
-                return (
-                    f"I worked it out from {belief.evidence_count} piece(s) of evidence, "
-                    f"{belief.lost_evidence} of which no longer exists. The confidence "
-                    "below reflects what is left."
-                )
-            return f"I worked it out from {belief.evidence_count} piece(s) of evidence."
+            return _why_derived(belief)
         case BeliefBand.ATTESTED:
             return (
                 "a source you connected reported it — neither your word nor my inference. "
