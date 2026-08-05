@@ -9,12 +9,15 @@ the production, model-backed engine, so no network or key is needed.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from inspect import unwrap
 from io import StringIO
 from itertools import count
 from typing import TYPE_CHECKING
 
 import pytest
+import typer.main
 from rich.console import Console
+from typer.core import TyperGroup
 from typer.testing import CliRunner
 
 from ai_assistant.core.config import Settings
@@ -2992,3 +2995,164 @@ def test_a_non_positive_grants_limit_is_a_usage_error(monkeypatch: pytest.Monkey
 
     result = CliRunner().invoke(cli.app, ["grants", "--limit", "0"])
     assert result.exit_code == 2
+
+
+# --- id arguments refuse at the parse boundary (ADR-0042 §7, ADR-0085 §3c) ---
+# ADR-0085 §3c binds *every* engine implementation to ``Identifier`` validation
+# "before any I/O", and its refusal is a ``ValueError`` — neither an
+# ``AssistantError`` nor a ``TransportError``, so on each parameter below it escaped
+# the command's error boundary as a traceback with exit 1 (#705). The subject here is
+# ``FakeAssistantEngine`` rather than a permissive stand-in precisely because the fake
+# enforces that clause through the same ``orchestration.payloads.identifier`` a hub
+# client does: these cases reproduce the traceback, they do not merely assert a nicer
+# exit code against a double that would have accepted anything.
+
+
+def _id_invocations(value: str) -> tuple[tuple[str, list[str]], ...]:
+    """Every parameter on this surface that carries an identifier, invoked with ``value``.
+
+    Six, not the five #705 enumerates: ``observe``'s is an *optional positional*, so
+    it reads like a flagless default rather than an id and was missed. Named so a
+    failure says which command failed.
+    """
+    return (
+        ("forget", ["forget", value, "--yes"]),
+        ("answer", ["answer", value, "--accept"]),
+        ("forget-question", ["forget-question", value]),
+        ("forget-conversation", ["forget-conversation", value, "--yes"]),
+        ("observe", ["observe", value]),
+        ("ask --conversation", ["ask", "hello", "--conversation", value, "--yes"]),
+    )
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_every_id_argument_refuses_a_blank_before_any_client_is_built(
+    blank: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blank id is a usage error (exit 2), never a traceback (ADR-0042 §7).
+
+    ``_non_blank`` rejects it with a ``ValueError``, which every implementation
+    raises before any I/O — so it arrives *inside* the command's
+    ``except (AssistantError, TransportError)`` boundary and is caught by neither.
+    Refusing during Typer's parameter parsing makes it a usage error instead, the
+    treatment blank ``learn`` content and a blank ``source`` already get.
+    """
+    _wire(monkeypatch, FakeAssistantEngine())
+
+    for name, argv in _id_invocations(blank):
+        result = CliRunner().invoke(cli.app, argv)
+        assert result.exit_code == 2, name
+        assert result.exception is None or isinstance(result.exception, SystemExit), name
+
+
+def test_every_id_argument_refuses_a_value_with_no_utf8_encoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    r"""A lone surrogate is refused at the parse boundary, and is not echoed back.
+
+    Linux passes argv as bytes and Python decodes it with ``surrogateescape``, so
+    ``assistant forget $'\xe9'`` arrives as half a character — a value
+    ``EncodableText`` refuses and ADR-0087's encoder has no form for. Without the
+    callback that refusal lands as the same uncaught ``ValueError`` a blank does.
+
+    **The message does not echo the value**, which is a practical necessity rather
+    than a policy borrowed from ``_present_source``: a value with no UTF-8 encoding
+    is one this process may not be able to write down, so reporting the fault would
+    fail the same way the fault does.
+    """
+    _wire(monkeypatch, FakeAssistantEngine())
+    unwritable = "\udce9"
+
+    for name, argv in _id_invocations(unwritable):
+        result = CliRunner().invoke(cli.app, argv)
+        assert result.exit_code == 2, name
+        assert unwritable not in result.output, name
+
+
+def test_an_id_is_stripped_before_it_is_looked_up_or_reported(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0085 §3c normalises an identity argument; this adapter does it too.
+
+    The asymmetry with ``_present_source`` is the decision rather than an
+    inconsistency. §3c makes stripping *contractual* for an identity argument,
+    because "optional normalisation on an identity argument is worse than none: it
+    makes the answer to ``belief(" rec-1 ")`` a property of which implementation you
+    are holding" — where ADR-0102 §2 keeps a grant's ``source`` byte-exact so a name
+    differing only by surrounding whitespace is refused rather than matched.
+
+    Doing it here rather than leaving it to the implementation is what keeps the
+    report honest: the id this module holds is the one it prints back, so an
+    adapter that relayed ``"  no-such  "`` would report the lookup against a string
+    the engine never used.
+    """
+    _wire(monkeypatch, FakeAssistantEngine())
+
+    result = CliRunner().invoke(cli.app, ["forget", "  no-such  ", "--yes"])
+
+    assert result.exit_code == 1  # an id naming no live belief, not a usage error
+    assert "the id no-such." in output.getvalue()
+
+
+def test_an_omitted_optional_id_still_means_no_conversation_was_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``None`` is the "no conversation named" state and must survive the callback.
+
+    The one thing ``_present_optional_id`` must not do is turn an absent id into a
+    blank one — which would make ``assistant observe`` refuse itself, and
+    ``assistant ask`` unable to start a conversation at all.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    assert CliRunner().invoke(cli.app, ["observe"]).exit_code == 0
+    assert CliRunner().invoke(cli.app, ["ask", "hello", "--yes"]).exit_code == 0
+    assert [call for call in engine.calls if call[0] == "observe"] == [
+        ("observe", {"conversation_id": None})
+    ]
+    assert [call[1]["conversation_id"] for call in engine.calls if call[0] == "converse"] == [None]
+
+
+def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
+    """The obligation is stated over the app rather than over a list someone kept.
+
+    #705 happened because five parameters were given a bare ``typer.Argument`` and
+    nothing said a sixth existed. Walking the registered commands closes both halves
+    of that: a parameter that loses its callback fails here rather than in a user's
+    terminal, and a *seventh* fails too — deliberately, because the list
+    :func:`_id_invocations` keeps is the one that goes stale, and this is what sends
+    its author to it.
+
+    **It catches the naming convention this surface follows, not every conceivable
+    parameter.** An id spelled without an ``_id`` suffix — as ``ask``'s
+    ``--conversation`` is — has to be recognised by name here, and a second such
+    spelling would slip the walk. That residual is why the behavioural cases above
+    enumerate the six explicitly rather than deriving them from this.
+    """
+    group = typer.main.get_command(cli.app)
+    assert isinstance(group, TyperGroup)
+    id_callbacks = {cli._present_id, cli._present_optional_id}
+
+    # Typer wraps a parameter callback in a click-shaped adapter, so the function
+    # itself is reached through ``__wrapped__`` rather than compared directly. A
+    # parameter with no callback at all — #705's state — unwraps to nothing and is
+    # recorded as False rather than skipped.
+    carried = {
+        f"{name}:{param.name}": param.callback is not None
+        and unwrap(param.callback) in id_callbacks
+        for name, command in sorted(group.commands.items())
+        for param in command.params
+        if str(param.name).endswith("_id") or param.name == "conversation"
+    }
+
+    # Asserted as a mapping rather than with `all(...)`, so a failure names the
+    # parameter that is missing its callback instead of reporting `False`.
+    assert carried == {
+        "answer:question_id": True,
+        "ask:conversation": True,
+        "forget:belief_id": True,
+        "forget-conversation:conversation_id": True,
+        "forget-question:question_id": True,
+        "observe:conversation_id": True,
+    }
