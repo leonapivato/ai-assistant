@@ -79,6 +79,7 @@ from ai_assistant.orchestration import (
     StepRunner,
     WriteOutcome,
     belief_from_record,
+    belief_summary_from_record,
     learn_outcome,
     presented_confidence,
 )
@@ -2156,6 +2157,7 @@ def _record(  # noqa: PLR0913 — one knob per field a Belief carries; that is t
     valid_until: datetime | None = None,
     content: str = "the office is in Boston",
     score: float | None = None,
+    evidence_elided: int = 0,
 ) -> SemanticMemory:
     """A stored semantic record, with every field the projection reads addressable.
 
@@ -2174,6 +2176,7 @@ def _record(  # noqa: PLR0913 — one knob per field a Belief carries; that is t
             source=source,
             confidence=confidence,
             evidence=evidence,
+            evidence_elided=evidence_elided,
             last_updated=last_updated,
             attestation=(
                 Attestation(reported_by="calendar:work", reported_at=AT)
@@ -2238,6 +2241,107 @@ def test_from_record_carries_resolved_evidence_and_never_ids() -> None:
     assert belief.evidence_count == 2
     assert belief.lost_evidence == 1
     assert "ep-1" not in str(belief)  # no citation id is reachable from the DTO at all
+
+
+@pytest.mark.parametrize(
+    ("source", "band"),
+    [
+        (MemorySource.USER_ASSERTED, BeliefBand.ASSERTED),
+        (MemorySource.INFERRED, BeliefBand.DERIVED),
+        (MemorySource.EXTERNAL, BeliefBand.ATTESTED),
+    ],
+)
+def test_both_projections_carry_the_stored_elision_on_every_band(
+    source: MemorySource, band: BeliefBand
+) -> None:
+    """ADR-0107 §3: the field is carried on **every** band, at both sites.
+
+    Parameterised over all three bands rather than over the one whose *rendering*
+    ADR-0107 §2 discusses, and §8 item 6 says why in as many words: naming only the
+    discussed bands "would leave the third free to be projected as ``0`` by an
+    implementation that wrongly coupled the field to §2's rendering scope, with
+    every other test here still passing". §2 scopes a disclosure obligation; §3
+    scopes the field, and it scopes it to everything. "A projection never zeroes,
+    clamps or omits it by band" is a checked claim here rather than a stated one.
+
+    The value is non-default at every assertion, per §8 item 6's governing rule: at
+    the default ``0`` this would pass whether the number is carried or silently
+    dropped, which is a test that cannot fail and therefore is not one.
+    """
+    confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.5
+    record = _record(
+        "rec-1", source=source, confidence=confidence, evidence=("ep-1",), evidence_elided=900
+    )
+
+    belief = belief_from_record(record, (Evidence(content="they said so"),))
+    assert belief.band is band
+    assert belief.evidence_elided == 900
+
+    summary = belief_summary_from_record(record, cited=1, resolved=1)
+    assert summary.band is band
+    assert summary.evidence_elided == 900
+
+
+def test_neither_projection_clamps_the_elision_to_the_citations_it_kept() -> None:
+    """ADR-0107 §8 item 2: no rounding, no clamping, no recomputation.
+
+    The two shapes a clamp would "fix" are both legitimate, and both are asserted
+    here: an elision far above the retained count, and a non-zero elision over an
+    empty tuple. ``evidence_elided`` counts displacements over the record's whole
+    history and is an upper bound over a *different population* than the retained
+    citations (ADR-0086 §4), so neither shape is a contradiction — and a projection
+    clamping to ``evidence_count`` would resolve ADR-0086 §4's deliberate
+    imprecision, in the wrong direction, on the one screen that exists to answer
+    "why do you believe that?".
+    """
+    many = _record(
+        "rec-1",
+        source=MemorySource.INFERRED,
+        confidence=0.5,
+        evidence=("ep-1",),
+        evidence_elided=900,
+    )
+    belief = belief_from_record(many, (Evidence(content="they said so"),))
+    assert belief.evidence_count == 1
+    assert belief.evidence_elided == 900  # not clamped to 1, and not zeroed
+    assert belief_summary_from_record(many, cited=1, resolved=1).evidence_elided == 900
+
+    # Nothing carried, something displaced: the belief cites nothing *now*, and how
+    # much it stopped carrying is still the honest answer rather than an anomaly.
+    empty = _record("rec-2", source=MemorySource.INFERRED, confidence=0.5, evidence_elided=7)
+    projected = belief_from_record(empty)
+    assert projected.evidence_count == 0
+    assert projected.evidence_elided == 7
+    assert belief_summary_from_record(empty, cited=0, resolved=0).evidence_elided == 7
+
+
+def test_the_elision_is_not_fed_into_the_presented_confidence() -> None:
+    """ADR-0107 §8 item 3, on ADR-0086 §4's ground: it would invert the signal.
+
+    Feeding elisions into :func:`presented_confidence` "would lower a belief's
+    presented confidence because the system worked". Two records identical but for
+    the elision must present one confidence — and the elided one must still report
+    its exact count, or this passes by the field having been dropped rather than by
+    it having been kept out of the arithmetic.
+    """
+    citations = (Evidence(content="they said so"), Evidence())
+    plain = _record("rec-1", source=MemorySource.INFERRED, confidence=0.8, evidence=("a", "b"))
+    elided = _record(
+        "rec-2",
+        source=MemorySource.INFERRED,
+        confidence=0.8,
+        evidence=("a", "b"),
+        evidence_elided=900,
+    )
+
+    assert belief_from_record(elided, citations).confidence == pytest.approx(
+        belief_from_record(plain, citations).confidence
+    )
+    assert belief_from_record(elided, citations).evidence_elided == 900
+    assert belief_summary_from_record(elided, cited=2, resolved=1).confidence == pytest.approx(
+        belief_summary_from_record(plain, cited=2, resolved=1).confidence
+    )
+    assert belief_summary_from_record(elided, cited=2, resolved=1).evidence_elided == 900
 
 
 def test_from_record_drops_the_relevance_score() -> None:

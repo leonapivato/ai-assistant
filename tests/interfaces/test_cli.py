@@ -985,6 +985,7 @@ def _belief(  # noqa: PLR0913 — one knob per field a Belief carries; that is t
     confidence: float = 1.0,
     evidence: tuple[Evidence, ...] = (),
     valid_until: datetime | None = None,
+    evidence_elided: int = 0,
 ) -> Belief:
     """One projected belief, as the façade hands it to the adapter.
 
@@ -1001,6 +1002,7 @@ def _belief(  # noqa: PLR0913 — one knob per field a Belief carries; that is t
         evidence=evidence,
         last_updated=AT,
         valid_until=valid_until,
+        evidence_elided=evidence_elided,
     )
 
 
@@ -1013,6 +1015,7 @@ def _summary(  # noqa: PLR0913 — one knob per field a BeliefSummary carries; t
     evidence_count: int = 0,
     lost_evidence: int = 0,
     valid_until: datetime | None = None,
+    evidence_elided: int = 0,
 ) -> BeliefSummary:
     """One listing row, as the façade hands it to the adapter (ADR-0085 §4a).
 
@@ -1030,6 +1033,7 @@ def _summary(  # noqa: PLR0913 — one knob per field a BeliefSummary carries; t
         lost_evidence=lost_evidence,
         last_updated=AT,
         valid_until=valid_until,
+        evidence_elided=evidence_elided,
     )
 
 
@@ -1131,6 +1135,191 @@ def test_why_does_not_claim_evidence_a_derived_belief_does_not_have(output: Stri
     rendered = _flat(output.getvalue())
     assert "no supporting evidence was recorded" in rendered
     assert "piece(s) of evidence" not in rendered
+
+
+def test_why_states_the_elision_ceiling_beside_the_count_it_kept(output: StringIO) -> None:
+    """ADR-0107 §5: a floor, a ceiling, and capacity rather than loss.
+
+    The shape is ADR-0086 §4's — "``len(evidence)`` citations shown, and *up to*
+    ``evidence_elided`` further episodes supported this belief and are no longer
+    carried" — and all three of its parts are pinned, because any one of them
+    missing is a different wrong answer:
+
+    * the **floor** is the retained count, still rendered;
+    * the **ceiling** reads as *up to*, never as a total, because the number
+      double-counts in the two cases ADR-0086 §4 names, and adding it to the floor
+      would state a figure no citation corresponds to;
+    * it reads as **capacity, not loss** — the episodes may be perfectly intact and
+      the line says the reference was dropped, which is ADR-0091 §1's second clause
+      and the whole difference between an elision and a tombstone.
+
+    Asserted against the exact number rather than merely against the words "up to",
+    per ADR-0107 §8 item 6.
+    """
+    cli._render_belief(
+        _belief(
+            BeliefBand.DERIVED,
+            confidence=0.62,
+            evidence=_cited("a", "b", "c"),
+            evidence_elided=900,
+        )
+    )
+    rendered = _flat(output.getvalue())
+    assert "3 piece(s) of evidence" in rendered  # the floor
+    assert "Up to 900 more piece(s) stood behind it" in rendered  # the ceiling, exact
+    assert "those may still exist" in rendered  # capacity…
+    assert "they were not lost" in rendered  # …and not loss
+
+
+def test_why_says_nothing_of_a_ceiling_when_nothing_was_displaced(output: StringIO) -> None:
+    """ADR-0107 §5 fires on ``evidence_elided > 0`` and is silent otherwise.
+
+    The counterpart to the case above, and what stops the clause being satisfied by
+    a line that always talks about elisions. Every belief in a deployment that has
+    never reached ADR-0086 §1's bound is this case, so a stray "up to 0 more" would
+    be the ordinary reading rather than the rare one.
+    """
+    cli._render_belief(_belief(BeliefBand.DERIVED, confidence=0.62, evidence=_cited("a", "b", "c")))
+    rendered = _flat(output.getvalue())
+    assert "3 piece(s) of evidence" in rendered
+    assert "stood behind it" not in rendered
+    assert "Up to" not in rendered
+
+
+def test_why_does_not_tell_an_elided_belief_that_nothing_supports_it(output: StringIO) -> None:
+    """ADR-0107 §7's repair, on the sentence it names by name.
+
+    "…but nothing supports it any more" is false for a belief that also elided nine
+    hundred citations: ADR-0086 §4 rules that "an elided citation is not unresolved,
+    and the belief did not lose support — the record lost the reference", so those
+    episodes may be intact and still supporting it. §7 requires the disclosure to
+    say **both** that every citation it still carries has gone **and** that up to
+    ``evidence_elided`` further ones stood behind it whose fate this surface cannot
+    report; all of that is asserted here.
+
+    **The predicate is untouched**, which is asserted directly rather than left to
+    the rendering to imply. ``unsupported`` is still ADR-0085 §4a's ``evidence_count
+    > 0 and lost_evidence == evidence_count`` on both types: §7 refused to add ``and
+    evidence_elided == 0`` to it, because that answers the question with a confident
+    ``False`` no better founded than the confident ``True``. The honest repair is at
+    the sentence, where "we cannot say" is expressible, and not at a boolean.
+    """
+    belief = _belief(
+        BeliefBand.DERIVED, confidence=0.1, evidence=(_GONE, _GONE), evidence_elided=900
+    )
+    assert belief.unsupported is True  # the ratified predicate, unchanged
+
+    cli._render_belief(belief)
+    rendered = _flat(output.getvalue())
+    assert "nothing supports it any more" not in rendered  # the false statement, gone
+    assert "none of which still exists" in rendered  # what *is* true is still said
+    assert "I still hold it" in rendered  # and it is still held, not retired
+    assert "Up to 900 more piece(s) stood behind it" in rendered
+    assert "those may still exist" in rendered
+
+
+def test_why_does_not_claim_no_evidence_was_recorded_when_some_was_displaced(
+    output: StringIO,
+) -> None:
+    """The fourth derived state, which ADR-0107 §7's prohibition also reaches.
+
+    A derived belief carrying no citations *now* but having displaced some is not a
+    belief for which "no supporting evidence was recorded": evidence was recorded,
+    and the reference to it was dropped. That is the statement §7 forbids on every
+    band, in its most absolute form — so this branch is repaired rather than left as
+    the one derived state that renders its count and owes no ceiling.
+    """
+    cli._render_belief(_belief(BeliefBand.DERIVED, confidence=0.4, evidence_elided=12))
+    rendered = _flat(output.getvalue())
+    assert "no supporting evidence was recorded" not in rendered
+    assert "I carry no evidence for it now" in rendered
+    assert "Up to 12 more piece(s) stood behind it" in rendered
+
+
+def test_the_listing_row_states_the_same_ceiling_as_the_single_belief_view(
+    output: StringIO,
+) -> None:
+    """One name, one renderer, one line — on both types (ADR-0107 §3, ADR-0085 §4a).
+
+    ADR-0107 §3 put the field on ``Belief`` as well as ``BeliefSummary`` precisely so
+    drilling into a belief cannot *lose* information: ADR-0077 §6 makes the
+    single-belief view the fuller answer, and it is the view ``forget`` renders
+    before destroying a record. A field on one type only would fork ``_why`` and
+    invert that split, so the two lines are asserted to be the same line.
+    """
+    cli._render_belief_summary(
+        _summary(
+            BeliefBand.DERIVED,
+            confidence=0.35,
+            evidence_count=2,
+            lost_evidence=1,
+            evidence_elided=900,
+        )
+    )
+    rendered = _flat(output.getvalue())
+    assert "2 piece(s) of evidence" in rendered
+    assert "1 of which no longer exists" in rendered
+    assert "Up to 900 more piece(s) stood behind it" in rendered
+    assert "Because:" not in rendered, "the listing still ships no citations"
+
+
+def test_an_elision_is_never_rendered_among_the_citations(output: StringIO) -> None:
+    """ADR-0107 §8 item 4: ``_render_evidence`` is not touched, and this is why.
+
+    ``Evidence`` has one nullable field, so a lost citation is one whose content is
+    ``None`` — meaning an entry standing for an elision would read as a **tombstone**
+    to every reader. That is the conflation ADR-0091 §1's second clause forbids and
+    ADR-0086 §4 calls "telling the user their data was lost when it was not". The
+    ceiling belongs on the ``Why`` line, so the tombstone count in the citation list
+    must not move with the elision.
+    """
+    cli._render_belief(
+        _belief(
+            BeliefBand.DERIVED,
+            confidence=0.35,
+            evidence=(_cited("they asked for metric units")[0], _GONE),
+            evidence_elided=900,
+        )
+    )
+    rendered = _flat(output.getvalue())
+    assert rendered.count("an item of evidence stood here and is gone") == 1
+    assert "Up to 900 more piece(s) stood behind it" in rendered
+
+
+@pytest.mark.parametrize(
+    ("band", "expected"),
+    [
+        (BeliefBand.ASSERTED, "you told me, and your own word is the whole of it."),
+        (
+            BeliefBand.ATTESTED,
+            "a source you connected reported it — neither your word nor my inference. "
+            "I recorded which source, and when it said so, but cannot show them here, "
+            "so 'Last revised' below is when I changed my mind and not when the "
+            "source spoke.",
+        ),
+    ],
+)
+def test_why_is_unchanged_on_the_bands_that_render_no_count(
+    band: BeliefBand, expected: str
+) -> None:
+    """ADR-0107 §2's band scoping, pinned as a decision rather than an oversight.
+
+    §2 owes the disclosure to ``DERIVED`` alone, because that is the bullet ADR-0073
+    §4 put the citation-count floor in: an assertion's warrant is the user's own word
+    and "there is nothing further to cite", and the attested floor is about the band,
+    the reporting source and whose clock is shown, with no count in it at all. §5
+    then requires nothing of a surface that renders no count. So these two lines owe
+    no ceiling and gain none.
+
+    **Asserted as full equality against a non-zero elision**, which is what makes it
+    a pin: an implementation appending the ceiling unconditionally would still pass a
+    mere absence-of-loss-wording check. Together with the parameterised projection
+    test in ``tests/orchestration``, this is what stops a later reader "repairing"
+    §2's scoping — the field *is* carried on these bands (§3), and choosing not to
+    render it is the ruling.
+    """
+    assert cli._why(_belief(band, confidence=0.9, evidence_elided=900)) == expected
+    assert cli._why(_summary(band, confidence=0.9, evidence_elided=900)) == expected
 
 
 def test_why_marks_an_attested_belief_as_a_source_s_report_not_ours(output: StringIO) -> None:
