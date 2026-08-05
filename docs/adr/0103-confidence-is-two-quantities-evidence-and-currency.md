@@ -334,11 +334,15 @@ currency ranks nor claims it never will.
 > currency decline that was never measured.
 
 > **Normative.** Currency is measured from the instant of the most recent event
-> that **confirmed** the belief, and the elapsed interval is never negative: a
-> confirmation instant at or after now reads as maximally current, and the instant
-> itself is neither refused nor rewritten (ADR-0092 §3).
-> `Provenance.last_updated` is not that instant and may not stand in for it: it is
-> transaction time, the clock of the system revising its own belief (ADR-0045 §3).
+> that **confirmed** the belief. `Provenance.last_updated` is not that instant and
+> may not stand in for it: it is transaction time, the clock of the system
+> revising its own belief (ADR-0045 §3).
+
+> **Normative.** Where the most recent confirming instant is in our future, the
+> elapsed interval is not measurable and the belief's currency is **unknown**. The
+> instant is neither refused nor rewritten (ADR-0092 §3), and no freshness is
+> projected through it: a source's timestamp records when that source asserts the
+> fact *was* current, never a claim that it stays current until then.
 
 > **Normative.** Which events confirm a belief is ruled here; which field carries
 > an event's instant, and whether it is stored or resolved on demand, is the
@@ -410,18 +414,27 @@ through the other quantity. And `ASSERTED` needs the user, because §4 already
 rules that the answer to a lapsed assertion is a question — so what resets its
 clock is the answer, not our own revision of the record.
 
-**A confirmation instant in our future is current, not anomalous.** ADR-0092 §3
-rules that "a `reported_at` in our future is not refused", because source clocks
-skew and refusing one "invents a read-path" failure — so this ADR inherits the
-possibility of a negative elapsed interval and has to say what it means rather
-than leave it to arithmetic. It means the source asserts the fact is current at
-least until that instant, which is a stronger claim than "current now", so the
-belief is maximally current and nothing is clamped, corrected or flagged on the
-record. The alternative readings both misreport: a negative interval fed to a
-decay function is undefined behaviour, and calling the belief *unknown* would turn
-a few seconds of ordinary clock skew into a re-confirmation prompt. This settles
-the case without touching §5's deferred decay function, which never sees a
-negative input.
+**A confirmation instant in our future is unmeasurable, not maximally fresh.**
+ADR-0092 §3 rules that "a `reported_at` in our future is not refused", because
+source clocks skew and refusing one invents a read-path failure — so this ADR
+inherits the possibility of a negative elapsed interval and has to say what it
+means rather than leave it to arithmetic. The tempting answer, which an earlier
+draft of this section took, is to read the future instant as a claim that the
+belief holds at least until then and call it maximally current. That over-reads
+ADR-0092: `reported_at` is "the instant the reporting source asserts the fact
+**was** current", a statement about a moment, not a guarantee running forward from
+one. Under the tempting reading a source whose clock is set years ahead suppresses
+every decline and every re-confirmation until its date arrives, which is the
+failure mode a decision about staleness least wants.
+
+So the honest value is the one the system actually has: we cannot measure elapsed
+time from an instant that has not happened, and §9's domain already carries a
+state for a currency that was never measured. It costs nothing at the ordinary
+scale of the problem, because whether an unknown currency prompts anything at all
+is a parameter question deferred with the rest (§5) — a few seconds of clock skew
+does not become a question to the user by way of this clause. And §5's decay
+function never sees a negative input, which is the property that let this be
+settled here rather than deferred into it.
 
 **`Provenance.last_updated` is refused as the clock for all three, including where
 it coincides.** It is the instant a currency computation would reach for, and it
