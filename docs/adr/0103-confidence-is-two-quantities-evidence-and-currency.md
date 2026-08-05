@@ -226,7 +226,9 @@ is exactly that kind of question.
 > incoming record is in the `DERIVED` band, the fold takes nothing of the incoming
 > record but its `evidence` and its effect on currency: the surviving record keeps
 > the target's `source`, `attestation`, content and evidence-strength, its
-> evidence is unioned under ADR-0086 §3's bound, and its currency is refreshed.
+> evidence is unioned under ADR-0086 §3's bound, and its currency is measured from
+> the more recent of the two records' confirming instants (§9) — never from the
+> moment of the fold.
 > The clause governs how such a fold folds and authorises none: a fold the writer
 > boundary refuses stays refused (ADR-0045 §5). Every other pairing is left as it
 > stands.
@@ -234,10 +236,18 @@ is exactly that kind of question.
 This is the ruling #646 asks for, and the split is what supplies it. Agreement
 between a derived observation and a better-warranted record is genuine
 information, and it is information about **currency**: the belief was seen to hold
-again just now. It is not information about warrant, because the observation
-supplies no warrant the target did not already have. Recording it as strength is
-what produced the `ValidationError`; recording it as currency is what it actually
-means.
+again *when that observation happened*. It is not information about warrant,
+because the observation supplies no warrant the target did not already have.
+Recording it as strength is what produced the `ValidationError`; recording it as
+currency is what it actually means.
+
+**The instant is the observation's, not the write's**, which is why the clause
+names it rather than saying "refreshed". A proposal citing a January episode can
+sit in a batch and land in June; a fold that read its own clock would report a
+belief confirmed in June on the strength of a January observation, and would do it
+by a route §9 closes for a derived record standing on its own. The fold is not a
+third kind of evidence — it is the moment two records are recognised as agreeing,
+and the agreement is only ever as recent as the observation behind it.
 
 **The clause is keyed on both bands, and that is deliberate rather than
 economical.** The pairings are enumerable, and stating the rule as "a `DERIVED`
@@ -353,7 +363,8 @@ currency ranks nor claims it never will.
 > `DERIVED`, the most recent observation supporting it, the latest `occurred_at`
 > among the episodes `Provenance.evidence` cites, and never the moment of
 > derivation. It is also confirmed by an agreeing record folded onto it under §6,
-> whatever band that record came from.
+> whatever band that record came from, at **that record's** own confirming instant
+> and never at the moment of the fold.
 
 > **Normative.** Currency's domain carries an explicit **unknown**, distinct from
 > every value it can take. A belief whose confirmation instant the store does not
