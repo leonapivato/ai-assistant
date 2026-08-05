@@ -525,6 +525,161 @@ async def test_a_drain_that_fails_still_reports_what_it_cost(
     assert done["drain_phase"] == "not_run"
 
 
+# --- Which half of the lifecycle failed (#581) -------------------------------
+
+
+async def test_a_failed_drain_is_reported_as_a_shutdown_and_never_as_a_failed_start(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#581: the operator is told which end of the lifecycle broke.
+
+    A closer that will not release its connection escapes through the same
+    ``except`` a startup fault does, and before this it earned the same words. "hub:
+    cannot start" on a process that had been serving for three weeks sends an
+    operator to look at configuration and permissions — everything except the drain
+    that actually failed.
+
+    Both halves of the assertion matter. The new wording appearing is worth little
+    on its own if the old wording still appears beside it, because a message an
+    operator has to reconcile against a contradicting one is not legible.
+    """
+
+    async def refuses_to_close() -> None:
+        msg = "the connection would not close"
+        raise OSError(msg)
+
+    engine.aclose = refuses_to_close  # type: ignore[method-assign]
+    engine.on_start = _stop_after_start()
+
+    with structlog.testing.capture_logs() as captured:
+        code = await hub.serve(settings)
+
+    stderr = capsys.readouterr().err
+    failed = _only(captured, "hub_shutdown_failed")
+    assert "cannot start" not in stderr
+    assert "shutdown failed while draining in-flight work" in stderr
+    assert "the connection would not close" in stderr
+    # The drain is where it failed, so nothing may claim the work finished.
+    assert "in-flight work was not drained" in stderr
+    assert failed["failed_at"] == "draining"
+    assert failed["exit_code"] == code
+    assert "hub_startup_failed" not in _events(captured)
+
+
+async def test_a_failure_after_the_engine_is_built_is_still_reported_as_a_failed_start(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The discriminator is that shutdown *raised*, not that shutdown *ran*.
+
+    §3's steps 4 to 6 sit inside the ``try`` whose ``finally`` runs the shutdown
+    sequence — deliberately, so a hub killed halfway through a slow embedder load
+    still closes what it opened. A store that will not open therefore produces a
+    record marked ``reached``, with a shutdown that ran to completion and a startup
+    fault escaping past it.
+
+    #581 proposed keying the wording on exactly that flag, and this is the test that
+    says why it cannot be: keyed on ``reached``, every one of those failures would
+    be relabelled a shutdown fault, which is the same defect pointing the other way.
+    """
+
+    async def will_not_open() -> None:
+        msg = "the memory store would not open"
+        raise OSError(msg)
+
+    engine.start = will_not_open  # type: ignore[method-assign]
+
+    with structlog.testing.capture_logs() as captured:
+        code = await hub.serve(settings)
+
+    stderr = capsys.readouterr().err
+    names = _events(captured)
+    assert code == EXIT_RESTART
+    assert "hub: cannot start: the memory store would not open" in stderr
+    assert "shutdown failed" not in stderr
+    assert "hub_shutdown_failed" not in names
+    # The shutdown sequence did run — which is precisely why `reached` cannot be
+    # the thing that chooses the wording.
+    assert "hub_shutdown_completed" in names
+
+
+async def test_a_shutdown_that_drained_before_it_failed_says_the_work_finished(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ADR-0083 §4's shutdown is two-phase, so "during shutdown" is not one moment.
+
+    A hub that drained cleanly and then could not let go of its instance lock has
+    lost no work at all, and a message saying only "could not shut down" would read
+    as the opposite to anyone who knows what phase B costs. So the stage is named
+    and the drain's own account rides with it — which is the first question a stop
+    that went wrong actually raises.
+    """
+
+    class _StuckLock(InstanceLock):
+        def release(self) -> None:
+            # Really released first: the failure under test is the *report*, and a
+            # test that also leaked the descriptor would hold this directory for
+            # the rest of the session.
+            super().release()
+            msg = "the lock descriptor would not close"
+            raise OSError(msg)
+
+    monkeypatch.setattr(hub, "InstanceLock", _StuckLock)
+    engine.on_start = _stop_after_start()
+
+    with structlog.testing.capture_logs() as captured:
+        code = await hub.serve(settings)
+
+    stderr = capsys.readouterr().err
+    failed = _only(captured, "hub_shutdown_failed")
+    assert code == EXIT_RESTART
+    assert engine.closed == 1
+    assert "shutdown failed while releasing the instance lock" in stderr
+    assert "in-flight work had already finished on its own" in stderr
+    assert failed["failed_at"] == "releasing_the_lock"
+    assert failed["drain_phase"] == "phase_a_quiesced"
+
+
+async def test_a_shutdown_fault_that_stays_down_keeps_its_code_and_its_remedy(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """§5's codes do not move; only the words around them do.
+
+    "Would restarting, unchanged, ever succeed?" has one answer wherever the fault
+    arose — an ``EACCES`` a closer hit is as unfixable by restarting as one the
+    opener hit — so the classification stays in one place and keeps its verdict. The
+    framing is what changes: this process is already on its way out, so the line an
+    operator reads is about the *next* start rather than about a restart that is not
+    being contemplated.
+    """
+
+    async def cannot_write() -> None:
+        raise OSError(errno.EACCES, "permission denied", str(settings.data_dir / "memory.db"))
+
+    engine.aclose = cannot_write  # type: ignore[method-assign]
+    engine.on_start = _stop_after_start()
+
+    code = await hub.serve(settings)
+
+    stderr = capsys.readouterr().err
+    assert code == EXIT_DEPLOYMENT
+    assert "shutdown failed while draining in-flight work" in stderr
+    assert "readable and writable by the user the hub runs as" in stderr
+    assert "the next start will meet the same condition" in stderr
+
+
 # --- Exit classification (§5, §6) -------------------------------------------
 
 

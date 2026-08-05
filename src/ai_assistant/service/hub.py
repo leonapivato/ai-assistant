@@ -35,6 +35,17 @@ four states an operator most needs to tell apart — phase A still within budget
 phase B awaiting after a cancellation, phase B blocked on something that will never
 finish, and already finished — all look identical: silence after
 ``hub_shutdown_requested``.
+
+**A failure is reported against the half of the lifecycle it happened in** (#581).
+The exit code is not: §5's codes answer "come back or stay down" and that question
+has one answer wherever the fault arose, so :func:`~ai_assistant.service.exits.classify`
+stays the only classifier and keeps its single call site. What differs is the text an
+operator reads. "cannot start" for a closer that would not release its connection
+sends them to look at configuration and permissions, on a hub that had been serving
+for weeks; and because §4's shutdown is two-phase, "could not shut down" is not
+specific enough either — draining and then failing to release the instance lock is a
+different fact from never draining at all. So a shutdown fault names the part that
+failed and what the drain had already done.
 """
 
 from __future__ import annotations
@@ -47,6 +58,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -98,6 +110,57 @@ _STOP_SIGNALS: Final = (signal.SIGTERM, signal.SIGINT)
 _IGNORED_SIGNALS: Final = (signal.SIGHUP,)
 
 
+class _ShutdownStage(StrEnum):
+    """The part of ADR-0083 §4's shutdown a failure came out of (#581).
+
+    **"During shutdown" is not one moment**, because §4's shutdown is two-phase and
+    §8 puts three other things around it. A message saying only "could not shut
+    down" would be as wrong in its own way as "cannot start" is: it reads as *the
+    drain failed* to anyone who knows what phase B costs, and a hub that drained
+    cleanly and then could not release its instance lock has lost nothing at all.
+    So the stage is named, and the value doubles as the log field.
+
+    The order below is the order they run in.
+    """
+
+    #: :meth:`~ai_assistant.service.transport.Listener.stop_accepting` — the door
+    #: closes at the start of phase A (ADR-0084 §1), before anything else.
+    CLOSING_THE_DOOR = "closing_the_door"
+    #: :meth:`~ai_assistant.service.scheduler.Scheduler.aclose` — stopped and
+    #: joined before the engine is closed (ADR-0083 §8).
+    STOPPING_THE_SCHEDULER = "stopping_the_scheduler"
+    #: :meth:`Engine.aclose` — §4's phases A and B together.
+    DRAINING = "draining"
+    #: :meth:`~ai_assistant.service.transport.Listener.aclose` — the connections
+    #: whose peers never spoke again, let go once the drain is done.
+    RELEASING_CONNECTIONS = "releasing_connections"
+    #: The instance lock, released last of all (ADR-0083 §1).
+    RELEASING_THE_LOCK = "releasing_the_lock"
+
+
+#: How each stage reads in an operator message, after "shutdown failed while".
+#: Separate from :class:`_ShutdownStage`'s values because those are log fields, and
+#: a structured field that has to double as English ends up being neither.
+_STAGE_PHRASES: Final[dict[_ShutdownStage, str]] = {
+    _ShutdownStage.CLOSING_THE_DOOR: "closing the door",
+    _ShutdownStage.STOPPING_THE_SCHEDULER: "stopping the scheduler",
+    _ShutdownStage.DRAINING: "draining in-flight work",
+    _ShutdownStage.RELEASING_CONNECTIONS: "letting go of the remaining connections",
+    _ShutdownStage.RELEASING_THE_LOCK: "releasing the instance lock",
+}
+
+#: What the drain had done by the time the shutdown failed, in operator-facing
+#: words. Keyed by the phase because that *is* the answer to the question a stop
+#: that went wrong raises first: did my in-flight work finish?
+_DRAIN_ACCOUNT: Final[dict[DrainPhase, str]] = {
+    DrainPhase.NOT_RUN: "in-flight work was not drained, and may not have finished",
+    DrainPhase.QUIESCED: "in-flight work had already finished on its own",
+    DrainPhase.CANCELLED: (
+        "in-flight work was cancelled at the drain budget, then awaited to completion"
+    ),
+}
+
+
 @dataclass(slots=True)
 class _ShutdownRecord:
     """What the shutdown sequence did, so its completion can be reported (#559).
@@ -128,6 +191,31 @@ class _ShutdownRecord:
     phase: DrainPhase = DrainPhase.NOT_RUN
     #: The whole shutdown, join and drain together.
     elapsed_seconds: float | None = None
+    #: The stage a failure escaped from, or ``None`` if none did (#581).
+    failed_at: _ShutdownStage | None = None
+
+    @property
+    def shutdown_failure(self) -> _ShutdownStage | None:
+        """The stage the shutdown failed at, or ``None`` if the fault was not its.
+
+        **``reached`` alone is not this test, and using it would invert the very bug
+        #581 reports.** The shutdown sequence runs in a ``finally``, so it also runs
+        when *startup* fails at step 4, 5 or 6 — a store that will not open, a
+        socket path too long to bind. In every one of those the record is `reached`
+        and the exception that escapes is still a startup fault, correctly reported
+        as one. What distinguishes the two is not that shutdown ran but that
+        shutdown *raised*, which is what :attr:`failed_at` records.
+
+        The pair is read together rather than :attr:`failed_at` alone because the
+        instance lock is released outside the shutdown sequence as well: a start
+        that failed before an engine existed still unwinds through that release,
+        and a fault there is the failed start it plainly is.
+
+        Returned rather than answered ``True``/``False`` so the caller carries the
+        stage it needs into the message without re-reading a field it has already
+        proved is set.
+        """
+        return self.failed_at if self.reached else None
 
 
 def main() -> int:
@@ -178,6 +266,11 @@ async def serve(settings: Settings) -> int:
     code is known — including on the path where shutdown itself failed, which is
     exactly the case where knowing whether work had been cancelled matters most.
 
+    **The wording, and only the wording, forks on which half of the lifecycle the
+    failure came from** (#581). One ``except`` and one :func:`classify` call are
+    what keep §5's "the boundary is a test, not a list" from decaying into a list;
+    the fork is below that, on the same record the completion event already reads.
+
     Args:
         settings: Loaded application settings.
 
@@ -191,9 +284,36 @@ async def serve(settings: Settings) -> int:
             code = await _start_and_run(settings, stop, shutdown)
         except Exception as exc:
             code, action = classify(exc)
-            _report_fault(exc, action=action, code=code)
+            stage = shutdown.shutdown_failure
+            if stage is None:
+                _report_fault(exc, action=action, code=code)
+            else:
+                _report_shutdown_fault(exc, shutdown, stage=stage, action=action, code=code)
     _report_shutdown(shutdown, code=code)
     return code
+
+
+@contextmanager
+def _during(record: _ShutdownRecord, stage: _ShutdownStage) -> Iterator[None]:
+    """Attribute anything escaping this block to ``stage``, and to nothing else.
+
+    Recording on the way *out* rather than on the way in is what makes the
+    attribution right in a ``finally``: when the drain raises and the connection
+    release that follows it succeeds, the drain is still what failed. A scheme that
+    marked each stage as it was entered would hand the blame to whichever cleanup
+    ran last.
+
+    ``BaseException`` because the record is a statement about what happened, not
+    about what :func:`serve` will report — a shutdown that lost to a cancellation
+    should not leave a record claiming it completed. :func:`serve` reads
+    :attr:`_ShutdownRecord.failed_shutting_down` only on the path where it caught an
+    ``Exception``, so widening here narrows nothing there.
+    """
+    try:
+        yield
+    except BaseException:
+        record.failed_at = stage
+        raise
 
 
 def _report_shutdown(shutdown: _ShutdownRecord, *, code: int) -> None:
@@ -326,7 +446,12 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
                 engine, scheduler, listener, shutdown, budget=settings.shutdown_drain_seconds
             )
     finally:
-        lock.release()
+        # Outside `_shut_down` because the lock outlives it: it is taken at step 2
+        # and released here whether or not there was ever an engine to drain. Named
+        # as a stage anyway, so a hub that drained cleanly and then could not let go
+        # of the lock says that rather than "could not shut down" (#581).
+        with _during(shutdown, _ShutdownStage.RELEASING_THE_LOCK):
+            lock.release()
     return EXIT_OK
 
 
@@ -382,8 +507,10 @@ async def _shut_down(
     record.jobs = scheduler.job_names
     began = time.monotonic()
     try:
-        await listener.stop_accepting()
-        await scheduler.aclose()
+        with _during(record, _ShutdownStage.CLOSING_THE_DOOR):
+            await listener.stop_accepting()
+        with _during(record, _ShutdownStage.STOPPING_THE_SCHEDULER):
+            await scheduler.aclose()
         record.scheduler_join_seconds = round(time.monotonic() - began, 3)
         _log.info(
             "hub_scheduler_stopped",
@@ -393,11 +520,13 @@ async def _shut_down(
         )
         drain_began = time.monotonic()
         try:
-            await engine.aclose()
+            with _during(record, _ShutdownStage.DRAINING):
+                await engine.aclose()
         finally:
             record.drain_seconds = round(time.monotonic() - drain_began, 3)
             record.phase = engine.drain_phase
-            await listener.aclose()
+            with _during(record, _ShutdownStage.RELEASING_CONNECTIONS):
+                await listener.aclose()
     finally:
         record.elapsed_seconds = round(time.monotonic() - began, 3)
 
@@ -498,6 +627,61 @@ def _log_ignored_signal(sig: signal.Signals) -> None:
     )
 
 
+def _report_shutdown_fault(
+    exc: BaseException,
+    record: _ShutdownRecord,
+    *,
+    stage: _ShutdownStage,
+    action: str,
+    code: int,
+) -> None:
+    """Print a *shutdown* failure's cause, where it happened, and what drained (#581).
+
+    The counterpart to :func:`_report_fault` and deliberately not a parameter on it:
+    the two share a shape and nothing else. A start that failed has produced nothing
+    an operator has to account for, so its remedy is the whole message. A stop that
+    failed has already run some of ADR-0083 §4, and the first question it raises is
+    not "what do I change" but **"did my in-flight work finish"** — which is why the
+    drain's account is printed before any remedy, and printed unconditionally.
+
+    **The exit code and the operator action are the same ones a start would get**,
+    from the same :func:`~ai_assistant.service.exits.classify` call. §5's question —
+    would restarting, unchanged, ever succeed? — has one answer wherever the fault
+    arose, and an ``EACCES`` a closer hit is as unfixable by restarting as one the
+    opener hit. So only the framing moves: the closing line says the *next start*
+    will meet the same condition, because this process is already on its way out and
+    telling it not to restart would be telling it what it is doing.
+
+    Operational text carrying no Tier 0/1 content (ADR-0004 §5), like every other
+    message on this path.
+
+    Args:
+        exc: The exception that escaped the shutdown sequence.
+        record: What the shutdown had done by the time it did.
+        stage: The part that failed, as
+            :attr:`~_ShutdownRecord.shutdown_failure` reported it.
+        action: The operator action from ``classify``, empty when none is asked.
+        code: The process exit code.
+    """
+    _log.error(
+        "hub_shutdown_failed",
+        exit_code=code,
+        failed_at=stage.value,
+        drain_phase=record.phase.value,
+        cause=str(exc),
+        error_class=type(exc).__name__,
+        operator_action=action or None,
+    )
+    print(f"hub: shutdown failed while {_STAGE_PHRASES[stage]}: {exc}", file=sys.stderr)
+    print(f"hub: {_DRAIN_ACCOUNT[record.phase]}.", file=sys.stderr)
+    if code == EXIT_DEPLOYMENT:
+        print(f"hub: {action}", file=sys.stderr)
+        print(
+            "hub: the next start will meet the same condition; the deployment must change.",
+            file=sys.stderr,
+        )
+
+
 def _report_fault(exc: BaseException, *, action: str, code: int) -> None:
     """Print a startup failure's cause, and its remedy when there is one.
 
@@ -511,6 +695,12 @@ def _report_fault(exc: BaseException, *, action: str, code: int) -> None:
     A restartable fault prints no action, because none is being asked of anyone —
     inventing an instruction there would be the "crash loop wearing a diagnosis"
     §5 warns about, in the other direction.
+
+    **Startup, and only startup.** A failure out of the shutdown sequence goes to
+    :func:`_report_shutdown_fault` instead — the classification is shared, the
+    wording is not (#581). Note that "startup" here includes a start that unwound
+    *through* a shutdown which itself succeeded: the fault is still the one that
+    stopped the hub coming up, and that is what this says.
 
     These messages are operational text carrying no Tier 0/1 content (ADR-0004
     §5): they name settings keys, paths and identifiers, never memory content and
