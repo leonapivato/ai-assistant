@@ -13,7 +13,10 @@ collide at collection.
 from __future__ import annotations
 
 import asyncio
+import errno
+import os
 import sqlite3
+import stat
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -236,3 +239,33 @@ class TestProgress:
         reembed._Progress().report(0, 0)
 
         assert capsys.readouterr().out.strip() == "0/0 records (100%)"
+
+
+def test_an_unflushable_rename_is_reported_as_a_warning_and_still_succeeds(
+    settings: Settings,
+    data_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    asyncio.run(_seed(data_dir))
+
+    real = os.fsync
+
+    def _refuse_directories(fd: int) -> None:
+        # Only the swap's directory fsync: the instance lock fsyncs its own file
+        # on the way in, and failing that would be a different test.
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "fsync not supported on this filesystem")
+        real(fd)
+
+    monkeypatch.setattr(os, "fsync", _refuse_directories)
+
+    code = reembed.main([])
+
+    # The migration happened, so the exit code says so; the durability caveat goes
+    # to stderr rather than turning a completed swap into a reported failure.
+    assert code == EXIT_OK
+    assert _tag(data_dir / "memory.db") == HashingEmbedder().model_id
+    captured = capsys.readouterr()
+    assert "records re-embedded" in captured.out
+    assert "could not be flushed to disk" in captured.err
