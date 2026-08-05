@@ -326,13 +326,19 @@ currency ranks nor claims it never will.
 
 ### 9. What the implementing lane decides
 
-> **Normative.** How the two quantities are represented on `Provenance` —
-> field names, types, and whether currency is stored or computed from
-> `Provenance.last_updated` — is the implementing lane's, subject to three
-> constraints: both quantities are separately readable by a consumer;
-> `Provenance.confidence`'s ratified meaning (ADR-0072 §3) is not silently
-> reinterpreted; and no migration of an existing record fabricates a currency
-> decline that was never measured.
+> **Normative.** How the two quantities are represented on `Provenance` — field
+> names, types, and whether currency is stored or computed — is the implementing
+> lane's, subject to three constraints: both quantities are separately readable by
+> a consumer; `Provenance.confidence`'s ratified meaning (ADR-0072 §3) is not
+> silently reinterpreted; and no migration of an existing record fabricates a
+> currency decline that was never measured.
+
+> **Normative.** Where currency is computed rather than stored, it is computed
+> from the instant the belief was last **confirmed**. `Provenance.last_updated` is
+> not that instant and may not stand in for it: it is transaction time, the clock
+> of the system revising its own belief (ADR-0045 §3). The implementing lane names
+> the confirmation instant it reads for each band, and stores one where the record
+> carries none.
 
 Deferring surface until a consumer exists is this repository's standing
 discipline — ADR-0072 §7 deferred a read's signature on exactly that ground, and
@@ -347,6 +353,19 @@ holds records whose currency was never observed; deriving a decline for them fro
 a rate nobody has measured (§5) would manufacture staleness the system never saw,
 and §4 would then start asking the user to re-confirm things on the strength of an
 invented number.
+
+**The confirmation clock is a separate clause because the obvious field is the
+wrong one.** `Provenance.last_updated` is the instant a currency computation would
+reach for, and it is transaction time — "the clock of the store changing its mind,
+not the clock of when the belief holds". The `ATTESTED` band makes the gap
+concrete rather than theoretical: ADR-0092 §3 rules that `Attestation.reported_at`
+is the source's own clock, that it is "never reconciled with ours", and that
+"`reported_at` earlier than `last_updated` is the normal case, not an anomaly". A
+calendar's months-old report imported this morning has a `last_updated` of this
+morning, so a currency read off transaction time would call it perfectly fresh —
+which is not a rounding error but the exact inversion of what §3 defines currency
+to measure. Where a band's confirmation instant is not on the record at all, the
+lane stores one rather than substituting the nearest field that is.
 
 > **Normative.** Where a belief's currency has lapsed, a surface that renders the
 > belief conveys that alongside its evidence-strength. The wording is the
