@@ -227,8 +227,9 @@ is exactly that kind of question.
 > record but its `evidence` and its effect on currency: the surviving record keeps
 > the target's `source`, `attestation`, content and evidence-strength, its
 > evidence is unioned under ADR-0086 §3's bound, and its currency is measured from
-> the later of the two records' confirming instants — from whichever one is
-> available where only one is, and as **unknown** only where neither is (§9). It is
+> the later of the two records' **usable** confirming instants, an instant being
+> usable when the store holds it and it is not in our future (§9) — from whichever
+> one is usable where only one is, and as **unknown** only where neither is. It is
 > never measured from the moment of the fold.
 > The clause governs how such a fold folds and authorises none: a fold the writer
 > boundary refuses stays refused (ADR-0045 §5). Every other pairing is left as it
@@ -252,14 +253,24 @@ and the agreement is only ever as recent as the observation behind it.
 
 **An unknown on one side does not spread to the survivor**, and the composition
 rule says so rather than leaving "the later of two instants" to mean something
-when one of them is not an instant. Either input can be unknown — a legacy record,
-or an `ATTESTED` one whose source clock runs ahead — and unknown means "we cannot
-measure this one", not "this one argues against freshness". A confirmation we *do*
-hold is not unmade by a second record we cannot date, so the survivor takes the
-known instant, and reads unknown only when it holds neither. The opposite rule —
-unknown whenever either side is — would let one undatable record erase a
-perfectly good confirmation, which is the same manufactured staleness §9's third
-constraint refuses on the migration path.
+when one of them is not one. Either input can be unknown — a legacy record with no
+confirming instant at all, or an `ATTESTED` one whose source clock runs ahead —
+and unknown means "we cannot measure this one", not "this one argues against
+freshness". A confirmation we *do* hold is not unmade by a second record we cannot
+date, so the survivor takes the usable instant and reads unknown only when it
+holds neither. The opposite rule — unknown whenever either side is — would let one
+undatable record erase a perfectly good confirmation, which is the same
+manufactured staleness §9's third constraint refuses on the migration path.
+
+**Selection is over *usable* instants, not merely present ones**, and the
+distinction is load-bearing rather than pedantic. A future-dated
+`Attestation.reported_at` is present on the record and, read as a number, is the
+later of the two — so a rule that selected the later present instant would pick
+it, and §9 would then make the survivor unknown even though a perfectly good
+derived observation sat on the other side. That is the spreading this section just
+refused, reached by a different route. An instant the store holds but cannot
+measure elapsed time from is not a candidate, which is the whole content of the
+word.
 
 **The clause is keyed on both bands, and that is deliberate rather than
 economical.** The pairings are enumerable, and stating the rule as "a `DERIVED`
