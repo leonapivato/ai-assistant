@@ -160,6 +160,19 @@ would pass every one of them. The derived columns are checked against the blob
 beside them rather than against the source, because the blob is what §1 makes
 authoritative and because the source may not carry those columns at all.
 
+> **Normative.** Immediately before the rename, the migration re-reads the live
+> store's fingerprint and refuses if it differs from the one the run started
+> with.
+
+Verification and the rename are two steps, and a write landing between them would
+be thrown away by the rename with nothing reporting it. This narrows that window
+from the length of a full re-read to the microseconds between a `stat` and a
+`rename`; it does not close it, and it is not offered as closing it. What closes
+it for the hub is the instance lock — but the lock is advisory, which ADR-0083
+§10 states in as many words, so it does not stop a `sqlite3` shell somebody left
+open on their own machine. That is the case this actually catches, and on a
+single-user machine it is the likely one.
+
 > **Normative.** Immediately before the rename, the migration hard-links the live
 > store to `<store>.pre-reembed`. If that path already exists and is not a link to
 > the live store's own inode, the migration refuses and does nothing.
