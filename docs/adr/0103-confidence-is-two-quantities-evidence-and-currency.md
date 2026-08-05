@@ -340,6 +340,14 @@ currency ranks nor claims it never will.
 > the confirmation instant it reads for each band, and stores one where the record
 > carries none.
 
+> **Normative.** Currency's domain carries an explicit **unknown**, distinct from
+> every value it can take. A belief whose confirmation instant the store does not
+> hold — which is every record written before this decision — reads as unknown,
+> and never as current. Unknown is not freshness: no surface or consumer renders
+> or treats an unknown currency as a confirmed one. Whether an unknown currency
+> triggers §4's re-confirmation, and on what schedule, is a parameter question and
+> is deferred with the rest of them (§5).
+
 Deferring surface until a consumer exists is this repository's standing
 discipline — ADR-0072 §7 deferred a read's signature on exactly that ground, and
 ADR-0028 §7 declined batch ingestion on it. What is *not* deferred is the
@@ -347,6 +355,28 @@ semantics, because that is what the implementing lane would otherwise have to
 invent, and what golden rule 5 requires to be ratified ahead of it: this is a
 `core` type that crosses subsystem boundaries, so the decision lands as its own
 PR before anything implements against it (ADR-0015 §5).
+
+**The line between what is ruled and what is deferred is "could two lanes make
+incompatible choices and both claim compliance?"** A field name cannot fail that
+test — a second implementation choosing a different one is a rename, and the
+conformance question is whether the quantity is readable at all, which the first
+clause pins. The *domain* can fail it, and does: a lane that reads a migrated
+record as fully current and a lane that reads it as unknown have made different
+decisions about what the system claims to know, and both would have satisfied this
+section as it stood before the third clause was added. So the domain is ruled here
+and the representation is not, and the third clause exists because that is
+precisely where the deferral was too wide.
+
+**Unknown is a distinct state because an unmeasured currency and a fresh one are
+different facts.** This is ADR-0086 §4's distinction one quantity over: an elision
+"is not a tombstone, and the two are different facts", because a surface that
+renders them alike "tells the user their data was lost when it was not". Reading
+a legacy record as current tells the user the assistant confirmed something it
+never confirmed — the same error, in the direction that flatters the system. And
+the alternative failure is real too, which is why the third constraint on the
+first clause stays: reading it as *stale* would fabricate a decline nobody
+measured. Neither invention is available, so the honest value is neither, and a
+domain with only numbers in it has nowhere to put that.
 
 The third constraint is the one worth stating out loud. A store migrated forward
 holds records whose currency was never observed; deriving a decline for them from
