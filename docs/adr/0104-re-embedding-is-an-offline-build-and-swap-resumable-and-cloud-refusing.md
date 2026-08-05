@@ -125,13 +125,29 @@ an embedder it can no longer construct at all.
 > the migration restarts from the beginning.
 
 The fingerprint is `st_dev`, `st_ino`, `st_size` and `st_mtime_ns` of the live
-store. Its job is to notice that the hub ran between two attempts and changed the
+store, **plus SQLite's own file change counter** — the four header bytes SQLite
+increments whenever it unlocks a database it has modified. The stat fields alone
+are not enough, and the reason is ordinary rather than exotic: `st_mtime_ns`
+reports the filesystem's timestamp *resolution*, not a promise that two writes a
+microsecond apart get different values, so a same-sized update inside one
+timestamp tick leaves all four unchanged. The change counter moves on a write
+that changes neither the file's length nor any timestamp. Its job is to notice that the hub ran between two attempts and changed the
 source underneath a half-built copy — a record updated or deleted below the
 cursor is not revisited by a resumed scan, so the copy would be stale in a way no
 later chunk corrects. The check is deliberately conservative: it re-runs the whole
 migration on any doubt, and the cost of a false restart is CPU, while the cost of
 a false resume is a corrupt store. It is also **not** trusted as the last word —
 §3's verification re-reads both stores in full and does not consult it.
+
+> **Normative.** The cursor is absent from the work store's `meta` until the
+> first chunk commits; it is never initialised to a sentinel.
+
+There is no integer to use as one. `rowid` is an explicit `INTEGER PRIMARY KEY`
+here, so it starts at `-2**63` and SQLite has nothing below that to compare
+against — which makes the obvious sentinel, `0`, silently skip every row at or
+below it. Such a row cannot be written through the store's own API, but it can
+exist in a file, and the failure it produced was a verification complaint about
+counts rather than anything an operator could act on.
 
 > **Normative.** The cursor and fingerprint are recorded in the work store's own
 > `meta` table and are deleted, in the same transaction that records the final
@@ -176,6 +192,17 @@ single-user machine it is the likely one.
 > **Normative.** Immediately before the rename, the migration hard-links the live
 > store to `<store>.pre-reembed`. If that path already exists and is not a link to
 > the live store's own inode, the migration refuses and does nothing.
+
+> **Normative.** A failure to flush the rename to disk is reported as an
+> unconfirmed durability, never as a failed migration, and the migration is
+> reported as having happened.
+
+Directory `fsync` is refused outright on some filesystems, which is a property of
+the mount rather than a fault of the run — and past the rename the migration
+*has* happened. An operator told "the swap did not happen", over a store that now
+carries the new tag, would go looking for a store that no longer exists. So the
+two facts are reported separately: the swap succeeded, and its durability could
+not be confirmed until the filesystem next syncs.
 
 The retained original is not belt-and-braces for the swap — the swap is atomic —
 it is for the case verification cannot cover: a target embedder that turns out to

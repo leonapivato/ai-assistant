@@ -76,6 +76,10 @@ BACKUP_SUFFIX: Final = ".pre-reembed"
 DEFAULT_BATCH_SIZE: Final = 128
 
 #: The work store's ``meta`` key holding the last source ``rowid`` copied.
+#: **Absent until the first chunk commits**, which is how "nothing copied yet" is
+#: spelled. A sentinel would have to be an integer below every possible ``rowid``,
+#: and SQLite has none: ``rowid`` starts at ``-2**63``, so ``0`` — the obvious
+#: choice — silently skips every row at or below it.
 _CURSOR_KEY: Final = "reembed_cursor"
 
 #: The work store's ``meta`` key holding the fingerprint of the live store the
@@ -93,6 +97,14 @@ _STORE_META_KEYS: Final = frozenset({"embedding_model", "dimensions"})
 #: their mode); duplicated rather than shared because the two lists answer
 #: different questions and would not move together.
 _SIDECARS: Final = ("-journal", "-wal", "-shm")
+
+#: The file change counter's bytes in the SQLite header — a big-endian 32-bit
+#: integer SQLite increments whenever it unlocks a database it has modified
+#: (`the database file format <https://sqlite.org/fileformat2.html>`_). Read as
+#: opaque bytes rather than decoded: :func:`_fingerprint` only ever compares it
+#: with itself.
+_CHANGE_COUNTER_START: Final = 24
+_CHANGE_COUNTER_END: Final = 28
 
 #: The columns that have existed in ``records`` since the schema's first version,
 #: and therefore the only ones this migration reads from the live store
@@ -166,23 +178,54 @@ class ReembedOutcome:
     swapped: bool
     """Whether the live store was replaced. ``False`` when nothing was required."""
 
+    durable: bool
+    """Whether the rename was confirmed flushed to disk.
+
+    ``False`` says the swap **happened** and could not be *confirmed* durable —
+    directory ``fsync`` is refused outright on some filesystems — which is a
+    different fact from the swap failing and must be reported as one. A caller
+    that reports it as a failure sends an operator looking for a store that no
+    longer exists.
+    """
+
 
 def _fingerprint(store: Path) -> str:
     """Identify the live store's *current* content, cheaply (ADR-0104 §2).
 
-    Device, inode, size and modification time in nanoseconds. The question this
-    answers is not "is this the same file" but "has anything written to it since
-    the last attempt" — because a resumed scan starts past the cursor and never
-    revisits a row updated or deleted below it, so a source that moved under a
-    half-built copy makes that copy stale in a way no later chunk corrects.
+    The question this answers is not "is this the same file" but "has anything
+    written to it since the last attempt" — because a resumed scan starts past the
+    cursor and never revisits a row updated or deleted below it, so a source that
+    moved under a half-built copy makes that copy stale in a way no later chunk
+    corrects.
+
+    **Device, inode, size and mtime are not enough on their own, and the reason is
+    not exotic.** ``st_mtime_ns`` reports the filesystem's timestamp *resolution*,
+    not a promise that two writes a microsecond apart get different values: Linux
+    stamps inodes from a coarse clock, so a same-sized update inside one tick can
+    leave all four unchanged. So the SQLite **file change counter** is read too —
+    the four bytes at offset 24 of the header, which SQLite increments whenever it
+    unlocks a database it has modified. It moves on a write that changes no byte
+    of the file's length and no timestamp, which is exactly the case the stat
+    fields miss. (WAL updates it differently, which costs nothing here: a WAL
+    store is refused outright by :func:`_require_rollback_journal`.)
 
     Deliberately conservative: it re-runs the whole migration on any doubt, since
     a false restart costs CPU and a false resume costs a corrupt store. It is also
-    not the last word — :func:`_verify` re-reads both stores in full and does not
-    consult it.
+    not the last word for a resume — :func:`_verify` re-reads both stores in full
+    and does not consult it.
+
+    Raises:
+        MemoryStoreError: If the header cannot be read at all.
     """
     info = store.stat()
-    return f"{info.st_dev}:{info.st_ino}:{info.st_size}:{info.st_mtime_ns}"
+    try:
+        with store.open("rb") as handle:
+            header = handle.read(_CHANGE_COUNTER_END)
+    except OSError as exc:
+        msg = f"failed to read the header of {store}: {exc}"
+        raise MemoryStoreError(msg) from exc
+    counter = header[_CHANGE_COUNTER_START:_CHANGE_COUNTER_END].hex()
+    return f"{info.st_dev}:{info.st_ino}:{info.st_size}:{info.st_mtime_ns}:{counter}"
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -467,7 +510,7 @@ class Reembedder:
             return 0
         try:
             meta = _read_meta(conn, str(self._work))
-            continuable = _CURSOR_KEY in meta and meta.get(_SOURCE_KEY) == _fingerprint(self._store)
+            continuable = meta.get(_SOURCE_KEY) == _fingerprint(self._store)
             same_target = (meta.get("embedding_model"), meta.get("dimensions")) == (
                 self._embedder.model_id,
                 str(self._embedder.dimensions),
@@ -477,7 +520,8 @@ class Reembedder:
             # Parsed here rather than trusted at resume time: an unreadable cursor
             # makes the work store unusable, and discarding it is this method's own
             # answer to every other way it can be unusable.
-            _as_int(meta[_CURSOR_KEY], f"the cursor {self._work} records")
+            if _CURSOR_KEY in meta:
+                _as_int(meta[_CURSOR_KEY], f"the cursor {self._work} records")
             return _count(conn, "records", str(self._work))
         except MemoryStoreError:
             return 0
@@ -506,7 +550,7 @@ class Reembedder:
         """
         plan = self.plan()
         if not plan.required:
-            return ReembedOutcome(plan=plan, embedded=0, resumed=0, swapped=False)
+            return ReembedOutcome(plan=plan, embedded=0, resumed=0, swapped=False, durable=True)
         resumed = plan.resumable
         started = _fingerprint(self._store)
         cursor = self._prepare_work(resumed)
@@ -521,10 +565,12 @@ class Reembedder:
                 work.close()
         finally:
             source.close()
-        self._swap(started)
-        return ReembedOutcome(plan=plan, embedded=embedded, resumed=resumed, swapped=True)
+        durable = self._swap(started)
+        return ReembedOutcome(
+            plan=plan, embedded=embedded, resumed=resumed, swapped=True, durable=durable
+        )
 
-    def _prepare_work(self, resumed: int) -> int:
+    def _prepare_work(self, resumed: int) -> int | None:
         """Return the cursor to continue from, creating the work store if needed.
 
         The work store is created by constructing a :class:`SqliteMemoryStore` on
@@ -535,7 +581,9 @@ class Reembedder:
         if resumed:
             conn = _connect(self._work)
             try:
-                cursor = _read_meta(conn, str(self._work))[_CURSOR_KEY]
+                cursor = _read_meta(conn, str(self._work)).get(_CURSOR_KEY)
+                if cursor is None:
+                    return None
                 return _as_int(cursor, f"the cursor {self._work} records")
             finally:
                 conn.close()
@@ -545,16 +593,15 @@ class Reembedder:
         try:
             with transaction(conn, "start a re-embedding", error=MemoryStoreError):
                 _write_meta(conn, _SOURCE_KEY, _fingerprint(self._store))
-                _write_meta(conn, _CURSOR_KEY, "0")
         finally:
             conn.close()
-        return 0
+        return None
 
     async def _copy(
         self,
         source: sqlite3.Connection,
         work: sqlite3.Connection,
-        cursor: int,
+        cursor: int | None,
         plan: ReembedPlan,
         progress: Callable[[int, int], None] | None,
     ) -> int:
@@ -613,7 +660,7 @@ class Reembedder:
                 (_CURSOR_KEY, _SOURCE_KEY),
             )
 
-    def _swap(self, started: str) -> None:
+    def _swap(self, started: str) -> bool:
         """Re-check the source, retain it, then move the verified store into place.
 
         Both connections are closed by the time this runs, and the store was
@@ -642,6 +689,10 @@ class Reembedder:
                 that is not this store.
             MemoryStoreError: If the source changed while the copy was built, or
                 the link or the rename fails.
+
+        Returns:
+            Whether the rename was confirmed flushed to disk. ``False`` means the
+            swap happened and its durability could not be confirmed.
         """
         if _fingerprint(self._store) != started:
             msg = (
@@ -652,14 +703,24 @@ class Reembedder:
         self._retain()
         try:
             self._work.replace(self._store)
+        except OSError as exc:
+            msg = f"failed to move the re-embedded store into place at {self._store}: {exc}"
+            raise MemoryStoreError(msg) from exc
+        # Past this line the migration has *happened*, so a failure below is a
+        # failure to confirm durability and is reported as one rather than raised.
+        # Directory `fsync` is refused outright on some filesystems, which is a
+        # property of the mount rather than a fault of this run — and an operator
+        # told "the swap did not happen", over a store that now carries the new
+        # tag, would go looking for a store that no longer exists.
+        try:
             directory = os.open(str(self._store.parent), os.O_RDONLY)
             try:
                 os.fsync(directory)
             finally:
                 os.close(directory)
-        except OSError as exc:
-            msg = f"failed to move the re-embedded store into place at {self._store}: {exc}"
-            raise MemoryStoreError(msg) from exc
+        except OSError:
+            return False
+        return True
 
     def _retain(self) -> None:
         """Hard-link the live store to its retained-original path (ADR-0104 §3).
@@ -692,16 +753,25 @@ class Reembedder:
             raise MemoryStoreError(msg) from exc
 
 
-def _chunk(source: sqlite3.Connection, cursor: int, size: int) -> list[_Row]:
+def _chunk(source: sqlite3.Connection, cursor: int | None, size: int) -> list[_Row]:
     """Read the next ``size`` source rows past ``cursor``, in ``rowid`` order.
+
+    ``cursor is None`` means nothing has been copied yet and is answered with an
+    unbounded scan rather than a sentinel, because SQLite has no integer below its
+    own minimum ``rowid`` (``-2**63``) to compare against. A store whose rows were
+    written by this build starts at 1, but ``rowid`` is an explicit
+    ``INTEGER PRIMARY KEY`` here and nothing stops a row from carrying zero or a
+    negative one — and skipping such a row would present as a verification failure
+    about counts rather than as anything an operator could act on.
 
     Raises:
         MemoryStoreError: If the store cannot be read.
     """
-    where = "WHERE rowid > ? ORDER BY rowid LIMIT ?"
-    sql = f"SELECT {_SOURCE_COLUMNS} FROM records {where}"  # noqa: S608 — module-level literals, never caller data
+    where = "" if cursor is None else "WHERE rowid > ?"
+    params: tuple[object, ...] = (size,) if cursor is None else (cursor, size)
+    sql = f"SELECT {_SOURCE_COLUMNS} FROM records {where} ORDER BY rowid LIMIT ?"  # noqa: S608 — module-level literals, never caller data
     try:
-        return [tuple(row) for row in source.execute(sql, (cursor, size))]
+        return [tuple(row) for row in source.execute(sql, params)]
     except sqlite3.Error as exc:
         msg = f"failed to read a chunk of records past rowid {cursor}: {exc}"
         raise MemoryStoreError(msg) from exc

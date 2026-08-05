@@ -185,6 +185,15 @@ async def _run_locked(settings: Settings, args: argparse.Namespace) -> int:
         return _report(exc)
     carried = f" ({outcome.resumed} carried over from an earlier run)" if outcome.resumed else ""
     print(f"done: {outcome.embedded} records re-embedded{carried}.")
+    if not outcome.durable:
+        # The swap happened; only its durability is unconfirmed. Said as a warning
+        # rather than an error for exactly that reason (ADR-0104 §3).
+        print(
+            f"warning: {plan.store} was replaced, but the rename could not be flushed to "
+            f"disk on this filesystem. It may not survive a power loss until the "
+            f"filesystem next syncs.",
+            file=sys.stderr,
+        )
     print(f"the store as it was is kept at {plan.backup} — delete it when you are satisfied.")
     return EXIT_OK
 

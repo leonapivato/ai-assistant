@@ -13,7 +13,10 @@ nothing is swapped in that has not been re-read against the source.
 
 from __future__ import annotations
 
+import errno
+import os
 import sqlite3
+import stat
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -647,3 +650,100 @@ async def test_a_source_written_after_verification_is_not_swapped_over(
     # The write survived, and the live store was not replaced by a copy missing it.
     assert _meta(store)["dimensions"] == str(_OLD)
     assert len(_read(store, "SELECT rowid FROM records")) == 2
+
+
+async def test_a_same_sized_write_after_verification_is_still_caught(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stat fields alone would miss this (review round 2, finding 2).
+
+    A same-sized update inside one timestamp tick leaves inode, size and
+    ``st_mtime_ns`` where they were. SQLite's file change counter moves anyway,
+    which is why the fingerprint reads it.
+    """
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record("a", "espresso")])
+    verify = reembed_module._verify
+
+    def _verify_then_overwrite(
+        source: sqlite3.Connection,
+        work: sqlite3.Connection,
+        plan: ReembedPlan,
+        embedder: Embedder,
+    ) -> None:
+        verify(source, work, plan, embedder)
+        before = store.stat()
+        interloper = sqlite3.connect(str(store))
+        try:
+            # Same id, same-length content: the row is rewritten in place.
+            interloper.execute(
+                "UPDATE records SET data = ? WHERE id = 'a'",
+                (_record("a", "ESPRESSO").model_dump_json(),),
+            )
+            interloper.commit()
+        finally:
+            interloper.close()
+        # The premise of the case: the stat fields did not move.
+        after = store.stat()
+        assert (after.st_ino, after.st_size) == (before.st_ino, before.st_size)
+
+    monkeypatch.setattr(reembed_module, "_verify", _verify_then_overwrite)
+
+    with pytest.raises(MemoryStoreError, match="changed while the re-embedded store"):
+        await Reembedder(store=store, embedder=HashingEmbedder(dimensions=_NEW)).run()
+
+    assert _meta(store)["dimensions"] == str(_OLD)
+
+
+async def test_a_record_at_rowid_zero_or_below_is_migrated(tmp_path: Path) -> None:
+    """``rowid`` is an explicit primary key here, so it need not be positive.
+
+    Reviewed as minor (round 2, finding 3) and fixed rather than filed because the
+    fix removes a sentinel instead of adding one: SQLite has no integer below its
+    own minimum ``rowid``, so ``0`` as "nothing copied yet" silently skipped every
+    row at or below it and surfaced as a count mismatch nobody could act on.
+    """
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record("positive", "espresso")])
+    conn = sqlite3.connect(str(store))
+    try:
+        for rowid, record_id in ((0, "zero"), (-5, "negative")):
+            record = _record(record_id, f"memory at rowid {rowid}")
+            conn.execute(
+                "INSERT INTO records(rowid, id, kind, data) VALUES (?, ?, ?, ?)",
+                (rowid, record.id, record.kind, record.model_dump_json()),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    outcome = await Reembedder(store=store, embedder=HashingEmbedder(dimensions=_NEW)).run()
+
+    assert outcome.swapped
+    assert outcome.embedded == 3
+    assert _read(store, "SELECT rowid FROM records ORDER BY rowid") == [(-5,), (0,), (1,)]
+
+
+async def test_an_unflushable_rename_is_a_warning_not_a_failed_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Directory ``fsync`` is refused on some filesystems (review round 2, finding 1)."""
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record("a", "espresso")])
+
+    real = os.fsync
+
+    def _refuse_directories(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "fsync not supported on this filesystem")
+        real(fd)
+
+    monkeypatch.setattr(os, "fsync", _refuse_directories)
+
+    outcome = await Reembedder(store=store, embedder=HashingEmbedder(dimensions=_NEW)).run()
+
+    # The swap *happened*. Only its durability is unconfirmed, and the two are
+    # different facts.
+    assert outcome.swapped
+    assert not outcome.durable
+    assert _meta(store)["dimensions"] == str(_NEW)
