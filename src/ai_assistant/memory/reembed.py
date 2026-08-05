@@ -41,6 +41,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sqlite3
+import stat
 from dataclasses import dataclass
 from itertools import zip_longest
 from pathlib import Path
@@ -725,18 +726,32 @@ class Reembedder:
     def _retain(self) -> None:
         """Hard-link the live store to its retained-original path (ADR-0104 §3).
 
-        An existing path naming *this store's own inode* is a previous attempt's
-        link, interrupted between the link and the rename, and is reused. Anything
-        else is somebody's file and is never overwritten.
+        An existing path that is a **hard link to this store's own inode** is a
+        previous attempt's, interrupted between the link and the rename, and is
+        reused. Anything else is somebody's file and is never overwritten.
+
+        **A symbolic link is not that, and the difference is the whole retention.**
+        A hard link is a second *name for the inode*, so it still names the old
+        database after the rename replaces the path. A symlink is a name for the
+        *path*, so after the rename it resolves to the new store and the old inode
+        has no name left at all — the migration would delete the very thing it
+        reports having kept, and report it in the same breath. ``Path.stat``
+        follows links and would say the inodes match, so the check is ``lstat``,
+        and it reads the device as well: an inode number is unique only within
+        one filesystem.
 
         Raises:
-            IncompatibleStateError: If the path is occupied by a different file.
+            IncompatibleStateError: If the path is occupied by anything that is
+                not a hard link to the live store.
             MemoryStoreError: If the link cannot be made.
         """
         try:
             os.link(self._store, self._backup)
         except FileExistsError:
-            if self._backup.stat().st_ino == self._store.stat().st_ino:
+            existing = self._backup.lstat()
+            live = self._store.stat()
+            same_inode = (existing.st_dev, existing.st_ino) == (live.st_dev, live.st_ino)
+            if not stat.S_ISLNK(existing.st_mode) and same_inode:
                 return
             msg = (
                 f"{self._backup} already exists and is not this store, so the "
@@ -744,7 +759,7 @@ class Reembedder:
             )
             raise IncompatibleStateError(
                 msg,
-                expected=f"{self._backup.name} absent, or a link to {self._store.name}",
+                expected=f"{self._backup.name} absent, or a hard link to {self._store.name}",
                 found=str(self._backup),
                 operator_action=f"move or delete {self._backup}, then run the migration again",
             ) from None
