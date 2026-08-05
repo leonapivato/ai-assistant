@@ -74,6 +74,11 @@ assistant = "ai_assistant.interfaces.cli:app"
 # Recorded here because the natural instinct is to add a subcommand, and the
 # failure would otherwise surface only as a `lint-imports` error, late.
 ai-assistant-hub = "ai_assistant.service:main"
+# The offline re-embedding migration (ADR-0104 §5), here for the same reason and
+# by the same rule: it takes the hub's instance lock, the lock lives in
+# `service`, and nothing may import `service` — so the tool has to *be* there and
+# therefore has to be its own console script.
+ai-assistant-reembed = "ai_assistant.service.reembed:main"
 
 [dependency-groups]
 dev = [
