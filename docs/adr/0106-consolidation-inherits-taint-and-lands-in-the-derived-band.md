@@ -146,9 +146,17 @@ unmarked text supplies none.
 
 ### 1. What "rests on external content" means, as a predicate over a stored record
 
-> **Normative.** A record **rests on external content** when `band_of` places it in
-> the `ATTESTED` band, or when its `Provenance` carries the derived-taint marker of
-> §2. External content is ADR-0098 §1's class, unchanged and not re-decided here.
+> **Normative.** A record **rests on recorded external content** when `band_of`
+> places it in the `ATTESTED` band, or when its `Provenance` carries the
+> derived-taint marker of §2. External content is ADR-0098 §1's class, unchanged and
+> not re-decided here, and membership stays decided by **recorded origin** as §1
+> rules — never by inspecting text.
+
+> **Normative.** The predicate above is not a claim that a record carrying `False`
+> was uninfluenced by external content. It tracks what was *recorded*, and it
+> inherits ADR-0098 §5's limit exactly: no ADR, lane, or surface may state or imply
+> that this marker detects external content embedded in text whose recorded origin
+> is not external.
 
 The predicate is two-part because the two bands need different carriers, and saying
 so plainly is what keeps the marker minimal.
@@ -192,13 +200,39 @@ about trust and source in the pure sense — it is the answer to ADR-0073 §4's 
 this held?" — and it belongs with `evidence` and `attestation`, not beside a
 validity window.
 
-**The default is `False`, and it is correct rather than merely convenient.** ADR-0098
-§5's verified chain — the observer is the only `DERIVED` producer, its citations are
-episode ids, and no episode is `EXTERNAL` because ADR-0093 §4 forbids a sensor
-proposing one — means every derived record a deployment holds today genuinely does
-not rest on external content. So a decoded pre-field record reads `False` and reads
-truthfully. This is not a case where a default papers over unknown history; the
-history is knowably empty, and §7 says what changes the moment it is not.
+**The default is `False`, it needs no backfill, and an earlier draft justified it
+with a claim ADR-0098 §5 falsifies four lines below the ones it quoted.** That draft
+said "every derived record a deployment holds today genuinely does not rest on
+external content", citing §5's chain: the observer is the only `DERIVED` producer,
+its citations are episode ids, and no episode is `EXTERNAL` because ADR-0093 §4
+forbids a sensor proposing one. Every link of that chain holds and the conclusion
+does not, because §5's next paragraph describes the path it misses: "the attacker's
+sentence reaches a durable belief through a plan rationale that our own model
+authored and `engine._exchange_of` recorded truthfully. The episode is `OBSERVED`
+because an exchange really did occur. Every provenance field along that path is
+correct, and **there is no field to read.**" *No derived belief cites external
+evidence* is a statement about citations; it is not a statement about warrants.
+Adversarial review found it on round 8, and the wrong version was load-bearing —
+it was the whole argument for the default.
+
+**What is true is narrower and is enough.** A pre-field record decodes `False`
+meaning *nothing external is recorded in this record's warrant*, which is exactly
+what §1's clauses now say the marker means and exactly what is true of every such
+record: no `EXTERNAL` citation exists to have been recorded. The undetectable path
+above is not covered by this field and is not covered by anything — that is §5's
+finding, not a gap this ADR opens — and what bounds it is what §5 enumerates: the
+belief lands in `DERIVED`, its confidence is strictly below 1.0, the observer's
+utility bar refuses proposals that are not about the user, output is capped, and the
+user's correction retires it.
+
+**A backfill is therefore refused rather than deferred.** The only conservative
+migration available is marking every legacy derived record tainted, since no
+migration can distinguish the influenced ones — there is no field to read. That
+would put every belief a deployment already holds behind a user question forever, on
+no evidence, and would assert taint the system cannot know in the same breath as it
+refuses to assert cleanliness it cannot know. Both directions are unavailable for
+the same reason, and the honest position is the one §5 already takes: state what is
+recorded, and name what is not.
 
 ### 3. The marker is computed by whoever selected the inputs, never read from the producer
 
@@ -727,12 +761,20 @@ into the regime by it.
 
 ## Consequences
 
-**The laundering path named in ADR-0098 §5 and §12 is closed at the memory write
-path**, and closed by construction rather than by detection: a consolidation over
-attested material cannot become a durable belief without the user answering a
+**The laundering path ADR-0098 §12 names — consolidation over *recorded* external
+material — is closed at the memory write path**, and closed by construction rather
+than by detection: it cannot become a durable belief without the user answering a
 question, and the fact that makes that true is computed by the component holding the
 inputs rather than claimed by the model reading them. ADR-0098 §6's rule that no
 bound may be bought from a filter is honoured — nothing here inspects text.
+
+**§5's undetectable path is not closed and this ADR does not narrow it.** Where
+external text reached a belief through a truthful `OBSERVED` episode, there is still
+no field to read, a consolidation over such a belief still carries `False`, and the
+containment is still the one §5 enumerates rather than this marker. What changes is
+that the *recorded* case now has an answer, which is the case ADR-0098 §12 said
+consolidation would be "the largest instance" of. Anyone reading this ADR as having
+closed the class has read it wrong, and §1's second clause says so.
 
 **Consolidation becomes more expensive over external material, on purpose.** The
 cheap consolidations are the ones over the system's own observations; a consolidator
