@@ -1143,6 +1143,31 @@ def test_why_marks_an_attested_belief_as_a_source_s_report_not_ours(output: Stri
     assert "not when the source spoke" in rendered
 
 
+def test_why_blames_the_surface_for_the_missing_attestation_and_not_the_store(
+    output: StringIO,
+) -> None:
+    """#711: the source and the report time *are* held, and the projection drops them.
+
+    An attested belief carries an ``Attestation`` by construction — ADR-0092 §1's
+    validator on :class:`~ai_assistant.core.types.Provenance` makes one mandatory
+    exactly on this band — so a line reading "not recorded" tells a user auditing
+    what is held about them the inverse of the truth, on the one band whose whole
+    purpose is provenance. The honest limit is this surface's: a
+    :class:`~ai_assistant.core.types.Belief` has nowhere to put an attestation
+    (#568), so the view cannot show what the store kept.
+
+    Pinned as **both halves**, because either alone is satisfiable by a wrong line:
+    the claim that the record was made, and the refusal to claim it can be shown
+    here. The negative assertion is what stops the old sentence returning under a
+    reworded neighbour — nothing else in this suite would notice.
+    """
+    cli._render_belief(_belief(BeliefBand.ATTESTED, confidence=0.9))
+    rendered = _flat(output.getvalue())
+    assert "I recorded which source, and when it said so" in rendered
+    assert "cannot show them here" in rendered
+    assert "not recorded" not in rendered
+
+
 def test_render_beliefs_reports_an_empty_page_plainly(output: StringIO) -> None:
     """Nothing matching is said, not shown as an empty success."""
     cli._render_beliefs((), limit=50, offset=0)

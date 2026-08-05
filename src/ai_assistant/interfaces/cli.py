@@ -2477,6 +2477,19 @@ def _why(belief: Belief | BeliefSummary) -> str:
     * **Attested** — it is named as someone else's report, so it reads as neither
       the user's word nor the assistant's inference, and the line says outright that
       ``Last revised`` is the assistant's clock rather than the source's.
+
+    **The attested line states a limit of this surface, never a limit of the store**
+    (#711). Which source spoke, and when, are *held*: an attested belief carries an
+    :class:`~ai_assistant.core.types.Attestation` by construction, since
+    :class:`~ai_assistant.core.types.Provenance` makes one mandatory exactly on this
+    band (ADR-0092 §1). What drops them is the projection — neither
+    :class:`~ai_assistant.core.types.Belief` nor
+    :class:`~ai_assistant.core.types.BeliefSummary` has anywhere to put one (#568,
+    #711). So "not recorded" would err in the direction ADR-0073 §4 forgives least:
+    a user auditing what is held about them would read it as "you did not keep it",
+    the inverse of the truth, on the one band whose whole purpose is provenance.
+    ADR-0098 §8 reads this branch as evidence that the belief surface carries no
+    attestation — and it still is, in words that are also true of the store.
     """
     match belief.band:
         case BeliefBand.ASSERTED:
@@ -2500,8 +2513,9 @@ def _why(belief: Belief | BeliefSummary) -> str:
         case BeliefBand.ATTESTED:
             return (
                 "a source you connected reported it — neither your word nor my inference. "
-                "Which source, and when it said so, are not recorded, so 'Last revised' "
-                "below is when I changed my mind and not when the source spoke."
+                "I recorded which source, and when it said so, but cannot show them here, "
+                "so 'Last revised' below is when I changed my mind and not when the "
+                "source spoke."
             )
         case _:  # pragma: no cover - exhaustive
             assert_never(belief.band)
