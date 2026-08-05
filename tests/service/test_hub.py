@@ -694,6 +694,44 @@ async def test_a_start_that_failed_and_then_failed_to_clean_up_is_still_a_failed
     assert failed["replaced_cause"] == "the memory store would not open"
 
 
+async def test_a_start_that_failed_and_then_failed_to_drain_is_still_a_failed_start(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The same substitution, one layer in: a stage of the shutdown does the erasing.
+
+    The lock release is the *outer* cleanup and easy to see. Every stage of the
+    shutdown sequence itself has the same power and runs first, so a capture point
+    that sat after them would restore the erased cause on the rarer path and not on
+    the commoner one — which is worse than not restoring it at all, because it looks
+    fixed. Here the store will not open and the drain will not finish.
+    """
+
+    async def will_not_open() -> None:
+        msg = "the memory store would not open"
+        raise OSError(msg)
+
+    async def refuses_to_close() -> None:
+        msg = "the connection would not close"
+        raise OSError(msg)
+
+    engine.start = will_not_open  # type: ignore[method-assign]
+    engine.aclose = refuses_to_close  # type: ignore[method-assign]
+
+    with structlog.testing.capture_logs() as captured:
+        await hub.serve(settings)
+
+    stderr = capsys.readouterr().err
+    assert "shutdown failed" not in stderr
+    assert "hub: cannot start: the connection would not close" in stderr
+    assert "the start had already failed with: the memory store would not open" in stderr
+    assert _only(captured, "hub_startup_failed")["replaced_cause"] == (
+        "the memory store would not open"
+    )
+
+
 async def test_a_start_that_failed_alone_does_not_have_its_cause_printed_twice(
     settings: Settings,
     wired: dict[str, list[Any]],
