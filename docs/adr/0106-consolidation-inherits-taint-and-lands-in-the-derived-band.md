@@ -413,10 +413,33 @@ ambiguous unless someone says which way is up.
 ### 6. The enforcement point: the gate rules, and it can see the fact without a store
 
 > **Normative.** **No `MemoryPolicy`** returns a committing ruling on a proposal
-> carrying `derived_from_external` and no `UserConfirmation` — whatever the policy's
-> other rules, and however trusted the producer. Its terminal ruling is `ASK_USER`
-> or `REJECT`. This is ADR-0098 §4's fourth clause given its enforcement point, and
-> adds no condition to it.
+> that is **in the `DERIVED` band**, carries `derived_from_external`, and carries no
+> `UserConfirmation` — whatever the policy's other rules, and however trusted the
+> producer. Its terminal ruling is `ASK_USER` or `REJECT`. This is ADR-0098 §4's
+> fourth clause given its enforcement point, and adds no condition to it.
+
+**The ceiling is band-scoped, and it is deliberately *not* expressed over
+`rests_on_recorded_external_content`.** The two differ in both directions and each
+difference is load-bearing.
+
+- **An `ATTESTED` proposal satisfies the predicate and must still commit.** A
+  calendar reader's proposal rests on recorded external content by definition; a
+  ceiling stated over the predicate would refuse every one of them and make the
+  reader useless. ADR-0098 §4 anticipated exactly this and drew the same line: the
+  distinction "the rule actually needs is between a **faithful transcription** — a
+  reader saying what its source says, at a band that already caps its standing — and
+  a **model-authored generalisation about the user** that an attacker's sentence
+  helped produce. Only the second is ruled here." The `DERIVED` band is where the
+  second lives. A later lane "simplifying" this clause to call the predicate would
+  break leg 6, which is why the divergence is stated rather than left to look like
+  an oversight.
+- **A stray flag outside `DERIVED` triggers nothing.** §7 forbids a band-keyed
+  validator, so `Provenance(source=USER_ASSERTED, derived_from_external=True, …)`
+  stays constructible; an earlier draft read the raw field and would have deferred a
+  user's own assertion on the strength of a boolean §2 says means nothing there.
+  Adversarial review found it on round 16, one round after the same defect was
+  repaired in the predicate — which is the argument for having a predicate at all,
+  and the reason §10 now tests this clause separately from it.
 
 > **Normative.** The clause above is an obligation of the `MemoryPolicy` contract:
 > it is stated on the Protocol and asserted in the shared `MemoryPolicyContract`
@@ -781,6 +804,12 @@ dispatch plan costs a lane, and this one has already been inherited twice.
 > **Normative.** The same lane states §6's ceiling on the `MemoryPolicy` Protocol
 > and adds it to `MemoryPolicyContract`, in the same change as the field. The
 > contract PR therefore touches `core/protocols.py` as well as `core/types.py`.
+
+> **Normative.** That suite case asserts the ceiling's two boundaries as well as its
+> subject: an `ATTESTED` proposal may still earn a committing ruling, and a
+> `USER_ASSERTED` proposal carrying a stray `derived_from_external=True` is not
+> deferred by this rule. A suite case exercising only a tainted `DERIVED` proposal
+> passes a policy that reads the raw field across every band.
 
 > **Normative.** The lane changing `memory`'s fold ships a test covering **both
 > positions of the tainted side** — tainted target with untainted incoming, and
