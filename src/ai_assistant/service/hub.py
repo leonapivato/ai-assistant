@@ -325,6 +325,32 @@ async def serve(settings: Settings) -> int:
     return code
 
 
+def _note_unwinding_from(record: _ShutdownRecord, exc: BaseException) -> None:
+    """Keep the fault a cleanup is about to erase, if it has not erased one yet.
+
+    A ``finally`` that raises substitutes its own exception for the one it was
+    unwinding from, and ``__context__`` is not read here — :func:`classify` follows
+    ``__cause__`` alone, deliberately. So without this the reason the hub is down is
+    reachable only from a traceback nobody prints (#581).
+
+    **Both guards carry an argument, and neither is defensive.**
+
+    * ``failed_at is None`` — once a stage has raised, the exception in hand *is*
+      the cleanup's rather than something the cleanup displaced. Recording it would
+      have a genuine shutdown failure describe itself as the thing it interrupted.
+    * ``unwinding_from is None`` — the two call sites nest, so the outer one sees
+      whatever the inner already recorded. First writer wins, because the earlier
+      fault is the one further from the cleanups and nearer the cause.
+
+    Args:
+        record: The shutdown record to note it on.
+        exc: The exception now unwinding. Rendered on the spot rather than kept, so
+            no traceback or frame outlives this call.
+    """
+    if record.failed_at is None and record.unwinding_from is None:
+        record.unwinding_from = str(exc) or type(exc).__name__
+
+
 @contextmanager
 def _during(record: _ShutdownRecord, stage: _ShutdownStage) -> Iterator[None]:
     """Attribute anything escaping this block to ``stage``, and to nothing else.
@@ -473,19 +499,22 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
                 jobs=list(scheduler.job_names),
             )
             await stop.wait()
+        except BaseException as exc:
+            # Before the `finally` below runs the shutdown sequence — which is the
+            # whole point. Once a stage of that sequence has raised, this exception
+            # is gone from everything anyone reads.
+            _note_unwinding_from(shutdown, exc)
+            raise
         finally:
             await _shut_down(
                 engine, scheduler, listener, shutdown, budget=settings.shutdown_drain_seconds
             )
     except BaseException as exc:
-        # Recorded here because here is where it is still knowable, and recorded
-        # only when the shutdown has not already raised — which is exactly what
-        # tells "the fault this is unwinding from" apart from "the fault the
-        # shutdown itself produced". The release below can replace this exception
-        # with one of its own, and `serve` would then hold a cleanup fault with
-        # nothing left in it to say why the hub is actually down (#581).
-        if shutdown.failed_at is None:
-            shutdown.unwinding_from = str(exc) or type(exc).__name__
+        # The second capture point, for the steps *above* the inner ``try``:
+        # credentials, the composition root, the two constructors. Nothing of the
+        # shutdown has run for those, but the lock release below can still erase
+        # them. The guards inside are what make this one safe here (#581).
+        _note_unwinding_from(shutdown, exc)
         raise
     finally:
         # Outside `_shut_down` because the lock outlives it: it is taken at step 2
