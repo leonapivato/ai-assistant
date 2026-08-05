@@ -786,6 +786,45 @@ async def test_a_sub_minute_zone_offset_keeps_its_seconds_in_the_label(tmp_path:
     assert reading.facet.next_starts_at == datetime(2026, 8, 3, 12, 6, 32, tzinfo=UTC)
 
 
+async def test_a_sub_minute_zone_offset_west_of_utc_keeps_its_sign_and_its_seconds(
+    tmp_path: Path,
+) -> None:
+    """The east-of-UTC case above, mirrored — because the sign and the seconds are
+    computed on separate lines.
+
+    ``_zone_label`` takes the sign off the *signed* total and then formats
+    ``abs(total)``, so a negative offset with seconds exercises a combination the
+    positive case cannot reach: ``-005328`` is ``-3208`` seconds, whose remainder is
+    only correct because the components are taken from the absolute value. Reading
+    the seconds off the signed total instead would render ``UTC-00:-53:-28`` here
+    while leaving the case above green.
+
+    Coverage rather than a defect: west-of-UTC renders correctly today, and this is
+    the assertion that holds it there. It pins **both** halves for the same reason
+    the positive case does — the label and the instant the facet reports agree only
+    if the offset is read the same way twice. 13:00 local at ``-00:53:28`` is
+    13:53:28Z, an hour and a half from the positive case's answer.
+    """
+    raw = calendar(
+        _custom_timezone("Corp/WLMT", offset="-005328"),
+        vevent(
+            "DTSTART;TZID=Corp/WLMT:20260803T130000",
+            "DURATION:PT1H",
+            "SUMMARY:x",
+            uid="one",
+        ),
+    )
+
+    reading = await reader(source(tmp_path, raw)).read()
+
+    (proposal,) = reading.proposals
+    assert proposal.proposed.content == (
+        'Calendar entry "x", on 2026-08-03 from 13:00 to 14:00 (UTC-00:53:28).'
+    )
+    assert reading.facet is not None
+    assert reading.facet.next_starts_at == datetime(2026, 8, 3, 13, 53, 28, tzinfo=UTC)
+
+
 async def test_a_recurrence_across_a_dst_transition_labels_each_occurrence_itself(
     tmp_path: Path,
 ) -> None:
