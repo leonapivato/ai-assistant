@@ -549,15 +549,38 @@ persist not one question. Adversarial review found the claim on round 1; the
 correction is the clause above, because the property has to be *obliged* rather than
 assumed.
 
-**With it, this section does not hit #659's wall.** ADR-0098 §8 warns that "a ruling
-made on the ingestion path reaches nobody at all" because `Engine.ingest`'s result
-reaches no adapter, and §10 says a later ADR wanting to report a capped or refused
-proposal "would hit that wall first". The write stage's enqueue is not a report: it
-writes a `DeferredProposal` into a `DeferralStore` exposing `pending`, `interrupted`
-and `export`, so the question outlives the job that raised it and is enumerable
-afterwards. #659 remains open and remains about the *report* of a ruling; nothing
-here discharges it, and a lane that wanted to tell the user "a consolidation was
-refused" would still hit it.
+**With it, an *admitted* question does not hit #659's wall.** ADR-0098 §8 warns that
+"a ruling made on the ingestion path reaches nobody at all" because `Engine.ingest`'s
+result reaches no adapter, and §10 says a later ADR wanting to report a capped or
+refused proposal "would hit that wall first". The write stage's enqueue is not a
+report: it writes a `DeferredProposal` into a `DeferralStore` exposing `pending`,
+`interrupted` and `export`, so the question outlives the job that raised it and is
+enumerable afterwards. #659 remains open and remains about the *report* of a ruling;
+nothing here discharges it, and a lane that wanted to tell the user "a consolidation
+was refused" would still hit it.
+
+> **Normative.** A consolidation whose question the queue **refuses** has not been
+> disposed of. Its material is retained and re-proposed on a later run; the
+> consolidator does not record that chunk as done, and does not treat the refusal as
+> a terminal ruling.
+
+**The queue can refuse, and a scheduled bulk producer is the thing that makes it.**
+`DeferralAdmissionOutcome.REFUSED` means "the answerable queue was at its cap;
+nothing was admitted and there is no deferral to read". A consolidator emitting more
+tainted proposals than the cap admits would otherwise rule correctly, persist
+nothing, and move on — the black hole the routing clause exists to close, arriving by
+the one door the clause left open. Adversarial review found it on round 11.
+
+**The invariant is ADR-0078 §7's own and is taken rather than invented.** That
+section chose a cap that "refuses the *new* question rather than evicting an old
+one", on the stated ground that "the producer still holds what it proposed and can
+re-propose, whereas an evicted question is gone with nobody left to notice". The
+clause above is that sentence made an obligation on the one producer for which
+"still holds" is not automatic: a scheduled job walking a cursor discards what it
+has processed by construction. **How** it retains and retries — cursor placement,
+backoff, whether a run stops on the first refusal — is fork 6's scheduler-chunking
+lane and is not decided here; **that** it must is decided here, because the
+containment of §6 fails without it.
 
 **One case the stage already excludes, named so the consolidation lane does not
 rediscover it.** ADR-0078 §3 filters a `DataTier.SECRET` proposal out before `defer`,
@@ -571,12 +594,13 @@ stage.
 
 **The cost is named rather than minimised.** A store holding a lot of external
 material will produce a lot of questions, and a scheduled consolidator can generate
-them faster than a user answers them. This ADR does not solve that and does not
-pretend the levers are free: the consolidator may **scope its input selection to
-untainted records**, which keeps its output auto-acceptable and is the shape
-available today; batching, question-merging, and any bound on the deferral queue are
-the consolidation lane's and leg 8's, on measurement. What is not available is
-relaxing the clause, which would be superseding ADR-0098 §4.
+them faster than a user answers them — at which point the queue's cap refuses, and
+the clause above turns the flood into retained work rather than lost work. This ADR
+does not solve the volume and does not pretend the levers are free: the consolidator
+may **scope its input selection to untainted records**, which keeps its output
+auto-acceptable and is the shape available today; batching, question-merging, and
+the cap's own value are the consolidation lane's and leg 8's, on measurement. What is
+not available is relaxing the ceiling, which would be superseding ADR-0098 §4.
 
 ### 7. No validator, and the window for one has closed
 
@@ -706,6 +730,11 @@ dispatch plan costs a lane, and this one has already been inherited twice.
 > affirmatively lands a durable record still carrying the marker** (§4, §6). A test
 > that stops at the policy's ruling does not satisfy this clause.
 
+> **Normative.** The same lane ships a test against a **deterministically full**
+> deferral queue, asserting the refused consolidation's material is retained and
+> re-proposed on a later run rather than consumed (§6). A test run with spare
+> capacity cannot fail on this and does not satisfy the clause.
+
 **Each clause names the case that can fail, because every one of these has a wrong
 implementation the neighbouring test waves through.** The producer-omits case is
 named because a test exercising only a cooperative producer passes a fail-open
@@ -759,6 +788,10 @@ differently or read one of its clauses more widely.
 - **ADR-0086 §2, §3, §4.** Relied on as the reason the citation tuple cannot carry
   taint, and as the test that refuses a validator. Neither is read more widely.
   **Addition.**
+- **ADR-0078 §7.** Relied on exactly as written: §6's retention clause is §7's own
+  stated ground for refusing rather than evicting — "the producer still holds what it
+  proposed and can re-propose" — made an obligation on the one producer for which
+  holding is not automatic. No cap, outcome, or queue rule is changed. **Addition.**
 - **ADR-0078 §3, §5 and §5a.** Relied on exactly as written. §6's routing clause
   obliges a new producer to use the write stage §3 already designates as the enqueue
   point, and takes no ruling about what that stage does; §3's `DataTier.SECRET`
@@ -815,8 +848,12 @@ into the regime by it.
   leaves standing authorisations open by name. **Fires with the first actuator**, in
   that lane's ADR, which now has a recorded fact to reason over rather than an
   unrecoverable one.
-- **A bound on the deferral queue a scheduled producer may fill.** §6 names the
-  volume cost and does not solve it. **Fires with the consolidation lane's own
+- **How a consolidator retains and retries refused work.** §6 rules *that* it must;
+  cursor placement, backoff, and whether a run halts on the first refusal are fork
+  6's scheduler-chunking lane. **Fires with that lane**, which the ADR-0083 amendment
+  it already owes is the place to state it.
+- **The deferral queue's cap value for a scheduled producer.** §6 names the volume
+  cost and does not set a number. **Fires with the consolidation lane's own
   measurement**, and its parameters are leg 8's under ADR-0103 §5's division.
 - **Whether taint survives a planning step.** #301, untouched here (§8).
 
