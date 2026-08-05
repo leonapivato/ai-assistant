@@ -304,13 +304,20 @@ ambiguous unless someone says which way is up.
 
 ### 6. The enforcement point: the gate rules, and it can see the fact without a store
 
-> **Normative.** A proposal carrying `derived_from_external` **and no
-> `UserConfirmation`** is not auto-accepted into durable memory. Its terminal ruling
-> is `ASK_USER` or `REJECT`. This is ADR-0098 §4's fourth clause given its
-> enforcement point, and adds no condition to it.
+> **Normative.** **No `MemoryPolicy`** returns a committing ruling on a proposal
+> carrying `derived_from_external` and no `UserConfirmation` — whatever the policy's
+> other rules, and however trusted the producer. Its terminal ruling is `ASK_USER`
+> or `REJECT`. This is ADR-0098 §4's fourth clause given its enforcement point, and
+> adds no condition to it.
 
-> **Normative.** The rule above is an admissibility rule — a property of the
-> proposal alone, committing nothing — and sits in `DefaultMemoryPolicy`'s
+> **Normative.** The clause above is an obligation of the `MemoryPolicy` contract:
+> it is stated on the Protocol and asserted in the shared `MemoryPolicyContract`
+> suite, beside the secret-tier ceiling and by the same `_COMMITTING` predicate.
+> The suite covers the confirmed case as well as the unconfirmed one, so that a
+> policy admitting the confirmed re-ingest is not failed by it.
+
+> **Normative.** The rule is an admissibility rule — a property of the proposal
+> alone, committing nothing — so in `DefaultMemoryPolicy` it sits in the
 > admissibility floor beside the secret-tier deferral, ahead of every conflict rule.
 > A proposal carrying a `UserConfirmation` for the deferral this rule raised passes
 > it and is judged on the ordinary path.
@@ -318,6 +325,33 @@ ambiguous unless someone says which way is up.
 > **Normative.** The ruling is the `MemoryPolicy`'s. No writer, applier, or
 > scheduler substitutes, upgrades, or downgrades it, and none of them may implement
 > this section by converting a ruling the policy made into a different one.
+
+**It is a contract obligation and not the default policy's rule, and an earlier
+draft made it the default's.** `MemoryIngestor` accepts any `MemoryPolicy` by
+injection, and `MemoryPolicyContract`'s docstring is explicit that the suite
+"deliberately does **not** encode *which* ruling a given proposal earns: that is
+each policy's reasoning". So a conforming policy that returned `ACCEPT` on a tainted
+proposal would breach ADR-0098 §4 while passing every test, and every test §10 would
+have obliged — they all run against `DefaultMemoryPolicy`. Adversarial review found
+it on round 4.
+
+**The precedent is exact and is one line above where this clause lands.** The suite
+already asserts one never-commit ceiling that is nobody's reasoning: "ADR-0004 §3:
+Tier 0 data belongs in the OS keyring, never the memory store — whatever the
+policy's other rules, however trusted the source". Its docstring states the test for
+what may join it — "Every obligation here traces to something already ratified" and
+"A conformance suite **is** contract: an obligation the Protocol does not state
+widens that contract without an ADR (golden rule 5)". This clause traces to ADR-0098
+§4, and this is the ADR golden rule 5 asks for, which is why the promotion is ruled
+here rather than left to the implementing lane's discretion.
+
+**It collides with neither exclusion the suite carries.** ADR-0040 §5 refuses to let
+the suite assert *which relation* a target-carrying ruling picks, and ADR-0028 §8
+keeps the fold's own rule out; ADR-0103 §7 keeps confidence composition out for the
+same reason. This clause asserts none of those — it is a ceiling on what may commit,
+not a rule about what a policy concludes, and a policy remains free to choose
+`ASK_USER` or `REJECT` and free to rule anything it likes once a confirmation is
+present.
 
 **The confirmation carve-out is what makes the question a question, and an earlier
 draft omitted it and thereby ruled the opposite of this ADR's own §5.** ADR-0078 §5
@@ -501,6 +535,10 @@ dispatch plan costs a lane, and this one has already been inherited twice.
 > **Normative.** The lane landing `derived_from_external` on `Provenance` ships a
 > test that a record decoded without the field reads `False`.
 
+> **Normative.** The same lane states §6's ceiling on the `MemoryPolicy` Protocol
+> and adds it to `MemoryPolicyContract`, in the same change as the field. The
+> contract PR therefore touches `core/protocols.py` as well as `core/types.py`.
+
 > **Normative.** The lane changing `memory`'s fold ships a test covering **both
 > positions of the tainted side** — tainted target with untainted incoming, and
 > untainted target with tainted incoming — asserting the folded result is tainted in
@@ -588,6 +626,15 @@ differently or read one of its clauses more widely.
   admissibility rule — §5a's own reason for that sequence ("properties of the
   proposal alone… neither commits anything") is the reason taint sits in the floor,
   and no rule of §5a's is read more widely. **Addition.**
+- **ADR-0004 §3.** Relied on only as the *shape* precedent for a never-commit
+  ceiling in the shared suite. Nothing about the secret tier is read more widely, and
+  §6's rule is deliberately unlike it in the one respect §6 names — a confirmation
+  can satisfy this one and can never satisfy that one. **Addition.**
+- **ADR-0028 §8, ADR-0040 §5, ADR-0103 §7.** Each keeps something *out* of the
+  `MemoryPolicy` suite — the fold's own rule, which relation a ruling picks, how
+  confidence composes. §6 adds a ceiling on what may commit, which is none of those,
+  and the suite already carries one of exactly that kind. No exclusion is narrowed.
+  **Addition.**
 - **ADR-0022 §4 and ADR-0081 §8.** Named in §9 as constraints on a *different* lane,
   with no ruling taken over either. **Addition.**
 - **ADR-0103.** §8 above declines to touch it in either direction. **Addition.**
@@ -647,6 +694,13 @@ ADR-0098 §4, not of this ADR, and should be argued there.
 implementing lane both add to the cross-subsystem hinge, so they sequence as separate
 `core` PRs (ADR-0068 §2). Neither depends on the other's field, so the order is a
 scheduling choice.
+
+**The `MemoryPolicy` contract grows an obligation, so the core PR is larger than one
+field.** It touches `core/protocols.py` and `MemoryPolicyContract` as well as
+`core/types.py`, and every existing `MemoryPolicy` implementation — the default and
+the canonical fake — must pass the widened suite. Both pass it today without change,
+because no proposal they can receive carries the field; the cost is the suite entry
+and the fake's own conformance run, not a behavioural edit.
 
 **A `bool` will feel too coarse the first time someone asks "from which source?"**
 and the answer will be to discharge ADR-0098 §8's second clause rather than to widen
