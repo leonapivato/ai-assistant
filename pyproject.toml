@@ -578,9 +578,12 @@ forbidden_modules = ["ai_assistant.readers"]
 # exactly why ADR-0084 §6 sequences this edit here and not with ADR-0083's lane.
 #
 # The rule it makes mechanical is ADR-0083's ruling 4: the hub is the only process
-# that opens the five databases, and the API is the only door. An adapter that
-# cannot reach the composition root cannot open a store, so exclusivity stops
-# being a convention a future adapter could forget.
+# that opens the databases under a data directory, and the API is the only door.
+# The count the ruling was written with is deliberately left out — ADR-0102 §7
+# opened the grant store as a sixth — because the property is what the contract is
+# about, and stating it without a number needs no edit at the seventh store. An
+# adapter that cannot reach the composition root cannot open a store, so
+# exclusivity stops being a convention a future adapter could forget.
 #
 # Direct imports only, as the sibling contract above is: what is forbidden is
 # `interfaces` reaching the composition root itself. `interfaces -> wire -> core`
