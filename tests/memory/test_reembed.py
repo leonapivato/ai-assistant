@@ -747,3 +747,43 @@ async def test_an_unflushable_rename_is_a_warning_not_a_failed_migration(
     assert outcome.swapped
     assert not outcome.durable
     assert _meta(store)["dimensions"] == str(_NEW)
+
+
+async def test_a_symlinked_backup_path_is_refused_and_the_original_survives(
+    tmp_path: Path,
+) -> None:
+    """A symlink is a name for the path, not for the inode (review round 3, blocker).
+
+    ``Path.stat`` follows it and reports the live store's inode, so it looked like
+    a previous attempt's own hard link. After the rename it would resolve to the
+    *new* store, leaving the old inode with no name at all — the migration would
+    delete the thing it reports having kept, and say so in the same breath.
+    """
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record("a", "espresso")])
+    backup = tmp_path / f"memory.db{BACKUP_SUFFIX}"
+    backup.symlink_to(store)
+
+    with pytest.raises(IncompatibleStateError, match="has nowhere to go") as caught:
+        await Reembedder(store=store, embedder=HashingEmbedder(dimensions=_NEW)).run()
+
+    assert "hard link" in caught.value.expected
+    # Nothing was swapped, so the original is still the live store rather than a
+    # dangling name for one that was unlinked.
+    assert _meta(store)["dimensions"] == str(_OLD)
+    assert backup.is_symlink()
+
+
+async def test_a_backup_path_on_another_inode_is_refused_even_at_the_same_number(
+    tmp_path: Path,
+) -> None:
+    """The check reads the device too: an inode number is unique per filesystem."""
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record("a", "espresso")])
+    backup = tmp_path / f"memory.db{BACKUP_SUFFIX}"
+    backup.write_text("a different file that happens to be here")
+
+    with pytest.raises(IncompatibleStateError, match="has nowhere to go"):
+        await Reembedder(store=store, embedder=HashingEmbedder(dimensions=_NEW)).run()
+
+    assert backup.read_text() == "a different file that happens to be here"

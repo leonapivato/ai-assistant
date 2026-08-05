@@ -198,8 +198,9 @@ open on their own machine. That is the case this actually catches, and on a
 single-user machine it is the likely one.
 
 > **Normative.** Immediately before the rename, the migration hard-links the live
-> store to `<store>.pre-reembed`. If that path already exists and is not a link to
-> the live store's own inode, the migration refuses and does nothing.
+> store to `<store>.pre-reembed`. If that path already exists and is not a **hard
+> link** to the live store's own device and inode, the migration refuses and does
+> nothing. A symbolic link is refused, never followed.
 
 > **Normative.** A failure to flush the rename to disk is reported as an
 > unconfirmed durability, never as a failed migration, and the migration is
@@ -225,6 +226,16 @@ what it replaced. Deleting it is the operator's act, not the tool's. The hard
 link is what keeps the retention free (one inode, no copy) and keeps the swap a
 single atomic step; a path that exists but names a different inode is somebody
 else's file and is never overwritten.
+
+**Hard, and specifically not symbolic**, because the difference is the whole of
+the retention rather than a detail of it. A hard link is a second name for the
+*inode*, so it still names the old database after the rename has replaced the
+path. A symbolic link is a name for the *path*, so after the rename it resolves
+to the new store and the old inode has no name left — the migration would delete
+the thing it reports having kept, and report it in the same breath. The check is
+therefore `lstat`, since following the link is exactly what makes a symlink look
+like a match, and it compares device as well as inode because an inode number is
+unique only within one filesystem.
 
 > **Normative.** Before it opens the live store, the migration refuses if a
 > SQLite sidecar (`-journal`, `-wal`, `-shm`) lies beside it; and once open, it
