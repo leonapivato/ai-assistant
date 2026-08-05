@@ -405,3 +405,66 @@ async def test_a_base_exception_from_the_worker_reaches_the_caller() -> None:
 
     with worker_finished_before_the_first_check(), pytest.raises(KeyboardInterrupt):
         await _run_to_completion(aborts)
+
+
+# --- one transaction idiom (#563) ------------------------------------------
+
+
+@contextlib.contextmanager
+def _traced(store: SqliteDeferralStore) -> Iterator[list[str]]:
+    """Collect every statement the store's connection runs inside the block."""
+    statements: list[str] = []
+    store._conn.set_trace_callback(statements.append)
+    try:
+        yield statements
+    finally:
+        store._conn.set_trace_callback(None)
+
+
+async def test_each_transaction_opens_in_the_form_its_call_site_asked_for(
+    tmp_path: Path,
+) -> None:
+    """The write form takes the lock up front; the read form does not, and both close.
+
+    Deterministic where a staged race is not: a race proves the lock excludes once
+    held, never *when* it was taken, so an implementation that began the
+    transaction just before the write would satisfy every race and still leave the
+    read-to-``BEGIN`` window #526 names wide open. The read form is asserted too,
+    because a bare ``BEGIN`` is what makes several ``SELECT``s one snapshot without
+    taking a write lock nothing there needs.
+    """
+    store = SqliteDeferralStore(path=tmp_path / "deferrals.db", now=_fixed_now)
+    try:
+        with _traced(store) as admitted:
+            await _admit(store, "d1")
+        assert admitted[0].strip().upper() == "BEGIN IMMEDIATE"
+        assert admitted[-1].strip().upper() == "COMMIT"
+
+        with _traced(store) as read:
+            await store.export()
+        assert read[0].strip().upper() == "BEGIN"
+        assert read[-1].strip().upper() == "COMMIT"
+
+        with _traced(store) as claimed:
+            await store.claim("d1")
+        assert claimed[0].strip().upper() == "BEGIN IMMEDIATE"
+        assert claimed[-1].strip().upper() == "COMMIT"
+    finally:
+        store.close()
+
+
+async def test_a_backend_fault_inside_a_transaction_is_the_seams_own_error(
+    tmp_path: Path,
+) -> None:
+    """The translation is per store: this one owes ``DeferralStoreError``.
+
+    Driven by writing on a closed connection, which is the cheapest real
+    ``sqlite3.Error`` the transaction's own ``BEGIN`` can raise. The message form
+    is asserted as well as the class, because it is what tells a reader *which*
+    operation the backend refused.
+    """
+    store = SqliteDeferralStore(path=tmp_path / "deferrals.db", now=_fixed_now)
+    store.close()
+
+    with pytest.raises(DeferralStoreError, match="failed to admit a deferral"):
+        await _admit(store, "d1")

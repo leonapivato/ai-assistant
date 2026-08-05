@@ -1543,3 +1543,62 @@ async def test_a_naive_clock_reading_is_refused_at_the_producer(tmp_path: Path) 
             await store.start()
     finally:
         store.close()
+
+
+# --- one transaction idiom (#563) ------------------------------------------
+
+
+@contextlib.contextmanager
+def _traced(store: SqliteConversationStore) -> Iterator[list[str]]:
+    """Collect every statement the store's connection runs inside the block."""
+    statements: list[str] = []
+    store._conn.set_trace_callback(statements.append)
+    try:
+        yield statements
+    finally:
+        store._conn.set_trace_callback(None)
+
+
+async def test_each_transaction_opens_in_the_form_its_call_site_asked_for() -> None:
+    """The write form takes the lock up front; the read form does not, and both close.
+
+    Deterministic where the staged races elsewhere in this module are not: a race
+    proves the lock excludes once held, never *when* it was taken, so an
+    implementation that began the transaction just before the write would satisfy
+    every race and still leave the read-to-``BEGIN`` window #526 names wide open.
+    The read form is asserted too, because a bare ``BEGIN`` is what makes several
+    ``SELECT``s one snapshot without taking a write lock nothing here needs.
+    """
+    store = SqliteConversationStore(path=":memory:", now=_fixed_now)
+    try:
+        with _traced(store) as opened:
+            conversation = await store.start()
+        assert opened[0].strip().upper() == "BEGIN IMMEDIATE"
+        assert opened[-1].strip().upper() == "COMMIT"
+
+        with _traced(store) as read:
+            await store.turns(conversation.id)
+        assert read[0].strip().upper() == "BEGIN"
+        assert read[-1].strip().upper() == "COMMIT"
+
+        with _traced(store) as stamped:
+            await store.stamp_deleted(conversation.id)
+        assert stamped[0].strip().upper() == "BEGIN IMMEDIATE"
+        assert stamped[-1].strip().upper() == "COMMIT"
+    finally:
+        store.close()
+
+
+async def test_a_backend_fault_inside_a_transaction_is_the_seams_own_error() -> None:
+    """The translation is per store: this one owes ``ConversationStoreError``.
+
+    Driven by writing on a closed connection, which is the cheapest real
+    ``sqlite3.Error`` the transaction's own ``BEGIN`` can raise. The message form
+    is asserted as well as the class, because it is what tells a reader *which*
+    operation the backend refused.
+    """
+    store = SqliteConversationStore(path=":memory:", now=_fixed_now)
+    store.close()
+
+    with pytest.raises(ConversationStoreError, match="failed to start a conversation"):
+        await store.start()
