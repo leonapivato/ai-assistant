@@ -1,7 +1,172 @@
 # 106. Consolidation inherits taint, lands in the derived band, and is the seam that makes externality recoverable
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-05
+- **Note (2026-08-05): ratified.** `Proposed` → `Accepted`, in the separate lane
+  #633 requires, after **both** required reviews came back green on the content
+  this ADR merged with: adversarial **APPROVE with no findings** and architecture
+  **APPROVE with no findings**, both at tree `f6977c6c9864`, round 18, 1077 lines
+  net across 18 commits, churn reported as a lower bound of `≥1.3×` (1399
+  touched; history was rewritten, so earlier rounds are not counted), each posted
+  to PR #740 by `just ship`. That is the outcome ADR-0070 §1 requires the
+  ratifying edit to record — "the ratifying edit records that review's outcome, it
+  does not replace it" — and it is taken from that comment rather than from a
+  report.
+
+  **Two lenses, and that is the rule rather than an excess.** This ADR decides
+  `core` surface without touching it — `Provenance.derived_from_external`, the
+  `rests_on_recorded_external_content` predicate beside `band_of`, and a
+  behavioural obligation on the `MemoryPolicy` Protocol asserted in
+  `MemoryPolicyContract` (§2, §6, §10) — so it is contract-surface under
+  `CONTRIBUTING.md` → "Stop when the required reviews are green", which makes a
+  change contract-surface "when it is the ADR deciding that surface". The
+  requirement is `CONTRIBUTING.md`'s and not `scripts/ship.sh`'s: the script fires
+  its architecture requirement on a diff touching `core/protocols.py` or
+  `core/types.py`, and a prose-only PR deciding those files trips neither, so both
+  lenses were run deliberately. **This ratifying edit takes the adversarial lens
+  alone**, which is the same clause read one step on: `CONTRIBUTING.md` →
+  "Trivial ADR edits" exempts "the `Proposed` → `Accepted` ratification flip" from
+  a separate review *of the edit itself*, "not licence to rewrite a ratified
+  decision in place", and ADR-0015 §5 exempts trivial ADRs by name.
+
+  **The anchor is not the merged head here, and the identity is established
+  through the tree rather than assumed**: the comment's
+  `<!-- ship:ca5ec98e1268f566dfcbe45cde9b7060baccd3f0 -->` anchor is the pre-merge
+  branch head, which `git merge-base --is-ancestor` shows is *not* an ancestor of
+  `main` because #740 was rebase-merged. Both were resolved with `git rev-parse`
+  rather than trusted: `ca5ec98e1268^{tree}` and `553c52d^{tree}` are the same
+  tree, `f6977c6c9864`, the one named above. The content the two reviews read is
+  therefore the content that landed, notwithstanding the rewritten hash.
+
+  **No `blocker` or `major` finding was waived.** Eighteen rounds produced ten
+  substantive defects and every one was verified against the tree and fixed in
+  the text; the ADR records each at the site it repaired, naming the round.
+  **Two review *directions* were refused rather than followed**, and both
+  refusals are argued in §6 rather than only in the pull request: round 10's
+  proposal to promote `reason` *wording* into the shared suite (refused because
+  `MemoryPolicyContract`'s docstring records that an obligation on `reason` was
+  **cut** for want of a Protocol statement, with #40 tracking its ratification, so
+  the suite cannot assert it — and its alternative, restricting consolidation to
+  `DefaultMemoryPolicy`, is refused by golden rule 1), and round 16's parenthetical
+  proposal to express §6's ceiling over `rests_on_recorded_external_content`
+  (refused because an `ATTESTED` proposal satisfies that predicate and must still
+  commit, so the change would break leg 6). What each finding got right was fixed;
+  the refusals are recorded here because a refused direction that lives only in a
+  PR body is a judgement a later reader cannot check.
+
+  **Beyond the `Status` line and this appended note, not one word of the text this
+  ADR merged with is edited** — not a clause, not a tense — which is ADR-0070 §1's
+  own test applied to the ratifying edit first, in its strongest available form:
+  no decision text is touched and no normative clause acquires, loses or alters an
+  obligation.
+
+  **That no pre-existing text needed editing is a swept result, not an omission,
+  and it was swept without an advance assertion to lean on.** This ADR carries no
+  header bullet claiming that every reference below is to a neighbour's text as
+  merged, and none naming its review set, so the tense edit ADR-0096 through
+  ADR-0102 each made at ratification is not owed here — there is no such bullet to
+  put in the past tense. The sweep was run site by site over the whole document
+  and the sites are named so a later reader can check the claim rather than trust
+  it. **No clause anywhere in this ADR mentions any ADR's `Status`**, its own
+  included. Every use of the word "ratified" was read: §Context's heading "The
+  floor is already ratified" and the Alternatives' "ADR-0098 §4's fourth clause is
+  ratified" are both about ADR-0098, which stands `Accepted` today and which this
+  flip cannot move; §Context's "lossy by ratified design" is ADR-0086 §2–§4's
+  rulings, §2's "a ratified band exemption" is ADR-0098 §1's, §9's "ADR-0022 §4
+  *ratifies* last-write-wins" is ADR-0022's text, and §11's "nothing ratified
+  before it is drawn into the regime" restates ADR-0089 §5. §6's "already
+  ratified" and "judged unratified" are quotations from `MemoryPolicyContract`'s
+  **docstring** about its own expectations, not about any ADR's standing. Not one
+  of them turns on where a document stands, so not one moves today.
+
+  **The clauses whose truth *depends* on this ratification were written forward,
+  and this edit is the event that makes them true rather than anything that could
+  falsify them.** §Context's "Ratifying only the band half would leave a reader
+  believing tainted consolidations auto-accept at `DERIVED`" argues about scope,
+  not standing; §Context's "the lane that builds it is sequenced behind this ADR,
+  which is why this decision is being taken now rather than alongside the code" is
+  golden rule 5's sequence, and it is what happened — #740 carried the decision
+  alone, no file under `src/` was in its diff, and nothing implements against it
+  until the contract lane behind this flip does. None is touched.
+
+  **One merge landed between this ADR's merge and its ratification, so the
+  staleness check was run rather than recited — and it is stated at the base this
+  edit actually lands on rather than at the authoring base**, which is the error
+  #704's adversarial review caught in ADR-0101's ratification note. Ratified
+  against `4e3652c`, where `git diff --name-only 553c52d 4e3652c` — `553c52d`
+  being the commit this ADR merged as, whose tree is the reviewed one named above
+  — names five paths across seven commits and no file outside `docs/adr/`:
+  ADR-0107, ADR-0104, and the three records ADR-0107 wrote atomically with itself
+  on ADR-0085, ADR-0086 and ADR-0091. That is #749, ADR-0107's lane, in six
+  commits, plus `2d2f515`, the single commit of #748's ADR-0104 ratification.
+  **No file under
+  `src/` or `tests/` moved**, so every claim this ADR makes about the tree is
+  claimed against the same code the two reviews read.
+
+  **ADR-0107 is the merge that could have disturbed something, and it disturbs one
+  thing — a pointer, not a ruling.** §12's first deferral hands the structured
+  presentation state to "**the lane that next revises those projections**, which
+  #568 and #624 already hold; filed as **#746**". ADR-0107 is that lane: it
+  closed #568 and #624 at 19:38 on the day this ADR merged at 18:44, and it
+  revised `Belief` and `BeliefSummary` — and it **did not** take the marker. Its
+  §10 says so directly, declining to open the two types to a question that is not
+  its field's. So #746 is open and its named owner has landed without it; a lane
+  taking #746 now inherits the deferral's *substance* from §12 and must find
+  itself an owner rather than read one off that sentence. Nothing §12 rules is
+  changed by this — it defers, and the deferral still stands — and ADR-0070 §1
+  routes the correction of a stale pointer in Decision text to a note, which is
+  this one. ADR-0107 reaches nothing else here: it neither cites this ADR nor
+  touches `Provenance`, and the ADR-0086 note it wrote states in its own words
+  that "§1's bound, §2's writer obligation, §3's fold, §4's field with its
+  recurrence over every install, its upper-bound reasoning" are all untouched —
+  which is exactly what §Context leans on when it rules the citation tuple cannot
+  carry taint.
+
+  **Every claim this ADR makes about the tree was re-read at `4e3652c` rather than
+  read for plausibility, and all hold.** `MemoryPolicy.decide` still takes
+  `(proposal, *, conflicts)` and holds no store, which is what makes §6's marker
+  the seam ADR-0098 §5 could not site; `readers/calendar.py` still constructs a
+  `Provenance` with `source=MemorySource.EXTERNAL`, so §Context's expired-premise
+  argument against a band-keyed validator (§7) still stands and ADR-0092 §2's
+  "now or never" is still answered *never*; `band_of`'s `MemorySource.EXTERNAL`
+  arm still maps to `ATTESTED`, which is why §5 is an absolute;
+  `DeferralAdmissionOutcome.REFUSED` still means the answerable queue was at its
+  cap, which is what §6's retention clause exists for; and **neither
+  `derived_from_external` nor `rests_on_recorded_external_content` appears
+  anywhere under `src/` or `tests/`** — this ADR decides them and implements
+  neither, which is golden rule 5's order and is why ADR-0098 §5's "nothing can
+  enforce it either" is not yet falsified by anything on `main`.
+
+  **One sentence of §4 is narrower than the tree, and it was already so when both
+  lenses read it.** §4's prose says `MemoryIngestor._merge` "takes `source`,
+  `last_updated` and `attestation` from **`incoming`**; only `confidence` (a
+  `max`) and `evidence` (a union) combine both sides." Since #742 landed
+  `_corroborates` — commit `a3291e4`, which `git merge-base --is-ancestor` puts
+  *before* this ADR's terminal review base `404e07f` — the fold has two arms, and
+  on the corroboration arm the survivor keeps the **target's** `source`,
+  `attestation`, content and confidence (ADR-0103 §6). So the sentence describes
+  the majority arm rather than the whole function. **The argument it carries is
+  unaffected and the marked clause is right**: a new field written in the majority
+  style would still clear a tainted target on the first clean reinforcement, which
+  is the laundering §4 exists to stop, and on the corroboration arm the target's
+  fields winning *preserves* taint — the safe direction. §4's obligation is stated
+  over the fold as a disjunction of both sides and is correct on both arms.
+  ADR-0089 §3 puts the prose outside the marked regime, and ADR-0070 §1 forbids
+  rewriting it, so it is recorded here rather than repaired.
+
+  **No deferral of this ADR has fired beyond the pointer above.** §12's actuator
+  entry waits on the first actuator, which has no lane; its retention entry waits
+  on fork 6's scheduler-chunking lane, unopened; its cap-value entry waits on the
+  consolidation lane's own measurement, and that lane is behind this flip — which
+  is ADR-0015 §5's sequence working rather than a claim going stale. §9's two
+  preconditions both hold as written: **#630 is open** and no `MemoryStore`
+  write-semantics lane is scheduled, so "that lane is not scheduled" is still
+  true, and ADR-0081 §8's assignment is quoted correctly — its own words are
+  "Owner: the `MemoryStore` write-semantics lane, the one that takes #104's
+  compare-and-swap"; **#631 is open and its trigger is still unfired**, so §9's
+  second clause still has work to do. **#746 is open**, as are #40, #659, #673 and
+  #301. **ADR-0070 §1's no-rewrite rule now protects this text**, so any later
+  correction to any of it is an appended dated note.
 
 ## Context
 
