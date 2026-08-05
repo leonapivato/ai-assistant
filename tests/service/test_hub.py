@@ -649,6 +649,113 @@ async def test_a_shutdown_that_drained_before_it_failed_says_the_work_finished(
     assert failed["drain_phase"] == "phase_a_quiesced"
 
 
+async def test_a_start_that_failed_and_then_failed_to_clean_up_is_still_a_failed_start(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A ``finally`` that raises erases what it was unwinding from, and it must not.
+
+    Python substitutes the cleanup's exception for the pending one, keeping the
+    original only as ``__context__`` — which nothing on this path reads, because
+    ``classify`` follows ``__cause__`` alone and deliberately so. So by the time
+    ``serve`` sees anything, the hub that never opened its store looks exactly like
+    a hub that served for weeks and then failed to let go of its lock.
+
+    Both halves are asserted. Framing it as a shutdown would be #581's own defect
+    mirrored — an operator told their hub stopped badly when it never came up — and
+    naming only the cleanup would leave the reason the hub is down in a traceback
+    nobody prints.
+    """
+
+    class _StuckLock(InstanceLock):
+        def release(self) -> None:
+            super().release()
+            msg = "the lock descriptor would not close"
+            raise OSError(msg)
+
+    async def will_not_open() -> None:
+        msg = "the memory store would not open"
+        raise OSError(msg)
+
+    monkeypatch.setattr(hub, "InstanceLock", _StuckLock)
+    engine.start = will_not_open  # type: ignore[method-assign]
+
+    with structlog.testing.capture_logs() as captured:
+        await hub.serve(settings)
+
+    stderr = capsys.readouterr().err
+    failed = _only(captured, "hub_startup_failed")
+    assert "shutdown failed" not in stderr
+    assert "hub: cannot start: the lock descriptor would not close" in stderr
+    assert "the start had already failed with: the memory store would not open" in stderr
+    assert failed["replaced_cause"] == "the memory store would not open"
+
+
+async def test_a_start_that_failed_alone_does_not_have_its_cause_printed_twice(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The displaced cause is only ever the one a cleanup actually displaced.
+
+    When nothing in the shutdown raises, the exception ``serve`` holds *is* the
+    recorded one — so a report that printed it again under "already failed with"
+    would be presenting one fact as two, on the very path where an operator is
+    trying to work out how many things went wrong.
+    """
+
+    async def will_not_open() -> None:
+        msg = "the memory store would not open"
+        raise OSError(msg)
+
+    engine.start = will_not_open  # type: ignore[method-assign]
+
+    with structlog.testing.capture_logs() as captured:
+        await hub.serve(settings)
+
+    stderr = capsys.readouterr().err
+    assert stderr.count("the memory store would not open") == 1
+    assert "already failed with" not in stderr
+    assert _only(captured, "hub_startup_failed")["replaced_cause"] is None
+
+
+async def test_a_stop_that_arrived_mid_startup_still_fails_as_a_shutdown(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Readiness is the wrong test for which half of the lifecycle failed.
+
+    A stop delivered during a slow engine build is an ordinary event, and the hub
+    honours it between steps — so it returns through the shutdown sequence having
+    never advertised itself. Nothing was in flight, nothing failed to start, and the
+    hub was asked to stop: a drain that then fails is a failed shutdown, however
+    plainly the hub was never running.
+    """
+
+    async def refuses_to_close() -> None:
+        msg = "the connection would not close"
+        raise OSError(msg)
+
+    engine.aclose = refuses_to_close  # type: ignore[method-assign]
+    engine.on_start = _stop_after_start()
+    engine.settle = True
+
+    with structlog.testing.capture_logs() as captured:
+        await hub.serve(settings)
+
+    stderr = capsys.readouterr().err
+    names = _events(captured)
+    assert "hub_ready" not in names
+    assert "cannot start" not in stderr
+    assert "shutdown failed while draining in-flight work" in stderr
+
+
 async def test_a_shutdown_fault_that_stays_down_keeps_its_code_and_its_remedy(
     settings: Settings,
     wired: dict[str, list[Any]],

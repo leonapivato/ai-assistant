@@ -193,6 +193,10 @@ class _ShutdownRecord:
     elapsed_seconds: float | None = None
     #: The stage a failure escaped from, or ``None`` if none did (#581).
     failed_at: _ShutdownStage | None = None
+    #: The failure the shutdown was already unwinding from, rendered, if any.
+    #: Kept as text rather than as the exception so the record holds no traceback
+    #: and no frames — nothing here needs to re-raise it.
+    unwinding_from: str | None = None
 
     @property
     def shutdown_failure(self) -> _ShutdownStage | None:
@@ -206,16 +210,44 @@ class _ShutdownRecord:
         as one. What distinguishes the two is not that shutdown ran but that
         shutdown *raised*, which is what :attr:`failed_at` records.
 
-        The pair is read together rather than :attr:`failed_at` alone because the
-        instance lock is released outside the shutdown sequence as well: a start
-        that failed before an engine existed still unwinds through that release,
-        and a fault there is the failed start it plainly is.
+        Three conditions, one for each way a fault can arrive holding a stage:
+
+        * :attr:`reached` — the instance lock is released outside the shutdown
+          sequence as well, so a start that failed before an engine existed still
+          unwinds through a stage. A fault there is that failed start, not a
+          shutdown that never happened.
+        * :attr:`failed_at` — the shutdown must have *raised*, not merely run.
+        * :attr:`unwinding_from` — **and it must not have been unwinding from
+          something else.** A ``finally`` that raises replaces the exception it was
+          unwinding from, so a start that failed and *then* failed to clean up hands
+          ``serve`` a cleanup fault with no trace of the start in it. Framing that as
+          a shutdown would tell an operator their hub stopped badly when it never
+          came up at all — #581's own defect, mirrored.
+
+        A stop signal that arrives mid-startup is deliberately *not* excluded by
+        that last condition, and readiness would be the wrong test for it: nothing
+        was in flight, the hub was asked to stop, and a shutdown that then failed is
+        a shutdown that failed.
 
         Returned rather than answered ``True``/``False`` so the caller carries the
         stage it needs into the message without re-reading a field it has already
         proved is set.
         """
-        return self.failed_at if self.reached else None
+        if not self.reached or self.unwinding_from is not None:
+            return None
+        return self.failed_at
+
+    @property
+    def replaced_cause(self) -> str | None:
+        """The failure a raising cleanup displaced, when it displaced one.
+
+        Conditioned on :attr:`failed_at` because that is what says the exception
+        ``serve`` caught came from a cleanup at all. Where nothing in the shutdown
+        raised, the exception ``serve`` holds *is* the one recorded here, and
+        printing it a second time under "already failed with" would be noise
+        dressed as an extra fact.
+        """
+        return self.unwinding_from if self.failed_at is not None else None
 
 
 def main() -> int:
@@ -286,7 +318,7 @@ async def serve(settings: Settings) -> int:
             code, action = classify(exc)
             stage = shutdown.shutdown_failure
             if stage is None:
-                _report_fault(exc, action=action, code=code)
+                _report_fault(exc, action=action, code=code, replaced=shutdown.replaced_cause)
             else:
                 _report_shutdown_fault(exc, shutdown, stage=stage, action=action, code=code)
     _report_shutdown(shutdown, code=code)
@@ -445,6 +477,16 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
             await _shut_down(
                 engine, scheduler, listener, shutdown, budget=settings.shutdown_drain_seconds
             )
+    except BaseException as exc:
+        # Recorded here because here is where it is still knowable, and recorded
+        # only when the shutdown has not already raised — which is exactly what
+        # tells "the fault this is unwinding from" apart from "the fault the
+        # shutdown itself produced". The release below can replace this exception
+        # with one of its own, and `serve` would then hold a cleanup fault with
+        # nothing left in it to say why the hub is actually down (#581).
+        if shutdown.failed_at is None:
+            shutdown.unwinding_from = str(exc) or type(exc).__name__
+        raise
     finally:
         # Outside `_shut_down` because the lock outlives it: it is taken at step 2
         # and released here whether or not there was ever an engine to drain. Named
@@ -682,7 +724,9 @@ def _report_shutdown_fault(
         )
 
 
-def _report_fault(exc: BaseException, *, action: str, code: int) -> None:
+def _report_fault(
+    exc: BaseException, *, action: str, code: int, replaced: str | None = None
+) -> None:
     """Print a startup failure's cause, and its remedy when there is one.
 
     ADR-0083 §5 requires **every** deployment fault to print its cause and the
@@ -702,9 +746,23 @@ def _report_fault(exc: BaseException, *, action: str, code: int) -> None:
     *through* a shutdown which itself succeeded: the fault is still the one that
     stopped the hub coming up, and that is what this says.
 
+    **``replaced`` is the start that a failing cleanup erased.** A ``finally`` that
+    raises substitutes its own exception for the one it was unwinding from, so on
+    that path ``exc`` is the cleanup's and the reason the hub is down is nowhere in
+    it. It is printed second rather than first because ``exc`` is the exception
+    :func:`~ai_assistant.service.exits.classify` actually judged: leading with a
+    cause that did not earn the exit code or the action beside it would be a message
+    an operator has to reconcile against itself.
+
     These messages are operational text carrying no Tier 0/1 content (ADR-0004
     §5): they name settings keys, paths and identifiers, never memory content and
     never a conversation.
+
+    Args:
+        exc: The exception that ended the start.
+        action: The operator action from ``classify``, empty when none is asked.
+        code: The process exit code.
+        replaced: The earlier failure ``exc`` displaced while unwinding, if any.
     """
     _log.error(
         "hub_startup_failed",
@@ -712,8 +770,11 @@ def _report_fault(exc: BaseException, *, action: str, code: int) -> None:
         cause=str(exc),
         error_class=type(exc).__name__,
         operator_action=action or None,
+        replaced_cause=replaced,
     )
     print(f"hub: cannot start: {exc}", file=sys.stderr)
+    if replaced is not None:
+        print(f"hub: the start had already failed with: {replaced}", file=sys.stderr)
     if code == EXIT_DEPLOYMENT:
         print(f"hub: {action}", file=sys.stderr)
         print(
