@@ -175,13 +175,39 @@ so plainly is what keeps the marker minimal.
 
 ### 2. The marker is one durable boolean on `Provenance`
 
-> **Normative.** `Provenance` gains `derived_from_external: bool = False`: whether
-> the belief's warrant traces to external content. It is `core/types.py` surface and
-> lands as its own contract PR ahead of any consumer (golden rule 5, ADR-0068 §2).
+> **Normative.** `Provenance` gains `derived_from_external: bool = False`: whether a
+> **derived** belief's warrant traces to recorded external content. It carries no
+> meaning outside the `DERIVED` band, and `False` on an `ATTESTED` or `ASSERTED`
+> record asserts nothing. It is `core/types.py` surface and lands as its own contract
+> PR ahead of any consumer (golden rule 5, ADR-0068 §2).
+
+> **Normative.** §1's predicate lands beside `band_of` as a pure function of a
+> `Provenance` in `core/types.py`. Every consumer asking "does this rest on recorded
+> external content?" calls it; none reads `derived_from_external` directly for that
+> question. §3's disjunction is over the predicate, not over the field.
 
 > **Normative.** The field carries no `Attestation` and names no source. Which
 > source a derived belief traces to is ADR-0098 §8's second clause, undischarged
 > there and not discharged here.
+
+**The field is narrower than the predicate, and an earlier draft let them share a
+sentence.** That draft described the field as "whether the belief's warrant traces to
+external content" — which is false of exactly the records whose warrant is most
+plainly external. A calendar record carries `source=EXTERNAL`, omits the field, and
+so reads `derived_from_external=False` while its recorded origin is external under
+ADR-0098 §1. §1's prose said why the field is unnecessary there; the field's own
+description promised the broader meaning anyway, and a `core` field is read by its
+description. Architecture review found it on round 13.
+
+**Which is why the predicate gets a function rather than a convention.** `band_of`
+is the precedent one field over: a pure function beside the enum, so that
+classification is computed in one place instead of spelled by each consumer. The same
+argument applies with more force here, because the hand-rolled version —
+`band_of(p.source) is BeliefBand.ATTESTED or p.derived_from_external` — is short
+enough that every consumer will write it and one of them will write only the second
+half. That is not a hypothetical: reading only the second half is precisely the
+defect this section is repairing. A function also gives §1's two clauses one
+implementation, so the disclaimer travels with the answer.
 
 **A boolean, because that is what the consumers need and nothing more.** The
 consumers are §6's gate, which needs a yes or no, and ADR-0098 §12's deferred
@@ -215,10 +241,13 @@ evidence* is a statement about citations; it is not a statement about warrants.
 Adversarial review found it on round 8, and the wrong version was load-bearing —
 it was the whole argument for the default.
 
-**What is true is narrower and is enough.** A pre-field record decodes `False`
-meaning *nothing external is recorded in this record's warrant*, which is exactly
-what §1's clauses now say the marker means and exactly what is true of every such
-record: no `EXTERNAL` citation exists to have been recorded. The undetectable path
+**What is true is narrower and is enough.** A pre-field **derived** record decodes
+`False` meaning *nothing external is recorded in this derived belief's warrant*,
+which is what the field means and what is true of every such record: no `EXTERNAL`
+citation exists to have been recorded. A pre-field *attested* record decodes `False`
+too and that says nothing at all about it — its externality is `band_of`'s to report,
+which is why the predicate and not the field is what any consumer asks. The
+undetectable path
 above is not covered by this field and is not covered by anything — that is §5's
 finding, not a gap this ADR opens — and what bounds it is what §5 enumerates: the
 belief lands in `DERIVED`, its confidence is strictly below 1.0, the observer's
@@ -697,7 +726,10 @@ dispatch plan costs a lane, and this one has already been inherited twice.
 ### 10. What the implementing lanes owe
 
 > **Normative.** The lane landing `derived_from_external` on `Provenance` ships a
-> test that a record decoded without the field reads `False`.
+> test that a record decoded without the field reads `False`, and a test that §1's
+> predicate returns **true** for an `ATTESTED` record whose `derived_from_external`
+> is `False`. The second is what fails an implementation that reads the field where
+> it should call the predicate.
 
 > **Normative.** The same lane states §6's ceiling on the `MemoryPolicy` Protocol
 > and adds it to `MemoryPolicyContract`, in the same change as the field. The
