@@ -807,7 +807,13 @@ def _is_grantable(identity: str, location: str | None) -> bool:
 
 
 def _summary_of(belief: Belief) -> BeliefSummary:
-    """Project one held belief into the listing's summary (ADR-0085 §4a)."""
+    """Project one held belief into the listing's summary (ADR-0085 §4a).
+
+    ``evidence_elided`` is carried through as held, on every band, so the fake and
+    the real projection agree about it (ADR-0107 §8 item 5). A fake that dropped it
+    would let a conformance suite pass against a listing that discloses less than
+    the detail view it was drilled into.
+    """
     return BeliefSummary(
         id=belief.id,
         band=belief.band,
@@ -818,6 +824,7 @@ def _summary_of(belief: Belief) -> BeliefSummary:
         evidence_count=belief.evidence_count,
         lost_evidence=belief.lost_evidence,
         valid_until=belief.valid_until,
+        evidence_elided=belief.evidence_elided,
     )
 
 

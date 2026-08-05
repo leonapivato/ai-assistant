@@ -435,6 +435,19 @@ def belief_from_record(record: MemoryRecord, evidence: tuple[Evidence, ...] = ()
     record, in order: the presented confidence is computed from how many of them
     resolved, so a caller that dropped the lost ones would report a belief as fully
     supported at the exact moment it stopped being.
+
+    **``evidence_elided`` travels as stored — not clamped, not rounded, not
+    recomputed** (ADR-0107 §8 item 2). It looks like a bug beside the resolved
+    tuple, because it can exceed ``len(evidence)`` and can be non-zero where the
+    tuple is empty; both are correct. The number counts displacements over the
+    record's whole history and is an **upper bound** over a different population
+    than the retained citations (ADR-0086 §4), which also double-counts in two
+    reachable cases. ADR-0086 §4's rule for ``export`` is that the stored number
+    travels so "the bound's imprecision travels with the field rather than being
+    resolved in the artifact"; a projection that clamped it to the retained count
+    would resolve exactly that imprecision, and resolve it wrongly. It is carried on
+    **every** band (ADR-0107 §3): §2's rendering obligation is scoped to ``DERIVED``
+    and this is not a rendering.
     """
     provenance = record.provenance
     resolved = sum(1 for item in evidence if not item.lost)
@@ -449,6 +462,7 @@ def belief_from_record(record: MemoryRecord, evidence: tuple[Evidence, ...] = ()
         evidence=evidence,
         last_updated=provenance.last_updated,
         valid_until=record.validity.valid_until,
+        evidence_elided=provenance.evidence_elided,
     )
 
 
@@ -466,6 +480,15 @@ def belief_summary_from_record(record: MemoryRecord, *, cited: int, resolved: in
     The adjusted confidence still needs the counts, which is why the listing keeps
     resolving *existence* per citation (ADR-0077 §6).
 
+    **``evidence_elided`` travels as stored**, for the reason
+    :func:`belief_from_record` states at length: it is an upper bound over the
+    record's whole history, so it may exceed ``cited`` and may be non-zero where
+    ``cited`` is zero, and clamping it to the retained count would resolve ADR-0086
+    §4's deliberate imprecision wrongly. It is neither an input to nor an output of
+    the presented confidence — feeding elisions into that function "would lower a
+    belief's presented confidence because the system worked, which inverts the
+    signal" (ADR-0086 §4).
+
     Args:
         record: The stored record.
         cited: How many citations the record carries.
@@ -482,6 +505,7 @@ def belief_summary_from_record(record: MemoryRecord, *, cited: int, resolved: in
         evidence_count=cited,
         lost_evidence=cited - resolved,
         valid_until=record.validity.valid_until,
+        evidence_elided=provenance.evidence_elided,
     )
 
 
