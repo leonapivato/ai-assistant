@@ -2721,6 +2721,12 @@ def test_a_source_the_enumeration_does_not_carry_is_never_granted(
     from the enumeration for a reason the client cannot see and must not guess at.
     """
     engine = _granting_engine()
+    # Held, and **not grantable**: its configured location has no UTF-8 encoding, so
+    # the hub omits it from the enumeration (ADR-0102 §6). That is the real cause
+    # rather than a name nobody holds, and it is the one the client cannot see: from
+    # here "absent" is all there is, which is why §6 fails closed rather than asking
+    # the client to reason about why.
+    engine.hold_source("notes", location="/srv/\udce9notes.md")
     _wire(monkeypatch, engine)
 
     result = CliRunner().invoke(cli.app, ["grant", "notes", "--scope", "facet", "--yes"])
@@ -2729,6 +2735,7 @@ def test_a_source_the_enumeration_does_not_carry_is_never_granted(
     rendered = output.getvalue()
     assert "cannot offer" in rendered
     assert "calendar" in rendered  # the remedy is the list, not an echo
+    assert "/srv/" not in rendered  # and never the path it could not show
 
 
 def test_a_source_with_no_configured_location_says_so_and_is_still_grantable(

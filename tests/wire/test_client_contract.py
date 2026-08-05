@@ -51,8 +51,11 @@ import pytest
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "orchestration"))
 
 from assistant_engine_contract import (
+    _NOT_CANONICAL,
     _SOURCE,
     _TINY_LIMIT,
+    _UNWRITABLE_LOCATION,
+    _UNWRITABLE_SOURCE,
     AssistantEngineContract,
     backwards_clock,
 )
@@ -168,6 +171,24 @@ class TestHubEngineClientContract(AssistantEngineContract):
         """
         backing = FakeAssistantEngine()
         backing.hold_source(_SOURCE, location="/srv/calendar.ics")
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield client
+
+    @pytest.fixture
+    async def defective_source_engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """A client of a hub holding a grantable source and two that are not.
+
+        **This binding is why the clause belongs in the shared suite**: the wire is
+        where an unshowable location would otherwise surface as a dropped socket
+        rather than a typed answer, since ``wire/server.py`` turns an
+        ``AssistantError`` into an error frame and lets anything else close the
+        connection. Hub-side filtering is what keeps the value out of the encoder,
+        and only a bound client proves it.
+        """
+        backing = FakeAssistantEngine()
+        backing.hold_source(_SOURCE, location="/srv/calendar.ics")
+        backing.hold_source(_UNWRITABLE_SOURCE, location=_UNWRITABLE_LOCATION)
+        backing.hold_source(_NOT_CANONICAL, location="/srv/mail")
         async with serving(backing, tmp_path / "hub.sock") as client:
             yield client
 
