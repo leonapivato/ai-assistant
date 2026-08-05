@@ -44,6 +44,7 @@ from pydantic import TypeAdapter
 from ai_assistant.core.types import (
     Belief,
     BeliefBand,
+    BeliefSummary,
     Confirmation,
     ContinuationToken,
     Evidence,
@@ -424,6 +425,70 @@ def test_a_belief_shaped_model_takes_its_ratified_bytes() -> None:
     # ``BeliefBand.STATED`` at ``main`` @ 89e0cfe, while the member is spelled
     # ``asserted`` here — two bytes wider.
     assert without_elision - len(b'"asserted"') + len(b'"stated"') == 204
+
+
+@pytest.mark.parametrize(
+    ("dto", "elided"),
+    [
+        (
+            Belief(
+                id="b-1",
+                band=BeliefBand.DERIVED,
+                kind=MemoryKind.SEMANTIC,
+                content="prefers metric units",
+                confidence=0.62,
+                last_updated=_AT,
+                evidence=(Evidence(content="said so"), Evidence()),
+                evidence_elided=900,
+            ),
+            900,
+        ),
+        (
+            BeliefSummary(
+                id="b-1",
+                band=BeliefBand.DERIVED,
+                kind=MemoryKind.SEMANTIC,
+                content="prefers metric units",
+                confidence=0.62,
+                last_updated=_AT,
+                evidence_count=2,
+                lost_evidence=1,
+                evidence_elided=900,
+            ),
+            900,
+        ),
+    ],
+    ids=["belief", "belief_summary"],
+)
+def test_a_belief_carries_its_elision_across_the_wire_unchanged(
+    dto: Belief | BeliefSummary, elided: int
+) -> None:
+    """ADR-0107 §8 item 6's wire boundary, over **both** DTO shapes.
+
+    **This test is the proof that ``codec.py`` needs no edit.** :func:`project`
+    dispatches on ``BaseModel`` and recurses over ``model_dump()``, so a field added
+    to a promoted type crosses the wire without anyone touching this module — and a
+    claim of that form is worth exactly as much as the test that checks it. ADR-0107
+    §3 also turns on the field being *plain*: it is deliberately not a
+    ``computed_field``, because a value one implementation sends and another omits
+    would make the same call measure two different sizes against ADR-0085 §8c's
+    limit, and ``evidence_elided`` is not computable by a client in the first place.
+
+    **Only a non-default value proves it**, which is ADR-0107 §8 item 6's governing
+    rule and the reason the two ``major`` findings in that ADR's own review were
+    vacuous tests: at ``0`` this passes whether the number is carried, defaulted or
+    silently dropped, and the decode would reconstruct the same object either way.
+
+    The round trip is the real client's: encode with the wire's codec, read the
+    bytes back as JSON, and revalidate the model. Both halves are asserted — the
+    field is in the transmitted bytes, and it survives the return journey exactly.
+    """
+    payload = _both(dto)  # and the engine's encoder agrees, per _both
+    assert f'"evidence_elided":{elided}'.encode() in payload
+
+    decoded = type(dto).model_validate(json.loads(payload))
+    assert decoded.evidence_elided == elided
+    assert decoded == dto
 
 
 def test_a_page_of_beliefs_is_the_same_bytes_comma_separated() -> None:
