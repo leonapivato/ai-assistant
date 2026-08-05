@@ -224,6 +224,67 @@ class ObserverContract:
                 "discarded_unusable (ADR-0100 §5)"
             )
 
+    #: Whether this implementation **cannot be asked** to propose a stated
+    #: subject at all — no input it accepts can express one, so the state the
+    #: clause below observes is unreachable rather than merely unreached.
+    #: ``ModelBackedObserver`` is that case and says why: ADR-0100 §5 records that
+    #: it "builds every record itself from a fixed JSON envelope whose schema has
+    #: no subject key, so the shipped observer *cannot* state one however the
+    #: model answers".
+    #:
+    #: Left ``False``, the suite requires the implementation to **prove** the
+    #: counting half by overriding :meth:`observation_asked_to_state_a_subject` —
+    #: the direction §5 wants the default to run in, since the clause exists to
+    #: fail closed against the next implementation rather than to describe this
+    #: one.
+    states_no_subject_by_construction: bool = False
+
+    def observation_asked_to_state_a_subject(self) -> Observer:
+        """Override with a subject that has been *asked* for a stated subject.
+
+        The returned observer must, when handed a two-episode batch, be scripted
+        so that it would propose **exactly one** belief and that belief states a
+        subject. Only the implementation knows how to ask — a template field on a
+        fake, an envelope key on a model-backed producer — which is why this is a
+        hook rather than a fixture the suite could build, exactly as
+        :meth:`gated_observation` is.
+
+        Not needed where :attr:`states_no_subject_by_construction` is ``True``.
+        """
+        raise NotImplementedError
+
+    @pytest.mark.optional_obligation
+    async def test_a_proposal_that_would_state_a_subject_is_refused_and_counted(self) -> None:
+        """Refused **and counted** — the second half of ADR-0100 §5's clause.
+
+        The case above pins that no proposal states a subject, and an
+        implementation could satisfy it by silently swallowing such a candidate:
+        it would return its other proposals, leave ``discarded_unusable``
+        untouched, and report a clean pass over work it had quietly dropped. That
+        is the shape ADR-0022 §3 exists to prevent — a degradation reported as a
+        normal outcome — and the count is the only thing that distinguishes them.
+
+        **Refused, never repaired.** Stripping the subject and proposing the
+        belief anyway is the failure that looks most like success: ADR-0100 §3
+        reads an unstated subject as *the owner's*, so a stripped proposal is not
+        a neutral one, it is a belief about someone else asserted about the owner.
+        Hence both assertions — nothing proposed, and something counted.
+
+        Skippable only where the implementation cannot be asked at all
+        (:attr:`states_no_subject_by_construction`), which is a statement about
+        the input surface rather than an exemption from the obligation.
+        """
+        if self.states_no_subject_by_construction:
+            pytest.skip("implementation cannot be asked to state a subject at all")
+
+        outcome = await self.observation_asked_to_state_a_subject().observe(batch_of(2))
+
+        assert outcome.proposals == (), "the belief that stated a subject was proposed anyway"
+        assert outcome.discarded_unusable >= 1, (
+            "the refused proposal was dropped without being counted, so the outcome "
+            "is indistinguishable from an observer that honestly proposed nothing"
+        )
+
     # --- evidence discipline (ADR-0077 §5) ----------------------------------
 
     async def test_every_proposal_cites_only_episodes_from_the_batch(

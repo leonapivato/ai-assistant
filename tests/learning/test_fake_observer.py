@@ -51,6 +51,10 @@ class TestFakeObserverContract(ObserverContract):
             gate=gate,
         )
 
+    def observation_asked_to_state_a_subject(self) -> Observer:
+        """One template naming a subject and nothing else, so the refusal *is* the outcome."""
+        return FakeObserver([ObservedBelief(content="prefers a window seat", about_person="Marta")])
+
 
 # --- behaviour specific to FakeObserver, beyond the shared contract ---------
 
@@ -90,6 +94,46 @@ async def test_a_belief_the_batch_cannot_support_is_discarded_and_counted() -> N
     outcome = await FakeObserver(
         [ObservedBelief(content="a broad generalisation", step=MemorySource.INFERRED, supports=2)]
     ).observe(batch_of(1))
+
+    assert outcome.proposals == ()
+    assert outcome.discarded_unusable == 1
+
+
+async def test_a_subject_stating_template_is_dropped_without_taking_the_pass_with_it() -> None:
+    """One refusal degrades the pass; it does not fail it (ADR-0077 §4, ADR-0100 §5).
+
+    The suite's clause scripts the refusal alone, so it can say the outcome *is*
+    the refusal. This is the mixed case it cannot express: the belief stating a
+    subject is discarded and counted, and the one beside it is proposed
+    untouched. Losing the whole pass over one unusable entry would throw away the
+    proposals that were fine, which is the degradation posture ADR-0077 §4 takes
+    of a malformed model response, reached here through a different door.
+    """
+    outcome = await FakeObserver(
+        [
+            ObservedBelief(content="prefers a window seat", about_person="Marta"),
+            ObservedBelief(content="the user prefers concise replies"),
+        ]
+    ).observe(batch_of(2))
+
+    (proposal,) = outcome.proposals
+    assert proposal.proposed.content == "the user prefers concise replies"
+    assert proposal.proposed.about_person is None
+    assert outcome.discarded_unusable == 1
+    assert outcome.discarded_over_limit == 0
+
+
+async def test_a_subject_stating_template_is_refused_whatever_the_evidence() -> None:
+    """The subject refusal is not an evidence failure wearing its clothes.
+
+    Scripted with support the batch amply covers, so the only reason to discard
+    it is the subject — which is what makes the fake's ordering observable rather
+    than incidental, and stops the clause passing because of a floor it never
+    reached.
+    """
+    outcome = await FakeObserver(
+        [ObservedBelief(content="prefers a window seat", supports=1, about_person="Marta")]
+    ).observe(batch_of(4))
 
     assert outcome.proposals == ()
     assert outcome.discarded_unusable == 1
