@@ -879,6 +879,39 @@ class AssistantEngineContract(ABC):
                 await defective_source_engine.grant(ungrantable, scope=[GrantScope.FACET])
         assert await defective_source_engine.recent_grants() == ()
 
+    async def test_a_refusal_names_a_held_reader_and_never_an_unknown_value(
+        self, defective_source_engine: AssistantEngine
+    ) -> None:
+        """ADR-0102 §4's fourth clause, which differentiates the *message*.
+
+        One error **class** covers all three causes — §2a keeps
+        ``UngrantableSourceError`` single because the caller's recourse is identical
+        — but §4 is explicit that the message is not: "An ``UngrantableSourceError``
+        raised because a *held* reader's declared name is inadmissible names that
+        reader; one raised because no held reader declares the value names no value
+        at all."
+
+        The asymmetry is not decoration. A held reader's identity is a **declared
+        constant** and therefore Tier 2 by ADR-0093 §7's construction, so naming it
+        tells an operator which reader to fix. A value that names nothing is
+        caller-supplied and may be a typo carrying personal data, which ADR-0097 §9
+        forbids echoing "so a mistyped value cannot reach the log (ADR-0004 §5)".
+        Collapsing the two into one anonymous message loses the operator's only
+        pointer; collapsing them the other way leaks.
+
+        **And no refusal carries a filesystem path** (§4, §6), which is the half a
+        message naming the reader is most tempted to add.
+        """
+        with pytest.raises(UngrantableSourceError) as unknown:
+            await defective_source_engine.grant("no-such-source", scope=[GrantScope.FACET])
+        assert "no-such-source" not in str(unknown.value)
+
+        for held in (_UNWRITABLE_SOURCE, _NOT_CANONICAL):
+            with pytest.raises(UngrantableSourceError) as caught:
+                await defective_source_engine.grant(held, scope=[GrantScope.FACET])
+            assert held.strip() in str(caught.value)
+            assert "/srv/" not in str(caught.value)
+
     async def test_the_good_source_beside_a_defective_one_still_grants(
         self, defective_source_engine: AssistantEngine
     ) -> None:

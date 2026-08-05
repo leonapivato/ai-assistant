@@ -518,15 +518,26 @@ class FakeAssistantEngine:
         uses = grant_scope(scope, name="scope")
         check_arguments("grant", max_bytes=self._max_payload_bytes, source=named, scope=uses)
         self.calls.append(("grant", {"source": named, "scope": uses}))
-        if named not in self.sources_held or not _is_grantable(named, self.sources_held[named]):
-            # **One refusal for all three causes** — no such source, an
-            # inadmissible declared name, an unshowable location. ADR-0102 §4 gives
-            # them one class because the caller's recourse is identical: call
-            # ``grantable_sources`` and pick from what it returns. The message
-            # echoes no caller-supplied value (ADR-0097 §9).
+        if named not in self.sources_held:
+            # **Names no value at all** (ADR-0102 §4). ADR-0097 §9 forbids echoing
+            # "no caller-supplied string beyond what the client already sent", so a
+            # mistyped value cannot reach a log; the remedy is the enumeration.
             msg = (
                 "no source by that name can be granted; call grantable_sources() and "
                 "choose one of the identities it returns (ADR-0097 §9)"
+            )
+            raise UngrantableSourceError(msg)
+        if not _is_grantable(named, self.sources_held[named]):
+            # **Names that reader** (ADR-0102 §4), and never its location. One error
+            # *class* covers all three causes (§2a — the recourse is identical), and
+            # the *message* still distinguishes them: a held reader is a declared
+            # constant and therefore Tier 2 by ADR-0093 §7's construction, so naming
+            # it tells an operator where to look, while a caller-supplied value that
+            # named nothing may not be echoed at all.
+            msg = (
+                f"the {named!r} source is held but cannot be granted: its declared name "
+                f"is not in canonical form, or its configured location cannot be shown "
+                f"to you (ADR-0102 §4, §6)"
             )
             raise UngrantableSourceError(msg)
         if self._live_grant(named) is not None:
