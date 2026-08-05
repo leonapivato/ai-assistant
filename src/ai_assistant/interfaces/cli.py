@@ -426,6 +426,57 @@ def _present_content(value: str) -> str:
     return value
 
 
+def _present_subject(value: str | None) -> str | None:
+    r"""Reject a blank ``--about-person`` during parsing, **without stripping**.
+
+    The subject axis's route into ``FeedbackEvent`` (ADR-0100 §7), and it borrows
+    :func:`_present_source`'s shape rather than :func:`_present_content`'s for the
+    reason that separates them. ``FeedbackEvent.about_person`` is
+    ``NonBlankEncodableText``, which refuses a blank value and an unencodable one
+    with a ``ValidationError`` — **not** an :class:`AssistantError`, so
+    constructing the event on either would escape :func:`_learn_feedback`'s error
+    boundaries as an uncaught traceback with no controlled exit code, the failure
+    ADR-0042 §7 forbids. Both cases are real: ``--about-person ""`` is a slip a
+    shell makes easy, and Linux passes argv as bytes that Python decodes with
+    ``surrogateescape``, so ``assistant learn x --about-person $'\xe9'`` arrives as
+    a lone surrogate no UTF-8 encoder will accept.
+
+    **The value is returned byte for byte** (ADR-0100 §6). An adapter that
+    stripped it would store ``" Marta "`` as ``"Marta"``, and §6's third clause
+    keeps a label exactly as the user gave it precisely so that every later
+    matching rule stays available — none of them can be recovered from labels that
+    were quietly normalised on the way in. The refusal is allowed to *strip in
+    order to decide*; what it may not do is return the stripped value.
+
+    ``None`` — the option not given — is the "no subject stated" state and passes
+    through untouched, which is the one thing this callback must not turn into a
+    blank.
+
+    Args:
+        value: The subject as the user typed it, or ``None`` when unset.
+
+    Returns:
+        The value, unchanged.
+
+    Raises:
+        BadParameter: If the value is blank, or has no UTF-8 encoding.
+    """
+    if value is None:
+        return None
+    if not value.strip():
+        msg = "must not be blank"
+        raise typer.BadParameter(msg)
+    try:
+        encodable_text(value)
+    except ValueError as exc:
+        # Not echoed, for :func:`_present_source`'s reason: a value with no UTF-8
+        # encoding is one this process may not be able to write down, so reporting
+        # the fault would fail the same way the fault does.
+        msg = "must be text with a UTF-8 encoding"
+        raise typer.BadParameter(msg) from exc
+    return value
+
+
 def _page_argument(value: int) -> int:
     """Reject a ``--limit``/``--offset`` the store would refuse (ADR-0073 §2).
 
@@ -586,6 +637,16 @@ def learn(
     about: str | None = typer.Option(
         None, "--about", "-a", help="Optional scope this feedback is about, e.g. 'units'."
     ),
+    about_person: str | None = typer.Option(
+        None,
+        "--about-person",
+        callback=_present_subject,
+        help=(
+            "Whom this is about, if it is about someone other than you, e.g. 'Marta'. "
+            "A name as you write it; nothing looks it up. Leave it off for anything "
+            "about you or your world."
+        ),
+    ),
     memory_kind: MemoryKind | None = _LEARN_MEMORY_KIND_OPTION,
 ) -> None:
     """Teach the assistant from a correction or a stated preference.
@@ -594,10 +655,24 @@ def learn(
     folds it into long-term memory. ``--memory-kind`` defaults from ``--kind`` and
     can be overridden. The result is a short summary of what memory did with it —
     stored, reinforced, or superseded.
+
+    **``--about`` and ``--about-person`` are two different things** (ADR-0100 §7).
+    ``--about`` scopes a preference to a topic — ``--about 'email tone'``.
+    ``--about-person`` says whom the belief is about, and it is the only way a
+    belief about someone else can say so: without it ``assistant learn "Marta
+    prefers window seats"`` is stored with no subject, which the system reads as
+    *yours*. The person flag is spelled long because ``--about`` and ``-a`` were
+    already the scope axis's, on this very command.
     """
     resolved_memory_kind = memory_kind if memory_kind is not None else _DEFAULT_MEMORY_KIND[kind]
     code = asyncio.run(
-        _learn_feedback(content, kind=kind, memory_kind=resolved_memory_kind, subject=about)
+        _learn_feedback(
+            content,
+            kind=kind,
+            memory_kind=resolved_memory_kind,
+            subject=about,
+            about_person=about_person,
+        )
     )
     raise typer.Exit(code)
 
@@ -1005,7 +1080,12 @@ async def _resume_pending(*, timeout_seconds: float, assume_yes: bool) -> int:
 
 
 async def _learn_feedback(
-    content: str, *, kind: FeedbackKind, memory_kind: MemoryKind, subject: str | None
+    content: str,
+    *,
+    kind: FeedbackKind,
+    memory_kind: MemoryKind,
+    subject: str | None,
+    about_person: str | None,
 ) -> int:
     """Load settings, build the engine, submit the feedback, and close it (ADR-0042 §2, §7).
 
@@ -1023,6 +1103,7 @@ async def _learn_feedback(
         memory_kind=memory_kind,
         content=content,
         subject=subject,
+        about_person=about_person,
         created_at=_utcnow(),
     )
     try:

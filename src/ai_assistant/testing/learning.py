@@ -155,6 +155,15 @@ class FakeFeedbackProcessor:
         Unlike ``RuleBasedFeedbackProcessor`` every kind is covered, so a consumer
         can exercise the branch it cares about rather than the two the production
         rules happen to support today.
+
+        **``about_person`` is carried onto all four**, where ``subject`` reaches
+        only the two kinds that have somewhere to put a scope. That is the axes'
+        own asymmetry (ADR-0100 §7) rather than a convenience: a subject is a field
+        of the *envelope* every record carries, so there is no kind for which "whom
+        this is about" has nowhere to go — and a branch that dropped it would write
+        ``None``, which ADR-0100 §3 reads as the owner's, over a subject the event
+        stated. It is also what keeps :func:`_derived_id`'s reasoning true: every
+        field of the event reaches the synthesised record.
         """
         record_id = self._id_factory() if self._id_factory is not None else _derived_id(event)
         provenance = self._provenance(event)
@@ -166,6 +175,7 @@ class FakeFeedbackProcessor:
                     provenance=provenance,
                     preference=event.content,
                     context=event.subject,
+                    about_person=event.about_person,
                 )
             case MemoryKind.SEMANTIC:
                 return SemanticMemory(
@@ -173,6 +183,7 @@ class FakeFeedbackProcessor:
                     content=event.content,
                     provenance=provenance,
                     fact=event.content,
+                    about_person=event.about_person,
                 )
             case MemoryKind.PROCEDURAL:
                 return ProceduralMemory(
@@ -181,6 +192,7 @@ class FakeFeedbackProcessor:
                     provenance=provenance,
                     situation=event.subject if event.subject else event.content,
                     steps=(event.content,),
+                    about_person=event.about_person,
                 )
             case MemoryKind.EPISODIC:
                 return EpisodicMemory(
@@ -188,6 +200,7 @@ class FakeFeedbackProcessor:
                     content=event.content,
                     provenance=provenance,
                     occurred_at=event.created_at,
+                    about_person=event.about_person,
                 )
 
     @staticmethod

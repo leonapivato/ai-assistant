@@ -385,6 +385,61 @@ is still a separate type and #62 is still open.
 """
 
 
+def _rejecting_non_blank(value: str) -> str:
+    """Reject a blank value, returning it **unchanged** (ADR-0096 §2).
+
+    The rejecting half of :func:`_non_blank` without its normalising half, and the
+    asymmetry is the decision rather than an oversight. A facet's ``source`` is a
+    *faithful copy* of the reading's, which is :data:`EncodableText` and does not
+    strip — so stripping here would make a conforming reader named ``"  calendar
+    "`` produce a reading whose ``source`` keeps the spaces and a facet whose
+    ``source`` loses them, and :class:`SourceReading`'s stamp-equality validator
+    would then refuse a reading every other rule permits. Tightening by
+    *normalising* is how two spellings of one value drift, silently, until
+    something compares them.
+
+    The general rule ADR-0096 §2 draws from it: **a faithful copy takes the type
+    of the field it copies, and may tighten only in ways that reject.**
+
+    **The message names no field**, because three unrelated ones now reach this
+    validator: a facet's ``source``, a grant's, and :attr:`MemoryBase.about_person`
+    (ADR-0100 §1). Pydantic reports the location it refused, so a message naming
+    one of them would contradict the other two on every second failure.
+
+    Raises:
+        ValueError: If the value is blank after stripping.
+    """
+    if not value.strip():
+        msg = "must not be blank"
+        raise ValueError(msg)
+    return value
+
+
+type NonBlankEncodableText = Annotated[EncodableText, AfterValidator(_rejecting_non_blank)]
+"""Text that is neither blank nor unwritable, and is **never normalised**.
+
+:data:`Identifier` refuses a blank value *and* strips the one it accepts;
+:data:`EncodableText` does neither. This is the third combination, and ADR-0096 §2
+needs it because a value copied between two fields must compare equal to its
+original: it refuses ``"   "`` while returning ``"  calendar  "`` byte-for-byte.
+
+**It does not close #667**, which proposes one identifier contract across
+:attr:`Reader.name <ai_assistant.core.protocols.Reader.name>`,
+:attr:`SourceReading.source` and :attr:`Attestation.reported_by` at once. What it
+does is keep a *facet* from carrying an identity that names nothing legible, on
+the construction paths a conformance suite cannot reach — a fixture, a fake, or a
+producer that is not a ``Reader`` at all.
+
+**Declared here rather than beside its first consumer**, for the reason the
+comment above this block gives of :data:`Identifier` and :data:`EncodableText`: it
+is a pure refinement of a scalar that every section of the module may reach for,
+and ADR-0100 §1 gave it a second consumer — :class:`MemoryBase`, which is declared
+far ahead of :class:`ContextFacet`. A forward reference plus ``model_rebuild``
+would have kept the old position at the cost of making a `core` type depend on an
+import-order side effect, so the primitive moved rather than the model.
+"""
+
+
 #: A SHA-256 digest rendered as lowercase hex is exactly this long.
 _SHA256_HEX_LENGTH = 64
 
@@ -895,7 +950,43 @@ class Validity(BaseModel):
 
 
 class MemoryBase(BaseModel):
-    """Fields shared by every memory record, regardless of kind."""
+    """Fields shared by every memory record, regardless of kind.
+
+    **``about_person`` is the subject axis** (ADR-0100): whom the belief is
+    *about*, which ADR-0099 §2 rules orthogonal to whose hub this is. It is on the
+    envelope rather than on :class:`Provenance` because ``Provenance`` answers *why
+    this should be believed* and the envelope answers *what is held, about what,
+    and for how long* — a field is placed by which question it answers, not by who
+    sets it (§2). Four rules govern it, and each is a clause rather than a
+    convention:
+
+    * **Two states, never three** (§1). It is stated, or it is ``None``. A blank
+      or whitespace-only label is refused at construction — a record saying ``""``
+      is a producer that meant to speak and said nothing — which is why the
+      annotation is :data:`NonBlankEncodableText` and not the bare
+      :data:`EncodableText` of ADR-0100 §1's illustrative snippet. The same type
+      supplies the *other* half §6 needs: it refuses a blank without stripping the
+      value it accepts.
+    * **``None`` means no subject is stated, and is read as the owner's** (§3). It
+      is not "unknown", and no reader, store or surface may exclude a ``None``
+      record from an answer about the owner on the ground that it says nothing.
+      **The owner is never named here** — there is no user identity anywhere in
+      this system (ADR-0036 §3, ADR-0097 §1), so a label naming the owner would be
+      a second spelling of a subject that already has one: the absence.
+    * **A label, resolving to nothing** (§6). Not an identifier, not a key, not a
+      reference. Nothing here treats two equal labels as one person or two unequal
+      ones as different people; whether labels may be matched at all is ADR-0101's,
+      which is the only instrument that may lift that. It is stored and returned
+      byte for byte: nothing normalises, case-folds, aliases or de-duplicates it.
+    * **Whom, not what** (§6). A belief about a company, a project, a device or a
+      topic states no subject, and a belief about two people is two beliefs.
+
+    **Stating one is not licence to propose one** (§4). A producer fills it only
+    from a subject it actually received — an explicit user act, or a structured
+    field of a source that names whom an entry is about — and never by inferring a
+    person from content. The field widens no producer's warrant, and its existence
+    may not be cited as though it did.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -920,6 +1011,14 @@ class MemoryBase(BaseModel):
             "(ADR-0045 §2). Defaults to fully open — live forever until retired. "
             "Read-time filters hide a record not live at ``now`` from ``get``/``search`` "
             "while ``export`` still returns it; distinct from ``expires_at`` retention."
+        ),
+    )
+    about_person: NonBlankEncodableText | None = Field(
+        default=None,
+        description=(
+            "Whom this belief is about, when that is someone other than the owner "
+            "(ADR-0100 §2). None means no subject is stated, which is read as the "
+            "owner's. A label as given, resolving to nothing (§6)."
         ),
     )
 
@@ -2000,48 +2099,6 @@ class ObservationOutcome(BaseModel):
 # has no provenance to lose, and a facet has.
 
 
-def _rejecting_non_blank(value: str) -> str:
-    """Reject a blank value, returning it **unchanged** (ADR-0096 §2).
-
-    The rejecting half of :func:`_non_blank` without its normalising half, and the
-    asymmetry is the decision rather than an oversight. A facet's ``source`` is a
-    *faithful copy* of the reading's, which is :data:`EncodableText` and does not
-    strip — so stripping here would make a conforming reader named ``"  calendar
-    "`` produce a reading whose ``source`` keeps the spaces and a facet whose
-    ``source`` loses them, and :class:`SourceReading`'s stamp-equality validator
-    would then refuse a reading every other rule permits. Tightening by
-    *normalising* is how two spellings of one value drift, silently, until
-    something compares them.
-
-    The general rule ADR-0096 §2 draws from it: **a faithful copy takes the type
-    of the field it copies, and may tighten only in ways that reject.**
-
-    Raises:
-        ValueError: If the value is blank after stripping.
-    """
-    if not value.strip():
-        msg = "a facet's source must not be blank"
-        raise ValueError(msg)
-    return value
-
-
-type NonBlankEncodableText = Annotated[EncodableText, AfterValidator(_rejecting_non_blank)]
-"""Text that is neither blank nor unwritable, and is **never normalised**.
-
-:data:`Identifier` refuses a blank value *and* strips the one it accepts;
-:data:`EncodableText` does neither. This is the third combination, and ADR-0096 §2
-needs it because a value copied between two fields must compare equal to its
-original: it refuses ``"   "`` while returning ``"  calendar  "`` byte-for-byte.
-
-**It does not close #667**, which proposes one identifier contract across
-:attr:`Reader.name <ai_assistant.core.protocols.Reader.name>`,
-:attr:`SourceReading.source` and :attr:`Attestation.reported_by` at once. What it
-does is keep a *facet* from carrying an identity that names nothing legible, on
-the construction paths a conformance suite cannot reach — a fixture, a fake, or a
-producer that is not a ``Reader`` at all.
-"""
-
-
 class ContextFacet(BaseModel):
     """One source's situational contribution, stamped with who said it and when.
 
@@ -2491,6 +2548,25 @@ class FeedbackEvent(BaseModel):
     The learning subsystem turns this into a :class:`MemoryUpdateProposal`. It
     carries ``memory_kind`` so a correction lands in the right typed record (a
     fact becomes a :class:`SemanticMemory`, not a preference).
+
+    **``subject`` and ``about_person`` are two different axes, side by side on
+    purpose** (ADR-0100 §7). ``subject`` is the older field and keeps its meaning
+    exactly: an optional *scope* for a preference — "email tone", "units" — which
+    :class:`~ai_assistant.learning.processor.RuleBasedFeedbackProcessor` lands as
+    :attr:`PreferenceMemory.context`. ``about_person`` is whom the belief is
+    *about*, with :class:`MemoryBase`'s semantics unchanged. The word "subject" is
+    taken at least five times over in this corpus and none of its senses is a
+    person, so the person axis does not get it: two fields called ``subject`` on
+    one type is not available, and their standing side by side is the clearest
+    statement that they are not one thing. Whether the older field would be better
+    named ``scope`` is a decision of ADR-0009's that no lane may change on
+    ADR-0100's authority (issue #688).
+
+    **This is the only route by which a non-owner subject enters the store**
+    (ADR-0100 §4): a user states one, or nothing does. It ships *with* the route —
+    ``assistant learn --about-person`` — because a field with no route would leave
+    every third-party belief constructing ``about_person=None``, which §3 reads as
+    the owner's, making a false record of the exact case the field was added for.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -2502,6 +2578,14 @@ class FeedbackEvent(BaseModel):
     )
     subject: EncodableText | None = Field(
         default=None, description="Optional scope/context, e.g. 'email tone'."
+    )
+    about_person: NonBlankEncodableText | None = Field(
+        default=None,
+        description=(
+            "Whom this feedback is about, when that is someone other than the owner "
+            "(ADR-0100 §7). Carried onto the record the processor builds. Distinct "
+            "from ``subject``, which is a preference scope."
+        ),
     )
     evidence: tuple[EncodableText, ...] = Field(
         default=(),
