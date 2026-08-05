@@ -263,6 +263,17 @@ the check that establishes that rather than assuming it.
 > a member absent from that list is refused. The allow-list is enumerated by
 > name, so a member added later is refused until somebody adds it deliberately.
 
+> **Normative.** Constructing the target embedder is exhaustive over
+> `EmbedderKind`. A member with no construction branch is refused, never built as
+> the default.
+
+Without that, the flag would lift the refusal onto a *substitution*: the
+composition root treated every unrecognised member as the on-device default, so
+an operator who authorised sending the store to one recipient would have got a
+migration to another, disclosed under the substituted name. Both members are
+branched, so the check is static — `mypy` narrows the refusal to `Never` and a
+member added without a branch fails the gate rather than surfacing at runtime.
+
 Fail-closed, and by enumeration rather than by a predicate on the embedder. A
 predicate would need a new capability on the `Embedder` Protocol — a contract
 change this decision does not need and golden rule 5 would make its own ADR — and

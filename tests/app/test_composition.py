@@ -1650,19 +1650,39 @@ class TestBuildReembedder:
         assert "somebody-elses-cloud" in message
         assert "--upload-entire-memory-store" in message
 
-    def test_an_off_device_target_proceeds_once_the_operator_authorises_it(
-        self, tmp_path: Path
-    ) -> None:
+    def test_the_flag_lifts_the_refusal_and_lifts_nothing_else(self, tmp_path: Path) -> None:
+        """Authorising the egress does not conjure an embedder that does not exist.
+
+        Review round 4 pressed on this and was right to: with the refusal lifted,
+        construction used to fall through to the vendored on-device model, so an
+        authorised selection would have reported one recipient and used another.
+        `_build_embedder` is exhaustive now, so an unimplemented member is refused
+        instead — and, because both members are branched, adding a third without a
+        branch is a `mypy` error at the gate rather than anything reachable here
+        (#737).
+        """
         settings = Settings(embedder=EmbedderKind.HASHING, data_dir=tmp_path)
         cloud = settings.model_copy(update={"embedder": _CloudKind.CLOUD})
 
-        # What is on test is the *refusal being lifted* and nothing more. It does
-        # not assert which embedder was built, and it must not: `_build_embedder`
-        # dispatches `HASHING` and treats every other value as the on-device
-        # default, so an unrecognised kind silently becomes `FastEmbedEmbedder`.
-        # That is a pre-existing gap in a function this change does not touch, it
-        # is unreachable while both members are dispatched correctly, and it is
-        # filed as #737 rather than widened into here.
-        reembedder = build_reembedder(cloud, upload_entire_memory_store=True)
+        with pytest.raises(AssertionError, match="somebody-elses-cloud"):
+            build_reembedder(cloud, upload_entire_memory_store=True)
 
-        assert reembedder.store == tmp_path / "memory.db"
+    def test_an_on_device_selection_reaches_the_migration_as_that_target(
+        self, tmp_path: Path
+    ) -> None:
+        """The other half: a selection that *is* implemented is the one wired.
+
+        Read off the plan rather than the object, because the plan is what the
+        tool discloses to the operator (ADR-0104 §4) — so this is the assertion
+        that the disclosed recipient is the configured one.
+        """
+        SqliteMemoryStore(
+            path=tmp_path / "memory.db", embedder=HashingEmbedder(dimensions=8)
+        ).close()
+        settings = Settings(embedder=EmbedderKind.HASHING, data_dir=tmp_path)
+
+        plan = build_reembedder(settings).plan()
+
+        assert plan.target_model == HashingEmbedder().model_id
+        assert plan.source_model == "hashing-8"
+        assert plan.required

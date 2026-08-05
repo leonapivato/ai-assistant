@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, assert_never
 
 from ai_assistant.context import (
     AssemblingContextProvider,
@@ -856,7 +856,9 @@ def _build_embedder(settings: Settings) -> Embedder:
     production "semantic" recall not actually semantic (roadmap leg 2).
 
     The two realizable modes are the only ones ADR-0024 admits — one vendored model,
-    no arbitrary-model path — so this is a mode switch, not a model resolver:
+    no arbitrary-model path — so this is a mode switch, not a model resolver, and
+    the switch is **exhaustive**: a member with no branch is refused rather than
+    quietly built as the default (#737).
 
     * :attr:`EmbedderKind.ON_DEVICE` → the vendored :class:`FastEmbedEmbedder`.
     * :attr:`EmbedderKind.HASHING` → the deterministic :class:`HashingEmbedder`,
@@ -897,6 +899,20 @@ def _build_embedder(settings: Settings) -> Embedder:
     """
     if settings.embedder is EmbedderKind.HASHING:
         return HashingEmbedder()
+    if settings.embedder is not EmbedderKind.ON_DEVICE:
+        # **Exhaustive, with no fall-through to the default, and the check is
+        # static.** A member with no branch used to land here and be built as the
+        # on-device model — silent, and wrong in the one direction that matters:
+        # `settings.embedder` is privacy-relevant surface now that ADR-0104 §4
+        # refuses an off-device target unless the operator authorises the
+        # whole-store egress, so an authorised selection quietly substituted for a
+        # different embedder would report one recipient and use another. With both
+        # members branched above, `mypy` narrows this to `Never`, so **adding a
+        # member without a branch is a gate failure rather than a runtime
+        # surprise** (#737). The call is the runtime backstop for a `Settings`
+        # built past pydantic's own validation, which is a programming error and
+        # is signalled as one.
+        assert_never(settings.embedder)
 
     # EmbedderKind.ON_DEVICE — the default (ADR-0006 §2). Everything below is
     # imported lazily so the hashing path never pays fastembed's ONNX import.
