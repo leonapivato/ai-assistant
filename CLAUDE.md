@@ -48,7 +48,11 @@ tools/          tool registry + external integrations
 permissions/    policy/permission checks + audit trail
 learning/       feedback capture → memory updates
 orchestration/  the engine wiring the pipeline together (consumes contracts)
+app/            composition root; the only place concretes are wired
+service/        the hub: one resident process per data directory
+wire/           the local API: envelope, framing, codec, client
 interfaces/     thin adapters onto the engine; no business logic
+testing/        canonical fakes for the core Protocols; test-only
 ```
 
 Request pipeline (owned by `orchestration`): intent → context assembly →

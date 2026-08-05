@@ -446,6 +446,14 @@ passes every check and only surfaces as a conflict on the second rebase:
 4. Provider SDKs (`pydantic_ai`, `anthropic`, `openai`, ...) are imported only
    inside `models/`.
 
+**These four are the headline, not the register.** They restate `CLAUDE.md`'s
+golden rules 1, 2 and 4. The register is `pyproject.toml`'s
+`[[tool.importlinter.contracts]]`, where each contract carries its reasoning in
+place — **check a change against `uv run lint-imports`, never against this
+list.** Restating the enforced set here would be a state claim in a living
+document, and the check owns that fact (ADR-0019, "No state claims in living
+documents" below).
+
 Subsystems communicate only through the Protocols in `core/protocols.py`. A
 Protocol change is a breaking change: call it out and add an ADR first.
 
