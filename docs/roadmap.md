@@ -204,7 +204,7 @@ behind the hub's API.
    "decided, and merged".
 5. **The hub.** Decided and built. **ADR-0083 decides the process**: one
    resident instance per data directory, holding an exclusive lock and owning the
-   five databases so that no other process opens them; a fixed startup sequence
+   databases in it so that no other process opens them; a fixed startup sequence
    with readiness signalled last; a two-phase shutdown, bounded where bounding is
    safe and unbounded where it is not; exit codes distinguishing "come back" from
    "stay down"; a refusal to start over state this build would serve *silently

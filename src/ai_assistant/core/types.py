@@ -653,7 +653,7 @@ class Attestation(BaseModel):
             the user and survives into ``export``, so it is not a place for a
             credential or a filesystem path that discloses more than the source's
             identity. Whether a human-facing display label is configured alongside
-            it is the sensor seam's question and is **not** this field; a surface
+            it is the reader seam's question and is **not** this field; a surface
             with no label falls back to this value. Typed :data:`Identifier` — the
             "required, non-empty" ADR-0092 §1 asks for — rather than
             :data:`VisibleIdentifier`, whose tightening is issue #62's for every
