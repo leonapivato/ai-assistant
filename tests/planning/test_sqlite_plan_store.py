@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
-from plan_store_contract import PlanStoreContract, _goal, _plan
+from plan_store_contract import PlanStoreContract, _claim, _goal, _plan
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import PlanningError
@@ -33,7 +33,7 @@ from ai_assistant.testing.cancellation import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
     from pathlib import Path
 
     from ai_assistant.core.protocols import PlanStore
@@ -537,6 +537,127 @@ def test_foreign_keys_are_enforced(tmp_path: Path) -> None:
         # A raw orphan insert — bypassing the app-level check — is refused.
         with pytest.raises(sqlite3.IntegrityError):
             store._conn.execute("INSERT INTO plans(id, goal_id, data) VALUES ('p9', 'ghost', '{}')")
+    finally:
+        store.close()
+
+
+@contextlib.contextmanager
+def _traced(store: SqlitePlanStore) -> Iterator[list[str]]:
+    """Collect every statement the store's connection runs inside the block."""
+    statements: list[str] = []
+    store._conn.set_trace_callback(statements.append)
+    try:
+        yield statements
+    finally:
+        store._conn.set_trace_callback(None)
+
+
+def _assert_one_immediate_transaction(
+    statements: list[str], *, what: str, closes: str = "COMMIT"
+) -> None:
+    """Assert ``what`` ran inside exactly one ``BEGIN IMMEDIATE`` that it closed.
+
+    Three properties, each of which a change to how the transaction is *spelled*
+    can break without breaking any behavioural test:
+
+    * the **first** statement is ``BEGIN IMMEDIATE``, so every read the write
+      depends on sits inside the write lock rather than in front of it — the
+      window #526 is about, which a staged race cannot see because a race can
+      only prove the lock excludes, never *when* it was taken;
+    * exactly **one** ``BEGIN``, since a second on the shared connection raises;
+    * the **last** statement closes it — ``COMMIT``, or ``ROLLBACK`` where the
+      block was left by a refusal — so no arm, an early ``return`` included,
+      abandons an open transaction that would poison the next caller's ``BEGIN``.
+
+    ``SqliteMemoryStore`` has carried the same assertion since #526
+    (``_assert_opens_with_the_write_lock``); this is that pin for this store.
+    """
+    assert statements, f"{what} ran no SQL at all"
+    opened = statements[0].strip()
+    assert opened.upper() == "BEGIN IMMEDIATE", (
+        f"{what} began with {opened!r}. The write lock has to be the *first* "
+        f"statement: a `BEGIN IMMEDIATE` issued any later leaves every read before "
+        f"it outside the transaction, which is the exposure #526 names."
+    )
+    begins = [one for one in statements if one.strip().upper().startswith("BEGIN")]
+    assert len(begins) == 1, f"{what} opened {len(begins)} transactions: {begins}"
+    assert statements[-1].strip().upper() == closes, (
+        f"{what} ended with {statements[-1]!r} rather than {closes}, so it left a "
+        f"transaction open on the shared connection"
+    )
+
+
+async def test_every_transaction_path_opens_and_closes_exactly_one(tmp_path: Path) -> None:
+    """The same assertion over every path that opens a transaction.
+
+    Each reads before it writes — a presence check, an identity comparison, the
+    ordinal counter, a liveness scan — and each read is one #526 says must not be
+    interleavable. Three arms ``return`` from the middle of the block (an
+    idempotent re-save, a delete of an absent goal, a delete blocked by a live
+    execution) and two leave it by raising; both are driven, since an early exit
+    is where an open transaction would be abandoned.
+    """
+    store = SqlitePlanStore(path=tmp_path / "plans.db", now=_fixed_now)
+
+    async def recorded(
+        what: str, run: Callable[[], Awaitable[object]], *, closes: str = "COMMIT"
+    ) -> None:
+        with _traced(store) as statements:
+            if closes == "COMMIT":
+                await run()
+            else:
+                with pytest.raises(PlanningError):
+                    await run()
+        _assert_one_immediate_transaction(statements, what=what, closes=closes)
+
+    try:
+        await recorded("save_goal (insert)", lambda: store.save_goal(_goal()))
+        await recorded("save_goal (update)", lambda: store.save_goal(_goal()))
+        await recorded("save_plan (insert)", lambda: store.save_plan(_plan()))
+        await recorded("save_plan (idempotent re-save)", lambda: store.save_plan(_plan()))
+        await recorded(
+            "save_plan (refused: unknown goal)",
+            lambda: store.save_plan(_plan(plan_id="orphan", goal_id="ghost")),
+            closes="ROLLBACK",
+        )
+        await recorded("start_execution", lambda: store.start_execution("p1"))
+        state = await store.start_execution("p1")
+        await recorded("commit_transition", lambda: store.commit_transition(_claim(state)))
+        await recorded("export", store.export)
+        await recorded("delete_goal (absent)", lambda: store.delete_goal("no-such-goal"))
+        await recorded("delete_goal (blocked by a live step)", lambda: store.delete_goal("g1"))
+        await recorded("clear (refused: a step is live)", store.clear, closes="ROLLBACK")
+        await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.SUCCEEDED,
+                expected_version=state.version + 1,
+            )
+        )
+        await recorded("delete_goal (present)", lambda: store.delete_goal("g1"))
+        await recorded("clear", store.clear)
+    finally:
+        store.close()
+
+
+async def test_a_refusal_inside_a_transaction_leaves_the_store_usable(tmp_path: Path) -> None:
+    """A domain refusal ends the transaction rather than abandoning it open.
+
+    ``save_plan`` raises ``PlanningError`` — not a ``sqlite3.Error`` — from inside
+    the block, which is the arm that has to reach a ``ROLLBACK`` on the way out.
+    The statement stream is asserted above; what this adds is the consequence:
+    the connection is out of its transaction and the next write still lands, since
+    a lingering transaction poisons the following ``BEGIN``.
+    """
+    store = SqlitePlanStore(path=tmp_path / "plans.db", now=_fixed_now)
+    try:
+        await store.save_goal(_goal())
+        with pytest.raises(PlanningError):
+            await store.save_plan(_plan(plan_id="orphan", goal_id="ghost"))
+
+        assert store._conn.in_transaction is False
+        assert await store.save_plan(_plan()) == "p1"  # the store is not poisoned
     finally:
         store.close()
 

@@ -152,6 +152,73 @@ async def test_a_refused_write_leaves_the_trail_untouched(ephemeral: SqliteAudit
     assert len(await ephemeral.export()) == 1
 
 
+@contextlib.contextmanager
+def _traced(trail: SqliteAuditTrail) -> Iterator[list[str]]:
+    """Collect every statement the trail's connection runs inside the block."""
+    statements: list[str] = []
+    trail._conn.set_trace_callback(statements.append)
+    try:
+        yield statements
+    finally:
+        trail._conn.set_trace_callback(None)
+
+
+def _assert_one_immediate_transaction(
+    statements: list[str], *, what: str, closes: str = "COMMIT"
+) -> None:
+    """Assert ``what`` ran inside exactly one ``BEGIN IMMEDIATE`` that it closed.
+
+    Three properties, each of which a change to how the transaction is *spelled*
+    can break without breaking any behavioural test:
+
+    * the **first** statement is ``BEGIN IMMEDIATE``, so the duplicate-id and
+      resolution checks sit inside the write lock rather than in front of it —
+      the window #526 is about, which a staged race cannot see, because a race
+      can only prove the lock excludes, never *when* it was taken;
+    * exactly **one** ``BEGIN``, since a second on the shared connection raises;
+    * the **last** statement closes it — ``COMMIT``, or ``ROLLBACK`` where the
+      block was left by a refusal — so no arm abandons an open transaction that
+      would poison the next caller's ``BEGIN``.
+
+    ``SqliteMemoryStore`` has carried the same assertion since #526
+    (``_assert_opens_with_the_write_lock``); this is that pin for this store.
+    """
+    assert statements, f"{what} ran no SQL at all"
+    opened = statements[0].strip()
+    assert opened.upper() == "BEGIN IMMEDIATE", (
+        f"{what} began with {opened!r}. The write lock has to be the *first* "
+        f"statement: a `BEGIN IMMEDIATE` issued any later leaves every read before "
+        f"it outside the transaction, which is the exposure #526 names."
+    )
+    begins = [one for one in statements if one.strip().upper().startswith("BEGIN")]
+    assert len(begins) == 1, f"{what} opened {len(begins)} transactions: {begins}"
+    assert statements[-1].strip().upper() == closes, (
+        f"{what} ended with {statements[-1]!r} rather than {closes}, so it left a "
+        f"transaction open on the shared connection"
+    )
+
+
+async def test_recording_opens_and_closes_exactly_one_immediate_transaction(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """Both arms of ``record``: the append, and the refusal that leaves it early.
+
+    The refusal is the one that matters structurally — ``DuplicateDecisionError``
+    is not a ``sqlite3.Error``, so it leaves the block by an exception the
+    transaction still has to be closed on the way out of.
+    """
+    with _traced(ephemeral) as statements:
+        await ephemeral.record(decision("d-1"))
+    _assert_one_immediate_transaction(statements, what="record")
+
+    with _traced(ephemeral) as statements, pytest.raises(DuplicateDecisionError):
+        await ephemeral.record(decision("d-1"))
+    _assert_one_immediate_transaction(statements, what="record (refused)", closes="ROLLBACK")
+
+    assert ephemeral._conn.in_transaction is False
+    assert await ephemeral.record(decision("d-2")) == "d-2"  # the trail is not poisoned
+
+
 async def test_the_refusals_share_one_catchable_base(ephemeral: SqliteAuditTrail) -> None:
     """A caller that only wants "the trail would not accept this" gets one handler."""
     await ephemeral.record(decision("d-1"))
