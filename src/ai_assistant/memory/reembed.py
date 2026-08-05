@@ -238,6 +238,24 @@ def _count(conn: sqlite3.Connection, table: str, what: str) -> int:
     return int(count)
 
 
+def _as_int(value: str, what: str) -> int:
+    """Read a number out of a store's ``meta``, as this seam's error rather than a crash.
+
+    Every value in ``meta`` is text somebody could have edited, and the console
+    tool above this maps ``AssistantError`` to an exit code and lets anything else
+    become a traceback. A store whose ``dimensions`` says ``'unknown'`` is a store
+    this build cannot reason about, which is a thing to *report*, not to fall over.
+
+    Raises:
+        MemoryStoreError: If the value is not an integer.
+    """
+    try:
+        return int(value)
+    except ValueError as exc:
+        msg = f"{what} is {value!r}, which is not a number"
+        raise MemoryStoreError(msg) from exc
+
+
 def _decode(data: str, record_id: object) -> MemoryRecord:
     """Decode a stored record, naming the row when it will not decode.
 
@@ -427,7 +445,7 @@ class Reembedder:
             work=self._work,
             backup=self._backup,
             source_model=source_model,
-            source_dimensions=int(source_dimensions),
+            source_dimensions=_as_int(source_dimensions, f"the dimension {self._store} records"),
             target_model=self._embedder.model_id,
             target_dimensions=self._embedder.dimensions,
             records=records,
@@ -456,6 +474,10 @@ class Reembedder:
             )
             if not (continuable and same_target):
                 return 0
+            # Parsed here rather than trusted at resume time: an unreadable cursor
+            # makes the work store unusable, and discarding it is this method's own
+            # answer to every other way it can be unusable.
+            _as_int(meta[_CURSOR_KEY], f"the cursor {self._work} records")
             return _count(conn, "records", str(self._work))
         except MemoryStoreError:
             return 0
@@ -486,6 +508,7 @@ class Reembedder:
         if not plan.required:
             return ReembedOutcome(plan=plan, embedded=0, resumed=0, swapped=False)
         resumed = plan.resumable
+        started = _fingerprint(self._store)
         cursor = self._prepare_work(resumed)
         source = _connect(self._store)
         try:
@@ -498,7 +521,7 @@ class Reembedder:
                 work.close()
         finally:
             source.close()
-        self._swap()
+        self._swap(started)
         return ReembedOutcome(plan=plan, embedded=embedded, resumed=resumed, swapped=True)
 
     def _prepare_work(self, resumed: int) -> int:
@@ -512,7 +535,8 @@ class Reembedder:
         if resumed:
             conn = _connect(self._work)
             try:
-                return int(_read_meta(conn, str(self._work))[_CURSOR_KEY])
+                cursor = _read_meta(conn, str(self._work))[_CURSOR_KEY]
+                return _as_int(cursor, f"the cursor {self._work} records")
             finally:
                 conn.close()
         _discard(self._work)
@@ -589,8 +613,8 @@ class Reembedder:
                 (_CURSOR_KEY, _SOURCE_KEY),
             )
 
-    def _swap(self) -> None:
-        """Retain the original, then move the verified store into place.
+    def _swap(self, started: str) -> None:
+        """Re-check the source, retain it, then move the verified store into place.
 
         Both connections are closed by the time this runs, and the store was
         cleared of sidecars and of WAL mode before any of the work started
@@ -600,11 +624,31 @@ class Reembedder:
         store intact and a hard link to it that the next run recognises as its
         own (ADR-0104 §3).
 
+        **The source is fingerprinted once more first**, and that is a narrowing
+        rather than a guarantee. Verification and the rename are two steps, and
+        anything writing to the live store between them would have its write
+        thrown away by the rename with nothing reporting it. The instance lock
+        stops the hub, but it is advisory — ADR-0083 §10 says so — so it does not
+        stop a ``sqlite3`` shell somebody left open on their own machine, which is
+        the case this actually catches. What is left is the gap between this stat
+        and the rename below, which is microseconds rather than the length of a
+        full re-read.
+
+        Args:
+            started: The source's fingerprint when the run began.
+
         Raises:
             IncompatibleStateError: If the retained-original path names something
                 that is not this store.
-            MemoryStoreError: If the link or the rename fails.
+            MemoryStoreError: If the source changed while the copy was built, or
+                the link or the rename fails.
         """
+        if _fingerprint(self._store) != started:
+            msg = (
+                f"{self._store} changed while the re-embedded store was being built, so "
+                f"the re-embedded store is missing that change and was not swapped in"
+            )
+            raise MemoryStoreError(msg)
         self._retain()
         try:
             self._work.replace(self._store)

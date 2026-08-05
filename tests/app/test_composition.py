@@ -1656,8 +1656,13 @@ class TestBuildReembedder:
         settings = Settings(embedder=EmbedderKind.HASHING, data_dir=tmp_path)
         cloud = settings.model_copy(update={"embedder": _CloudKind.CLOUD})
 
-        # The flag lifts the §4 refusal and nothing else: what comes back is an
-        # ordinary migration against ``<data_dir>/memory.db``.
+        # What is on test is the *refusal being lifted* and nothing more. It does
+        # not assert which embedder was built, and it must not: `_build_embedder`
+        # dispatches `HASHING` and treats every other value as the on-device
+        # default, so an unrecognised kind silently becomes `FastEmbedEmbedder`.
+        # That is a pre-existing gap in a function this change does not touch, it
+        # is unreachable while both members are dispatched correctly, and it is
+        # filed as #737 rather than widened into here.
         reembedder = build_reembedder(cloud, upload_entire_memory_store=True)
 
         assert reembedder.store == tmp_path / "memory.db"

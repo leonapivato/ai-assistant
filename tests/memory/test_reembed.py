@@ -29,10 +29,12 @@ from ai_assistant.core.types import (
     Validity,
 )
 from ai_assistant.memory import SqliteMemoryStore
+from ai_assistant.memory import reembed as reembed_module
 from ai_assistant.memory.reembed import (
     BACKUP_SUFFIX,
     WORK_SUFFIX,
     Reembedder,
+    ReembedPlan,
 )
 from ai_assistant.models import HashingEmbedder
 
@@ -563,3 +565,85 @@ async def test_an_empty_store_migrates_to_the_new_tag(tmp_path: Path) -> None:
     assert outcome.swapped
     assert outcome.embedded == 0
     assert _meta(store) == {"embedding_model": target.model_id, "dimensions": str(_NEW)}
+
+
+async def test_a_store_with_unreadable_metadata_is_reported_not_a_traceback(
+    tmp_path: Path,
+) -> None:
+    """Every ``meta`` value is text somebody could have edited (review round 1)."""
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record("a", "espresso")])
+    conn = sqlite3.connect(str(store))
+    try:
+        conn.execute("UPDATE meta SET value = 'unknown' WHERE key = 'dimensions'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(MemoryStoreError, match="not a number"):
+        Reembedder(store=store, embedder=HashingEmbedder(dimensions=_NEW)).plan()
+
+
+async def test_a_work_store_with_an_unreadable_cursor_is_discarded(tmp_path: Path) -> None:
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record(str(index), f"memory {index}") for index in range(4)])
+
+    broken = _CountingEmbedder(fail_after=2)
+    with pytest.raises(MemoryStoreError, match="embedder failed"):
+        await Reembedder(store=store, embedder=broken, batch_size=2).run()
+
+    work = tmp_path / f"memory.db{WORK_SUFFIX}"
+    conn = sqlite3.connect(str(work))
+    try:
+        conn.execute("UPDATE meta SET value = 'halfway' WHERE key = 'reembed_cursor'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Unusable is unusable: the work store is discarded, exactly as it is when its
+    # target or its source fingerprint does not match.
+    outcome = await Reembedder(store=store, embedder=_CountingEmbedder(), batch_size=2).run()
+
+    assert outcome.resumed == 0
+    assert outcome.embedded == 4
+
+
+async def test_a_source_written_after_verification_is_not_swapped_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gap between the re-read and the rename, narrowed (review round 1, finding 2).
+
+    The instance lock stops the hub but is advisory (ADR-0083 §10), so it does not
+    stop a ``sqlite3`` shell left open on the same machine. A write landing in this
+    window would otherwise be thrown away by the rename with nothing reporting it.
+    """
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record("a", "espresso")])
+    verify = reembed_module._verify
+
+    def _verify_then_write(
+        source: sqlite3.Connection,
+        work: sqlite3.Connection,
+        plan: ReembedPlan,
+        embedder: Embedder,
+    ) -> None:
+        verify(source, work, plan, embedder)
+        late = _record("late", "written behind the lock's back")
+        interloper = sqlite3.connect(str(store))
+        try:
+            interloper.execute(
+                "INSERT INTO records(id, kind, data) VALUES (?, ?, ?)",
+                (late.id, late.kind, late.model_dump_json()),
+            )
+            interloper.commit()
+        finally:
+            interloper.close()
+
+    monkeypatch.setattr(reembed_module, "_verify", _verify_then_write)
+
+    with pytest.raises(MemoryStoreError, match="changed while the re-embedded store"):
+        await Reembedder(store=store, embedder=HashingEmbedder(dimensions=_NEW)).run()
+
+    # The write survived, and the live store was not replaced by a copy missing it.
+    assert _meta(store)["dimensions"] == str(_OLD)
+    assert len(_read(store, "SELECT rowid FROM records")) == 2
