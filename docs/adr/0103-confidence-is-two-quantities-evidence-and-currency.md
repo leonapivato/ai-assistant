@@ -227,8 +227,9 @@ is exactly that kind of question.
 > record but its `evidence` and its effect on currency: the surviving record keeps
 > the target's `source`, `attestation`, content and evidence-strength, its
 > evidence is unioned under ADR-0086 §3's bound, and its currency is measured from
-> the more recent of the two records' confirming instants (§9) — never from the
-> moment of the fold.
+> the later of the two records' confirming instants — from whichever one is
+> available where only one is, and as **unknown** only where neither is (§9). It is
+> never measured from the moment of the fold.
 > The clause governs how such a fold folds and authorises none: a fold the writer
 > boundary refuses stays refused (ADR-0045 §5). Every other pairing is left as it
 > stands.
@@ -248,6 +249,17 @@ belief confirmed in June on the strength of a January observation, and would do 
 by a route §9 closes for a derived record standing on its own. The fold is not a
 third kind of evidence — it is the moment two records are recognised as agreeing,
 and the agreement is only ever as recent as the observation behind it.
+
+**An unknown on one side does not spread to the survivor**, and the composition
+rule says so rather than leaving "the later of two instants" to mean something
+when one of them is not an instant. Either input can be unknown — a legacy record,
+or an `ATTESTED` one whose source clock runs ahead — and unknown means "we cannot
+measure this one", not "this one argues against freshness". A confirmation we *do*
+hold is not unmade by a second record we cannot date, so the survivor takes the
+known instant, and reads unknown only when it holds neither. The opposite rule —
+unknown whenever either side is — would let one undatable record erase a
+perfectly good confirmation, which is the same manufactured staleness §9's third
+constraint refuses on the migration path.
 
 **The clause is keyed on both bands, and that is deliberate rather than
 economical.** The pairings are enumerable, and stating the rule as "a `DERIVED`
