@@ -107,6 +107,14 @@ schema's first version, so a store predating `expires_at`, `valid_until` or
 and the clause above forbids that. A store carrying a hashing tag is by
 definition an old store, so this is the ordinary case and not a corner.
 
+**Every row is copied, expired ones included**, and the read filters stay where
+they are. [ADR-0103](0103-confidence-is-two-quantities-evidence-and-currency.md)
+§1 binds every leg 7 decision — none of them may "delete, expire, elide or weaken
+a belief, or the evidence behind a belief, in order to reclaim storage" — and a
+migration that quietly dropped what `search` would not have returned would be
+doing exactly that under cover of a reindex. Re-embedding changes how records are
+found, and nothing about which of them the store holds.
+
 **Re-embedding reads content, never the old vectors**, which is what makes the
 source embedder unnecessary — and therefore what lets a deployment migrate *off*
 an embedder it can no longer construct at all.
@@ -203,6 +211,12 @@ the mount rather than a fault of the run — and past the rename the migration
 carries the new tag, would go looking for a store that no longer exists. So the
 two facts are reported separately: the swap succeeded, and its durability could
 not be confirmed until the filesystem next syncs.
+
+Retaining it is also the only reading ADR-0103 §1 leaves open. A migration that
+deleted the pre-migration store to save a copy's worth of disk would be removing
+the evidence behind every belief in it for no warrant other than store size,
+which that clause forbids in as many words. The disk cost is named in the
+Consequences instead, where it belongs.
 
 The retained original is not belt-and-braces for the swap — the swap is atomic —
 it is for the case verification cannot cover: a target embedder that turns out to
@@ -316,7 +330,8 @@ make the §4 refusal unreachable in the one case it exists for.
 - **Disk.** The migration needs room for a second copy of the store while it
   runs, and leaves a third — the retained original — until the operator deletes
   it. For a personal store of text plus vectors this is the right trade against
-  the alternative, which is a rewrite that can corrupt.
+  the alternative, which is a rewrite that can corrupt, and ADR-0103 §1 rules out
+  buying the space back by dropping anything.
 - **Time is not bounded and is not meant to be.** The cost is one on-device
   embedding per record, and §2 is the answer to the length rather than an attempt
   to shorten it. Progress is reported as it goes, so an operator can tell a slow
@@ -331,6 +346,12 @@ make the §4 refusal unreachable in the one case it exists for.
   moves it — work in `models/` on ADR-0006 §4's *detection* half. This ADR decides
   the *remedy* half. They meet only in that a sharper `model_id` makes this
   migration fire more often and correctly.
+- **Nothing in ADR-0103 is disturbed.** Its §1 governs this decision and this
+  decision complies: every row is copied, the original is retained, and the only
+  thing this ADR discards is migration scaffolding. Its §2's split of confidence
+  into evidence-strength and currency lives inside each record's JSON, which §1
+  above copies verbatim, so a store migrated by this tool carries whatever the
+  fold semantics wrote and this migration has no opinion about it.
 - **Revisit if** exclusivity is relaxed (ADR-0083 §12's condition), which would
   make the instance lock insufficient to serialise this tool against the hub; if a
   cloud `Embedder` is implemented, which is when §4 stops being hypothetical and
