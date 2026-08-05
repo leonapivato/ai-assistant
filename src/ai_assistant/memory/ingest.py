@@ -882,11 +882,25 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     **Currency is not written here, because nothing represents it yet.** ADR-0103
     §6's third contribution — that the survivor's currency is measured from the
     later of the two records' usable confirming instants — is a rule about a
-    quantity §9 leaves to a lane with a consumer to read it, and this fold does not
-    lose the input that rule needs: the derived record's confirming instant is the
-    latest ``occurred_at`` among the episodes it cites (§9), and those citations are
-    exactly what the union retains, newest-appended and therefore the last to be
-    displaced by the bound.
+    quantity ADR-0103 §9's first clause leaves to a lane with a consumer to read
+    it, and it is not one this fold could honour under its own steam: the derived
+    record's confirming instant is the latest ``occurred_at`` among the episodes it
+    cites (§9), those instants live on the *episodes* rather than on the
+    ``Provenance`` in hand, and this function has no store to read them from. What
+    the fold does instead is keep the input that rule reads — the citations
+    themselves, appended last to the union and so the last to be displaced.
+
+    **That retention is not total, and the limit is ADR-0086's rather than this
+    ruling's.** Where the incoming record alone carries more than
+    :data:`MAX_EVIDENCE_CITATIONS`, its own oldest-accumulated citations are
+    displaced, and accumulation order is not ``occurred_at`` order — so the
+    displaced one can be the episode carrying the latest instant. The bound bites
+    identically on both arms and on every fold before this change, ADR-0103 §1
+    names ADR-0086 §1's citation bound as one it does not disturb, and §9 defines a
+    derived belief's confirming instant over "the episodes ``Provenance.evidence``
+    cites" — the retained ones. Whether a currency implementation needs the instant
+    computed *before* the bound applies is that lane's question, recorded on #744
+    with this case.
 
     **The union is bounded here, before the ``Provenance`` is constructed**, so
     the constructor's validators run on the value that is stored — the surrounding
