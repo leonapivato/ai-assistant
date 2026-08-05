@@ -356,6 +356,13 @@ def test_a_corpus_with_no_gaps_says_so_rather_than_omitting_the_line(tmp_path: P
     A reader comparing two runs sees the width change in a fixed place; a line
     that appeared only when non-empty would make "no gaps" and "the checker
     stopped reporting them" the same output.
+
+    **Asserted in both human formats, not just one.** The two renderers share
+    ``_gap_numbers`` and each extends its lines unconditionally, so covering one
+    covers the other only for as long as that sharing survives — and it is the
+    markdown that CI publishes to the job summary, which is where the revisit
+    signal has a reader at all. Transitive coverage is exactly the shape that
+    outlives the refactor it was resting on (#619).
     """
     _make_repo(tmp_path, {"0002-two.md": "# 2. Two\n", "0003-three.md": "# 3. Three\n"})
 
@@ -363,6 +370,9 @@ def test_a_corpus_with_no_gaps_says_so_rather_than_omitting_the_line(tmp_path: P
 
     assert report["gaps"] == []
     assert "Gaps in the issued ADR set (0): none." in _rendered(tmp_path, "text", "--no-tracker")
+    assert "Gaps in the issued ADR set (**0**): none." in _rendered(
+        tmp_path, "markdown", "--no-tracker"
+    )
 
 
 # --------------------------------------------------------------------------- #
