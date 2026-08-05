@@ -697,10 +697,14 @@ scheduling choice.
 
 **The `MemoryPolicy` contract grows an obligation, so the core PR is larger than one
 field.** It touches `core/protocols.py` and `MemoryPolicyContract` as well as
-`core/types.py`, and every existing `MemoryPolicy` implementation — the default and
-the canonical fake — must pass the widened suite. Both pass it today without change,
-because no proposal they can receive carries the field; the cost is the suite entry
-and the fake's own conformance run, not a behavioural edit.
+`core/types.py`, and every existing `MemoryPolicy` implementation must pass the
+widened suite — which means **both** of them change, the canonical
+`FakeMemoryPolicy` as much as `DefaultMemoryPolicy`. A fake configured to return
+`ACCEPT` returns it for a tainted unconfirmed proposal too; its secret-tier override
+does not reach that input, and the suite's new case will hand it one. So the
+contract PR gives the fake the same non-committing override and tests it, and the
+lane should budget for that rather than discovering it when its own conformance run
+fails.
 
 **A `bool` will feel too coarse the first time someone asks "from which source?"**
 and the answer will be to discharge ADR-0098 §8's second clause rather than to widen
