@@ -181,10 +181,34 @@ so plainly is what keeps the marker minimal.
 > record asserts nothing. It is `core/types.py` surface and lands as its own contract
 > PR ahead of any consumer (golden rule 5, ADR-0068 §2).
 
-> **Normative.** §1's predicate lands beside `band_of` as a pure function of a
-> `Provenance` in `core/types.py`. Every consumer asking "does this rest on recorded
-> external content?" calls it; none reads `derived_from_external` directly for that
-> question. §3's disjunction is over the predicate, not over the field.
+> **Normative.** §1's predicate lands beside `band_of` in `core/types.py` as
+> `rests_on_recorded_external_content(provenance: Provenance) -> bool`, returning
+> `True` exactly when `band_of(provenance.source)` is `BeliefBand.ATTESTED` or
+> `provenance.derived_from_external` is `True`. Every consumer asking "does this rest
+> on recorded external content?" calls it; none reads `derived_from_external`
+> directly for that question. §3's disjunction and §10's tests are over this
+> function, not over the field.
+
+The shape, stated as ADR-0072 §2 stated `band_of`'s rather than left to the lane:
+
+```python
+def rests_on_recorded_external_content(provenance: Provenance) -> bool:
+    """Whether a record's warrant traces to recorded external content (ADR-0106 §1).
+
+    Not a claim about influence: it reports what was recorded, never what a
+    model may have read (ADR-0098 §5).
+    """
+    return (
+        band_of(provenance.source) is BeliefBand.ATTESTED
+        or provenance.derived_from_external
+    )
+```
+
+**It takes a `Provenance` rather than a `MemorySource`**, which is the one place it
+departs from `band_of`, and the departure is forced: the predicate needs both the
+source and the field, and `Provenance` is the object that holds them. It stays a pure
+function of an immutable value, so ADR-0068 is undisturbed exactly as ADR-0072 §2
+noted for `band_of`.
 
 > **Normative.** The field carries no `Attestation` and names no source. Which
 > source a derived belief traces to is ADR-0098 §8's second clause, undischarged
@@ -267,9 +291,9 @@ recorded, and name what is not.
 
 > **Normative.** For a model-backed producer, `derived_from_external` on its
 > proposals is computed by the component that **selected the input set**, as the
-> disjunction of §1's predicate over those inputs, and written onto the proposal
-> before it reaches the `MemoryWriter`. Any value the producer itself emitted for
-> the field is discarded, not merged.
+> disjunction of `rests_on_recorded_external_content` (§2) over those inputs, and
+> written onto the proposal before it reaches the `MemoryWriter`. Any value the
+> producer itself emitted for the field is discarded, not merged.
 
 **This is ADR-0098 §4's third clause, one step further along the same path.** That
 clause put the marking of a mixed-origin payload on `orchestration` rather than on
@@ -726,10 +750,10 @@ dispatch plan costs a lane, and this one has already been inherited twice.
 ### 10. What the implementing lanes owe
 
 > **Normative.** The lane landing `derived_from_external` on `Provenance` ships a
-> test that a record decoded without the field reads `False`, and a test that §1's
-> predicate returns **true** for an `ATTESTED` record whose `derived_from_external`
-> is `False`. The second is what fails an implementation that reads the field where
-> it should call the predicate.
+> test that a record decoded without the field reads `False`, and a test that
+> `rests_on_recorded_external_content` returns **true** for an `ATTESTED` record
+> whose `derived_from_external` is `False`. The second is what fails an
+> implementation that reads the field where it should call the predicate.
 
 > **Normative.** The same lane states §6's ceiling on the `MemoryPolicy` Protocol
 > and adds it to `MemoryPolicyContract`, in the same change as the field. The
