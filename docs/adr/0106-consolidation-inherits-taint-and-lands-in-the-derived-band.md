@@ -315,16 +315,40 @@ returning "a fabricated `REJECT`", "because a ruling is the policy's to make
 (ADR-0005 §3) and a writer inventing one puts a decision nobody made into the ingest
 result". The same sentence reads on an upgrade as on a refusal.
 
-**An `ASK_USER` ruling is not a black hole on this path, and that is checked rather
-than assumed.** ADR-0098 §8 warns that "a ruling made on the ingestion path reaches
-nobody at all" because `Engine.ingest`'s result reaches no adapter, and §10 says a
-later ADR wanting to report a capped or refused proposal "would hit #659's wall
-first". This clause does not hit that wall, because `ASK_USER` does not merely report
-— it writes a durable `DeferredProposal` into a `DeferralStore` that exposes
-`pending`, `interrupted` and `export`. The question survives the job that raised it
-and is enumerable afterwards. #659 remains open and remains about the *report* of a
-ruling; nothing here discharges it, and a lane that wanted to tell the user "a
-consolidation was refused" would still hit it.
+> **Normative.** A consolidator reaches the store through the orchestration write
+> stage, never through `MemoryWriter.ingest` directly.
+
+**Without that clause the ruling of §6 is a black hole, and an earlier draft of this
+section asserted the opposite.** That draft said `ASK_USER` "does not merely report —
+it writes a durable `DeferredProposal`", which is false at the writer.
+`MemoryIngestor` states it in its own words: "`REJECT` and `ASK_USER` write nothing
+at all." ADR-0078 §3 rules where the durability actually comes from — "`MemoryWriter.ingest`
+… does not change, and does not learn to queue … Instead the **orchestration write
+stage** — which already holds the `MemoryWriter` by injection and now also holds the
+`DeferralStore` — observes `result.decision.kind is ASK_USER` and enqueues" — and
+`orchestration.MemoryWriteStage` is documented as "the one place a proposal" takes
+that route. A scheduled job that called the writer directly, which is the convenient
+thing for a scheduler to do, would rule `ASK_USER` on a thousand consolidations and
+persist not one question. Adversarial review found the claim on round 1; the
+correction is the clause above, because the property has to be *obliged* rather than
+assumed.
+
+**With it, this section does not hit #659's wall.** ADR-0098 §8 warns that "a ruling
+made on the ingestion path reaches nobody at all" because `Engine.ingest`'s result
+reaches no adapter, and §10 says a later ADR wanting to report a capped or refused
+proposal "would hit that wall first". The write stage's enqueue is not a report: it
+writes a `DeferredProposal` into a `DeferralStore` exposing `pending`, `interrupted`
+and `export`, so the question outlives the job that raised it and is enumerable
+afterwards. #659 remains open and remains about the *report* of a ruling; nothing
+here discharges it, and a lane that wanted to tell the user "a consolidation was
+refused" would still hit it.
+
+**One case the stage already excludes, named so the consolidation lane does not
+rediscover it.** ADR-0078 §3 filters a `DataTier.SECRET` proposal out before `defer`,
+so its `ASK_USER` is reported and nothing is persisted. A consolidation over secret
+material therefore terminates in a refusal that reaches nobody — which is correct
+under §6's first clause (nothing lands) and is #659's channel problem, not a licence
+to route around the stage.
 
 **The cost is named rather than minimised.** A store holding a lot of external
 material will produce a lot of questions, and a scheduled consolidator can generate
@@ -428,11 +452,34 @@ dispatch plan costs a lane, and this one has already been inherited twice.
 > **when the producer's own output omitted it** (§3), and a test that the gate's
 > terminal ruling on it is `ASK_USER` or `REJECT` (§6).
 
-The second clause names the producer-omits case specifically because a test that
-only exercises a cooperative producer passes against a fail-open implementation. It
-is the same discipline ADR-0098 §9 imposed on the prompt-assembly lane, whose clause
-insists on rendering "a record whose `content` contains that assembler's own
-container syntax" rather than merely asserting a label is present.
+> **Normative.** The same lane ships a test whose only tainted input is a `DERIVED`
+> record carrying `derived_from_external`, asserting the proposal reaches the gate
+> tainted. A selection step that computes the marker from the input's *band* alone
+> satisfies the clause above and fails this one.
+
+> **Normative.** The same lane ships a test in which every selected input is
+> untainted and the producer emits `derived_from_external=True`, asserting the
+> proposal reaching the gate carries `False` (§3's discard-not-merge).
+
+> **Normative.** The same lane ships an end-to-end test that a tainted consolidation
+> routed through the orchestration write stage leaves a `DeferredProposal`
+> enumerable from the `DeferralStore` afterwards (§6). A test that stops at the
+> policy's ruling does not satisfy this clause.
+
+**Four clauses rather than one, because three of the four failures pass the first.**
+The producer-omits case is named because a test that only exercises a cooperative
+producer passes a fail-open implementation. The `DERIVED`-input case is the one that
+makes "inherits" mean anything past a single hop: an implementation checking
+`source is EXTERNAL` and nothing else is fail-open against exactly the second-order
+consolidation §4's monotonicity exists to stop, and it is invisible to a test whose
+tainted input is attested. The producer-emits case is the mirror, and its failure is
+merely noisy rather than unsafe — a merging implementation raises spurious questions
+— but §3 states discard as an obligation and an unwitnessed obligation decays. The
+end-to-end case is the one that would have caught this ADR's own round-1 defect
+(§6): the ruling was right and the question reached nobody. This is the discipline
+ADR-0098 §9 imposed on the prompt-assembly lane, whose clause insists on rendering
+"a record whose `content` contains that assembler's own container syntax" rather
+than merely asserting a label is present — the test has to be able to fail.
 
 Unmarked, and owed by nobody as an obligation: the observer is unaffected. Its
 payload holds episodes and nothing else (ADR-0077 §1, §3), no episode is `EXTERNAL`
@@ -467,6 +514,10 @@ differently or read one of its clauses more widely.
 - **ADR-0086 §2, §3, §4.** Relied on as the reason the citation tuple cannot carry
   taint, and as the test that refuses a validator. Neither is read more widely.
   **Addition.**
+- **ADR-0078 §3.** Relied on exactly as written: §6's routing clause obliges a new
+  producer to use the write stage that §3 already designates as the enqueue point,
+  and takes no ruling about what that stage does. §3's `DataTier.SECRET` filter is
+  named rather than narrowed. **Addition.**
 - **ADR-0022 §4 and ADR-0081 §8.** Named in §9 as constraints on a *different* lane,
   with no ruling taken over either. **Addition.**
 - **ADR-0103.** §8 above declines to touch it in either direction. **Addition.**
