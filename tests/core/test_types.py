@@ -792,6 +792,122 @@ def test_proposal_defaults_to_personal_sensitivity() -> None:
     assert proposal.sensitivity is DataTier.PERSONAL
 
 
+# --- the subject axis: whom a belief is about (ADR-0100) ---------------------
+
+
+def _believed(subject: str | None = None) -> SemanticMemory:
+    """One well-formed semantic record, varying only its stated subject."""
+    return SemanticMemory(
+        id="r1",
+        content="prefers a window seat",
+        fact="prefers a window seat",
+        about_person=subject,
+        provenance=Provenance(
+            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_WHEN
+        ),
+    )
+
+
+def test_a_record_states_no_subject_by_default() -> None:
+    """``None`` is "no subject stated", which ADR-0100 §3 reads as the owner's.
+
+    Not "unknown", and not a spelling of the owner: there is no user identity in
+    this system to name them by (ADR-0036 §3, ADR-0097 §1), so the absence is the
+    owner's only spelling and a second one could never be reconciled with it.
+    """
+    assert _believed().about_person is None
+
+
+def test_a_stated_subject_is_kept_byte_for_byte() -> None:
+    """A label is stored exactly as given (ADR-0100 §6).
+
+    Surrounding whitespace is the case that matters, because it is the one a
+    validator is most tempted to tidy: :data:`Identifier` strips, and this field
+    must not. Verbatim storage is what leaves every later matching rule available
+    — none can be recovered from labels normalised on the way in.
+    """
+    assert _believed("  Marta  ").about_person == "  Marta  "
+
+
+def test_two_spellings_of_one_name_are_two_subjects() -> None:
+    """Nothing in this type resolves a label to a person (ADR-0100 §6).
+
+    ``"Marta"`` and ``"marta"`` are two subjects to every piece of code in the
+    system until ADR-0101's matching rule is implemented — a cost paid
+    deliberately, in the one place it can be paid off later without rewriting
+    stored data.
+    """
+    assert _believed("Marta").about_person != _believed("marta").about_person
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_a_record_refuses_a_blank_subject(blank: str) -> None:
+    """Two states, never three (ADR-0100 §1).
+
+    A record stating ``""`` as its subject is a producer that meant to speak and
+    said nothing, and it must not be representable — ADR-0092 §2's discipline for
+    making half-states unconstructable, applied to a single datum.
+    """
+    with pytest.raises(ValidationError, match="must not be blank"):
+        _believed(blank)
+
+
+def test_the_subject_enters_a_proposal_fingerprint() -> None:
+    """A belief about Marta is not the same offer as one about the owner.
+
+    ``proposal_fingerprint`` projects the whole record minus three bookkeeping
+    fields, so the subject enters it with no change to that projection —
+    deliberately (ADR-0100 §1): the two are different things to be asked to
+    accept, exactly as ADR-0078 §7 argues of ``validity``.
+    """
+    owners = MemoryUpdateProposal(proposed=_believed(), rationale="because")
+    martas = MemoryUpdateProposal(proposed=_believed("Marta"), rationale="because")
+
+    assert owners.proposal_fingerprint != martas.proposal_fingerprint
+
+
+def test_a_feedback_event_states_no_subject_by_default() -> None:
+    event = FeedbackEvent(
+        kind=FeedbackKind.PREFERENCE,
+        memory_kind=MemoryKind.PREFERENCE,
+        content="prefers a window seat",
+        created_at=_WHEN,
+    )
+    assert event.about_person is None
+
+
+def test_a_feedback_event_keeps_its_scope_and_its_subject_apart() -> None:
+    """``subject`` is a preference scope; ``about_person`` is whom it is about.
+
+    Side by side on one type is the clearest statement that they are two axes
+    (ADR-0100 §7), and the older field keeps its name and its meaning — no lane
+    may rename it on ADR-0100's authority (#688).
+    """
+    event = FeedbackEvent(
+        kind=FeedbackKind.PREFERENCE,
+        memory_kind=MemoryKind.PREFERENCE,
+        content="prefers a window seat",
+        subject="travel",
+        about_person="Marta",
+        created_at=_WHEN,
+    )
+
+    assert event.subject == "travel"
+    assert event.about_person == "Marta"
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_a_feedback_event_refuses_a_blank_subject(blank: str) -> None:
+    with pytest.raises(ValidationError, match="must not be blank"):
+        FeedbackEvent(
+            kind=FeedbackKind.PREFERENCE,
+            memory_kind=MemoryKind.PREFERENCE,
+            content="prefers a window seat",
+            about_person=blank,
+            created_at=_WHEN,
+        )
+
+
 # --- ADR-0068: the memory record graph is frozen all the way down -------
 
 

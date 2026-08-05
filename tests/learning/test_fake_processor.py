@@ -34,12 +34,13 @@ if TYPE_CHECKING:
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def _event(
+def _event(  # noqa: PLR0913 — one keyword per event field a case may need to vary
     *,
     kind: FeedbackKind = FeedbackKind.PREFERENCE,
     memory_kind: MemoryKind = MemoryKind.PREFERENCE,
     content: str = "prefers concise replies",
     subject: str | None = None,
+    about_person: str | None = None,
     evidence: tuple[str, ...] = (),
 ) -> FeedbackEvent:
     return FeedbackEvent(
@@ -47,6 +48,7 @@ def _event(
         memory_kind=memory_kind,
         content=content,
         subject=subject,
+        about_person=about_person,
         evidence=evidence,
         created_at=_WHEN,
     )
@@ -112,6 +114,25 @@ async def test_synthesises_a_typed_record_for_every_memory_kind() -> None:
     for memory_kind, record_type in expected.items():
         [proposal] = await FakeFeedbackProcessor().process(_event(memory_kind=memory_kind))
         assert isinstance(proposal.proposed, record_type)
+
+
+@pytest.mark.parametrize(
+    "memory_kind",
+    [MemoryKind.PREFERENCE, MemoryKind.SEMANTIC, MemoryKind.PROCEDURAL, MemoryKind.EPISODIC],
+)
+async def test_a_stated_subject_reaches_every_kind(memory_kind: MemoryKind) -> None:
+    """``about_person`` is on the envelope, so no kind lacks somewhere to put it.
+
+    Where ``subject`` reaches only the two kinds that have room for a *scope*,
+    the subject axis reaches all four — the axes' own asymmetry (ADR-0100 §7),
+    and what keeps ``_derived_id``'s reasoning true: every field of the event
+    reaches the synthesised record.
+    """
+    [proposal] = await FakeFeedbackProcessor().process(
+        _event(memory_kind=memory_kind, about_person="Marta")
+    )
+
+    assert proposal.proposed.about_person == "Marta"
 
 
 async def test_synthesised_record_carries_the_feedbacks_provenance() -> None:

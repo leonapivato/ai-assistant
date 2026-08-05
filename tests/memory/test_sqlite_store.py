@@ -1420,6 +1420,180 @@ async def test_migration_rolls_back_a_rebuild_that_hits_a_corrupt_row(tmp_path: 
         check.close()
 
 
+# --- the subject axis: the column and its migration (ADR-0100 §8) ------------
+
+
+def _subject_column(store: SqliteMemoryStore, record_id: str) -> str | None:
+    """Read the raw ``records.about_person`` column, bypassing the JSON decode.
+
+    The column is what §8's migration is *about*, and nothing reads it yet — so a
+    case asserting through ``get`` would pass with the column empty, since every
+    read decodes the record from the blob. Asserting the column directly is the
+    only way to see the write path populating it.
+    """
+    row = store._conn.execute(
+        "SELECT about_person FROM records WHERE id = ?", (record_id,)
+    ).fetchone()
+    return None if row is None else row[0]
+
+
+def _write_pre_subject_db(path: Path, records: list[MemoryRecord]) -> None:
+    """Create a database on the *current* epoch schema but without the subject column.
+
+    The shape a build immediately before ADR-0100 wrote: both lifecycle columns
+    already ``INTEGER`` microsecond epochs, so the rebuild path correctly declines
+    to run, and ``about_person`` absent. It is the case a migration keyed only on
+    the epoch check would silently skip.
+    """
+    legacy = sqlite3.connect(path)
+    legacy.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    legacy.executemany(
+        "INSERT INTO meta(key, value) VALUES (?, ?)",
+        [("embedding_model", "hashing-8"), ("dimensions", "8")],
+    )
+    legacy.execute(
+        "CREATE TABLE records(rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
+        "kind TEXT NOT NULL, data TEXT NOT NULL, "
+        "expires_at INTEGER, valid_until INTEGER)"
+    )
+    legacy.executemany(
+        "INSERT INTO records(id, kind, data, expires_at, valid_until) VALUES (?, ?, ?, NULL, NULL)",
+        [(r.id, r.kind, r.model_dump_json()) for r in records],
+    )
+    legacy.commit()
+    legacy.close()
+
+
+async def test_a_stated_subject_round_trips_and_reaches_its_column(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """The record carries the subject, and so does the column beside it.
+
+    The blob is the truth — every read decodes from it — and the column is the
+    derived index ADR-0101 will query, exactly the arrangement ``expires_at`` and
+    ``valid_until`` already have.
+    """
+    store = make_store()
+    stored = SemanticMemory(
+        id="1",
+        content="prefers a window seat",
+        fact="prefers a window seat",
+        about_person="Marta",
+        provenance=_provenance(),
+    )
+
+    await store.add(stored)
+
+    got = await store.get("1")
+    assert got is not None
+    assert got.about_person == "Marta"
+    assert _subject_column(store, "1") == "Marta"
+
+
+async def test_the_subject_column_keeps_the_label_verbatim(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """Nothing between the user and the column normalises a label (ADR-0100 §6)."""
+    store = make_store()
+    await store.add(
+        SemanticMemory(
+            id="1",
+            content="c",
+            fact="c",
+            about_person="  marta  ",
+            provenance=_provenance(),
+        )
+    )
+
+    assert _subject_column(store, "1") == "  marta  "
+
+
+async def test_an_unstated_subject_leaves_the_column_null(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    store = make_store()
+    await store.add(_semantic("1", "the office moved"))
+
+    assert _subject_column(store, "1") is None
+
+
+async def test_an_overwrite_rewrites_the_subject_column(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """An upsert rewrites every column, this one included — in both directions.
+
+    Clearing it back to ``NULL`` is the half a partial ``UPDATE`` would get wrong,
+    and it is the one that matters: a stale label left behind would make the
+    column disagree with the blob, and ADR-0101's query would then answer from a
+    subject the record no longer states.
+    """
+    store = make_store()
+    await store.add(
+        SemanticMemory(
+            id="1", content="c", fact="c", about_person="Marta", provenance=_provenance()
+        )
+    )
+
+    await store.add(SemanticMemory(id="1", content="c", fact="c", provenance=_provenance()))
+
+    assert _subject_column(store, "1") is None
+    got = await store.get("1")
+    assert got is not None
+    assert got.about_person is None
+
+
+async def test_migration_adds_the_subject_column_to_a_pre_subject_table(
+    tmp_path: Path,
+) -> None:
+    """A nullable column, backfilled ``NULL``, on a table already on the epochs.
+
+    ``NULL`` is the *right* value rather than a placeholder: a record written
+    before the field states no subject, and ADR-0100 §8 forbids inferring one for
+    it from content, from ``participants`` or by asking a model. The existing rows
+    must survive, because this is an ``ALTER`` on a table the rebuild path
+    deliberately does not touch.
+    """
+    db = tmp_path / "pre-subject.db"
+    _write_pre_subject_db(db, [_semantic("legacy", "written before the field existed")])
+
+    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    try:
+        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
+        assert "about_person" in columns
+        assert _subject_column(store, "legacy") is None
+        assert {r.id for r in await store.export()} == {"legacy"}
+        # And the upgraded table takes a write that states one.
+        await store.add(
+            SemanticMemory(
+                id="new", content="c", fact="c", about_person="Marta", provenance=_provenance()
+            )
+        )
+        assert _subject_column(store, "new") == "Marta"
+    finally:
+        store.close()
+
+
+async def test_the_rebuild_path_also_produces_the_subject_column(tmp_path: Path) -> None:
+    """A table old enough to need the rebuild arrives with the column too.
+
+    The two migrations are ordered rather than independent: the rebuild recreates
+    the table, so a column added before it would be dropped. Asserting the oldest
+    shape is what makes the ordering observable — a pre-ADR-0007 table has neither
+    lifecycle column, so it takes the rebuild and must come out with all three.
+    """
+    db = tmp_path / "ancient.db"
+    _write_legacy_db(db, [_semantic("legacy", "written long before the field")])
+
+    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    try:
+        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
+        assert {"expires_at", "valid_until", "about_person"} <= columns
+        assert _subject_column(store, "legacy") is None
+        assert {r.id for r in await store.export()} == {"legacy"}
+    finally:
+        store.close()
+
+
 async def test_export_wraps_corrupt_stored_record(
     make_store: Callable[..., SqliteMemoryStore],
 ) -> None:

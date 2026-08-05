@@ -230,6 +230,32 @@ async def test_an_entry_of_a_forbidden_kind_is_discarded() -> None:
     assert outcome.discarded_unusable == 1
 
 
+@pytest.mark.parametrize("key", ["about_person", "subject", "about"])
+async def test_a_model_cannot_state_a_subject_however_it_spells_one(key: str) -> None:
+    """This observer states no subject *by construction* (ADR-0100 §5).
+
+    The shared suite pins that no proposal states a subject. This pins the
+    mechanism the ADR relies on for that holding today rather than merely being
+    observed to: the envelope schema has no subject key, ``_record`` builds every
+    record itself from a fixed set of fields, and so there is no spelling of a
+    subject the model can reach. An unrecognised key is unused, not unusable —
+    the entry is proposed, without a subject.
+
+    Three spellings, because the hazard is a *later* edit threading one of them
+    into ``_record``'s inputs without noticing ADR-0100 §5 forbids it. The day a
+    subject legitimately reaches a producer — §4's "structured field of a source"
+    case, which has no instance today — it arrives with an ADR, and this is the
+    case that fails and asks for one.
+    """
+    observer, _ = _observer(_envelope(_belief(evidence=["E1"], **{key: "Marta"})))
+
+    outcome = await observer.observe(batch_of(2))
+
+    (proposal,) = outcome.proposals
+    assert proposal.proposed.about_person is None
+    assert outcome.discarded_unusable == 0
+
+
 @pytest.mark.parametrize(
     ("kind", "memory_kind"),
     [
