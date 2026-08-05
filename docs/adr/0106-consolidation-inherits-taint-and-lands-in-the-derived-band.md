@@ -248,6 +248,19 @@ is the same shape as ADR-0103 §3's ratchet on evidence-strength, arrived at fro
 other direction — evidence-strength ratchets up because evidence is never unseen,
 and taint ratchets on because a warrant is never un-received.
 
+**The clause is stated over the *fold*, not over the incoming record, because
+`memory`'s fold is not symmetric and the asymmetry runs the wrong way here.**
+`MemoryIngestor._merge(target, incoming)` builds its `Provenance` field by field and
+takes `source`, `last_updated` and `attestation` from **`incoming`**; only
+`confidence` (a `max`) and `evidence` (a union) combine both sides. A new field
+written in the majority style — `incoming.provenance.derived_from_external` — would
+clear a tainted target the first time a clean proposal reinforced it, which is
+precisely the laundering above. The marker belongs with `confidence` and `evidence`
+in the combining minority: **the fold's value is the disjunction of both sides**,
+and the direction that has to be exercised is a *tainted target* reinforced by an
+*untainted incoming*, which §10 obliges. The opposite direction passes an
+implementation that merely copies the incoming field and proves nothing.
+
 **The exit is supersession by the user, and it is already built.** ADR-0072 §4 and
 ADR-0038 state the asymmetry: `ASSERTED` may retire `DERIVED`, never the reverse,
 and the applier "closes the superseded record's validity window and writes the
@@ -346,9 +359,12 @@ refused" would still hit it.
 **One case the stage already excludes, named so the consolidation lane does not
 rediscover it.** ADR-0078 §3 filters a `DataTier.SECRET` proposal out before `defer`,
 so its `ASK_USER` is reported and nothing is persisted. A consolidation over secret
-material therefore terminates in a refusal that reaches nobody — which is correct
-under §6's first clause (nothing lands) and is #659's channel problem, not a licence
-to route around the stage.
+material therefore terminates in an `ASK_USER` that is **never queued and so can
+never be answered** — not a `REJECT`, and the distinction matters to an operator
+reading the result: the ruling is a question nobody will be asked, not a refusal.
+Nothing lands either way, so §6's first clause is satisfied; that the question
+evaporates is #659's channel problem, and neither is a licence to route around the
+stage.
 
 **The cost is named rather than minimised.** A store holding a lot of external
 material will produce a lot of questions, and a scheduled consolidator can generate
@@ -444,8 +460,13 @@ dispatch plan costs a lane, and this one has already been inherited twice.
 ### 10. What the implementing lanes owe
 
 > **Normative.** The lane landing `derived_from_external` on `Provenance` ships a
-> test that a record decoded without the field reads `False`, and a test that a
-> tainted record survives a fold with an untainted one still tainted (§4).
+> test that a record decoded without the field reads `False`.
+
+> **Normative.** The lane changing `memory`'s fold ships a test in which the
+> **existing target is tainted and the incoming record is not**, asserting the
+> folded result is still tainted (§4). A test with the taint on the incoming side
+> does not satisfy this clause: it passes an implementation that copies the incoming
+> field, which is the laundering §4 forbids.
 
 > **Normative.** The consolidation lane ships a test that a proposal built from an
 > input set containing an `ATTESTED` record reaches the gate carrying the marker
