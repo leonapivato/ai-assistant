@@ -52,9 +52,11 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import GrantError, InvalidGrantError
 from ai_assistant.core.types import SourceGrant
+from ai_assistant.permissions._transactions import transaction
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from contextlib import AbstractContextManager
 
     from ai_assistant.core.types import GrantScope
 
@@ -456,6 +458,31 @@ class SqliteSourceGrantStore:
             raise GrantError(msg)
         return True
 
+    def _transaction(
+        self, what: str, *, immediate: bool = True
+    ) -> AbstractContextManager[sqlite3.Connection]:
+        """Run the block inside one transaction, translating backend failures.
+
+        ``IMMEDIATE`` takes the write lock up front rather than at the first
+        write, which is what puts :meth:`_record_sync`'s *reads* under it: the
+        free-id check, the live-grant check and the revocation invariants all
+        decide whether the append may happen, so a deferred begin would let a
+        second process observe the same free id or the same unrevoked grant
+        between them and the append — and ADR-0097 §4's one-live-grant-per-source
+        guarantee would be a race. The ``asyncio`` lock closes that within one
+        process; this closes it against the file. ``immediate=False`` is the read
+        form, a deferred transaction for several ``SELECT``s that must see one
+        snapshot.
+
+        Anything other than a backend failure propagates unchanged, after the
+        transaction is rolled back — which is how :meth:`record` refuses a second
+        live grant as ``InvalidGrantError`` without leaving a row behind.
+
+        Raises:
+            GrantError: If the backend fails at any point.
+        """
+        return transaction(self._conn, what, error=GrantError, immediate=immediate)
+
     # --- the write path ---------------------------------------------------
 
     async def record(self, grant: SourceGrant) -> str:
@@ -483,40 +510,28 @@ class SqliteSourceGrantStore:
 
     def _record_sync(self, snapshot: SourceGrant) -> None:
         """Validate against what is stored and insert, as one transaction."""
-        conn = self._conn
-        try:
-            with conn:  # commits on success, rolls back on any exception
-                # `BEGIN IMMEDIATE` rather than the deferred transaction sqlite3
-                # would open at the INSERT: the checks below are *reads*, so a
-                # deferred begin would leave them outside the write lock and let a
-                # second process observe the same free id or unrevoked grant
-                # between them and the append. The asyncio lock closes that within
-                # one process; this closes it against the file.
-                conn.execute("BEGIN IMMEDIATE")
-                if conn.execute("SELECT 1 FROM grants WHERE id = ?", (snapshot.id,)).fetchone():
-                    msg = (
-                        f"grant {snapshot.id!r} is already recorded; the store is "
-                        f"append-only, so history cannot be rewritten by replaying a write"
-                    )
-                    raise InvalidGrantError(msg)
-                if snapshot.revokes is None:
-                    self._check_no_live_grant(conn, snapshot)
-                else:
-                    self._check_revocation(conn, snapshot)
-                conn.execute(
-                    "INSERT INTO grants(id, source, decided_at_us, revokes, data) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (
-                        snapshot.id,
-                        snapshot.source,
-                        _sort_key(snapshot.decided_at),
-                        snapshot.revokes,
-                        snapshot.model_dump_json(),
-                    ),
+        with self._transaction(f"record grant {snapshot.id!r}") as conn:
+            if conn.execute("SELECT 1 FROM grants WHERE id = ?", (snapshot.id,)).fetchone():
+                msg = (
+                    f"grant {snapshot.id!r} is already recorded; the store is "
+                    f"append-only, so history cannot be rewritten by replaying a write"
                 )
-        except sqlite3.Error as exc:
-            msg = f"failed to record grant {snapshot.id!r}: {exc}"
-            raise GrantError(msg) from exc
+                raise InvalidGrantError(msg)
+            if snapshot.revokes is None:
+                self._check_no_live_grant(conn, snapshot)
+            else:
+                self._check_revocation(conn, snapshot)
+            conn.execute(
+                "INSERT INTO grants(id, source, decided_at_us, revokes, data) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    snapshot.id,
+                    snapshot.source,
+                    _sort_key(snapshot.decided_at),
+                    snapshot.revokes,
+                    snapshot.model_dump_json(),
+                ),
+            )
 
     def _check_no_live_grant(self, conn: sqlite3.Connection, grant: SourceGrant) -> None:
         """Refuse a second live grant for one source (ADR-0097 §4).
@@ -729,13 +744,8 @@ class SqliteSourceGrantStore:
         shape rather than the user's history, so burning the book leaves a database
         this code can still open.
         """
-        conn = self._conn
-        try:
-            with conn:
-                removed = conn.execute("DELETE FROM grants").rowcount
-        except sqlite3.Error as exc:
-            msg = f"failed to clear the grant store: {exc}"
-            raise GrantError(msg) from exc
+        with self._transaction("clear the grant store") as conn:
+            removed = conn.execute("DELETE FROM grants").rowcount
         return int(removed)
 
     def close(self) -> None:

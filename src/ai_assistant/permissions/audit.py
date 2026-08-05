@@ -41,9 +41,11 @@ from ai_assistant.core.errors import (
     InvalidResolutionError,
 )
 from ai_assistant.core.types import PermissionDecision, PermissionOutcome
+from ai_assistant.permissions._transactions import transaction
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from contextlib import AbstractContextManager
 
 _OWNER_ONLY = 0o600
 
@@ -500,6 +502,29 @@ class SqliteAuditTrail:
                 (execution_id, step_id, outcome, decision_id),
             )
 
+    def _transaction(
+        self, what: str, *, immediate: bool = True
+    ) -> AbstractContextManager[sqlite3.Connection]:
+        """Run the block inside one transaction, translating backend failures.
+
+        ``IMMEDIATE`` takes the write lock up front rather than at the first
+        write, which is what puts :meth:`_record_sync`'s *reads* under it: the
+        free-id check and the resolution check both decide whether the append may
+        happen, so a deferred begin would let a second process observe the same
+        free id or the same unresolved ``CONFIRM`` between them and the append.
+        The ``asyncio`` lock closes that within one process; this closes it
+        against the file. ``immediate=False`` is the read form, a deferred
+        transaction for several ``SELECT``s that must see one snapshot.
+
+        Anything other than a backend failure propagates unchanged, after the
+        transaction is rolled back — which is how :meth:`record` refuses a
+        duplicate id as ``DuplicateDecisionError`` without leaving a row behind.
+
+        Raises:
+            AuditError: If the backend fails at any point.
+        """
+        return transaction(self._conn, what, error=AuditError, immediate=immediate)
+
     # --- the write path ---------------------------------------------------
 
     async def record(self, decision: PermissionDecision) -> str:
@@ -523,43 +548,31 @@ class SqliteAuditTrail:
 
     def _record_sync(self, snapshot: PermissionDecision) -> None:
         """Validate against what is stored and insert, as one transaction."""
-        conn = self._conn
-        try:
-            with conn:  # commits on success, rolls back on any exception
-                # `BEGIN IMMEDIATE` rather than the deferred transaction sqlite3
-                # would open at the INSERT: the checks below are *reads*, so a
-                # deferred begin would leave them outside the write lock and let
-                # a second process observe the same free id or unresolved
-                # CONFIRM between them and the append. The asyncio lock closes
-                # that within one process; this closes it against the file.
-                conn.execute("BEGIN IMMEDIATE")
-                if conn.execute("SELECT 1 FROM decisions WHERE id = ?", (snapshot.id,)).fetchone():
-                    msg = (
-                        f"decision {snapshot.id!r} is already recorded; the trail is "
-                        f"append-only, so history cannot be rewritten by replaying a write"
-                    )
-                    raise DuplicateDecisionError(msg)
-                if snapshot.resolves is not None:
-                    self._check_resolution(snapshot)
-                conn.execute(
-                    "INSERT INTO decisions("
-                    "id, decided_at_us, resolves, execution_id, step_id, outcome, "
-                    "expires_at_us, data"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        snapshot.id,
-                        _sort_key(snapshot.decided_at),
-                        snapshot.resolves,
-                        snapshot.execution_id,
-                        snapshot.step_id,
-                        snapshot.ruling.outcome.value,
-                        None if snapshot.expires_at is None else _sort_key(snapshot.expires_at),
-                        snapshot.model_dump_json(),
-                    ),
+        with self._transaction(f"record decision {snapshot.id!r}") as conn:
+            if conn.execute("SELECT 1 FROM decisions WHERE id = ?", (snapshot.id,)).fetchone():
+                msg = (
+                    f"decision {snapshot.id!r} is already recorded; the trail is "
+                    f"append-only, so history cannot be rewritten by replaying a write"
                 )
-        except sqlite3.Error as exc:
-            msg = f"failed to record decision {snapshot.id!r}: {exc}"
-            raise AuditError(msg) from exc
+                raise DuplicateDecisionError(msg)
+            if snapshot.resolves is not None:
+                self._check_resolution(snapshot)
+            conn.execute(
+                "INSERT INTO decisions("
+                "id, decided_at_us, resolves, execution_id, step_id, outcome, "
+                "expires_at_us, data"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    snapshot.id,
+                    _sort_key(snapshot.decided_at),
+                    snapshot.resolves,
+                    snapshot.execution_id,
+                    snapshot.step_id,
+                    snapshot.ruling.outcome.value,
+                    None if snapshot.expires_at is None else _sort_key(snapshot.expires_at),
+                    snapshot.model_dump_json(),
+                ),
+            )
 
     def _check_resolution(self, decision: PermissionDecision) -> None:
         """Enforce ADR-0021 §1 and ADR-0044 §2's invariant on a resolving decision.
@@ -841,13 +854,8 @@ class SqliteAuditTrail:
         file's shape rather than the user's history, so burning the book leaves a
         database this code can still open (and would still count as version 1).
         """
-        conn = self._conn
-        try:
-            with conn:
-                removed = conn.execute("DELETE FROM decisions").rowcount
-        except sqlite3.Error as exc:
-            msg = f"failed to clear the audit trail: {exc}"
-            raise AuditError(msg) from exc
+        with self._transaction("clear the audit trail") as conn:
+            removed = conn.execute("DELETE FROM decisions").rowcount
         return int(removed)
 
     def close(self) -> None:

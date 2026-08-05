@@ -46,10 +46,12 @@ from ai_assistant.core.types import (
     PlanExport,
     StepStatus,
 )
+from ai_assistant.planning._transactions import transaction
 from ai_assistant.planning.execution import PlanExecution
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import StepTransition
@@ -950,6 +952,35 @@ class SqlitePlanStore:
         except ClockReadingError as exc:
             raise PlanningError(str(exc)) from exc
 
+    def _transaction(
+        self, what: str, *, immediate: bool = True
+    ) -> AbstractContextManager[sqlite3.Connection]:
+        """Run the block inside one transaction, translating backend failures.
+
+        ``IMMEDIATE`` takes the write lock up front rather than at the first
+        write, which is what puts the *reads* every mutation here decides on
+        under it: the identity comparison in :meth:`save_goal`, the goal's
+        existence in :meth:`save_plan`, the durable ordinal in
+        :meth:`start_execution`, the stored version a transition is applied to,
+        and the liveness scan a deletion is refused by. A deferred begin would
+        leave each of those outside the lock and let a second process act on the
+        state it read (ADR-0049 §1, §3). ``immediate=False`` is the read form, a
+        deferred transaction for several ``SELECT``s that must see one snapshot.
+
+        ``what`` reads as the tail of ``failed to {what}``, which is the message
+        :func:`_wrap` composes for the reads that run outside a transaction; the
+        two spellings are deliberately the same sentence.
+
+        Anything other than a backend failure propagates unchanged, after the
+        transaction is rolled back — which is how :meth:`save_plan` refuses an
+        orphan and :meth:`clear` refuses a live execution without leaving
+        anything behind.
+
+        Raises:
+            PlanningError: If the backend fails at any point.
+        """
+        return transaction(self._conn, what, error=PlanningError, immediate=immediate)
+
     # --- goals and plans --------------------------------------------------
 
     async def save_goal(self, goal: Goal) -> str:
@@ -980,33 +1011,26 @@ class SqlitePlanStore:
         return snapshot.id
 
     def _save_goal_sync(self, goal: Goal) -> None:
-        conn = self._conn
-        try:
-            with conn:
-                conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute("SELECT data FROM goals WHERE id = ?", (goal.id,)).fetchone()
-                if row is not None:
-                    existing = _decode_goal(row[0])
-                    identity = ("statement", "provenance", "created_at")
-                    changed = [
-                        field
-                        for field in identity
-                        if getattr(existing, field) != getattr(goal, field)
-                    ]
-                    if changed:
-                        msg = (
-                            f"goal {goal.id} already exists and its {', '.join(changed)} cannot "
-                            "change: plans and executions already recorded against it would "
-                            "silently come to describe a different objective. Use a new id."
-                        )
-                        raise PlanningError(msg)
-                conn.execute(
-                    "INSERT INTO goals(id, data) VALUES (?, ?) "
-                    "ON CONFLICT(id) DO UPDATE SET data = excluded.data",
-                    (goal.id, goal.model_dump_json()),
-                )
-        except sqlite3.Error as exc:
-            raise _wrap("save goal", goal.id, exc) from exc
+        with self._transaction(f"save goal {goal.id!r}") as conn:
+            row = conn.execute("SELECT data FROM goals WHERE id = ?", (goal.id,)).fetchone()
+            if row is not None:
+                existing = _decode_goal(row[0])
+                identity = ("statement", "provenance", "created_at")
+                changed = [
+                    field for field in identity if getattr(existing, field) != getattr(goal, field)
+                ]
+                if changed:
+                    msg = (
+                        f"goal {goal.id} already exists and its {', '.join(changed)} cannot "
+                        "change: plans and executions already recorded against it would "
+                        "silently come to describe a different objective. Use a new id."
+                    )
+                    raise PlanningError(msg)
+            conn.execute(
+                "INSERT INTO goals(id, data) VALUES (?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+                (goal.id, goal.model_dump_json()),
+            )
 
     async def get_goal(self, goal_id: str) -> Goal | None:
         """Return the goal with ``goal_id``, or ``None``."""
@@ -1033,31 +1057,23 @@ class SqlitePlanStore:
         return plan.id
 
     def _save_plan_sync(self, plan: ActionPlan) -> None:
-        conn = self._conn
-        try:
-            with conn:
-                conn.execute("BEGIN IMMEDIATE")
-                if (
-                    conn.execute("SELECT 1 FROM goals WHERE id = ?", (plan.goal_id,)).fetchone()
-                    is None
-                ):
-                    msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
+        with self._transaction(f"save plan {plan.id!r}") as conn:
+            if conn.execute("SELECT 1 FROM goals WHERE id = ?", (plan.goal_id,)).fetchone() is None:
+                msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
+                raise PlanningError(msg)
+            row = conn.execute("SELECT data FROM plans WHERE id = ?", (plan.id,)).fetchone()
+            if row is not None:
+                if _decode_plan(row[0]) != plan:
+                    msg = (
+                        f"plan {plan.id} already exists and differs; re-planning must use a "
+                        "new id so the previous plan stays an intact audit record"
+                    )
                     raise PlanningError(msg)
-                row = conn.execute("SELECT data FROM plans WHERE id = ?", (plan.id,)).fetchone()
-                if row is not None:
-                    if _decode_plan(row[0]) != plan:
-                        msg = (
-                            f"plan {plan.id} already exists and differs; re-planning must use a "
-                            "new id so the previous plan stays an intact audit record"
-                        )
-                        raise PlanningError(msg)
-                    return  # idempotent re-save
-                conn.execute(
-                    "INSERT INTO plans(id, goal_id, data) VALUES (?, ?, ?)",
-                    (plan.id, plan.goal_id, plan.model_dump_json()),
-                )
-        except sqlite3.Error as exc:
-            raise _wrap("save plan", plan.id, exc) from exc
+                return  # idempotent re-save
+            conn.execute(
+                "INSERT INTO plans(id, goal_id, data) VALUES (?, ?, ?)",
+                (plan.id, plan.goal_id, plan.model_dump_json()),
+            )
 
     async def get_plan(self, plan_id: str) -> ActionPlan | None:
         """Return the plan with ``plan_id``, or ``None``."""
@@ -1082,32 +1098,27 @@ class SqlitePlanStore:
             return await _run_to_completion(self._start_execution_sync, plan_id)
 
     def _start_execution_sync(self, plan_id: str) -> ExecutionState:
-        conn = self._conn
-        try:
-            with conn:
-                conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute("SELECT data FROM plans WHERE id = ?", (plan_id,)).fetchone()
-                if row is None:
-                    msg = f"cannot start an execution for unknown plan {plan_id}"
-                    raise PlanningError(msg)
-                plan = _decode_plan(row[0])
-                ordinal = self._next_ordinal(conn)
-                execution_id = f"{plan_id}-exec-{os.getpid()}-{self._nonce}-{ordinal}"
-                state = self._tracker.start(plan, execution_id=execution_id)
-                conn.execute(
-                    "INSERT INTO executions(id, plan_id, version, active, created_seq, data) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        state.id,
-                        state.plan_id,
-                        state.version,
-                        int(state.is_active),
-                        ordinal,
-                        state.model_dump_json(),
-                    ),
-                )
-        except sqlite3.Error as exc:
-            raise _wrap("start execution for plan", plan_id, exc) from exc
+        with self._transaction(f"start execution for plan {plan_id!r}") as conn:
+            row = conn.execute("SELECT data FROM plans WHERE id = ?", (plan_id,)).fetchone()
+            if row is None:
+                msg = f"cannot start an execution for unknown plan {plan_id}"
+                raise PlanningError(msg)
+            plan = _decode_plan(row[0])
+            ordinal = self._next_ordinal(conn)
+            execution_id = f"{plan_id}-exec-{os.getpid()}-{self._nonce}-{ordinal}"
+            state = self._tracker.start(plan, execution_id=execution_id)
+            conn.execute(
+                "INSERT INTO executions(id, plan_id, version, active, created_seq, data) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    state.id,
+                    state.plan_id,
+                    state.version,
+                    int(state.is_active),
+                    ordinal,
+                    state.model_dump_json(),
+                ),
+            )
         return state.model_copy(deep=True)
 
     def _next_ordinal(self, conn: sqlite3.Connection) -> int:
@@ -1176,29 +1187,25 @@ class SqlitePlanStore:
             return await _run_to_completion(self._commit_transition_sync, transition)
 
     def _commit_transition_sync(self, transition: StepTransition) -> ExecutionState:
-        conn = self._conn
-        try:
-            with conn:
-                conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute(
-                    "SELECT data FROM executions WHERE id = ?", (transition.execution_id,)
-                ).fetchone()
-                if row is None:
-                    msg = f"unknown execution {transition.execution_id}"
-                    raise PlanningError(msg)
-                stored = _decode_execution(row[0])
-                updated = self._tracker.apply(stored, transition)
-                conn.execute(
-                    "UPDATE executions SET version = ?, active = ?, data = ? WHERE id = ?",
-                    (
-                        updated.version,
-                        int(updated.is_active),
-                        updated.model_dump_json(),
-                        updated.id,
-                    ),
-                )
-        except sqlite3.Error as exc:
-            raise _wrap("commit a transition on execution", transition.execution_id, exc) from exc
+        what = f"commit a transition on execution {transition.execution_id!r}"
+        with self._transaction(what) as conn:
+            row = conn.execute(
+                "SELECT data FROM executions WHERE id = ?", (transition.execution_id,)
+            ).fetchone()
+            if row is None:
+                msg = f"unknown execution {transition.execution_id}"
+                raise PlanningError(msg)
+            stored = _decode_execution(row[0])
+            updated = self._tracker.apply(stored, transition)
+            conn.execute(
+                "UPDATE executions SET version = ?, active = ?, data = ? WHERE id = ?",
+                (
+                    updated.version,
+                    int(updated.is_active),
+                    updated.model_dump_json(),
+                    updated.id,
+                ),
+            )
         return updated.model_copy(deep=True)
 
     async def get_execution(self, execution_id: str) -> ExecutionState | None:
@@ -1255,26 +1262,23 @@ class SqlitePlanStore:
         )
 
     def _export_sync(self) -> tuple[list[str], list[str], list[str]]:
-        conn = self._conn
-        try:
-            # All three reads inside one transaction, so the export is a single
-            # database snapshot: a concurrent connection cannot commit a goal+plan
-            # between the goals read and the plans read and leave the export with a
-            # plan whose goal is missing — the dangling, PlanExport-rejected state
-            # ADR-0004 §6's "internally consistent" forbids. BEGIN IMMEDIATE takes
-            # the write lock, so no writer interleaves the reads.
-            with conn:
-                conn.execute("BEGIN IMMEDIATE")
-                goals = [str(r[0]) for r in conn.execute("SELECT data FROM goals").fetchall()]
-                plans = [str(r[0]) for r in conn.execute("SELECT data FROM plans").fetchall()]
-                executions = [
-                    str(r[0])
-                    for r in conn.execute(
-                        "SELECT data FROM executions ORDER BY created_seq ASC"
-                    ).fetchall()
-                ]
-        except sqlite3.Error as exc:
-            raise _wrap("export planning state", "", exc) from exc
+        # All three reads inside one transaction, so the export is a single
+        # database snapshot: a concurrent connection cannot commit a goal+plan
+        # between the goals read and the plans read and leave the export with a
+        # plan whose goal is missing — the dangling, PlanExport-rejected state
+        # ADR-0004 §6's "internally consistent" forbids. The write form, not the
+        # deferred one a read would otherwise take: the write lock excludes a
+        # writer outright rather than leaving the reads to a snapshot another
+        # connection is free to write around.
+        with self._transaction("export planning state") as conn:
+            goals = [str(r[0]) for r in conn.execute("SELECT data FROM goals").fetchall()]
+            plans = [str(r[0]) for r in conn.execute("SELECT data FROM plans").fetchall()]
+            executions = [
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT data FROM executions ORDER BY created_seq ASC"
+                ).fetchall()
+            ]
         return goals, plans, executions
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
@@ -1290,50 +1294,44 @@ class SqlitePlanStore:
             return await _run_to_completion(self._delete_goal_sync, goal_id)
 
     def _delete_goal_sync(self, goal_id: str) -> GoalDeletion:
-        conn = self._conn
-        try:
-            with conn:
-                conn.execute("BEGIN IMMEDIATE")
-                if conn.execute("SELECT 1 FROM goals WHERE id = ?", (goal_id,)).fetchone() is None:
-                    return GoalDeletion(deleted=False, blocked_by=("<no such goal>",))
+        with self._transaction(f"delete goal {goal_id!r}") as conn:
+            if conn.execute("SELECT 1 FROM goals WHERE id = ?", (goal_id,)).fetchone() is None:
+                return GoalDeletion(deleted=False, blocked_by=("<no such goal>",))
 
-                plan_ids = [
-                    str(r[0])
-                    for r in conn.execute(
-                        "SELECT id FROM plans WHERE goal_id = ?", (goal_id,)
-                    ).fetchall()
-                ]
-                executions = [
-                    _decode_execution(r[0])
-                    for r in conn.execute(
-                        "SELECT e.data FROM executions e JOIN plans p ON e.plan_id = p.id "
-                        "WHERE p.goal_id = ?",
-                        (goal_id,),
-                    ).fetchall()
-                ]
-
-                live = sorted(state.id for state in executions if state.has_live_step)
-                if live:
-                    return GoalDeletion(deleted=False, blocked_by=tuple(live))
-
-                indeterminate = tuple(
-                    sorted(
-                        step.step_id
-                        for state in executions
-                        for step in state.steps
-                        if step.status is StepStatus.INDETERMINATE
-                    )
-                )
-                # Children first, so the foreign keys hold at each delete.
-                conn.execute(
-                    "DELETE FROM executions WHERE plan_id IN "
-                    "(SELECT id FROM plans WHERE goal_id = ?)",
+            plan_ids = [
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT id FROM plans WHERE goal_id = ?", (goal_id,)
+                ).fetchall()
+            ]
+            executions = [
+                _decode_execution(r[0])
+                for r in conn.execute(
+                    "SELECT e.data FROM executions e JOIN plans p ON e.plan_id = p.id "
+                    "WHERE p.goal_id = ?",
                     (goal_id,),
+                ).fetchall()
+            ]
+
+            live = sorted(state.id for state in executions if state.has_live_step)
+            if live:
+                return GoalDeletion(deleted=False, blocked_by=tuple(live))
+
+            indeterminate = tuple(
+                sorted(
+                    step.step_id
+                    for state in executions
+                    for step in state.steps
+                    if step.status is StepStatus.INDETERMINATE
                 )
-                conn.execute("DELETE FROM plans WHERE goal_id = ?", (goal_id,))
-                conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
-        except sqlite3.Error as exc:
-            raise _wrap("delete goal", goal_id, exc) from exc
+            )
+            # Children first, so the foreign keys hold at each delete.
+            conn.execute(
+                "DELETE FROM executions WHERE plan_id IN (SELECT id FROM plans WHERE goal_id = ?)",
+                (goal_id,),
+            )
+            conn.execute("DELETE FROM plans WHERE goal_id = ?", (goal_id,))
+            conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
         return GoalDeletion(
             deleted=True,
             plans_removed=len(plan_ids),
@@ -1352,27 +1350,22 @@ class SqlitePlanStore:
             return await _run_to_completion(self._clear_sync)
 
     def _clear_sync(self) -> int:
-        conn = self._conn
-        try:
-            with conn:
-                conn.execute("BEGIN IMMEDIATE")
-                # A live step is RUNNING, which implies active, so the flag
-                # pre-filters the rows to decode; has_live_step is the exact test.
-                active = (
-                    _decode_execution(str(r[0]))
-                    for r in conn.execute("SELECT data FROM executions WHERE active = 1").fetchall()
-                )
-                live = sorted(state.id for state in active if state.has_live_step)
-                if live:
-                    msg = f"cannot clear while executions are live: {', '.join(live)}"
-                    raise ActiveExecutionError(msg)
-                removed = 0
-                # Children first, to satisfy the foreign keys; meta is untouched.
-                removed += conn.execute("DELETE FROM executions").rowcount
-                removed += conn.execute("DELETE FROM plans").rowcount
-                removed += conn.execute("DELETE FROM goals").rowcount
-        except sqlite3.Error as exc:
-            raise _wrap("clear the plan store", "", exc) from exc
+        with self._transaction("clear the plan store") as conn:
+            # A live step is RUNNING, which implies active, so the flag
+            # pre-filters the rows to decode; has_live_step is the exact test.
+            active = (
+                _decode_execution(str(r[0]))
+                for r in conn.execute("SELECT data FROM executions WHERE active = 1").fetchall()
+            )
+            live = sorted(state.id for state in active if state.has_live_step)
+            if live:
+                msg = f"cannot clear while executions are live: {', '.join(live)}"
+                raise ActiveExecutionError(msg)
+            removed = 0
+            # Children first, to satisfy the foreign keys; meta is untouched.
+            removed += conn.execute("DELETE FROM executions").rowcount
+            removed += conn.execute("DELETE FROM plans").rowcount
+            removed += conn.execute("DELETE FROM goals").rowcount
         return removed
 
     def close(self) -> None:
