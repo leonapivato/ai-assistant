@@ -100,6 +100,7 @@ from ai_assistant.core.types import (
     QuestionState,
     QueueOutcome,
     StepStatus,
+    encodable_text,
 )
 from ai_assistant.wire import HubEngineClient, TransportError
 from ai_assistant.wire.address import check_socket_path, socket_path
@@ -256,7 +257,7 @@ _DEFAULT_BELIEF_KINDS: tuple[MemoryKind, ...] = tuple(
 
 
 def _present_source(value: str) -> str:
-    """Reject a blank ``source`` during Typer's parameter parsing, **without stripping**.
+    r"""Reject a blank ``source`` during Typer's parameter parsing, **without stripping**.
 
     :func:`_present_content`'s shape, for the same reason and with one extra rule.
     The reason: ``NonBlankEncodableText`` refuses a blank value with a
@@ -265,6 +266,14 @@ def _present_source(value: str) -> str:
     uncaught traceback with no controlled exit code — the failure ADR-0042 §7
     forbids. Catching it here makes it a normal usage error (exit code 2) before
     any client is built.
+
+    **Encodability is checked as well as blankness**, and it is a real case rather
+    than a defensive one — the same mechanism ADR-0102 §6 names for a configured
+    path, one argument over. Linux passes argv as bytes and Python decodes it with
+    ``surrogateescape``, so ``assistant revoke $'\xe9'`` arrives as a lone surrogate
+    that ``EncodableText`` refuses and ADR-0087's encoder cannot express. Without
+    this the refusal lands in the client, as the same uncaught ``ValueError`` this
+    callback exists to prevent.
 
     The extra rule is that **the value is returned byte for byte** (ADR-0102 §2).
     An adapter that stripped it would make ``revoke " calendar "`` reach the hub as
@@ -280,11 +289,20 @@ def _present_source(value: str) -> str:
         The value, unchanged.
 
     Raises:
-        BadParameter: If the value is blank.
+        BadParameter: If the value is blank, or has no UTF-8 encoding.
     """
     if not value.strip():
         msg = "must not be blank"
         raise typer.BadParameter(msg)
+    try:
+        encodable_text(value)
+    except ValueError as exc:
+        # The value is **not** echoed: it is a caller-supplied source, and it has no
+        # UTF-8 encoding, so putting it in the message would be both an echo
+        # ADR-0097 §9 forbids and a string this process may not be able to write
+        # down. The remedy is the enumeration, not the value.
+        msg = "must be text with a UTF-8 encoding; see 'assistant sources'"
+        raise typer.BadParameter(msg) from exc
     return value
 
 
