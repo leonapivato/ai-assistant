@@ -193,10 +193,10 @@ class _ShutdownRecord:
     elapsed_seconds: float | None = None
     #: The stage a failure escaped from, or ``None`` if none did (#581).
     failed_at: _ShutdownStage | None = None
-    #: The failure the shutdown was already unwinding from, rendered, if any.
-    #: Kept as text rather than as the exception so the record holds no traceback
-    #: and no frames — nothing here needs to re-raise it.
-    unwinding_from: str | None = None
+    #: The failure a cleanup was already unwinding from, if any. The exception
+    #: itself rather than its text, because ADR-0083 §5's verdict is read off the
+    #: class and the ``errno``, not off the message (:func:`_classify_pair`).
+    unwinding_from: BaseException | None = None
 
     @property
     def shutdown_failure(self) -> _ShutdownStage | None:
@@ -238,7 +238,7 @@ class _ShutdownRecord:
         return self.failed_at
 
     @property
-    def replaced_cause(self) -> str | None:
+    def replaced_cause(self) -> BaseException | None:
         """The failure a raising cleanup displaced, when it displaced one.
 
         Conditioned on :attr:`failed_at` because that is what says the exception
@@ -315,14 +315,52 @@ async def serve(settings: Settings) -> int:
         try:
             code = await _start_and_run(settings, stop, shutdown)
         except Exception as exc:
-            code, action = classify(exc)
+            replaced = shutdown.replaced_cause
+            code, action = _classify_pair(exc, replaced)
             stage = shutdown.shutdown_failure
             if stage is None:
-                _report_fault(exc, action=action, code=code, replaced=shutdown.replaced_cause)
+                _report_fault(exc, action=action, code=code, replaced=replaced)
             else:
                 _report_shutdown_fault(exc, shutdown, stage=stage, action=action, code=code)
     _report_shutdown(shutdown, code=code)
     return code
+
+
+def _classify_pair(escaped: BaseException, displaced: BaseException | None) -> tuple[int, str]:
+    """ADR-0083 §5's verdict when a cleanup fault erased the failure under it.
+
+    **§5's test is about the situation, not about an exception object**: "would
+    restarting, unchanged, ever succeed?" A filesystem access fault earns ``78``
+    "wherever in startup it surfaces" (§3 step 3, §5), and it does not stop having
+    surfaced because a ``finally`` raised over it. Classifying only what escaped
+    hands a supervisor ``1`` and buys "an infinite restart loop against an
+    unchanging ``EACCES``" — §5's own words for the failure it exists to prevent.
+
+    **It only ever raises a verdict to** :data:`EXIT_DEPLOYMENT`, **never lowers
+    one**, and that asymmetry is the whole safety argument. §5 puts the burden the
+    other way — "where a new fault does not obviously answer the question, the
+    answer is ``1``: a spurious restart is recoverable and a spurious ``78`` is an
+    outage" — so nothing here may invent a stay-down verdict. Every ``78`` it
+    returns is one :func:`~ai_assistant.service.exits.classify` itself returned, for
+    a fault that really happened, and the action printed alongside is that fault's.
+
+    Reads as a no-op on every ordinary path: ``displaced`` is non-``None`` only when
+    a cleanup raised over a fault that had already ended the start.
+
+    Args:
+        escaped: The exception that reached :func:`serve`.
+        displaced: The one it replaced while unwinding, if it replaced any.
+
+    Returns:
+        The exit code, and the operator action to print with it.
+    """
+    code, action = classify(escaped)
+    if displaced is None or code == EXIT_DEPLOYMENT:
+        return code, action
+    displaced_code, displaced_action = classify(displaced)
+    if displaced_code == EXIT_DEPLOYMENT:
+        return displaced_code, displaced_action
+    return code, action
 
 
 def _note_unwinding_from(record: _ShutdownRecord, exc: BaseException) -> None:
@@ -344,11 +382,10 @@ def _note_unwinding_from(record: _ShutdownRecord, exc: BaseException) -> None:
 
     Args:
         record: The shutdown record to note it on.
-        exc: The exception now unwinding. Rendered on the spot rather than kept, so
-            no traceback or frame outlives this call.
+        exc: The exception now unwinding.
     """
     if record.failed_at is None and record.unwinding_from is None:
-        record.unwinding_from = str(exc) or type(exc).__name__
+        record.unwinding_from = exc
 
 
 @contextmanager
@@ -754,7 +791,7 @@ def _report_shutdown_fault(
 
 
 def _report_fault(
-    exc: BaseException, *, action: str, code: int, replaced: str | None = None
+    exc: BaseException, *, action: str, code: int, replaced: BaseException | None = None
 ) -> None:
     """Print a startup failure's cause, and its remedy when there is one.
 
@@ -778,10 +815,10 @@ def _report_fault(
     **``replaced`` is the start that a failing cleanup erased.** A ``finally`` that
     raises substitutes its own exception for the one it was unwinding from, so on
     that path ``exc`` is the cleanup's and the reason the hub is down is nowhere in
-    it. It is printed second rather than first because ``exc`` is the exception
-    :func:`~ai_assistant.service.exits.classify` actually judged: leading with a
-    cause that did not earn the exit code or the action beside it would be a message
-    an operator has to reconcile against itself.
+    it. It is printed second rather than first because ``exc`` is the one that
+    reached :func:`serve`; :func:`_classify_pair` is what keeps the code and the
+    action beside it consistent with *both*, so the two lines cannot disagree about
+    whether a human has to act.
 
     These messages are operational text carrying no Tier 0/1 content (ADR-0004
     §5): they name settings keys, paths and identifiers, never memory content and
@@ -799,7 +836,8 @@ def _report_fault(
         cause=str(exc),
         error_class=type(exc).__name__,
         operator_action=action or None,
-        replaced_cause=replaced,
+        replaced_cause=str(replaced) if replaced is not None else None,
+        replaced_error_class=type(replaced).__name__ if replaced is not None else None,
     )
     print(f"hub: cannot start: {exc}", file=sys.stderr)
     if replaced is not None:

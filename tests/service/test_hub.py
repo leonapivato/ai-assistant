@@ -732,6 +732,71 @@ async def test_a_start_that_failed_and_then_failed_to_drain_is_still_a_failed_st
     )
 
 
+async def test_a_stay_down_start_erased_by_a_cleanup_fault_still_stays_down(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """§5's test is about the situation, not about whichever exception survived.
+
+    "A filesystem access fault, ``78`` **wherever in startup it surfaces**" (§3 step
+    3) — and it does not stop having surfaced because a ``finally`` raised over it.
+    Classified on the cleanup's generic ``OSError`` alone, an ``EACCES`` that ended
+    the start returns ``1`` and buys "an infinite restart loop against an unchanging
+    ``EACCES``", which is §5's own name for the failure the codes exist to prevent.
+
+    Worth stating that this is the *supervisor's* half of the same defect the rest
+    of this section is about: the operator now reads the permission fault, and a
+    process that printed a stay-down cause while returning a come-back code would be
+    telling its two audiences different things.
+    """
+
+    async def cannot_read() -> None:
+        raise PermissionError(errno.EACCES, "permission denied", str(settings.data_dir / "x.db"))
+
+    async def refuses_to_close() -> None:
+        msg = "the connection would not close"
+        raise OSError(msg)
+
+    engine.start = cannot_read  # type: ignore[method-assign]
+    engine.aclose = refuses_to_close  # type: ignore[method-assign]
+
+    code = await hub.serve(settings)
+
+    stderr = capsys.readouterr().err
+    assert code == EXIT_DEPLOYMENT
+    assert "readable and writable by the user the hub runs as" in stderr
+    assert "will not be fixed by restarting" in stderr
+
+
+async def test_a_cleanup_fault_never_invents_a_stay_down_verdict(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+) -> None:
+    """The asymmetry is the safety argument, so it is asserted rather than assumed.
+
+    §5 puts the burden of proof on ``78``: "where a new fault does not obviously
+    answer the question, the answer is ``1``: a spurious restart is recoverable and
+    a spurious ``78`` is an outage." Two faults that each earn ``1`` alone must not
+    add up to one that does not, or reading a second exception would have bought
+    legibility at the cost of the outage §5 is most careful about.
+    """
+
+    async def a_corrupt_page() -> None:
+        raise OSError(errno.EIO, "input/output error")
+
+    async def refuses_to_close() -> None:
+        msg = "the connection would not close"
+        raise OSError(msg)
+
+    engine.start = a_corrupt_page  # type: ignore[method-assign]
+    engine.aclose = refuses_to_close  # type: ignore[method-assign]
+
+    assert await hub.serve(settings) == EXIT_RESTART
+
+
 async def test_a_start_that_failed_alone_does_not_have_its_cause_printed_twice(
     settings: Settings,
     wired: dict[str, list[Any]],
