@@ -2557,26 +2557,99 @@ def test_sources_lists_each_source_with_where_it_reads_from(
     assert "not granted" in rendered
 
 
-def test_grant_shows_the_location_before_it_asks_and_sends_nothing_if_refused(
+def test_grant_renders_the_location_before_it_asks(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-0102 §6's third clause, in the order that is the whole of it.
+    """ADR-0102 §6's third clause, and **the ordering is the whole of it**.
 
-    **The location is rendered before consent is taken**, and a refusal sends no
-    ``grant`` at all. The two halves are asserted together because either alone is
-    satisfiable by a wrong implementation: one that asked first and rendered after
-    would pass a "the path appears" check, and one that rendered and granted
-    regardless would pass an "it was shown" check.
+    "A client renders ``location`` to the user, and takes an explicit act from the
+    user, **before** it sends ``grant``." A client that prompted first and rendered
+    the path afterwards would satisfy every "the path appears somewhere" check and
+    breach the clause outright — the user would be answering about a source they
+    had not been shown, which is the uninformed grant ADR-0097 §9a exists to
+    prevent.
+
+    So the console is read **at the moment the confirmation is requested**, from
+    inside the approver itself, rather than after the command has returned. That is
+    the only vantage point from which "before" is observable at all: nothing on the
+    wire distinguishes the two orders (ADR-0098 §5), and neither does the final
+    output.
+    """
+    engine = _granting_engine()
+    _wire(monkeypatch, engine)
+    seen_at_prompt: list[str] = []
+
+    def _watching(_source: object) -> bool:
+        seen_at_prompt.append(output.getvalue())
+        return False
+
+    monkeypatch.setattr(cli, "_confirm_grant", _watching)
+    result = CliRunner().invoke(cli.app, ["grant", "calendar", "--scope", "facet"])
+
+    assert result.exit_code == 0
+    assert len(seen_at_prompt) == 1, "the user must be asked exactly once"
+    assert "/srv/calendar.ics" in seen_at_prompt[0]
+    # And the refusal is honoured: nothing is sent at all.
+    assert not [call for call in engine.calls if call[0] == "grant"]
+    assert not engine.grants_recorded
+
+
+def test_a_blank_source_is_a_usage_error_and_never_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0042 §7: an adapter maps every failure to a controlled exit code.
+
+    ``NonBlankEncodableText`` refuses a blank ``source`` with a ``ValueError``,
+    which is **not** an :class:`AssistantError` — so without a parse-time refusal it
+    escapes the command's error boundary as an uncaught traceback. ``revoke`` is the
+    case that reached the client at all: ``grant`` enumerates first and happens to
+    report the value as unofferable, which is the right answer by accident of
+    ordering rather than by a rule, so both are pinned here.
+
+    Exit code 2, because it is a usage error caught before any client is built —
+    the treatment ``--limit`` and blank ``learn`` content already get.
+    """
+    _wire(monkeypatch, _granting_engine())
+
+    assert CliRunner().invoke(cli.app, ["revoke", "   "]).exit_code == 2
+    assert CliRunner().invoke(cli.app, ["grant", "   ", "--scope", "facet"]).exit_code == 2
+
+
+def test_a_repeated_scope_is_a_usage_error_and_never_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0097 §10 spells a duplicated scope as a refusal, not something to fold away.
+
+    Both the client and the engine raise ``ValueError`` for it, which is again not
+    an :class:`AssistantError`, so ``--scope facet --scope facet`` escaped as a
+    traceback for the same reason a blank source did.
+    """
+    _wire(monkeypatch, _granting_engine())
+
+    result = CliRunner().invoke(
+        cli.app, ["grant", "calendar", "--scope", "facet", "--scope", "facet", "--yes"]
+    )
+    assert result.exit_code == 2
+
+
+def test_the_source_reaches_the_hub_exactly_as_it_was_typed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0102 §2: the adapter refuses a blank source and **normalises nothing**.
+
+    The refusal above is a parse-time callback, and a callback is exactly where an
+    author reaches for ``.strip()``. Doing so would make ``revoke " calendar "``
+    arrive at the hub as ``calendar`` and *match* a held reader, where ADR-0097 §10
+    requires it be refused rather than matched — §2's substitutability failure,
+    arriving one layer further out than the annotation it was argued about.
     """
     engine = _granting_engine()
     _wire(monkeypatch, engine)
 
-    result = CliRunner().invoke(cli.app, ["grant", "calendar", "--scope", "facet"], input="n\n")
-    assert result.exit_code == 0
-    rendered = output.getvalue()
-    assert "/srv/calendar.ics" in rendered
-    assert not [call for call in engine.calls if call[0] == "grant"]
-    assert not engine.grants_recorded
+    CliRunner().invoke(cli.app, ["revoke", "  calendar  "])
+    assert [call for call in engine.calls if call[0] == "revoke"] == [
+        ("revoke", {"source": "  calendar  "})
+    ]
 
 
 def test_grant_records_the_grant_once_the_user_agrees(
