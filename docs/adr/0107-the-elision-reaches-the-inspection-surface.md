@@ -1,7 +1,137 @@
 # 107. The elision reaches the inspection surface: both DTOs carry it, and ADR-0086 §10 deferred the form
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-05
+- **Note (2026-08-05): ratified.** `Proposed` → `Accepted`, in the separate lane
+  #633 requires — and which the bullet at §8 item 7 predicts by name — after
+  **both** required reviews came back green on the content this ADR merged with:
+  adversarial **APPROVE with no findings** and architecture **APPROVE with no
+  findings**, both at tree `e3fdb6fae5b1`, round 7, 883 lines net across 6
+  commits, churn reported as a lower bound of `≥1.2×` (1039 touched; history was
+  rewritten, so earlier rounds are not counted), each posted to PR #749 by
+  `just ship`. That is the outcome ADR-0070 §1 requires the ratifying edit to
+  record — "the ratifying edit records that review's outcome, it does not replace
+  it" — and it is taken from that comment rather than from a report.
+
+  **The header bullet below naming the review set is satisfied rather than
+  waived, and this edit takes one lens for a reason that bullet does not cover.**
+  It requires "adversarial *and* architecture, though the PR carrying it is prose
+  only", on the ground that this ADR decides `core/types.py` surface; PR #749 ran
+  both and both are recorded above, so the requirement was met on the decision.
+  This *ratifying edit* is a different change: `CONTRIBUTING.md` → "Trivial ADR
+  edits" exempts "the `Proposed` → `Accepted` ratification flip" from a separate
+  review *of the edit itself* — "about *review cost*, and nothing else … not
+  licence to rewrite a ratified decision in place, and it does not lift any review
+  the ADR's substance requires" — and ADR-0015 §5 exempts trivial ADRs by name. So
+  the adversarial lens alone is the required set here, and the bullet needs **no
+  tense edit** to stay true: unlike ADR-0096's and ADR-0102's, which carried a
+  forward-looking "it **is** reviewed while `Proposed` and ratified only after"
+  and were put into the past tense at their ratifications, this one states only
+  what the required set *is* and why `scripts/ship.sh` does not fire it
+  mechanically. Both sentences read the same today.
+
+  **The anchor is not the merged head here, and the identity is established
+  through the tree rather than assumed**: the comment's
+  `<!-- ship:896e0717a39d931fb6cedd29e1e46e5952b6e35e -->` anchor is the pre-merge
+  branch head, which `git merge-base --is-ancestor` shows is *not* an ancestor of
+  `main` because #749 was rebase-merged. Both were resolved with `git rev-parse`
+  rather than trusted: `896e0717a39d^{tree}` and `4e3652c^{tree}` are the same
+  tree, `e3fdb6fae5b1`, the one named above.
+
+  **No `blocker` or `major` finding was waived, and none was deferred to an
+  issue.** Four findings were raised across rounds 1–6, each verified against the
+  text and fixed in it: the deferred shape of the three amendment records
+  (`blocker`, round 1), one obligation stated at two widths in §2 and §5
+  (`blocker`, round 3), the same defect restated one section over in §7
+  (`blocker`, round 4), and two vacuously-passing test requirements in §8
+  (`major`, rounds 5 and 6). **The two `blocker`s are the same defect at two
+  sites, and §5's per-clause width table is the remedy rather than a residue of
+  it.** §5 records both instances in the text rather than quietly repairing them,
+  on ADR-0091 §1's stated ground that "the drift is a property of the form, not of
+  any author's care", and then checks all seven clauses' widths in one table. That
+  is the treatment ADR-0091 §1 gave its own instance, applied here to two; nothing
+  about it was left unresolved at the terminal round.
+
+  **Beyond the `Status` line and this appended note, not one word of the text this
+  ADR merged with is edited** — not a clause, not a tense — which is ADR-0070 §1's
+  own test applied to the ratifying edit first, in its strongest available form:
+  no decision text is touched and no normative clause acquires, loses or alters an
+  obligation. It is also the only in-place form §1 permits, which allows a
+  header-line edit at ratification and holds that "ratified decision text — the
+  Context, Decision and Consequences — is never rewritten".
+
+  **The sweep did *not* come back empty here, and what it found is recorded rather
+  than repaired.** It was run site by site over the whole document. **No clause
+  mentions this ADR's own `Status`.** Three mention a neighbour's, all in §11, and
+  they divide:
+
+  - **§11's "ADR-0085's `Status` is a plain `Accepted`, so under ADR-0070 §4 and
+    ADR-0082 §2 it takes the leading `Partially superseded by ADR-0107 (…)` token"
+    is false as of today, and this ADR's own commit range is what falsified it.**
+    Commit `24a1fd0` — "write ADR-0107's three records atomically with the ADR",
+    in this ADR's own PR — put that token on ADR-0085's `Status` line, so the
+    premise stopped holding before the PR merged. It is a *prescription that was
+    then performed*, so it reads as the reasoning for an edit rather than as a
+    live claim about where ADR-0085 stands, and a reader acts identically on it
+    either way. ADR-0070 §1 forbids rewriting it, so it is recorded here. This is
+    the same shape as the §Context sentence ADR-0104's ratification note recorded
+    for the same reason.
+  - **§11's "ADR-0086's `Status` already leads with `Partially superseded by
+    ADR-0091`" and "ADR-0091's `Status` is a plain `Accepted` and takes no token"
+    were checked and deliberately left.** Both are true on `main` today, both were
+    re-read rather than recognised, and this document's flip can move neither.
+    Rewriting either would touch Decision text for no gain.
+
+  **One more sentence is moment-scoped and this very lane is its counterexample,
+  which is worth naming rather than leaving to be rediscovered.** §11 argues the
+  atomic shape partly on "the two lanes in flight write a new ADR file and a
+  `Status` flip on a third, and neither touches ADR-0085, ADR-0086 or ADR-0091."
+  That was true of the lanes in flight when this was written. The lane performing
+  *this* flip writes two `Status` flips and **does** touch ADR-0085 — appending a
+  dated note recording that the supersession its line names has now landed, which
+  is ADR-0070 §1's second permitted header edit. The sentence is a claim about a
+  moment's traffic, not a rule, so nothing it supports is disturbed; §11's
+  argument for atomicity never rested on that clause alone.
+
+  **The clauses whose truth *depends* on this ratification were written forward,
+  and this edit is the event that makes them true.** §8's opening — "Its own PR,
+  after this ADR is ratified (golden rule 5)" — and §8 item 7's "The one
+  `docs/adr/` edit still outstanding after this change is the `Proposed` →
+  `Accepted` flip, which is a separate trivial ratification PR" are both
+  predictions of this lane, and this lane is what satisfies them. Item 7 is also
+  the text that fixes this edit's own shape: a separate PR, a trivial edit, and
+  `docs/adr/` only. Neither is touched.
+
+  **No merge landed between this ADR's merge and its ratification, so the
+  staleness check is short rather than skipped.** Ratified against `4e3652c`,
+  which **is** the commit this ADR merged as — `git diff --name-only 4e3652c
+  4e3652c` is empty and `git log 4e3652c..origin/main` names no commit. The base
+  move that *did* happen was before the merge, from `404e07f` to `2d2f515`, and it
+  is recorded in PR #749 rather than here. So the tree the two reviews read is the
+  tree this edit lands on, byte for byte.
+
+  **Every claim this ADR makes about the tree was nonetheless re-read at
+  `4e3652c` rather than carried over, and all hold.** `core/types.py`'s
+  `BeliefSummary.evidence_count` still carries ADR-0073 §4's phrase verbatim in
+  its `description=` — "How many citations stand behind it, resolved or not" —
+  and `Belief.evidence_count`'s property docstring still repeats it, which is the
+  wording §6 corrects; **neither `Belief` nor `BeliefSummary` carries
+  `evidence_elided` yet**, and `Provenance` still does, which is §3's premise and
+  the gap §2 names; `orchestration/engine.py`'s `belief_from_record` and
+  `belief_summary_from_record` both still hold the whole `MemoryRecord`, so the
+  number is available at both projection sites without a second store read;
+  `interfaces/cli.py`'s `_why` is still one renderer over `Belief | BeliefSummary`
+  with `_render_belief_fields` shared beneath it, and still says "nothing supports
+  it any more", which is the sentence §7 repairs. That none of this has moved is
+  ADR-0015 §5's sequence working: §8's lane is blocked on this flip.
+
+  **The deferrals stand as written.** §10's currency question is #744's, open;
+  its attested-count question waits on ADR-0073 §4's own `ATTESTED` gate and leg
+  6's first `EXTERNAL` producer; and its "when the first displacement happens"
+  entry is still unscheduled by design. **#568 and #624 are closed by this ADR**,
+  which is what closes them rather than this flip. **ADR-0070 §1's no-rewrite rule
+  now protects this text**, so any later correction to any of it is an appended
+  dated note.
 - **This is a contract change.** §3 adds one field to `Belief` and one to
   `BeliefSummary` in `core/types.py` — two types the `AssistantEngine` Protocol
   returns, which `orchestration` produces and `interfaces` and `wire` consume.

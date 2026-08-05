@@ -49,6 +49,24 @@
   and ADR-0073's own ADR-0084 note used. Appended note per ADR-0070 §1: no text
   below it is rewritten, and the superseded sentences are left standing exactly as
   written. Refs #568, #624.
+- Note (2026-08-05): **ADR-0107 is ratified, so the `Status` line above now names
+  a supersession that has landed rather than one that is drafted.** ADR-0107 was
+  flipped `Proposed` → `Accepted` in the separate lane #633 requires, after both
+  of its required reviews — adversarial and architecture — came back APPROVE with
+  no findings at tree `e3fdb6fa`, round 7, posted to PR #749 by `just ship`.
+  **Nothing about the scope changes**: what is replaced and what survives are
+  exactly what the note above records, and the `Status` line is already correct
+  and is unchanged. This note exists only because that note drew the
+  drafted-versus-ratified distinction itself, in the sentence beginning "While
+  ADR-0107 is still `Proposed`" — a conditional that stops applying rather than
+  becoming false, and which therefore leaves a reader holding only this ADR
+  unable to tell which of the two states obtains. Recording the change is
+  ADR-0070 §1's second permitted in-place header edit, "**recording a supersession
+  that has landed**"; doing it as an appended note rather than by editing the
+  earlier one is §1's own mechanism, under which an amendment *adds* and does not
+  overwrite. The earlier note is a dated record of the moment it was written and
+  is left standing exactly as written, as is every sentence below both notes.
+  Refs #568, #624.
 - **This is ADR-0084 §5's step 2, and it exists so that no lane authors `core`
   contract surface unreviewed.** ADR-0084 decided *that* the façade is promoted
   to a Protocol, *what class* of thing promotes with it, and the boundary rules
