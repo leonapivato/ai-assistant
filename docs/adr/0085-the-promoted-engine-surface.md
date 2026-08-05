@@ -1,7 +1,54 @@
 # 85. The promoted engine surface: fifteen methods, twenty-four types, one closed graph
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0107 (§4a's "`Belief` is unchanged … its counts stay derived from it", and §4's normative field rows for `Belief` and `BeliefSummary`)
 - Date: 2026-07-31
+- Partially superseded: 2026-08-05 by ADR-0107 — **two field lists are no longer
+  complete and one absolute is no longer true; everything §4a decided about *why*
+  the two types differ is untouched.** ADR-0086 §1 bounded `Provenance.evidence`
+  and its §4 recorded the displacement as `Provenance.evidence_elided`, which
+  neither inspection DTO could carry. ADR-0107 §3 gives both of them a field for
+  it — the question ADR-0086 §10 filed as #568 and expressly left to this ADR's
+  surface: "`Belief` and `BeliefSummary` are ADR-0085's contract surface".
+
+  **Replaced.** §4a's "`Belief` is unchanged: it carries the resolved `evidence`
+  tuple, and its counts stay derived from it" — the leading absolute, not the
+  clause about the counts. `Belief` gains one field, `evidence_elided: int = 0`
+  (`ge=0`). And §4's rows for `Belief` and for `BeliefSummary` in the twenty-four
+  promoted types' **normative** field table, which no longer list every field
+  either type carries: a reader building either from that table ships an
+  incomplete type and fails conformance. That is the practical consequence and the
+  whole reason this record exists.
+
+  **Not replaced, and the scope matters more than the token.** `BeliefSummary`
+  still has **no `evidence` field at all** and still carries `evidence_count` and
+  `lost_evidence` as fields; `Belief`'s `evidence_count` and `lost_evidence` are
+  still properties over `evidence`, unchanged in value and in meaning (ADR-0107
+  §6); and `unsupported` still has one definition on both types, `evidence_count >
+  0 and lost_evidence == evidence_count` (ADR-0107 §7). §4a's deciding reason —
+  that a `BeliefSummary` has nowhere to put a citation's content, so a conforming
+  listing cannot over-deliver — is exactly why ADR-0107 adds a **count** and not a
+  tuple. §4b's invariant table is unchanged (ADR-0107 §4 adds none), §6b's derived
+  predicates are unchanged (the new field is a field, not a predicate), and §8's
+  figures do not move: §8f's belief page is "fifty beliefs' own `content` plus a
+  handful of scalars each", and a bounded integer per row is another scalar.
+
+  **One amendment rides here rather than earning a second record**, under
+  ADR-0070 §1's first bucket and ADR-0082 §2's placement rule. §4a's "It holds how
+  many there are and how many are gone, which is what §4 asked the listing to
+  convey" was true when written — nothing could displace before ADR-0086 §1's
+  bound — and is completed rather than reversed, because ADR-0073 §4's "how many
+  citations stand behind it" is now answered by the pair `evidence_count` and
+  `evidence_elided`. A reader acting on it acts identically.
+
+  ADR-0107 lands **in the same change as this note**, so this `Status` line never
+  names an ADR that does not exist — the hazard ADR-0070 §1 guards against, and
+  which ADR-0082 §7 states is the whole of §1's condition: "§1's condition is that
+  the superseding ADR **exists**, not that it is ratified … an atomic pair makes
+  that unreachable." While ADR-0107 is still `Proposed` the line names a
+  supersession that is drafted rather than ratified, the form ADR-0075 established
+  and ADR-0073's own ADR-0084 note used. Appended note per ADR-0070 §1: no text
+  below it is rewritten, and the superseded sentences are left standing exactly as
+  written. Refs #568, #624.
 - **This is ADR-0084 §5's step 2, and it exists so that no lane authors `core`
   contract surface unreviewed.** ADR-0084 decided *that* the façade is promoted
   to a Protocol, *what class* of thing promotes with it, and the boundary rules

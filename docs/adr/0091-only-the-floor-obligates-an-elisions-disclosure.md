@@ -2,6 +2,36 @@
 
 - Status: Accepted
 - Date: 2026-08-02
+- Note (2026-08-05): **Three of §6's deferrals are taken, and no clause of this
+  ADR is replaced.** §6 defers "how an inspection surface conveys the elision, and
+  on which type" to #568; "whether ADR-0086 §10's deferral of 'its rendering'
+  reaches ADR-0073 §4's floor" to #624; and "whether
+  `BeliefSummary.evidence_count`'s documented meaning needs correcting" to #568's
+  change. ADR-0107 decides all three: its §3 gives both `Belief` and
+  `BeliefSummary` a field `evidence_elided: int = 0` (`ge=0`); its §1 settles #624
+  for the reading that §10 deferred only the *form*, so ADR-0073 §4's floor
+  governs the inspection surface as ratified; and its §6 rules that
+  `evidence_count` keeps its value and loses the floor's wording, with the floor's
+  question answered by the pair of counts. A reader holding only this ADR would
+  otherwise still believe the three open, which is the ADR-0082 §1 trigger.
+
+  **Nothing this ADR decided changes, and its `Status` takes no token.** §1's
+  first marked clause is relied on by ADR-0107 §1 and §2 exactly as written —
+  its release "is bounded by §4's authority and reaches no other ADR", so it
+  neither created the obligation ADR-0107 acts on nor removed it, and ADR-0073
+  §4's floor arrives there intact because this ADR left it so. §1's second marked
+  clause is **satisfied** by ADR-0107 §5 and §9, not narrowed: an elision is
+  rendered as capacity rather than loss, and ADR-0107 §9 declines to render one as
+  an `Evidence` entry precisely because `Evidence` has one nullable field and the
+  marker would read as a tombstone. §2, §3, §4, §5, §7 and §8 are untouched. So no
+  clause is superseded, and under ADR-0070 §4 no leading token is owed; the record
+  ADR-0082 §1 requires is this note.
+
+  **§6's remaining entries stand.** When the first displacement happens is still
+  unpredicted; `MAX_EVIDENCE_CITATIONS`, the fold, the recurrence and
+  `MemoryStore.get_many` are still untouched; and ADR-0086 stays unmarked
+  (ADR-0089 §5) — ADR-0107 adds no mark to it and its own note carries none.
+  Appended note per ADR-0070 §1; no ratified text is rewritten. Refs #568, #624.
 - Partially supersedes: ADR-0086 — §4's clause that two renderings of an elision
   and a tombstone must both exist; §1 below. The rest of §4 stands whole: the
   field, its recurrence over installs, the record-level obligation, the
