@@ -183,11 +183,13 @@ so plainly is what keeps the marker minimal.
 
 > **Normative.** §1's predicate lands beside `band_of` in `core/types.py` as
 > `rests_on_recorded_external_content(provenance: Provenance) -> bool`, returning
-> `True` exactly when `band_of(provenance.source)` is `BeliefBand.ATTESTED` or
-> `provenance.derived_from_external` is `True`. Every consumer asking "does this rest
-> on recorded external content?" calls it; none reads `derived_from_external`
-> directly for that question. §3's disjunction and §10's tests are over this
-> function, not over the field.
+> `True` exactly when `band_of(provenance.source)` is `BeliefBand.ATTESTED`, or when
+> it is `BeliefBand.DERIVED` **and** `provenance.derived_from_external` is `True`.
+> The marker term is band-guarded, so the field cannot speak outside the band §2
+> gives it. Every consumer asking "does this rest on recorded external content?"
+> calls this function; none reads `derived_from_external` directly for that
+> question. §3's disjunction and §10's tests are over this function, not over the
+> field.
 
 The shape, stated as ADR-0072 §2 stated `band_of`'s rather than left to the lane:
 
@@ -198,11 +200,30 @@ def rests_on_recorded_external_content(provenance: Provenance) -> bool:
     Not a claim about influence: it reports what was recorded, never what a
     model may have read (ADR-0098 §5).
     """
-    return (
-        band_of(provenance.source) is BeliefBand.ATTESTED
-        or provenance.derived_from_external
+    band = band_of(provenance.source)
+    return band is BeliefBand.ATTESTED or (
+        band is BeliefBand.DERIVED and provenance.derived_from_external
     )
 ```
+
+**The band guard is not defensive tidiness; without it the function contradicts the
+clause above it.** §7 forbids a band-keyed validator, so
+`Provenance(source=USER_ASSERTED, derived_from_external=True, …)` stays
+constructible, and an unguarded disjunction would report a user's own assertion as
+resting on external content — which §4's second clause forbids the record from
+claiming and ADR-0098 §1 forbids in principle, since "the user's own utterance is
+not [external], however it was composed". Architecture review found it on round 15.
+
+**Reading the band rather than the stray flag is also the safer of the two, not
+merely the tidier.** The alternative — letting a flag on an asserted record win —
+would let a `DERIVED`-band field override a ratified band exemption, which is a
+larger hole than the one it closes: the `ASSERTED` band is reached only through
+`USER_ASSERTED`, and ADR-0098 §4's first two clauses already forbid a producer
+proposing an asserted record whose content or evidence is external or raising its own
+band by any means. A record in that state is malformed rather than adversarial, and
+the honest response to a malformed record is to honour the classifier the corpus
+keys everything else on (ADR-0072 §4: "the standing is keyed on `source`") rather
+than a boolean that §2 says means nothing there.
 
 **It takes a `Provenance` rather than a `MemorySource`**, which is the one place it
 departs from `band_of`, and the departure is forced: the predicate needs both the
@@ -750,10 +771,12 @@ dispatch plan costs a lane, and this one has already been inherited twice.
 ### 10. What the implementing lanes owe
 
 > **Normative.** The lane landing `derived_from_external` on `Provenance` ships a
-> test that a record decoded without the field reads `False`, and a test that
+> test that a record decoded without the field reads `False`; a test that
 > `rests_on_recorded_external_content` returns **true** for an `ATTESTED` record
-> whose `derived_from_external` is `False`. The second is what fails an
-> implementation that reads the field where it should call the predicate.
+> whose `derived_from_external` is `False`; and a test that it returns **false** for
+> a `USER_ASSERTED` record carrying `derived_from_external=True`. The second fails an
+> implementation that reads the field where it should call the predicate; the third
+> fails one that drops the band guard.
 
 > **Normative.** The same lane states §6's ceiling on the `MemoryPolicy` Protocol
 > and adds it to `MemoryPolicyContract`, in the same change as the field. The
