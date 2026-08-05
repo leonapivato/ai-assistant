@@ -477,6 +477,86 @@ def _present_subject(value: str | None) -> str | None:
     return value
 
 
+def _present_id(value: str) -> str:
+    r"""Reject a blank or unwritable id during Typer's parameter parsing, **stripping** it.
+
+    :func:`_present_source`'s shape with its normalisation rule inverted, and the
+    inversion is the whole of why this is a separate function. The reason for having
+    a callback at all is the same: ADR-0085 §3c puts
+    :data:`~ai_assistant.core.types.Identifier` validation on *every* implementation
+    of the engine surface, "before any I/O", and its refusal is a ``ValueError`` —
+    **not** an :class:`AssistantError` and not a ``TransportError`` — so a blank id
+    escapes each command's ``except (AssistantError, TransportError)`` boundary as an
+    uncaught traceback with no controlled exit code, the failure ADR-0042 §7 forbids.
+    Catching it here makes it a normal usage error (exit code 2) before any client is
+    built, exactly as :func:`_page_argument` does for a page the store would refuse.
+
+    **Encodability is checked as well as blankness**, and it is a real case rather
+    than a defensive one. Linux passes argv as bytes and Python decodes it with
+    ``surrogateescape``, so ``assistant forget $'\xe9'`` arrives as a lone surrogate
+    that ``EncodableText`` refuses and ADR-0087's encoder cannot express; without this
+    that refusal lands as the same uncaught ``ValueError`` a blank one does. The value
+    is **not** echoed in the message, for :func:`_present_source`'s reason: a value
+    with no UTF-8 encoding is one this process may not be able to write down, so
+    reporting the fault would fail the same way the fault does.
+
+    **The value is returned stripped**, where :func:`_present_source` returns its byte
+    for byte, because the two arguments are refined by different types and the
+    difference is decided rather than incidental. ADR-0085 §3c makes normalisation
+    contractual for an *identity* argument — a rule that only rejected blanks "would
+    leave stripping optional, and optional normalisation on an identity argument is
+    worse than none: it makes the answer to ``belief(" rec-1 ")`` a property of which
+    implementation you are holding". A grant's ``source`` is ``NonBlankEncodableText``
+    instead, which ADR-0102 §2 keeps byte-exact so that a source differing from a
+    declared name only by surrounding whitespace is refused rather than matched
+    (ADR-0097 §10).
+
+    Stripping *here* rather than leaving it to the implementation is not cosmetic
+    either: the id this module keeps is the one :func:`_render_no_such_belief` and
+    :func:`_render_no_such_conversation` report back, so without it a lookup the
+    engine performed against ``rec-1`` would be reported against ``" rec-1 "``.
+
+    Args:
+        value: The identifier as the user typed it.
+
+    Returns:
+        The identifier stripped, which is what the engine is then asked about.
+
+    Raises:
+        BadParameter: If the value is blank, or has no UTF-8 encoding.
+    """
+    stripped = value.strip()
+    if not stripped:
+        msg = "must not be blank"
+        raise typer.BadParameter(msg)
+    try:
+        encodable_text(stripped)
+    except ValueError as exc:
+        msg = "must be text with a UTF-8 encoding"
+        raise typer.BadParameter(msg) from exc
+    return stripped
+
+
+def _present_optional_id(value: str | None) -> str | None:
+    """:func:`_present_id` for the two id parameters that may be absent.
+
+    ``observe``'s positional and ``ask --conversation`` both default to ``None``,
+    which is the "no conversation named" state — the one thing this must not turn
+    into a blank, and the reason it cannot simply be :func:`_present_id`. The shape
+    :func:`_present_subject` uses for the same reason.
+
+    Args:
+        value: The identifier as the user typed it, or ``None`` when unset.
+
+    Returns:
+        The identifier stripped, or ``None``.
+
+    Raises:
+        BadParameter: If a value was given and is blank, or has no UTF-8 encoding.
+    """
+    return None if value is None else _present_id(value)
+
+
 def _page_argument(value: int) -> int:
     """Reject a ``--limit``/``--offset`` the store would refuse (ADR-0073 §2).
 
@@ -525,6 +605,7 @@ def ask(
         None,
         "--conversation",
         "-c",
+        callback=_present_optional_id,
         help=(
             "Continue this conversation (see 'assistant conversations'). "
             "Omit it to start a new one; the id is printed either way."
@@ -583,7 +664,9 @@ def conversations(
 
 @app.command("forget-conversation")
 def forget_conversation(
-    conversation_id: str = typer.Argument(..., help="The id of the conversation to destroy."),
+    conversation_id: str = typer.Argument(
+        ..., callback=_present_id, help="The id of the conversation to destroy."
+    ),
     *,
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Skip the prompt. The conversation is still shown first."
@@ -756,7 +839,9 @@ def questions(
 
 @app.command()
 def answer(
-    question_id: str = typer.Argument(..., help="The id of the question to answer."),
+    question_id: str = typer.Argument(
+        ..., callback=_present_id, help="The id of the question to answer."
+    ),
     *,
     accept: bool = typer.Option(
         ...,
@@ -783,7 +868,9 @@ def answer(
 
 @app.command("forget-question")
 def forget_question(
-    question_id: str = typer.Argument(..., help="The id of the question to destroy."),
+    question_id: str = typer.Argument(
+        ..., callback=_present_id, help="The id of the question to destroy."
+    ),
 ) -> None:
     """Destroy one deferred question, answered or not.
 
@@ -805,6 +892,7 @@ def forget_question(
 def observe(
     conversation_id: str | None = typer.Argument(
         None,
+        callback=_present_optional_id,
         help="The conversation to observe. Defaults to the most recently active one.",
     ),
 ) -> None:
@@ -826,7 +914,9 @@ def observe(
 
 @app.command()
 def forget(
-    belief_id: str = typer.Argument(..., help="The id of the belief to destroy."),
+    belief_id: str = typer.Argument(
+        ..., callback=_present_id, help="The id of the belief to destroy."
+    ),
     *,
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Skip the prompt. The belief is still shown first."
@@ -997,9 +1087,11 @@ async def _ask(
     code rather than escaping as a traceback (§7). Returns the process exit code.
     The composition root owns constructing the façade; this adapter owns closing it.
 
-    ``conversation_id`` is relayed untouched: whether it names a conversation is the
-    engine's question, and an unknown one comes back as an ``AssistantError`` this
-    boundary renders rather than as a silently fresh conversation (ADR-0074 §1).
+    ``conversation_id`` arrives non-blank and already stripped, which is the whole of
+    what :func:`_present_optional_id` does to it (ADR-0085 §3c). Whether it *names* a
+    conversation is the engine's question, and an unknown one comes back as an
+    ``AssistantError`` this boundary renders rather than as a silently fresh
+    conversation (ADR-0074 §1).
     """
     timeout = timedelta(seconds=timeout_seconds)  # already validated positive + finite
     approver: Callable[[Confirmation], bool] = (
@@ -1161,9 +1253,10 @@ async def _list_questions(*, limit: int, offset: int) -> int:
 async def _answer_question(question_id: str, *, accept: bool) -> int:
     """Load settings, build the engine, answer one question, and close it (§9).
 
-    The same single error boundary every other command has (ADR-0042 §7). The id is
-    relayed untouched: whether it names an open question is the engine's question,
-    and one that does not comes back as an ordinary outcome rather than an error.
+    The same single error boundary every other command has (ADR-0042 §7). The id
+    arrives non-blank and already stripped (:func:`_present_id`, ADR-0085 §3c);
+    whether it *names* an open question is the engine's question, and one that does
+    not comes back as an ordinary outcome rather than an error.
     """
     try:
         engine = await _open_engine()
@@ -1204,9 +1297,10 @@ async def _observe_conversation(conversation_id: str | None) -> int:
     error boundary (ADR-0042 §7): every stage that can fail — loading settings,
     configuring logging, constructing the engine, the observation itself, and
     shutdown — is inside it, so an :class:`AssistantError` is rendered and mapped to
-    a non-zero exit code rather than escaping as a traceback. The id is relayed
-    untouched, exactly as ``ask --conversation`` relays one: whether it names a
-    conversation is the engine's question (ADR-0074 §1).
+    a non-zero exit code rather than escaping as a traceback. The id arrives
+    non-blank and already stripped, exactly as ``ask --conversation``'s does
+    (:func:`_present_optional_id`, ADR-0085 §3c): whether it *names* a conversation
+    is the engine's question (ADR-0074 §1).
     """
     try:
         engine = await _open_engine()
