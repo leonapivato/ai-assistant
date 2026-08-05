@@ -255,6 +255,13 @@ async def test_recording_opens_and_closes_exactly_one_immediate_transaction(
         await ephemeral.record(revocation_of(granted, grant_id="g-revoke"))
     _assert_one_immediate_transaction(statements, what="record (revocation)")
 
+    # `clear` is here because it was the one write path outside the discipline
+    # (#563): it ran under a bare `with conn:`, which opens the *deferred*
+    # transaction the driver would have opened at the DELETE anyway.
+    with _traced(ephemeral) as statements:
+        assert await ephemeral.clear() == 2
+    _assert_one_immediate_transaction(statements, what="clear")
+
     assert ephemeral._conn.in_transaction is False
 
 

@@ -56,9 +56,11 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     describe_untrusted,
 )
+from ai_assistant.memory._transactions import transaction
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Sequence
+    from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
 
@@ -577,8 +579,9 @@ class SqliteDeferralStore:
         except ClockReadingError as exc:
             raise DeferralStoreError(str(exc)) from exc
 
-    @contextlib.contextmanager
-    def _transaction(self, what: str, *, immediate: bool = True) -> Iterator[sqlite3.Connection]:
+    def _transaction(
+        self, what: str, *, immediate: bool = True
+    ) -> AbstractContextManager[sqlite3.Connection]:
         """Run the block inside one transaction, translating backend failures.
 
         ``IMMEDIATE`` takes the write lock up front, so a read-then-write mutation
@@ -595,33 +598,7 @@ class SqliteDeferralStore:
         Raises:
             DeferralStoreError: If the backend fails at any point.
         """
-        conn = self._conn
-        begin = "BEGIN IMMEDIATE" if immediate else "BEGIN"
-        try:
-            conn.execute(begin)
-        except sqlite3.Error as exc:
-            msg = f"failed to {what}: {exc}"
-            raise DeferralStoreError(msg) from exc
-        try:
-            yield conn
-        except BaseException as exc:
-            # `BaseException`, not `Exception`: ADR-0060's resource clause is
-            # unconditional, and a transaction left open on the shared connection is
-            # a resource held with nothing running that will release it — the next
-            # `BEGIN` fails and the store is poisoned for every later caller.
-            with contextlib.suppress(sqlite3.Error):
-                conn.execute("ROLLBACK")
-            if isinstance(exc, sqlite3.Error):
-                msg = f"failed to {what}: {exc}"
-                raise DeferralStoreError(msg) from exc
-            raise
-        try:
-            conn.execute("COMMIT")
-        except sqlite3.Error as exc:
-            with contextlib.suppress(sqlite3.Error):
-                conn.execute("ROLLBACK")
-            msg = f"failed to {what}: {exc}"
-            raise DeferralStoreError(msg) from exc
+        return transaction(self._conn, what, error=DeferralStoreError, immediate=immediate)
 
     @staticmethod
     def _fetch(

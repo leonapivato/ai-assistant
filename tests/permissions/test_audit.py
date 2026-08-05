@@ -218,6 +218,13 @@ async def test_recording_opens_and_closes_exactly_one_immediate_transaction(
     assert ephemeral._conn.in_transaction is False
     assert await ephemeral.record(decision("d-2")) == "d-2"  # the trail is not poisoned
 
+    # `clear` is here because it was the one write path outside the discipline
+    # (#563): it ran under a bare `with conn:`, which opens the *deferred*
+    # transaction the driver would have opened at the DELETE anyway.
+    with _traced(ephemeral) as statements:
+        assert await ephemeral.clear() == 2
+    _assert_one_immediate_transaction(statements, what="clear")
+
 
 async def test_the_refusals_share_one_catchable_base(ephemeral: SqliteAuditTrail) -> None:
     """A caller that only wants "the trail would not accept this" gets one handler."""
