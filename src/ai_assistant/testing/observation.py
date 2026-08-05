@@ -110,6 +110,14 @@ class ObservedBelief:
     drive a non-zero ``discarded_unusable`` without the fake ever emitting a
     proposal that breaks the contract.
 
+    **There is no subject here, and there must not be one** (ADR-0100 §5). An
+    observer's proposal states no ``about_person``, so a template carrying one
+    would be a template this fake could only honour by breaking its contract —
+    ``EPISODIC``'s case, one clause over. It is left off the template rather than
+    refused in :meth:`__post_init__`, because a field nobody can set cannot be set
+    wrongly; the shared ``Observer`` suite pins the outcome either way, which is
+    what makes the omission a decision rather than a gap.
+
     Attributes:
         content: The belief's canonical text rendering (ADR-0005 §1). Also the
             kind-specific field's value, so one string is all a consumer needs.

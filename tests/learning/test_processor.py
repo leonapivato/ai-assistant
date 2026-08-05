@@ -21,12 +21,13 @@ from ai_assistant.learning import RuleBasedFeedbackProcessor
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def _event(
+def _event(  # noqa: PLR0913 — one keyword per event field a case may need to vary
     *,
     kind: FeedbackKind = FeedbackKind.PREFERENCE,
     memory_kind: MemoryKind = MemoryKind.PREFERENCE,
     content: str = "prefers concise replies",
     subject: str | None = None,
+    about_person: str | None = None,
     evidence: tuple[str, ...] = (),
 ) -> FeedbackEvent:
     return FeedbackEvent(
@@ -34,6 +35,7 @@ def _event(
         memory_kind=memory_kind,
         content=content,
         subject=subject,
+        about_person=about_person,
         evidence=evidence,
         created_at=_WHEN,
     )
@@ -91,6 +93,61 @@ async def test_procedural_and_episodic_targets_are_deferred() -> None:
 
     assert await processor.process(_event(memory_kind=MemoryKind.PROCEDURAL)) == []
     assert await processor.process(_event(memory_kind=MemoryKind.EPISODIC)) == []
+
+
+# --- the subject axis: the user's route into it (ADR-0100 §7) ----------------
+
+
+async def test_a_stated_subject_reaches_the_preference_branch() -> None:
+    """The scope and the subject land in their own places, not each other's."""
+    event = _event(subject="travel", about_person="Marta")
+
+    [proposal] = await _processor().process(event)
+
+    record = proposal.proposed
+    assert isinstance(record, PreferenceMemory)
+    assert record.about_person == "Marta"
+    assert record.context == "travel"  # the scope axis, unmoved
+
+
+async def test_a_stated_subject_reaches_the_semantic_branch_too() -> None:
+    """The branch that discards a *scope* must still carry the subject.
+
+    This is the specific way ADR-0100 §7 could be got wrong, because the two
+    fields look alike at the call site: the semantic branch has nowhere to put a
+    ``subject`` scope and drops it, as ADR-0009 §1 decided. Dropping the subject
+    with it would write ``None``, which ADR-0100 §3 reads as *the owner's*, over a
+    subject the user had just stated — the false record §7's route exists to
+    avoid, reintroduced one layer down.
+    """
+    event = _event(
+        kind=FeedbackKind.CORRECTION,
+        memory_kind=MemoryKind.SEMANTIC,
+        content="works from the Lisbon office",
+        subject="offices",
+        about_person="Marta",
+    )
+
+    [proposal] = await _processor().process(event)
+
+    record = proposal.proposed
+    assert isinstance(record, SemanticMemory)
+    assert record.about_person == "Marta"
+
+
+async def test_the_subject_is_carried_verbatim() -> None:
+    """Nothing on the way in normalises a label (ADR-0100 §6)."""
+    [proposal] = await _processor().process(_event(about_person="  marta  "))
+
+    assert proposal.proposed.about_person == "  marta  "
+
+
+@pytest.mark.parametrize("memory_kind", [MemoryKind.PREFERENCE, MemoryKind.SEMANTIC])
+async def test_an_unstated_subject_stays_unstated(memory_kind: MemoryKind) -> None:
+    """Silence is carried across as silence, never repaired into a name."""
+    [proposal] = await _processor().process(_event(memory_kind=memory_kind))
+
+    assert proposal.proposed.about_person is None
 
 
 async def test_rationale_records_the_feedback() -> None:

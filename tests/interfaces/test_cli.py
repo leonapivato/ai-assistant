@@ -611,6 +611,120 @@ def test_learn_builds_a_preference_event_with_a_subject(
     assert event.subject == "units"
 
 
+def test_learn_states_a_subject_with_about_person(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--about-person is the only route a non-owner subject has (ADR-0100 §4, §7).
+
+    Without it, ``assistant learn "Marta prefers window seats"`` constructs
+    ``about_person=None``, which §3 reads as *the owner's* — so the field's
+    arrival would make a false record of exactly the case it was added for. That
+    is why §7 makes the route a precondition of the field rather than a follow-up.
+    """
+    engine = _RecordingEngine(_stored_outcome())
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["learn", "--kind", "preference", "Marta prefers window seats", "--about-person", "Marta"],
+    )
+    assert result.exit_code == 0
+    event = engine.events[0]
+    assert event.about_person == "Marta"
+    assert event.subject is None  # the scope axis, untouched by the person flag
+
+
+def test_learn_keeps_the_two_about_flags_apart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--about is a scope and --about-person is whom it is about (ADR-0100 §7).
+
+    Given together they land in their own fields. The person flag is spelled long
+    precisely because ``--about`` and ``-a`` were already the scope axis's on this
+    command, and a second short flag beside ``-a`` is the confusion the ADR spent
+    a section avoiding.
+    """
+    engine = _RecordingEngine(_stored_outcome())
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "learn",
+            "--kind",
+            "preference",
+            "prefers window seats",
+            "--about",
+            "travel",
+            "--about-person",
+            "Marta",
+        ],
+    )
+    assert result.exit_code == 0
+    event = engine.events[0]
+    assert event.subject == "travel"
+    assert event.about_person == "Marta"
+
+
+def test_learn_defaults_to_stating_no_subject(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Silence is "no subject stated", which is read as the owner's (ADR-0100 §3)."""
+    engine = _RecordingEngine(_stored_outcome())
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["learn", "--kind", "correction", "the office moved"])
+
+    assert result.exit_code == 0
+    assert engine.events[0].about_person is None
+
+
+def test_learn_passes_a_subject_through_byte_for_byte(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The adapter does not tidy a label (ADR-0100 §6).
+
+    Stripping here would store ``"  marta  "`` as ``"marta"``, and §6 keeps a
+    label exactly as given precisely so that every later matching rule stays
+    available — none can be recovered from labels normalised on the way in.
+    """
+    engine = _RecordingEngine(_stored_outcome())
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(
+        cli.app, ["learn", "--kind", "correction", "x", "--about-person", "  marta  "]
+    )
+
+    assert result.exit_code == 0
+    assert engine.events[0].about_person == "  marta  "
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_learn_rejects_a_blank_about_person(blank: str) -> None:
+    """A blank subject is a usage error, not an uncaught ValidationError (§7).
+
+    ``FeedbackEvent.about_person`` is ``NonBlankEncodableText``, whose refusal is
+    a ``ValidationError`` — not an ``AssistantError`` — raised while the event is
+    built, which is *before* :func:`_learn_feedback`'s error boundary opens. The
+    parse-time callback turns it into a clean exit 2, the shape ``_present_source``
+    already uses one command over.
+    """
+    result = CliRunner().invoke(
+        cli.app, ["learn", "--kind", "correction", "x", "--about-person", blank]
+    )
+
+    assert result.exit_code == 2  # Typer's usage-error code
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_learn_rejects_an_unencodable_about_person() -> None:
+    r"""A lone surrogate reaches argv and no UTF-8 encoder will take it.
+
+    Linux passes argv as bytes and Python decodes it with ``surrogateescape``, so
+    ``assistant learn x --about-person $'\xe9'`` arrives as half a character.
+    ``EncodableText`` refuses it, and without the parse-time check that refusal
+    would land as the same uncaught ``ValidationError`` a blank one would.
+    """
+    result = CliRunner().invoke(
+        cli.app, ["learn", "--kind", "correction", "x", "--about-person", "\udce9"]
+    )
+
+    assert result.exit_code == 2
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
 def test_learn_memory_kind_flag_overrides_the_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
