@@ -205,6 +205,112 @@ async def test_conflicting_proposal_merges_into_existing() -> None:
     assert await store.get("new") is None  # merged in place, not duplicated
 
 
+#: A target the ``ATTESTED`` band admits at full confidence (ADR-0038 §2a) whose
+#: content is a superset of :data:`_CORROBORATED`'s terms, so the derived proposal
+#: below is detected as a conflict and *which* content survived is visible.
+_IMPORTED = "prefers window seats, as the airline has it"
+_CORROBORATED = "prefers window seats"
+
+
+async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -> None:
+    """#646: the fold that used to raise out of ``core`` and write nothing.
+
+    An ``EXTERNAL`` target at 1.0 — legitimate under ADR-0038 §2a — reinforced by
+    an ``OBSERVED`` proposal took ``source`` from the proposal and ``confidence``
+    as the maximum, producing ``source=OBSERVED, confidence=1.0``, which
+    ``Provenance._derived_is_never_certain`` refuses (ADR-0077 §7). The fold raised
+    a ``ValidationError`` and the ingest wrote nothing at all.
+
+    ADR-0103 §6 rules the pairing: the incoming record contributes its ``evidence``
+    and nothing else, so the attested record survives whole. Asserted end to end
+    because "nothing was written" was the defect — a unit call on the fold would
+    have shown the exception and not the empty store.
+    """
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    await store.add(
+        _preference("imported", _IMPORTED, confidence=1.0, source=MemorySource.EXTERNAL)
+    )
+
+    result = await _ingestor(store).ingest(
+        _proposal(_preference("observed", _CORROBORATED, confidence=0.6, evidence=(_EPISODE,)))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.REINFORCE
+    assert result.record_id == "imported"
+    survivor = await store.get("imported")
+    assert survivor is not None
+    # The attested record survives whole: its band, its warrant, its text, and the
+    # attestation ADR-0073 §4 makes a disclosure obligation.
+    assert survivor.provenance.source is MemorySource.EXTERNAL
+    assert survivor.provenance.confidence == 1.0
+    assert survivor.provenance.attestation == _ATTESTED_BY
+    assert survivor.content == _IMPORTED
+    # The one thing the derived observation contributes: its evidence, unioned.
+    # This is where the corroboration is recorded — the episode it stands on is
+    # retained, which is what a currency rule reads from later (ADR-0103 §9).
+    assert set(survivor.provenance.evidence) == {_EPISODE}
+    assert await store.get("observed") is None  # folded in place, not duplicated
+
+
+async def test_a_derived_reinforcement_never_raises_an_attested_records_confidence() -> None:
+    """The trade ADR-0103 §6 names, at a target the old ``max`` would not have crashed on.
+
+    The rule is keyed on the two *bands* and not on the arithmetic, so it governs
+    an ``EXTERNAL`` target at 0.7 exactly as it governs one at 1.0 — where the
+    old fold would have raised the survivor to the derived record's 0.9 and this
+    one does not. A derived observation's strength is not a warrant the attested
+    record acquired by being agreed with; nothing is destroyed, because the
+    observation's episode is retained and can propose the derived belief on its
+    own terms.
+    """
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    await store.add(
+        _preference("imported", _IMPORTED, confidence=0.7, source=MemorySource.EXTERNAL)
+    )
+
+    result = await _ingestor(store).ingest(
+        _proposal(_preference("observed", _CORROBORATED, confidence=0.9, evidence=(_EPISODE,)))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.REINFORCE
+    survivor = await store.get("imported")
+    assert survivor is not None
+    assert survivor.provenance.confidence == 0.7
+    assert survivor.provenance.source is MemorySource.EXTERNAL
+
+
+async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_did() -> None:
+    """The reverse pairing is untouched, deliberately (ADR-0103 §6, #733).
+
+    A ``DERIVED`` target reinforced by an ``EXTERNAL`` record still folds to
+    ``EXTERNAL`` at the maximum. That survivor carries a strength the surviving
+    source's own record never supplied — filed as #733 — but it is a *valid*
+    ``Provenance``: the ``ATTESTED`` band admits any value up to 1.0 (ADR-0038
+    §2a), so ADR-0103 §6's first clause admits it and its second clause, keyed on
+    an ``ATTESTED`` target, does not reach it. Pinned so that fixing #646 cannot
+    quietly decide #733 too.
+    """
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    await store.add(_preference("observed", _IMPORTED, confidence=0.9, evidence=(_EPISODE,)))
+
+    result = await _ingestor(store).ingest(
+        _proposal(
+            _preference("imported", _CORROBORATED, confidence=0.5, source=MemorySource.EXTERNAL)
+        )
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.REINFORCE
+    assert result.record_id == "observed"
+    survivor = await store.get("observed")
+    assert survivor is not None
+    assert survivor.provenance.source is MemorySource.EXTERNAL
+    assert survivor.provenance.confidence == 0.9
+    assert survivor.content == _CORROBORATED  # newer content still wins here
+
+
 async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
     # The unlearning path (issue #38, ADR-0038), now non-destructive (ADR-0045
     # §4): a correction takes the stale belief off the read path by closing its

@@ -15,7 +15,9 @@ from memory_writer_contract import MemoryWriterContract, WriterFactory
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
+    Attestation,
     DataTier,
+    EpisodicMemory,
     MemoryDecisionKind,
     MemorySource,
     MemoryUpdateProposal,
@@ -35,7 +37,7 @@ def _fixed_now() -> datetime:
     return datetime(2026, 6, 1, tzinfo=UTC)
 
 
-def _proposal(record_id: str) -> MemoryUpdateProposal:
+def _proposal(record_id: str, *, evidence: tuple[str, ...] = ()) -> MemoryUpdateProposal:
     content = "prefers concise emails"
     return MemoryUpdateProposal(
         proposed=PreferenceMemory(
@@ -43,7 +45,10 @@ def _proposal(record_id: str) -> MemoryUpdateProposal:
             content=content,
             preference=content,
             provenance=Provenance(
-                source=MemorySource.OBSERVED, confidence=0.6, last_updated=_fixed_now()
+                source=MemorySource.OBSERVED,
+                confidence=0.6,
+                evidence=evidence,
+                last_updated=_fixed_now(),
             ),
         ),
         rationale="because",
@@ -155,6 +160,57 @@ def _inferred(record_id: str, *, validity: Validity | None = None) -> Preference
             source=MemorySource.INFERRED, confidence=0.6, last_updated=_fixed_now()
         ),
     )
+
+
+async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -> None:
+    """The fake folds ADR-0103 §6's pairing the way ``MemoryIngestor`` does (#646).
+
+    Not contract — ADR-0103 §7 declines to promote §6 to the conformance suite, and
+    ADR-0040 §5a keeps how confidence combines unasserted — so the suite cannot
+    hold the two copies together and this case does it instead. A fake that kept
+    the old ``max`` would let an `orchestration` test see an ``OBSERVED`` survivor
+    at 1.0, which production cannot write at all: ``Provenance`` refuses it
+    (ADR-0077 §7) and the ingest writes nothing.
+    """
+    store = FakeMemoryStore(now=_fixed_now)
+    await store.add(
+        EpisodicMemory(
+            id="cited-episode",
+            content="the exchange the derived proposal rests on",
+            occurred_at=_fixed_now(),
+            provenance=Provenance(
+                source=MemorySource.OBSERVED, confidence=0.6, last_updated=_fixed_now()
+            ),
+        )
+    )
+    imported = PreferenceMemory(
+        id="imported",
+        content="prefers concise emails, as the mail client has it",
+        preference="prefers concise emails",
+        provenance=Provenance(
+            source=MemorySource.EXTERNAL,
+            confidence=1.0,
+            evidence=("t-ev",),
+            last_updated=_fixed_now(),
+            attestation=Attestation(reported_by="mail:work", reported_at=_fixed_now()),
+        ),
+    )
+    await store.add(imported)
+    writer = FakeMemoryWriter(
+        store=store, policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE), now=_fixed_now
+    )
+
+    result = await writer.ingest(_proposal("observed", evidence=("cited-episode",)))
+
+    assert result.decision.kind is MemoryDecisionKind.REINFORCE
+    assert result.record_id == "imported"
+    survivor = await store.get("imported")
+    assert survivor is not None
+    assert survivor.provenance.source is MemorySource.EXTERNAL
+    assert survivor.provenance.confidence == 1.0
+    assert survivor.provenance.attestation == imported.provenance.attestation
+    assert survivor.content == imported.content
+    assert set(survivor.provenance.evidence) == {"t-ev", "cited-episode"}
 
 
 async def test_supersede_refuses_a_future_dated_target_without_writing() -> None:

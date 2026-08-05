@@ -823,6 +823,32 @@ def _installed(record: MemoryRecord) -> MemoryRecord:
     return record.model_copy(update={"provenance": bounded})
 
 
+def _corroborates(target: MemoryRecord, incoming: MemoryRecord) -> bool:
+    """Is this the fold ADR-0103 §6 rules — an ``ATTESTED`` target, a ``DERIVED`` proposal?
+
+    Keyed on both bands and on neither record's confidence, so the same fold folds
+    the same way at ``0.7`` and at ``1.0``; only the ``1.0`` case was #646's crash.
+    ``ATTESTED`` is named on the target side rather than the rule being stated as
+    "a ``DERIVED`` proposal onto any target", because nothing folds onto an
+    ``ASSERTED`` target at all (:func:`_refuse_unsafe_fold` clause 1). Duplicated
+    from ``MemoryIngestor`` (golden rule 1), and duplicated *because* ADR-0103 §7
+    declines to promote §6 to the conformance suite: with no shared case holding
+    the two copies together, this fake follows the ingestor deliberately rather
+    than mechanically.
+
+    Args:
+        target: The stored record the ruling folds into.
+        incoming: The proposed record being folded in.
+
+    Returns:
+        Whether ADR-0103 §6's second clause governs this fold.
+    """
+    return (
+        band_of(target.provenance.source) is BeliefBand.ATTESTED
+        and band_of(incoming.provenance.source) is BeliefBand.DERIVED
+    )
+
+
 def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     """Fold ``incoming`` into ``target``, keeping the target's id.
 
@@ -838,17 +864,40 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     **two** sources, so both records' ``evidence_elided`` are summed — even when
     the union fits and nothing is displaced (ADR-0086 §4).
 
-    The ``attestation`` is the **incoming** one (ADR-0092 §6), which is required
-    rather than a choice: this ``Provenance`` is built field by field, so its iff
-    validator would raise on an attested fold carrying none. It follows the rule
-    ``source`` and ``last_updated`` already follow — newer content wins, and the
-    attestation describes the content that survived.
+    **A ``DERIVED`` record folded onto an ``ATTESTED`` one corroborates rather than
+    accumulates** (ADR-0103 §6): the whole target record survives — content,
+    ``source``, ``attestation``, confidence, window and expiry — and the incoming
+    record contributes its evidence and nothing else. Not contract either, and
+    mirrored here for the reason every other unpinned rule is: a fake that folded
+    differently would let an `orchestration` test see a survivor production never
+    writes, and in this pairing production used to raise a ``ValidationError`` out
+    of ``core`` and write nothing at all (#646).
+
+    The ``attestation`` is the **incoming** one on the ordinary arm (ADR-0092 §6),
+    which is required rather than a choice: this ``Provenance`` is built field by
+    field, so its iff validator would raise on an attested fold carrying none. It
+    follows the rule ``source`` and ``last_updated`` already follow — newer content
+    wins, and the attestation describes the content that survived. The
+    corroboration arm keeps that same property by keeping the *target's*
+    attestation, beside the target's ``source`` and the target's text.
+    ``last_updated`` comes from the incoming record on both arms: it is transaction
+    time (ADR-0045 §3), not one of the belief properties ADR-0103 §6 withholds.
     """
     union = tuple(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence]))
     evidence, elided = _bounded_evidence(
         union,
         elided=target.provenance.evidence_elided + incoming.provenance.evidence_elided,
     )
+    if _corroborates(target, incoming):
+        corroborated = Provenance(
+            source=target.provenance.source,
+            confidence=target.provenance.confidence,
+            evidence=evidence,
+            evidence_elided=elided,
+            last_updated=incoming.provenance.last_updated,
+            attestation=target.provenance.attestation,
+        )
+        return target.model_copy(update={"provenance": corroborated})
     provenance = Provenance(
         source=incoming.provenance.source,
         confidence=max(target.provenance.confidence, incoming.provenance.confidence),
