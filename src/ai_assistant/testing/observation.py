@@ -110,13 +110,17 @@ class ObservedBelief:
     drive a non-zero ``discarded_unusable`` without the fake ever emitting a
     proposal that breaks the contract.
 
-    **There is no subject here, and there must not be one** (ADR-0100 §5). An
-    observer's proposal states no ``about_person``, so a template carrying one
-    would be a template this fake could only honour by breaking its contract —
-    ``EPISODIC``'s case, one clause over. It is left off the template rather than
-    refused in :meth:`__post_init__`, because a field nobody can set cannot be set
-    wrongly; the shared ``Observer`` suite pins the outcome either way, which is
-    what makes the omission a decision rather than a gap.
+    **``about_person`` is a template the fake refuses, not one it honours**
+    (ADR-0100 §5). An observer's proposal states no subject, so a template asking
+    for one is **discarded and counted** — ``supports``-beyond-the-batch's shape,
+    not ``EPISODIC``'s. The difference between those two shapes is which half of
+    §5's clause a consumer needs to see: ``EPISODIC`` is refused at construction
+    because nothing downstream is meant to observe it, while "not proposed, **and
+    counted in** ``discarded_unusable``" is a statement about an *outcome*, and an
+    outcome nothing can produce is a clause no test can reach. This is the one
+    place in the tree where that state is expressible, so it is expressible here —
+    and the fake still never emits a proposal that breaks its own contract, which
+    is the property that matters.
 
     Attributes:
         content: The belief's canonical text rendering (ADR-0005 §1). Also the
@@ -139,6 +143,10 @@ class ObservedBelief:
             the episodes it ends up citing.
         rationale: Why this belief is being proposed. Non-blank.
         steps: A ``PROCEDURAL`` record's steps; ignored for the other kinds.
+        about_person: A subject to state — which an observer may not, so a
+            template naming one is **discarded and counted**, never proposed
+            (ADR-0100 §5). ``None``, the default, is the ordinary case and the
+            only one that yields a proposal.
     """
 
     content: str
@@ -149,6 +157,7 @@ class ObservedBelief:
     record_id: str | None = None
     rationale: str = "fake observer: the batch supports this"
     steps: tuple[str, ...] = field(default=())
+    about_person: str | None = None
 
     def __post_init__(self) -> None:
         """Refuse a template the fake could only honour by breaking its contract.
@@ -376,7 +385,18 @@ class FakeObserver:
         never a model's (ADR-0077 §5) — and a template wanting more support than
         the batch holds falls below its step's evidence floor and is discarded
         rather than repaired by attaching what is there.
+
+        **A template stating a subject is refused first**, before the batch is
+        even consulted (ADR-0100 §5). The order says which refusal it is: an
+        observer states no subject *whatever* the evidence, so consulting the
+        batch first would make a subject-stating template with too little support
+        look like an evidence failure. It is refused rather than stripped, because
+        stripping would propose a belief the caller asked to be about someone else
+        as though it were about the owner — the false record ADR-0100 §3's reading
+        rule turns an unstated subject into.
         """
+        if template.about_person is not None:
+            return None
         window = batch[template.start : template.start + template.supports]
         cited = tuple(episode.id for episode in window)
         if len(cited) < _EVIDENCE_FLOOR[template.step]:

@@ -134,6 +134,17 @@ class _GatedProvider:
 class TestModelBackedObserverContract(ObserverContract):
     """Runs ModelBackedObserver through the shared Observer conformance suite."""
 
+    #: This observer cannot be *asked* to state a subject, which is why it opts
+    #: out of the counting half of ADR-0100 §5 rather than proving it. §5 records
+    #: the reason as a property of the implementation: it "builds every record
+    #: itself from a fixed JSON envelope whose schema has no subject key, so the
+    #: shipped observer *cannot* state one however the model answers". What that
+    #: leaves unproven is proven directly instead, by
+    #: ``test_a_model_cannot_state_a_subject_however_it_spells_one`` below, which
+    #: is the stronger statement for this implementation: not "a stated subject is
+    #: refused" but "there is no way to state one".
+    states_no_subject_by_construction = True
+
     @pytest.fixture
     def observer(self) -> Observer:
         subject, _ = _observer(_eager_reply)
