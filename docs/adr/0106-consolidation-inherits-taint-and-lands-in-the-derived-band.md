@@ -362,10 +362,31 @@ ambiguous unless someone says which way is up.
 > never `REJECT`. The contract ceiling above admits either; the default takes the
 > question.
 
-> **Normative.** That ruling's `reason` states that the proposal's warrant rests on
-> recorded external content. A question the user cannot tell apart from an ordinary
-> one does not discharge §6, and no consolidator ships while the question it raises
-> cannot say why it was raised.
+> **Normative.** `DefaultMemoryPolicy`'s `reason` on that ruling states that the
+> proposal's warrant rests on recorded external content, and no consolidator ships
+> against the default while the question it raises cannot say why it was raised.
+> This obligation is the default's; it is **not** promoted to the `MemoryPolicy`
+> contract or to the shared suite.
+
+> **Normative.** A deployment that injects its own `MemoryPolicy` owns the
+> legibility of its own questions. This ADR's ceiling still binds it — §6's first
+> clause is a contract obligation — but nothing here obliges the *wording* of any
+> policy's `reason`.
+
+**The split between the two clauses is the suite's own, and it is the reason the
+legibility half stops at the default.** The ceiling — what may commit — is universal
+and belongs on the contract, which §6's first clauses rule. The *wording* of a
+`reason` is not: `MemoryPolicyContract`'s docstring records that two expectations
+were cut precisely because the Protocol does not state them, and names one of them —
+"that `reason` is non-blank" — with **#40** tracking its proper ratification. An ADR
+that asserted `reason` *content* in the shared suite would be widening the contract
+further than the widening already judged unratified, over a free-text field where no
+test can distinguish a sentence that conveys externality from one that claims to.
+Adversarial review proposed exactly that on round 10, and the alternative it offered
+— restricting consolidation to `DefaultMemoryPolicy` — is refused by golden rule 1,
+which has `orchestration` depend on the Protocol and the composition root choose the
+implementation. What the finding did get right is that the earlier clause read as
+universal while being enforceable only against the default; it now says which it is.
 
 **The reason field is the presentation state ADR-0098 §12's deferral demands, and it
 exists already.** That bullet defers "a presentation state for an inference that
@@ -673,9 +694,11 @@ dispatch plan costs a lane, and this one has already been inherited twice.
 > ordering. Every other clause here supplies evidence, so none of them can fail on
 > that ordering.
 
-> **Normative.** The end-to-end test above also asserts that the `Question` reaching
-> the user carries a `reason` distinguishing a tainted proposal from an ordinary
-> one (§6). Asserting only that a question exists does not satisfy this clause.
+> **Normative.** The end-to-end test above runs against `DefaultMemoryPolicy` and
+> also asserts that the `Question` reaching the user carries a `reason`
+> distinguishing a tainted proposal from an ordinary one (§6). Asserting only that a
+> question exists does not satisfy this clause. It is a test of the default, not a
+> conformance obligation on the `MemoryPolicy` Protocol.
 
 > **Normative.** The same lane ships an end-to-end test that a tainted consolidation
 > routed through the orchestration write stage leaves a `DeferredProposal`
