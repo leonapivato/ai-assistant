@@ -516,12 +516,22 @@ ADR-0078 refuses to queue a secret proposal at all and `MemoryUpdateProposal`'s
 validator makes the combination unconstructable — there is no question to answer. A
 tainted proposal *is* queued, so there is one, and answering it is the point.
 
-**This requires no Protocol change, which is the whole reason the marker is on the
-record.** ADR-0098 §5 could not site the enforcement because
-`MemoryPolicy.decide(proposal, *, conflicts)` "holds no store, so it cannot resolve
-the ids in `Provenance.evidence`". A boolean on `proposal.proposed.provenance` needs
-no resolution: the gate reads it off the argument it already receives. The seam
-§5 said did not exist turns out to cost one field and no signature.
+**This requires no change to `decide`'s signature and no evidence-resolution seam,
+which is the whole reason the marker is on the record.** ADR-0098 §5 could not site
+the enforcement because `MemoryPolicy.decide(proposal, *, conflicts)` "holds no
+store, so it cannot resolve the ids in `Provenance.evidence`". A boolean on
+`proposal.proposed.provenance` needs no resolution: the gate reads it off the
+argument it already receives, unchanged. The seam §5 said did not exist turns out to
+cost one field and no signature.
+
+**It does change the `MemoryPolicy` contract, and the distinction is not a
+quibble.** What the clauses above add is a *behavioural* obligation — stated on the
+Protocol, asserted in `MemoryPolicyContract` — and a lane that read "no Protocol
+change" as licence to ship the field and a default-policy branch alone would leave
+an injected policy free to `ACCEPT` a tainted proposal, which is the round-4 hole
+this section closed. An earlier draft carried the unqualified sentence past that
+round and contradicted its own §10; adversarial review found it on round 12. The
+cost is a docstring and a suite case, not a new argument and not a new method.
 
 **The second clause is ADR-0098 §5's own restated at this ADR's seam**, and it is a
 separate clause because the pressure is real and specific: a scheduled bulk job that
