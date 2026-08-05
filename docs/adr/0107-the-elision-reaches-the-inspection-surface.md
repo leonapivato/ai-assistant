@@ -209,10 +209,38 @@ nothing.
 
 ### 2. The inspection surface conveys the elision, and `export` is not a substitute
 
-> **Normative.** Where a belief's `Provenance.evidence_elided` is above zero, the
-> inspection surface conveys that more citations stood behind the belief than it
-> carries. It is not discharged by `MemoryStore.export`, by the record, or by any
-> surface other than the one a user reads to ask why a belief is held.
+> **Normative.** Where a **`DERIVED`** belief's `Provenance.evidence_elided` is
+> above zero, the inspection surface conveys that more citations stood behind the
+> belief than it carries. It is not discharged by `MemoryStore.export`, by the
+> record, or by any surface other than the one a user reads to ask why a belief is
+> held. The clause is scoped to that band and imposes nothing on the other two;
+> §3's field is carried on **every** band regardless, and §5 governs the shape
+> wherever a count is rendered.
+
+**The band scoping is ADR-0073 §4's, not a convenience.** §4 answers "why is it
+held" band by band, and the citation-count obligation sits inside its `DERIVED`
+bullet: "the surface conveys that the belief is **derived** and how many citations
+stand behind it". Its `ASSERTED` answer is complete without any citation — "a
+user's assertion is its own warrant … there is nothing further to cite" — and its
+`ATTESTED` floor is about the band, the reporting source and whose clock is shown,
+with no count in it at all. A clause obligating a count-derived disclosure on all
+three bands would be wider than the floor it rests on, and this ADR has no other
+ground for one.
+
+**`ATTESTED` and `ASSERTED` beliefs *can* carry a non-zero elision, so the
+silence is chosen rather than overlooked.** `Provenance`'s three validators —
+`_user_asserted_is_certain`, `_derived_is_never_certain`, `_attested_iff_attestation` —
+restrict `evidence` by band nowhere, and ADR-0086 §1 scopes its bound to
+`MemoryRecord` installs without reference to band, so any band's record can
+displace. What follows for those two bands is stated rather than left to be
+inferred: **the count is on the DTO** (§3), so `export`, the wire and any client
+that wants it all have it; **no rendering is owed**, because the band's own floor
+asks for no count and inventing one would answer a question that band's warrant
+does not turn on — an attested belief's warrant is the source's report, not its
+corroborating episodes. If leg 6's first `EXTERNAL` producer makes an attested
+citation count meaningful, that is ADR-0073 §4's own already-named `ATTESTED`
+gate, decided by the lane that has the producer in hand — the same disposition §4
+made for the source identity and the source clock, and not one to guess here.
 
 **The argument for "export is enough" is real and it fails on one word.**
 ADR-0086 §4 says the record-level obligation "is what makes the truncation
@@ -243,8 +271,10 @@ and §1 above confirms is undeferred.
 
 > **Normative.** `BeliefSummary` and `Belief` each gain a field
 > `evidence_elided: int = 0` with `ge=0`, carrying `Provenance.evidence_elided`
-> as stored. It is a **field on both** — not a property, not a computed field,
-> and not derived from anything either type carries.
+> as stored, **on every band**. It is a **field on both** — not a property, not a
+> computed field, and not derived from anything either type carries. §2's
+> band-scoped rendering obligation does not scope this field: a projection never
+> zeroes, clamps or omits it by band.
 
 **On `BeliefSummary` this is additive and needs no argument beyond §2**: the type
 already carries its counts as fields because it has no evidence to derive them
@@ -325,15 +355,23 @@ render them so a reader can tell them apart. **This clause adds the trigger, not
 the words**: it says *when* the ceiling is owed, and leaves what it says to the
 surface, exactly as ADR-0077 §6 left the tombstone's and ADR-0086 §10 intended.
 
-**Conditioning on "wherever a count is rendered" is what settles the band
-question mechanically**, rather than by a second ruling. `interfaces/cli.py`'s
-`_why` renders a citation count for a `DERIVED` belief and for no other band —
-ADR-0073 §4 gives `ASSERTED` its own complete answer ("a user's assertion is its
-own warrant … there is nothing further to cite") and gives `ATTESTED` a floor
-about source and clock with no count in it. So the obligation lands on the
-derived band today and travels by itself if another band starts rendering counts.
-For a band that renders no count, ADR-0086 §4's record-and-`export` disclosure
-remains what it always was.
+**This clause is keyed on rendering and §2 is keyed on band, and the two are
+written not to overlap.** §2 decides *whether* a disclosure is owed, and owes it
+for `DERIVED` alone, on ADR-0073 §4's floor. This clause decides *what a rendered
+count looks like*, for any band, and owes nothing to a surface that renders no
+count. Where they meet — a `DERIVED` belief, whose count `interfaces/cli.py`'s
+`_why` does render — both bite and they agree. Where they do not, neither speaks:
+for `ASSERTED` and `ATTESTED` today, §2 is out of scope by band and this clause is
+out of scope by rendering, so ADR-0086 §4's record-and-`export` disclosure remains
+exactly what it always was, with §3's field on the DTO besides.
+
+**Stating the two scopes separately is the point.** An earlier draft of §2 was
+unconditional over bands while this clause exempted a no-count surface, which is
+one obligation written twice at two widths — the defect ADR-0089 §3 exists to
+prevent and #477 is the record of. It was caught by adversarial review of this
+ADR and is recorded rather than quietly repaired, for the reason ADR-0091 §1 gave
+when it recorded its own instance: the drift is a property of the form, not of any
+author's care.
 
 *Illustrative and not normative* (ADR-0089 §3): a derived belief carrying
 sixty-four citations with none lost and nine hundred elided reads as "I worked it
@@ -411,17 +449,23 @@ tests; it needs no `core/protocols.py` change, because no signature moves.
    elisions into that function would lower a belief's presented confidence because
    the system worked, which inverts the signal." Its arguments stay `cited` and
    `resolved` over the carried tuple.
-4. **`interfaces/cli.py`** — `_why`'s derived branches gain the ceiling per §5 and
-   the unsupported branch is repaired per §7. `_render_evidence` is **not**
-   touched: an elision is not an `Evidence` entry and must not be rendered in the
-   citation list, where ADR-0091 §1's second clause makes it indistinguishable
-   from a tombstone.
+4. **`interfaces/cli.py`** — `_why`'s **derived** branches gain the ceiling per §5
+   and the unsupported branch is repaired per §7. Its `ASSERTED` and `ATTESTED`
+   branches are **unchanged**, and that is §2's scoping applied rather than an
+   omission: neither renders a citation count, so neither owes a ceiling.
+   `_render_evidence` is **not** touched either: an elision is not an `Evidence`
+   entry and must not be rendered in the citation list, where ADR-0091 §1's second
+   clause makes it indistinguishable from a tombstone.
 5. **`testing/engine.py`** — `_summary_of` carries the field through, so the
    canonical fake and the real projection agree.
 6. **Tests** — a projection test at each site that a non-zero `evidence_elided`
    reaches both DTOs; a rendering test that a derived belief with elisions states
    the ceiling and does not call them lost; a rendering test that an
-   `unsupported` belief with elisions does not say nothing supports it; and a
+   `unsupported` belief with elisions does not say nothing supports it; **a
+   projection test that an `ATTESTED` belief with a non-zero `evidence_elided`
+   still carries the number on both DTOs, paired with a rendering test that its
+   `_why` line is unchanged** — the two together are what pin §2's band scoping as
+   a decision rather than letting a later reader repair it as an oversight; and a
    round-trip through `wire/codec.py` (which projects generically over
    `model_dump`, so it needs no edit, and a test is what proves that).
 7. **Nothing under `docs/adr/`.** The three records §11 owes land with this ADR,
@@ -471,6 +515,14 @@ tests; it needs no `core/protocols.py` change, because no signature moves.
 - **Whether `Provenance` should record which connected source attested a belief,
   and whether the belief DTOs should carry it.** ADR-0092 §1 answered the first;
   the second is ADR-0073 §4's other open gate and is not this field's question.
+- **Whether an `ATTESTED` or `ASSERTED` belief's inspection line should render a
+  citation count at all, and therefore an elision ceiling with it.** §2 scopes
+  its obligation to `DERIVED` because that is where ADR-0073 §4 put the
+  count, and §3 carries the number on every band regardless, so the question is
+  live rather than foreclosed — but it belongs to ADR-0073 §4's own `ATTESTED`
+  gate, on leg 6's first `EXTERNAL` producer, which is the lane that will hold the
+  evidence to answer it. Deciding it here would be guessing at a rendering for a
+  band with no producer, which is the widening ADR-0073 §4 itself declined.
 - **When the first displacement happens.** ADR-0091 §6 declined to schedule it and
   so does this: the condition is stated, the calendar is not.
 - **Anything about consolidation.** Leg 7's consolidation lanes are the producer
