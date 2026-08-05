@@ -2,6 +2,38 @@
 
 - Status: Partially superseded by ADR-0091 (§4's clause that two renderings of an elision and a tombstone must both exist)
 - Date: 2026-07-31
+- Note (2026-08-05): **§10's second deferral is taken, and nothing this ADR
+  decided changes.** §10 records under "What this ADR does not decide" that
+  "**Whether the inspection DTOs grow a field for the elision**, and its
+  rendering. §4, filed as **#568**. … the disclosure lives on the record and in
+  `export` until that lane rules." ADR-0107 is that lane. Its §3 gives `Belief`
+  and `BeliefSummary` a field `evidence_elided: int = 0` (`ge=0`), so the
+  disclosure now reaches the inspection surface as well as the record and
+  `export`; its §5 applies §4's floor-plus-ceiling shape and its capacity-not-loss
+  rule wherever a citation count is rendered; and its §1 settles #624 by ruling
+  that §10 deferred the *form* of the disclosure and never the obligation, which
+  is what §11 below already implies with "ADR-0073 §4's floor is *satisfied* here,
+  not narrowed". A reader holding only this ADR would otherwise still believe the
+  DTO question open and the disclosure confined to `export`, which is the
+  ADR-0082 §1 trigger; this note is the whole of the record.
+
+  **A deferral collected is a stacked addition, not a supersession.** §11 states
+  the treatment itself — "performing a revisit an earlier ADR asked for is a
+  stacked addition to *that* ADR, which is the treatment ADR-0082 §1 classifies as
+  correct on `main` for ADR-0072 §3 → ADR-0077 §7" — and it applies to §10's own
+  filed question exactly as it applied to ADR-0077 §6's schedule. So no clause of
+  this ADR is replaced and no `Status` token is added: §1's bound, §2's writer
+  obligation, §3's fold, §4's field with its recurrence over every install, its
+  upper-bound reasoning, `export`'s carriage of the stored number and the
+  confidence-neutrality rule, §5, §6, §7 and §9 are all untouched. This `Status`
+  line already leads with a `Partially superseded by` token, so under ADR-0082 §2
+  the record lives in this note and nothing is written on the line.
+
+  **One sentence of §4 is discharged rather than falsified.** "As the promoted
+  surface stands, that count does not reach the inspection DTOs at all" was a true
+  statement about the surface as it then stood, and §4 scopes it itself with
+  "Until it is taken". ADR-0107 §11 argues the classification from the other side.
+  Appended note per ADR-0070 §1; no ratified text is rewritten. Refs #568, #624.
 - **This is a contract change.** §1–§4 bound `Provenance.evidence` and add one
   field to it — a `core` type both `memory` and `planning` construct (ADR-0068
   §2) — and §3 adds an obligation to the `MemoryWriter` conformance suite. §6

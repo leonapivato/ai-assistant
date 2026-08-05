@@ -31,16 +31,17 @@
   "the surface conveys it" while leaving the governing text ambiguous, and
   deciding #624 without #568 would settle which text governs while leaving the
   DTOs with nowhere to put the number. §1 takes the second, §2–§7 the first.
-- **Records owed on earlier ADRs (ADR-0082 §1), declared here and written
-  elsewhere.** §11 names each clause, quotes it, and applies ADR-0070 §1's test.
-  One is owed on ADR-0085 as a partial supersession, two as dated notes on
-  ADR-0086 and ADR-0091, and five commonly-assumed others are argued *not* owed —
-  ADR-0073 §4 and ADR-0077 §6 among them. They are declared in this text, which
-  is where ADR-0082 §1 puts the judgement, and the edits themselves are sequenced
-  into a following change: the split ADR-0086 §11 and ADR-0084 §12 each made, for
-  the reason ADR-0086 §11 gives — a `Partially superseded by ADR-0107` line
-  written while this ADR is `Proposed` would assert on a live ADR's `Status` that
-  it had been superseded by a decision not yet made.
+- **Records owed on earlier ADRs (ADR-0082 §1), declared and written here.** §11
+  names each clause, quotes it, and applies ADR-0070 §1's test. One is owed on
+  ADR-0085 as a partial supersession, two as dated notes on ADR-0086 and
+  ADR-0091, and six commonly-assumed others are argued *not* owed — ADR-0073 §4
+  and ADR-0077 §6 among them. **All three land in this change**, atomically with
+  the ADR that causes them, which is what ADR-0082 §7 asks for: ADR-0070 §1's
+  condition "is that the superseding ADR **exists**, not that it is ratified — the
+  hazard §1 names is a `Status` line pointing at nothing, and an atomic pair makes
+  that unreachable". ADR-0073's own ADR-0084 note is the exercised form, written
+  while the causing ADR was still `Proposed` — "the form ADR-0075 established".
+  §11 says why the deferred shape ADR-0086 §11 took is available and worse here.
 - **Refs:** ADR-0073 §4 (the floor this turns on), ADR-0077 §6 (the surface split
   and the tombstone precedent), ADR-0085 §4a/§4b/§4/§6b/§8f (the DTOs, their
   invariants, the derived predicates, and the frame arithmetic), ADR-0086 §4/§10
@@ -423,9 +424,12 @@ tests; it needs no `core/protocols.py` change, because no signature moves.
    `unsupported` belief with elisions does not say nothing supports it; and a
    round-trip through `wire/codec.py` (which projects generically over
    `model_dump`, so it needs no edit, and a test is what proves that).
-7. **The records on ADR-0085, ADR-0086 and ADR-0091** (§11), which are `docs/adr/`
-   edits and may land in that lane or in a third; each is in a different file from
-   this one.
+7. **Nothing under `docs/adr/`.** The three records §11 owes land with this ADR,
+   not with the implementation, so that lane's fence is `src/` and `tests/` only.
+   The one `docs/adr/` edit still outstanding after this change is the
+   `Proposed` → `Accepted` flip, which is a separate trivial ratification PR
+   (`CONTRIBUTING.md` → "Trivial ADR edits"; #633 records why it cannot ride
+   here).
 
 ### 9. Explicitly declined
 
@@ -575,13 +579,31 @@ table is unchanged because §4 adds none.
 deciding it, and adding an unrelated count to two DTOs neither settles nor
 forecloses where a currency lives. ADR-0103's own §5 is untouched.
 
-**The edits themselves are sequenced into a following change**, for ADR-0086
-§11's stated reason: ADR-0070 §1 permits "recording a supersession **that has
-landed**", and a `Proposed` ADR's decision has not. Writing `Partially superseded
-by ADR-0107` on ADR-0085 now would assert that a live ADR had been superseded by
-a decision review can still change. **What is not deferred is the judgement** —
-ADR-0082 §1 puts that in this text, quoted and argued, where this review reaches
-it; the following change transcribes it.
+**All three edits land in this change, and the deferred shape is refused.**
+ADR-0086 §11 took the other route, reasoning that "ADR-0070 §1 permits 'recording
+a supersession **that has landed**', and a `Proposed` ADR's decision has not".
+**ADR-0082 §7 names that reading as the recurring failure it is** — filed as #458,
+"not a governance gap but a reviewer failure mode" — and states §1's condition
+outright: "§1's condition is that the superseding ADR **exists**, not that it is
+ratified — the hazard §1 names is a `Status` line pointing at nothing, and an
+atomic pair makes that unreachable." ADR-0082 is ratified and later than the
+reading it corrects, and ADR-0073's ADR-0084 note is the exercised atomic form,
+written while ADR-0084 was `Proposed`.
+
+**Deferring is permitted and is worse here, for three reasons specific to this
+lane.** ADR-0086 §11's second reason was that "two lanes are writing under
+`docs/adr/` this wave, so the edits need ordering that this lane does not own" —
+true there, and inapplicable here: the two lanes in flight write a new ADR file
+and a `Status` flip on a third, and neither touches ADR-0085, ADR-0086 or
+ADR-0091. Its third was that a later review round could move the decision — which
+is an argument *for* atomicity, since a note in the same change moves with it and
+one in a following change silently does not. And the interval matters more here
+than it did there: a `main` carrying ADR-0107's "`Belief` gains a field" beside
+ADR-0085 §4a's "`Belief` is unchanged", with no pointer in either direction, is
+two live documents stating one thing at two widths — #477's failure, and the one
+ADR-0089 §5 exists to stop. **What ADR-0082 §1 puts in this text is the
+judgement**, quoted and argued above where this review reaches it; the edits
+transcribe it, in the same commit.
 
 ## Consequences
 
