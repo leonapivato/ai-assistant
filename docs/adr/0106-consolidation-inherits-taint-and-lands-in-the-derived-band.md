@@ -318,9 +318,13 @@ ambiguous unless someone says which way is up.
 
 > **Normative.** The rule is an admissibility rule — a property of the proposal
 > alone, committing nothing — so in `DefaultMemoryPolicy` it sits in the
-> admissibility floor beside the secret-tier deferral, ahead of every conflict rule.
-> A proposal carrying a `UserConfirmation` for the deferral this rule raised passes
-> it and is judged on the ordinary path.
+> admissibility floor, **behind** the secret-tier deferral and ahead of every
+> conflict rule. A proposal carrying a `UserConfirmation` for the deferral this rule
+> raised passes it and is judged on the ordinary path.
+
+> **Normative.** `DefaultMemoryPolicy`'s ruling under that rule is **`ASK_USER`**,
+> never `REJECT`. The contract ceiling above admits either; the default takes the
+> question.
 
 > **Normative.** The ruling is the `MemoryPolicy`'s. No writer, applier, or
 > scheduler substitutes, upgrades, or downgrades it, and none of them may implement
@@ -352,6 +356,30 @@ same reason. This clause asserts none of those — it is a ceiling on what may c
 not a rule about what a policy concludes, and a policy remains free to choose
 `ASK_USER` or `REJECT` and free to rule anything it likes once a confirmation is
 present.
+
+**The default's ruling is pinned separately, because a ceiling that admits two
+outcomes does not choose between them and §10 needs one chosen.** ADR-0098 §4's
+wording is "a user question **or** a refusal", so the contract ceiling keeps both:
+a policy with a different posture — one deployed somewhere a user cannot be asked —
+conforms by refusing, and pinning `ASK_USER` into the *contract* would refuse it.
+But a `DefaultMemoryPolicy` that refused would make §10's end-to-end clause
+unimplementable, because `MemoryWriteStage` queues on `ASK_USER` and on nothing
+else: there would be no `DeferredProposal` to enumerate and no affirmative answer to
+give. Adversarial review found the two marked clauses jointly unsatisfiable on
+round 6.
+
+Choosing the question is also the substantive answer rather than a repair. #668's
+goal, which this ADR inherits, is converting a successful injection into "a visible,
+source-attributed proposal — spam, not poison"; a silent `REJECT` on the scheduler's
+path destroys the consolidation, tells nobody, and leaves the user unable to keep a
+summary they would have wanted. That is a worse outcome than a question, and under
+ADR-0098 §8 it would additionally reach nobody at all.
+
+**Behind the secret-tier rule rather than beside it**, which is ADR-0078 §5a's
+ordering taken exactly: the secret ceiling "precede[s] any conflict reasoning" and
+nothing may make it skippable, and a proposal that is both secret and tainted must
+take the secret path — unqueued — rather than this one. Stating the order removes
+the only case where the two floors could disagree about what to return.
 
 **The confirmation carve-out is what makes the question a question, and an earlier
 draft omitted it and thereby ruled the opposite of this ADR's own §5.** ADR-0078 §5
