@@ -2632,6 +2632,30 @@ def test_a_repeated_scope_is_a_usage_error_and_never_a_traceback(
     assert result.exit_code == 2
 
 
+def test_a_source_with_no_utf8_encoding_is_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    r"""ADR-0102 §6's encoding hazard, one argument over from the path it names.
+
+    Linux passes argv as bytes and Python decodes it with ``surrogateescape``, so
+    ``assistant revoke $'\xe9'`` arrives as a lone surrogate — a value
+    ``EncodableText`` refuses and ADR-0087's encoder has no form for. Refused at the
+    parse boundary, so it is a usage error rather than the uncaught ``ValueError``
+    the client would otherwise raise past the command's error boundary.
+
+    **The refusal does not echo the value**, which is both ADR-0097 §9's rule about
+    a caller-supplied source and a practical necessity: the process may not be able
+    to write it down at all.
+    """
+    _wire(monkeypatch, _granting_engine())
+    unwritable = "\udce9"
+
+    result = CliRunner().invoke(cli.app, ["revoke", unwritable])
+    assert result.exit_code == 2
+    assert unwritable not in result.output
+    assert CliRunner().invoke(cli.app, ["grant", unwritable, "--scope", "facet"]).exit_code == 2
+
+
 def test_the_source_reaches_the_hub_exactly_as_it_was_typed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
