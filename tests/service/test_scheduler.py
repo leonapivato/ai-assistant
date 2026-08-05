@@ -305,12 +305,20 @@ async def test_the_armed_job_ingests_a_granted_source_and_reports_completion(
     absorbed would leave the belief count unchanged and look identical to one that
     never ran (ADR-0022 §4a's shape, at the scheduler).
 
-    **A second tick is awaited rather than one**, for the sibling case's reason:
-    the completion log is written after the body returns, so waiting for attempt
-    two is what makes attempt one's log certainly present rather than racing the
-    cancellation in ``aclose``. It buys a second property free — a re-read folds
-    into the record it already wrote rather than duplicating it (ADR-0093 §5's
-    "nothing the store holds is destroyed by a re-read", from the other side).
+    **Two ticks are awaited, and the signal is raised only once the body has
+    returned** — which is the whole of what makes the second one real. Signalling
+    *before* awaiting the job would wake ``_drive`` into cancelling the scheduler
+    with the second ingestion still in flight, so the test would assert over one
+    completed run while claiming two. Raising it afterwards is safe in the
+    direction that matters: ``Scheduler._run_job`` reaches its ``_log.info`` with
+    no ``await`` between the body returning and the log, and its first suspension
+    point is the ``asyncio.sleep`` after re-arming — so every completed attempt is
+    certainly logged before a cancellation can land.
+
+    That earns the second property rather than assuming it: both ingestions really
+    run, so a re-read folding into the record it already wrote — rather than
+    duplicating it — is something this asserts (ADR-0093 §5's "nothing the store
+    holds is destroyed by a re-read", from the other side).
     """
     settings = _reader_settings(tmp_path, interval=_TICK)
     _write_one_event_calendar(tmp_path / "calendar.ics")
@@ -325,10 +333,14 @@ async def test_the_armed_job_ingests_a_granted_source_and_reports_completion(
 
     async def counting() -> object:
         nonlocal attempts
-        attempts += 1
-        if attempts >= 2:
-            twice.set()
-        return await armed.run()
+        # Counted and signalled in a ``finally``, so an attempt is only "done" once
+        # the job has actually returned or raised — see the docstring.
+        try:
+            return await armed.run()
+        finally:
+            attempts += 1
+            if attempts >= 2:
+                twice.set()
 
     try:
         with structlog.testing.capture_logs() as captured:
@@ -341,8 +353,10 @@ async def test_the_armed_job_ingests_a_granted_source_and_reports_completion(
         _events(captured)
     )
     completed = [entry for entry in captured if entry["event"] == "hub_scheduler_job_completed"]
-    assert completed, _events(captured)
-    assert completed[0]["job"] == "calendar_reader"
+    # Two, not one: both ingestions ran to completion, which is what makes the
+    # single belief below evidence of folding rather than of a cancelled re-read.
+    assert len(completed) >= 2, _events(captured)
+    assert {entry["job"] for entry in completed} == {"calendar_reader"}
     assert len(beliefs) == 1
     assert "Dentist" in beliefs[0].content
 
@@ -380,6 +394,17 @@ async def test_an_ungranted_source_is_refused_every_interval_and_never_by_path(
     file, so the refusal is provably the *grant* and not the source: ADR-0097 §5
     requires that nothing be opened at all, and a test over an unreadable file
     could not tell the two refusals apart.
+
+    **"Every interval" is asserted as two refusals, and the signal is raised only
+    once the job has raised.** Both halves are needed. One refusal would pass
+    against a regression in which the first tick refuses and every later tick
+    returns an empty success — the "reports health while ingesting nothing" state
+    §5 chose an exception to prevent. And signalling *before* awaiting the job
+    would wake ``_drive`` into cancelling the scheduler mid-tick, so the second
+    refusal would never be logged to assert on. Raising it afterwards is sound
+    because ``Scheduler._run_job`` reaches ``_log_failure`` with no ``await``
+    between the body raising and the log, and its first suspension point is the
+    ``asyncio.sleep`` after re-arming.
     """
     settings = _reader_settings(tmp_path, interval=_TICK)
     _write_one_event_calendar(tmp_path / "calendar.ics")
@@ -393,10 +418,14 @@ async def test_an_ungranted_source_is_refused_every_interval_and_never_by_path(
 
     async def counting() -> object:
         nonlocal attempts
-        attempts += 1
-        if attempts >= 2:
-            twice.set()
-        return await armed.run()
+        # Counted and signalled in a ``finally``, so an attempt is only "done" once
+        # the job has actually raised — see the docstring.
+        try:
+            return await armed.run()
+        finally:
+            attempts += 1
+            if attempts >= 2:
+                twice.set()
 
     try:
         with structlog.testing.capture_logs() as captured:
@@ -409,15 +438,22 @@ async def test_an_ungranted_source_is_refused_every_interval_and_never_by_path(
     # refusal is retried at the next due instant and never takes the loop down.
     assert attempts >= 2, "the job was not retried after its grant was refused"
     failures = [entry for entry in captured if entry["event"] == "hub_scheduler_job_failed"]
-    assert failures, _events(captured)
-    assert failures[0]["job"] == "calendar_reader"
+    # **Two refusals, not one.** Asserting a single one would pass against a
+    # regression in which the first tick refuses and every later tick returns an
+    # empty success — which is precisely the "reports health while ingesting
+    # nothing" state ADR-0022 §4a refuses and §5 chose an exception to prevent.
+    assert len(failures) >= 2, _events(captured)
+    assert {entry["job"] for entry in failures} == {"calendar_reader"}
     # Never a ``ReaderError``: an operator debugging a missing calendar must not be
     # sent to the filesystem for a fault that lives in the grant store (§5).
-    assert failures[0]["error_class"] == "SourceNotGrantedError"
+    # Asserted over **every** refusal, not just the first: §8's clause binds the
+    # log line an operator reads at any interval, not the opening one.
+    assert {entry["error_class"] for entry in failures} == {"SourceNotGrantedError"}
     # §8's two halves: the identity and the use that was refused...
-    cause = str(failures[0]["cause"])
-    assert CALENDAR_READER_NAME in cause
-    assert GrantScope.INGEST.value in cause
+    for failure in failures:
+        cause = str(failure["cause"])
+        assert CALENDAR_READER_NAME in cause
+        assert GrantScope.INGEST.value in cause
     # ...and nothing else. A declared identity is safe by construction (ADR-0093
     # §7); a path is the Tier 1 leak the clause exists to prevent.
     rendered = repr(captured)
