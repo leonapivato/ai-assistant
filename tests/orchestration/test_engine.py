@@ -3251,6 +3251,85 @@ async def test_the_batch_renders_tombstones_where_the_singles_did() -> None:
     assert belief.lost_evidence == 3
 
 
+# --- a refused citation read is an error, never a tombstone (#585) -------
+
+
+class RefusingCitationStore(FakeMemoryStore):
+    """A store that answers everything but the citation batch, **once armed**.
+
+    Armed rather than refusing from construction, because the fixture's own writes
+    reach the same store: a store that refused every ``get_many`` would risk failing
+    during setup, and the case would be about the harness instead of about the
+    projection. ``refuse_after`` then chooses *which* batch refuses, which is what
+    lets a listing case put the refusal on a belief that is not the first one.
+    """
+
+    def __init__(self, *, now: Callable[[], datetime], refuse_after: int = 0) -> None:
+        super().__init__(now=now)
+        self._refuse_after = refuse_after
+        self._armed = False
+        self.batches = 0
+
+    def arm(self) -> None:
+        """Start refusing, from the batch after ``refuse_after`` on."""
+        self._armed = True
+
+    async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+        if not self._armed:
+            return await super().get_many(record_ids)
+        self.batches += 1
+        if self.batches > self._refuse_after:
+            msg = "the citation batch cannot be read"
+            raise MemoryStoreError(msg)
+        return await super().get_many(record_ids)
+
+
+async def test_belief_propagates_a_store_that_refuses_the_citation_read() -> None:
+    """The ``MemoryStoreError`` the docstring declares actually escapes ``belief``.
+
+    What this pins is not the raise but the *alternative*: a projection that caught
+    the refusal and rendered the unread citations as tombstones would return a
+    perfectly well-formed :class:`~ai_assistant.core.types.Belief`, and a caller
+    cannot tell that apart from genuinely lost evidence. A tombstone asserts "this
+    evidence is gone" (ADR-0077 §6); a read that failed asserts nothing of the kind,
+    and the record graph is frozen (ADR-0068) precisely so that losing evidence stays
+    a statement about the world rather than about the store's mood.
+    """
+    store = RefusingCitationStore(now=lambda: AT)
+    harness = Harness(memory=store)
+    await _derived_with_two_episodes(harness)
+    store.arm()
+
+    with pytest.raises(MemoryStoreError):
+        await harness.engine.belief("rec-1")
+
+
+async def test_beliefs_propagates_rather_than_returning_a_page_it_could_not_resolve() -> None:
+    """A page has one chance to swallow the refusal per belief, and takes none of them.
+
+    The refusal is placed on the **second** belief's batch deliberately: a listing
+    that resolved each summary independently and kept the ones that succeeded would
+    return a one-element page here, which reads to a caller as "that is all the
+    beliefs there are" — the same indistinguishability as the tombstone above, one
+    level up. Pinned on ``beliefs`` rather than inferred from ``belief`` because
+    ``Engine._beliefs`` walks the page itself, so nothing about the single-belief
+    path constrains what a partial page would do.
+    """
+    store = RefusingCitationStore(now=lambda: AT, refuse_after=1)
+    harness = Harness(memory=store)
+    await _derived_with_two_episodes(harness)
+    await harness.memory.add(_episode_record("ep-3", "they wrote 20 °C"))
+    await harness.memory.add(
+        _record("rec-2", source=MemorySource.INFERRED, confidence=_STORED, evidence=("ep-3",))
+    )
+    store.arm()
+
+    with pytest.raises(MemoryStoreError):
+        await harness.engine.beliefs()
+
+    assert store.batches > 1, "the refusal landed after a belief had already resolved"
+
+
 # --- the deferred-question surface, through the façade (ADR-0078 §8, §9) ----
 
 
