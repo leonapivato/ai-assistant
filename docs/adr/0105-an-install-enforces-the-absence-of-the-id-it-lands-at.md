@@ -1,6 +1,6 @@
 # 105. An install enforces the absence of the id it lands at
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-05
 - **This is not a substantive contract ADR, and the test was applied rather than
   assumed.** `CONTRIBUTING.md` → "Contract ADRs land before their implementation"
@@ -48,7 +48,7 @@
   Deliberately not decided here: it is a `core/protocols.py` edit affecting a
   ratified clause that is not this ADR's, and doing it under this ADR would
   reclassify a fix as a contract change to tidy something the fix did not cause.
-  Filed rather than dropped (§8).
+  Filed rather than dropped (§9).
 - **It discharges two named deferrals rather than superseding anything.**
   [ADR-0092](0092-an-attested-belief-names-its-source-and-a-user-assertion-retires-it.md)
   §10 deferred "whether `ACCEPT` should install insert-if-absent for a producer
@@ -228,9 +228,11 @@ conflict, is ruled `ACCEPT`, and upserts in place. After §1 it raises.
 
 Three reasons that is the right trade:
 
-- **No producer in the tree does it.** Every one mints per proposal —
-  `readers/calendar.py` per sync per ADR-0092 §6, `learning/observer.py` and
-  `learning/processor.py` per observation — so none has an id to re-propose at.
+- **No *production* producer in the tree does it.** Every one mints per proposal —
+  `readers/calendar.py` per sync per ADR-0092 §6, `learning/observer.py` at
+  `self._id_factory()`, and `learning/processor.py` — so none has an id to
+  re-propose at. **One shipped producer does, and it is a fake**; see §8, which is
+  why this ADR is `Proposed` rather than `Accepted`.
 - **It is not the intended update path, and ADR-0092 §6 already said so.**
   "Idempotency does not vanish; it moves": an unchanged re-sync proposes identical
   content, detection scores the existing record at the top of its ranking, and the
@@ -244,7 +246,8 @@ Three reasons that is the right trade:
 A producer that genuinely wants to address a stored record is the trigger
 ADR-0081 §8 names — "a producer that *derives* a record id from content rather
 than minting one … which is the only way a cross-kind collision stops being a bug
-and starts being a design". That trigger is unfired, and §5 leaves it that way.
+and starts being a design". **That trigger is fired**, by a fake rather than a
+production producer, and §8 records what it costs this decision.
 
 ### 5. ADR-0081 §8's deferral keeps its owner, its trigger and its scope
 
@@ -329,7 +332,54 @@ which is where it is reviewed. Each candidate, and the verdict:
   #110's slot starvation at a small `conflict_limit`, to reach a case §1 refuses
   directly.
 
-### 8. What this ADR does not decide
+### 8. Unresolved: ADR-0081 §8's trigger is already fired, by a fake
+
+**This section is why the `Status` above is `Proposed`.** It was found by running
+the full suite against the implementation, not by reading, and it is stated here
+rather than worked around because it bears on whether §1 is this lane's to make.
+
+`FakeBeliefObserver` — `ai_assistant/testing/observation.py`, the canonical
+`Observer` fake — does **not** mint. `_identify` derives the record id from a
+`sha256` over the belief's content, kind, step and citations, and says why in as
+many words:
+
+> Derived from what is being believed and what supports it rather than from a
+> counter, so it is deterministic without depending on execution order and
+> identical across instances — two fakes writing into one store cannot silently
+> overwrite each other, and re-observing one batch proposes the *same* record id
+> twice, which is what a consumer testing a `REINFORCE` fold needs.
+
+That is exactly the producer class ADR-0081 §8 named as its trigger, and §8's
+"until then no producer can collide" is therefore already false on `main`. Three
+consequences, none of them comfortable:
+
+- **§1 breaks three tests outside `memory`**, each encoding another subsystem's
+  ratified behaviour: `test_learn_resolves_a_repeated_record_id_last_write_wins`
+  and `test_learn_leaves_earlier_proposals_applied_when_a_later_write_fails`
+  (ADR-0022 §4's visible collision and partial application) and
+  `test_two_unscoped_runs_select_the_same_conversation` (ADR-0077 §8's
+  cursor-free re-observation).
+- **The fake's stated purpose is not achieved today, which §1 exposes.**
+  Re-observing one batch does *not* reach a `REINFORCE`: `_detect_conflicts`
+  filters the proposal's own id out of the conflict set (issue #110), so the
+  prior record is never a conflict, the policy rules `ACCEPT`, and the write is
+  an upsert. The fold the docstring promises has never happened; what happened is
+  the silent replacement §1 refuses.
+- **So the fake diverges from production in the axis that matters here.**
+  `learning/observer.py` mints at `self._id_factory()`. A fake whose ids collide
+  where the real producer's cannot is the shape ADR-0026 §7 warns about, one
+  direction over: it lets a consumer's test pass on an idempotency the production
+  observer never provides.
+
+**What this ADR does not do is resolve it**, because the two candidate
+resolutions belong to other ground. Either `FakeBeliefObserver` mints like the
+producer it doubles — a `testing` change whose fallout lands in
+`tests/orchestration/**` and turns on ADR-0077 §8's re-observation ruling — or
+the collision rule waits for the `MemoryStore` write-semantics lane, which
+ADR-0081 §8 already owns and whose trigger this discovery fires. The first is the
+better answer on the merits, and it is still not this lane's to take alone.
+
+### 9. What this ADR does not decide
 
 - **Issue #631** — an imported record's identity being re-established by
   similarity, so a materially rewritten source entry duplicates instead of folding.
