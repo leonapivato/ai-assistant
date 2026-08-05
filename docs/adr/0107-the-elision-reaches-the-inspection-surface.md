@@ -484,22 +484,30 @@ tests; it needs no `core/protocols.py` change, because no signature moves.
    clause makes it indistinguishable from a tombstone.
 5. **`testing/engine.py`** — `_summary_of` carries the field through, so the
    canonical fake and the real projection agree.
-6. **Tests.** The projection test is **parameterised over all three bands** —
-   `ASSERTED`, `DERIVED`, `ATTESTED` — asserting at both sites that a non-zero
-   `evidence_elided` reaches both DTOs unchanged. Naming only the bands whose
-   *rendering* is discussed would leave the third free to be projected as `0` by
-   an implementation that wrongly coupled the field to §2's rendering scope, and
-   every other test here would still pass; parameterising is what makes §3's
-   "never zeroes, clamps or omits it by band" a checked claim rather than a stated
-   one. Then: a rendering test that a derived belief with elisions states the
-   ceiling and does not call them lost; a rendering test that an `unsupported`
-   derived belief with elisions does not say nothing supports it; **a rendering
-   test that the `ASSERTED` and `ATTESTED` `_why` lines are unchanged in the
-   presence of a non-zero elision** — which, paired with the parameterised
-   projection above, is what pins §2's band scoping as a decision rather than
-   letting a later reader repair it as an oversight; and a round-trip through
-   `wire/codec.py` (which projects generically over `model_dump`, so it needs no
-   edit, and a test is what proves that).
+6. **Tests, and one rule governs all of them.** The field's default is `0`, so
+   **every case below constructs a non-zero, non-default `evidence_elided` and
+   asserts the exact number**, at every boundary it crosses. A fixture left at the
+   default passes whether the field is carried or silently dropped, which is a
+   test that cannot fail and therefore is not one. Stated once here rather than
+   repeated per case, and it is the operative requirement on each:
+
+   - **Projection, parameterised over all three bands** — `ASSERTED`, `DERIVED`,
+     `ATTESTED` — at both sites, asserting the value reaches both DTOs unchanged.
+     Naming only the bands whose *rendering* is discussed would leave the third
+     free to be projected as `0` by an implementation that wrongly coupled the
+     field to §2's rendering scope, with every other test here still passing.
+     This is what makes §3's "never zeroes, clamps or omits it by band" a checked
+     claim rather than a stated one.
+   - **Rendering, derived** — the ceiling is stated, and not as a loss; and an
+     `unsupported` derived belief with elisions does not say nothing supports it.
+   - **Rendering, the other two bands** — the `ASSERTED` and `ATTESTED` `_why`
+     lines are unchanged in the presence of a non-zero elision. With the
+     parameterised projection above, this is what pins §2's band scoping as a
+     decision rather than letting a later reader repair it as an oversight.
+   - **The wire boundary** — a round-trip through `wire/codec.py` asserting the
+     exact non-zero value survives for **both** DTO shapes. The codec projects
+     generically over `model_dump`, so it needs no edit; the test is what proves
+     that, and only a non-default value can prove it.
 7. **Nothing under `docs/adr/`.** The three records §11 owes land with this ADR,
    not with the implementation, so that lane's fence is `src/` and `tests/` only.
    The one `docs/adr/` edit still outstanding after this change is the
