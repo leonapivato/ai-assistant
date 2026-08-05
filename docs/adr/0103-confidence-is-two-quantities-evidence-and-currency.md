@@ -217,17 +217,19 @@ is exactly that kind of question.
 
 ### 6. #646: a cross-band `REINFORCE` corroborates rather than accumulates
 
-> **Normative.** A record's evidence-strength is warranted by that record's own
-> `source`. No fold carries an evidence-strength across a change of `source` that
-> the new `source` does not itself warrant, and no fold constructs a `Provenance`
+> **Normative.** A record's evidence-strength is admissible in the band its own
+> `source` places it in. No fold installs a record whose evidence-strength its
+> surviving band does not admit, and therefore no fold constructs a `Provenance`
 > that `core` refuses.
 
-> **Normative.** Where a `REINFORCE`'s incoming record is in the `DERIVED` band
-> and its target is not, the fold takes nothing of the incoming record but its
-> `evidence` and its effect on currency: the surviving record keeps the target's
-> `source`, `attestation`, content and evidence-strength, its evidence is unioned
-> under ADR-0086 §3's bound, and its currency is refreshed. In every other pairing
-> this ADR leaves the fold as it stands.
+> **Normative.** Where a `REINFORCE`'s target is in the `ATTESTED` band and its
+> incoming record is in the `DERIVED` band, the fold takes nothing of the incoming
+> record but its `evidence` and its effect on currency: the surviving record keeps
+> the target's `source`, `attestation`, content and evidence-strength, its
+> evidence is unioned under ADR-0086 §3's bound, and its currency is refreshed.
+> The clause governs how such a fold folds and authorises none: a fold the writer
+> boundary refuses stays refused (ADR-0045 §5). Every other pairing is left as it
+> stands.
 
 This is the ruling #646 asks for, and the split is what supplies it. Agreement
 between a derived observation and a better-warranted record is genuine
@@ -237,14 +239,29 @@ supplies no warrant the target did not already have. Recording it as strength is
 what produced the `ValidationError`; recording it as currency is what it actually
 means.
 
-**The clause is exactly as wide as the defect.** The pairings are enumerable and
-only one is broken. A fold onto an `ASSERTED` target is already refused outright
-(`_refuse_unsafe_fold` clause 1, ADR-0045 §5). A `USER_ASSERTED` incoming record
-is not in the `DERIVED` band, so the existing fold stands and the assertion wins
-at 1.0, which is right. A `DERIVED` target reinforced by an `EXTERNAL` record
-folds to `EXTERNAL` at up to 1.0, which ADR-0038 §2a permits. Same-band folds are
-untouched. The one remaining pairing — an `ATTESTED` target reinforced by a
-`DERIVED` proposal — is #646's, and it is the one this clause rules.
+**The clause is keyed on both bands, and that is deliberate rather than
+economical.** The pairings are enumerable, and stating the rule as "a `DERIVED`
+incoming record onto any other target" would have swept in the one pairing the
+corpus refuses outright: nothing of any source folds onto an `ASSERTED` target
+under either ruling (`_refuse_unsafe_fold` clause 1, ADR-0045 §5), so a clause
+prescribing how that fold folds would prescribe a fold that may not happen. Naming
+`ATTESTED` on the target side keeps the rule inside the reachable set. Of the
+rest: a `USER_ASSERTED` incoming record is not in the `DERIVED` band, so the
+existing fold stands and the assertion wins at 1.0, which is right; a `DERIVED`
+target reinforced by an `EXTERNAL` record folds to `EXTERNAL` at up to 1.0, which
+ADR-0038 §2a permits and the first clause admits; and same-band folds are
+untouched. The one remaining pairing is #646's, and it is the one this clause
+rules.
+
+**The reverse pairing carries a milder version of the same question, and it is
+not ruled here.** A `DERIVED` target at a strength above an `EXTERNAL` incoming
+record's folds, today, to an `EXTERNAL` survivor carrying the higher number — a
+strength the surviving source's own record did not supply. That is admissible
+under the first clause, because the `ATTESTED` band admits it and `core` refuses
+nothing; it produces no defect, no refusal and no lost attestation, and the
+general question of what a source-changing fold may carry is wider than the
+decision this ADR is. It is filed rather than absorbed (#733), which is what
+`CLAUDE.md`'s triage rule asks of a finding outside the change.
 
 **Keeping the target's content, and not only its strength, is deliberate.**
 `Provenance.attestation` is present exactly when the band is `ATTESTED`
@@ -256,12 +273,11 @@ external system words it never reported. Neither half is available, so the
 incoming record contributes evidence and currency, and nothing else.
 
 **What is given up is named.** Where the derived incoming record's strength
-happens to exceed the target's, today's `max` would raise the survivor's number
-and this clause does not. That is the intended trade: a number a record's own
-source cannot warrant is not a strength it has, and consistency between `source`
-and strength is worth more than a monotone number. Nothing is destroyed — the
-observation's episode is retained, cited, and available to propose the derived
-belief on its own terms.
+happens to exceed the attested target's, today's `max` would raise the survivor's
+number and this clause does not. That is the intended trade: the survivor is the
+attested record, and a derived observation's strength is not a warrant that record
+acquired by being agreed with. Nothing is destroyed — the observation's episode is
+retained, cited, and available to propose the derived belief on its own terms.
 
 ### 7. This is `memory`'s semantics; the contract is not touched here
 
