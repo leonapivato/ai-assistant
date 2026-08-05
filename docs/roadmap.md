@@ -298,21 +298,31 @@ behind the hub's API.
    decision (#629). *Exit: the assistant knows something true about
    the user's day it was never told, from a source the user granted.*
 7. **Memory at volume.** Consolidation (many episodes distilled into few
-   durable beliefs, run by the hub's scheduler), confidence decay and salience
-   so unreinforced beliefs age instead of accumulating, the size caps ADR-0007
-   deferred, retrieval ranking under load, and the re-embedding migration
-   (#425) — which leg 5 makes a legible refusal to start rather than an automated
-   fix, leaving the automation to this leg and to ADR-0006 §4, run as an offline
-   tool that takes the hub's own instance lock (ADR-0083 §6, §10). Consolidation
-   is also the job most likely to make the scheduler's serial, one-at-a-time
-   shape worth revisiting (ADR-0083 §7). *Exit: months of use make retrieval
-   better, not slower and noisier.*
+   durable beliefs, run by the hub's scheduler), the decay and salience ADR-0072
+   §10 files against this leg by name, retrieval ranking under load, and the
+   re-embedding migration (#425) — which leg 5 makes a legible refusal to start
+   rather than an automated fix, leaving the automation to this leg and to
+   ADR-0006 §4, run as an offline tool that takes the hub's own instance lock
+   (ADR-0083 §1, §10). Consolidation is also the job most likely to make the
+   scheduler's serial, one-at-a-time shape worth revisiting (ADR-0083 §7).
+   **The leg is about quality, not size** (ADR-0103 §1): what ages is a second
+   quantity, never the evidence a belief was built on, and nothing here destroys
+   evidence to reclaim space — which leaves ADR-0007 §5's size-caps slice
+   deferred where it already was rather than pulling it into this leg.
+   *Exit: months of use make retrieval better, not slower — measured in this
+   leg, as retrieval latency and k-shortfall against a synthetically aged store.
+   The "not noisier" half is handed to leg 8 as an entry claim, because it needs
+   the memory-precision measure leg 8 builds; a claim this leg has no instrument
+   for is one it would assert rather than test.*
 8. **Minimal evaluation.** The `EvaluationTrace` slice — Tier-2 operational
    data, no egress (ADR-0004) — plus a first few of VISION.md's success
    measures: memory precision, correction rate, repeated-explanation rate. This
    is also the hub's operational telemetry; a process that runs for weeks
-   cannot be debugged by rerunning it. *Exit: "is the user model getting more
-   accurate?" is answered by data, not opinion.*
+   cannot be debugged by rerunning it. Memory precision is also what answers the
+   half of leg 7's exit test leg 7 hands over — whether months of use made
+   retrieval noisier — so that claim enters here rather than closing there.
+   *Exit: "is the user model getting more accurate?" is answered by data, not
+   opinion.*
 
 ## The later arc, in order
 
