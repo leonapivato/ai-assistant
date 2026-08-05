@@ -255,6 +255,69 @@ _DEFAULT_BELIEF_KINDS: tuple[MemoryKind, ...] = tuple(
 )
 
 
+def _present_source(value: str) -> str:
+    """Reject a blank ``source`` during Typer's parameter parsing, **without stripping**.
+
+    :func:`_present_content`'s shape, for the same reason and with one extra rule.
+    The reason: ``NonBlankEncodableText`` refuses a blank value with a
+    ``ValueError``, which is **not** an :class:`AssistantError`, so it would escape
+    :func:`_revoke_source`'s and :func:`_grant_source`'s error boundaries as an
+    uncaught traceback with no controlled exit code — the failure ADR-0042 §7
+    forbids. Catching it here makes it a normal usage error (exit code 2) before
+    any client is built.
+
+    The extra rule is that **the value is returned byte for byte** (ADR-0102 §2).
+    An adapter that stripped it would make ``revoke " calendar "`` reach the hub as
+    ``calendar`` and *match* a held reader, where ADR-0097 §10 requires that a
+    source differing from a declared name only by surrounding whitespace is refused
+    rather than matched — the substitutability failure §2 refuses the ``Identifier``
+    annotation for, arriving one layer further out instead.
+
+    Args:
+        value: The source name as the user typed it.
+
+    Returns:
+        The value, unchanged.
+
+    Raises:
+        BadParameter: If the value is blank.
+    """
+    if not value.strip():
+        msg = "must not be blank"
+        raise typer.BadParameter(msg)
+    return value
+
+
+def _distinct_scope(value: list[GrantScope]) -> list[GrantScope]:
+    """Reject a repeated ``--scope`` during Typer's parameter parsing.
+
+    ADR-0097 §10 spells a duplicated scope as a refusal rather than something to
+    fold away silently — ``(FACET, FACET)`` is a caller that has lost track of what
+    it is asking for — and both the client and the engine raise ``ValueError`` for
+    it. That is not an :class:`AssistantError` either, so without this
+    ``assistant grant calendar --scope facet --scope facet`` escapes as a traceback
+    exactly as a blank source does.
+
+    **Empty needs no check here**: the option is required, so Typer refuses a call
+    that names no scope at all before this runs.
+
+    Args:
+        value: The scopes as the user repeated them.
+
+    Returns:
+        The value, unchanged — order is the record's validator's to normalise
+        (ADR-0097 §10), not this adapter's.
+
+    Raises:
+        BadParameter: If a scope is named more than once.
+    """
+    if len(set(value)) != len(value):
+        named = ", ".join(use.value for use in value)
+        msg = f"names a use more than once ({named}); each may be given at most once"
+        raise typer.BadParameter(msg)
+    return value
+
+
 #: ``assistant grant``'s repeatable scope flag, hoisted to module scope for the
 #: reason the ``learn`` and ``beliefs`` enum options are (ruff's B008). Required
 #: with no default, deliberately: ADR-0097 §2 refuses an empty scope at
@@ -263,6 +326,7 @@ _DEFAULT_BELIEF_KINDS: tuple[MemoryKind, ...] = tuple(
 _GRANT_SCOPE_OPTION = typer.Option(
     ...,
     "--scope",
+    callback=_distinct_scope,
     help=(
         "What this grant allows (repeatable): 'facet' to look at the source while "
         "answering, 'ingest' to durably remember what it says."
@@ -707,7 +771,11 @@ def sources() -> None:
 
 @app.command()
 def grant(
-    source: str = typer.Argument(..., help="The source to connect (see 'assistant sources')."),
+    source: str = typer.Argument(
+        ...,
+        callback=_present_source,
+        help="The source to connect (see 'assistant sources').",
+    ),
     scope: list[GrantScope] = _GRANT_SCOPE_OPTION,
     *,
     yes: bool = typer.Option(
@@ -735,7 +803,7 @@ def grant(
 
 @app.command()
 def revoke(
-    source: str = typer.Argument(..., help="The source to disconnect."),
+    source: str = typer.Argument(..., callback=_present_source, help="The source to disconnect."),
 ) -> None:
     """Stop me reading one source, from now on.
 
