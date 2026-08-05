@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ai_assistant.core.errors import MemoryStoreError
+from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
 from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
@@ -173,6 +173,84 @@ async def test_accepts_and_stores_a_novel_memory() -> None:
     assert result.decision.kind is MemoryDecisionKind.ACCEPT
     assert result.record_id == "1"
     assert await store.get("1") is not None
+
+
+async def test_an_accept_onto_an_occupied_id_refuses_and_never_re_mints() -> None:
+    """ADR-0105 §1 and §2, on the production wiring rather than a driven ruling.
+
+    Issue #630's defect end to end: an unrelated live belief and a proposal minted
+    at the same id, ruled by the *real* policy — which rules ``ACCEPT``, because
+    ``_detect_conflicts`` excludes the proposal's own id, so the belief this write
+    would destroy is not among the conflicts and no ruling was made about it.
+    Under ``MemoryStore.add``'s upsert it was replaced and ``ingest`` returned a
+    healthy ``record_id``.
+
+    The injected factory raises if it is read, which pins §2 mechanically: the id
+    is the *proposal's*, so the writer refuses rather than relocating the write the
+    way ``_apply_supersede`` does with an id ADR-0045 §4 made its own.
+    """
+
+    def _never() -> str:
+        msg = "an ACCEPT must not re-mint: the id is the proposal's, not the writer's"
+        raise AssertionError(msg)
+
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    occupant = _semantic("collide", "the user's cat is called Mimi")
+    await store.add(occupant)
+    ingestor = MemoryIngestor(
+        store=store, policy=DefaultMemoryPolicy(), now=_fixed_now, id_factory=_never
+    )
+
+    with pytest.raises(MemoryStoreConflictError, match="already stored there"):
+        await ingestor.ingest(
+            _proposal(
+                _semantic(
+                    "collide",
+                    "quarterly revenue was up 4 percent",
+                    confidence=0.9,
+                    evidence=(_EPISODE,),
+                )
+            )
+        )
+
+    # Byte-identical, not merely present: a writer that refused after landing the
+    # write would pass a bare `get` and still have destroyed the belief.
+    assert await store.get("collide") == occupant
+
+
+async def test_re_proposing_a_stored_record_at_its_own_id_no_longer_updates_it() -> None:
+    """ADR-0105 §4's cost, pinned rather than left to be discovered.
+
+    The one behaviour §1 takes away. It was reachable because ``_detect_conflicts``
+    filters the proposal's own id out of the conflict set (issue #110): a
+    re-proposal at a stored id sees no conflict, is ruled ``ACCEPT``, and used to
+    upsert in place. No producer in this tree does it — every one mints per
+    proposal — and the supported update path is the fold, which is what an
+    unchanged re-proposal at a *fresh* id already gets (ADR-0092 §6, "idempotency
+    does not vanish; it moves").
+    """
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    stored = _semantic("e", "prefers concise emails", confidence=0.5)
+    await store.add(stored)
+    ingestor = _ingestor(store)
+    refreshed = _semantic("e", "prefers concise emails", confidence=0.9, evidence=(_EPISODE,))
+
+    with pytest.raises(MemoryStoreConflictError):
+        await ingestor.ingest(_proposal(refreshed))
+
+    assert await store.get("e") == stored
+
+    # The same content at a *minted* id folds, as it always has: one record,
+    # updated in place at the target's id, and the confidence maximised.
+    result = await ingestor.ingest(_proposal(refreshed.model_copy(update={"id": "minted"})))
+
+    assert result.decision.kind is MemoryDecisionKind.REINFORCE
+    assert result.record_id == "e"
+    folded = await store.get("e")
+    assert folded is not None
+    assert folded.provenance.confidence == pytest.approx(0.9)
 
 
 async def test_secret_proposal_is_deferred_and_not_stored() -> None:

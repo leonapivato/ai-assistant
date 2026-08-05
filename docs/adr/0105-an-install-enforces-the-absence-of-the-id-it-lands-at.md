@@ -8,22 +8,47 @@
   crosses subsystem boundaries", and golden rule 5 names a Protocol change. This
   ADR does neither: it changes which **already-ratified** `MemoryStore` verb
   `MemoryIngestor` calls on two of its four write-producing rulings.
-  `MemoryStore.add`, `MemoryStore.write_atomic`, `MemoryWrite` and
-  `MemoryWriteMode` are consumed exactly as
-  [ADR-0046](0046-a-memorystore-batch-commits-atomically.md) ratified them, and no
+  `MemoryStore.write_atomic`, `MemoryWrite` and `MemoryWriteMode` are consumed
+  exactly as [ADR-0046](0046-a-memorystore-batch-commits-atomically.md) ratified
+  them, `MemoryStore.add` keeps every word of its own contract (§3), and no
   signature, field or documented promise in `core` changes. It therefore ships
   **with** its implementation in one PR rather than ahead of it, and `just ship`
   agrees independently: its architecture trigger is keyed on
   `src/ai_assistant/core/protocols.py` and `src/ai_assistant/core/types.py`, and
   fires on neither.
-- **It changes a `MemoryWriter` conformance obligation**, which
+- **It adds a `MemoryWriter` conformance obligation**, which
   [ADR-0079](0079-a-correction-resolves-every-conflict-it-is-shown.md) §3 made
   contract rather than one implementation's habit. That is why the decision is
   recorded at all instead of landing as a defect fix: the shared conformance
   suite and `FakeMemoryWriter` move with `MemoryIngestor`, and the behaviour at
-  the boundary is what a later reader will read as the rule. It is not why the
-  ADR would ship separately — the sentence above states the test that governs
-  that, and a conformance obligation is not a Protocol.
+  the boundary is what a later reader will read as the rule.
+
+  **It is not why the ADR would ship separately, and `main` settles that rather
+  than the reasoning above.** The obvious objection is that every neighbouring
+  writer obligation — ADR-0079 §3's retirement set, ADR-0080 §1's clamp,
+  ADR-0081 §1's self-consuming write, ADR-0086 §2's bound — is also *stated* on
+  `MemoryWriter.ingest`'s docstring in `core/protocols.py`, so this one owes a
+  line there too, and that would be a contract change. **Checked against the
+  tree, and it does not hold:**
+  [ADR-0078](0078-a-deferred-memory-decision-is-a-durable-question.md) §5b's
+  check 0 — a write-producing ruling on `DataTier.SECRET` is refused at the
+  writer boundary — is pinned in `memory_writer_contract.py` for all four
+  write-producing rulings by
+  `test_no_write_producing_ruling_persists_secret_tier_data`, and
+  `MemoryWriter.ingest`'s docstring says **nothing** about it: the whole
+  `MemoryWriter` block mentions neither `DataTier` nor secrecy. So a
+  *refusal* at the writer boundary, ratified by its own ADR and pinned by the
+  shared suite with no `core/protocols.py` text behind it, is the established
+  shape on `main` and not an exception being carved here. §1 is the same
+  category, and takes the same treatment.
+
+  What that leaves genuinely open is whether the Protocol docstring *ought* to
+  enumerate its refusals as well as its positive obligations — a question about
+  ADR-0078 §5b's entry as much as this one, with a whole-docstring answer.
+  Deliberately not decided here: it is a `core/protocols.py` edit affecting a
+  ratified clause that is not this ADR's, and doing it under this ADR would
+  reclassify a fix as a contract change to tidy something the fix did not cause.
+  Filed rather than dropped (§8).
 - **It discharges two named deferrals rather than superseding anything.**
   [ADR-0092](0092-an-attested-belief-names-its-source-and-a-user-assertion-retires-it.md)
   §10 deferred "whether `ACCEPT` should install insert-if-absent for a producer
@@ -317,6 +342,14 @@ which is where it is reviewed. Each candidate, and the verdict:
   worth naming: #630 is destruction and #631 is duplication, #630 is reached by
   every minting producer and #631 only by a re-syncing one, and a consolidator —
   which mints and does not re-sync — meets #630 and never #631.
+- **Whether `MemoryWriter.ingest`'s Protocol docstring should enumerate the
+  writer's *refusals* as well as its positive obligations.** It states ADR-0079
+  §3's, ADR-0080 §1's, ADR-0081 §1's and ADR-0086 §2's obligations and says
+  nothing about ADR-0078 §5b check 0's secret-tier refusal, which the shared
+  suite has pinned since that ADR landed. §1 joins the second group by the
+  precedent, so this ADR neither needs nor makes that call — but the asymmetry is
+  real, it is older than this change, and a `core/protocols.py` edit answering it
+  belongs to whoever takes the docstring as a whole. Filed as issue #734.
 - **The re-proposal path an asserting producer would want**, beyond noting in §4
   that the fold is it.
 - **Anything about `confidence`.** Issue #646 and ADR-0103's split are a separate

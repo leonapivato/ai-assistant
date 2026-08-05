@@ -966,6 +966,13 @@ class MemoryIngestor:
         5. **An unretirable window** (ADR-0080 §3): a ``SUPERSEDE`` whose retirement
            set holds a record whose window cannot be closed representably raises
            ``MemoryStoreError`` before the atomic batch (:func:`_close_window`).
+        6. **An install onto an occupied id** (ADR-0105 §1): an ``ACCEPT`` or
+           ``STORE_TEMPORARY`` whose ``proposed.id`` already names a *stored*
+           record raises ``MemoryStoreConflictError`` with nothing written
+           (:meth:`_install_if_absent`). Unlike the four above this is enforced by
+           the store rather than tested here — a one-element ``INSERT_IF_ABSENT``
+           batch — so it fires at the write and costs no read. The writer does
+           **not** re-mint: the id is the proposal's, not this writer's (§2).
 
         And one **refusal at the fold** (ADR-0045 §5, narrowed by ADR-0078 §5b): a
         fold onto a ``USER_ASSERTED`` target raises unless the proposal carries a
@@ -981,6 +988,9 @@ class MemoryIngestor:
         Raises:
             UnresolvedEvidenceError: If a ``DERIVED`` proposal cites a record the
                 store does not hold; nothing is written and the policy is not asked.
+            MemoryStoreConflictError: If an ``ACCEPT`` or ``STORE_TEMPORARY``
+                install would land at an id a stored record already occupies
+                (ADR-0105 §1); nothing is written.
             MemoryStoreError: If detection surfaces more conflicts than this
                 ingestor will resolve in one ingest, if a write-producing ruling
                 landed on a ``DataTier.SECRET`` proposal, if a ruling would install
@@ -1154,10 +1164,10 @@ class MemoryIngestor:
         # result, which has already applied the same rule to the union it formed.
         match decision.kind:
             case MemoryDecisionKind.ACCEPT:
-                return await self._store.add(_installed(proposed))
+                return await self._install_if_absent(_installed(proposed))
             case MemoryDecisionKind.STORE_TEMPORARY:
                 expires_at = self._expiry(decision.ttl)
-                return await self._store.add(
+                return await self._install_if_absent(
                     _installed(proposed.model_copy(update={"expires_at": expires_at}))
                 )
             case MemoryDecisionKind.REINFORCE | MemoryDecisionKind.SUPERSEDE:
@@ -1182,6 +1192,75 @@ class MemoryIngestor:
                 return await self._store.add(_installed(_merge(target, proposed)))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
+
+    async def _install_if_absent(self, record: MemoryRecord) -> str:
+        """Install ``record`` at its own id, **insert-if-absent** (ADR-0105 §1).
+
+        The write path for ``ACCEPT`` and ``STORE_TEMPORARY``, replacing the blind
+        ``MemoryStore.add`` upsert both used. ``add``'s documented semantics are a
+        caller-id upsert — "``id`` is the caller's idempotency key" — and every
+        producer in this tree *mints* its ids rather than asserting them, so a
+        proposal arriving at a stored id is a collision in a ``uuid4`` factory and
+        never a use of that key. Under ``add`` it silently replaced an unrelated
+        live belief and returned a healthy ``record_id`` (issue #630).
+
+        This is ADR-0045 §4's rule for a minted id — "names no existing record,
+        **enforced not assumed**" — applied to the two installing rulings it did
+        not reach. ``SUPERSEDE`` has had it since ADR-0045; ``REINFORCE`` is
+        excluded because its fold lands at the *target's* id, drawn from the
+        conflicts this ingest resolved and therefore stored by construction
+        (ADR-0081 §6), where an upsert is what a fold *is*.
+
+        **A one-element** :meth:`MemoryStore.write_atomic` **batch, not a**
+        ``get``. ADR-0081 §8's objection to a writer-side collision rule is that
+        the writer "could only enforce [it] by paying a ``get(proposed.id)`` on
+        every ingest to see something the store sees for free while it replaces
+        the row". ADR-0046's :class:`MemoryWriteMode` is that free enforcement:
+        the absence is checked by the store, inside the write, so this path adds
+        **no read**, cannot be raced against the write it guards, and costs
+        exactly what ``add`` cost — ``SqliteMemoryStore`` routes both through one
+        ``_persist_record`` and one ``_embed_one``.
+
+        "Absent" is ADR-0046 §3's sense: **physical presence**, not
+        read-visibility. A stored row blocks the insert even when expired or
+        window-closed — which is the reading this needs rather than merely the one
+        it gets, since a retired target carrying a user's correction is invisible
+        to ``get`` and ``search`` alike (ADR-0045 §6) and a readability-keyed check
+        would step past it and destroy exactly what the retirement preserved.
+
+        **It raises rather than re-minting, because the id is not this writer's**
+        (ADR-0105 §2). ``_apply_supersede`` re-mints because ADR-0045 §4 made that
+        id the writer's own to choose; this one is the proposal's. Relocating it
+        would return a ``record_id`` the producer never asked for, and would move
+        the destination *after* :func:`_refuse_self_consuming_write` had already
+        ruled on it — a refusal computed for one write and applied to another.
+        A collision here is a producer fault, and repairing it silently would hide
+        a broken id factory behind a healthy result.
+
+        Returns:
+            ``record.id`` — where an ``INSERT_IF_ABSENT`` at that id returns at
+            all, it landed there or raised, so this reads the value rather than
+            indexing the batch's echo (the shape :meth:`_apply_supersede` already
+            uses for its minted id).
+
+        Raises:
+            MemoryStoreConflictError: If a record is already stored at
+                ``record.id``. Nothing is written.
+            MemoryStoreError: On any other store failure.
+        """
+        try:
+            await self._store.write_atomic(
+                [MemoryWrite(record=record, mode=MemoryWriteMode.INSERT_IF_ABSENT)]
+            )
+        except MemoryStoreConflictError as exc:
+            msg = (
+                f"refusing to install {record.id!r}: a record is already stored there, and this "
+                f"write would replace a belief no ruling was made about. An installing producer "
+                f"mints its ids, so this is a collision in its factory rather than an update — "
+                f"the supported way to update a stored belief is a fold (ADR-0105 §1, §4)"
+            )
+            raise MemoryStoreConflictError(msg) from exc
+        return record.id
 
     async def _apply_supersede(self, targets: list[MemoryRecord], proposed: MemoryRecord) -> str:
         """Close every ``target``'s window and write ``proposed`` as a new record.

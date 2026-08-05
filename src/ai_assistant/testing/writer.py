@@ -185,7 +185,7 @@ class FakeMemoryWriter:
         mutate what it reads there, so the call log gets its own; the working
         snapshot stays private to this call.
 
-        The five refusals ``MemoryIngestor`` carries are carried here too, in the
+        The six refusals ``MemoryIngestor`` carries are carried here too, in the
         same order and for the same reason the fold refusals already are — a fake
         that stored what production refuses lets a consumer's test pass on state the
         real writer would never produce. Unresolvable ``DERIVED`` evidence
@@ -193,12 +193,18 @@ class FakeMemoryWriter:
         conflict set above the ceiling (ADR-0079 §1) fires in detection, before any
         ruling; a write-producing ruling on secret-tier data (ADR-0078 §5b check 0)
         and a ruling that would install the proposal at an id it cites (ADR-0081 §1)
-        both fire between the ruling and the write dispatch; and an unrepresentable
-        window close (ADR-0080 §3) fires in the applier, before the atomic batch.
+        both fire between the ruling and the write dispatch; an unrepresentable
+        window close (ADR-0080 §3) fires in the applier, before the atomic batch;
+        and an ``ACCEPT`` or ``STORE_TEMPORARY`` landing on an occupied id
+        (ADR-0105 §1) is refused by the store itself, at the write
+        (:meth:`_install_if_absent`).
 
         Raises:
             UnresolvedEvidenceError: If a ``DERIVED`` proposal cites a record the
                 store does not hold; nothing is written and the policy is not asked.
+            MemoryStoreConflictError: If an ``ACCEPT`` or ``STORE_TEMPORARY``
+                install would land at an id a stored record already occupies
+                (ADR-0105 §1); nothing is written.
             MemoryStoreError: If conflict resolution surfaces more conflicts than
                 this writer resolves in one ingest, if a write-producing ruling
                 landed on a ``DataTier.SECRET`` proposal, if a ruling would install
@@ -305,9 +311,9 @@ class FakeMemoryWriter:
         # `_merge` result, which has already bounded the union it formed.
         match decision.kind:
             case MemoryDecisionKind.ACCEPT:
-                return await self._store.add(_installed(proposed))
+                return await self._install_if_absent(_installed(proposed))
             case MemoryDecisionKind.STORE_TEMPORARY:
-                return await self._store.add(
+                return await self._install_if_absent(
                     _installed(
                         proposed.model_copy(update={"expires_at": self._expiry(decision.ttl)})
                     )
@@ -326,6 +332,38 @@ class FakeMemoryWriter:
                 return await self._store.add(_installed(_merge(target, proposed)))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
+
+    async def _install_if_absent(self, record: MemoryRecord) -> str:
+        """Install ``record`` at its own id, insert-if-absent (ADR-0105 §1).
+
+        Contract behaviour, mirroring ``MemoryIngestor._install`` and duplicated
+        for the reason every rule in this module is: a fake that upserted where the
+        production writer refuses would let a consumer's test pass on a write that
+        destroyed an unrelated belief (issue #630). ``ACCEPT`` and
+        ``STORE_TEMPORARY`` install through a one-element ``INSERT_IF_ABSENT``
+        batch rather than ``MemoryStore.add``'s blind upsert, so the store enforces
+        the absence while it writes and the writer pays no read. The id is the
+        proposal's rather than this writer's, so a collision **raises** instead of
+        re-minting the way ``_apply_supersede`` does (ADR-0105 §2).
+
+        Raises:
+            MemoryStoreConflictError: If a record is already stored at
+                ``record.id``. Nothing is written.
+            MemoryStoreError: On any other store failure.
+        """
+        try:
+            await self._store.write_atomic(
+                [MemoryWrite(record=record, mode=MemoryWriteMode.INSERT_IF_ABSENT)]
+            )
+        except MemoryStoreConflictError as exc:
+            msg = (
+                f"refusing to install {record.id!r}: a record is already stored there, and this "
+                f"write would replace a belief no ruling was made about. An installing producer "
+                f"mints its ids, so this is a collision in its factory rather than an update — "
+                f"the supported way to update a stored belief is a fold (ADR-0105 §1, §4)"
+            )
+            raise MemoryStoreConflictError(msg) from exc
+        return record.id
 
     async def _apply_supersede(self, targets: list[MemoryRecord], proposed: MemoryRecord) -> str:
         """Retire the whole set and write ``proposed`` at a fresh id (ADR-0079 §3).

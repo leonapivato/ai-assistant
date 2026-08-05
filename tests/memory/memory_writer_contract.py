@@ -21,7 +21,7 @@ returns its id; ``STORE_TEMPORARY`` stores it with an expiry; ``REJECT`` and
 ``SUPERSEDE`` naming a target absent from the conflicts raises ``MemoryStoreError``
 rather than storing the proposal as new.
 
-Four refusals are pinned besides, each stated on what a writer can observe:
+Five refusals are pinned besides, each stated on what a writer can observe:
 
 * **Evidence must resolve** (ADR-0077 §5). A ``DERIVED`` proposal citing a record
   the store does not hold raises ``UnresolvedEvidenceError`` naming the id, with
@@ -48,6 +48,14 @@ Four refusals are pinned besides, each stated on what a writer can observe:
   the value should be.
 * **An unrepresentable close refuses** (ADR-0080 §3), whole, leaving every record
   in the retirement set byte-identical.
+* **An install enforces the absence of the id it lands at** (ADR-0105 §1).
+  ``ACCEPT`` and ``STORE_TEMPORARY`` install insert-if-absent, so a proposal
+  arriving at an id a **stored** record occupies raises
+  ``MemoryStoreConflictError`` with nothing written — and "stored" is physical
+  presence rather than read-visibility (ADR-0046 §3), so a window-closed record no
+  read can see still refuses the install. The writer does not re-mint: the id is
+  the proposal's rather than the writer's, which is what distinguishes this from
+  ``SUPERSEDE``'s bounded re-mint above (ADR-0105 §2).
 
 ``REINFORCE`` and ``SUPERSEDE`` are pinned *differentially* (ADR-0040 §5a, as the
 mechanism half is rewritten by ADR-0045 §5):
@@ -134,7 +142,11 @@ from typing import TYPE_CHECKING, Protocol
 import pytest
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import MemoryStoreError, UnresolvedEvidenceError
+from ai_assistant.core.errors import (
+    MemoryStoreConflictError,
+    MemoryStoreError,
+    UnresolvedEvidenceError,
+)
 from ai_assistant.core.protocols import MemoryWriter
 from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
@@ -909,6 +921,79 @@ class MemoryWriterContract:
         assert stored is not None
         assert stored.expires_at is not None
         assert stored.expires_at.tzinfo is not None
+
+    @pytest.mark.parametrize(
+        "kind",
+        [MemoryDecisionKind.ACCEPT, MemoryDecisionKind.STORE_TEMPORARY],
+        ids=str,
+    )
+    async def test_an_install_onto_an_occupied_id_is_refused_and_that_record_survives(
+        self, make_writer: WriterFactory, kind: MemoryDecisionKind
+    ) -> None:
+        """ADR-0105 §1: an install enforces the absence of the id it lands at.
+
+        Both installing rulings write **insert-if-absent**, so a proposal minted at
+        an id some unrelated live belief already occupies is refused with nothing
+        written — where ``MemoryStore.add``'s upsert silently replaced it and
+        returned a healthy ``record_id`` (issue #630). The record standing there is
+        *not* a conflict and never could be: ``ingest`` excludes the proposal's own
+        id from the conflict set, so no ruling was ever made about the belief this
+        write would have destroyed.
+
+        Stated on ``MemoryStoreConflictError`` rather than plain
+        ``MemoryStoreError`` because the two say different things to a producer: a
+        collision in an id factory is retryable by re-minting, and every other
+        writer refusal is not.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        occupant = _preference("collide", "the user's cat is called Mimi")
+        await store.add(occupant)
+        policy = FakeMemoryPolicy(kind, ttl=timedelta(days=1))
+
+        with pytest.raises(MemoryStoreConflictError):
+            await make_writer(store, policy).ingest(
+                _proposal(_preference("collide", "quarterly revenue was up 4 percent"))
+            )
+
+        # Byte-identical, not merely present: a writer that refused *after*
+        # landing the write would pass a bare `get` and still have destroyed it.
+        assert await store.export() == [occupant]
+
+    @pytest.mark.parametrize(
+        "kind",
+        [MemoryDecisionKind.ACCEPT, MemoryDecisionKind.STORE_TEMPORARY],
+        ids=str,
+    )
+    async def test_an_install_is_refused_by_a_stored_record_no_read_can_see(
+        self, make_writer: WriterFactory, kind: MemoryDecisionKind
+    ) -> None:
+        """ "Absent" is physical presence, not read-visibility (ADR-0046 §3).
+
+        The reading this rule *needs*, not merely the one it inherits. A target
+        retired by a user's correction is retained with a closed ``validity``
+        window and is invisible to ``get`` and ``search`` alike (ADR-0045 §6) —
+        which is precisely the record ADR-0092 §Context traces being erased by a
+        write aimed at its id. A refusal keyed on readability would step past it
+        and destroy the retirement the correction bought.
+
+        Read here from a store whose clock is past the close, so the occupant is
+        genuinely unreadable at the moment the install is attempted rather than
+        merely asserted to be.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        retired = _preference("collide", "the user's cat is called Mimi").model_copy(
+            update={"validity": Validity(valid_until=_WHEN)}
+        )
+        await store.add(retired)
+        assert await store.get("collide") is None
+        policy = FakeMemoryPolicy(kind, ttl=timedelta(days=1))
+
+        with pytest.raises(MemoryStoreConflictError):
+            await make_writer(store, policy).ingest(
+                _proposal(_preference("collide", "quarterly revenue was up 4 percent"))
+            )
+
+        assert await store.export() == [retired]
 
     @pytest.mark.parametrize(
         "kind", [MemoryDecisionKind.REJECT, MemoryDecisionKind.ASK_USER], ids=str
