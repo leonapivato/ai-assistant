@@ -283,11 +283,16 @@ first cannot, and it covers it in the safe direction by construction.
 > only at a chunk boundary, so no chunk is abandoned part-way and a run may
 > overrun its budget by at most the duration of one chunk.
 
+> **Normative.** A job may be chunked only if every operation it performs inside
+> one chunk is itself bounded by a deadline. A run's overrun past its budget is
+> bounded by one chunk's duration, and that bound is worth exactly as much as
+> those deadlines are.
+
 > **Normative.** `Settings` gains `scheduler_run_budget`, a `timedelta` defaulting
 > to five minutes, and `scheduler_chunk_size`, an integer defaulting to 50. The
 > duration is refused at load unless it is finite and strictly positive, in the
 > `gt=timedelta(0)` form ADR-0083 §7 requires of every duration it adds; the count
-> is refused unless it is a positive `int`.
+> is refused at load unless it is exactly an `int` in `[1, 2**63)`.
 
 **The two bounds do different jobs and neither substitutes for the other.** The
 *chunk count* bounds what a crash discards and what a run may overrun by; the
@@ -317,6 +322,24 @@ is a delay a purge can absorb: ADR-0083 §7 records that "a missed or late tick 
 never a correctness bug", because ADR-0007 §2 enforces retention at read time so
 "the privacy guarantee does not depend on a background job".
 
+**That arithmetic is only as good as the chunk's own deadlines, which is why the
+second clause is a clause and not a remark.** A budget checked at a chunk boundary
+bounds nothing if the boundary can fail to arrive: a provider call that never
+returns holds the serial loop for as long as it hangs, and no figure in
+`Settings` would say so. The corpus already supplies the deadline for the cost
+that dominates these jobs — `model_timeout_seconds` is the "Deadline for a single
+model attempt, in seconds", defaulting to 60, carrying `gt=0` and
+`allow_inf_nan=False` precisely because infinity "would silently disable the
+deadline". So a chunk's true bound is the product `core/config.py` already names,
+"``max_attempts * timeout + total backoff``", multiplied by the chunk's records
+— not one timeout, and worth computing before setting a chunk size. **What the
+clause adds is that this must be checked rather than assumed**: a job whose chunk
+reaches an operation with no deadline is not a job that may be chunked under this
+ADR, and its lane owes that operation a deadline before it may be scheduled.
+**This ADR adds no cancellation mechanism** and does not reach inside a chunk;
+declaring the admissibility condition is the part that is run mechanics, and
+supplying a missing deadline belongs to whichever seam lacks it.
+
 **Fifty is chosen small on purpose.** The chunk is both the unit of loss and the
 unit of overrun, and the jobs this ADR is written for spend a model call or an
 embedding per record; a deployment whose per-record cost is high wants it lower,
@@ -326,6 +349,23 @@ default' with no figure is two conforming stores handing the same continuation
 different history", and the neighbouring precedent is `observation_batch_size`,
 whose default of 20 is deliberately small for the same reason: "this batch is both
 a prompt and an egress."
+
+**`[1, 2**63)` is not decoration, and `observation_batch_size` is the precedent
+for both ends.** A chunk size is what a walking job hands a paged read as its
+limit, and `MemoryStore.list_beliefs` raises `ValueError` "If `limit` or `offset`
+falls outside `0 <= value < 2**63`" — a bound its own docstring explains is
+refused rather than clamped because "Python's `int` is unbounded and SQLite's
+parameter binding is not, so an over-wide value raises `OverflowError` out of the
+driver while an in-memory store answers with an empty page". A setting that loads
+happily and then fails on the job's first scheduled run — hours after the
+misconfiguration, in a background task — is the failure `core/config.py` already
+refuses for exactly this shape: `observation_batch_size` carries `ge=1` and
+`lt=2**63` on the stated ground that "A setting the store would refuse must fail
+at load, not at the first observation." **"Exactly an `int`" is the other half**,
+and it is the corpus's own words: `bool` is an `int` subclass, so `True` would
+otherwise load as a chunk size of one, which is why these fields are
+`_IntegerSetting` rather than bare `int`. Both bounds are read off the
+neighbouring field rather than invented here.
 
 **The bounds are the scheduler's mechanics, not a job's quality parameters.**
 ADR-0106 §12 files "the deferral queue's cap value for a scheduled producer" with
@@ -685,14 +725,20 @@ apart later.
 
 **A long job's cost becomes a configured duty cycle rather than an unknown.** An
 operator reading `scheduler_run_budget` against a job's interval can state the
-worst delay a sibling job suffers and the rate at which a backlog drains. That is
-the bound ADR-0083 §7 accepted the absence of, and it is what makes the serial
-loop keep its advantages at leg 7's volume instead of becoming the thing that
-forces concurrency.
+worst delay a sibling job suffers **and the deadlines of the operations inside
+one chunk** — §4's second clause makes the second half a precondition of being
+chunked at all, so the figure is computable rather than nominal. That is the
+bound ADR-0083 §7 accepted the absence of, and it is what makes the serial loop
+keep its advantages at leg 7's volume instead of becoming the thing that forces
+concurrency.
 
-**What gets harder: every chunked job now owes an order.** §2 refuses instants and
-identifier sets, so a subsystem that wants a scheduled walk must have — or add — a
-total, non-reordering key over the rows it walks. `src/ai_assistant/memory/sqlite_store.py`
+**What gets harder: every chunked job now owes an order, and a deadline on
+everything inside its chunk.** §2 refuses instants, offsets and identifier sets,
+so a subsystem that wants a scheduled walk must have — or add — a total,
+non-reordering key over the rows it walks; §4's second clause adds that an
+operation with no deadline disqualifies the job until it has one, which is a real
+constraint on any future chunked job reaching a seam the corpus has not yet
+bounded. `src/ai_assistant/memory/sqlite_store.py`
 has one; a store that does not will discover it here rather than after the job
 ships.
 
