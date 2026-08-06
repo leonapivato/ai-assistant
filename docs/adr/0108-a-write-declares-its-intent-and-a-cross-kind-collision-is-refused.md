@@ -22,17 +22,22 @@
   prose-only PR trips neither of `scripts/ship.sh`'s persona regexes, so both
   lenses are run deliberately rather than mechanically, in ADR-0106's shape.
 - **This ADR partially supersedes [ADR-0022](0022-the-closed-learning-loop.md)
-  §4's same-id collision clause, and amends
+  §4's same-id collision clause and
+  [ADR-0046](0046-a-memorystore-batch-commits-atomically.md)'s cross-kind `UPSERT`
+  clause, and amends
   [ADR-0081](0081-no-write-consumes-the-evidence-its-own-proposal-cites.md) §8.**
   §6 applies ADR-0070 §1's amend-versus-supersede test to each and gets different
-  answers, which is why they are recorded differently: ADR-0022 §4's
-  "last-write-wins" is a decision a reader would act on differently after this
-  (**partial supersession**, ADR-0070 §3), while ADR-0081 §8's deferral is
+  answers, which is why they are recorded differently. ADR-0022 §4's
+  "last-write-wins" and ADR-0046's "upsert a full, different-kind replacement at an
+  existing id and assert `get` returns the replacement" are each decisions a reader
+  would act on differently after this — indeed the ADR-0046 clause is a conformance
+  obligation an implementation could satisfy only by *breaching* §4 (**partial
+  supersession**, ADR-0070 §3). ADR-0081 §8's deferral, by contrast, is
   *discharged* by this ADR taking it, and two of the three reasons it gave are
   contradicted by facts that postdate it (**an amendment**, recorded as a dated
   header note in ADR-0078 §10's shape). **No ratified body text is rewritten and
-  all three files land in this one change**, so neither Status line ever names an
-  absent ADR.
+  all four files land in this one change**, so no Status line ever names an absent
+  ADR.
 
 ## Context
 
@@ -326,10 +331,10 @@ before them:
   §4 rules out, and does not forbid a future subclass some later ADR introduces
   with reasons of its own.
 
-### 6. What this changes in ADR-0022 §4, and in ADR-0081 §8
+### 6. What this changes in ADR-0022 §4, in ADR-0046, and in ADR-0081 §8
 
-The two get different treatments because ADR-0070 §1's test gives different answers,
-and the difference is worth stating rather than assuming.
+The three get different treatments because ADR-0070 §1's test gives different
+answers, and the difference is worth stating rather than assuming.
 
 **ADR-0022 §4 — partial supersession.** §4's clause reads: "two proposals carrying
 the same record id resolve **last-write-wins**, because `MemoryStore.add` is an
@@ -348,6 +353,37 @@ visible rather than hidden; this makes it visible as a refusal instead of as two
 reported ids, and preserves the deliberate re-proposal §4 protected by giving it a
 verb (§2's `REINFORCE` row). What is withdrawn is only that the deliberate outcome
 was the **default** for a caller that intended the other one.
+
+**ADR-0046 — partial supersession, and it is the sharper of the two.** §4's
+refusal is an *addition* to what `UPSERT` does, and the repository has ruled twice
+that adding a refusal is an amendment rather than a supersession (ADR-0081 §5, on
+ADR-0079 §4 and ADR-0077 §5 each adding one to `MemoryWriter.ingest`). That
+precedent does **not** carry here, and the reason is specific: ADR-0046 did not
+merely leave the cross-kind case unmentioned, it **required the opposite outcome by
+name**, in the conformance obligations its Consequences hand to the implementing
+lane —
+
+> an `UPSERT` on a **present** id **overwrites** it, exactly as a bare `add` upsert
+> does — verified with an *open* replacement so `get` can see it: upsert a full,
+> different-kind replacement at an existing id and assert `get` returns the
+> replacement, not the prior record.
+
+An implementation could satisfy that sentence only by breaching §4. There is no
+reading on which a reader acts identically before and after, so ADR-0070 §1 makes
+it a supersession, and §3 makes it a partial one: only that clause and §2's
+unconditional phrasing of the same rule are replaced. Everything else ADR-0046
+decides stands, and §3's physical-presence definition is not merely preserved but
+**adopted** — §4's refusal uses ADR-0046 §3's sense of "names a stored record"
+rather than inventing a second one, which is why an expired or window-closed row
+collides on both rules alike.
+
+The property that clause was pinning survives; only its instrument changes. It was
+proving an upsert is a *full replacement rather than a merge* — every column
+rewritten, not only the payload — and it reached for a kind change as the most
+visible way to show it. §5 pins the same property same-kind, through the lifecycle
+columns, which is if anything the sharper instrument: a store that rewrote only the
+JSON blob would keep the old retention deadline and closed window, and `get` would
+then answer `None` for a record that is fully open.
 
 **ADR-0081 §8 — an amendment, recorded as a dated note.** §8's cross-kind bullet is
 a *deferral with an owner*, and this ADR discharges it: §4 above rules the horn §8
@@ -459,11 +495,12 @@ advances nor blocks it.
 - **`MemoryStore.add` acquires no callers in `src/` and one new refusal.** It
   remains contract surface, remains the upsert, and remains exercised by the
   conformance suite against all three backends.
-- **Two ratified ADRs get Status-line edits in this change**: ADR-0022 gains a
-  leading partial-supersession token naming §4's collision clause, and ADR-0081
-  gains a dated header note recording the discharge and the two corrected grounds.
-  Both are the append-only forms ADR-0070 §1 permits; no Decision text is
-  rewritten in either.
+- **Three ratified ADRs get Status-line edits in this change**: ADR-0022 and
+  ADR-0046 each gain a leading partial-supersession token — naming §4's collision
+  clause and the cross-kind `UPSERT` clause respectively — and ADR-0081 gains a
+  dated header note recording the discharge and the two corrected grounds. All are
+  the append-only forms ADR-0070 §1 permits; no Decision or Consequences text is
+  rewritten in any of them.
 - **A round trip is added to the `REINFORCE` path in name only.** `write_atomic`
   with one element embeds through the same `_embed_one` and writes through the same
   `_persist_record` as `add`; ADR-0046 §2 already ruled the degenerate batch legal

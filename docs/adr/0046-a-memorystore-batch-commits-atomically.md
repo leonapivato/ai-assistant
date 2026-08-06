@@ -1,7 +1,44 @@
 # 46. A `MemoryStore` batch commits atomically, or not at all
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0108 (the cross-kind case of `UPSERT`'s overwrite obligation)
 - Date: 2026-07-23
+- Partially superseded: 2026-08-05 by ADR-0108 — **an `UPSERT` whose id names a
+  stored record of a *different kind* is now refused, not applied. `UPSERT`'s
+  behaviour on a same-kind id, and everything else this ADR decides, is
+  untouched.**
+  [ADR-0108](0108-a-write-declares-its-intent-and-a-cross-kind-collision-is-refused.md)
+  §4 puts a cross-kind refusal on every upsert-capable door, as the backstop under
+  its §1 ruling that a write declares its collision intent at the seam.
+
+  **Replaced**, one clause in the two places that state it:
+
+  1. §2's mode definition, to the extent it reads unconditionally: "**`UPSERT`**
+     reproduces today's `add` semantics — overwrite an existing id, insert an
+     absent one." It now carries one exception and only one: a stored record of a
+     different `kind` at that id.
+  2. **The operative one**, in `Consequences` → "The triad is extended, not
+     created": "an `UPSERT` on a **present** id **overwrites** it, exactly as a bare
+     `add` upsert does — verified with an *open* replacement so `get` can see it:
+     **upsert a full, different-kind replacement at an existing id and assert `get`
+     returns the replacement, not the prior record**." That conformance obligation
+     now requires the opposite outcome in the different-kind case, and an
+     implementation satisfying it as written would breach ADR-0108 §4. The
+     *property* it pins — that an upsert is a full replacement rather than a merge,
+     rewriting every column and not only the payload — is unchanged, and is pinned
+     same-kind instead, through the lifecycle columns (ADR-0108 §5).
+
+  **Not replaced, and it is everything else.** §1's method; §2's two-mode set and
+  `MemoryWrite`; §3's physical-presence rule and repeated-id rejection, which
+  ADR-0108 §4 adopts verbatim for its own refusal rather than varying; §4's
+  all-or-nothing failure semantics and `MemoryStoreConflictError`, which carry the
+  new refusal unchanged as an element failure like any other; §5's ruling that this
+  primitive does not close #248's lost update; and §6. The `SUPERSEDE` batch shape
+  is unaffected: its `UPSERT` element is the window-closed form of the very record
+  it lands on, so it is same-kind by construction.
+
+  This record lands in ADR-0108's own (`Proposed`) change, in the shape ADR-0081
+  used for its ADR-0077 note (commit `4bc008b`), so the review that can still
+  change ADR-0108 §4 reads it alongside.
 - **Contract change.** This adds one method — `write_atomic` — to the
   `MemoryStore` Protocol in `core/protocols.py`, plus a `MemoryWrite` value
   object and a `MemoryWriteMode` enum in `core/types.py` (both cross subsystem
