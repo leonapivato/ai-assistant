@@ -1,11 +1,95 @@
 # 110. What closes a validity window without the user: a covered reading's absence, and never a clock
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-06
+- **Note (2026-08-06): ratified.** `Proposed` → `Accepted`, in the separate lane
+  #633 requires, after **both** required reviews came back green on the content
+  this ADR merged with: adversarial **APPROVE with no findings** and architecture
+  **APPROVE with no findings**, both at round 4, 951 lines net across 5 commits,
+  churn reported as a lower bound of `≥1.1×` (1075 touched; history was rewritten,
+  so earlier rounds are not counted), each posted to PR #783 by `just ship`. That
+  is the outcome ADR-0070 §1 requires the ratifying edit to record — "the
+  ratifying edit records that review's outcome, it does not replace it" — and it
+  is taken from that comment rather than from a report.
+
+  **Two lenses, and that is what this ADR's own header bullet below declared it
+  owed.** It decides `core` surface without touching it — §2's and §10's one
+  optional field on `SourceReading` — so it is contract-surface under
+  `CONTRIBUTING.md` → "Stop when the required reviews are green", which makes a
+  change contract-surface "when it is the ADR deciding that surface". The
+  requirement was `CONTRIBUTING.md`'s and not `scripts/ship.sh`'s: the script
+  fires its architecture requirement on a diff touching `core/protocols.py` or
+  `core/types.py`, and a prose-only PR deciding those files trips neither, so both
+  lenses were run deliberately. **This ratifying edit takes the adversarial lens
+  alone**, which is the same clause read one step on: `CONTRIBUTING.md` →
+  "Trivial ADR edits" exempts "the `Proposed` → `Accepted` ratification flip" from
+  a separate review *of the edit itself*, "not licence to rewrite a ratified
+  decision in place", and ADR-0015 §5 exempts trivial ADRs by name.
+
+  **The anchor is not the merged head, and the identity is established through
+  the tree rather than assumed**: the comment's
+  `<!-- ship:a77711e852c67d63a9bebdccd140741c5b39b6be -->` anchor is the pre-merge
+  branch head, which is *not* an ancestor of `main` because #783 was
+  rebase-merged. Both were resolved with `git rev-parse` rather than trusted:
+  `a77711e852c6^{tree}` and `9b16e56^{tree}` — the commit the PR merged as — are
+  the same tree, `7a9b09acfec2`. The content the two reviews read is therefore the
+  content that landed, notwithstanding the rewritten hash.
+
+  **No `blocker` or `major` finding was waived.** The architecture lens carried one
+  `major` through round 3 — that §4's suspension clause put `STORE_TEMPORARY` on
+  the stored-nothing side, which ADR-0108 §1 makes false — and it was fixed in the
+  text rather than argued away: §4 is keyed on `MemoryIngestResult.record_id` being
+  `None` rather than on an enumeration of rulings, and the paragraph beginning "The
+  clause is keyed on `record_id` being `None`" records the defect at the site it
+  repaired. Round 4 re-ran both lenses over the repaired text and neither raised
+  anything.
+
+  **One sentence was corrected and it is the only edit besides the `Status` line.**
+  The durability bullet below asserted that "Several of the ADRs this decision
+  composes with stand `Proposed` on `main`". That was checked against the tree
+  rather than taken, and it was false — at this PR's branch point the only ADRs
+  standing `Proposed` on `main` were ADR-0043 and ADR-0089, and this ADR cites
+  neither; ADR-0109, the last neighbour it composes with that had stood `Proposed`,
+  was ratified eight hours before this ADR's first commit. The sentence is
+  therefore made conditional rather than factual, which is what the rest of the
+  bullet always relied on: the operative content is that a ratification flip moves
+  no clause cited here, and that content is untouched. **Nothing else below is
+  edited** — not a clause, not a tense — which is ADR-0070 §1's own test applied
+  to the ratifying edit first: no decision text is touched and no normative clause
+  acquires, loses or alters an obligation.
+
+  **The scheduler lane's ADR has since been issued, and §6's and §9's issue-only
+  reference is left standing rather than renumbered.** That lane's ADR is
+  [ADR-0111](0111-a-scheduled-walk-is-chunked-and-resumes-from-a-durable-cursor.md),
+  which merged as #784 and is ratified in this same change. §9's ground for naming
+  the seam by issue — "a citation to a number no ref carries is a Tier 1 defect
+  under ADR-0088 §6 as ADR-0090 §1 narrows it" — was correct at the moment it was
+  written and is a dated record of it; rewriting it now would falsify ADR-0111 §10,
+  which quotes that sentence and describes this ADR's reference as by-issue-only,
+  in the document being ratified beside this one. The seam is navigable without the
+  edit: ADR-0111 §11 states it from both sides and cites this ADR by number, and
+  §§1–8 there bind the walk while this ADR binds the verdict.
+
+  **The rest of the sweep is empty, and the sites are named so the claim can be
+  checked rather than trusted.** Every use of "ratified" below was read: §3's "a
+  ratified thing this system already knows how to retire" is ADR-0080 §5's ruling,
+  §8's "already ratified for the band" is ADR-0103 §4's, §8's "worse on two
+  ratified counts" is ADR-0072 §1's and ADR-0103 §1's, and §10's and the
+  Alternatives' "owes its own ratified ADR" and "an ADR ratifies before
+  implementation" are golden rule 5's rule rather than any document's standing.
+  Not one turns on where an ADR stands. The clauses whose truth *depends* on this
+  ratification were written forward and this edit is the event that makes them
+  true: §11's "#639 closes when this ADR is ratified", §12's "#112 closes with this
+  decision", and the Consequences' "#639 and #112 close on ratification". No tree
+  claim has gone stale: nothing outside `docs/adr/` has changed on `main` since
+  this PR's branch point, so §2's `SourceReading` fields, §4's
+  `MemoryIngestResult.record_id` docstring, §5's `write_atomic` and §6's
+  `list_beliefs` all read exactly as the reviews read them. Refs #112, #639, #729,
+  #631, #632, #633.
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-06, not
-  to its status on any later day.** Several of the ADRs this decision composes
-  with stand `Proposed` on `main` and their ratification flips are their own
-  lanes'; `CONTRIBUTING.md` → "Trivial ADR edits" and ADR-0070 §1 both class that
+  to its status on any later day.** Where an ADR this decision composes with
+  stands or stood `Proposed` on `main`, its ratification flip is its own lane's;
+  `CONTRIBUTING.md` → "Trivial ADR edits" and ADR-0070 §1 both class that
   flip as recording a ratification rather than deciding one, so no clause cited
   here moves with it. Where a later ADR *changes* one of them, that change owes
   its own record and this ADR is owed a matching one.

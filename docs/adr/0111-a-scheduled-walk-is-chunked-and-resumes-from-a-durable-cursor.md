@@ -1,7 +1,80 @@
 # 111. A scheduled walk is chunked, and resumes from a durable cursor that never leads its effects
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-06
+- **Note (2026-08-06): ratified.** `Proposed` → `Accepted`, in the separate lane
+  #633 requires, after the required review came back green on the content this
+  ADR merged with: adversarial **APPROVE with no findings**, round 2, 888 lines
+  net across 3 commits, churn `1.0×` (920 touched, reported exact), posted to
+  PR #784 by `just ship`. That is the outcome ADR-0070 §1 requires the ratifying
+  edit to record — "the ratifying edit records that review's outcome, it does not
+  replace it" — and it is taken from that comment rather than from a report.
+
+  **One lens, and the header bullet below is why.** This ADR touches no Protocol
+  in `core/protocols.py` and no type in `core/types.py`, and decides none: it adds
+  two `Settings` fields (§4) and rules on mechanics that live in `service/` and
+  below each subsystem's own façade. So it is not contract-surface under
+  `CONTRIBUTING.md` → "Stop when the required reviews are green", which requires
+  the architecture lens for a change to the shared contract surface or for "the
+  ADR deciding that surface"; `scripts/ship.sh` fires its own architecture
+  requirement on a diff touching those two files and this diff touched neither.
+  That is the reading ADR-0090 §5 and ADR-0091's header each recorded for ADRs
+  that decided no surface, and the opposite of the one ADR-0110's header records
+  for itself. **This ratifying edit takes the same single lens**, now for the
+  further reason that `CONTRIBUTING.md` → "Trivial ADR edits" exempts "the
+  `Proposed` → `Accepted` ratification flip" from a separate review *of the edit
+  itself*, "not licence to rewrite a ratified decision in place", and ADR-0015 §5
+  exempts trivial ADRs by name.
+
+  **The anchor is not the merged head, and the identity is established through
+  the tree rather than assumed**: the comment's
+  `<!-- ship:288fba3e9cc12a34e4a3d44ebd6900fb4aae074a -->` anchor is the pre-merge
+  branch head, which is *not* an ancestor of `main` because #784 was
+  rebase-merged. Both were resolved with `git rev-parse` rather than trusted:
+  `288fba3e9cc1^{tree}` and `72ae77f^{tree}` — the commit the PR merged as — are
+  the same tree, `95cb527050f5`. The content the review read is therefore the
+  content that landed, notwithstanding the rewritten hash.
+
+  **No `blocker` or `major` finding was waived.** Round 1 raised two `major`
+  findings and both were fixed in the text rather than argued away: that §4's
+  budget bounds nothing if a chunk can block indefinitely, repaired by §4's second
+  normative clause making a per-operation deadline a precondition of being chunked
+  at all and by the paragraph beginning "That arithmetic is only as good as the
+  chunk's own deadlines"; and that `scheduler_chunk_size` would accept values
+  `MemoryStore.list_beliefs` rejects at runtime, repaired by pinning the field to
+  exactly an `int` in `[1, 2**63)` and by the paragraph beginning "`[1, 2**63)` is
+  not decoration". Round 2 re-ran the lens over the repaired text and raised
+  nothing.
+
+  **Beyond the `Status` line, not one word below is edited** — not a clause, not a
+  tense — which is ADR-0070 §1's own test applied to the ratifying edit first: no
+  decision text is touched and no normative clause acquires, loses or alters an
+  obligation. **That the sweep is empty is a result rather than an omission, and
+  the sites are named so it can be checked rather than trusted.** The durability
+  clause below asserts no ADR's `Status` and needed no tense edit. **No clause
+  below is written in the present tense about any ADR's standing**: §11's ADR-0110
+  bullet says in terms that "Its status on any later day is its own lane's" — that
+  lane is this one, and ADR-0110 is ratified in this same change, which the bullet
+  anticipated rather than asserted against. Every other use of "ratified" was read
+  and none turns on a document's standing: §Context's heading "three ratified
+  places" and §9's, §6's and the Alternatives' references to ADR-0097 §5's ruling,
+  ADR-0077 §8's window and the "nearest ratified precedent" are all about what
+  those texts decided. The clauses whose truth *depends* on this ratification were
+  written forward and this edit is the event that makes them true: the header's and
+  §11's "an implementation lane's act against this text once ratified", and
+  §Consequences' "a lane with a ratified text to build against". §10's "Both notes
+  name ADR-0111 and ship in this change" is satisfied — both landed with #784 and
+  are verified below. No tree claim has gone stale either: nothing outside
+  `docs/adr/` has changed on `main` since this PR's branch point, so §1's
+  `jobs_for`, §1's `meta`/`rowid` schema in
+  `src/ai_assistant/memory/sqlite_store.py`, §4's `observation_batch_size` and
+  `model_timeout_seconds` bounds, §7's `Reembedder._resumable` and §9's
+  `Scheduler._log_failure` all read exactly as the review read them. **The two
+  amendment records §10 owes are on `main` and complete** — ADR-0083's `Status`
+  qualifier with its dated note, and ADR-0077's dated note with no qualifier
+  because its `Status` carries a leading token (ADR-0082 §2) — and each gains
+  today's short note recording that the ADR they name has ratified. Refs #632,
+  #710, #729, #633.
 - **Durability clause.** Every reference below to ADR-NNNN is to its text as
   merged on 2026-08-06, not to its status on any later day. Where a later ADR
   changes one of them, this ADR is read against the text quoted here and the
