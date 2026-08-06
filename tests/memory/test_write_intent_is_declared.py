@@ -24,11 +24,12 @@ callers where it cannot.
 
 The check reads the **parsed source**, not a grep: a comment, a docstring, or a
 string literal mentioning ``MemoryWrite`` is not a construction, and a construction
-split across lines is still one node. It resolves import aliases and refuses to
-treat an opaque ``**mapping`` as a declaration — both are ways past an earlier draft
-of this module, and both have negative cases below. A check that accepts everything
-is indistinguishable from a sound one on the tree it is pointed at, so what it
-*rejects* is proved rather than assumed.
+split across lines is still one node. It resolves renamings — both import aliases
+and plain assignments — and refuses to treat an opaque ``**mapping`` as a
+declaration. All three were ways past an earlier draft of this module, and each has
+a negative case below. A check that accepts everything is indistinguishable from a
+sound one on the tree it is pointed at, so what it *rejects* is proved rather than
+assumed.
 """
 
 from __future__ import annotations
@@ -41,13 +42,33 @@ import ai_assistant
 _PACKAGE = Path(ai_assistant.__file__).parent
 
 
+def _names_the_class(node: ast.expr, known: set[str]) -> bool:
+    """Whether ``node`` refers to the class: a known name, or ``*.MemoryWrite``."""
+    if isinstance(node, ast.Name):
+        return node.id in known
+    return isinstance(node, ast.Attribute) and node.attr == "MemoryWrite"
+
+
 def _local_names(tree: ast.AST) -> set[str]:
     """Every local name bound to ``MemoryWrite`` in ``tree``, aliases included.
 
-    ``from ai_assistant.core.types import MemoryWrite as W`` makes ``W(record=r)``
-    a construction that a check looking only for the literal spelling would walk
-    straight past. Resolved from the module's own imports rather than assumed, so
-    the finder cannot be stepped around by renaming.
+    Two ways to rename it, and a check that missed either would report a clean tree
+    while a destructive default sat in it:
+
+    - ``from ai_assistant.core.types import MemoryWrite as W``, then ``W(record=r)``;
+    - ``Write = MemoryWrite``, then ``Write(record=r)``.
+
+    Assignment aliases are followed **to a fixed point**, so an alias of an alias
+    resolves too. Both forms are read off the module's own source rather than
+    assumed absent.
+
+    **Where this stops, stated rather than implied.** A binding that reaches a name
+    through a function return, a container, or a conditional is beyond static reach,
+    and no AST check gets it without type inference. That boundary is the same one
+    ADR-0108 §7 draws around ``add``: the guarantee is that the *ordinary* way to
+    write a defaulted construction is caught, so getting past it means writing the
+    bypass on purpose — which review can see, and which a reader can no longer do by
+    accident.
     """
     names = {"MemoryWrite"}
     for node in ast.walk(tree):
@@ -57,7 +78,21 @@ def _local_names(tree: ast.AST) -> set[str]:
                 for alias in node.names
                 if alias.name.rsplit(".", 1)[-1] == "MemoryWrite"
             )
-    return names
+    while True:
+        before = len(names)
+        for node in ast.walk(tree):
+            targets: list[ast.expr] = []
+            if isinstance(node, ast.Assign) and _names_the_class(node.value, names):
+                targets = list(node.targets)
+            elif (
+                isinstance(node, ast.AnnAssign)
+                and node.value is not None
+                and _names_the_class(node.value, names)
+            ):
+                targets = [node.target]
+            names.update(target.id for target in targets if isinstance(target, ast.Name))
+        if len(names) == before:
+            return names
 
 
 def _constructions(tree: ast.AST) -> list[ast.Call]:
@@ -69,19 +104,11 @@ def _constructions(tree: ast.AST) -> list[ast.Call]:
     repository does not have and which would be its own problem.
     """
     local = _local_names(tree)
-    found: list[ast.Call] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        matched = (
-            func.id in local
-            if isinstance(func, ast.Name)
-            else getattr(func, "attr", None) == "MemoryWrite"
-        )
-        if matched:
-            found.append(node)
-    return found
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _names_the_class(node.func, local)
+    ]
 
 
 def _declares_mode(call: ast.Call) -> bool:
@@ -175,21 +202,26 @@ def test_an_opaque_unpacking_does_not_count_as_declaring() -> None:
     assert [_declares_mode(call) for call in _constructions(literal_without)] == [False]
 
 
-def test_an_aliased_import_is_still_found() -> None:
-    """Renaming the class at the import is not a way past the finder.
+def test_a_renamed_class_is_still_found() -> None:
+    """Neither way of renaming the class is a way past the finder.
 
-    ``from ... import MemoryWrite as W`` then ``W(record=r)`` is the same
-    destructive default with a different spelling, and a check keyed on the literal
-    name would report a clean tree. The negative half matters as much: an unrelated
-    ``W`` in a module that never imported the class must **not** be matched, or the
-    check acquires false positives and gets loosened until it catches nothing.
+    ``from ... import MemoryWrite as W`` and ``Write = MemoryWrite`` are the same
+    destructive default under a different spelling, and a check keyed on the literal
+    name reports a clean tree for both. Aliases of aliases resolve too, which is why
+    the resolution runs to a fixed point rather than in one pass.
+
+    The negative half matters as much: an unrelated ``W`` in a module that never
+    imported the class must **not** match, or the check acquires false positives and
+    gets loosened until it catches nothing.
     """
-    aliased = ast.parse(
-        "from ai_assistant.core.types import MemoryWrite as W\nW(record=r)\n",
-    )
+    imported = ast.parse("from ai_assistant.core.types import MemoryWrite as W\nW(record=r)\n")
+    assigned = ast.parse("Write = MemoryWrite\nWrite(record=r)\n")
+    chained = ast.parse("A = MemoryWrite\nB = A\nB(record=r)\n")
+    qualified_alias = ast.parse("W = types.MemoryWrite\nW(record=r)\n")
     unrelated = ast.parse("from somewhere import Widget as W\nW(record=r)\n")
 
-    assert [_declares_mode(call) for call in _constructions(aliased)] == [False]
+    for tree in (imported, assigned, chained, qualified_alias):
+        assert [_declares_mode(call) for call in _constructions(tree)] == [False]
     assert _constructions(unrelated) == []
 
 
