@@ -83,6 +83,19 @@ review-codex persona base="":
 ship:
     scripts/ship.sh
 
+# Ask that same acceptance rule what it would decide, BEFORE pushing a rebase —
+# `ship`'s own code, nothing written to GitHub, and a PR head that still lags
+# HEAD is fine because this is meant to run before the push. Prints the inputs it
+# judged: the base move's file set with ADR-0027 §3 floor paths marked, and where
+# it made no floor claim, which of the three reasons applies. Rebase FIRST — it
+# refuses an un-rebased HEAD, whose merge base has not moved yet, rather than
+# reporting a floor tested over an empty file set (issue #751).
+#
+# Last line, because `just --list` shows only that one: what a base move costs.
+# Would this base move cost a review round? Rebase first, then ask (ADR-0027 §2)
+drill:
+    scripts/ship.sh --drill
+
 # First-time developer setup
 setup:
     uv sync
