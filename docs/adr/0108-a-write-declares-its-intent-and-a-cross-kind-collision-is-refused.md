@@ -1,7 +1,55 @@
 # 108. A write declares its intent at the store seam, and a cross-kind collision is refused at every door
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-05
+- **Note (2026-08-05): ratified.** `Proposed` → `Accepted`, after **both**
+  required reviews came back green on the content this ADR merged with:
+  adversarial **APPROVE with no findings** and architecture **APPROVE with no
+  findings**, both at tree `2bd9e6f0eee0`, round 13, 845 lines net across 15
+  commits, churn `1.4×` (1187 touched, reported exact), each posted to PR #757 by
+  `just ship`. That is the outcome ADR-0070 §1 requires the ratifying edit to
+  record — "the ratifying edit records that review's outcome, it does not replace
+  it" — and it is taken from that comment rather than from a report.
+
+  **The reviewed tree is not the merged tree, and the gap is ADR-0027 §2(b)'s
+  rather than unreviewed content.** The artifacts were recorded against base
+  `7a2489905db6`; the PR shipped on base `713128ac97a1` after a rebase over the
+  `scripts/ship.sh` lane (#751). The reviewed patch identity `2131c49bb312` is
+  unchanged either side of that move, the recorded base is a *proper* ancestor of
+  the new merge base, the range carries no pathless entry, and the move touches
+  only `scripts/ship.sh`, `tests/scripts/test_ship.py` and
+  `tests/scripts/test_ship_drill.py` — none of them ADR-0027 §3 floor paths. The
+  three-file drift set is published on that ship comment per §4. So the reviews
+  cover this decision's content in full; what differs is a base neither lens was
+  asked to re-certify and the gate re-ran against.
+
+  **The anchor is not the merged head, and the identity is established through the
+  tree rather than assumed**: the comment's `<!-- ship:8f6d4178dd94… -->` anchor is
+  the pre-merge branch head, which `git merge-base --is-ancestor` shows is *not* an
+  ancestor of `main` because #757 was rebase-merged. Both were resolved with
+  `git rev-parse`: `8f6d4178^{tree}` and `603a2b4^{tree}` are the same tree,
+  `7fcb56d97bc5`.
+
+  **This ratifying edit takes the adversarial lens alone**, which is the header
+  bullet below read one step on rather than waived. That bullet requires
+  "adversarial *and* architecture" because this ADR decides `core/protocols.py`
+  surface, and PR #757 ran both — recorded above. This *edit* is a different
+  change: `CONTRIBUTING.md` → "Trivial ADR edits" exempts "the `Proposed` →
+  `Accepted` ratification flip" from a separate review *of the edit itself*, which
+  is "about *review cost*, and nothing else … not licence to rewrite a ratified
+  decision in place", and ADR-0015 §5 exempts trivial ADRs by name.
+
+  **One tense correction, and it is why this edit is its own change.** The header
+  bullet below says this ADR "is flipped to `Accepted` on merge". It was not: #757
+  merged carrying `Proposed`, which is the ordinary shape here — ADR-0104 and
+  ADR-0107 were each ratified by a separate commit after their own merge — but not
+  what that sentence predicts. The sentence is left unrewritten, as ADR-0070 §1
+  requires, and bounded here: **the flip is a separate change after the merge, not
+  part of it.** The rule the bullet is really invoking — golden rule 5's "ratified
+  **and** merged as its own PR before anything implements against it" — is
+  therefore satisfied by this edit landing ahead of the implementation, not by the
+  merge of #757 alone. The implementing PR is #760, and its adversarial lens
+  blocked on exactly this gap, which is how it was found.
 - **This is a contract change, of the semantics-only kind.** `MemoryStore.add`
   keeps its signature and keeps its upsert semantics; what it gains is one
   refusal clause (§4), and what changes around it is which verb each caller in
