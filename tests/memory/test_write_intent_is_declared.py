@@ -32,17 +32,23 @@ everything is indistinguishable from a sound one on the tree it is pointed at, s
 what it *rejects* is proved rather than assumed — including the false positives it
 must not produce, which are the failure that gets a check like this deleted.
 
-What it deliberately does **not** chase is indirection through a value the source
-does not spell; :func:`_local_names` gives the reasoning and why that boundary is
-where it is.
+Bindings are resolved **per lexical scope**, so one function's
+``factory=MemoryWrite`` parameter cannot make an unrelated ``factory`` elsewhere
+fail. What the check deliberately does **not** chase is indirection through a value
+the source never spells; :func:`_names_in` gives the reasoning for both, and why
+that boundary is where it is.
 """
 
 from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import ai_assistant
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _PACKAGE = Path(ai_assistant.__file__).parent
 
@@ -54,48 +60,96 @@ def _names_the_class(node: ast.expr, known: set[str]) -> bool:
     return isinstance(node, ast.Attribute) and node.attr == "MemoryWrite"
 
 
-def _local_names(tree: ast.AST) -> set[str]:
-    """Every local name bound to ``MemoryWrite`` in ``tree``, aliases included.
+#: The node types that open a new lexical scope. Name resolution stops at each of
+#: them in both directions: a binding made inside one is not visible outside it.
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
-    Two ways to rename it, and a check that missed either would report a clean tree
-    while a destructive default sat in it:
 
-    - ``from ai_assistant.core.types import MemoryWrite as W``, then ``W(record=r)``;
-    - ``Write = MemoryWrite``, then ``Write(record=r)``.
+def _own_nodes(scope: ast.AST) -> Iterator[ast.AST]:
+    """Every node lexically inside ``scope`` but not inside a *nested* scope.
 
-    Three ways to rename it, and a check that missed any would report a clean tree
-    while a destructive default sat in it:
+    A nested scope's own node is yielded — so a caller can recurse into it — while
+    its contents are not, which is what keeps one function's bindings out of
+    another's.
+    """
+    stack = list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        yield node
+        if not isinstance(node, _SCOPES):
+            stack.extend(ast.iter_child_nodes(node))
+
+
+def _defaulted_parameters(args: ast.arguments, enclosing: set[str]) -> set[str]:
+    """Parameters whose *default* is the class, so calling them constructs one.
+
+    ``def build(factory=MemoryWrite)`` binds ``factory`` to the class on every call
+    that does not override it. The default expression is evaluated in the
+    **enclosing** scope, which is the name set it is judged against; the parameter
+    it binds belongs to the function's own.
+    """
+    positional = args.posonlyargs + args.args
+    bound = {
+        parameter.arg
+        for parameter, default in zip(
+            positional[len(positional) - len(args.defaults) :], args.defaults, strict=True
+        )
+        if _names_the_class(default, enclosing)
+    }
+    return bound | {
+        parameter.arg
+        for parameter, default in zip(args.kwonlyargs, args.kw_defaults, strict=True)
+        if default is not None and _names_the_class(default, enclosing)
+    }
+
+
+def _names_in(scope: ast.AST, enclosing: set[str]) -> set[str]:
+    """Names bound to ``MemoryWrite`` in ``scope``, inheriting ``enclosing``.
+
+    Three ways to rename the class, and a check that missed any would report a
+    clean tree while a destructive default sat in it:
 
     - ``from ai_assistant.core.types import MemoryWrite as W``, then ``W(record=r)``;
     - ``Write = MemoryWrite``, then ``Write(record=r)``;
     - ``def build(factory=MemoryWrite): return factory(record=r)``.
 
     All three are **static binding forms** — the class is named in the syntax that
-    creates the binding — so all three resolve, and they resolve to a fixed point so
-    an alias of an alias does too.
+    creates the binding — so all three resolve, to a fixed point, so an alias of an
+    alias does too.
+
+    **Scoped, because the alternative failure is worse than the one it fixes.**
+    Collecting names across the whole module would let one function's
+    ``factory=MemoryWrite`` parameter make an unrelated ``factory`` in a second
+    function fail the check — a false positive landing on a contributor who touched
+    nothing relevant, and the failure that gets a check like this deleted rather
+    than fixed. Bindings are therefore resolved per lexical scope and each call is
+    judged against its own.
 
     **Where this stops is a design boundary, not an omission.** Once a reference
-    reaches a name through a *value* the source does not spell — a function's return,
-    a container element, a class attribute read at runtime, ``functools.partial``,
-    ``getattr`` — no AST check follows it, and chasing each form in turn has no
-    terminus. This check is aimed at the **accidental** default: the caller who wrote
-    ``MemoryWrite(record=r)`` because the field has one, which is the whole of what
-    ADR-0108 §7 says is checkable. Reaching the same effect through indirection means
-    constructing the bypass deliberately — visible in review, and no longer something
-    a reader does without noticing. That is the same boundary §7 draws around ``add``,
-    and it is stated here so a later reader can tell a deliberate limit from a gap.
+    reaches a name through a *value* the source does not spell — a function's
+    return, a container element, a class attribute read at runtime,
+    ``functools.partial``, ``getattr`` — no AST check follows it, and chasing each
+    form in turn has no terminus. This check is aimed at the **accidental** default:
+    the caller who wrote ``MemoryWrite(record=r)`` because the field has one, which
+    is the whole of what ADR-0108 §7 says is checkable. Reaching the same effect
+    through indirection means constructing the bypass deliberately — visible in
+    review, and no longer something a reader does without noticing. That is the same
+    boundary §7 draws around ``add``, stated here so a later reader can tell a
+    deliberate limit from a gap.
     """
-    names = {"MemoryWrite"}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom | ast.Import):
-            names.update(
-                alias.asname or alias.name
-                for alias in node.names
-                if alias.name.rsplit(".", 1)[-1] == "MemoryWrite"
-            )
+    names = set(enclosing)
+    if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+        names |= _defaulted_parameters(scope.args, enclosing)
     while True:
         before = len(names)
-        for node in ast.walk(tree):
+        for node in _own_nodes(scope):
+            if isinstance(node, ast.ImportFrom | ast.Import):
+                names.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name.rsplit(".", 1)[-1] == "MemoryWrite"
+                )
+                continue
             targets: list[ast.expr] = []
             if isinstance(node, ast.Assign) and _names_the_class(node.value, names):
                 targets = list(node.targets)
@@ -105,44 +159,29 @@ def _local_names(tree: ast.AST) -> set[str]:
                 and _names_the_class(node.value, names)
             ):
                 targets = [node.target]
-            elif isinstance(node, ast.arguments):
-                # A parameter whose *default* is the class is bound to it on every
-                # call that does not override it, so the parameter name constructs
-                # `MemoryWrite` exactly as an assignment alias does.
-                positional = node.posonlyargs + node.args
-                names.update(
-                    parameter.arg
-                    for parameter, default in zip(
-                        positional[len(positional) - len(node.defaults) :],
-                        node.defaults,
-                        strict=True,
-                    )
-                    if _names_the_class(default, names)
-                )
-                names.update(
-                    parameter.arg
-                    for parameter, default in zip(node.kwonlyargs, node.kw_defaults, strict=True)
-                    if default is not None and _names_the_class(default, names)
-                )
             names.update(target.id for target in targets if isinstance(target, ast.Name))
         if len(names) == before:
             return names
 
 
-def _constructions(tree: ast.AST) -> list[ast.Call]:
+def _constructions(tree: ast.AST, enclosing: set[str] | None = None) -> list[ast.Call]:
     """Every ``MemoryWrite(...)`` call in ``tree``, however it is spelled.
 
-    Matches a bare or aliased name (:func:`_local_names`) and the qualified
-    attribute form ``types.MemoryWrite(...)``. Anything else ending in
-    ``MemoryWrite`` would have to be a second class of that name, which this
-    repository does not have and which would be its own problem.
+    Matches a bare or renamed name (:func:`_names_in`) and the qualified attribute
+    form ``types.MemoryWrite(...)``. Anything else ending in ``MemoryWrite`` would
+    have to be a second class of that name, which this repository does not have and
+    which would be its own problem.
     """
-    local = _local_names(tree)
-    return [
+    names = _names_in(tree, {"MemoryWrite"} if enclosing is None else enclosing)
+    found = [
         node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and _names_the_class(node.func, local)
+        for node in _own_nodes(tree)
+        if isinstance(node, ast.Call) and _names_the_class(node.func, names)
     ]
+    for node in _own_nodes(tree):
+        if isinstance(node, _SCOPES):
+            found.extend(_constructions(node, names))
+    return found
 
 
 def _declares_mode(call: ast.Call) -> bool:
@@ -268,14 +307,33 @@ def test_a_renamed_class_is_still_found() -> None:
     assert _constructions(unrelated) == []
 
 
-def test_an_unrelated_parameter_default_is_not_an_alias() -> None:
-    """A parameter defaulting to something else must not poison the name set.
+def test_a_name_bound_in_one_scope_does_not_reach_another() -> None:
+    """The false positive that scoping exists to prevent, pinned as a case.
 
-    ``_local_names`` grows a set of names that then match *every* call, so a wrong
-    entry does not merely miss a construction — it reports constructions that are
-    not there, in unrelated code. That failure is worse than the one the check
-    exists for, because it lands on a contributor who touched nothing relevant.
+    A wrong entry in the name set does not merely miss a construction — it *invents*
+    them, in code the author never touched. Here ``make`` legitimately takes the
+    class as a default and declares its mode; ``use`` takes an unrelated callable
+    that happens to share the parameter's name. A module-wide name set would fail
+    ``use``'s call, and the contributor's only remedy would be to rename a variable
+    or delete the check. Both were on offer and the check would have lost.
     """
+    two_scopes = ast.parse(
+        "def make(factory=MemoryWrite):\n"
+        "    return factory(record=r, mode=m)\n"
+        "def use(factory):\n"
+        "    return factory(record=r)\n"
+    )
+
+    found = _constructions(two_scopes)
+
+    # Exactly one construction — `make`'s, which declares — and `use`'s call is not
+    # one at all.
+    assert [call.lineno for call in found] == [2]
+    assert [_declares_mode(call) for call in found] == [True]
+
+
+def test_an_unrelated_parameter_default_is_not_an_alias() -> None:
+    """A parameter defaulting to something else is not a binding to the class."""
     other = ast.parse("def build(f=Widget, *, g=None):\n    return f(record=r)\n")
     no_default = ast.parse("def build(f):\n    return f(record=r)\n")
 
