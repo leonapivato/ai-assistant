@@ -1,7 +1,57 @@
 # 81. No write consumes the evidence its own proposal cites
 
-- Status: Accepted
+- Status: Accepted, §8's cross-kind deferral discharged and two of its grounds amended by ADR-0108
 - Date: 2026-07-29
+- Note (2026-08-05): **§8's first deferred item is taken, and two of the three
+  grounds it gave for deferring have expired.** The item — "whether a proposal
+  arriving at the id of a stored record of a *different kind* should be refused
+  rather than silently upserted", #472's second question — is ruled by
+  [ADR-0108](0108-a-write-declares-its-intent-and-a-cross-kind-collision-is-refused.md)
+  §4: refused with `MemoryStoreError`, at **every** upsert-capable door, on every
+  implementation. **Nothing §8 decided is replaced.** A deferral decides to defer,
+  and a deferral that is taken has been honoured, not overridden — ADR-0070 §1's
+  test therefore makes this an amendment noted here rather than a supersession.
+  What is recorded is the state of §8's stated reasoning against the tree as it
+  now stands:
+
+  1. **The cost ground has expired.** §8 wrote that a writer "could only enforce
+     [it] by paying a `get(proposed.id)` on every ingest to see something the
+     store sees for free while it replaces the row — giving up §1's no-I/O,
+     cannot-be-raced property". ADR-0046's `INSERT_IF_ABSENT` mode buys the
+     absence check with **no read at all**: the store enforces it inside the
+     transaction that writes, so it adds no I/O and cannot be raced against the
+     write it guards. `MemoryIngestor._apply_supersede` already uses it.
+  2. **The coverage ground is stale in both halves.** §8 wrote that "a cross-kind
+     collision arriving from capture would pass a writer-side rule untouched. A
+     rule at `add` covers every caller; a rule at `ingest` covers one." Episodic
+     capture does not call `add` at all — `ConversationCapture` writes a
+     one-element `write_atomic` in `INSERT_IF_ABSENT` mode and refuses `add`
+     explicitly, for §8's own reason — so the caller §8 named as the reason had
+     already protected itself. And `add` is not "every caller": `write_atomic` is
+     a second door into the store, which is why ADR-0108 §4 binds both.
+  3. **The residue ground stands unchanged**, and is why this remained a
+     low-priority defect properly fixed rather than an incident: with §1 closed,
+     what remained was a silent replacement of an *unrelated* record, with no
+     fabricated warrant behind it.
+
+  **§8's trigger fired before the deferral was taken**, so its own terms were met
+  rather than overridden: §8 named "a producer that *derives* a record id from
+  content rather than minting one" as what would make the question urgent, and
+  #735 records `FakeBeliefObserver` deriving ids from a content hash on `main`.
+  §8's "until then no producer can collide" is correspondingly no longer true.
+
+  **§8's named owner is not the lane that took it, deliberately.** §8 gave the
+  item to "the `MemoryStore` write-semantics lane, the one that takes #104's
+  compare-and-swap", on the ground that it "wants the same conformance-suite
+  rewrite across all three backends that #104's CAS wants". That rewrite happens
+  in ADR-0108's implementing lane regardless, for its §1's sake, which is the
+  whole of §8's stated reason for pairing them; #104 is untouched. §8's **second**
+  deferred item — the general "no stored record cites itself" invariant, owned by
+  the belief-presentation lane — is untouched, as is every other section.
+
+  This record lands in ADR-0108's own (`Proposed`) change, in the shape this ADR
+  used for its ADR-0077 note (commit `4bc008b`), so the review that can still
+  change ADR-0108 §4 reads it alongside.
 - **This is a contract change, of the semantics-only kind.**
   `MemoryWriter.ingest` gains one refusal clause (§1): a ruling that would
   *install* the proposal at an id that same proposal cites is refused rather
