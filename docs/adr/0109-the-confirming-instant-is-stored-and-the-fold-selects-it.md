@@ -716,16 +716,39 @@ both decline to make.
 > changes no file under `core/protocols.py`, because no signature moves, and none
 > under `docs/adr/`, because the one record §13 owes lands with this ADR.
 
-> **Normative.** Every test that lane writes for this ADR constructs a
-> `last_confirmed_at` that is not `None` and is distinct from every other instant
-> in the case — the injected clock's reading, `last_updated`,
+> **Normative.** Every test whose expected outcome is a concrete instant
+> constructs a `last_confirmed_at` that is not `None` and is distinct from every
+> other instant in the case — the injected clock's reading, `last_updated`,
 > `attestation.reported_at`, and the other record's instant — and asserts the exact
-> value it expects.
+> instant it expects.
 
-The items below are what those two clauses obligate; ADR-0089 §3 has the mark
-supply the obligation and this text say what it means. The second clause is
+> **Normative.** Every test whose expected outcome is **unknown** asserts
+> `last_confirmed_at is None` exactly — never merely falsy, and never by omitting
+> the assertion. Where the code path under test can also produce a concrete
+> instant, that unknown case is accompanied by a sibling case over the same path
+> which does.
+
+The items below are what those three clauses obligate; ADR-0089 §3 has the mark
+supply the obligation and this text say what it means. The two test clauses are
 stated here rather than beside the test list because a mark indented into a list
 item is not a mark (ADR-0089 §2).
+
+**The two test clauses divide the cases and neither covers both**, which is
+deliberate: some of the outcomes below *are* `None`, and a rule demanding a
+non-`None` value everywhere would be unsatisfiable for exactly those. Each guards
+a different vacuity. A concrete-instant case left at the field's default passes
+whether the value is carried or silently dropped, so the first clause forbids the
+default and forbids reusing an instant already in the fixture. An unknown case is
+the mirror: on a path that can produce either outcome, `is None` alone passes
+against an implementation that never writes the field, so the second clause pairs
+it with a sibling that would fail under that implementation. Two of the three
+unknown outcomes below are on such paths and get their siblings from the same
+list — the fold where neither input is usable sits beside the selection cases,
+and the legacy blob with no key sits beside the round-trip. The third, the
+capture path, can only ever produce unknown, so the sibling clause does not
+reach it; its assertion still earns its place, because it fails the moment a
+producer writes the episode's own `occurred_at` into the field, which is exactly
+what §4 above decided against.
 
 1. **`core/types.py`** — `last_confirmed_at: UtcInstant | None = Field(default=None,
    description=…)` on `Provenance`, appended after `attestation`. **No validator**
@@ -763,11 +786,11 @@ item is not a mark (ADR-0089 §2).
    produce, the fake observer taking the latest `occurred_at` over the same
    `window` of episodes it already slices to build its citations.
    `testing/engine.py`'s canned `Goal` is unchanged, for item 3's reason.
-5. **Tests, governed by the anti-vacuity clause above.** The field's default is
-   `None`, and a fixture that leaves it defaulted passes whether the field is
-   carried or silently dropped, while one that reuses the case's clock passes
-   whether the code selected the instant or read the clock. Both are tests that
-   cannot fail, which is why that clause is stated once for every case here:
+5. **Tests, governed by the two anti-vacuity clauses above.** A fixture left at
+   the default passes whether the field is carried or silently dropped, and one
+   that reuses the case's clock passes whether the code selected the instant or
+   read the clock. Both are tests that cannot fail, which is why those clauses are
+   stated once for every case here rather than repeated per item:
 
    - **The at-capacity regression, which is the case this whole decision turns
      on** (#744, PR #742's finding 2). A deterministic fold whose incoming record
