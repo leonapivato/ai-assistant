@@ -77,7 +77,7 @@ Some base moves genuinely do cost a round, and then the review is owed — the p
 
 `scripts/ship.sh --drill` answers ADR-0027 §2's question with `ship`'s own code: the same acceptance loop, the same `_is_floor_path`, the same §4 budget. It writes nothing to GitHub, and it tolerates a PR head that still lags `HEAD` — that is its normal state, because it exists to run *before* the push.
 
-**Rebase first, drill second**, and the drill enforces that order rather than merely asking for it: on a `HEAD` that does not contain the fetched base tip it refuses outright, because the merge base has not moved yet and the floor would be tested over an empty file set — a "clear" that answers a different question (issue #751).
+**Rebase first, drill second**, and the drill enforces that order rather than merely asking for it: on a `HEAD` that does not contain the fetched base tip it refuses outright, because the merge base there is still the *old* one. The floor would be tested over the range up to that — a base move you have already accounted for rather than the one you are asking about, and where nothing else has moved, an empty range. Either way the "clear" answers a different question (issue #751).
 
 ```bash
 git fetch origin main && git rebase FETCH_HEAD
