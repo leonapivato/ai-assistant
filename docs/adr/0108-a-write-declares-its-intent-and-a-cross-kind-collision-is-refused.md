@@ -9,6 +9,9 @@
   is added, and `core/types.py` and `core/errors.py` are untouched** — the write
   modes this decision routes on are `MemoryWriteMode.UPSERT` and
   `MemoryWriteMode.INSERT_IF_ABSENT`, ratified and shipping since ADR-0046 §2.
+  (One consequence of leaving `core/types.py` alone is that the `UPSERT` member's
+  own docstring restates the pre-§4 behaviour; §9 records that and why it is a
+  follow-up rather than part of this change.)
   What changes is the documented meaning of two methods plus the shared
   conformance suite, which is the review concern `CONTRIBUTING.md` names when a
   Protocol's meaning changes without its shape. Golden rule 5 therefore applies:
@@ -577,6 +580,16 @@ advances nor blocks it.
   overwrite; whether a derived id is the right design for that fake is the
   observer lane's.
 - **Anything about `add`'s signature.** §8 files that; it is not decided here.
+- **The restatement of `UPSERT`'s meaning in `core/types.py`.** The
+  `MemoryWriteMode.UPSERT` member's docstring says "Overwrite the record if its id
+  is present, insert it if absent", which §4 now qualifies. This ADR **does** decide
+  the semantics — the ruling is §4's and is stated on both `MemoryStore` methods in
+  `core/protocols.py` — and leaves only the *restatement* stale, on a file the
+  implementing lane's fence excludes. Recorded here rather than left for a reader to
+  notice, because a public cross-subsystem type is what a backend author reads to
+  learn what a mode means, and one working from it alone would build a store the
+  conformance suite then fails. Filed as a docstring-only follow-up; no new ADR is
+  owed, since the decision already exists.
 
 ## Consequences
 
