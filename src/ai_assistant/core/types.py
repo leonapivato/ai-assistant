@@ -1086,6 +1086,14 @@ class MemoryWriteMode(StrEnum):
     Reproduces :meth:`~ai_assistant.core.protocols.MemoryStore.add`'s upsert
     semantics — what a window-close is, since the target already exists and is
     overwritten with its retired form.
+
+    A cross-kind collision is the one exception, and it is refused rather than
+    overwritten (ADR-0108 §4): where the id names a stored record of a different
+    ``kind``, nothing is written.
+    :meth:`~ai_assistant.core.protocols.MemoryStore.write_atomic` carries the full
+    statement. The sentence above stays true of a window-close, which writes the
+    retired form of the very record it lands on and so is same-kind by
+    construction.
     """
 
     INSERT_IF_ABSENT = "insert_if_absent"
