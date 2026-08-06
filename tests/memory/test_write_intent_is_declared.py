@@ -24,12 +24,17 @@ callers where it cannot.
 
 The check reads the **parsed source**, not a grep: a comment, a docstring, or a
 string literal mentioning ``MemoryWrite`` is not a construction, and a construction
-split across lines is still one node. It resolves renamings — both import aliases
-and plain assignments — and refuses to treat an opaque ``**mapping`` as a
-declaration. All three were ways past an earlier draft of this module, and each has
-a negative case below. A check that accepts everything is indistinguishable from a
-sound one on the tree it is pointed at, so what it *rejects* is proved rather than
-assumed.
+split across lines is still one node. It resolves every **static binding form** that
+renames the class — import alias, assignment, parameter default — and refuses to
+treat an opaque ``**mapping`` as a declaration. All four were ways past an earlier
+draft of this module, and each has a negative case below. A check that accepts
+everything is indistinguishable from a sound one on the tree it is pointed at, so
+what it *rejects* is proved rather than assumed — including the false positives it
+must not produce, which are the failure that gets a check like this deleted.
+
+What it deliberately does **not** chase is indirection through a value the source
+does not spell; :func:`_local_names` gives the reasoning and why that boundary is
+where it is.
 """
 
 from __future__ import annotations
@@ -58,17 +63,27 @@ def _local_names(tree: ast.AST) -> set[str]:
     - ``from ai_assistant.core.types import MemoryWrite as W``, then ``W(record=r)``;
     - ``Write = MemoryWrite``, then ``Write(record=r)``.
 
-    Assignment aliases are followed **to a fixed point**, so an alias of an alias
-    resolves too. Both forms are read off the module's own source rather than
-    assumed absent.
+    Three ways to rename it, and a check that missed any would report a clean tree
+    while a destructive default sat in it:
 
-    **Where this stops, stated rather than implied.** A binding that reaches a name
-    through a function return, a container, or a conditional is beyond static reach,
-    and no AST check gets it without type inference. That boundary is the same one
-    ADR-0108 §7 draws around ``add``: the guarantee is that the *ordinary* way to
-    write a defaulted construction is caught, so getting past it means writing the
-    bypass on purpose — which review can see, and which a reader can no longer do by
-    accident.
+    - ``from ai_assistant.core.types import MemoryWrite as W``, then ``W(record=r)``;
+    - ``Write = MemoryWrite``, then ``Write(record=r)``;
+    - ``def build(factory=MemoryWrite): return factory(record=r)``.
+
+    All three are **static binding forms** — the class is named in the syntax that
+    creates the binding — so all three resolve, and they resolve to a fixed point so
+    an alias of an alias does too.
+
+    **Where this stops is a design boundary, not an omission.** Once a reference
+    reaches a name through a *value* the source does not spell — a function's return,
+    a container element, a class attribute read at runtime, ``functools.partial``,
+    ``getattr`` — no AST check follows it, and chasing each form in turn has no
+    terminus. This check is aimed at the **accidental** default: the caller who wrote
+    ``MemoryWrite(record=r)`` because the field has one, which is the whole of what
+    ADR-0108 §7 says is checkable. Reaching the same effect through indirection means
+    constructing the bypass deliberately — visible in review, and no longer something
+    a reader does without noticing. That is the same boundary §7 draws around ``add``,
+    and it is stated here so a later reader can tell a deliberate limit from a gap.
     """
     names = {"MemoryWrite"}
     for node in ast.walk(tree):
@@ -90,6 +105,25 @@ def _local_names(tree: ast.AST) -> set[str]:
                 and _names_the_class(node.value, names)
             ):
                 targets = [node.target]
+            elif isinstance(node, ast.arguments):
+                # A parameter whose *default* is the class is bound to it on every
+                # call that does not override it, so the parameter name constructs
+                # `MemoryWrite` exactly as an assignment alias does.
+                positional = node.posonlyargs + node.args
+                names.update(
+                    parameter.arg
+                    for parameter, default in zip(
+                        positional[len(positional) - len(node.defaults) :],
+                        node.defaults,
+                        strict=True,
+                    )
+                    if _names_the_class(default, names)
+                )
+                names.update(
+                    parameter.arg
+                    for parameter, default in zip(node.kwonlyargs, node.kw_defaults, strict=True)
+                    if default is not None and _names_the_class(default, names)
+                )
             names.update(target.id for target in targets if isinstance(target, ast.Name))
         if len(names) == before:
             return names
@@ -218,11 +252,35 @@ def test_a_renamed_class_is_still_found() -> None:
     assigned = ast.parse("Write = MemoryWrite\nWrite(record=r)\n")
     chained = ast.parse("A = MemoryWrite\nB = A\nB(record=r)\n")
     qualified_alias = ast.parse("W = types.MemoryWrite\nW(record=r)\n")
+    positional_default = ast.parse("def build(f=MemoryWrite):\n    return f(record=r)\n")
+    keyword_default = ast.parse("def build(*, f=MemoryWrite):\n    return f(record=r)\n")
     unrelated = ast.parse("from somewhere import Widget as W\nW(record=r)\n")
 
-    for tree in (imported, assigned, chained, qualified_alias):
+    for tree in (
+        imported,
+        assigned,
+        chained,
+        qualified_alias,
+        positional_default,
+        keyword_default,
+    ):
         assert [_declares_mode(call) for call in _constructions(tree)] == [False]
     assert _constructions(unrelated) == []
+
+
+def test_an_unrelated_parameter_default_is_not_an_alias() -> None:
+    """A parameter defaulting to something else must not poison the name set.
+
+    ``_local_names`` grows a set of names that then match *every* call, so a wrong
+    entry does not merely miss a construction — it reports constructions that are
+    not there, in unrelated code. That failure is worse than the one the check
+    exists for, because it lands on a contributor who touched nothing relevant.
+    """
+    other = ast.parse("def build(f=Widget, *, g=None):\n    return f(record=r)\n")
+    no_default = ast.parse("def build(f):\n    return f(record=r)\n")
+
+    assert _constructions(other) == []
+    assert _constructions(no_default) == []
 
 
 def test_a_lexical_mention_is_not_a_construction() -> None:
