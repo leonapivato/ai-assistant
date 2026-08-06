@@ -21,8 +21,11 @@ where a new caller is likeliest to be careless.
 
 ## Two checks, because one of them makes the other sound
 
-The obvious check — "every ``MemoryWrite(...)`` call names its mode" — is only as
-good as its ability to recognise the call, and a name can be renamed:
+The obvious check — "every construction of a ``MemoryWrite`` names its mode" —
+covers the direct call and Pydantic's alternative constructors alike
+(``model_validate``, ``model_construct``), since each applies the field default and
+none goes through the other. But it is only as good as its ability to recognise
+the class, and a name can be renamed:
 ``from ... import MemoryWrite as W``; ``Write = MemoryWrite``;
 ``def build(f=MemoryWrite)``. An earlier draft chased those by resolving aliases,
 and each round of that produced a new one to chase — then, once the resolver grew
@@ -87,16 +90,38 @@ def _names_the_class(node: ast.expr) -> bool:
     return isinstance(node, ast.Attribute) and node.attr == _CLASS
 
 
+#: Pydantic's alternative constructors. Each builds a ``MemoryWrite`` without
+#: going through ``__init__``, so each applies the field default exactly as the
+#: bare call does — and each is invisible to a check that looks only for a call
+#: *of* the class.
+_CONSTRUCTORS = frozenset(
+    {"model_validate", "model_construct", "model_validate_json", "model_validate_strings"}
+)
+
+
 def _constructions(tree: ast.AST) -> list[ast.Call]:
-    """Every ``MemoryWrite(...)`` call in ``tree``.
+    """Every call in ``tree`` that builds a ``MemoryWrite``.
+
+    The direct call ``MemoryWrite(...)``, and the alternative constructors
+    (:data:`_CONSTRUCTORS`) — ``MemoryWrite.model_validate({"record": r})`` is a
+    write with the default ``UPSERT`` mode just as surely as ``MemoryWrite(record=r)``
+    is, and ADR-0108 §1 is about what a write *does*, not which spelling made it.
 
     Complete only because :func:`_renamings` is empty — see the module docstring.
     """
-    return [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and _names_the_class(node.func)
-    ]
+    found: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        via_constructor = (
+            isinstance(func, ast.Attribute)
+            and func.attr in _CONSTRUCTORS
+            and _names_the_class(func.value)
+        )
+        if _names_the_class(func) or via_constructor:
+            found.append(node)
+    return found
 
 
 #: The module that defines the class, absolutely spelled.
@@ -178,33 +203,38 @@ def _renamings(tree: ast.AST) -> list[ast.AST]:
     return found
 
 
+def _maps_mode(node: ast.expr) -> bool:
+    """Whether ``node`` is a dict *display* carrying a literal ``"mode"`` key."""
+    return isinstance(node, ast.Dict) and any(
+        isinstance(key, ast.Constant) and key.value == "mode" for key in node.keys
+    )
+
+
 def _declares_mode(call: ast.Call) -> bool:
     """Whether ``call`` names ``mode`` in a way this check can actually read.
 
-    A literal ``mode=`` keyword, or a ``**{...}`` whose dict *display* carries a
-    literal ``"mode"`` key. **An opaque ``**mapping`` does not count**, and that is
-    worth stating: ``MemoryWrite(record=r, **{})`` and
-    ``MemoryWrite(record=r, **kwargs)`` both take ``MemoryWriteMode.UPSERT`` from the
-    field default, so a check that waved them through would fail open on exactly the
-    construction that most looks written to get past a rule — while looking, on
-    today's tree, identical to one that did not.
+    Three readable forms, one per way of building the model: a literal ``mode=``
+    keyword (``MemoryWrite(...)`` and ``model_construct``), a ``**{...}`` whose
+    dict display carries a literal ``"mode"`` key, and a **positional** dict
+    display, which is how ``model_validate({"record": r, "mode": m})`` says it.
+
+    **Anything opaque does not count**, and that is the point rather than a
+    limitation. ``MemoryWrite(record=r, **{})``, ``MemoryWrite(record=r, **kwargs)``
+    and ``MemoryWrite.model_validate(payload)`` all take
+    ``MemoryWriteMode.UPSERT`` from the field default, so a check that waved them
+    through would fail open on exactly the constructions that most look written to
+    get past a rule — while looking, on today's tree, identical to one that did not.
 
     Failing closed costs nothing and is not a guess about the future: nothing under
-    ``src/ai_assistant/`` builds a ``MemoryWrite`` this way, and a caller that one
-    day needs to can pass ``mode`` alongside the unpack.
+    ``src/ai_assistant/`` builds a ``MemoryWrite`` any of these ways, and a caller
+    that one day needs to can name ``mode`` alongside.
     """
-    for keyword in call.keywords:
-        if keyword.arg == "mode":
-            return True
-        if (
-            keyword.arg is None
-            and isinstance(keyword.value, ast.Dict)
-            and any(
-                isinstance(key, ast.Constant) and key.value == "mode" for key in keyword.value.keys
-            )
-        ):
-            return True
-    return False
+    if any(_maps_mode(arg) for arg in call.args):
+        return True
+    return any(
+        keyword.arg == "mode" or (keyword.arg is None and _maps_mode(keyword.value))
+        for keyword in call.keywords
+    )
 
 
 def test_the_class_is_never_bound_to_another_name() -> None:
@@ -334,6 +364,35 @@ def test_the_renaming_check_leaves_unrelated_code_alone() -> None:
         foreign_colliding_suffix,
     ):
         assert _renamings(tree) == [], ast.dump(tree)
+
+
+def test_pydantic_alternative_constructors_are_constructions_too() -> None:
+    """``model_validate`` and friends build the model without going through ``__init__``.
+
+    ``MemoryWrite.model_validate({"record": r})`` applies the field default exactly
+    as ``MemoryWrite(record=r)`` does — a destructive write, and one a check looking
+    only for a call *of* the class never sees. ADR-0108 §1 is about what a write
+    does, not which spelling produced it.
+
+    An opaque payload fails closed: ``model_validate(payload)`` cannot be read, and
+    reading it optimistically is how the rule would be enforced everywhere except
+    where it was evaded.
+    """
+    validated = ast.parse('MemoryWrite.model_validate({"record": r})')
+    validated_ok = ast.parse('MemoryWrite.model_validate({"record": r, "mode": m})')
+    constructed = ast.parse("MemoryWrite.model_construct(record=r)")
+    constructed_ok = ast.parse("MemoryWrite.model_construct(record=r, mode=m)")
+    opaque_payload = ast.parse("MemoryWrite.model_validate(payload)")
+    from_json = ast.parse("MemoryWrite.model_validate_json(blob)")
+    qualified = ast.parse('types.MemoryWrite.model_validate({"record": r})')
+
+    for tree in (validated, constructed, opaque_payload, from_json, qualified):
+        assert [_declares_mode(call) for call in _constructions(tree)] == [False], ast.dump(tree)
+    for tree in (validated_ok, constructed_ok):
+        assert [_declares_mode(call) for call in _constructions(tree)] == [True], ast.dump(tree)
+
+    # An unrelated object's method of the same name is not a construction of ours.
+    assert _constructions(ast.parse("Widget.model_validate({'record': r})")) == []
 
 
 def test_a_lexical_mention_is_not_a_construction() -> None:
