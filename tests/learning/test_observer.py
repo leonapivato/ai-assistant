@@ -201,6 +201,76 @@ async def test_a_cited_label_becomes_the_id_of_the_episode_actually_read() -> No
     assert proposal.conflicts == ()
 
 
+#: Three instants for the out-of-order batch below, none of them the observer's
+#: clock (:data:`_WHEN`). ADR-0109 §10 forbids a fixture whose expected value
+#: coincides with an instant the code could have reached for instead — here the
+#: clock, which is already ``last_updated``, and the *first* cited episode's
+#: instant, which is what "take the first citation" would answer.
+_EARLY: Final = datetime(2025, 9, 3, tzinfo=UTC)
+_LATEST: Final = datetime(2025, 12, 24, tzinfo=UTC)
+_MIDDLE: Final = datetime(2025, 10, 17, tzinfo=UTC)
+
+
+async def test_a_derived_beliefs_confirming_instant_is_the_latest_cited_occurred_at() -> None:
+    """ADR-0109 §4's ``DERIVED`` arm, over a batch deliberately out of order.
+
+    ADR-0103 §9 rules the band's confirming event as "the most recent observation
+    supporting it, the latest ``occurred_at`` among the episodes
+    ``Provenance.evidence`` cites, and never the moment of derivation". The cited
+    episodes run ``_EARLY, _LATEST, _MIDDLE``, so an implementation taking the
+    first citation, the last, or the batch's own order answers differently from
+    one taking the maximum — which is the only assertion that separates them.
+
+    ``last_updated`` is the observer's clock and is a *fourth* distinct value, so
+    this case also carries ADR-0109 §10's transaction-time clause on the producer
+    side.
+
+    The **uncited** episode is what makes "among the episodes it cites" mean
+    something: it is the latest in the batch by a year, and a producer computing
+    over the batch rather than over the citations it resolved would answer with
+    it. The citations are ours and never the model's (ADR-0077 §5), and ADR-0106
+    §3 has the instant taken over that same selected set for the same reason.
+    """
+    observer, _ = _observer(_envelope(_belief(evidence=["E1", "E2", "E3"], step="inferred")))
+    episodes = [
+        episode("e-early", occurred_at=_EARLY),
+        episode("e-latest", occurred_at=_LATEST),
+        episode("e-middle", occurred_at=_MIDDLE),
+        episode("e-uncited", occurred_at=_LATEST.replace(year=_LATEST.year + 1)),
+    ]
+
+    outcome = await observer.observe(episodes)
+
+    (proposal,) = outcome.proposals
+    provenance = proposal.proposed.provenance
+    assert provenance.evidence == ("e-early", "e-latest", "e-middle")
+    assert provenance.last_confirmed_at == _LATEST
+    assert provenance.last_updated == _WHEN
+    assert provenance.last_confirmed_at != provenance.last_updated
+
+
+async def test_a_cited_episode_dated_in_our_future_is_stored_unchanged() -> None:
+    """ADR-0109 §4's fourth clause, at the ``DERIVED`` producer.
+
+    Nothing constrains ``EpisodicMemory.occurred_at`` to the past, so this producer
+    is separately capable of dropping or clamping a future instant, and it must do
+    neither: it "writes its band's instant as it stands and applies no usability
+    test to it". The usability test is the fold's, where two candidates exist.
+
+    Asserting the exact instant refuses ``None``, the observer's own clock, and a
+    clamp to it, in one assertion.
+    """
+    ahead = _WHEN.replace(year=_WHEN.year + 2)
+    observer, _ = _observer(_envelope(_belief(evidence=["E1", "E2"], step="inferred")))
+    episodes = [episode("e-past", occurred_at=_EARLY), episode("e-ahead", occurred_at=ahead)]
+
+    outcome = await observer.observe(episodes)
+
+    (proposal,) = outcome.proposals
+    assert proposal.proposed.provenance.last_confirmed_at == ahead
+    assert ahead > _WHEN
+
+
 async def test_an_entry_citing_a_label_outside_the_batch_is_discarded_not_repaired() -> None:
     """Evidence attached to satisfy a rule is not evidence (ADR-0077 §5)."""
     observer, _ = _observer(_envelope(_belief(evidence=["E9"])))

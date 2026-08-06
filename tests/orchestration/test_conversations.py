@@ -174,6 +174,17 @@ async def test_capture_writes_one_episode_carrying_exactly_what_section_4_ratifi
     assert stored.importance == 0.0
     assert stored.participants == ()
     assert stored.validity == Validity()
+    # ADR-0109 §4's episode paragraph, which is *about* the empty `evidence`
+    # above: a `DERIVED` belief's confirming instant ranges over the episodes it
+    # cites, and over the empty set it yields nothing, so this record reads as
+    # ADR-0103 §9's **unknown**. `is None` exactly, never merely falsy. The
+    # assertion earns its place on a path that can produce no other outcome
+    # because it fails the moment a producer writes `occurred_at` — asserted
+    # non-`None` two lines above — into the field, which is what §4 decided
+    # against: nothing retires an episode, so "is this still true?" is not a
+    # question about it, and every episode in the store would otherwise claim a
+    # currency it has no use for.
+    assert stored.provenance.last_confirmed_at is None
 
 
 async def test_an_unset_retention_stamps_a_finite_expiry() -> None:

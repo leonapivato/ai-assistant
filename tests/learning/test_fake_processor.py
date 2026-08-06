@@ -147,6 +147,11 @@ async def test_synthesised_record_carries_the_feedbacks_provenance() -> None:
     assert record.provenance.source is MemorySource.USER_ASSERTED
     assert record.provenance.evidence == ("ep-9",)
     assert record.provenance.last_updated == _WHEN
+    # The `ASSERTED` band's confirming event is the user stating it (ADR-0109 §4),
+    # so this fake takes the utterance's instant exactly as `FeedbackProcessor`
+    # does. Asserted against the *event* rather than against `last_updated` beside
+    # it, so the claim stays about the confirming event if #775 moves the other.
+    assert record.provenance.last_confirmed_at == event.created_at
 
 
 async def test_synthesised_ids_are_derived_from_the_feedback() -> None:
