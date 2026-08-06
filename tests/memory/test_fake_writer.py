@@ -177,14 +177,23 @@ def _inferred(record_id: str, *, validity: Validity | None = None) -> Preference
 #: The lifecycle fields the fold case below gives its two records **distinctly**,
 #: so which record each one came from is asserted rather than defaulted (#745): with
 #: the two agreeing, the case passes whichever record the fold took them from.
+#: **Both ends of each window differ**, not only `valid_from`: the assertions compare
+#: whole `Validity` values, and with a shared `valid_until` a fold that took the
+#: target's start and the incoming record's end would compare equal and pass while
+#: moving when the surviving belief stops being live.
+#:
 #: Chosen against `_fixed_now` (2026-06-01), the store's clock and the writer's —
-#: the windows open before it and the expiries fall after it, so both records are
-#: readable throughout and a missing survivor means the fold got the rule wrong.
-_TARGET_WINDOW = Validity(valid_from=datetime(2026, 2, 1, tzinfo=UTC))
-_TARGET_EXPIRES_AT = datetime(2027, 1, 1, tzinfo=UTC)
+#: the windows open before it and both close and expire after it, so both records
+#: are readable throughout and a missing survivor means the fold got the rule wrong.
+_TARGET_WINDOW = Validity(
+    valid_from=datetime(2026, 2, 1, tzinfo=UTC), valid_until=datetime(2027, 6, 1, tzinfo=UTC)
+)
+_TARGET_EXPIRES_AT = datetime(2027, 9, 1, tzinfo=UTC)
 _TARGET_WHEN = datetime(2026, 1, 1, tzinfo=UTC)
-_INCOMING_WINDOW = Validity(valid_from=datetime(2026, 3, 1, tzinfo=UTC))
-_INCOMING_EXPIRES_AT = datetime(2026, 12, 1, tzinfo=UTC)
+_INCOMING_WINDOW = Validity(
+    valid_from=datetime(2026, 3, 1, tzinfo=UTC), valid_until=datetime(2027, 3, 1, tzinfo=UTC)
+)
+_INCOMING_EXPIRES_AT = datetime(2027, 5, 1, tzinfo=UTC)
 _INCOMING_WHEN = datetime(2026, 5, 1, tzinfo=UTC)
 
 
@@ -262,6 +271,79 @@ async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -
     # Transaction time is the incoming record's: the store has just changed its
     # mind about this belief, and keeping `_TARGET_WHEN` would deny that.
     assert survivor.provenance.last_updated == _INCOMING_WHEN
+
+
+async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_did() -> None:
+    """The fake leaves the reverse pairing alone too (ADR-0103 §6, #733, #745).
+
+    The mirror of ``test_ingest.py``'s case of the same name, and it is what makes
+    the corroboration case above discriminating rather than merely green: **both**
+    arms keep somebody's window and expiry, so "the target's survive" is a claim
+    about the arm ADR-0103 §6 rules and says nothing on its own. Pinned on this copy
+    of the fold and not only on ``MemoryIngestor``'s because the conformance suite
+    holds neither — it pins ``REINFORCE``'s id and its evidence union, and ADR-0040
+    §5a leaves the rest of the fold to `memory` — so a fake that regressed here
+    would hand an `orchestration` test a survivor with a lifetime production would
+    not have written, and nothing else would notice.
+
+    ``last_updated`` is the one field the two arms agree on: transaction time on
+    both (ADR-0045 §3).
+    """
+    store = FakeMemoryStore(now=_fixed_now)
+    target = PreferenceMemory(
+        id="observed",
+        content="prefers concise emails, as we have inferred it",
+        preference="prefers concise emails",
+        validity=_TARGET_WINDOW,
+        expires_at=_TARGET_EXPIRES_AT,
+        provenance=Provenance(
+            source=MemorySource.OBSERVED,
+            confidence=0.9,
+            evidence=("t-ev",),
+            last_updated=_TARGET_WHEN,
+        ),
+    )
+    await store.add(target)
+    # An `EXTERNAL` proposal, so `_corroborates` is false in the other direction:
+    # the target is the `DERIVED` one here. It carries its own `Attestation`
+    # because the `ATTESTED` band must (ADR-0092 §1) — which is also why the fold
+    # takes the incoming attestation on this arm and could not on the other.
+    incoming = MemoryUpdateProposal(
+        proposed=PreferenceMemory(
+            id="imported",
+            content="prefers concise emails",
+            preference="prefers concise emails",
+            validity=_INCOMING_WINDOW,
+            expires_at=_INCOMING_EXPIRES_AT,
+            provenance=Provenance(
+                source=MemorySource.EXTERNAL,
+                confidence=0.5,
+                last_updated=_INCOMING_WHEN,
+                attestation=Attestation(reported_by="mail:work", reported_at=_fixed_now()),
+            ),
+        ),
+        rationale="because",
+        sensitivity=DataTier.PERSONAL,
+    )
+    writer = FakeMemoryWriter(
+        store=store, policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE), now=_fixed_now
+    )
+
+    result = await writer.ingest(incoming)
+
+    assert result.decision.kind is MemoryDecisionKind.REINFORCE
+    assert result.record_id == "observed"
+    survivor = await store.get("observed")
+    assert survivor is not None
+    # Newer content wins on this arm, and the confidence is still the maximum...
+    assert survivor.provenance.source is MemorySource.EXTERNAL
+    assert survivor.provenance.confidence == 0.9
+    assert survivor.content == incoming.proposed.content
+    # ...and the lifetime that comes with it is the incoming record's, both ends of
+    # the window and the expiry.
+    assert survivor.validity == _INCOMING_WINDOW
+    assert survivor.expires_at == _INCOMING_EXPIRES_AT
+    assert survivor.provenance.last_updated == _INCOMING_WHEN  # as on the other arm
 
 
 async def test_supersede_refuses_a_future_dated_target_without_writing() -> None:
