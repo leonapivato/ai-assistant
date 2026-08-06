@@ -25,16 +25,21 @@
      change to what §8 decided: recorded as a supersession rather than argued into
      an amendment. #104 itself is untouched and stays open.
 
-  **Not replaced: §8's reasoning is corrected, not overruled**, and the three
-  grounds it gave stand as follows against the tree as it now is.
+  **Not replaced: §8's reasoning is assessed, not overruled.** Of the three grounds
+  it gave, **one is stale and two stand** — and §4 is built on one of the two that
+  stand.
 
-  1. **The cost ground has expired.** §8 wrote that a writer "could only enforce
-     [it] by paying a `get(proposed.id)` on every ingest to see something the
-     store sees for free while it replaces the row — giving up §1's no-I/O,
-     cannot-be-raced property". ADR-0046's `INSERT_IF_ABSENT` mode buys the
-     absence check with **no read at all**: the store enforces it inside the
-     transaction that writes, so it adds no I/O and cannot be raced against the
-     write it guards. `MemoryIngestor._apply_supersede` already uses it.
+  1. **The cost ground stands, and ADR-0108 §4 honours it.** §8 wrote that a writer
+     "could only enforce [it] by paying a `get(proposed.id)` on every ingest to see
+     something the store sees for free while it replaces the row — giving up §1's
+     no-I/O, cannot-be-raced property". Still exactly true, and it is *why* the
+     refusal is in the store: a writer cannot learn the stored record's **kind**
+     without reading it, and `INSERT_IF_ABSENT` does not supply it — that mode
+     refuses every collision without reporting what it collided with. §4's check
+     costs no read because the store's own `SELECT` already reads the row, which is
+     the "something the store sees for free" §8 predicted. (#630's thread argued
+     this ground had expired; it had not. That argument holds for the *absence*
+     check ADR-0108 §1 needs, and was carried across to a different rule.)
   2. **The coverage ground is stale in both halves.** §8 wrote that "a cross-kind
      collision arriving from capture would pass a writer-side rule untouched. A
      rule at `add` covers every caller; a rule at `ingest` covers one." Episodic
