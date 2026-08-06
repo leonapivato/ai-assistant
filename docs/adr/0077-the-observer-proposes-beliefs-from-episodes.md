@@ -109,6 +109,38 @@
   exists and is ratified, and ADR-0070 §1's hazard — a line pointing at nothing —
   does not arise. Appended note per ADR-0070 §1: no text below it is rewritten,
   and the superseded sentences are left standing exactly as written.
+- Note (2026-08-06): **§8's sentence filing the cursor's ownership with the
+  resident process is narrowed by
+  [ADR-0111](0111-a-scheduled-walk-is-chunked-and-resumes-from-a-durable-cursor.md);
+  everything §8 *decided* stands.** The sentence is *"a cursor is durable
+  per-user state whose natural owner is the resident process, filed with leg 5
+  (§11)"*. It was written as a filing note — why the cursor went to a later leg —
+  but it reads as a placement claim, and ADR-0083 §13 quotes it as one. ADR-0111
+  §1 rules that a scheduled job's resumption position is durable state of the
+  subsystem whose store the job walks, written in the chunk's own transaction
+  below the façade, and that the scheduler holds none of it: only the holder of
+  the store's connection can make the cursor and the work it records commit
+  together, which is the guarantee ADR-0104 §2 was built around. A reader holding
+  only this ADR would build the cursor in `ai_assistant/service/`, so ADR-0082 §1's
+  test is met on its second limb — reading a clause more widely than it now holds
+  — and the record is owed. **This is an amendment, not a supersession**
+  (ADR-0070 §1): what §8 decided — observation as an explicit operation, the
+  conversation-scoped selection rule, the skip-without-backfill rule, and that
+  there is no durable cursor today — is untouched, and *"re-observation is safe by
+  construction"* is not merely preserved but is the premise ADR-0111 §3's
+  at-least-once ordering rests on. **§11's deferral is discharged, not amended**:
+  it filed the cursor with a later leg and now has an answer, which ADR-0083 §15
+  classifies as a stacked addition. **What ADR-0111 does not take** is the
+  observation job's *selector*: §8's window stays this ADR's ground, and a
+  cursor-driven second selector is that lane's to choose, bound by ADR-0111 §2's
+  requirement that the order be total and non-reordering. This ADR's `Status`
+  carries the leading `Partially superseded by` token, so under ADR-0082 §2 no
+  qualifier is written on that line and this note is the whole record. ADR-0111
+  ships in the same change as this note, which is the existence condition
+  ADR-0083 §15 states; while it is `Proposed`, this note names a decision that is
+  drafted rather than ratified, the form `main` already carries. Appended per
+  ADR-0070 §1: no text below is rewritten and §8's sentence stands as written.
+  Refs #632, #729.
 - Note (2026-07-31): **The ADR-0081 amendment qualifier moves off the `Status`
   line into the note below; nothing about the amendment changes.** The line read
   `Accepted, §5's check-not-a-guarantee clause amended by ADR-0081`. Taking the
