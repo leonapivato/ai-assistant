@@ -60,7 +60,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import ModelProvider
@@ -281,14 +281,27 @@ class ModelBackedObserver:
         # misconfigured clock costs no egress of the batch to find out.
         now = self._clock()
         labels = {f"E{index + 1}": record.id for index, record in enumerate(batch)}
+        # Taken from the batch *this module selected*, beside the labels and for
+        # the same reason: a `DERIVED` belief's confirming instant is the latest
+        # `occurred_at` among the episodes it cites (ADR-0103 §9), and it is ours
+        # to compute rather than the model's to emit (ADR-0109 §4, ADR-0106 §3).
+        # Snapshotted here, off the same frozen tuple, so it cannot come apart
+        # from `labels` across the model round trip.
+        occurred = {record.id: record.occurred_at for record in batch}
         conversation = [
             Message(role=Role.SYSTEM, content=_SYSTEM_PROMPT),
             Message(role=Role.USER, content=_render_batch(batch)),
         ]
         reply = await self._model.complete(conversation)
-        return self._distil(reply.content, labels, now)
+        return self._distil(reply.content, labels, occurred, now)
 
-    def _distil(self, content: str, labels: dict[str, str], now: datetime) -> ObservationOutcome:
+    def _distil(
+        self,
+        content: str,
+        labels: dict[str, str],
+        occurred: Mapping[str, datetime],
+        now: datetime,
+    ) -> ObservationOutcome:
         """Turn one model reply into proposals and the two discard counts.
 
         **Validate every entry first, then apply the bound to the survivors**, in
@@ -314,7 +327,7 @@ class ModelBackedObserver:
         usable: list[MemoryUpdateProposal] = []
         unusable = 0
         for entry in entries:
-            proposal = self._to_proposal(entry, labels, now)
+            proposal = self._to_proposal(entry, labels, occurred, now)
             if proposal is None:
                 unusable += 1
             else:
@@ -326,7 +339,11 @@ class ModelBackedObserver:
         )
 
     def _to_proposal(
-        self, entry: object, labels: dict[str, str], now: datetime
+        self,
+        entry: object,
+        labels: dict[str, str],
+        occurred: Mapping[str, datetime],
+        now: datetime,
     ) -> MemoryUpdateProposal | None:
         """Build one proposal, or ``None`` where the entry cannot be used.
 
@@ -357,6 +374,14 @@ class ModelBackedObserver:
             confidence=_confidence(step, len(cited)),
             evidence=cited,
             last_updated=now,
+            # The band's confirming event (ADR-0103 §9, ADR-0109 §4): the latest
+            # `occurred_at` among the episodes cited, never the moment of
+            # derivation — `now` is transaction time and is already above. Taken
+            # over the ids *this module* resolved the citations to, so a value the
+            # model emitted for it could not reach the field even if it tried
+            # (ADR-0106 §3). Stored as it stands, so an episode dated in our
+            # future is neither dropped nor clamped (ADR-0109 §4's fourth clause).
+            last_confirmed_at=_latest_occurred(cited, occurred),
         )
         try:
             record = _record(
@@ -461,6 +486,23 @@ def _resolve(raw: object, labels: dict[str, str]) -> tuple[str, ...]:
         return ()
     resolved = [labels[label] for label in raw if isinstance(label, str) and label in labels]
     return tuple(dict.fromkeys(resolved))
+
+
+def _latest_occurred(cited: Sequence[str], occurred: Mapping[str, datetime]) -> datetime | None:
+    """A ``DERIVED`` belief's confirming instant (ADR-0103 §9, ADR-0109 §4).
+
+    The **latest** ``occurred_at`` among the episodes ``cited`` names — "the belief
+    was seen to hold again *when that observation happened*" — and never the moment
+    of derivation. ``cited`` is already the output of :func:`_resolve`, so every id
+    in it came from ``labels`` and is therefore a key of ``occurred``: the lookup is
+    total by construction, and a citation the model invented was dropped before it
+    reached here.
+
+    ``None`` where nothing is cited, which no proposal reaching this point can be
+    (:data:`_EVIDENCE_FLOOR` refuses it) but which is the honest answer over an
+    empty set rather than a substitute instant (ADR-0109 §4's second clause).
+    """
+    return max((occurred[episode_id] for episode_id in cited), default=None)
 
 
 def _record(
