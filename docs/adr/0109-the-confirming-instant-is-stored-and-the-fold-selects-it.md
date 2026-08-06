@@ -717,10 +717,11 @@ both decline to make.
 > under `docs/adr/`, because the one record §13 owes lands with this ADR.
 
 > **Normative.** Every test whose expected outcome is a concrete instant
-> constructs a `last_confirmed_at` that is not `None` and is distinct from every
-> other instant in the case — the injected clock's reading, `last_updated`,
-> `attestation.reported_at`, and the other record's instant — and asserts the exact
-> instant it expects.
+> constructs a `last_confirmed_at` that is not `None`, is distinct from every
+> instant in the case other than the confirming event it is expected to be taken
+> from — in particular from the injected clock's reading, from `last_updated`, and
+> from the other record's value in a fold — and asserts the exact instant it
+> expects.
 
 > **Normative.** Every test whose expected outcome is **unknown** asserts
 > `last_confirmed_at is None` exactly — never merely falsy, and never by omitting
@@ -738,7 +739,14 @@ deliberate: some of the outcomes below *are* `None`, and a rule demanding a
 non-`None` value everywhere would be unsatisfiable for exactly those. Each guards
 a different vacuity. A concrete-instant case left at the field's default passes
 whether the value is carried or silently dropped, so the first clause forbids the
-default and forbids reusing an instant already in the fixture. An unknown case is
+default and forbids reusing any other instant the fixture already holds. **The
+confirming event itself is exempt from that distinctness, and has to be**: §4
+above has the `ATTESTED` producer set the field *to* `Attestation.reported_at`,
+so a rule requiring the two to differ would forbid the very behaviour the reader
+test exists to pin. What the clause forbids is the value coinciding with an
+instant the code could have reached for *instead* — which is why the reader's
+case still has to give `read_at` a different value from `reported_at`. An unknown
+case is
 the mirror: on a path that can produce either outcome, `is None` alone passes
 against an implementation that never writes the field, so the second clause pairs
 it with a sibling that would fail under that implementation. Two of the three
