@@ -546,8 +546,20 @@ _read_base_move() {
 # through the environment rather than `-v`: awk's `-v` interprets backslash
 # escapes in the assigned value, which would corrupt a path containing a literal
 # backslash before the encoder ever saw it.
+#
+# $2 selects how far to go, and the DEFAULT IS BOTH LAYERS — §4's publication is
+# the caller this exists for and its output is unchanged. `control-only` stops
+# after layer 1, for a caller rendering to a terminal rather than into Markdown:
+# layer 1 is the one that carries the safety (a pathname must never become two
+# apparent lines, and must never carry an ANSI escape into what an operator
+# reads), while layer 2 answers a hazard a terminal does not have and would
+# render every `_` in an ordinary source path as `&#95;`, making the evidence
+# harder to read than the thing it was protecting against. One implementation
+# either way, and one awk process either way — a second encoder would be a second
+# thing to keep correct, and a second process per pathname would double the cost
+# the §4 path already counts.
 _encode_path() {
-    _encode_arg="$1" LC_ALL=C awk 'BEGIN {
+    _encode_arg="$1" _encode_layers="${2:-all}" LC_ALL=C awk 'BEGIN {
         s = ENVIRON["_encode_arg"]
         for (i = 1; i < 32; i++) ctl = ctl sprintf("%c", i)
         ctl = ctl sprintf("%c", 127)
@@ -564,17 +576,19 @@ _encode_path() {
             else if (v == 13) out = out "\\r"
             else out = out sprintf("\\x%02x", v)
         }
-        gsub(/&/, "\\&amp;", out)
-        gsub(/</, "\\&lt;", out)
-        gsub(/>/, "\\&gt;", out)
-        gsub(/\\/, "\\&#92;", out)
-        gsub(/`/, "\\&#96;", out)
-        gsub(/\*/, "\\&#42;", out)
-        gsub(/_/, "\\&#95;", out)
-        gsub(/\[/, "\\&#91;", out)
-        gsub(/\]/, "\\&#93;", out)
-        gsub(/\|/, "\\&#124;", out)
-        gsub(/~/, "\\&#126;", out)
+        if (ENVIRON["_encode_layers"] != "control-only") {
+            gsub(/&/, "\\&amp;", out)
+            gsub(/</, "\\&lt;", out)
+            gsub(/>/, "\\&gt;", out)
+            gsub(/\\/, "\\&#92;", out)
+            gsub(/`/, "\\&#96;", out)
+            gsub(/\*/, "\\&#42;", out)
+            gsub(/_/, "\\&#95;", out)
+            gsub(/\[/, "\\&#91;", out)
+            gsub(/\]/, "\\&#93;", out)
+            gsub(/\|/, "\\&#124;", out)
+            gsub(/~/, "\\&#126;", out)
+        }
         printf "%s", out
     }'
 }
@@ -703,7 +717,7 @@ _evaluate_drift() {
 # cached its rendering in `drift_block` by the time this runs. Nothing downstream
 # reads the arrays again.
 _drill_report() {
-    local old n i s d marked
+    local old n i s d marked s_out d_out
     echo "ship: drill — ADR-0027 §2 coverage, computed but not posted" >&2
     {
         echo "  HEAD                  ${sha}"
@@ -750,12 +764,28 @@ _drill_report() {
             if _is_floor_path "$s" || { [[ -n "$d" ]] && _is_floor_path "$d"; }; then
                 marked="[FLOOR] "
             fi
+            # Encoded for rendering only, and strictly AFTER the floor decision:
+            # the floor is a question about the path git reported, so testing an
+            # escaped form would be testing a different string. Layer 1 alone
+            # (§4's encoder, `control-only`) — git permits a pathname containing
+            # a newline or an ESC, and this listing is the drill's whole claim
+            # about what it evaluated. Unescaped, one such name renders as two
+            # apparent report lines, or repaints the ones above it, and the file
+            # set an operator reads stops being the file set the floor tested —
+            # a false "clear" reached through the output rather than the logic,
+            # which is the class of failure this whole change is about.
+            s_out="$(_encode_path "$s" control-only)"
             if [[ -n "$d" ]]; then
-                echo "      ${marked}${drift_status[$i]} ${s} -> ${d}" >&2
+                d_out="$(_encode_path "$d" control-only)"
+                echo "      ${marked}${drift_status[$i]} ${s_out} -> ${d_out}" >&2
             else
-                echo "      ${marked}${drift_status[$i]} ${s}" >&2
+                echo "      ${marked}${drift_status[$i]} ${s_out}" >&2
             fi
         done
+        if [[ "$n" -gt 0 ]]; then
+            echo "    (pathnames above are escaped: \`\\\\\`, \`\\t\`, \`\\n\`, \`\\r\`," \
+                "\`\\xHH\`)" >&2
+        fi
         # The summary is `drift_floor`, set by `_read_base_move` — the value the
         # acceptance rule itself read. The `[FLOOR]` marks above are the same
         # helper over the same endpoints, printed per path so the verdict shows
