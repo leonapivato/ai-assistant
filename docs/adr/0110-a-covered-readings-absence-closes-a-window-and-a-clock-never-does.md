@@ -278,9 +278,31 @@ corpus rather than assumed here.
 > three conditions and not present in `R` is **absent from** `R`. No second notion
 > of identity is introduced, and no matcher of its own is run.
 
-> **Normative.** Where any proposal of `R` did not resolve to a live record —
-> deferred as a durable question (ADR-0078), rejected, or stored temporarily — `R`
-> warrants **no** absence at all and closes no window.
+> **Normative.** Where any proposal of `R` **stored nothing** — its
+> `MemoryIngestResult.record_id` is `None`, which is what a `REJECT` and an
+> `ASK_USER` deferral (ADR-0078) leave behind — `R` warrants **no** absence at all
+> and closes no window.
+
+**The clause is keyed on `record_id` being `None` rather than on an enumeration of
+rulings, and the difference is not cosmetic.** `MemoryIngestResult.record_id` is
+documented as "Id of the record left live by the write, or None if nothing was
+stored", so the field already draws exactly the line this clause needs, and a
+ruling added later lands on the correct side of it without amending this ADR. An
+earlier draft enumerated instead, and put `STORE_TEMPORARY` on the stored-nothing
+side, which is false: ADR-0108 §1 rules that "`ACCEPT` and `STORE_TEMPORARY` write
+the proposal as a *new* record", so a temporary store resolves to a live id like
+any other install. Keying on the field rather than on a remembered list is what
+stops that class of error.
+
+**`ACCEPT` and `STORE_TEMPORARY` therefore need no exception, and it is worth
+saying why they do not.** Both install at the *proposal's* id, so neither can ever
+mark a §3 candidate present — a candidate is a record the store already held, and
+ADR-0108 §2 refuses an install onto a stored id outright. So an entry that
+re-appeared and did **not** fold leaves its predecessor absent and closes it. That
+is not a gap: it is the rewrite path this section already traces, where the
+predecessor genuinely stopped being true and the install carries the current text.
+The unchanged entry, which must not take that path, does not — ADR-0092 §6 puts it
+on `REINFORCE`, which folds at the target's id and marks it present.
 
 **This settles #631's interaction, and it settles it by refusing to have a second
 opinion about identity.** ADR-0092 §7 files the residual that identity is
@@ -314,9 +336,9 @@ close is correct, and not the repeat, where it would not be.
 **The second clause fails closed, and the case it is built for is real.** A
 proposal that conflicts with a `USER_ASSERTED` record is ruled `ASK_USER` and
 nothing is written (ADR-0092 §7 traces exactly this path). The entry *is* in the
-source; the ingest simply did not resolve it to a record. Counting that as an
+source; the ingest simply stored nothing for it. Counting that as an
 absence would close the window of the attested record the user is being asked
-about, on the strength of the question. So one unresolved proposal suspends
+about, on the strength of the question. So one stored-nothing proposal suspends
 absence for the whole reading, which is the refuse-rather-than-guess posture
 ADR-0093 §5 takes for a bound and ADR-0080 §3 takes for an unrepresentable close.
 It is deliberately coarse: the alternative is a per-proposal correspondence rule,
