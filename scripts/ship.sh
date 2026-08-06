@@ -717,7 +717,7 @@ _evaluate_drift() {
 # cached its rendering in `drift_block` by the time this runs. Nothing downstream
 # reads the arrays again.
 _drill_report() {
-    local old n i s d marked s_out d_out
+    local old n listed i s d marked s_out d_out
     echo "ship: drill — ADR-0027 §2 coverage, computed but not posted" >&2
     {
         echo "  HEAD                  ${sha}"
@@ -752,8 +752,36 @@ _drill_report() {
             continue
         fi
         n=${#drift_status[@]}
+        listed=$n
         echo "    files examined      ${n}" >&2
-        for ((i = 0; i < n; i++)); do
+        # The enumeration is bounded by the SAME short-circuit `_evaluate_drift`
+        # applies, read from the same `drift_budget`, and it is here for the same
+        # two reasons that comment gives. The path encoder runs once per pathname,
+        # so a base move of tens of thousands of files would spend a subprocess
+        # each — on a set the acceptance rule has usually already rejected without
+        # rendering it, which is precisely the work that short-circuit exists to
+        # skip. And the drill is a pre-push check a lane waits on; one that takes
+        # minutes to print a screenful of paths nobody can read is not one.
+        #
+        # TRUNCATING IS THE ONE THING IT MUST NOT DO. §4 is explicit that a
+        # partial set is worse than none, and the same holds here: an omitted tail
+        # is exactly where the breaching path hides, so a shortened list would be
+        # #751's failure in a new costume. So the listing is omitted WHOLE and
+        # said to be omitted. What is NOT omitted is the answer: `drift_floor`
+        # below was computed by `_read_base_move` over the complete set, without
+        # any of this rendering, so the floor verdict is unaffected by the bound.
+        if [[ $((n * 20)) -gt "$drift_budget" ]]; then
+            {
+                echo "    listing             OMITTED — ${n} path(s) cannot fit ADR-0027 §4's"
+                echo "                        ${drift_budget}-byte record, and §4 forbids a"
+                echo "                        truncated set, so none is printed. The floor"
+                echo "                        verdict below was still computed over all ${n}."
+                echo "                        To read the set:"
+                echo "                          git diff --name-status -M ${old:0:12} ${expected_base:0:12}"
+            } >&2
+            listed=0
+        fi
+        for ((i = 0; i < listed; i++)); do
             s="${drift_src[$i]}"
             d="${drift_dst[$i]}"
             marked="        "
@@ -782,19 +810,28 @@ _drill_report() {
                 echo "      ${marked}${drift_status[$i]} ${s_out}" >&2
             fi
         done
-        if [[ "$n" -gt 0 ]]; then
+        if [[ "$listed" -gt 0 ]]; then
             echo "    (pathnames above are escaped: \`\\\\\`, \`\\t\`, \`\\n\`, \`\\r\`," \
                 "\`\\xHH\`)" >&2
         fi
         # The summary is `drift_floor`, set by `_read_base_move` — the value the
-        # acceptance rule itself read. The `[FLOOR]` marks above are the same
-        # helper over the same endpoints, printed per path so the verdict shows
-        # its working; the verdict is not re-derived from them.
-        if [[ "$drift_floor" == "1" ]]; then
+        # acceptance rule itself read, over all `n` entries whether or not they
+        # were listed. The `[FLOOR]` marks above are the same helper over the same
+        # endpoints, printed per path so the verdict shows its working; the
+        # verdict is not re-derived from them, which is what keeps it true when
+        # the working is omitted. The wording tracks that: an omitted listing says
+        # "over the N path(s) examined", never "listed above", because a reader
+        # must not be told to check evidence that is not on screen.
+        if [[ "$drift_floor" == "1" && "$listed" -eq "$n" ]]; then
             echo "    §3 floor            BREACHED by the marked path(s) — this base move" >&2
             echo "                        costs a review round." >&2
-        else
+        elif [[ "$drift_floor" == "1" ]]; then
+            echo "    §3 floor            BREACHED somewhere in the ${n} path(s) examined" >&2
+            echo "                        (not listed) — this base move costs a review round." >&2
+        elif [[ "$listed" -eq "$n" ]]; then
             echo "    §3 floor            clear over the ${n} path(s) listed above." >&2
+        else
+            echo "    §3 floor            clear over all ${n} path(s) examined (not listed)." >&2
         fi
         case "${drift_verdict[$old]}" in
         ok) echo "    §2(b) verdict       available — the artifact covers HEAD" >&2 ;;
