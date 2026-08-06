@@ -24,7 +24,11 @@ callers where it cannot.
 
 The check reads the **parsed source**, not a grep: a comment, a docstring, or a
 string literal mentioning ``MemoryWrite`` is not a construction, and a construction
-split across lines is still one node.
+split across lines is still one node. It resolves import aliases and refuses to
+treat an opaque ``**mapping`` as a declaration — both are ways past an earlier draft
+of this module, and both have negative cases below. A check that accepts everything
+is indistinguishable from a sound one on the tree it is pointed at, so what it
+*rejects* is proved rather than assumed.
 """
 
 from __future__ import annotations
@@ -37,35 +41,78 @@ import ai_assistant
 _PACKAGE = Path(ai_assistant.__file__).parent
 
 
-def _constructions(tree: ast.AST) -> list[ast.Call]:
-    """Every ``MemoryWrite(...)`` call in ``tree``.
+def _local_names(tree: ast.AST) -> set[str]:
+    """Every local name bound to ``MemoryWrite`` in ``tree``, aliases included.
 
-    Matched on the callee's name, so both ``MemoryWrite(...)`` and a qualified
-    ``types.MemoryWrite(...)`` are found. Anything else named ``MemoryWrite`` would
-    have to be a second class with the same name, which this repository does not
-    have and which would be its own problem.
+    ``from ai_assistant.core.types import MemoryWrite as W`` makes ``W(record=r)``
+    a construction that a check looking only for the literal spelling would walk
+    straight past. Resolved from the module's own imports rather than assumed, so
+    the finder cannot be stepped around by renaming.
     """
+    names = {"MemoryWrite"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom | ast.Import):
+            names.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name.rsplit(".", 1)[-1] == "MemoryWrite"
+            )
+    return names
+
+
+def _constructions(tree: ast.AST) -> list[ast.Call]:
+    """Every ``MemoryWrite(...)`` call in ``tree``, however it is spelled.
+
+    Matches a bare or aliased name (:func:`_local_names`) and the qualified
+    attribute form ``types.MemoryWrite(...)``. Anything else ending in
+    ``MemoryWrite`` would have to be a second class of that name, which this
+    repository does not have and which would be its own problem.
+    """
+    local = _local_names(tree)
     found: list[ast.Call] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-        if name == "MemoryWrite":
+        matched = (
+            func.id in local
+            if isinstance(func, ast.Name)
+            else getattr(func, "attr", None) == "MemoryWrite"
+        )
+        if matched:
             found.append(node)
     return found
 
 
 def _declares_mode(call: ast.Call) -> bool:
-    """Whether ``call`` names ``mode``, by keyword or by ``**`` unpacking.
+    """Whether ``call`` names ``mode`` in a way this check can actually read.
 
-    ``**kwargs`` counts as declaring: the check cannot see inside it, and a caller
-    building the mapping deliberately is not the caller this rule is aimed at — the
-    one that wrote ``MemoryWrite(record=r)`` and got a destructive write for free.
-    Failing closed there would block a legitimate construction with no way to
-    satisfy the rule.
+    A literal ``mode=`` keyword, or a ``**{...}`` whose dict *display* carries a
+    literal ``"mode"`` key. **An opaque ``**mapping`` does not count**, and that is
+    the whole point of stating it: ``MemoryWrite(record=r, **{})`` and
+    ``MemoryWrite(record=r, **kwargs)`` both take ``MemoryWriteMode.UPSERT`` from
+    the field default, so a check that waved them through would fail open on
+    exactly the construction it exists to catch — while looking, on today's tree,
+    identical to one that did not.
+
+    Failing closed costs nothing here and is not a guess about the future: nothing
+    under ``src/ai_assistant/`` builds a ``MemoryWrite`` this way, and a caller that
+    one day needs to can pass ``mode`` alongside the unpack. A check whose only
+    bypass requires writing the bypass deliberately is the strongest one available
+    without type inference.
     """
-    return any(keyword.arg in {"mode", None} for keyword in call.keywords)
+    for keyword in call.keywords:
+        if keyword.arg == "mode":
+            return True
+        if (
+            keyword.arg is None
+            and isinstance(keyword.value, ast.Dict)
+            and any(
+                isinstance(key, ast.Constant) and key.value == "mode" for key in keyword.value.keys
+            )
+        ):
+            return True
+    return False
 
 
 def test_every_memorywrite_in_the_package_names_its_mode() -> None:
@@ -99,13 +146,51 @@ def test_the_check_can_see_an_undeclared_construction() -> None:
     """
     accepted = ast.parse("MemoryWrite(record=r, mode=MemoryWriteMode.UPSERT)")
     bare = ast.parse("MemoryWrite(record=r)")
-    unpacked = ast.parse("MemoryWrite(**write_kwargs)")
     qualified = ast.parse("types.MemoryWrite(record=r)")
 
     assert [_declares_mode(call) for call in _constructions(accepted)] == [True]
     assert [_declares_mode(call) for call in _constructions(bare)] == [False]
-    assert [_declares_mode(call) for call in _constructions(unpacked)] == [True]
     assert [_declares_mode(call) for call in _constructions(qualified)] == [False]
+
+
+def test_an_opaque_unpacking_does_not_count_as_declaring() -> None:
+    """The bypass a first draft of this check allowed, closed and pinned.
+
+    ``MemoryWrite(record=r, **{})`` takes ``MemoryWriteMode.UPSERT`` from the field
+    default exactly as ``MemoryWrite(record=r)`` does. A check that accepted any
+    ``**`` because it "cannot see inside" would pass both while claiming to enforce
+    ADR-0108 §1 — failing open on the one construction that most looks like it was
+    written to get past a rule.
+
+    A dict *display* is different: ``**{"mode": m}`` is readable, so it is read.
+    """
+    empty = ast.parse("MemoryWrite(record=r, **{})")
+    opaque = ast.parse("MemoryWrite(record=r, **write_kwargs)")
+    literal = ast.parse('MemoryWrite(record=r, **{"mode": m})')
+    literal_without = ast.parse('MemoryWrite(**{"record": r})')
+
+    assert [_declares_mode(call) for call in _constructions(empty)] == [False]
+    assert [_declares_mode(call) for call in _constructions(opaque)] == [False]
+    assert [_declares_mode(call) for call in _constructions(literal)] == [True]
+    assert [_declares_mode(call) for call in _constructions(literal_without)] == [False]
+
+
+def test_an_aliased_import_is_still_found() -> None:
+    """Renaming the class at the import is not a way past the finder.
+
+    ``from ... import MemoryWrite as W`` then ``W(record=r)`` is the same
+    destructive default with a different spelling, and a check keyed on the literal
+    name would report a clean tree. The negative half matters as much: an unrelated
+    ``W`` in a module that never imported the class must **not** be matched, or the
+    check acquires false positives and gets loosened until it catches nothing.
+    """
+    aliased = ast.parse(
+        "from ai_assistant.core.types import MemoryWrite as W\nW(record=r)\n",
+    )
+    unrelated = ast.parse("from somewhere import Widget as W\nW(record=r)\n")
+
+    assert [_declares_mode(call) for call in _constructions(aliased)] == [False]
+    assert _constructions(unrelated) == []
 
 
 def test_a_lexical_mention_is_not_a_construction() -> None:
