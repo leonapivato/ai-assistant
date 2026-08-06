@@ -444,6 +444,67 @@ def test_provenance_defaults_to_having_elided_nothing() -> None:
         )
 
 
+# --- currency's confirming instant (ADR-0109) --------------------------------
+
+
+def test_provenance_defaults_to_an_unknown_confirming_instant() -> None:
+    """``None`` is ADR-0103 §9's *unknown*, and it is what a record decodes at.
+
+    ``is None`` exactly, never merely falsy: unknown is a distinct state rather
+    than a small number, and no surface may read it as either fresh or stale. The
+    sibling case that keeps this from being vacuous is the one below, which
+    constructs a concrete instant over the same field — without it, ``is None``
+    passes against a type that has no such field at all.
+
+    Additive with a default is also the whole of ADR-0109 §8's no-migration claim:
+    a record stored before this decision deserialises here, at ``None``.
+    """
+    prov = Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN)
+
+    assert prov.last_confirmed_at is None
+
+
+def test_no_validator_pins_the_confirming_instant_to_the_two_it_could_be_ordered_by() -> None:
+    """The absence is the decision (ADR-0109 §8), so both states construct.
+
+    Each candidate invariant refuses something legitimate, which is ADR-0086 §3's
+    test — "does it refuse something that already worked":
+
+    * ``last_confirmed_at <= last_updated`` would refuse the *ordinary* attested
+      case rather than a pathological one. A ``reported_at`` in our future "is not
+      refused" (ADR-0092 §3) and ADR-0109 §4 stores it as it stands, so a record
+      legitimately carries a confirming instant later than the write that stored
+      it.
+    * ``last_confirmed_at == attestation.reported_at`` for the ``ATTESTED`` band
+      would refuse precisely the survivor ADR-0103 §6 mandates: after a
+      corroborating fold the record keeps the *target's* attestation while the
+      instant may have advanced to the incoming derived record's. The two fields
+      are not redundant, and their disagreement is meaningful rather than drift.
+
+    Pinned here rather than left implicit, so a later lane adding either validator
+    breaks this case instead of discovering the problem in somebody's store —
+    ADR-0107 §4's precedent for stating an absence as a ruling.
+    """
+    ahead_of_the_write = Provenance(
+        source=MemorySource.OBSERVED,
+        confidence=0.6,
+        last_updated=_WHEN,
+        last_confirmed_at=_LATER,
+    )
+    assert ahead_of_the_write.last_confirmed_at == _LATER
+    assert ahead_of_the_write.last_confirmed_at > ahead_of_the_write.last_updated
+
+    disagreeing = Provenance(
+        source=MemorySource.EXTERNAL,
+        confidence=0.9,
+        last_updated=_LATER,
+        attestation=_ATTESTED_BY,
+        last_confirmed_at=_LATER,
+    )
+    assert disagreeing.attestation is not None
+    assert disagreeing.last_confirmed_at != disagreeing.attestation.reported_at
+
+
 # --- what one observation produced (ADR-0077 §9) -----------------------------
 
 
@@ -864,6 +925,46 @@ def test_the_subject_enters_a_proposal_fingerprint() -> None:
     martas = MemoryUpdateProposal(proposed=_believed("Marta"), rationale="because")
 
     assert owners.proposal_fingerprint != martas.proposal_fingerprint
+
+
+def test_the_confirming_instant_enters_a_proposal_fingerprint() -> None:
+    """ADR-0078 §7's criterion applied, not amended (ADR-0109 §8).
+
+    The projection is "the whole record minus the fields that are bookkeeping
+    about the record rather than the belief it states", and ``core/types.py``
+    records that the criterion "decides the next one rather than an inventory
+    having to be extended by whoever adds it". ``last_confirmed_at`` is a fact
+    about the belief — when the world last confirmed it — so it is *in*, and the
+    checkable form of that is two proposals differing only here.
+
+    Contrast ``provenance.last_updated``, which is excluded because two identical
+    observations a minute apart carry different stamps and the user would be
+    nagged by the mechanism whose job is to stop that. The nag is unreachable
+    through this field in any band: a ``DERIVED`` re-observation of the same
+    episodes yields the same maximum, an ``ATTESTED`` re-import carries the same
+    ``reported_at``, and two distinct utterances are a second confirming act
+    rather than a second look at one.
+    """
+    when = _WHEN
+    later = _LATER
+
+    def proposed(confirmed_at: datetime) -> MemoryUpdateProposal:
+        record = _believed().model_copy(
+            update={
+                "provenance": Provenance(
+                    source=MemorySource.USER_ASSERTED,
+                    confidence=1.0,
+                    last_updated=when,
+                    last_confirmed_at=confirmed_at,
+                )
+            }
+        )
+        return MemoryUpdateProposal(proposed=record, rationale="because")
+
+    assert proposed(when).proposal_fingerprint != proposed(later).proposal_fingerprint
+    # ...and it is genuinely *this* field doing it: the same value twice agrees,
+    # so the inequality above is not two arbitrary digests over a jittering record.
+    assert proposed(later).proposal_fingerprint == proposed(later).proposal_fingerprint
 
 
 def test_a_feedback_event_states_no_subject_by_default() -> None:
