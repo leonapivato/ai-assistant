@@ -621,9 +621,12 @@ class MemoryStoreContract:
         # one right and the other wrong — the divergence ADR-0046 §3 forbids,
         # arriving through a new rule.
         #
-        # Expired rather than window-closed, so the two cases together cover both
-        # ways a row can be present-but-unreadable.
-        await store.add(_semantic("1", "coffee", expires_at=_LONG_AGO))
+        # Window-closed, like the `add` case above and for the same reason
+        # (ADR-0108 §5(a)): it is the only present-but-unreadable state `export`
+        # still shows, so it is the only one that can witness "nothing is written"
+        # alongside the refusal itself.
+        retired = _semantic("1", "coffee", validity=Validity(valid_until=_LONG_AGO))
+        await store.add(retired)
         assert await store.get("1") is None
 
         with pytest.raises(MemoryStoreError) as excinfo:
@@ -632,17 +635,39 @@ class MemoryStoreContract:
             )
         assert not isinstance(excinfo.value, MemoryStoreConflictError)
 
-        # `export` drops an expired record (ADR-0007), so presence is asserted the
-        # one way left: the id is still occupied, which an INSERT_IF_ABSENT of the
-        # *original* kind proves by colliding rather than succeeding.
-        with pytest.raises(MemoryStoreConflictError):
-            await store.write_atomic(
-                [
-                    MemoryWrite(
-                        record=_semantic("1", "coffee"), mode=MemoryWriteMode.INSERT_IF_ABSENT
-                    )
-                ]
-            )
+        assert list(await store.export()) == [retired]  # retained and unchanged
+
+    @pytest.mark.parametrize("through_batch", [False, True], ids=["add", "write_atomic"])
+    async def test_an_expired_row_still_occupies_its_id_against_a_cross_kind_write(
+        self, store: MemoryStore, through_batch: bool
+    ) -> None:
+        # The second invisibility axis. Expiry and a closed window hide a row from
+        # reads for different reasons — retention (ADR-0007) and truth (ADR-0045 §6)
+        # — and physical presence is meant to be blind to both, so both are
+        # exercised on both doors.
+        #
+        # This case proves **occupancy only**, and deliberately does not stand in
+        # for the two above: `export` drops an expired record entirely, so once the
+        # write is refused there is no contract-visible way to look at the row at
+        # all, and an implementation that damaged it and *then* raised would pass
+        # here. That is precisely why ADR-0108 §5(a) names the window-closed record
+        # for the nothing-was-written half rather than offering a choice.
+        incoming = _preference("1", "prefers tea")
+        await store.add(_semantic("1", "coffee", expires_at=_LONG_AGO))
+        assert await store.get("1") is None
+        write = (
+            store.write_atomic([MemoryWrite(record=incoming, mode=MemoryWriteMode.UPSERT)])
+            if through_batch
+            else store.add(incoming)
+        )
+
+        with pytest.raises(MemoryStoreError) as excinfo:
+            await write
+        assert not isinstance(excinfo.value, MemoryStoreConflictError)
+
+        # The refusal is itself the occupancy evidence: the store could only have
+        # learned the stored kind by finding a row under that id, which is what a
+        # read-visibility rule would have failed to do.
 
     async def test_search_finds_a_matching_record(self, store: MemoryStore) -> None:
         await store.add(_semantic("c", "the user likes coffee"))
