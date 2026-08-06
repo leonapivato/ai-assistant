@@ -897,9 +897,11 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
 
     **A derived record folded onto an attested one contributes its evidence and
     nothing else** (ADR-0103 §6). The survivor keeps the target's ``source``,
-    ``attestation``, content and confidence; the evidence union, the transaction
-    stamp and the confirming instant move. Two rules that are each right on their own produced
-    #646 between them — "take the maximum" is right about *evidence* and wrong
+    ``attestation``, content and confidence; the evidence union and the
+    transaction stamp move, and the confirming instant is **composed** from both
+    sides rather than taken from either (ADR-0109 §5, below). Two rules that are
+    each right on their own produced #646 between them — "take the maximum" is
+    right about *evidence* and wrong
     about *what a derived source can warrant* — and the survivor was a
     ``Provenance`` ``core`` refuses, so the fold raised a ``ValidationError`` and
     nothing was written at all. Agreement between a derived observation and a
@@ -1007,6 +1009,19 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     never disagrees with the ``source`` beside it, including in the awkward case
     where one source's record is reinforced by another's report: the survivor
     honestly says who reported the text it now holds.
+
+    Args:
+        target: The stored record the ruling folds into.
+        incoming: The proposed record being folded in.
+        now: The writer's clock reading, which defines "our future" for
+            :func:`_confirming_instant`'s usability test and for nothing else.
+            Passed in rather than read here, so this function stays a pure
+            function of its arguments and the caller keeps the clock guard that
+            translates a bad reading into `memory`'s own error (ADR-0026 §4).
+
+    Returns:
+        The survivor: the target's record on ADR-0103 §6's arm, the incoming
+        record wearing the target's id on the ordinary one.
     """
     union = tuple(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence]))
     evidence, elided = _bounded_evidence(
