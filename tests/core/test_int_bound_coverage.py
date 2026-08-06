@@ -65,6 +65,7 @@ from typing import (
     TYPE_CHECKING,
     Annotated,
     TypeAliasType,
+    TypeGuard,
     get_args,
     get_origin,
     get_type_hints,
@@ -98,8 +99,13 @@ AT = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
 GE_ZERO = Field(ge=0).metadata[0]
 
 
-def _declares_a_lower_bound(metadata: Iterable[object]) -> bool:
-    """Whether any entry in ``metadata`` is a ``ge``/``gt`` constraint.
+def _is_int_bound(value: object) -> TypeGuard[int]:
+    """Whether ``value`` is a bound this module can reason about: a plain ``int``."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _lowest_admissible(metadata: Iterable[object]) -> int | None:
+    """The smallest value ``metadata``'s lower bound admits, or ``None`` if it declares none.
 
     Duck-typed on the attribute rather than isinstance-checked against
     ``annotated_types``: that package reaches the environment only as a
@@ -107,14 +113,32 @@ def _declares_a_lower_bound(metadata: Iterable[object]) -> bool:
     so importing it here would be a test depending on something the project does
     not ask for.
 
-    The comparison is ``is not None`` and **not** truthiness, because the bound
+    Each comparison is against ``None`` and **not** truthiness, because the bound
     this module exists for is ``ge=0`` — the one value a truthiness test would
     read as absent.
+
+    Only an ``int`` bound is returned. ``core`` bounds things other than integers:
+    ``Settings`` carries ``timedelta`` floors and ``confidence`` carries
+    ``ge=0.0``, and neither is a value this module has anything to say about. A
+    ``bool`` is excluded for the same reason it is excluded from the walk.
+
+    ``gt=n`` becomes ``n + 1``, which is exact for the integers this module scopes
+    itself to and is why the non-integer bounds have to be filtered out first
+    rather than coerced.
     """
-    return any(
-        getattr(item, "ge", None) is not None or getattr(item, "gt", None) is not None
-        for item in metadata
-    )
+    for item in metadata:
+        ge = getattr(item, "ge", None)
+        if _is_int_bound(ge):
+            return ge
+        gt = getattr(item, "gt", None)
+        if _is_int_bound(gt):
+            return gt + 1
+    return None
+
+
+def _declares_a_lower_bound(metadata: Iterable[object]) -> bool:
+    """Whether ``metadata`` carries a ``ge``/``gt`` constraint at all."""
+    return _lowest_admissible(metadata) is not None
 
 
 def _int_leaves(
@@ -172,6 +196,43 @@ def unbounded_int_fields(model: type[BaseModel]) -> list[str]:
     ]
 
 
+def int_defaults_escaping_their_bound(model: type[BaseModel]) -> list[str]:
+    """Names of ``model``'s int fields whose *default* is not held to the field's floor.
+
+    **Pydantic does not validate a field default** unless ``validate_default`` is
+    set, so a bound is enforced on every value a caller supplies and on nothing
+    the caller omits. ``evidence_elided: int = Field(default=-1, ge=0)`` would
+    construct, keep its ``ge=0``, refuse an explicit ``-1``, and still hand every
+    default-constructed belief the ``-1`` that ``_elision_ceiling`` reads as
+    nothing to disclose — the ADR-0107 §2 disclosure suppressed by the field that
+    was supposed to guarantee it.
+
+    This is the second of the two independent paths, and it is
+    ``test_instant_coverage.py``'s ``unvalidated_datetime_defaults`` applied to a
+    different kind of constraint: ADR-0023 §2's three naive instants got in
+    through exactly this gap. Either path can regress while the other stays
+    green, which is why they are separate functions rather than one verdict.
+
+    A ``default_factory`` is flagged outright rather than called: its value is
+    not readable without running it, and running arbitrary project code is not
+    this check's business. ``core`` declares none on an int today, so the strict
+    reading costs nothing and fails closed if one appears.
+    """
+    hints = get_type_hints(model, include_extras=True)
+    flagged = []
+    for name, field in model.model_fields.items():
+        floor = _lowest_admissible(field.metadata)
+        if floor is None or not _int_leaves(hints.get(name), bounded=True):
+            continue  # not a bounded int field, so path one's subject or neither
+        if field.validate_default:
+            continue  # pydantic runs the constraint over the default itself
+        unreadable = field.default_factory is not None
+        below = _is_int_bound(field.default) and field.default < floor
+        if unreadable or below:
+            flagged.append(name)
+    return flagged
+
+
 def _core_models() -> list[type[BaseModel]]:
     """Every pydantic model reachable in the ``ai_assistant.core`` package.
 
@@ -220,6 +281,23 @@ def test_no_core_int_field_is_exempt_from_the_rule() -> None:
         (model.__name__, name) for model in _core_models() for name in unbounded_int_fields(model)
     }
     assert unbounded == set()
+
+
+@pytest.mark.parametrize("model", _core_models(), ids=lambda model: model.__name__)
+def test_no_core_int_default_escapes_its_own_bound(model: type[BaseModel]) -> None:
+    """Path two: a declared floor the field's own default is not held to."""
+    offenders = sorted(int_defaults_escaping_their_bound(model))
+    assert not offenders, f"{model.__name__} has default-escaping int field(s) {offenders}"
+
+
+def test_no_core_int_field_is_exempt_from_the_default_rule() -> None:
+    """The same statement over the whole package, for the same reason as above."""
+    escaping = {
+        (model.__name__, name)
+        for model in _core_models()
+        for name in int_defaults_escaping_their_bound(model)
+    }
+    assert escaping == set()
 
 
 # --- negative fixtures: the sweep must discriminate, not just pass -----------
@@ -311,40 +389,100 @@ def test_a_bool_field_is_not_treated_as_an_int() -> None:
     assert unbounded_int_fields(_Flagged) == []
 
 
+def test_the_default_check_catches_a_literal_default_below_the_floor() -> None:
+    """Path two, on its own: the shape pydantic constructs happily and never checks."""
+
+    class _Escaping(BaseModel):
+        elided: int = Field(default=-1, ge=0)
+
+    assert int_defaults_escaping_their_bound(_Escaping) == ["elided"]
+    assert unbounded_int_fields(_Escaping) == []  # path one stays green
+    assert _Escaping().elided == -1  # the default really does slip through
+    with pytest.raises(ValidationError):
+        _Escaping(elided=-1)  # while an explicit one is still refused
+
+
+def test_the_default_check_catches_a_default_factory() -> None:
+    """Flagged unread, because reading it means running it."""
+
+    class _Factory(BaseModel):
+        elided: int = Field(default_factory=lambda: -1, ge=0)
+
+    assert int_defaults_escaping_their_bound(_Factory) == ["elided"]
+    assert unbounded_int_fields(_Factory) == []
+
+
+def test_a_validated_default_passes_the_default_check() -> None:
+    """The escape hatch works, and it really does validate."""
+
+    class _Validated(BaseModel):
+        elided: int = Field(default=0, ge=0, validate_default=True)
+
+    assert int_defaults_escaping_their_bound(_Validated) == []
+    assert _Validated().elided == 0
+
+
+def test_a_required_int_has_no_default_to_escape() -> None:
+    """``ConversationTurn.ordinal`` is the shape: a floor and nothing to omit."""
+
+    class _Required(BaseModel):
+        ordinal: int = Field(ge=1)
+
+    assert int_defaults_escaping_their_bound(_Required) == []
+    assert unbounded_int_fields(_Required) == []
+
+
+def test_a_default_on_the_floor_is_not_flagged() -> None:
+    """``ge=0`` with ``default=0`` is the corpus's own shape, and admissible."""
+
+    class _OnTheFloor(BaseModel):
+        elided: int = Field(default=0, ge=0)
+        limit: int = Field(default=1, gt=0)
+
+    assert int_defaults_escaping_their_bound(_OnTheFloor) == []
+
+
 # --- the anchors: ADR-0107 §3's zero, on every type that carries it ----------
+#
+# Each builder goes through ``model_validate`` rather than the constructor, so
+# that omitting ``evidence_elided`` is expressible: a keyword-splat into a typed
+# constructor is not, and the omission is exactly what the default anchor tests.
+# It is the same validation path — ADR-0085 §4b's invariants and ``extra="forbid"``
+# both still run.
+
+#: The fields both belief DTOs need beyond ``evidence_elided``, which are the same
+#: six: ADR-0085 §4a's "same three names read identically on both types" extends to
+#: everything the listing and the detail view share.
+_BELIEF_FIELDS: dict[str, object] = {
+    "id": "rec-1",
+    "band": BeliefBand.DERIVED,
+    "kind": MemoryKind.SEMANTIC,
+    "content": "the office is in Boston",
+    "confidence": 0.5,
+    "last_updated": AT,
+}
 
 
-def _provenance(elided: int) -> Provenance:
+def _provenance(**overrides: int) -> Provenance:
     """The record's own copy of the count (ADR-0086 §4)."""
-    return Provenance(
-        source=MemorySource.OBSERVED, confidence=0.6, last_updated=AT, evidence_elided=elided
+    return Provenance.model_validate(
+        {
+            "source": MemorySource.OBSERVED,
+            "confidence": 0.6,
+            "last_updated": AT,
+            **overrides,
+        }
     )
 
 
-def _belief(elided: int) -> Belief:
+def _belief(**overrides: int) -> Belief:
     """The single-belief view — the fuller answer, per ADR-0077 §6."""
-    return Belief(
-        id="rec-1",
-        band=BeliefBand.DERIVED,
-        kind=MemoryKind.SEMANTIC,
-        content="the office is in Boston",
-        confidence=0.5,
-        last_updated=AT,
-        evidence_elided=elided,
-    )
+    return Belief.model_validate(_BELIEF_FIELDS | overrides)
 
 
-def _summary(elided: int) -> BeliefSummary:
+def _summary(**overrides: int) -> BeliefSummary:
     """The listing row, which has no evidence to derive a count from (ADR-0085 §4a)."""
-    return BeliefSummary(
-        id="rec-1",
-        band=BeliefBand.DERIVED,
-        kind=MemoryKind.SEMANTIC,
-        content="the office is in Boston",
-        confidence=0.5,
-        last_updated=AT,
-        evidence_elided=elided,
-    )
+    return BeliefSummary.model_validate(_BELIEF_FIELDS | overrides)
 
 
 #: What one of the anchor builders returns: a type carrying ``evidence_elided``.
@@ -357,7 +495,7 @@ ElisionCarrier = Provenance | Belief | BeliefSummary
 #: is the part that cannot rot. Its case there is one clause of a *defaults*
 #: test and reads as part of that narrative; this set is the claim that the three
 #: carriers are three.
-ELISION_CARRIERS: dict[str, Callable[[int], ElisionCarrier]] = {
+ELISION_CARRIERS: dict[str, Callable[..., ElisionCarrier]] = {
     "Provenance": _provenance,
     "Belief": _belief,
     "BeliefSummary": _summary,
@@ -377,7 +515,7 @@ def test_every_type_carrying_an_elision_is_anchored_here() -> None:
 
 
 @pytest.mark.parametrize("build", ELISION_CARRIERS.values(), ids=list(ELISION_CARRIERS))
-def test_a_negative_elision_is_refused(build: Callable[[int], ElisionCarrier]) -> None:
+def test_a_negative_elision_is_refused(build: Callable[..., ElisionCarrier]) -> None:
     """ADR-0107 §3's ``ge=0``, as behaviour rather than as a declaration.
 
     The sweep above asserts the floor is declared; this asserts the declared
@@ -386,12 +524,12 @@ def test_a_negative_elision_is_refused(build: Callable[[int], ElisionCarrier]) -
     was would be read by ``_elision_ceiling`` as nothing to disclose.
     """
     with pytest.raises(ValidationError):
-        build(-1)
+        build(evidence_elided=-1)
 
 
 @pytest.mark.parametrize("build", ELISION_CARRIERS.values(), ids=list(ELISION_CARRIERS))
 def test_a_non_default_elision_is_carried_exactly(
-    build: Callable[[int], ElisionCarrier],
+    build: Callable[..., ElisionCarrier],
 ) -> None:
     """ADR-0107 §8's rule for every case that touches this field.
 
@@ -399,16 +537,33 @@ def test_a_non_default_elision_is_carried_exactly(
     asserts the exact number" — a fixture left at the default passes whether the
     field is carried or silently dropped, which is a test that cannot fail.
     """
-    assert build(3).evidence_elided == 3
+    assert build(evidence_elided=3).evidence_elided == 3
 
 
 @pytest.mark.parametrize("build", ELISION_CARRIERS.values(), ids=list(ELISION_CARRIERS))
-def test_the_bound_is_inclusive_of_zero(build: Callable[[int], ElisionCarrier]) -> None:
+def test_the_bound_is_inclusive_of_zero(build: Callable[..., ElisionCarrier]) -> None:
     """The discriminating half: ``ge=0`` and not ``gt=0``.
 
     Zero is the overwhelmingly common value — every record that has never had a
     citation displaced — so a floor tightened by one would refuse almost the
-    whole corpus. This is the one case ADR-0107 §8's non-default rule does not
-    govern, because the default *is* its subject.
+    whole corpus. This is one of the two cases ADR-0107 §8's non-default rule
+    does not govern, because the default *is* its subject.
     """
-    assert build(0).evidence_elided == 0
+    assert build(evidence_elided=0).evidence_elided == 0
+
+
+@pytest.mark.parametrize("build", ELISION_CARRIERS.values(), ids=list(ELISION_CARRIERS))
+def test_the_declared_default_is_zero(build: Callable[..., ElisionCarrier]) -> None:
+    """ADR-0107 §3 fixes the default as well as the floor: ``evidence_elided: int = 0``.
+
+    The generic path-two sweep asserts no ``core`` int default escapes its own
+    bound, which would already catch a default of ``-1``. This is narrower and
+    checks what that rule cannot: a default of ``4`` satisfies ``ge=0`` and would
+    still make every record claim four citations it never elided, inventing a
+    disclosure rather than suppressing one.
+
+    The second case ADR-0107 §8's non-default rule does not govern, and for the
+    same reason as the one above — this test's subject *is* what happens when the
+    field is omitted, so supplying a value would test something else.
+    """
+    assert build().evidence_elided == 0
