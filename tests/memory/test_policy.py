@@ -64,6 +64,7 @@ def _semantic(
     source: MemorySource = MemorySource.OBSERVED,
     confidence: float = 0.6,
     evidence: tuple[str, ...] = (_EPISODE,),
+    derived_from_external: bool = False,
 ) -> MemoryRecord:
     return SemanticMemory(
         id=record_id,
@@ -75,6 +76,7 @@ def _semantic(
             last_updated=_WHEN,
             evidence=evidence,
             attestation=_attestation_for(source),
+            derived_from_external=derived_from_external,
         ),
     )
 
@@ -137,8 +139,8 @@ async def test_a_derived_proposal_citing_no_evidence_is_rejected(source: MemoryS
 async def test_a_derived_proposal_citing_no_evidence_is_rejected_even_with_conflicts() -> None:
     # Rule 2 precedes the conflict rules: an inadmissible proposal is not worth
     # deferring to the user about, and it must not be folded into a live record
-    # either. A rule placed after rule 3 would rule ASK_USER here, and one placed
-    # after rule 7 would REINFORCE an unsupported belief onto a real one.
+    # either. A rule placed after rule 4 would rule ASK_USER here, and one placed
+    # after rule 8 would REINFORCE an unsupported belief onto a real one.
     proposal = _proposal(_semantic("unsupported", confidence=0.9, evidence=()))
     conflicts = [
         _semantic("their-words", source=MemorySource.USER_ASSERTED, confidence=1.0),
@@ -173,6 +175,172 @@ async def test_an_asserted_or_external_proposal_citing_nothing_is_untouched(
     # neither is constrained — which is exactly why ADR-0072 §3 put the rule at the
     # policy gate rather than on the type.
     proposal = _proposal(_semantic("stated", source=source, confidence=1.0, evidence=()))
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+# --- Rule 3: a tainted derived proposal defers (ADR-0106 §6, ADR-0098 §4) ------
+
+
+@pytest.mark.parametrize("source", [MemorySource.OBSERVED, MemorySource.INFERRED], ids=str)
+async def test_a_tainted_derived_proposal_defers_with_a_reason_naming_its_warrant(
+    source: MemorySource,
+) -> None:
+    """The default takes the question, and says why it is asking (ADR-0106 §6).
+
+    The contract ceiling admits ``ASK_USER`` or ``REJECT``; this policy picks the
+    question, because a silent refusal on a scheduler's path destroys the belief,
+    tells nobody, and leaves the user unable to keep a summary they would have
+    wanted. #668's goal — which ADR-0106 inherits — is turning a successful
+    injection into "a visible, source-attributed proposal — spam, not poison".
+
+    The ``reason`` is asserted for content and not merely for being non-blank,
+    which is the whole of ADR-0106 §6's legibility clause: a user shown an
+    unexplained question about a plausible-sounding belief answers yes, and the
+    gate will have converted a silent corruption into a solicited one. This
+    obligation is the default's and is deliberately **not** in the shared suite —
+    no test can distinguish a sentence that conveys externality from one that
+    claims to, and ``MemoryPolicyContract`` records that a ``reason`` obligation
+    was cut for want of a Protocol statement (#40).
+    """
+    proposal = _proposal(_semantic("consolidated", source=source, derived_from_external=True))
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
+    assert "external" in decision.reason.lower()
+
+
+async def test_a_tainted_derived_proposal_defers_ahead_of_every_conflict_rule() -> None:
+    # The rule is an *admissibility* rule — a property of the proposal alone,
+    # committing nothing — so it sits in the floor rather than beside the conflict
+    # reasoning. Placed after the conflict rules it would fold a tainted
+    # consolidation straight onto a live belief, which is the write ADR-0098 §4
+    # forbids happening without the user's answer.
+    proposal = _proposal(_semantic("consolidated", derived_from_external=True))
+    existing = _semantic("existing", source=MemorySource.OBSERVED)
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[existing])
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
+    assert decision.target_id is None
+
+
+async def test_a_secret_tainted_proposal_takes_the_secret_path() -> None:
+    """Rule 1 outranks rule 3, and the two are not interchangeable.
+
+    Both rule ``ASK_USER``, so the *kind* cannot tell them apart — which is why
+    the ``reason`` is what this asserts. ADR-0078 §1 refuses to queue a secret
+    proposal at all, so its question is reported and never persisted; a taint rule
+    ordered first would produce a question the write stage *would* queue, putting
+    Tier-0 content into a durable ``DeferralStore`` row. ADR-0004 §3's "never in
+    the memory database" is defeated by the queue as surely as by the store.
+    """
+    proposal = _proposal(
+        _semantic("consolidated", derived_from_external=True), sensitivity=DataTier.SECRET
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
+    assert "secret" in decision.reason.lower()
+
+
+async def test_a_tainted_derived_proposal_citing_nothing_is_rejected_not_queued() -> None:
+    """Rule 2 outranks rule 3 (ADR-0106 §6, ADR-0078 §5a's ordering).
+
+    A taint rule ordered first would return ``ASK_USER`` and put an unwarranted
+    belief in front of the user as though answering it could make it admissible —
+    ADR-0077 §5 rejects it whatever the user says. ADR-0078 §5a could observe that
+    such a proposal "is rejected at its first ingest, so it is never deferred and
+    never confirmed"; a consolidator's *first* ingest is exactly where a
+    citation-less proposal arrives, so the case is live rather than unreachable,
+    and "a floor that holds only while a coincidence holds is not a floor".
+    """
+    proposal = _proposal(_semantic("consolidated", evidence=(), derived_from_external=True))
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.REJECT
+
+
+async def test_a_confirmed_tainted_proposal_is_judged_on_the_ordinary_path() -> None:
+    """The carve-out that makes the question a question (ADR-0078 §5, ADR-0106 §6).
+
+    The confirmed answer is a *re-ingest*: the coordinator rebuilds the proposal
+    with the user's authority and calls the writer again, marker and all. Without
+    the carve-out this rule fires a second time and defers the answered question —
+    "The user answers, and is asked again" (ADR-0078 §3) — and a tainted
+    consolidation could never land at all, contradicting ADR-0106 §5 and its
+    Consequences. Being reached by asking the user is not the *auto*-acceptance
+    ADR-0098 §4 forbids.
+    """
+    proposal = _confirmed(_semantic("consolidated", derived_from_external=True), retires=())
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+async def test_an_attested_proposal_carrying_the_marker_still_commits() -> None:
+    """ADR-0106 §10's first boundary, at the one place it is assertable.
+
+    A calendar reader's proposal rests on recorded external content by definition,
+    so a ceiling stated over
+    ``rests_on_recorded_external_content`` would refuse every occurrence leg 6
+    imports and make the reader useless (ADR-0106 §6). The marker is set here as
+    well, because ADR-0106 §7 leaves the combination constructible and a rule
+    reading the raw field across every band would fail on it.
+
+    Pinned against *this* policy rather than in ``MemoryPolicyContract``: the
+    shared suite runs ``FakeMemoryPolicy`` at every ``MemoryDecisionKind``,
+    including ``REJECT``, so "must commit" would fail a double that conforms —
+    and the suite's own rule is that it does not encode which ruling a proposal
+    earns. What the suite asserts there instead is the *invariance*: the marker
+    changes nothing outside the ``DERIVED`` band.
+    """
+    proposal = _proposal(
+        _semantic(
+            "import", source=MemorySource.EXTERNAL, confidence=0.9, derived_from_external=True
+        )
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+async def test_a_user_assertion_carrying_a_stray_marker_is_not_deferred() -> None:
+    """ADR-0106 §10's second boundary: it fails a rule that drops the band guard.
+
+    ADR-0106 §7 forbids a band-keyed validator on the field, so this record
+    constructs — and ADR-0106 §2 says the field means nothing in this band. A rule
+    reading the raw flag would defer a user's own assertion on the strength of it,
+    which ADR-0098 §1 forbids in principle: the user's own utterance is not
+    external "however it was composed — a user who pastes an email into a turn is
+    exercising judgement".
+    """
+    proposal = _proposal(
+        _semantic(
+            "their-words",
+            source=MemorySource.USER_ASSERTED,
+            confidence=1.0,
+            derived_from_external=True,
+        )
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+async def test_an_untainted_derived_proposal_is_untouched_by_the_rule() -> None:
+    # The negative control: without it every case above passes a policy that
+    # defers every derived proposal, which would stop the observer landing
+    # anything at all.
+    proposal = _proposal(_semantic("our-guess", source=MemorySource.INFERRED, confidence=0.9))
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
 
@@ -284,7 +452,7 @@ async def test_user_assertion_takes_the_best_ranked_retirable_conflict() -> None
 
 
 async def test_external_proposal_conflicting_with_an_assertion_defers() -> None:
-    # Rule 2, restated for EXTERNAL specifically: a sync is a non-asserted
+    # Rule 5, restated for EXTERNAL specifically: a sync is a non-asserted
     # proposal, so it may not silently overwrite what the user told us.
     proposal = _proposal(_semantic("sync", source=MemorySource.EXTERNAL, confidence=1.0))
     corrected = _semantic("corrected", source=MemorySource.USER_ASSERTED, confidence=1.0)
