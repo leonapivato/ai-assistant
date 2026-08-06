@@ -635,6 +635,7 @@ shut. It also does not avoid the work, since the conformance rewrite is the same
 closes #630 and the backstop protects against a caller bug rather than a design gap.
 Rejected because §4 is nearly free once §5's conformance rewrite is happening
 anyway, because it is the one part of this that holds against a caller that gets §1
-wrong, and because leaving ADR-0081 §8's deferral standing with two of its three
-grounds known-stale would leave a stale argument in the record — which is the same
-failure #630's own thread corrected.
+wrong, and because leaving ADR-0081 §8's deferral standing with its coverage ground
+known-stale would leave a stale argument in the record — which is the same failure
+#630's own thread corrected, and which §6 shows this ADR then committed once itself
+about §8's *cost* ground before review caught it.

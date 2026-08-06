@@ -3,9 +3,10 @@
 - Status: Partially superseded by ADR-0108 (§8's first deferred item and its assignment to the #104 lane)
 - Date: 2026-07-29
 - Partially superseded: 2026-08-05 by ADR-0108 — **§8's first deferred item is
-  ruled, and its assignment of that item to the #104 lane no longer holds. Two of
-  the three grounds §8 gave for deferring have also expired. §8's second deferred
-  item, §§1–7, §9 and §10 stand untouched.**
+  ruled, and its assignment of that item to the #104 lane no longer holds. Of the
+  three grounds §8 gave for deferring, **one is stale and two stand** — the cost
+  ground is why the refusal is in the store rather than the writer. §8's second
+  deferred item, §§1–7, §9 and §10 stand untouched.**
   [ADR-0108](0108-a-write-declares-its-intent-and-a-cross-kind-collision-is-refused.md)
   §4 rules it: a cross-kind same-id write is refused with `MemoryStoreError`, at
   **every** upsert-capable door, on every implementation.
