@@ -97,6 +97,69 @@
   against, and the implementing lane is the thing that will date them. **ADR-0070
   §1's no-rewrite rule now protects this text**, so any later correction to any of
   it is an appended dated note.
+- **Note (2026-08-06): §9's representation deferral is taken, §7's conformance
+  question is answered, and §9 is read with §6's qualifier.** ADR-0109 is the
+  implementing lane §9's first clause names, and this note is the record ADR-0082
+  §1 requires of it. **Nothing this ADR decided changes and no `Status` token is
+  owed**: three sentences that said a question was open are collected by a later
+  ADR, which is a stacked addition rather than a supersession (ADR-0107 §11's
+  treatment of ADR-0086 §10, on ADR-0086 §11's own treatment of ADR-0077 §6). A
+  reader acting on any clause below acts identically before and after, which is
+  ADR-0070 §1's test. **No text below this line is rewritten.**
+
+  **§9's first clause is discharged.** It left "field names, types, and whether
+  currency is stored or computed" to the implementing lane. ADR-0109 §1 and §2
+  rule that the confirming instant is **stored** on `Provenance`, as
+  `last_confirmed_at: UtcInstant | None` defaulting to `None`, and that currency —
+  the elapsed interval — is computed at read and never stored. `None` is this
+  ADR's §9 **unknown**; a record written before that decision decodes at the
+  default and reads as unknown, so §9's fourth clause and its third constraint are
+  satisfied by the field's default rather than by a migration. §9's three
+  constraints are met as stated there: the two quantities are separately readable,
+  `Provenance.confidence`'s meaning (ADR-0072 §3) is untouched because a field is
+  added rather than reinterpreted, and nothing fabricates a decline.
+
+  **The fork §9 did not foresee, and how it resolved.** §9 held that a
+  representation choice could not fail its own "could two lanes make incompatible
+  choices and both claim compliance?" test, because "a second implementation
+  choosing a different one is a rename". Issue #744 and PR #742's adversarial
+  review found the case where it can: where a `REINFORCE`'s incoming record
+  carries more than `MAX_EVIDENCE_CITATIONS` citations, ADR-0086 §3's bound
+  displaces its oldest **accumulated** ones, which need not be its oldest by
+  `occurred_at` — so a resolver reading "the latest `occurred_at` among the
+  episodes `Provenance.evidence` cites" can return a different instant from the
+  one §6 measures the survivor's currency from, and both readings cite this ADR.
+  ADR-0109 §5 resolves it: the instant is captured by the producer, before the
+  bound can reach it, and the fold selects between the two records' stored values.
+  §6's ruling is unchanged in every particular — this is the representation under
+  which it is implementable, not a revision of it.
+
+  **§7's last sentence is answered.** It left "whether any clause of this ADR
+  becomes a conformance obligation" to "the lane that implements it, in an ADR
+  that names those clauses and applies ADR-0070 §1's test to them". ADR-0109 §9 is
+  that ADR: it names §6 and §9 of this one and declines to promote either to the
+  `MemoryWriter` conformance suite, so ADR-0040 §5a's "a writer that combines
+  confidence differently conforms, and must" stays true and ADR-0028 §8's
+  exclusion stays whole — which is the outcome §7 said it wanted preserved.
+
+  **§9's "most recent confirming instant" is read as the most recent *usable*
+  one**, on §6's definition — an instant the store holds and which is not in our
+  future. This is #741's requested clarification, recorded here rather than edited
+  into §9's text, and it changes no outcome: #741 itself records that the two
+  clauses "agree on the outcome", that "§6 is the more specific rule and says so on
+  its face", and that the architecture lens raised and retired the point in rounds
+  9 and 10 of PR #732. The reading matters to a lane holding §9 alone, which is why
+  it is stated. ADR-0109 §7 carries the same reading as a marked clause. Refs
+  #744, #741, #742, ADR-0109.
+- **Note (2026-08-06) on this note's own status.** ADR-0109 is `Proposed` at the
+  time of writing, and this note lands in the same change as ADR-0109 itself
+  rather than after its ratification — ADR-0082 §7's atomic form, whose condition
+  is "that the superseding ADR **exists**, not that it is ratified". The hazard
+  §1 of ADR-0070 guards against is a `Status` line pointing at nothing, and this
+  ADR's `Status` line is not touched at all: no clause of it is superseded, so
+  under ADR-0070 §4 and ADR-0082 §2 the record is the dated note above and nothing
+  else. Should ADR-0109 be ratified with a different resolution, the note that
+  records that lands the same way.
 
 ## Context
 
