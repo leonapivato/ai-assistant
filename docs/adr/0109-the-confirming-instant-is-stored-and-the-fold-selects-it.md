@@ -717,11 +717,17 @@ both decline to make.
 > under `docs/adr/`, because the one record §13 owes lands with this ADR.
 
 > **Normative.** Every test whose expected outcome is a concrete instant
-> constructs a `last_confirmed_at` that is not `None`, is distinct from every
-> instant in the case other than the confirming event it is expected to be taken
-> from — in particular from the injected clock's reading, from `last_updated`, and
-> from the other record's value in a fold — and asserts the exact instant it
-> expects.
+> constructs a `last_confirmed_at` that is not `None`, asserts the exact instant it
+> expects, and gives that instant a value differing from every **independently
+> choosable** instant in the case — in particular from the injected clock's
+> reading and, in a fold, from the other record's value. An instant the code under
+> test necessarily derives from the same source as the confirming event is not
+> independently choosable, and is exempt.
+
+> **Normative.** At least one producer case and at least one fold case give
+> `last_confirmed_at` a value differing from the same record's `last_updated`, so
+> the suite pins ADR-0103 §9's refusal of transaction time even where one producer
+> happens to set both fields from one source.
 
 > **Normative.** Every test whose expected outcome is **unknown** asserts
 > `last_confirmed_at is None` exactly — never merely falsy, and never by omitting
@@ -729,13 +735,13 @@ both decline to make.
 > instant, that unknown case is accompanied by a sibling case over the same path
 > which does.
 
-The items below are what those three clauses obligate; ADR-0089 §3 has the mark
-supply the obligation and this text say what it means. The two test clauses are
+The items below are what those four clauses obligate; ADR-0089 §3 has the mark
+supply the obligation and this text say what it means. The three test clauses are
 stated here rather than beside the test list because a mark indented into a list
 item is not a mark (ADR-0089 §2).
 
-**The two test clauses divide the cases and neither covers both**, which is
-deliberate: some of the outcomes below *are* `None`, and a rule demanding a
+**The test clauses divide the cases, and the first two cover disjoint sets**,
+which is deliberate: some of the outcomes below *are* `None`, and a rule demanding a
 non-`None` value everywhere would be unsatisfiable for exactly those. Each guards
 a different vacuity. A concrete-instant case left at the field's default passes
 whether the value is carried or silently dropped, so the first clause forbids the
@@ -744,9 +750,28 @@ confirming event itself is exempt from that distinctness, and has to be**: §4
 above has the `ATTESTED` producer set the field *to* `Attestation.reported_at`,
 so a rule requiring the two to differ would forbid the very behaviour the reader
 test exists to pin. What the clause forbids is the value coinciding with an
-instant the code could have reached for *instead* — which is why the reader's
-case still has to give `read_at` a different value from `reported_at`. An unknown
-case is
+instant the code could have reached for *instead*, and only where the fixture can
+hold the two apart — which is why the reader's case still has to give `read_at` a
+different value from `reported_at`.
+
+**`last_updated` is the instant that exemption is really about, and the third
+clause is what stops it costing anything.** `FeedbackProcessor._provenance` sets
+`last_updated=event.created_at` today, and §4 above has the same producer take
+its confirming instant from the same `event.created_at`, so in that one case the
+two fields coincide by construction and no fixture can separate them. ADR-0103 §9
+anticipated exactly this: for a live `ASSERTED` record transaction time "happens
+to sit very close to the user's own utterance today, and relying on that is
+exactly the kind of coincidence that breaks silently". A per-case rule cannot
+catch a copy there, so the third clause moves the obligation to where the fixture
+*can* hold them apart — the calendar reader, whose `last_updated` is `read_at`
+while its confirming instant is `reported_at`, and the fold, whose survivor takes
+`last_updated` from the incoming record and its instant from either side. Between
+them the suite proves the field is not transaction time; the `ASSERTED` case
+proves the value is the event's. Whether that producer should be setting
+transaction time from the event at all is an ADR-0045 §3 question about a line
+this ADR does not touch, and it is filed rather than absorbed (#775).
+
+An unknown case is
 the mirror: on a path that can produce either outcome, `is None` alone passes
 against an implementation that never writes the field, so the second clause pairs
 it with a sibling that would fail under that implementation. Two of the three
