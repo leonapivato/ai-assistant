@@ -19,7 +19,7 @@ is the name every ``set`` and every ``TaskGroup`` uses — so a check there woul
 name heuristic with false positives, or a type-directed one failing open exactly
 where a new caller is likeliest to be careless.
 
-## Two checks, because one of them makes the other sound
+## Three checks, because enumerating what to catch does not terminate
 
 The obvious check — "every construction of a ``MemoryWrite`` names its mode" —
 covers the direct call and Pydantic's alternative constructors alike
@@ -40,19 +40,34 @@ Given that, every construction is spelled ``MemoryWrite(...)`` or
 no name resolution, and nothing to be wrong about. The two together are sound in a
 way neither is alone.
 
-This is deliberately a *convention* enforced mechanically, in the shape
-``tests/core/test_protocol_triad.py`` uses for the triad's naming: a lane that has a
-real reason to alias the class should change this check in the same PR, on purpose,
-rather than discover that aliasing quietly disabled the other one.
+The third check does for *construction paths* what the second did for names. Listing
+the ways to build the model has the same non-terminating shape — the direct call,
+then ``model_validate``, then ``model_construct``, then
+``TypeAdapter(MemoryWrite).validate_python(...)``, then whatever is next — and every
+one of them has to **name the class**. So the third check asks the opposite
+question: is this mention one of the shapes we have decided are safe? Exactly three
+are — an import, a type annotation, and a construction that declares its mode.
+Anything else fails, including handing the class to something that will build it
+later. ``TypeAdapter`` is not special-cased; it fails because passing the class as
+an argument is not on the list.
 
-**Where it stops.** Indirection through a value the source never spells — a
-function's return, a container element, ``functools.partial``, ``getattr`` — is not
-reachable by any AST check and is not chased. That boundary is the same one
-ADR-0108 §7 draws around ``add``: the check is aimed at the **accidental** default,
-the caller who wrote ``MemoryWrite(record=r)`` because the field has one. Reaching
-the same effect through indirection means building the bypass deliberately.
+All three are deliberately *conventions* enforced mechanically, in the shape
+``tests/core/test_protocol_triad.py`` uses for the triad's naming. A lane with a
+real reason to alias the class, or to hand it to a validator, changes these checks
+in the same PR, on purpose — rather than discovering that doing so quietly
+disabled them.
 
-Both checks read the **parsed source**, never a grep: a comment, a docstring, or a
+**Where it stops.** Indirection through a value the source never spells — a name
+that arrives via a function's return, a container read at runtime,
+``functools.partial``, ``getattr`` — is not reachable by any AST check. The third
+check narrows that a long way, because *storing* the class anywhere is itself
+refused, but it cannot close it: what is left needs the class to reach a call site
+without being written there. That boundary is the same one ADR-0108 §7 draws around
+``add``: the checks are aimed at the **accidental** default — the caller who wrote
+``MemoryWrite(record=r)`` because the field has one — and reaching the same effect
+otherwise means building the bypass deliberately.
+
+Every check reads the **parsed source**, never a grep: a comment, a docstring, or a
 string mentioning ``MemoryWrite`` is not a construction, and a call split across
 lines is still one node. What each check *rejects* is proved below, because a
 predicate that accepted everything would look identical on the tree it is pointed
@@ -203,6 +218,61 @@ def _renamings(tree: ast.AST) -> list[ast.AST]:
     return found
 
 
+def _annotation_nodes(tree: ast.AST) -> set[int]:
+    """Node ids appearing inside a type annotation, which never build anything."""
+    approved: set[int] = set()
+    for node in ast.walk(tree):
+        annotations: list[ast.expr | None] = []
+        if isinstance(node, ast.AnnAssign | ast.arg):
+            annotations.append(node.annotation)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            annotations.append(node.returns)
+        approved.update(
+            id(inner)
+            for annotation in annotations
+            if annotation is not None
+            for inner in ast.walk(annotation)
+        )
+    return approved
+
+
+def _unapproved_references(tree: ast.AST) -> list[ast.expr]:
+    """Every mention of the class that is neither an annotation nor a construction.
+
+    **This is the check inverted, and the inversion is the point.** Enumerating the
+    ways to build a ``MemoryWrite`` does not terminate: the direct call, then
+    ``model_validate``, then ``model_construct``, then
+    ``TypeAdapter(MemoryWrite).validate_python(...)``, then whatever is next. Each
+    is a real hole and closing one reveals the next, which is a check that is always
+    one round behind.
+
+    Every one of them has to **name the class**, so this asks the opposite question:
+    is this mention one of the shapes we have decided are safe? Those are exactly
+    three — an import, a type annotation, and a construction that declares its mode
+    (:func:`_constructions`, :func:`_declares_mode`). Anything else fails, including
+    handing the class to something that will build it later. ``TypeAdapter`` is not
+    special-cased; it fails because passing the class as an *argument* is not on the
+    list.
+
+    The cost is that a legitimate new use — a genuine `TypeAdapter`, a registry
+    keyed by model class — fails until someone adds it here. That is the intended
+    trade and the same one ``tests/core/test_protocol_triad.py`` makes for the
+    triad's naming: the check is a convention with a mechanism behind it, and
+    widening it is a deliberate edit in the PR that needs it rather than a silent
+    discovery that the rule stopped applying.
+    """
+    approved = _annotation_nodes(tree)
+    for call in _constructions(tree):
+        approved.update(id(inner) for inner in ast.walk(call.func))
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name | ast.Attribute)
+        and _names_the_class(node)
+        and id(node) not in approved
+    ]
+
+
 def _maps_mode(node: ast.expr) -> bool:
     """Whether ``node`` is a dict *display* carrying a literal ``"mode"`` key."""
     return isinstance(node, ast.Dict) and any(
@@ -255,6 +325,33 @@ def test_the_class_is_never_bound_to_another_name() -> None:
         "through it from the mode check below and so disables ADR-0108 §1 for that "
         "module. Use the class directly, or change this check deliberately in the "
         "same PR. At: " + ", ".join(renamed)
+    )
+
+
+def test_the_class_is_only_imported_annotated_or_constructed() -> None:
+    """The third check, and the one that stops the enumeration (:func:`_unapproved_references`).
+
+    Every way of building a ``MemoryWrite`` has to name the class somewhere, so
+    rather than listing the ways — a list that was one round behind for several
+    rounds running — this allows only the shapes we have decided are safe and fails
+    everything else. ``TypeAdapter(MemoryWrite).validate_python({"record": r})``
+    fails here, not because ``TypeAdapter`` is known about, but because handing the
+    class to *anything* is not on the list.
+    """
+    stray = [
+        _where(source, node)
+        for source in _sources()
+        for node in _unapproved_references(
+            ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        )
+    ]
+
+    assert not stray, (
+        f"{_CLASS} is referenced somewhere that is neither an import, a type "
+        "annotation, nor a construction naming its mode — so it may be built with "
+        "the destructive UPSERT default by a path this check cannot read "
+        "(ADR-0108 §1, §7). Construct it directly with mode=..., or widen this "
+        "check deliberately in the same PR. At: " + ", ".join(stray)
     )
 
 
@@ -364,6 +461,43 @@ def test_the_renaming_check_leaves_unrelated_code_alone() -> None:
         foreign_colliding_suffix,
     ):
         assert _renamings(tree) == [], ast.dump(tree)
+
+
+def test_the_allowlist_rejects_a_deferred_construction_path() -> None:
+    """The case that made the enumeration terminate, and the shapes it must still allow.
+
+    ``TypeAdapter(MemoryWrite).validate_python({"record": r})`` builds a write with
+    the destructive default and satisfies neither the direct-call nor the
+    alternative-constructor predicate. It fails here for a reason that does not
+    depend on knowing what ``TypeAdapter`` is: the class was handed to something.
+
+    The accepted shapes are pinned beside it, because an allowlist that rejected an
+    ordinary annotation or import would be unusable and would be widened until it
+    allowed everything.
+    """
+    adapter = ast.parse('TypeAdapter(MemoryWrite).validate_python({"record": r})')
+    stashed = ast.parse("registry['write'] = MemoryWrite")
+    returned = ast.parse("def factory():\n    return MemoryWrite\n")
+
+    for tree in (adapter, stashed, returned):
+        assert _unapproved_references(tree), ast.dump(tree)
+
+    imported = ast.parse("from ai_assistant.core.types import MemoryWrite")
+    annotated_arg = ast.parse("def f(writes: Sequence[MemoryWrite]) -> None: ...")
+    annotated_var = ast.parse("w: MemoryWrite | None = None")
+    annotated_return = ast.parse("def f() -> MemoryWrite: ...")
+    constructed = ast.parse("MemoryWrite(record=r, mode=m)")
+    via_constructor = ast.parse('MemoryWrite.model_validate({"record": r, "mode": m})')
+
+    for tree in (
+        imported,
+        annotated_arg,
+        annotated_var,
+        annotated_return,
+        constructed,
+        via_constructor,
+    ):
+        assert _unapproved_references(tree) == [], ast.dump(tree)
 
 
 def test_pydantic_alternative_constructors_are_constructions_too() -> None:
