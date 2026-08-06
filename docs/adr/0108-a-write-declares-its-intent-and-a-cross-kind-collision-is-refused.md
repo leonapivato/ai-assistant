@@ -284,6 +284,32 @@ different-kind stored id still refuses with `MemoryStoreConflictError` — the
 existing rule wins there, because it refuses *earlier* and its remedy is the
 narrower one.
 
+> **Normative.** Two further conformance cases are required, because §4's two
+> qualifiers are each independently satisfiable by a wrong implementation that
+> passes every case above. **(a) Physical presence, on both doors**: a cross-kind
+> `add` *and* a cross-kind `UPSERT` at an id held by an **expired or window-closed**
+> record are each refused, and that record is still returned by `export`
+> afterwards. **(b) Rollback**: a multi-element `write_atomic` whose *later* element
+> is a cross-kind `UPSERT` commits **nothing**, including the valid element ordered
+> before it.
+
+Neither is decoration, and neither is implied by the cases above them:
+
+- **A store can judge the collision on read-visibility** and pass every
+  single-collision case, because those all use a live record. It would then let a
+  preference silently replace a *retired* belief — retained history, which is the
+  least recoverable thing in the store and precisely what ADR-0046 §3 made
+  `INSERT_IF_ABSENT` physical to protect. §4 says "physical presence, in ADR-0046
+  §3's sense" and a rule that is not tested at the only place the two senses differ
+  is not a rule.
+- **A store can refuse the cross-kind element and keep the earlier ones.** ADR-0046
+  §4's all-or-nothing already governs this — the refusal is an element failure like
+  any other — but the shipped implementation raises it from *inside* the write body
+  rather than from a pre-pass, so "nothing is written" depends on a rollback that no
+  single-element case exercises. This is exactly the divergence ADR-0046 §3 forbids
+  between a sequential SQLite apply and a stage-then-swap fake, arriving through a
+  new door.
+
 ### 6. What this changes in ADR-0022 §4, and in ADR-0081 §8
 
 The two get different treatments because ADR-0070 §1's test gives different answers,
