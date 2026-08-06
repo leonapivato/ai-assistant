@@ -79,8 +79,11 @@ Some base moves genuinely do cost a round, and then the review is owed — the p
 
 **Rebase first, drill second**, and the drill enforces that order rather than merely asking for it: on a `HEAD` that does not contain the fetched base tip it refuses outright, because the merge base there is still the *old* one. The floor would be tested over the range up to that — a base move you have already accounted for rather than the one you are asking about, and where nothing else has moved, an empty range. Either way the "clear" answers a different question (issue #751).
 
+Rebase onto **the PR's own base branch**, which is what the drill resolves and fetches — usually `main`, but not on a stacked PR, where hard-coding `main` would strip the parent base out of `HEAD` and earn you the refusal you were trying to avoid:
+
 ```bash
-git fetch origin main && git rebase FETCH_HEAD
+base="$(gh pr view --json baseRefName --jq .baseRefName)"
+git fetch origin "$base" && git rebase FETCH_HEAD
 scripts/ship.sh --drill        # or: just drill
 ```
 

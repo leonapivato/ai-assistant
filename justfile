@@ -87,9 +87,11 @@ ship:
 # `ship`'s own code, nothing written to GitHub, and a PR head that still lags
 # HEAD is fine because this is meant to run before the push. Prints the inputs it
 # judged: the base move's file set with ADR-0027 §3 floor paths marked, and where
-# it made no floor claim, which of the three reasons applies. Rebase FIRST — it
-# refuses an un-rebased HEAD, whose merge base has not moved yet, rather than
-# reporting a floor tested over an empty file set (issue #751).
+# it made no floor claim, which of the three reasons applies. Rebase FIRST — onto
+# the PR's own base branch, which is not always main — because on a HEAD that
+# does not contain the fetched tip it refuses rather than reporting a floor
+# tested over the range to the OLD merge base: an earlier base move rather than
+# the prospective one, and where nothing else moved, an empty range (issue #751).
 #
 # Last line, because `just --list` shows only that one: what a base move costs.
 # Would this base move cost a review round? Rebase first, then ask (ADR-0027 §2)
