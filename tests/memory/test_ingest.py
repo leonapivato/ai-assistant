@@ -60,11 +60,12 @@ def _prov(
     *,
     source: MemorySource = MemorySource.OBSERVED,
     attestation: Attestation | None = None,
+    last_updated: datetime = _WHEN,
 ) -> Provenance:
     return Provenance(
         source=source,
         confidence=confidence,
-        last_updated=_WHEN,
+        last_updated=last_updated,
         evidence=evidence,
         # Keyed on the band, so a `MemorySource` added into `ATTESTED` later needs
         # no edit here, and so a case that supplies its own is not overridden.
@@ -114,19 +115,27 @@ def _semantic(
     )
 
 
-def _preference(
+def _preference(  # noqa: PLR0913 — one keyword per record field a case may need to vary
     record_id: str,
     content: str,
     *,
     confidence: float = 0.6,
     evidence: tuple[str, ...] = (),
     source: MemorySource = MemorySource.OBSERVED,
+    validity: Validity | None = None,
+    expires_at: datetime | None = None,
+    last_updated: datetime = _WHEN,
 ) -> MemoryRecord:
+    # The three lifecycle fields are optional and default to what every case that
+    # does not care about them already had — an open window, no expiry, `_WHEN` —
+    # so only the fold cases that assert on them have to spell them out.
     return PreferenceMemory(
         id=record_id,
         content=content,
         preference=content,
-        provenance=_prov(confidence, evidence, source=source),
+        validity=validity if validity is not None else Validity(),
+        expires_at=expires_at,
+        provenance=_prov(confidence, evidence, source=source, last_updated=last_updated),
     )
 
 
@@ -211,6 +220,22 @@ async def test_conflicting_proposal_merges_into_existing() -> None:
 _IMPORTED = "prefers window seats, as the airline has it"
 _CORROBORATED = "prefers window seats"
 
+#: The lifecycle fields the two fold cases below give their records **distinctly**,
+#: so which record each one came from is asserted rather than defaulted. Both arms
+#: keep somebody's window and expiry, so a case where the two agree passes whichever
+#: record the fold took them from — which is the gap #745 reports.
+#:
+#: Every instant is chosen against `_fixed_now` (2026-06-01), which those two cases
+#: make the store's clock as well as the ingestor's: the windows open before it and
+#: the expiries fall after it, so both records are readable throughout and a missing
+#: survivor means the fold got the rule wrong rather than that the clock retired it.
+_TARGET_WINDOW = Validity(valid_from=datetime(2026, 2, 1, tzinfo=UTC))
+_TARGET_EXPIRES_AT = datetime(2027, 1, 1, tzinfo=UTC)
+_INCOMING_WINDOW = Validity(valid_from=datetime(2026, 3, 1, tzinfo=UTC))
+_INCOMING_EXPIRES_AT = datetime(2026, 12, 1, tzinfo=UTC)
+#: The incoming record's transaction stamp, distinct from the target's `_WHEN`.
+_INCOMING_WHEN = datetime(2026, 5, 1, tzinfo=UTC)
+
 
 async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -> None:
     """#646: the fold that used to raise out of ``core`` and write nothing.
@@ -225,15 +250,40 @@ async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -
     and nothing else, so the attested record survives whole. Asserted end to end
     because "nothing was written" was the defect — a unit call on the fold would
     have shown the exception and not the empty store.
+
+    **"Whole" includes the lifecycle fields**, which is why the two records carry
+    distinct ones here (#745). ``validity`` and ``expires_at`` are properties of
+    the belief, so §6's two contributions do not include them and the target's
+    survive; ``last_updated`` is transaction time (ADR-0045 §3) rather than a
+    belief property, so it comes from the incoming record and is not a third
+    contribution.
     """
-    store = InMemoryMemoryStore()
+    store = InMemoryMemoryStore(now=_fixed_now)
     await _plant_episodes(store, _EPISODE)
     await store.add(
-        _preference("imported", _IMPORTED, confidence=1.0, source=MemorySource.EXTERNAL)
+        _preference(
+            "imported",
+            _IMPORTED,
+            confidence=1.0,
+            source=MemorySource.EXTERNAL,
+            validity=_TARGET_WINDOW,
+            expires_at=_TARGET_EXPIRES_AT,
+            last_updated=_WHEN,
+        )
     )
 
     result = await _ingestor(store).ingest(
-        _proposal(_preference("observed", _CORROBORATED, confidence=0.6, evidence=(_EPISODE,)))
+        _proposal(
+            _preference(
+                "observed",
+                _CORROBORATED,
+                confidence=0.6,
+                evidence=(_EPISODE,),
+                validity=_INCOMING_WINDOW,
+                expires_at=_INCOMING_EXPIRES_AT,
+                last_updated=_INCOMING_WHEN,
+            )
+        )
     )
 
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
@@ -246,10 +296,22 @@ async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -
     assert survivor.provenance.confidence == 1.0
     assert survivor.provenance.attestation == _ATTESTED_BY
     assert survivor.content == _IMPORTED
+    # Its window and its expiry too. These are the belief's own properties, so
+    # ADR-0103 §6 leaves the incoming record's behind with its confidence and its
+    # text — a fold that carried them across would give the surviving attested
+    # belief a lifetime the attested source never stated.
+    assert survivor.validity == _TARGET_WINDOW
+    assert survivor.expires_at == _TARGET_EXPIRES_AT
     # The one thing the derived observation contributes: its evidence, unioned.
     # This is where the corroboration is recorded — the episode it stands on is
     # retained, which is what a currency rule reads from later (ADR-0103 §9).
     assert set(survivor.provenance.evidence) == {_EPISODE}
+    # ...and the stamp saying we revised the record, which is not a second one.
+    # `last_updated` is transaction time (ADR-0045 §3) and the store has just
+    # changed its mind: the survivor's evidence is not the evidence the target was
+    # stored with, so keeping the target's `_WHEN` would claim a write that just
+    # happened never did.
+    assert survivor.provenance.last_updated == _INCOMING_WHEN
     assert await store.get("observed") is None  # folded in place, not duplicated
 
 
@@ -291,14 +353,38 @@ async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_
     §2a), so ADR-0103 §6's first clause admits it and its second clause, keyed on
     an ``ATTESTED`` target, does not reach it. Pinned so that fixing #646 cannot
     quietly decide #733 too.
+
+    It carries the lifecycle half of that boundary as well (#745), and that is what
+    makes the corroboration case's opposite assertion mean anything: this arm keeps
+    the *incoming* record's window and expiry, so "the target's survive" is a rule
+    about the arm ADR-0103 §6 rules rather than about the fold. ``last_updated`` is
+    the one field the two arms agree on — transaction time on both (ADR-0045 §3).
     """
-    store = InMemoryMemoryStore()
+    store = InMemoryMemoryStore(now=_fixed_now)
     await _plant_episodes(store, _EPISODE)
-    await store.add(_preference("observed", _IMPORTED, confidence=0.9, evidence=(_EPISODE,)))
+    await store.add(
+        _preference(
+            "observed",
+            _IMPORTED,
+            confidence=0.9,
+            evidence=(_EPISODE,),
+            validity=_TARGET_WINDOW,
+            expires_at=_TARGET_EXPIRES_AT,
+            last_updated=_WHEN,
+        )
+    )
 
     result = await _ingestor(store).ingest(
         _proposal(
-            _preference("imported", _CORROBORATED, confidence=0.5, source=MemorySource.EXTERNAL)
+            _preference(
+                "imported",
+                _CORROBORATED,
+                confidence=0.5,
+                source=MemorySource.EXTERNAL,
+                validity=_INCOMING_WINDOW,
+                expires_at=_INCOMING_EXPIRES_AT,
+                last_updated=_INCOMING_WHEN,
+            )
         )
     )
 
@@ -309,6 +395,9 @@ async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_
     assert survivor.provenance.source is MemorySource.EXTERNAL
     assert survivor.provenance.confidence == 0.9
     assert survivor.content == _CORROBORATED  # newer content still wins here
+    assert survivor.validity == _INCOMING_WINDOW  # and so does its window
+    assert survivor.expires_at == _INCOMING_EXPIRES_AT  # and its expiry
+    assert survivor.provenance.last_updated == _INCOMING_WHEN  # as on the other arm
 
 
 async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
