@@ -78,6 +78,15 @@ An under-specified brief is the largest source of rework. Each one carries:
   Golden rule 5 already sequences the *PRs* — this sequences the *lanes* the
   same way. The Protocol triad is one PR and so still one lane
   (`CONTRIBUTING.md` → "Adding a Protocol"); it is the ADR that ships alone.
+  The rule also has a mechanical ground, not just a context one: a PR stacked
+  on another PR's branch records that branch as its review base, and a
+  rebase-merge of the parent rewrites the SHA out of history. The parent's
+  merge itself moves nothing — a merge to `main` never moves a merge base
+  (ADR-0027) — but it deletes the base branch, forcing the child to retarget
+  and rebase onto `main`, and *that* is where §2(b)'s proper-ancestor clause
+  becomes unsatisfiable and a fresh round is owed *even when not one reviewed
+  byte moved*. Stacking buys a round at review time and forfeits one at the
+  retarget its parent's merge makes inevitable.
 - **Cross-lane interactions** in both directions: what this lane will see if
   another merges first, and what it must not assume. Say **where in the merge
   order it sits and why** (§5). A lane told it merges last plans for the rebase
