@@ -20,6 +20,50 @@
   without a triad and refused it, so §10's `core` Protocol and its triad
   obligation stand exactly as written. This line is an appended note; the
   `Status` field above is this ADR's only status. See ADR-0095.
+- Note (2026-08-06): **§11's fourth deferral is discharged by
+  [ADR-0110](0110-a-covered-readings-absence-closes-a-window-and-a-clock-never-does.md);
+  §4's first sentence is untouched and §4's second is read with §11, as it was
+  written to be.** §11 defers "Retracting an attested belief when its source stops
+  reporting it" with the condition "Fires with ADR-0092's override mechanism, whose
+  id discipline it shares". ADR-0092 has merged, the condition is met, and ADR-0110
+  is that decision (#639).
+
+  **§4's absence refusal stands verbatim.** "A sensor never proposes the absence,
+  cancellation or retraction of anything" is narrowed in no respect: ADR-0110 §7
+  puts nothing about absence in `SourceReading.proposals`, and the inference from a
+  reading to a retirement is made by a consumer holding the store — which §1 denies
+  a reader in as many words. What ADR-0110 adds to the reading is a **coverage**
+  declaration, a fact about the read of the same class as `read_at`, from which its
+  §3 closes a live attested record's validity window only where that record's own
+  bounded envelope window lies wholly within the declared coverage and the reading's
+  ingest left it untouched.
+
+  **§4's second sentence — "An entry missing from a later reading is not evidence
+  that the entry was withdrawn" — is qualified by that rule, and this is recorded
+  as a discharge rather than a supersession.** Read alone the sentence is
+  unqualified; read with §11, which defers this exact retraction by name in the same
+  Decision, a reader holding this ADR was told a later ADR would rule it and what
+  would unblock it, so that reader acts on ADR-0110 rather than differently. That is
+  the shape ADR-0045's 2026-08-02 note records for ADR-0092's discharge of its
+  §5/§7/§10 policy choice — "**The deferral is discharged, not overturned.**"
+  ADR-0110 §13 states both readings, takes this one, and says what would change
+  under the other. **§4's reasoning is not weakened but completed**: of the four
+  cases it called indistinguishable from the reading, §5's refuse-don't-truncate
+  rule and §8's raise-don't-return rule already removed the truncated file and the
+  permission error, and ADR-0110 §2 separates the last pair — a bounded read from a
+  genuine deletion — with the coverage declaration rather than with a judgement.
+
+  **Everything else stands.** §1's no-store rule (which ADR-0110 §5 depends on),
+  §2's placement, §3's two cadences and its additive `SourceReading`, §4's band and
+  episode rules, §5's bound and no-cursor argument, §6, §7, §7a, §7b, §8's failure
+  postures, §9's gates, §10's surface and §11's other deferrals are untouched. This
+  is ADR-0070 §1's appended dated note; no ratified text below is rewritten. Under
+  [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §2 no
+  `Status` qualifier is written, because this ADR's `Status` line is led by
+  `Partially superseded by` — the note is the whole record. ADR-0110 lands **in the
+  same change as this note**, so this note never names an ADR that does not exist;
+  it stands `Proposed`, which is the form ADR-0075 established and ADR-0045's
+  2026-07-28 note records `main` carrying three times over. Refs #639, #112, #729.
 - **Decides a `core` contract and implements none of it.** Golden rule 5 and
   ADR-0015 §5 put a contract ADR in its own PR, merged before anything implements
   against it. The Protocol, its shared conformance suite and its canonical fake in
