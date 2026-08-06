@@ -205,12 +205,18 @@ class FakeFeedbackProcessor:
 
     @staticmethod
     def _provenance(event: FeedbackEvent) -> Provenance:
-        """User-asserted provenance carrying the feedback's evidence and time."""
+        """User-asserted provenance carrying the feedback's evidence and time.
+
+        ``last_confirmed_at`` is the utterance's instant, matching
+        ``FeedbackProcessor`` (ADR-0109 §4): an ``ASSERTED`` belief is confirmed by
+        the user stating it, never by the moment we wrote it down.
+        """
         return Provenance(
             source=MemorySource.USER_ASSERTED,
             confidence=_FULL_CONFIDENCE,
             evidence=event.evidence,
             last_updated=event.created_at,
+            last_confirmed_at=event.created_at,
         )
 
     @property

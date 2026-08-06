@@ -406,6 +406,14 @@ class FakeObserver:
             confidence=_confidence(template.step, len(cited)),
             evidence=cited,
             last_updated=self._now,
+            # The `DERIVED` band's confirming event: the **latest** `occurred_at`
+            # among the episodes cited, over the same `window` the citations come
+            # from, and never the moment of derivation — `self._now` is
+            # transaction time and is already above (ADR-0103 §9, ADR-0109 §4).
+            # `max` over the window rather than its last entry: the batch is not
+            # ordered by `occurred_at`, and taking the last would pass on an
+            # ordered fixture and drift from `LearningObserver` on any other.
+            last_confirmed_at=max(episode.occurred_at for episode in window),
         )
         return MemoryUpdateProposal(
             proposed=_record(template, provenance, _identify(template, cited)),

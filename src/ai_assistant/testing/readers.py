@@ -180,9 +180,16 @@ def attested_proposal(
             so two calls with the same belief do not aim at one address. A caller
             *choosing* an id here is not a producer *deriving* one, which is what
             ADR-0092 §6 rules on.
-        reported_at: When the source asserts the fact was current, on **its** clock.
+        reported_at: When the source asserts the fact was current, on **its**
+            clock. It lands in ``last_confirmed_at`` as well as in the
+            ``Attestation``, because the ``ATTESTED`` band's confirming event *is*
+            the source's report and never our ingestion of it (ADR-0103 §9,
+            ADR-0109 §4). Written as it stands — a value in our future is stored
+            unchanged (ADR-0092 §3) — which is what makes this fake follow the
+            concrete calendar reader rather than diverge from it.
         last_updated: When *we* last revised the belief — transaction time, our
-            clock (ADR-0045 §3).
+            clock (ADR-0045 §3). Deliberately **not** the confirming instant: a
+            months-old report imported this morning is not a fresh belief.
 
     The ``rationale`` and the ``sensitivity`` are set rather than parameterised,
     because ADR-0093 §4 obliges a reader to make both a choice: the rationale
@@ -219,6 +226,7 @@ def attested_proposal(
                 confidence=_ATTESTED_CONFIDENCE,
                 last_updated=last_updated,
                 attestation=Attestation(reported_by=reported_by, reported_at=reported_at),
+                last_confirmed_at=reported_at,
             ),
         ),
         rationale=f"{reported_by} reported it",
