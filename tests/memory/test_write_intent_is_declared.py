@@ -99,8 +99,20 @@ def _constructions(tree: ast.AST) -> list[ast.Call]:
     ]
 
 
+def _is_the_module(node: ast.ImportFrom) -> bool:
+    """Whether ``node`` imports from the module that defines the class.
+
+    ``ai_assistant.core.types``, and the relative spellings that resolve to it.
+    **A same-named class from anywhere else is not this one**:
+    ``from vendor.api import MemoryWrite as ExternalWrite`` is somebody else's type
+    and none of this check's business, and flagging it would be exactly the
+    false-positive failure the negative cases below exist to prevent.
+    """
+    return (node.module or "").endswith("core.types")
+
+
 def _renamings(tree: ast.AST) -> list[ast.AST]:
-    """Every node that binds the class to some other name.
+    """Every node that binds **this** class to some other name.
 
     The three static binding forms, which are the three ways to make a construction
     that :func:`_constructions` cannot see:
@@ -109,16 +121,25 @@ def _renamings(tree: ast.AST) -> list[ast.AST]:
     - ``Write = MemoryWrite`` (and the annotated form)
     - ``def build(factory=MemoryWrite): ...``
 
-    A plain ``import MemoryWrite`` is not a renaming and is what every module here
+    A plain unaliased import is not a renaming, and is what every module here
     already does.
+
+    The import form checks the module it comes from (:func:`_is_the_module`); the
+    other two cannot, and are name-based. That is sound *given* the first: a bare
+    ``MemoryWrite`` inside this package is the one imported there. A foreign class
+    imported under this very name would have to arrive unaliased — at which point
+    the mode check would judge its constructions too, and the honest response is to
+    change this module deliberately rather than to have it be quietly wrong in
+    either direction.
     """
     found: list[ast.AST] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom | ast.Import):
+        if isinstance(node, ast.ImportFrom):
             found.extend(
                 node
                 for alias in node.names
-                if alias.name.rsplit(".", 1)[-1] == _CLASS
+                if _is_the_module(node)
+                and alias.name == _CLASS
                 and alias.asname is not None
                 and alias.asname != _CLASS
             )
@@ -236,6 +257,7 @@ def test_an_opaque_unpacking_does_not_count_as_declaring() -> None:
 def test_the_renaming_check_sees_every_binding_form() -> None:
     """Each form the literal finder would walk past is caught by the other check."""
     imported = ast.parse("from ai_assistant.core.types import MemoryWrite as W")
+    relative = ast.parse("from ..core.types import MemoryWrite as W")
     assigned = ast.parse("Write = MemoryWrite")
     annotated = ast.parse("Write: type[MemoryWrite] = MemoryWrite")
     qualified_alias = ast.parse("W = types.MemoryWrite")
@@ -244,6 +266,7 @@ def test_the_renaming_check_sees_every_binding_form() -> None:
 
     for tree in (
         imported,
+        relative,
         assigned,
         annotated,
         qualified_alias,
@@ -266,8 +289,21 @@ def test_the_renaming_check_leaves_unrelated_code_alone() -> None:
     unrelated_alias = ast.parse("from elsewhere import Widget as W\nWrite = Widget")
     unrelated_default = ast.parse("def build(f=Widget, *, g=None): ...")
     a_construction = ast.parse("MemoryWrite(record=r, mode=m)")
+    # The one that matters most: a *different* class that happens to share the
+    # name. Aliasing it is somebody else's business, and a check keyed on the name
+    # alone would block a module that never touched this contract at all.
+    foreign_same_name = ast.parse("from vendor.api import MemoryWrite as ExternalWrite")
+    foreign_module_import = ast.parse("import vendor.api.MemoryWrite as ExternalWrite")
 
-    for tree in (plain_import, same_name, unrelated_alias, unrelated_default, a_construction):
+    for tree in (
+        plain_import,
+        same_name,
+        unrelated_alias,
+        unrelated_default,
+        a_construction,
+        foreign_same_name,
+        foreign_module_import,
+    ):
         assert _renamings(tree) == [], ast.dump(tree)
 
 
