@@ -196,8 +196,23 @@ _INCOMING_WINDOW = Validity(
 _INCOMING_EXPIRES_AT = datetime(2027, 5, 1, tzinfo=UTC)
 _INCOMING_WHEN = datetime(2026, 5, 1, tzinfo=UTC)
 
+#: The **open** lifetime, run opposite a bounded one on the *surviving* side of each
+#: arm, exactly as in `test_ingest.py`. Two bounded lifetimes show the fold picks the
+#: right record but not that it picks at all: a fold coalescing the two
+#: (`target.expires_at or incoming.expires_at`) is indistinguishable from one
+#: selecting while both sides are truthy, and would retire an open-ended belief on a
+#: date nothing set for it.
+_OPEN_LIFETIME = (Validity(), None)
 
-async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -> None:
+
+@pytest.mark.parametrize(
+    ("target_window", "target_expiry"),
+    [(_TARGET_WINDOW, _TARGET_EXPIRES_AT), _OPEN_LIFETIME],
+    ids=["bounded-target", "open-target"],
+)
+async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it(
+    target_window: Validity, target_expiry: datetime | None
+) -> None:
     """The fake folds ADR-0103 §6's pairing the way ``MemoryIngestor`` does (#646).
 
     Not contract — ADR-0103 §7 declines to promote §6 to the conformance suite, and
@@ -214,6 +229,9 @@ async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -
     comes from the incoming record because it is transaction time (ADR-0045 §3)
     rather than a belief property. A fake that diverged here would hand a consumer
     a survivor with a lifetime production would not have written.
+
+    Run at a bounded target lifetime and at an open one (:data:`_OPEN_LIFETIME`),
+    so the case says the survivor's lifetime is *selected* rather than non-empty.
     """
     store = FakeMemoryStore(now=_fixed_now)
     await store.add(
@@ -230,8 +248,8 @@ async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -
         id="imported",
         content="prefers concise emails, as the mail client has it",
         preference="prefers concise emails",
-        validity=_TARGET_WINDOW,
-        expires_at=_TARGET_EXPIRES_AT,
+        validity=target_window,
+        expires_at=target_expiry,
         provenance=Provenance(
             source=MemorySource.EXTERNAL,
             confidence=1.0,
@@ -264,16 +282,24 @@ async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -
     assert survivor.provenance.attestation == imported.provenance.attestation
     assert survivor.content == imported.content
     # The belief's own lifetime is the target's; the incoming record's is left
-    # behind with its confidence and its text.
-    assert survivor.validity == _TARGET_WINDOW
-    assert survivor.expires_at == _TARGET_EXPIRES_AT
+    # behind with its confidence and its text. At the open parameter this is the
+    # stronger claim that nothing was filled in from the other side.
+    assert survivor.validity == target_window
+    assert survivor.expires_at == target_expiry
     assert set(survivor.provenance.evidence) == {"t-ev", "cited-episode"}
     # Transaction time is the incoming record's: the store has just changed its
     # mind about this belief, and keeping `_TARGET_WHEN` would deny that.
     assert survivor.provenance.last_updated == _INCOMING_WHEN
 
 
-async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_did() -> None:
+@pytest.mark.parametrize(
+    ("incoming_window", "incoming_expiry"),
+    [(_INCOMING_WINDOW, _INCOMING_EXPIRES_AT), _OPEN_LIFETIME],
+    ids=["bounded-incoming", "open-incoming"],
+)
+async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_did(
+    incoming_window: Validity, incoming_expiry: datetime | None
+) -> None:
     """The fake leaves the reverse pairing alone too (ADR-0103 §6, #733, #745).
 
     The mirror of ``test_ingest.py``'s case of the same name, and it is what makes
@@ -288,6 +314,10 @@ async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_
 
     ``last_updated`` is the one field the two arms agree on: transaction time on
     both (ADR-0045 §3).
+
+    Parametrized on the same axis as the corroboration case, moved to the side that
+    survives *here*: an open incoming record must leave the survivor open rather
+    than let the target's bounded lifetime stand in.
     """
     store = FakeMemoryStore(now=_fixed_now)
     target = PreferenceMemory(
@@ -313,8 +343,8 @@ async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_
             id="imported",
             content="prefers concise emails",
             preference="prefers concise emails",
-            validity=_INCOMING_WINDOW,
-            expires_at=_INCOMING_EXPIRES_AT,
+            validity=incoming_window,
+            expires_at=incoming_expiry,
             provenance=Provenance(
                 source=MemorySource.EXTERNAL,
                 confidence=0.5,
@@ -341,8 +371,8 @@ async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_
     assert survivor.content == incoming.proposed.content
     # ...and the lifetime that comes with it is the incoming record's, both ends of
     # the window and the expiry.
-    assert survivor.validity == _INCOMING_WINDOW
-    assert survivor.expires_at == _INCOMING_EXPIRES_AT
+    assert survivor.validity == incoming_window
+    assert survivor.expires_at == incoming_expiry
     assert survivor.provenance.last_updated == _INCOMING_WHEN  # as on the other arm
 
 

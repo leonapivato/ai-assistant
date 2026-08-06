@@ -246,8 +246,26 @@ _INCOMING_EXPIRES_AT = datetime(2027, 5, 1, tzinfo=UTC)
 #: The incoming record's transaction stamp, distinct from the target's `_WHEN`.
 _INCOMING_WHEN = datetime(2026, 5, 1, tzinfo=UTC)
 
+#: The **open** lifetime — both `Validity` ends unset and no expiry — run opposite a
+#: bounded one on the *surviving* side of each arm below. Two bounded lifetimes
+#: establish that the fold picks the right record; they cannot establish that it
+#: *picks* at all, because a fold coalescing the two (`target.expires_at or
+#: incoming.expires_at`) is indistinguishable from one selecting while both sides
+#: are truthy. That distinction is not academic on this side of the fold: the
+#: survivor is the record whose lifetime is meant to stand, so coalescing would hand
+#: an open-ended belief the other record's expiry and retire it on a date nothing
+#: ever set for it.
+_OPEN_LIFETIME = (Validity(), None)
 
-async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -> None:
+
+@pytest.mark.parametrize(
+    ("target_window", "target_expiry"),
+    [(_TARGET_WINDOW, _TARGET_EXPIRES_AT), _OPEN_LIFETIME],
+    ids=["bounded-target", "open-target"],
+)
+async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it(
+    target_window: Validity, target_expiry: datetime | None
+) -> None:
     """#646: the fold that used to raise out of ``core`` and write nothing.
 
     An ``EXTERNAL`` target at 1.0 — legitimate under ADR-0038 §2a — reinforced by
@@ -267,6 +285,10 @@ async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -
     survive; ``last_updated`` is transaction time (ADR-0045 §3) rather than a
     belief property, so it comes from the incoming record and is not a third
     contribution.
+
+    Run at a bounded target lifetime and at an open one (:data:`_OPEN_LIFETIME`),
+    against a bounded incoming record either way, so the case says the survivor's
+    lifetime is *selected* rather than merely non-empty.
     """
     store = InMemoryMemoryStore(now=_fixed_now)
     await _plant_episodes(store, _EPISODE)
@@ -276,8 +298,8 @@ async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -
             _IMPORTED,
             confidence=1.0,
             source=MemorySource.EXTERNAL,
-            validity=_TARGET_WINDOW,
-            expires_at=_TARGET_EXPIRES_AT,
+            validity=target_window,
+            expires_at=target_expiry,
             last_updated=_WHEN,
         )
     )
@@ -309,9 +331,10 @@ async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -
     # Its window and its expiry too. These are the belief's own properties, so
     # ADR-0103 §6 leaves the incoming record's behind with its confidence and its
     # text — a fold that carried them across would give the surviving attested
-    # belief a lifetime the attested source never stated.
-    assert survivor.validity == _TARGET_WINDOW
-    assert survivor.expires_at == _TARGET_EXPIRES_AT
+    # belief a lifetime the attested source never stated. At the open parameter
+    # this is the stronger claim that nothing was filled in from the other side.
+    assert survivor.validity == target_window
+    assert survivor.expires_at == target_expiry
     # The one thing the derived observation contributes: its evidence, unioned.
     # This is where the corroboration is recorded — the episode it stands on is
     # retained, which is what a currency rule reads from later (ADR-0103 §9).
@@ -353,7 +376,14 @@ async def test_a_derived_reinforcement_never_raises_an_attested_records_confiden
     assert survivor.provenance.source is MemorySource.EXTERNAL
 
 
-async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_did() -> None:
+@pytest.mark.parametrize(
+    ("incoming_window", "incoming_expiry"),
+    [(_INCOMING_WINDOW, _INCOMING_EXPIRES_AT), _OPEN_LIFETIME],
+    ids=["bounded-incoming", "open-incoming"],
+)
+async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_did(
+    incoming_window: Validity, incoming_expiry: datetime | None
+) -> None:
     """The reverse pairing is untouched, deliberately (ADR-0103 §6, #733).
 
     A ``DERIVED`` target reinforced by an ``EXTERNAL`` record still folds to
@@ -369,6 +399,10 @@ async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_
     the *incoming* record's window and expiry, so "the target's survive" is a rule
     about the arm ADR-0103 §6 rules rather than about the fold. ``last_updated`` is
     the one field the two arms agree on — transaction time on both (ADR-0045 §3).
+
+    Parametrized on the same axis as the corroboration case and for the same
+    reason, moved to the side that survives *here*: an open incoming record must
+    leave the survivor open rather than let the target's bounded lifetime stand in.
     """
     store = InMemoryMemoryStore(now=_fixed_now)
     await _plant_episodes(store, _EPISODE)
@@ -391,8 +425,8 @@ async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_
                 _CORROBORATED,
                 confidence=0.5,
                 source=MemorySource.EXTERNAL,
-                validity=_INCOMING_WINDOW,
-                expires_at=_INCOMING_EXPIRES_AT,
+                validity=incoming_window,
+                expires_at=incoming_expiry,
                 last_updated=_INCOMING_WHEN,
             )
         )
@@ -405,8 +439,8 @@ async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_
     assert survivor.provenance.source is MemorySource.EXTERNAL
     assert survivor.provenance.confidence == 0.9
     assert survivor.content == _CORROBORATED  # newer content still wins here
-    assert survivor.validity == _INCOMING_WINDOW  # and so does its window
-    assert survivor.expires_at == _INCOMING_EXPIRES_AT  # and its expiry
+    assert survivor.validity == incoming_window  # and so does its window
+    assert survivor.expires_at == incoming_expiry  # and its expiry
     assert survivor.provenance.last_updated == _INCOMING_WHEN  # as on the other arm
 
 
