@@ -9,9 +9,12 @@
   flip as recording a ratification rather than deciding one, so no clause cited
   here moves with it. Where a later ADR *changes* one of them, that change owes
   its own record and this ADR is owed a matching one.
-- **Decides `core` surface and implements none of it.** One optional field on
-  `SourceReading` in `core/types.py` (§2) and a set of obligations on the writer
-  boundary (§5). Golden rule 5 and ADR-0015 §5 put a contract ADR in its own PR,
+- **Decides `core` surface and implements none of it.** Exactly one optional field
+  on `SourceReading` in `core/types.py`, with its endpoint type and invariant
+  pinned (§2, §10). **No `core/protocols.py` change**: §5's closes ride
+  `MemoryStore.write_atomic` and §6's enumeration `MemoryStore.list_beliefs`, both
+  of which exist, and §10 rules that a lane concluding it needs a new Protocol
+  member owes its own ADR. Golden rule 5 and ADR-0015 §5 put a contract ADR in its own PR,
   merged and ratified before anything implements against it; the implementation
   is a separate later lane. **Its required review set is therefore adversarial
   *and* architecture**, even though the PR carrying it is prose only — the reading
@@ -152,10 +155,28 @@ held entirely on the reader, where "a caller able to widen the read is a caller
 able to defeat the bound".
 
 > **Normative.** A reading warrants no absence unless it **declares its
-> coverage**: the interval of the source's world the read exhausted, half-open,
-> with `None` at either end meaning unbounded — the shape `Validity` already uses.
-> It is carried on `SourceReading` as an **optional** field, and its absence means
-> the reading declares no coverage and warrants no absence.
+> coverage**: the interval of the source's world the read exhausted, expressed as
+> a half-open `[covers_from, covers_until)` pair of **`UtcInstant | None`**, where
+> `None` at either end means unbounded and both-set implies `covers_until >
+> covers_from` — `Validity`'s shape, its endpoint type, and its invariant. It is
+> carried on `SourceReading` as an **optional** field, and its absence means the
+> reading declares no coverage and warrants no absence.
+
+**The endpoint type and the invariant are ruled here rather than left to the
+lane, because they fail ADR-0103 §9's test and a name does not.** That section
+draws the line at "could two lanes make incompatible choices and both claim
+compliance?" — and a lane reading coverage as instants and a lane reading it as
+dates, indices or an opaque source cursor give **different answers to §3's
+containment question** while each satisfying a clause that named neither. So the
+domain is pinned. What is left to the lane is the field's and the value object's
+*spelling*, which is rename-class: a second implementation choosing another name
+has renamed something, not decided something.
+
+**`UtcInstant` because the corpus has one instant type and this is an interval of
+instants.** `Validity.valid_from`/`valid_until`, `Attestation.reported_at` and
+`SourceReading.read_at` are all `UtcInstant`, and §3 compares coverage directly
+against `Validity`'s two ends — a comparison across two different annotations
+would be a conversion for nothing, and a conversion is where a timezone is lost.
 
 > **Normative.** A coverage declaration states what the read **exhausted**, and a
 > reader may declare it only where that is true of the read it performed. It is
@@ -192,6 +213,15 @@ the bound; it does not know, and may not assert, what the source contains.
 > 3. the record's own envelope validity window lies **wholly within** `C` — the
 >    record states a position in the source's world, and `C` exhausted it;
 > 4. the record is **absent from** `R` in §4's sense.
+
+> **Normative.** "Wholly within" is containment of one half-open interval in
+> another with unbounded ends, stated so no lane has to derive it: the record's
+> window `[vf, vu)` lies wholly within `C = [cf, cu)` iff **`cf` is `None` or
+> (`vf` is not `None` and `vf >= cf`)** and **`cu` is `None` or (`vu` is not
+> `None` and `vu <= cu`)**. An unbounded record end is contained only by an
+> unbounded coverage end on the same side — so a record with a fully open window
+> is contained only by a fully unbounded coverage, and a bounded reading contains
+> none.
 
 **Condition 3 is what separates the bounded read from the deletion**, and it is
 the whole content of the decision. A record whose window is fully open states no
@@ -327,6 +357,58 @@ its own, because no policy is standing behind it. #112's sketch asked whether
 ("`SUPERSEDE` names the relation") and this ADR declines it here for the
 independent reason that an absence-close has no proposal to attach a ruling to.
 
+### 5a. Ruling: this reconciliation is #248's trigger, and it is a hard prerequisite
+
+A reconciliation is a **read-modify-write across three steps** — select the live
+in-coverage records (§6), ingest `R`'s proposals (§4), write the closes (§5) —
+and `write_atomic` does not make that sequence isolated. ADR-0046 §5 rules this
+in terms, and rules it about exactly this shape: "It makes a **write-set**
+atomic. The conflict `search` that produced the records happened *before* the
+batch is assembled and is not inside it, so a concurrent writer that changed `T`
+between the read and the `write_atomic` is still lost. Atomic-write-set is
+orthogonal to read-modify-write isolation." So a `REINFORCE` landing on a
+selected record between the selection and the batch is overwritten by the close's
+`UPSERT`, and the evidence that `REINFORCE` unioned is gone — ADR-0086's citation
+list destroyed by a retirement, which is the one outcome ADR-0045 exists to make
+impossible.
+
+**ADR-0046 §5 also names what would make this urgent, and this decision is it.**
+Its ground for leaving #248 open is that "#248 has no in-scope consumer to
+justify that surface" — "nothing runs two writers on one store" — and it states
+its own trigger: "If a composition ever does run two writers on one store,
+closing #248 is that lane's trigger." The residual it scopes is "**any two
+writers not sharing that lock**, in-process or cross-", because #262's lock is
+held by one `MemoryIngestor` instance. A reconciliation writing closes is a
+writer that does not hold it.
+
+> **Normative.** The reconciliation §3 authorises may not be implemented until
+> its selection, its ingest and its closes are **serialised against every other
+> writer on the same store** — either because the composition runs one writer and
+> the reconciliation shares its serialisation, or because the compare-and-swap
+> ADR-0046 §5 scopes to its own lane exists and the closes are conditional on the
+> selected records being unchanged. An implementation over an unserialised
+> read-modify-write is refused.
+
+> **Normative.** This ADR does **not** design that primitive and adds no
+> concurrency token to `MemoryRecord`. A `MemoryWriteMode.IF_UNCHANGED` and its
+> token are ADR-0046 §5's own lane's, and #248's, exactly as scoped there.
+
+This is ADR-0045 §8's move, one act over. That section ruled "rather than assume"
+that "the window-closing `SUPERSEDE` applier requires #104 first", splitting the
+dependency by what actually needs it and stating the consumer requirements
+without designing the primitive, so that "a later lane cannot silently implement
+the applier over a non-atomic pair of blind upserts." The same sentence is owed
+here about a non-isolated one, and for the same reason: the failure is silent,
+it destroys evidence, and it would ship under the cover of a feature.
+
+**The cheaper half of the disjunct is the one this expects to be taken.** The
+reconciliation runs on the hub's scheduler (ADR-0083 §7), where the ingest path
+it consumes already runs; a single writer serialised as #262 serialises one today
+satisfies the clause with no new `core` surface at all. The compare-and-swap is
+named as the alternative so the clause states a condition rather than a
+particular wiring — the discipline ADR-0080 §1 applied when it fixed that there
+is *one* close instant without requiring a clock.
+
 ### 6. Each close is justified alone, so the walk belongs to another ADR
 
 > **Normative.** Each close under §3 is justified by one record and one reading
@@ -444,6 +526,11 @@ in `export` (ADR-0045 §6).
   both for want of a consumer, and this ADR creates none: a reconciliation reads
   live records and writes closes, and asks nothing about what was believed on an
   earlier day. §12 carries the deferral forward.
+- **The compare-and-swap #248 needs, and its concurrency token.** §5a rules that
+  this reconciliation is the consumer ADR-0046 §5 named as #248's trigger and
+  makes serialisation a hard prerequisite; it does not design the primitive, add a
+  version field to `MemoryRecord`, or rule on `MemoryWriteMode`. That stays where
+  ADR-0046 §5 scoped it.
 - **#631's source-key field and its index.** ADR-0092 §10 declined them and §4
   above deliberately does not require them: absence is read off the gate's own
   outcome precisely so that this decision does not depend on a facility the corpus
@@ -480,14 +567,32 @@ later lane:**
 - **`MemoryDecisionKind`, `MemoryDecision` and `MemoryPolicy` are untouched**, per
   §5: an absence-close carries no proposal and reaches no policy.
 
-**What the implementing lane decides, and the constraint on it.** Whether the
-writer boundary exposes §5's close as a new `MemoryWriter` member or as a widening
-of an existing one is the implementing lane's — a shape question a second lane
-could answer differently without either being non-conforming. What is *not* the
-lane's, because two lanes could there make incompatible choices and both claim
-compliance (ADR-0103 §9's test), is: the close obeys ADR-0080 §1's clamp and §3's
-refusal; it is atomic over the set (§5); it never runs through `MemoryStore.add`;
-and it never reaches a record outside §3's four conditions.
+- **`MemoryWriter` is untouched, and no new member is authorised here.**
+
+> **Normative.** The mechanism this ADR decides is buildable on the `core`
+> surface that exists plus §10's one optional field, and it authorises no other
+> Protocol change. A close is a `MemoryWrite` in `MemoryWriteMode.UPSERT` inside a
+> `write_atomic` batch — the mode `MemoryWriteMode` documents a window-close as,
+> and same-kind by construction, so ADR-0108 §4's cross-kind refusal is not
+> engaged. A lane that concludes it needs a new `MemoryWriter` or `MemoryStore`
+> member owes its own ratified ADR for it under golden rule 5, and may not read
+> this one as pre-authorising it.
+
+An earlier draft of this section left "a new `MemoryWriter` member or a widening
+of an existing one" to the lane as a shape question. That was wrong on this
+repository's own terms: those are two different Protocol surfaces, golden rule 5
+makes either a decision an ADR has to ratify before it is implemented, and
+handing that choice to an implementation lane is the thing the rule exists to
+stop. It is also unnecessary — `write_atomic` and `list_beliefs` already carry the
+whole mechanism — so the deferral was buying nothing and spending a rule.
+
+**What is genuinely the implementing lane's** is the spelling of §2's field and
+value object, and the wiring of the reconciliation into a scheduler job. What is
+*not* the lane's, because two lanes could there make incompatible choices and both
+claim compliance (ADR-0103 §9's test), is: §2's endpoint type and invariant; §3's
+containment rule and its four conditions; §4's definition of presence and its
+suspension clause; ADR-0080 §1's clamp and §3's refusal; atomicity over the set
+(§5); and §5a's serialisation prerequisite.
 
 **The conformance question is deferred to that lane, in ADR-0103 §7's form.**
 Whether any clause here becomes a `MemoryWriter` or `MemoryStore` conformance
@@ -613,6 +718,16 @@ untouched and §4 above depends on it. §7's residual is not closed by this ADR
 which it bites* without touching the residual's statement or its filing.
 **No record owed.**
 
+**ADR-0046 §5 — nothing owed.** §5 rules that `write_atomic` does not close
+#248's lost update, scopes the residual to "any two writers not sharing that
+lock", and states its own firing condition — "If a composition ever does run two
+writers on one store, closing #248 is that lane's trigger." §5a above reports
+that the trigger has fired and makes the closure a prerequisite. Every sentence
+of §5 stays true, including its ground for deferring: the surface is still
+unbuilt, and this ADR still declines to design it. Firing a condition an earlier
+ADR stated is using it as specified, not amending it. **Stacked addition; no
+record owed.**
+
 **ADR-0072 §1, §4, §5 — nothing owed.** §1's re-derivability condition is cited as
 a reason not to close a derived belief. §4's band rule is relied on. §5 acquires no
 exception and is granted none: nothing here ranks, weights or composes anything at
@@ -641,12 +756,17 @@ owed.**
 - **`core` grows one optional field and no Protocol member**, which is the
   cheapest shape this decision was available in; the alternatives that would have
   cost more are in §Alternatives.
+- **#248 acquires the consumer ADR-0046 §5 said would fire its trigger**, and §5a
+  makes closing it — by a single serialised writer, or by that section's
+  compare-and-swap — a hard prerequisite of the implementation rather than a
+  follow-up. This is the one place this decision makes something *harder*, and it
+  is a prerequisite for ADR-0045 §8's reason: a silent lost update that destroys a
+  citation list under the cover of a retirement is worse than a lane that waits.
 - **The implementing lane owes**: the `SourceReading` field and its value object
-  with the additive migration story ADR-0093 §3's pattern implies; the writer
-  boundary's close under §5's four constraints; the reconciliation itself,
-  sequenced with the scheduler chunking work (#632, #710); and the conformance
-  judgement §10
-  defers to it.
+  with the additive migration story ADR-0093 §3's pattern implies; the
+  reconciliation under §5's obligations and §5a's prerequisite, sequenced with the
+  scheduler chunking work (#632, #710); and the conformance judgement §10 defers
+  to it.
 - **#639 and #112 close on ratification** (§11, §12), and ADR-0045 §10's three
   surviving deferrals move to their own issue.
 - **Revisit if** a reader is found whose entries have a position in the source's
@@ -700,6 +820,25 @@ owed.**
   in §2 and §10: it breaks every existing construction site and every stored
   reading to avoid a `None`, which is the trade ADR-0093 §3 already refused for the
   facet half and ADR-0109 §2 refused for `last_confirmed_at`.
+- **Design the compare-and-swap here**, so the reconciliation could ship without
+  waiting. Rejected in §5a and §9: it needs a concurrency token on `MemoryRecord`,
+  which is `core/types.py` surface ADR-0046 §5 scoped to its own lane and ADR-0045
+  weighed and avoided for its blast radius, and it would be a second lane's
+  contract decided inside this one. Naming the prerequisite costs a sentence and
+  leaves the decision where it belongs; the disjunct's cheaper half — one
+  serialised writer — needs no new surface at all.
+- **Leave the writer surface open, as "a new `MemoryWriter` member or a widening
+  of an existing one".** Rejected in §10, after an earlier draft did exactly this.
+  Those are two Protocol surfaces, golden rule 5 makes either one a decision an
+  ADR ratifies before implementation, and handing the choice to an implementation
+  lane is what that rule exists to stop. `write_atomic` and `list_beliefs` carry
+  the whole mechanism, so the deferral bought nothing.
+- **Leave coverage's endpoint type to the implementing lane**, as ADR-0103 §9 left
+  currency's representation. Rejected in §2: §9's own test is whether two lanes
+  could make incompatible choices and both claim compliance, and instants versus
+  dates versus source cursors give different answers to §3's containment question.
+  The *name* passes that test and is left to the lane; the domain does not and is
+  not.
 - **Rule the enumeration's mechanics here too**, since §6 depends on one existing.
   Rejected as scope: they are the scheduler chunking-and-cursor lane's (#632,
   #710), and §6's monotonicity is
