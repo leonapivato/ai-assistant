@@ -831,7 +831,58 @@ def _corroborates(target: MemoryRecord, incoming: MemoryRecord) -> bool:
     )
 
 
-def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
+def _confirming_instant(
+    target: Provenance, incoming: Provenance, *, now: datetime
+) -> datetime | None:
+    """The survivor's ``last_confirmed_at``: ADR-0103 §6's rule, ADR-0109 §5's shape.
+
+    The later of the two records' **usable** confirming instants; the usable one
+    where only one is usable; ``None`` where neither is. An instant is usable when
+    it is not ``None`` and not in the writer's future at the moment of the fold —
+    ``now`` is the ingestor's own injected, guarded clock, never a module-level
+    wall clock, so the selection is deterministic under test (ADR-0109 §5).
+
+    **The clock is what makes this the rule ADR-0103 §6 wrote rather than "the
+    later present value".** #741's pair is the proof: an ``ATTESTED`` target whose
+    ``reported_at`` is future-dated — stored unchanged, because ADR-0092 §3 does
+    not refuse a source's clock skew — folded with a ``DERIVED`` record confirmed
+    in January. Selecting the later *present* value takes the future one, and a
+    read then reports *unknown* for a belief with a perfectly good January
+    confirmation on the other side: the manufactured staleness ADR-0103 §6's
+    unknown-does-not-spread paragraph and ADR-0103 §9's third constraint both
+    refuse, reached at the fold. Selecting over usable values takes January.
+
+    **Composed rather than inherited on both arms.** The ordinary arm's survivor is
+    the incoming record wearing the target's id, so taking the incoming record's
+    instant alone would move a belief's currency *backwards* whenever the target
+    held the later confirmation — reachable with no producer doing anything
+    unusual, a proposal citing a December episode reinforcing a belief confirmed in
+    January. "A confirmation we *do* hold is not unmade" is ADR-0103 §6's own
+    sentence about the unknown case and reads identically about the merely-older
+    one.
+
+    **The selection is made once, and a future instant that later becomes past is
+    not promoted retroactively.** Nothing is lost by that: the target's
+    ``attestation`` survives the fold under ADR-0103 §6, so the record still says
+    what the source reported and when it claimed to be reporting it.
+
+    Args:
+        target: The stored record's provenance.
+        incoming: The proposed record's provenance.
+        now: The ingestor's clock reading, defining "our future" for this fold.
+
+    Returns:
+        The instant the survivor carries, or ``None`` for ADR-0103 §9's unknown.
+    """
+    usable = [
+        instant
+        for instant in (target.last_confirmed_at, incoming.last_confirmed_at)
+        if instant is not None and instant <= now
+    ]
+    return max(usable, default=None)
+
+
+def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> MemoryRecord:
     """Fold ``incoming`` into ``target``, keeping the target's id.
 
     Newer content wins; evidence is unioned and confidence taken as the maximum,
@@ -846,8 +897,8 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
 
     **A derived record folded onto an attested one contributes its evidence and
     nothing else** (ADR-0103 §6). The survivor keeps the target's ``source``,
-    ``attestation``, content and confidence; only the evidence union and the
-    transaction stamp move. Two rules that are each right on their own produced
+    ``attestation``, content and confidence; the evidence union, the transaction
+    stamp and the confirming instant move. Two rules that are each right on their own produced
     #646 between them — "take the maximum" is right about *evidence* and wrong
     about *what a derived source can warrant* — and the survivor was a
     ``Provenance`` ``core`` refuses, so the fold raised a ``ValidationError`` and
@@ -879,28 +930,35 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     revised the record is not one of them, and keeping the target's would claim a
     write that just happened never did.
 
-    **Currency is not written here, because nothing represents it yet.** ADR-0103
-    §6's third contribution — that the survivor's currency is measured from the
-    later of the two records' usable confirming instants — is a rule about a
-    quantity ADR-0103 §9's first clause leaves to a lane with a consumer to read
-    it, and it is not one this fold could honour under its own steam: the derived
-    record's confirming instant is the latest ``occurred_at`` among the episodes it
-    cites (§9), those instants live on the *episodes* rather than on the
-    ``Provenance`` in hand, and this function has no store to read them from. What
-    the fold does instead is keep the input that rule reads — the citations
-    themselves, appended last to the union and so the last to be displaced.
+    **Currency is composed here, on both arms, from the two records and the
+    ingestor's clock** (ADR-0109 §5, §6). ADR-0103 §6's third contribution — the
+    survivor's currency is measured from the later of the two records' *usable*
+    confirming instants, from whichever one is usable where only one is, and as
+    unknown only where neither is, never from the moment of the fold — is
+    implementable now that the instant is stored on the record rather than resolved
+    from the episodes (ADR-0109 §1). :func:`_confirming_instant` is that selection,
+    and it reads two values this function already holds plus ``now``: no store
+    read, so ADR-0081 §1's store-free, cannot-be-raced property is kept whole. It
+    governs **every** ``REINFORCE``, in every band pairing — ADR-0103 §9's fourth
+    clause says "whatever band that record came from", which is vacuous under
+    ADR-0103 §6's pairing alone, and a same-band rule that withheld currency would
+    age a belief re-observed every week exactly as fast as one nobody has seen
+    since.
 
-    **That retention is not total, and the limit is ADR-0086's rather than this
-    ruling's.** Where the incoming record alone carries more than
-    :data:`MAX_EVIDENCE_CITATIONS`, its own oldest-accumulated citations are
+    **The citation bound can no longer displace the instant, which is why #744's
+    finding has nowhere left to act.** Where the incoming record alone carries more
+    than :data:`MAX_EVIDENCE_CITATIONS`, its own oldest-accumulated citations are
     displaced, and accumulation order is not ``occurred_at`` order — so the
-    displaced one can be the episode carrying the latest instant. The bound bites
-    identically on both arms and on every fold before this change, ADR-0103 §1
-    names ADR-0086 §1's citation bound as one it does not disturb, and §9 defines a
-    derived belief's confirming instant over "the episodes ``Provenance.evidence``
-    cites" — the retained ones. Whether a currency implementation needs the instant
-    computed *before* the bound applies is that lane's question, recorded on #744
-    with this case.
+    displaced one can be the episode carrying the latest instant, and
+    ``evidence_elided`` retains a count and never an id (ADR-0086 §4), so that
+    instant is not recoverable from the survivor's tuple. Under a *resolver* the
+    survivor's currency would silently fall back to the latest retained citation. It
+    does not here: both inputs to the selection were computed by their producers
+    when the confirming events were in hand, which is **before** ADR-0086 §3's bound
+    ever applied, so the instant stopped depending on the citation list at the
+    moment the proposal was authored. The bound bites exactly as it always did —
+    ADR-0103 §1's promise not to disturb ADR-0086's citation bound holds — and it
+    now displaces citations and nothing else.
 
     **The union is bounded here, before the ``Provenance`` is constructed**, so
     the constructor's validators run on the value that is stored — the surrounding
@@ -955,6 +1013,9 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
         union,
         elided=target.provenance.evidence_elided + incoming.provenance.evidence_elided,
     )
+    # Selected once, before the arms: ADR-0109 §6 makes the rule identical on both,
+    # and computing it in one place is what stops the two arms drifting.
+    confirmed_at = _confirming_instant(target.provenance, incoming.provenance, now=now)
     if _corroborates(target, incoming):
         corroborated = Provenance(
             source=target.provenance.source,
@@ -963,6 +1024,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
             evidence_elided=elided,
             last_updated=incoming.provenance.last_updated,
             attestation=target.provenance.attestation,
+            last_confirmed_at=confirmed_at,
         )
         return target.model_copy(update={"provenance": corroborated})
     provenance = Provenance(
@@ -972,6 +1034,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
         evidence_elided=elided,
         last_updated=incoming.provenance.last_updated,
         attestation=incoming.provenance.attestation,
+        last_confirmed_at=confirmed_at,
     )
     return incoming.model_copy(update={"id": target.id, "provenance": provenance})
 
@@ -1319,7 +1382,13 @@ class MemoryIngestor:
                         _retirement_set(target, conflicts, proposal=proposal, resolved=resolved),
                         proposed,
                     )
-                return await self._fold(_installed(_merge(target, proposed)))
+                # The clock reading is the fold's, taken here rather than inside
+                # `_merge`: `_now_utc` translates a bad reading into this
+                # subsystem's `MemoryStoreError` (ADR-0026 §4), and a module-level
+                # helper has no error class to raise. It also keeps `_merge` a pure
+                # function of its arguments, which is what makes ADR-0109 §5's
+                # selection deterministic under test.
+                return await self._fold(_installed(_merge(target, proposed, now=self._now_utc())))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
 

@@ -323,7 +323,10 @@ class FakeMemoryWriter:
                         _retirement_set(target, conflicts, proposal=proposal, resolved=resolved),
                         proposed,
                     )
-                return await self._fold(_installed(_merge(target, proposed)))
+                # The clock reading is taken here, not inside `_merge`: `_now_utc`
+                # translates a bad reading into `MemoryStoreError` as the ingestor
+                # does, and a module-level helper has no error class to raise.
+                return await self._fold(_installed(_merge(target, proposed, now=self._now_utc())))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
 
@@ -888,7 +891,45 @@ def _corroborates(target: MemoryRecord, incoming: MemoryRecord) -> bool:
     )
 
 
-def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
+def _confirming_instant(
+    target: Provenance, incoming: Provenance, *, now: datetime
+) -> datetime | None:
+    """The survivor's ``last_confirmed_at`` — ADR-0103 §6's rule, ADR-0109 §5's shape.
+
+    The later of the two records' **usable** confirming instants; the usable one
+    where only one is usable; ``None`` where neither is. Usable means not ``None``
+    and not in the writer's future at the moment of the fold, on this fake's own
+    injected clock.
+
+    Duplicated from ``MemoryIngestor`` rather than shared, exactly as this module's
+    other contract helpers are: ``ai_assistant.testing`` may not import a subsystem
+    (golden rule 1). ADR-0109 §9 declines to promote its §5 and §6 to the ``MemoryWriter``
+    conformance suite — a writer that composes currency differently conforms, or
+    ADR-0028 §8's exclusion is void — while requiring **this** fake to implement
+    them identically to the ingestor, so a lane testing against it observes the
+    ingestor's behaviour. That is an obligation on the canonical fake, not on every
+    implementation of the Protocol, and it is why the clock is here at all: without
+    it the fake would take a future-dated ``reported_at`` where the ingestor takes
+    the usable January instant, and every fold test written against this double
+    would certify a survivor production never writes.
+
+    Args:
+        target: The stored record's provenance.
+        incoming: The proposed record's provenance.
+        now: This writer's clock reading, defining "our future" for this fold.
+
+    Returns:
+        The instant the survivor carries, or ``None`` for ADR-0103 §9's unknown.
+    """
+    usable = [
+        instant
+        for instant in (target.last_confirmed_at, incoming.last_confirmed_at)
+        if instant is not None and instant <= now
+    ]
+    return max(usable, default=None)
+
+
+def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> MemoryRecord:
     """Fold ``incoming`` into ``target``, keeping the target's id.
 
     A minimal fold — newer content wins, confidence taken as the maximum. Only
@@ -921,12 +962,23 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     attestation, beside the target's ``source`` and the target's text.
     ``last_updated`` comes from the incoming record on both arms: it is transaction
     time (ADR-0045 §3), not one of the belief properties ADR-0103 §6 withholds.
+
+    ``last_confirmed_at`` is **composed** on both arms rather than inherited from
+    either side (:func:`_confirming_instant`, ADR-0109 §5, §6): the later of the two
+    records' usable instants, the usable one where only one is, and ``None`` where
+    neither is. Not contract — ADR-0109 §9 leaves a writer free to compose currency
+    differently — and mirrored here because a fake that diverged would make every
+    fold test written against it a test of nothing. Nothing needs the cited episodes
+    to compute it: the producers captured their instants before ADR-0086 §3's bound
+    could displace anything, so the bound displaces citations and nothing else.
     """
     union = tuple(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence]))
     evidence, elided = _bounded_evidence(
         union,
         elided=target.provenance.evidence_elided + incoming.provenance.evidence_elided,
     )
+    # Selected once, before the arms: ADR-0109 §6 makes the rule identical on both.
+    confirmed_at = _confirming_instant(target.provenance, incoming.provenance, now=now)
     if _corroborates(target, incoming):
         corroborated = Provenance(
             source=target.provenance.source,
@@ -935,6 +987,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
             evidence_elided=elided,
             last_updated=incoming.provenance.last_updated,
             attestation=target.provenance.attestation,
+            last_confirmed_at=confirmed_at,
         )
         return target.model_copy(update={"provenance": corroborated})
     provenance = Provenance(
@@ -944,5 +997,6 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
         evidence_elided=elided,
         last_updated=incoming.provenance.last_updated,
         attestation=incoming.provenance.attestation,
+        last_confirmed_at=confirmed_at,
     )
     return incoming.model_copy(update={"id": target.id, "provenance": provenance})
