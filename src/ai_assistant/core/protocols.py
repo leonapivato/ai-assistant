@@ -644,6 +644,44 @@ class MemoryPolicy(Protocol):
     ) -> MemoryDecision:
         """Rule on a proposed memory update.
 
+        **A tainted derived proposal is never committed unconfirmed** (ADR-0106
+        §6, giving ADR-0098 §4's fourth clause its enforcement point). No policy
+        returns a committing ruling — ``ACCEPT``, ``REINFORCE``, ``SUPERSEDE`` or
+        ``STORE_TEMPORARY`` — on a proposal whose ``proposed.provenance`` is in
+        the ``DERIVED`` band, carries
+        :attr:`~ai_assistant.core.types.Provenance.derived_from_external`, and
+        carries no :class:`~ai_assistant.core.types.UserConfirmation` — whatever
+        the policy's other rules, and however trusted the producer. Its terminal
+        ruling is ``ASK_USER`` or ``REJECT``; the contract admits either, and
+        which one a policy picks is its own reasoning. The fact is read off the
+        argument already passed, so this needs no store and no evidence
+        resolution — which is why ADR-0098 §5 could not site the rule and this
+        one can.
+
+        **The condition is band-scoped, and deliberately not
+        :func:`~ai_assistant.core.types.rests_on_recorded_external_content`.**
+        The two differ in both directions and each difference is load-bearing. An
+        ``ATTESTED`` proposal satisfies that predicate by definition and must
+        still be allowed to commit — a ceiling stated over it would refuse every
+        reader's import and make the reader useless. And a stray
+        ``derived_from_external`` outside the ``DERIVED`` band triggers nothing,
+        because ADR-0106 §7 leaves such a record constructible while ADR-0106 §2
+        says the field means nothing there. The rule is about a model-authored
+        generalisation about the user that external content helped produce, never
+        a faithful transcription at a band that already caps its standing
+        (ADR-0098 §4).
+
+        **A confirmation passes it.** ADR-0078 §5's confirmed answer is a
+        *re-ingest*: the coordinator rebuilds the proposal carrying the user's
+        authority and calls the writer again, marker and all. A rule firing a
+        second time there would ask the user the question they just answered, and
+        a tainted consolidation could never land at all. A ruling reached by
+        asking the user is not the *auto*-acceptance ADR-0098 §4 forbids.
+
+        Nothing here obliges the *wording* of any ``reason`` (ADR-0106 §6): a
+        deployment injecting its own policy owns the legibility of its own
+        questions, and this ceiling still binds it.
+
         Args:
             proposal: The candidate memory and why it was proposed.
             conflicts: Existing records the proposal contradicts, already
