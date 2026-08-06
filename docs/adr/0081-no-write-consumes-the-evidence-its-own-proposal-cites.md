@@ -1,18 +1,32 @@
 # 81. No write consumes the evidence its own proposal cites
 
-- Status: Accepted, §8's cross-kind deferral discharged and two of its grounds amended by ADR-0108
+- Status: Partially superseded by ADR-0108 (§8's first deferred item and its assignment to the #104 lane)
 - Date: 2026-07-29
-- Note (2026-08-05): **§8's first deferred item is taken, and two of the three
-  grounds it gave for deferring have expired.** The item — "whether a proposal
-  arriving at the id of a stored record of a *different kind* should be refused
-  rather than silently upserted", #472's second question — is ruled by
+- Partially superseded: 2026-08-05 by ADR-0108 — **§8's first deferred item is
+  ruled, and its assignment of that item to the #104 lane no longer holds. Two of
+  the three grounds §8 gave for deferring have also expired. §8's second deferred
+  item, §§1–7, §9 and §10 stand untouched.**
   [ADR-0108](0108-a-write-declares-its-intent-and-a-cross-kind-collision-is-refused.md)
-  §4: refused with `MemoryStoreError`, at **every** upsert-capable door, on every
-  implementation. **Nothing §8 decided is replaced.** A deferral decides to defer,
-  and a deferral that is taken has been honoured, not overridden — ADR-0070 §1's
-  test therefore makes this an amendment noted here rather than a supersession.
-  What is recorded is the state of §8's stated reasoning against the tree as it
-  now stands:
+  §4 rules it: a cross-kind same-id write is refused with `MemoryStoreError`, at
+  **every** upsert-capable door, on every implementation.
+
+  **Replaced**, two clauses of §8's first bullet:
+
+  1. The **deferral** — "whether a proposal arriving at the id of a stored record of
+     a *different kind* should be refused rather than silently upserted … **Deferred.**"
+     A reader of §8 would treat the question as open; it is not.
+  2. **The operative one, the owner.** "**Owner: the `MemoryStore` write-semantics
+     lane**, the one that takes #104's compare-and-swap." ADR-0108 takes it in a
+     lane that leaves #104 untouched. §8's stated reason for the pairing was that
+     the cross-kind rule "wants the same conformance-suite rewrite across all three
+     backends that #104's CAS wants" — and that rewrite happens in ADR-0108's
+     implementing lane anyway, for its §1's sake, so pairing them again would mean
+     doing it twice. That is a good reason to reassign, and reassigning is still a
+     change to what §8 decided: recorded as a supersession rather than argued into
+     an amendment. #104 itself is untouched and stays open.
+
+  **Not replaced: §8's reasoning is corrected, not overruled**, and the three
+  grounds it gave stand as follows against the tree as it now is.
 
   1. **The cost ground has expired.** §8 wrote that a writer "could only enforce
      [it] by paying a `get(proposed.id)` on every ingest to see something the
@@ -40,14 +54,9 @@
   #735 records `FakeBeliefObserver` deriving ids from a content hash on `main`.
   §8's "until then no producer can collide" is correspondingly no longer true.
 
-  **§8's named owner is not the lane that took it, deliberately.** §8 gave the
-  item to "the `MemoryStore` write-semantics lane, the one that takes #104's
-  compare-and-swap", on the ground that it "wants the same conformance-suite
-  rewrite across all three backends that #104's CAS wants". That rewrite happens
-  in ADR-0108's implementing lane regardless, for its §1's sake, which is the
-  whole of §8's stated reason for pairing them; #104 is untouched. §8's **second**
-  deferred item — the general "no stored record cites itself" invariant, owned by
-  the belief-presentation lane — is untouched, as is every other section.
+  §8's **second** deferred item — the general "no stored record cites itself"
+  invariant, owned by the belief-presentation lane — is untouched, as is every
+  other section of this ADR.
 
   This record lands in ADR-0108's own (`Proposed`) change, in the shape this ADR
   used for its ADR-0077 note (commit `4bc008b`), so the review that can still

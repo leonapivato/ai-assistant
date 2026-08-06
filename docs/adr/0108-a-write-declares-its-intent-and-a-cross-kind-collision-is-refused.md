@@ -21,23 +21,17 @@
   under `CONTRIBUTING.md` → "Stop when the required reviews are green". A
   prose-only PR trips neither of `scripts/ship.sh`'s persona regexes, so both
   lenses are run deliberately rather than mechanically, in ADR-0106's shape.
-- **This ADR partially supersedes [ADR-0022](0022-the-closed-learning-loop.md)
-  §4's same-id collision clause and
+- **This ADR partially supersedes three ratified ADRs** —
+  [ADR-0022](0022-the-closed-learning-loop.md) §4's same-id collision clause,
   [ADR-0046](0046-a-memorystore-batch-commits-atomically.md)'s cross-kind `UPSERT`
-  clause, and amends
-  [ADR-0081](0081-no-write-consumes-the-evidence-its-own-proposal-cites.md) §8.**
-  §6 applies ADR-0070 §1's amend-versus-supersede test to each and gets different
-  answers, which is why they are recorded differently. ADR-0022 §4's
-  "last-write-wins" and ADR-0046's "upsert a full, different-kind replacement at an
-  existing id and assert `get` returns the replacement" are each decisions a reader
-  would act on differently after this — indeed the ADR-0046 clause is a conformance
-  obligation an implementation could satisfy only by *breaching* §4 (**partial
-  supersession**, ADR-0070 §3). ADR-0081 §8's deferral, by contrast, is
-  *discharged* by this ADR taking it, and two of the three reasons it gave are
-  contradicted by facts that postdate it (**an amendment**, recorded as a dated
-  header note in ADR-0078 §10's shape). **No ratified body text is rewritten and
-  all four files land in this one change**, so no Status line ever names an absent
-  ADR.
+  clause, and
+  [ADR-0081](0081-no-write-consumes-the-evidence-its-own-proposal-cites.md) §8's
+  first deferred item together with its assignment to the #104 lane. §6 applies
+  ADR-0070 §1's test to each. Three findings, in the reviews this ADR ran while
+  `Proposed`, moved two of these from "amendment" to "supersession"; the reasoning
+  is in §6 rather than the classification being asserted. **No ratified body text
+  is rewritten and all four files land in this one change**, so no Status line ever
+  names an absent ADR.
 
 ## Context
 
@@ -396,13 +390,34 @@ columns, which is if anything the sharper instrument: a store that rewrote only 
 JSON blob would keep the old retention deadline and closed window, and `get` would
 then answer `None` for a record that is fully open.
 
-**ADR-0081 §8 — an amendment, recorded as a dated note.** §8's cross-kind bullet is
-a *deferral with an owner*, and this ADR discharges it: §4 above rules the horn §8
-left open. Discharging a deferral changes no decision — §8 decided to defer, and the
-deferral has now been taken, which is what a deferral is for. But two of the three
-grounds §8 gave are contradicted by facts that postdate it, and ADR-0070 §1 admits
-exactly this class of amendment ("reconciles the ADR … with a fact that postdates
-it"):
+**ADR-0081 §8 — partial supersession, and the classification was corrected under
+review.** §8's cross-kind bullet is a *deferral with an owner*, and the first draft
+of this section recorded taking it as an amendment, on the reasoning that
+"discharging a deferral changes no decision — §8 decided to defer, and the deferral
+has now been taken, which is what a deferral is for." **That reasoning does not
+survive ADR-0070 §1's test and is withdrawn.** Two clauses of §8 are things a reader
+acts on and both change:
+
+- The **deferral** itself. A reader of §8 treats the cross-kind question as open and
+  does not rule it; after §4 it is ruled. "A deferral that is taken has been
+  honoured" describes the *spirit* correctly and is not the test ADR-0070 §1 sets,
+  which is whether the reader acts identically.
+- **The owner**, which is the sharper of the two. §8 does not merely defer, it
+  assigns: "Owner: the `MemoryStore` write-semantics lane, the one that takes #104's
+  compare-and-swap." This ADR lands the ruling in a lane that leaves #104 untouched.
+  §8's stated reason for pairing them is that the cross-kind rule "wants the same
+  conformance-suite rewrite across all three backends that #104's CAS wants" — and
+  that rewrite happens here anyway, for §1's sake, so pairing them again would mean
+  doing it twice. That is a good reason to reassign; it is still a reassignment, and
+  §5's obligations are what discharge §8's stated concern rather than what excuse
+  it.
+
+So the record on ADR-0081 is a leading-token partial supersession naming both
+clauses, and #104 stays open and unclaimed by this lane.
+
+**§8's *reasoning* is separately corrected, and that part is an amendment** —
+ADR-0070 §1's "reconciles the ADR … with a fact that postdates it". Two of the three
+grounds §8 gave are contradicted by the tree:
 
 1. §8's cost ground — a writer "could only enforce [it] by paying a
    `get(proposed.id)` on every ingest to see something the store sees for free" —
@@ -417,19 +432,11 @@ it"):
    smaller — **stands unchanged**, and is why this is a low-priority defect
    properly fixed rather than an incident.
 
-§8's named trigger also fired before this lane started, which is recorded here so
-the deferral's own terms are seen to have been met rather than overridden: #735
-finds `FakeBeliefObserver` deriving record ids from a content hash, which is
-verbatim the class §8 named as the thing that would make the question urgent, and
-which its "until then no producer can collide" therefore no longer covers.
-
-**§8's named owner is not this lane, and that is deliberate.** §8 gave the item to
-"the `MemoryStore` write-semantics lane, the one that takes #104's compare-and-swap"
-— on the ground that the cross-kind refusal "wants the same conformance-suite
-rewrite across all three backends that #104's CAS wants". That rewrite is happening
-here, for §1's sake, which is the whole of §8's stated reason for pairing them; #104
-itself is untouched (§8's argument was about sharing a conformance rewrite, not
-about a shared decision). Pairing them again would mean doing this rewrite twice.
+§8's named **trigger** also fired before this lane started, which is recorded
+because it means the deferral's own terms were met rather than merely outrun: #735
+finds `FakeBeliefObserver` deriving record ids from a content hash, verbatim the
+class §8 named as the thing that would make the question urgent, and which its
+"until then no producer can collide" therefore no longer covers.
 
 ### 7. The residual, stated rather than papered over
 
@@ -524,12 +531,20 @@ advances nor blocks it.
 - **`MemoryStore.add` acquires no callers in `src/` and one new refusal.** It
   remains contract surface, remains the upsert, and remains exercised by the
   conformance suite against all three backends.
-- **Three ratified ADRs get Status-line edits in this change**: ADR-0022 and
-  ADR-0046 each gain a leading partial-supersession token — naming §4's collision
-  clause and the cross-kind `UPSERT` clause respectively — and ADR-0081 gains a
-  dated header note recording the discharge and the two corrected grounds. All are
-  the append-only forms ADR-0070 §1 permits; no Decision or Consequences text is
-  rewritten in any of them.
+- **Three ratified ADRs get Status-line edits in this change**, each a leading
+  partial-supersession token with a dated note beneath it: ADR-0022 (§4's collision
+  clause), ADR-0046 (the cross-kind `UPSERT` clause), ADR-0081 (§8's first deferred
+  item and its owner). ADR-0081's note additionally records the two corrected
+  grounds, which is an amendment riding in the same note. All are the append-only
+  forms ADR-0070 §1 permits; no Decision or Consequences text is rewritten in any
+  of them, and ADR-0081's leading token replaces an `Accepted` under ADR-0082 §2 —
+  no prior amendment qualifier stood on that line to be moved.
+- **This ADR touches more of the record than a change of its size usually does**,
+  and that is the finding rather than an aside: a rule about *what a write means*
+  reaches every ADR that ever described a write's collision behaviour, and three
+  had. Two of the three classifications above started as amendments and became
+  supersessions under review. A later ADR in this area should expect the same and
+  budget for it.
 - **A round trip is added to the `REINFORCE` path in name only.** `write_atomic`
   with one element embeds through the same `_embed_one` and writes through the same
   `_persist_record` as `add`; ADR-0046 §2 already ruled the degenerate batch legal
