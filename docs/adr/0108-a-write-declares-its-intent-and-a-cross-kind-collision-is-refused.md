@@ -6,12 +6,12 @@
   keeps its signature and keeps its upsert semantics; what it gains is one
   refusal clause (§4), and what changes around it is which verb each caller in
   `src/` uses to say what it means (§2, §3). **No signature changes, no Protocol
-  is added, and `core/types.py` and `core/errors.py` are untouched** — the write
-  modes this decision routes on are `MemoryWriteMode.UPSERT` and
-  `MemoryWriteMode.INSERT_IF_ABSENT`, ratified and shipping since ADR-0046 §2.
-  (One consequence of leaving `core/types.py` alone is that the `UPSERT` member's
-  own docstring restates the pre-§4 behaviour; §9 records that and why it is a
-  follow-up rather than part of this change.)
+  is added, and `core/errors.py` is untouched** — the write modes this decision
+  routes on are `MemoryWriteMode.UPSERT` and `MemoryWriteMode.INSERT_IF_ABSENT`,
+  ratified and shipping since ADR-0046 §2. `core/types.py` gains **no surface**
+  either, but does take one docstring amendment: §5 requires `UPSERT`'s member
+  docstring to carry §4's exception, because that member is contract surface a
+  backend author reads and two normative descriptions of one mode may not disagree.
   What changes is the documented meaning of two methods plus the shared
   conformance suite, which is the review concern `CONTRIBUTING.md` names when a
   Protocol's meaning changes without its shape. Golden rule 5 therefore applies:
@@ -276,6 +276,17 @@ both doors by construction rather than by two implementers remembering. In
 > docstrings on `MemoryStore.add`, `MemoryStore.write_atomic` and
 > `MemoryWriter.ingest`; and cases in `MemoryStoreContract` pinning both verbs'
 > collision behaviour, plus cases in `MemoryWriterContract` pinning the routing.
+
+> **Normative.** `MemoryWriteMode.UPSERT`'s member docstring in `core/types.py` is
+> amended with §4's exception, in the change that lands the refusal and not after
+> it. It currently reads "Overwrite the record if its id is present, insert it if
+> absent" — the outcome §4 forbids for a cross-kind id — and it is **contract
+> surface in its own right**: `MemoryWriteMode` crosses subsystem boundaries and is
+> what a backend author reads to learn what a mode means. Two normative
+> descriptions of one mode may not disagree, however clearly the `MemoryStore`
+> methods state the rule, so this is not a restatement to tidy up later. **Docstring
+> only** — no field, no member, no shape; the enum is unchanged, which is why this
+> ADR still adds nothing to `core/types.py`'s surface.
 
 > **Normative.** §1 is enforced mechanically, not left to review: a test asserts
 > that **every `MemoryWrite` construction under `src/ai_assistant/` names its
@@ -580,16 +591,11 @@ advances nor blocks it.
   overwrite; whether a derived id is the right design for that fake is the
   observer lane's.
 - **Anything about `add`'s signature.** §8 files that; it is not decided here.
-- **The restatement of `UPSERT`'s meaning in `core/types.py`.** The
-  `MemoryWriteMode.UPSERT` member's docstring says "Overwrite the record if its id
-  is present, insert it if absent", which §4 now qualifies. This ADR **does** decide
-  the semantics — the ruling is §4's and is stated on both `MemoryStore` methods in
-  `core/protocols.py` — and leaves only the *restatement* stale, on a file the
-  implementing lane's fence excludes. Recorded here rather than left for a reader to
-  notice, because a public cross-subsystem type is what a backend author reads to
-  learn what a mode means, and one working from it alone would build a store the
-  conformance suite then fails. Filed as a docstring-only follow-up; no new ADR is
-  owed, since the decision already exists.
+- **Which change carries §5's `MemoryWriteMode.UPSERT` amendment**, if not the one
+  implementing the rest of §5. That is a lane-scoping question for whoever
+  dispatches the work, not a decision: §5 requires the amendment and this ADR is
+  not ratified until it lands with the rest. What is *not* open is whether it is
+  owed.
 
 ## Consequences
 
