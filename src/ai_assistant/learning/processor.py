@@ -7,6 +7,11 @@ no natural-language interpretation and no I/O: given the feedback's target
 ``USER_ASSERTED`` provenance, so the existing :class:`DefaultMemoryPolicy`
 accepts it and the loop "takes" on the first correction.
 
+Its one seam beyond the model of the feedback itself is an injected clock, which
+stamps *transaction* time on what it proposes (ADR-0045 §3). The event supplies
+the instants that are facts about the world; the clock supplies the one that is a
+fact about our write.
+
 Interpreting freeform feedback is the job of a later model-backed processor
 behind the same Protocol.
 """
@@ -14,8 +19,10 @@ behind the same Protocol.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.types import (
     MemoryKind,
     MemorySource,
@@ -28,6 +35,7 @@ from ai_assistant.core.types import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import FeedbackEvent, MemoryRecord
 
 _FULL_CONFIDENCE = 1.0
@@ -37,6 +45,10 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
 class RuleBasedFeedbackProcessor:
     """Maps explicit feedback to a user-asserted memory proposal.
 
@@ -44,17 +56,39 @@ class RuleBasedFeedbackProcessor:
     :class:`~ai_assistant.core.protocols.FeedbackProcessor`.
     """
 
-    def __init__(self, *, id_factory: Callable[[], str] = _uuid) -> None:
+    def __init__(self, *, now: Clock = _utcnow, id_factory: Callable[[], str] = _uuid) -> None:
         """Initialise the processor.
 
         Args:
+            now: Clock for each proposed record's ``provenance.last_updated`` —
+                *transaction* time, and so ours rather than the event's
+                (ADR-0045 §3). Injectable for deterministic tests, and guarded by
+                :func:`~ai_assistant.core.clock.checked_clock` (ADR-0026 §7).
             id_factory: Supplies ids for new records; injectable for
                 deterministic tests. Defaults to random UUIDs.
         """
+        self._clock = checked_clock(now, owner="RuleBasedFeedbackProcessor")
         self._id_factory = id_factory
 
     async def process(self, event: FeedbackEvent) -> Sequence[MemoryUpdateProposal]:
-        """Return the proposal implied by ``event``, or nothing for a deferred kind."""
+        """Return the proposal implied by ``event``, or nothing for a deferred kind.
+
+        Args:
+            event: The explicit, already-structured feedback to interpret.
+
+        Returns:
+            One proposal for a supported target, and an empty sequence for a
+            deferred one.
+
+        Raises:
+            ValueError: If the injected clock's reading does not conform — a
+                :class:`~ai_assistant.core.clock.ClockReadingError`, which is a
+                ``ValueError`` and is left unwrapped: `learning` has no error class
+                of its own to translate it into, and the distinct subclass keeps a
+                refused *reading* separable from a failure of the clock itself
+                (ADR-0026 §2, §4). A deferred target reads no clock, so it cannot
+                raise this.
+        """
         record = self._to_record(event)
         if record is None:
             return []
@@ -69,7 +103,8 @@ class RuleBasedFeedbackProcessor:
         """Build the typed record for ``event``, or ``None`` for a deferred kind.
 
         A new id and provenance are minted only for a *supported* target, so a
-        deferred kind does not consume an id from an allocating factory.
+        deferred kind consumes neither an id from an allocating factory nor a
+        reading from a clock that advances on being read.
 
         **Both branches carry ``about_person`` across, and the field it sits
         beside is not it** (ADR-0100 §7). ``event.subject`` is a preference
@@ -103,30 +138,40 @@ class RuleBasedFeedbackProcessor:
             case _:  # PROCEDURAL, EPISODIC — need richer structure (deferred, ADR-0009 §6)
                 return None
 
-    @staticmethod
-    def _provenance(event: FeedbackEvent) -> Provenance:
-        """User-asserted provenance carrying the feedback's evidence and time.
+    def _provenance(self, event: FeedbackEvent) -> Provenance:
+        """User-asserted provenance carrying the feedback's evidence and two instants.
 
-        **The confirming instant is the utterance's, not the write's**
-        (ADR-0109 §4). An ``ASSERTED`` belief is confirmed by the user stating it,
-        so ``last_confirmed_at`` is ``event.created_at`` — the same discipline
-        that keeps ``ATTESTED`` off our ingestion clock and ``DERIVED`` off the
-        moment of derivation. Reading the ingest clock instead would make a
-        re-processed feedback event look freshly confirmed.
+        **The two instants come from different clocks, and each answers to its
+        own rule.** They are not two spellings of one quantity, and the fact that
+        a live path puts them microseconds apart is the coincidence ADR-0103 §9
+        warns "breaks silently" — so each is taken from its own source here.
 
-        The two instants coincide here because this producer already takes its
-        *transaction* stamp from the same event, which is the coincidence ADR-0103
-        §9 warns "breaks silently". Whether that is the right transaction time is
-        an ADR-0045 §3 question about a line ADR-0109 does not touch, filed as
-        #775. What holds the two fields apart in the suite is the calendar reader,
-        whose ``last_updated`` is ``read_at`` while its confirming instant is the
-        source's ``reported_at``, and the fold, whose survivor takes the two from
-        different sides (ADR-0109 §10).
+        ``last_confirmed_at`` **is the utterance's instant, not the write's**
+        (ADR-0109 §4): an ``ASSERTED`` belief is confirmed by the user stating it,
+        so it is ``event.created_at``. That is the same discipline which keeps
+        ``ATTESTED`` off our ingestion clock and ``DERIVED`` off the moment of
+        derivation, and reading a clock for it instead would make a re-processed
+        feedback event look freshly confirmed. The instant is written as it stands,
+        including one ahead of our own clock, because the usability test belongs to
+        the fold alone (ADR-0109 §4's fourth clause, ADR-0092 §3).
+
+        ``last_updated`` **is transaction time, and so it is our clock at this
+        write** (ADR-0045 §3): "when *we* last revised the belief" — the clock of
+        the store changing its mind, never the clock of when the belief holds.
+        ``event.created_at`` is a fact about the world rather than about our write,
+        and taking the stamp from it made the record claim a revision at an instant
+        nothing was revised at, wrongly by exactly the delay of a queued, retried or
+        replayed event (#775).
+
+        The clock is read **here**, on the branches that mint a record, rather than
+        once in ``process``: a deferred target has nothing to stamp, and reading for
+        it would consume a reading and turn a misconfigured clock into a failure of
+        a call that today returns nothing and touches no seam.
         """
         return Provenance(
             source=MemorySource.USER_ASSERTED,
             confidence=_FULL_CONFIDENCE,
             evidence=event.evidence,
-            last_updated=event.created_at,
+            last_updated=self._clock(),
             last_confirmed_at=event.created_at,
         )
