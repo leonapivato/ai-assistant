@@ -32,13 +32,62 @@
 # one. Gating every push would force a full Codex run per WIP commit, which is
 # the fix-per-finding cost pattern ADR-0015 exists to remove.
 #
-# Usage: scripts/ship.sh
+# Usage: scripts/ship.sh [--drill]
 set -euo pipefail
 
 die() {
     echo "ship: $1" >&2
     exit 1
 }
+
+# --- --drill: answer the moved-base question with this script, not a replica --
+#
+# Before pushing a rebased branch a lane wants to know whether its existing
+# artifact still covers HEAD, or whether the moved base costs a review round —
+# ADR-0027 §2's question, asked early because a round is cheaper to skip than to
+# unspend. `.claude/agents/worker.md` had lanes assemble that answer by hand from
+# this script's parts, and issue #751 records TWO ways the hand-assembled version
+# returned the PERMISSIVE answer for a base move that in fact breaches §3's floor:
+#
+#   1. `_is_floor_path` is defined below, OUTSIDE the `>>> shared-patch-identity`
+#      markers. A replica that sources only the marked block — which is what the
+#      instructions emphasise, because the identity is the part that must not be
+#      hand-copied — has no such function. The natural loop shape
+#      `_is_floor_path "$p" && breach=1` then fails with `command not found`, the
+#      `&&` does not fire, no breach is recorded, and the replica concludes
+#      "floor clear". Every other clause in this area fails CLOSED; that one
+#      failed open, on the clause that decides whether a review round is owed.
+#   2. Run BEFORE the rebase, `git merge-base FETCH_HEAD HEAD` is still the OLD
+#      base, so `<recorded base>..<that>` is empty, no floor path is in it, and
+#      the replica again concludes "floor clear" — this time with every helper
+#      correctly in scope. The drill is only meaningful once HEAD stands on the
+#      base it is being judged against.
+#
+# `--drill` closes both by construction rather than by instruction. It is this
+# script, so every helper is in scope and the floor is decided by the same
+# `_is_floor_path` the acceptance rule uses; and it REFUSES on an un-rebased HEAD
+# rather than answering the question it was not asked. It decides nothing new:
+# ADR-0027 §2 and §3 are applied verbatim, by the same code, and the only
+# differences from a real ship are that the PR head need not yet match HEAD
+# (the point is to run before the push) and that nothing is written to GitHub.
+#
+# It reports its INPUTS, not only its verdict — the recorded bases it evaluated,
+# the computed merge base, and every path of the base move with the floor ones
+# marked — so that "no floor path in these 3 files" and "the floor was never
+# evaluated" can no longer read as the same answer. Where nothing reached §2(b),
+# it says so and makes no floor claim at all.
+drill=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --drill)
+        drill=1
+        shift
+        ;;
+    *)
+        die "unknown argument '$1' — usage: scripts/ship.sh [--drill]"
+        ;;
+    esac
+done
 
 # Validate an operator-supplied byte budget BEFORE any arithmetic reads it.
 # `[[ x -gt "$b" ]]` and `$(( ))` evaluate their operand as an ARITHMETIC
@@ -91,7 +140,15 @@ sha="$(git rev-parse HEAD)"
 pr_sha="$(gh pr view --json headRefOid --jq .headRefOid 2>/dev/null || true)"
 [[ -z "$pr_sha" ]] && die "no PR found for '${branch}' — open one first (gh pr create)"
 if [[ "$pr_sha" != "$sha" ]]; then
-    die "PR head is ${pr_sha:0:12} but HEAD is ${sha:0:12} — push first"
+    # The drill exists to be run BEFORE the push, so a lagging PR head is its
+    # normal state rather than an error — but it is stated, because the answer
+    # is about local HEAD and the reader may have assumed otherwise.
+    if [[ "$drill" == "1" ]]; then
+        echo "ship: drill — PR head is ${pr_sha:0:12}, HEAD is ${sha:0:12};" \
+            "answering for local HEAD (the drill runs before the push)" >&2
+    else
+        die "PR head is ${pr_sha:0:12} but HEAD is ${sha:0:12} — push first"
+    fi
 fi
 
 # A change to the shared contract surface needs the architecture lens too
@@ -124,6 +181,33 @@ fi
 # possibly-stale local ref; FETCH_HEAD is that ref as of this moment.
 git fetch --no-tags --quiet origin "$base_ref" ||
     die "could not fetch base '${base_ref}' to check for contract changes"
+
+# Issue #751, second mechanism. `expected_base` below is `git merge-base
+# FETCH_HEAD "$sha"` — the merge base as it stands NOW. That is the right input
+# for a real ship, which reports on the PR as it is; it is the wrong input for a
+# drill, which is asked what will be true AFTER the rebase the lane is about to
+# do. On an un-rebased branch the two differ: the merge base is still the old
+# base, `<recorded base>..<merge base>` is empty, and every §3 floor test passes
+# over nothing. A "clear" computed that way is not a weaker answer than the real
+# one, it is an answer to a different question.
+#
+# So the drill refuses rather than guessing. Simulating the rebase is the other
+# option and is not taken: its result depends on how conflicts resolve, which is
+# exactly the judgement a prediction may not make on the author's behalf. Fetch,
+# rebase, then drill — in that order — and the question becomes answerable.
+#
+# `--is-ancestor FETCH_HEAD "$sha"` is the whole test: HEAD contains the fetched
+# tip iff the branch is current, and when it does, `expected_base` IS that tip.
+# Ship itself is untouched by this; it never needed the branch to be current.
+if [[ "$drill" == "1" ]] && ! git merge-base --is-ancestor FETCH_HEAD "$sha"; then
+    die "the drill cannot answer yet: HEAD does not contain the fetched tip of
+     '${base_ref}' ($(git rev-parse --short FETCH_HEAD)), so this branch is not
+     rebased onto it. The base move being asked about has not happened here yet,
+     and evaluating ADR-0027 §3's floor now would test it over an EMPTY file set
+     and report a clear that means nothing (issue #751).
+     rebase first, then drill:
+       git rebase FETCH_HEAD && scripts/ship.sh --drill"
+fi
 
 # Capture the file list before matching, rather than piping git into `grep -q`.
 # `grep -q` exits at the first match and closes the pipe; on a diff large enough
@@ -598,6 +682,100 @@ _evaluate_drift() {
     return 0
 }
 
+# --- The drill's report (issue #751) -----------------------------------------
+#
+# Printed after the acceptance loop has run, so it describes the decision that
+# was actually taken rather than a second computation of it. Everything here is
+# read from the state that loop left behind — `drift_verdict` holds one entry per
+# recorded base that REACHED §2(b)'s floor test, and nothing else can — so the
+# report cannot claim a floor was evaluated where the loop never evaluated one.
+# That equivalence is the fix: the false "clear" of #751 was a report whose
+# reasoning and whose verdict had drifted apart.
+#
+# THE WORD "clear" IS NEVER PRINTED WITHOUT THE FILE SET IT WAS DECIDED OVER.
+# Where no artifact reached (b) — the base did not move, or the artifact failed
+# an earlier clause — that is stated as "not evaluated", which is a different
+# sentence from "evaluated and clear" and must stay one.
+#
+# `_read_base_move` is re-run here for the listing. It clobbers the `drift_*`
+# arrays, which is safe at this point and only at this point: `_render_drift`
+# reads them, but it is called only from `_evaluate_drift`, which has already
+# cached its rendering in `drift_block` by the time this runs. Nothing downstream
+# reads the arrays again.
+_drill_report() {
+    local old n i s d marked
+    echo "ship: drill — ADR-0027 §2 coverage, computed but not posted" >&2
+    {
+        echo "  HEAD                  ${sha}"
+        echo "  HEAD tree             ${head_tree}"
+        echo "  PR base branch        ${base_ref}"
+        echo "  fetched base tip      $(git rev-parse FETCH_HEAD)"
+        echo "  PR merge base         ${expected_base}"
+        if [[ -n "$head_patch_id" ]]; then
+            echo "  HEAD patch identity   ${head_patch_id}"
+        else
+            echo "  HEAD patch identity   (none — §2(b) unavailable, see ADR-0027 §2)"
+        fi
+    } >&2
+    if [[ ${#drift_verdict[@]} -eq 0 ]]; then
+        {
+            echo "  §3 floor              NOT EVALUATED — no artifact reached §2(b)."
+            echo "                        Either the base has not moved (path (a)"
+            echo "                        governs and the tree comparison is the whole"
+            echo "                        test), or every artifact failed an earlier"
+            echo "                        clause. This run makes NO floor claim."
+        } >&2
+        return 0
+    fi
+    for old in "${!drift_verdict[@]}"; do
+        echo "  base move             ${old:0:12}..${expected_base:0:12}" >&2
+        if ! _read_base_move "$old" "$expected_base"; then
+            {
+                echo "    listing             UNREADABLE — the base move's file set could"
+                echo "                        not be read from this clone, so the floor is"
+                echo "                        NOT EVALUATED and §2(b) is unavailable."
+            } >&2
+            continue
+        fi
+        n=${#drift_status[@]}
+        echo "    files examined      ${n}" >&2
+        for ((i = 0; i < n; i++)); do
+            s="${drift_src[$i]}"
+            d="${drift_dst[$i]}"
+            marked="        "
+            # The floor is decided by the same helper the acceptance rule uses,
+            # called from the same process. This is #751's first mechanism: a
+            # replica that sources only the shared block has no `_is_floor_path`
+            # and silently marks nothing.
+            if _is_floor_path "$s" || { [[ -n "$d" ]] && _is_floor_path "$d"; }; then
+                marked="[FLOOR] "
+            fi
+            if [[ -n "$d" ]]; then
+                echo "      ${marked}${drift_status[$i]} ${s} -> ${d}" >&2
+            else
+                echo "      ${marked}${drift_status[$i]} ${s}" >&2
+            fi
+        done
+        # The summary is `drift_floor`, set by `_read_base_move` — the value the
+        # acceptance rule itself read. The `[FLOOR]` marks above are the same
+        # helper over the same endpoints, printed per path so the verdict shows
+        # its working; the verdict is not re-derived from them.
+        if [[ "$drift_floor" == "1" ]]; then
+            echo "    §3 floor            BREACHED by the marked path(s) — this base move" >&2
+            echo "                        costs a review round." >&2
+        else
+            echo "    §3 floor            clear over the ${n} path(s) listed above." >&2
+        fi
+        case "${drift_verdict[$old]}" in
+        ok) echo "    §2(b) verdict       available — the artifact covers HEAD" >&2 ;;
+        floor) echo "    §2(b) verdict       unavailable — floor breach (§3)" >&2 ;;
+        toobig) echo "    §2(b) verdict       unavailable — drift record exceeds §4's budget" >&2 ;;
+        unreadable) echo "    §2(b) verdict       unavailable — base or listing unreadable" >&2 ;;
+        esac
+    done
+    return 0
+}
+
 declare -A covering=()
 # Why an artifact was rejected. ADR-0020 already required "content moved" to be
 # distinguishable from "base moved"; ADR-0027 adds a third state and the message
@@ -1031,6 +1209,14 @@ if [[ "$saw_persona_mismatch" == "1" ]]; then
      record changes nothing; run the review the lens actually needs"
 fi
 
+# The drill's report goes out HERE — after the acceptance loop, before the
+# requirement checks below can `die`. Both outcomes then carry their inputs: a
+# refusal is explained by the same file set that produced it, and an acceptance
+# names the base move it was granted over rather than asserting a bare "clear".
+if [[ "$drill" == "1" ]]; then
+    _drill_report
+fi
+
 # Adversarial is the required lens before merge. ADR-0020 relaxes neither this
 # nor the architecture requirement below; it changes only what counts as a
 # review of *this* content.
@@ -1251,6 +1437,19 @@ if [[ "$(wc -c <"$body")" -gt "$max_bytes" ]]; then
     die "the review report is over ${max_bytes} bytes and cannot be posted intact
      truncating it would risk dropping the findings and the verdict
      post it by hand, or re-run the review to get a shorter one"
+fi
+
+# The drill stops here — the last point before anything is written. Everything
+# above ran: the same acceptance rule, the same requirement checks, the same
+# verdict and snapshot resolution, the same size limit. So a drill that exits 0
+# is a statement about THIS script's behaviour rather than a model of it, which
+# is the property a replica could not have. What it deliberately does not do is
+# re-check the PR head immediately before writing, because it is not writing and
+# the head is expected to move (the push it precedes is what moves it).
+if [[ "$drill" == "1" ]]; then
+    echo "ship: drill — the recorded review(s) cover HEAD; ship would post" \
+        "${#artifacts[@]} review(s) to PR #${num}. Nothing was written." >&2
+    exit 0
 fi
 
 # Posting is not idempotent on its own: if GitHub creates the comment but the

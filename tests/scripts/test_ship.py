@@ -497,18 +497,22 @@ def _record_snapshot(  # noqa: PLR0913  # one parameter per anchor field ship va
     return path
 
 
-def _run_ship(
+def _run_ship(  # noqa: PLR0913  # one parameter per axis of the run the fake gh must vary
     repo: Path,
     tmp_path: Path,
     *,
     pr_sha: str,
     pr_sha_after: str | None = None,
     gh_env: dict[str, str] | None = None,
+    args: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     """Run ship.sh against the fake gh.
 
     ``gh_env`` overrides what the fake reports (e.g. ``GH_CROSS_REPO=true`` to
-    simulate a PR from a fork).
+    simulate a PR from a fork). ``args`` is passed through to the script —
+    ``("--drill",)`` for the pre-push coverage check of issue #751. The empty
+    default is a real ship, so every test that omits it still exercises the
+    posting path with no arguments at all.
     """
     assert _BASH is not None
     env = os.environ.copy()
@@ -525,7 +529,7 @@ def _run_ship(
     comments.mkdir(exist_ok=True)
     env["GH_COMMENTS_DIR"] = str(comments)
     return subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test-controlled env
-        [_BASH, str(_SCRIPT)],
+        [_BASH, str(_SCRIPT), *args],
         cwd=repo,
         check=False,
         capture_output=True,
