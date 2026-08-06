@@ -963,6 +963,17 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     ``last_updated`` comes from the incoming record on both arms: it is transaction
     time (ADR-0045 §3), not one of the belief properties ADR-0103 §6 withholds.
 
+    ``derived_from_external`` is the **disjunction** of both sides on both arms
+    (ADR-0106 §4), and this one is mirrored because the alternative is a fake that
+    *launders*: this ``Provenance`` is built field by field, so omitting the field
+    would default it to ``False`` and clear a tainted target on the first clean
+    reinforcement — the exact laundering ADR-0106 §4 exists to stop, performed by
+    the double a subsystem reaches for when it does not want `memory`'s internals.
+    Not promoted to the ``MemoryWriter`` conformance suite: ADR-0106 §10 assigns
+    the test to the lane changing `memory`'s fold, and ADR-0028 §8 and ADR-0040
+    §5a keep the fold's own composition rules off that contract. It is pinned
+    against both writers directly instead.
+
     ``last_confirmed_at`` is **composed** on both arms rather than inherited from
     either side (:func:`_confirming_instant`, ADR-0109 §5, §6): the later of the two
     records' usable instants, the usable one where only one is, and ``None`` where
@@ -991,6 +1002,9 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     )
     # Selected once, before the arms: ADR-0109 §6 makes the rule identical on both.
     confirmed_at = _confirming_instant(target.provenance, incoming.provenance, now=now)
+    # Likewise selected once, before the arms (ADR-0106 §4): the clause is stated
+    # over the fold as a disjunction, so neither arm may read one side alone.
+    tainted = target.provenance.derived_from_external or incoming.provenance.derived_from_external
     if _corroborates(target, incoming):
         corroborated = Provenance(
             source=target.provenance.source,
@@ -999,6 +1013,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
             evidence_elided=elided,
             last_updated=incoming.provenance.last_updated,
             attestation=target.provenance.attestation,
+            derived_from_external=tainted,
             last_confirmed_at=confirmed_at,
         )
         return target.model_copy(update={"provenance": corroborated})
@@ -1009,6 +1024,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
         evidence_elided=elided,
         last_updated=incoming.provenance.last_updated,
         attestation=incoming.provenance.attestation,
+        derived_from_external=tainted,
         last_confirmed_at=confirmed_at,
     )
     return incoming.model_copy(update={"id": target.id, "provenance": provenance})

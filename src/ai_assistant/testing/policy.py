@@ -23,9 +23,11 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.types import (
+    BeliefBand,
     DataTier,
     MemoryDecision,
     MemoryDecisionKind,
+    band_of,
 )
 
 if TYPE_CHECKING:
@@ -63,17 +65,31 @@ class FakeMemoryPolicy:
     :attr:`calls` and answered with :attr:`kind`, so a test picks the branch it
     wants to exercise instead of constructing a proposal that provokes it.
 
-    Two contract obligations override the configured kind, because a fake that
+    Three contract obligations override the configured kind, because a fake that
     could be configured into violating its own conformance suite would be a trap:
 
     * **Secret-tier proposals are never committed** (ADR-0004 §3) — they return
       ``ASK_USER`` whatever ``kind`` says.
+    * **An unconfirmed, tainted, derived proposal is never committed** (ADR-0106
+      §6) — likewise ``ASK_USER``. The secret override does not reach it: a
+      consolidation over ordinary personal material is not Tier 0, so a fake left
+      at its default ``ACCEPT`` would commit exactly the proposal ADR-0098 §4
+      forbids committing, and would certify a consumer that relied on it.
     * **A fold needs a target.** ``REINFORCE`` and ``SUPERSEDE`` both name a
       target record; with no conflicts to fold into there is no representable
       fold decision, so either falls back to ``ACCEPT``.
 
-    Both are visible in the returned :attr:`~MemoryDecision.reason`, so a
+    All three are visible in the returned :attr:`~MemoryDecision.reason`, so a
     surprised test can see what happened rather than silently passing.
+
+    The taint override is **as narrow as the contract clause and no narrower**.
+    It is keyed on the band rather than on the raw field, because ADR-0106 §7
+    leaves a stray flag outside the ``DERIVED`` band constructible and ADR-0106 §2
+    says it means nothing there; and it stands down for a proposal carrying a
+    :class:`~ai_assistant.core.types.UserConfirmation`, because ADR-0078 §5's
+    confirmed answer is a re-ingest of the same marked proposal — a fake that
+    deferred it again would make the confirmed path untestable through this
+    double, which is the one path the containment depends on.
     """
 
     def __init__(
@@ -125,6 +141,20 @@ class FakeMemoryPolicy:
             return MemoryDecision(
                 kind=MemoryDecisionKind.ASK_USER,
                 reason="fake: secret-tier data is never committed",
+            )
+
+        provenance = proposal.proposed.provenance
+        if (
+            band_of(provenance.source) is BeliefBand.DERIVED
+            and provenance.derived_from_external
+            and proposal.confirmation is None
+        ):
+            return MemoryDecision(
+                kind=MemoryDecisionKind.ASK_USER,
+                reason=(
+                    "fake: a derived belief resting on recorded external content is "
+                    "never committed unconfirmed (ADR-0106 §6)"
+                ),
             )
 
         kind = self.kind
