@@ -11,6 +11,7 @@ which are contract.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -87,6 +88,44 @@ async def test_a_scripted_belief_cites_the_batch_it_was_actually_handed() -> Non
     (proposal,) = outcome.proposals
     assert proposal.proposed.content == "prefers concise replies"
     assert proposal.proposed.provenance.evidence == ("e1",)
+
+
+#: Three instants for the case below, none of them the fake's own clock, so an
+#: implementation reading `last_updated` would be visible (ADR-0109 §10).
+_EARLY: Final = datetime(2025, 9, 3, tzinfo=UTC)
+_LATEST: Final = datetime(2025, 12, 24, tzinfo=UTC)
+_MIDDLE: Final = datetime(2025, 10, 17, tzinfo=UTC)
+
+
+async def test_the_fake_takes_the_latest_occurred_at_over_the_window_it_cited() -> None:
+    """ADR-0109 §4's ``DERIVED`` arm, in the canonical fake (ADR-0109 §10 item 4).
+
+    The instant is the **latest** ``occurred_at`` among the episodes cited, taken
+    over the same ``window`` this fake already slices to build its citations. The
+    batch runs ``_MIDDLE, _LATEST, _EARLY`` and the citation window is its last
+    two, which separates three wrong implementations with one assertion: the
+    window's first entry is ``_LATEST`` but its last is ``_EARLY``, and a maximum
+    taken over the whole *batch* would also have to survive the uncited head.
+
+    Held to the same rule as ``ModelBackedObserver``, because a fake that diverged
+    would make every consumer's test written against it a test of nothing
+    (ADR-0026 §7) — the reason the fold's two copies are run over one table too.
+    """
+    episodes = [
+        episode("e-head", occurred_at=_MIDDLE),
+        episode("e-latest", occurred_at=_LATEST),
+        episode("e-early", occurred_at=_EARLY),
+    ]
+
+    outcome = await FakeObserver(
+        [ObservedBelief(content="prefers concise replies", start=1, supports=2)]
+    ).observe(episodes)
+
+    (proposal,) = outcome.proposals
+    provenance = proposal.proposed.provenance
+    assert provenance.evidence == ("e-latest", "e-early")
+    assert provenance.last_confirmed_at == _LATEST
+    assert provenance.last_confirmed_at != provenance.last_updated
 
 
 async def test_a_belief_the_batch_cannot_support_is_discarded_and_counted() -> None:

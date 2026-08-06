@@ -67,12 +67,20 @@ _TORN_BATCH: Final = (
 )
 
 
-def episode(episode_id: str, *, content: str | None = None) -> EpisodicMemory:
+def episode(
+    episode_id: str, *, content: str | None = None, occurred_at: datetime | None = None
+) -> EpisodicMemory:
     """One well-formed episode for a batch, with a documented sub-1.0 confidence.
 
     Exported rather than private: an implementation's own tests build batches for
     the same subject and must not re-derive what a capture-shaped episode looks
     like (ADR-0074 §4's derived-band obligation included).
+
+    ``occurred_at`` defaults to the shared instant every other case wants held
+    still, and is a parameter for the one that cannot: a ``DERIVED`` belief's
+    confirming instant is the **latest** ``occurred_at`` among the episodes cited
+    (ADR-0103 §9, ADR-0109 §4), which no batch of identically-dated episodes can
+    tell apart from the first, the last, or an arbitrary one.
     """
     return EpisodicMemory(
         id=episode_id,
@@ -82,7 +90,7 @@ def episode(episode_id: str, *, content: str | None = None) -> EpisodicMemory:
             confidence=0.9,
             last_updated=_WHEN,
         ),
-        occurred_at=_WHEN,
+        occurred_at=occurred_at if occurred_at is not None else _WHEN,
     )
 
 

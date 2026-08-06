@@ -29,6 +29,7 @@ def _event(  # noqa: PLR0913 — one keyword per event field a case may need to 
     subject: str | None = None,
     about_person: str | None = None,
     evidence: tuple[str, ...] = (),
+    created_at: datetime = _WHEN,
 ) -> FeedbackEvent:
     return FeedbackEvent(
         kind=kind,
@@ -37,7 +38,7 @@ def _event(  # noqa: PLR0913 — one keyword per event field a case may need to 
         subject=subject,
         about_person=about_person,
         evidence=evidence,
-        created_at=_WHEN,
+        created_at=created_at,
     )
 
 
@@ -169,3 +170,43 @@ async def test_deferred_target_does_not_consume_an_id() -> None:
 
     [proposal] = await processor.process(_event(memory_kind=MemoryKind.PREFERENCE))
     assert proposal.proposed.id == "id-1"  # the first id goes to the first real record
+
+
+async def test_the_confirming_instant_is_the_utterances_and_not_the_write() -> None:
+    """ADR-0109 §4's ``ASSERTED`` arm: the user stating it is the confirming event.
+
+    ``last_confirmed_at`` is ``event.created_at``, so a feedback event re-processed
+    a month later does not look freshly confirmed. That is the same discipline
+    which keeps ``ATTESTED`` off our ingestion clock and ``DERIVED`` off the moment
+    of derivation (ADR-0103 §9).
+
+    The two fields coincide here by construction — this producer already takes its
+    transaction stamp from the same event — so no fixture can separate them, which
+    ADR-0109 §10 anticipates and exempts. What proves the field is not transaction
+    time is the calendar reader's case, whose ``last_updated`` is ``read_at``, and
+    the fold's, whose survivor takes the two from different sides. Whether *this*
+    producer should be setting transaction time from the event at all is #775, and
+    the equality below is deliberately written as an equality with the event rather
+    than with ``last_updated``, so a fix there does not silently rewrite this claim.
+    """
+    when = datetime(2025, 11, 30, 9, 15, tzinfo=UTC)
+
+    [proposal] = await _processor().process(_event(created_at=when))
+
+    assert proposal.proposed.provenance.last_confirmed_at == when
+
+
+async def test_a_feedback_event_created_in_our_future_is_stored_unchanged() -> None:
+    """ADR-0109 §4's fourth clause, at the ``ASSERTED`` producer.
+
+    ``FeedbackEvent.created_at`` has no upper bound, so this producer is separately
+    capable of dropping or clamping an instant ahead of its own clock and must do
+    neither — the usability test belongs to the fold, where two candidates exist.
+    Asserting the exact instant refuses ``None``, a local clock reading and a clamp
+    at once.
+    """
+    ahead = datetime(2027, 4, 1, tzinfo=UTC)
+
+    [proposal] = await _processor().process(_event(created_at=ahead))
+
+    assert proposal.proposed.provenance.last_confirmed_at == ahead

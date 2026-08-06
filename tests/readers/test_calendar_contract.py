@@ -261,6 +261,66 @@ async def test_every_proposal_is_attested_to_the_entrys_own_dtstamp(tmp_path: Pa
     assert proposal.proposed.provenance.last_updated == reading.read_at
 
 
+async def test_the_confirming_instant_is_the_sources_report_and_never_our_read(
+    tmp_path: Path,
+) -> None:
+    """ADR-0109 §4's ``ATTESTED`` arm, at the producer that owns the band.
+
+    The ``ATTESTED`` band's confirming event is the reporting source's report,
+    "whose instant is ``Attestation.reported_at`` (ADR-0092 §3) and never our
+    ingestion of it" (ADR-0103 §9). So ``last_confirmed_at`` is the ``DTSTAMP``,
+    the same value the attestation carries.
+
+    This reader is where the suite proves the field is **not** transaction time
+    (ADR-0109 §10's third clause), because it is the producer whose two instants a
+    fixture can hold apart: ``last_updated`` is ``read_at`` and the confirming
+    instant is the source's, and :data:`STAMP` is months earlier. A currency read
+    off ``last_updated`` would call a months-old report imported this morning
+    perfectly fresh, which is the case ADR-0103 §9 gives in terms.
+
+    The coincidence with ``attestation.reported_at`` is exempt from ADR-0109 §10's
+    distinctness rule and has to be: §4 has this producer set the field *to* that
+    value, so a rule requiring the two to differ would forbid the behaviour this
+    test exists to pin. ``read_at`` is the instant the code could have reached for
+    instead, and the fixture holds *that* apart.
+    """
+    reading = await reader(source(tmp_path, _ONE_ENTRY)).read()
+
+    (proposal,) = reading.proposals
+    provenance = proposal.proposed.provenance
+    assert provenance.last_confirmed_at is not None
+    assert utc(provenance.last_confirmed_at) == STAMP
+    assert provenance.last_confirmed_at != reading.read_at
+    assert provenance.last_confirmed_at != provenance.last_updated
+
+
+async def test_a_dtstamp_in_our_future_is_stored_unchanged_and_not_clamped(
+    tmp_path: Path,
+) -> None:
+    """ADR-0109 §4's fourth clause, at the producer ADR-0092 §3 wrote it for.
+
+    A producer "writes its band's instant as it stands and applies no usability
+    test to it": source clocks skew, a ``reported_at`` in our future "is not
+    refused" (ADR-0092 §3), and dropping or clamping one here would destroy the
+    very value the fold needs to compare. The usability test belongs to the fold
+    alone, where two candidates exist; at the producer there is one.
+
+    Three separate outcomes are refused, because each is a way a careful
+    implementer might have "helped": ``None``, ``read_at``, and a clamp to
+    ``read_at``. Asserting the exact stamp rules out all three at once.
+    """
+    ahead = "20270101T000000Z"
+    entry = calendar(vevent(f"DTSTART:{utc(NOW)}", "DURATION:PT1H", "SUMMARY:Standup", stamp=ahead))
+
+    reading = await reader(source(tmp_path, entry)).read()
+
+    (proposal,) = reading.proposals
+    provenance = proposal.proposed.provenance
+    assert provenance.last_confirmed_at is not None
+    assert utc(provenance.last_confirmed_at) == ahead
+    assert provenance.last_confirmed_at > reading.read_at
+
+
 async def test_an_entry_with_no_dtstamp_is_skipped_rather_than_given_a_local_time(
     tmp_path: Path,
 ) -> None:

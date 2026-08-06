@@ -316,6 +316,13 @@ def test_the_helper_reports_the_source_clock_and_ours_separately() -> None:
     assert attestation.reported_by == "calendar"
     assert attestation.reported_at == _WHEN
     assert proposal.proposed.provenance.last_updated == _LATER
+    # And the *confirming* instant is the source's too, never ours (ADR-0109 §4):
+    # the `ATTESTED` band is confirmed by the report and not by our ingestion of
+    # it. Pinned on the canonical helper because a fake that quietly wrote `None`
+    # here, or `last_updated`, would let every suite built on it certify a reader
+    # the concrete `CalendarReader` does not resemble (ADR-0026 §7).
+    assert proposal.proposed.provenance.last_confirmed_at == _WHEN
+    assert proposal.proposed.provenance.last_confirmed_at != _LATER
 
 
 async def test_a_second_read_does_not_reach_the_source_a_cancelled_one_still_holds() -> None:
