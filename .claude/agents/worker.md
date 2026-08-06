@@ -68,20 +68,45 @@ So when the coordinator sends you back to rebase, that is the plan working. Reba
 
 **Do not run a fresh review to make `ship` accept.** Whether the moved base costs a round is decided by ADR-0027 §2, and `CONTRIBUTING.md` → "Report the review, then mark it ready" carries every condition. Where the base move clears the floor and leaves the reviewed patch untouched, the existing artifact still covers the head and `ship` publishes the drift.
 
-Some base moves genuinely do cost a round, and then the review is owed — the point is not that you never re-review, it is that **you do not decide to spend on your own judgement.** Run the verification below *before* you push, and the two cases separate cleanly:
+Some base moves genuinely do cost a round, and then the review is owed — the point is not that you never re-review, it is that **you do not decide to spend on your own judgement.** Run the drill below *before* you push, and the two cases separate cleanly:
 
-- **Your own check predicts a refusal** — a floor path moved, the patch identity changed, the range has a pathless entry. The round is really owed. Say so in your report with the figures, and let the coordinator rule before you spend it. This is cheap, because you have not pushed yet.
-- **Your check predicted acceptance and `ship` refuses anyway.** That is a contradiction between your reading and the tool's, and it is a **STOP**: halt and quote the refusal verbatim. Do not buy a round to make it go away — a wrong reading of these conditions is worth surfacing, and paying for it silently hides it from everyone.
+- **The drill predicts a refusal** — a floor path moved, the patch identity changed, the range has a pathless entry, the recorded base is not an ancestor of the new merge base. The round is really owed. Say so in your report with the drill's own figures, and let the coordinator rule before you spend it. This is cheap, because you have not pushed yet.
+- **The drill said the artifact covers HEAD and `ship` refuses anyway.** The drill *is* `ship`, so that is the same code disagreeing with itself across two runs — which makes it more worth surfacing, not less. It is a **STOP**: halt and quote the refusal verbatim. Do not buy a round to make it go away; paying for it silently hides it from everyone.
 
-### Prove the moved-base path before you push, don't assume it
+### Prove the moved-base path before you push — run the drill, never a replica
 
-Check ADR-0027 §2(b)'s conditions yourself, using `ship`'s own logic rather than a paraphrase — then you learn a refusal before the push instead of after.
+`scripts/ship.sh --drill` answers ADR-0027 §2's question with `ship`'s own code: the same acceptance loop, the same `_is_floor_path`, the same §4 budget. It writes nothing to GitHub, and it tolerates a PR head that still lags `HEAD` — that is its normal state, because it exists to run *before* the push.
 
-- **Source the shared block between `scripts/ship.sh`'s `>>> shared-patch-identity` markers; never hand-copy the options.** The identity is `git patch-id --verbatim`, and `--verbatim` is load-bearing: `--stable` strips whitespace, so a hand-copy that drops the flag computes a whitespace-blind identity that would accept content no reviewer read (ADR-0027 §2 says exactly this). Worth confirming the block is byte-identical to the copy in `scripts/codex-review.sh`, so recorder and verifier agree.
-- **Validate your replica before you trust it.** It must reproduce the `patch_id=` recorded in the artifact header on the *pre-rebase* range, **and it must refuse your own stale artifacts** from earlier rounds. A replica that accepts everything looks identical on the artifact you care about, so a match proves nothing until you have seen it discriminate.
-- **Check the remaining conditions against `ship.sh`'s own helpers, not a paraphrase** — note they are not all inside the shared block, so read the script for where each lives: the range has no pathless entry (`_range_has_pathless_entry`; a rename-only or mode-only change makes the identity untrustworthy and path (b) unavailable, fail-closed); the base move clears the floor (`_is_floor_path`, applied rename-aware over **both** endpoints of every entry); and the recorded base is a *proper* ancestor of the new merge base — an equal base is path (a), not (b).
+**Rebase first, drill second**, and the drill enforces that order rather than merely asking for it: on a `HEAD` that does not contain the fetched base tip it refuses outright, because the merge base has not moved yet and the floor would be tested over an empty file set — a "clear" that answers a different question (issue #751).
 
-Report the figures, not the conclusion. And note `ship` can fail with `PR head is X but HEAD is Y — push first` for a few seconds after a force-push — that is GitHub's PR head lagging, not a refusal. Retry before diagnosing.
+```bash
+git fetch origin main && git rebase FETCH_HEAD
+scripts/ship.sh --drill        # or: just drill
+```
+
+**Do not assemble that check by hand out of `ship.sh`'s parts.** This section used to tell you to, and issue #751 records two ways the hand-built replica returned "floor clear" for a base move that in fact breached the floor: `_is_floor_path` lives *outside* the `>>> shared-patch-identity` markers, so a replica sourcing only that block called a function that did not exist, the `&&` never fired, and no breach was recorded; and run before the rebase it tested the floor over nothing. Both are now closed by construction instead of by instruction — read the report rather than rebuilding the reasoning behind it.
+
+**Read what the report declines to claim, not only its verdict.** It prints its inputs — `HEAD` and its tree, the fetched base tip, the merge base, the patch identity — then, per recorded base, the base move's file set with floor paths marked `[FLOOR]`, and the §2(b) verdict. The word `clear` is never printed without the file set it was decided over, and **three distinct sentences mean "no floor claim was made"**. They are not interchangeable, and none of them is a clear:
+
+- `§3 floor  NOT EVALUATED` — no artifact reached §2(b) at all: either the base did not move (path (a) governs and the tree comparison is the whole test), or every artifact failed an earlier clause. Nothing was tested, and what follows says which case you are in: a refusal naming the clause that failed, or an acceptance, which means path (a) governed and §2(b) was never needed.
+- `listing  UNREADABLE` — the base move's file set could not be read from this clone, so the floor is untested and §2(b) is unavailable.
+- `§3 floor  NOT CLAIMED` — the floor *was* tested over the complete set and found no breach, but the set is too large to render whole, and §4 forbids a truncated one. So it is not a clear you can check and is not offered as one; §2(b) is unavailable here regardless (the report names the budget variable to raise if you need the set on screen).
+
+A breach, by contrast, is stated whether or not the listing fits on screen — that is the conservative direction, and it costs the round either way.
+
+Two real ones. On **PR #765** the base move touched a single non-floor file (`.claude/skills/dispatch-agents/SKILL.md`) — the shape the drill states as `§3 floor  clear over the 1 path(s) listed above.` with `§2(b) verdict  available — the artifact covers HEAD`, and `ship` then published the drift and cost no round. On **PR #760** it printed this (elisions marked), and the round was genuinely owed:
+
+```text
+  §3 floor              NOT EVALUATED — no artifact reached §2(b).
+                        [...] This run makes NO floor claim.
+ship: no adversarial review covering this PR's content
+     a review exists whose recorded base is *not an ancestor* of this PR's merge
+     base — that is not base drift, it is a different history [...]
+```
+
+The recorded base had been rebase-merged, so its SHA was no longer in any history and the ancestry clause could not be satisfied. Note what that is *not*: it is not a floor breach, and no floor was evaluated at all — reporting it as one would name the wrong reason for the same round.
+
+Report the drill's figures, not your conclusion from them. And note that `ship` — the real one, after the push — can fail with `PR head is X but HEAD is Y — push first` for a few seconds, which is GitHub's PR head lagging a force-push rather than a refusal. Retry before diagnosing.
 
 On findings, `docs/review/guide.md` is the reference: treat each one as a **hypothesis to verify against the actual text**, never a fact to comply with. Park anything out-of-scope, pre-existing, or nit-level as a **GitHub issue** — do NOT grow the PR to absorb findings.
 
