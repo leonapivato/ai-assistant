@@ -105,10 +105,28 @@ class RuleBasedFeedbackProcessor:
 
     @staticmethod
     def _provenance(event: FeedbackEvent) -> Provenance:
-        """User-asserted provenance carrying the feedback's evidence and time."""
+        """User-asserted provenance carrying the feedback's evidence and time.
+
+        **The confirming instant is the utterance's, not the write's**
+        (ADR-0109 §4). An ``ASSERTED`` belief is confirmed by the user stating it,
+        so ``last_confirmed_at`` is ``event.created_at`` — the same discipline
+        that keeps ``ATTESTED`` off our ingestion clock and ``DERIVED`` off the
+        moment of derivation. Reading the ingest clock instead would make a
+        re-processed feedback event look freshly confirmed.
+
+        The two instants coincide here because this producer already takes its
+        *transaction* stamp from the same event, which is the coincidence ADR-0103
+        §9 warns "breaks silently". Whether that is the right transaction time is
+        an ADR-0045 §3 question about a line ADR-0109 does not touch, filed as
+        #775. What holds the two fields apart in the suite is the calendar reader,
+        whose ``last_updated`` is ``read_at`` while its confirming instant is the
+        source's ``reported_at``, and the fold, whose survivor takes the two from
+        different sides (ADR-0109 §10).
+        """
         return Provenance(
             source=MemorySource.USER_ASSERTED,
             confidence=_FULL_CONFIDENCE,
             evidence=event.evidence,
             last_updated=event.created_at,
+            last_confirmed_at=event.created_at,
         )

@@ -457,6 +457,17 @@ class CalendarReader:
     ) -> MemoryUpdateProposal:
         """One attested belief about one occurrence.
 
+        **``reported_at`` lands in two fields for two different reasons**
+        (ADR-0109 §4). In the ``Attestation`` it records who said what and when
+        they said it — a disclosure obligation (ADR-0073 §4). As
+        ``last_confirmed_at`` it records when the *world* last confirmed the
+        belief, which for the ``ATTESTED`` band is the reporting source's report
+        and never our ingestion of it (ADR-0103 §9). They are not redundant: a
+        corroborating fold keeps this attestation while advancing the instant to
+        an incoming derived record's (ADR-0103 §6), so the field must be stored
+        and independently writable rather than derived from the attestation
+        beside it (ADR-0109 §11).
+
         Args:
             occurrence: What the source says happens.
             reported_at: Its ``DTSTAMP``, already known to be present — the
@@ -482,6 +493,14 @@ class CalendarReader:
                         # on Tuesday (ADR-0092 §3).
                         reported_at=reported_at,
                     ),
+                    # The band's confirming event, written as it stands: a
+                    # `reported_at` in our future is stored unchanged rather than
+                    # dropped or clamped (ADR-0092 §3, ADR-0109 §4's fourth
+                    # clause), because the fold is the only place a choice between
+                    # two candidates exists. Never `read_at` — that would be
+                    # transaction time, and a months-old report imported this
+                    # morning would read as perfectly fresh (ADR-0103 §9).
+                    last_confirmed_at=reported_at,
                 ),
             ),
             rationale=f"the {self.name} source reported this entry",

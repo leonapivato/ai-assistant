@@ -449,6 +449,15 @@ class ConversationLifecycle:
         ``OBSERVED`` places every captured episode in the ``DERIVED`` band, which
         makes capture the first producer into it, arriving before the observer it
         exists to feed.
+
+        **``last_confirmed_at`` stays unset, and that is a decision rather than an
+        omission** (ADR-0109 §4). ADR-0103 §9's derived rule ranges over the
+        episodes a record *cites*, and this one cites nothing by the paragraph
+        above, so over the empty set it yields nothing and the record reads as
+        ADR-0103 §9's **unknown**. That is the honest answer: an episode records
+        that something happened, nothing retires it, and "is this still true?" is
+        not a question about it. Writing ``occurred_at`` into the field instead
+        would make every episode in the store claim a currency it has no use for.
         """
         return EpisodicMemory(
             id=turn.episode_id,
@@ -460,6 +469,7 @@ class ConversationLifecycle:
                 source=MemorySource.OBSERVED,
                 confidence=CAPTURE_CONFIDENCE,
                 last_updated=now,
+                # `last_confirmed_at` left at its `None` default — see above.
             ),
         )
 
