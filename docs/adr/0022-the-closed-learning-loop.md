@@ -1,7 +1,48 @@
 # 22. The closed learning loop in `orchestration`
 
-- Status: Partially superseded by ADR-0084 (§2's placement of `TurnResult` outside `core/types.py`, and its sole graduation trigger)
+- Status: Partially superseded by ADR-0084 (§2's placement of `TurnResult` outside `core/types.py`, and its sole graduation trigger) and ADR-0108 (§4's same-id collision resolution)
 - Date: 2026-07-20
+- Partially superseded: 2026-08-05 by ADR-0108 — **§4's last sentence-pair, that a
+  repeated record id resolves last-write-wins because `add` is an upsert, is
+  replaced. Everything else §4 decides stands, and so does the reason §4 gave.**
+  [ADR-0108](0108-a-write-declares-its-intent-and-a-cross-kind-collision-is-refused.md)
+  §1 rules that a `MemoryStore` write declares its collision intent at the call
+  site, and §2 routes the ingestor's installing rulings — `ACCEPT` and
+  `STORE_TEMPORARY` — through `write_atomic` in `INSERT_IF_ABSENT` mode.
+
+  **Replaced**, the closing paragraph of §4:
+
+  > Ordering also settles collisions: two proposals carrying the same record id
+  > resolve **last-write-wins**, because `MemoryStore.add` is an upsert keyed on
+  > id. The loop does not de-duplicate, because the id is documented as the
+  > caller's idempotency key — a processor re-proposing an id may well mean to
+  > supersede its own earlier proposal, and both outcomes report that id, so the
+  > collision is visible rather than hidden.
+
+  Two proposals both ruled `ACCEPT` at one id no longer resolve last-write-wins:
+  the second is **refused** and nothing is written (ADR-0108 §3). A reader acting
+  on the sentence would predict a stored record and a healthy id where there is
+  now a `MemoryStoreConflictError`, which is ADR-0070 §1's decision change and
+  therefore a supersession rather than an amendment.
+
+  **Not replaced, and it is the reasoning.** §4 wanted the collision *visible
+  rather than hidden* — "both outcomes report that id" — and ADR-0108 §1 keeps
+  that goal by a stronger mechanism: a refusal is more visible than two reported
+  ids. §4's deliberate case, "a processor re-proposing an id may well mean to
+  supersede its own earlier proposal", is **not banned**; ADR-0108 §2 gives it a
+  verb, the `REINFORCE` fold's explicit `UPSERT` at the ruling's target id. What
+  is withdrawn is only that the deliberate outcome was the **default** for a
+  caller that meant the other one — which is what made a `uuid4` collision
+  silently destroy an unrelated record (#630). Everything else in §4 stands: which
+  rulings write, what "nothing was written" means, in-order independent
+  application, the absent cross-call transaction and its deferral to #104, and §4
+  as already amended by ADR-0028. §§1–3, 4a and 5 are untouched.
+  **On the timing of this record.** ADR-0108 merges as `Proposed` and is ratified
+  in its own lane. This record lands *with* it — the shape ADR-0081 used for its
+  ADR-0077 note (commit `4bc008b`, both files in one change) rather than ADR-0078
+  §10's deferral to ratification — so the review that can still change the
+  decision reads this record alongside it, and no Status line ever names an absent
+  ADR. If that review changes ADR-0108 §1 or §2, this record changes with it.
 - Partially superseded: 2026-07-31 by ADR-0084 — **§2's paragraph on where
   `TurnResult` lives, and on the one condition that would move it, is false;
   nothing this ADR decided about the learning loop changes.**
