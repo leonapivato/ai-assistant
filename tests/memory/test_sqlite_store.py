@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import sqlite3
 import subprocess
 import sys
@@ -2068,3 +2069,79 @@ async def test_a_base_exception_from_the_worker_reaches_the_caller() -> None:
 
     with worker_finished_before_the_first_check(), pytest.raises(KeyboardInterrupt):
         await _run_to_completion(aborts)
+
+
+# --- ADR-0109 §8: the field needs no column and no migration ----------------
+
+
+async def test_a_confirming_instant_survives_the_stores_round_trip(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """The exact instant comes back, not merely a truthy one (ADR-0109 §10).
+
+    The store persists each record as ``model_dump_json()`` in a ``data`` column
+    and decodes it back through pydantic, so this is the check that ``Provenance``
+    really is what round-trips rather than an inventory of columns somebody has to
+    remember to extend. The instant is deliberately *not* ``last_updated``, so a
+    codec that dropped the field and left the other stamp standing fails here.
+    """
+    confirmed_at = datetime(2025, 7, 4, 8, 30, tzinfo=UTC)
+    store = make_store()
+    record = SemanticMemory(
+        id="s1",
+        content="the office moved to Lisbon",
+        fact="the office moved to Lisbon",
+        provenance=Provenance(
+            source=MemorySource.OBSERVED,
+            confidence=0.6,
+            last_updated=_WHEN,
+            last_confirmed_at=confirmed_at,
+        ),
+    )
+
+    await store.add(record)
+    got = await store.get("s1")
+
+    assert got is not None
+    assert got.provenance.last_confirmed_at == confirmed_at
+    assert got.provenance.last_updated == _WHEN
+
+
+async def test_a_blob_written_before_the_field_existed_decodes_as_unknown(
+    tmp_path: Path, make_store: Callable[..., SqliteMemoryStore]
+) -> None:
+    """ADR-0103 §9's fourth clause, satisfied by the default rather than a migration.
+
+    "No migration writes a ``last_confirmed_at`` for a record stored before this
+    decision" (ADR-0109 §8), and nothing has to: the field is additive with a
+    ``None`` default, so a blob whose JSON has no such key decodes as *unknown*.
+    This is what makes that a checked claim rather than a stated one — the key is
+    stripped from the stored ``data`` out of band, which is exactly the shape a
+    record written by an older build has.
+
+    ``is None`` exactly, and its sibling over the same decode path is the
+    round-trip above: without one, this case passes against a build that never
+    writes the field at all.
+    """
+    database = tmp_path / "memory.db"
+    store = make_store()
+    await store.add(_preference("p1", "prefers concise replies"))
+    store.close()
+
+    raw = sqlite3.connect(str(database))
+    try:
+        (data,) = raw.execute("SELECT data FROM records WHERE id = 'p1'").fetchone()
+        payload = json.loads(data)
+        assert "last_confirmed_at" in payload["provenance"], (
+            "the strip below would be vacuous if the field were never serialised"
+        )
+        del payload["provenance"]["last_confirmed_at"]
+        raw.execute("UPDATE records SET data = ? WHERE id = 'p1'", (json.dumps(payload),))
+        raw.commit()
+    finally:
+        raw.close()
+
+    got = await make_store().get("p1")
+
+    assert got is not None
+    assert got.provenance.last_confirmed_at is None
