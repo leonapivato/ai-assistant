@@ -65,14 +65,13 @@ from typing import (
     TYPE_CHECKING,
     Annotated,
     TypeAliasType,
-    TypeGuard,
     get_args,
     get_origin,
     get_type_hints,
 )
 
 import pytest
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 import ai_assistant.core
 from ai_assistant.core.types import (
@@ -89,6 +88,8 @@ from ai_assistant.core.types import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
+    from pydantic.fields import FieldInfo
+
 AT = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
 
 #: The ``ge=0`` constraint object itself, as pydantic normalises it onto a field.
@@ -99,13 +100,8 @@ AT = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
 GE_ZERO = Field(ge=0).metadata[0]
 
 
-def _is_int_bound(value: object) -> TypeGuard[int]:
-    """Whether ``value`` is a bound this module can reason about: a plain ``int``."""
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _lowest_admissible(metadata: Iterable[object]) -> int | None:
-    """The smallest value ``metadata``'s lower bound admits, or ``None`` if it declares none.
+def _declares_a_lower_bound(metadata: Iterable[object]) -> bool:
+    """Whether any entry in ``metadata`` is a ``ge``/``gt`` constraint.
 
     Duck-typed on the attribute rather than isinstance-checked against
     ``annotated_types``: that package reaches the environment only as a
@@ -113,32 +109,43 @@ def _lowest_admissible(metadata: Iterable[object]) -> int | None:
     so importing it here would be a test depending on something the project does
     not ask for.
 
-    Each comparison is against ``None`` and **not** truthiness, because the bound
+    The comparison is ``is not None`` and **not** truthiness, because the bound
     this module exists for is ``ge=0`` — the one value a truthiness test would
     read as absent.
 
-    Only an ``int`` bound is returned. ``core`` bounds things other than integers:
-    ``Settings`` carries ``timedelta`` floors and ``confidence`` carries
-    ``ge=0.0``, and neither is a value this module has anything to say about. A
-    ``bool`` is excluded for the same reason it is excluded from the walk.
-
-    ``gt=n`` becomes ``n + 1``, which is exact for the integers this module scopes
-    itself to and is why the non-integer bounds have to be filtered out first
-    rather than coerced.
+    Only presence is asked, never the bound's value: ``core`` floors things that
+    are not integers at all — ``Settings`` carries ``timedelta`` bounds — and a
+    check that read the number would have to decide what to do with them.
     """
-    for item in metadata:
-        ge = getattr(item, "ge", None)
-        if _is_int_bound(ge):
-            return ge
-        gt = getattr(item, "gt", None)
-        if _is_int_bound(gt):
-            return gt + 1
-    return None
+    return any(
+        getattr(item, "ge", None) is not None or getattr(item, "gt", None) is not None
+        for item in metadata
+    )
 
 
-def _declares_a_lower_bound(metadata: Iterable[object]) -> bool:
-    """Whether ``metadata`` carries a ``ge``/``gt`` constraint at all."""
-    return _lowest_admissible(metadata) is not None
+def _the_field_would_accept(field: FieldInfo, value: object) -> bool:
+    """Whether ``value`` survives the validation ``field`` declares for itself.
+
+    Pydantic's own machinery rather than a reimplementation of it: the question
+    is exactly "would this field have taken this value", and hand-comparing a
+    literal against a bound answers a narrower one. It reads the *effective*
+    constraint — pydantic hoists ``Annotated[int, Ge(0)]`` metadata onto the
+    ``FieldInfo``, so an annotation-level floor is already here — and it refuses
+    a default of the wrong type rather than only one of the wrong magnitude.
+
+    **Strict**, because the lax mode that serves a wire boundary is the wrong
+    reading here: it coerces ``"0"`` to ``0`` and would pass a default that
+    leaves the constructed model holding a ``str`` where its annotation promises
+    an ``int``. Nothing in ``core`` declares a default this refuses.
+    """
+    adapter: TypeAdapter[object] = TypeAdapter(
+        Annotated[(field.annotation, *field.metadata)], config=ConfigDict(strict=True)
+    )
+    try:
+        adapter.validate_python(value)
+    except ValidationError:
+        return False
+    return True
 
 
 def _int_leaves(
@@ -196,8 +203,8 @@ def unbounded_int_fields(model: type[BaseModel]) -> list[str]:
     ]
 
 
-def int_defaults_escaping_their_bound(model: type[BaseModel]) -> list[str]:
-    """Names of ``model``'s int fields whose *default* is not held to the field's floor.
+def int_defaults_their_field_would_refuse(model: type[BaseModel]) -> list[str]:
+    """Names of ``model``'s bounded int fields whose *default* the field itself would reject.
 
     **Pydantic does not validate a field default** unless ``validate_default`` is
     set, so a bound is enforced on every value a caller supplies and on nothing
@@ -213,24 +220,29 @@ def int_defaults_escaping_their_bound(model: type[BaseModel]) -> list[str]:
     through exactly this gap. Either path can regress while the other stays
     green, which is why they are separate functions rather than one verdict.
 
+    The verdict is :func:`_the_field_would_accept`'s, so the check asks whether
+    the field would have taken its own default rather than comparing a literal
+    against a number. That is what makes it total over the ways a default can be
+    inadmissible: below the floor, ``None`` on a non-optional field, or a value of
+    the wrong type entirely. Each of those constructs today and leaves the model
+    holding it.
+
     A ``default_factory`` is flagged outright rather than called: its value is
     not readable without running it, and running arbitrary project code is not
     this check's business. ``core`` declares none on an int today, so the strict
     reading costs nothing and fails closed if one appears.
     """
     hints = get_type_hints(model, include_extras=True)
-    flagged = []
-    for name, field in model.model_fields.items():
-        floor = _lowest_admissible(field.metadata)
-        if floor is None or not _int_leaves(hints.get(name), bounded=True):
-            continue  # not a bounded int field, so path one's subject or neither
-        if field.validate_default:
-            continue  # pydantic runs the constraint over the default itself
-        unreadable = field.default_factory is not None
-        below = _is_int_bound(field.default) and field.default < floor
-        if unreadable or below:
-            flagged.append(name)
-    return flagged
+    return [
+        name
+        for name, field in model.model_fields.items()
+        # a bounded int field whose default pydantic will never look at
+        if _declares_a_lower_bound(field.metadata)
+        and _int_leaves(hints.get(name), bounded=True)
+        and not field.is_required()
+        and not field.validate_default
+        and (field.default_factory is not None or not _the_field_would_accept(field, field.default))
+    ]
 
 
 def _core_models() -> list[type[BaseModel]]:
@@ -284,10 +296,10 @@ def test_no_core_int_field_is_exempt_from_the_rule() -> None:
 
 
 @pytest.mark.parametrize("model", _core_models(), ids=lambda model: model.__name__)
-def test_no_core_int_default_escapes_its_own_bound(model: type[BaseModel]) -> None:
+def test_no_core_int_default_is_one_its_own_field_would_refuse(model: type[BaseModel]) -> None:
     """Path two: a declared floor the field's own default is not held to."""
-    offenders = sorted(int_defaults_escaping_their_bound(model))
-    assert not offenders, f"{model.__name__} has default-escaping int field(s) {offenders}"
+    offenders = sorted(int_defaults_their_field_would_refuse(model))
+    assert not offenders, f"{model.__name__} has inadmissible int default(s) {offenders}"
 
 
 def test_no_core_int_field_is_exempt_from_the_default_rule() -> None:
@@ -295,7 +307,7 @@ def test_no_core_int_field_is_exempt_from_the_default_rule() -> None:
     escaping = {
         (model.__name__, name)
         for model in _core_models()
-        for name in int_defaults_escaping_their_bound(model)
+        for name in int_defaults_their_field_would_refuse(model)
     }
     assert escaping == set()
 
@@ -395,7 +407,7 @@ def test_the_default_check_catches_a_literal_default_below_the_floor() -> None:
     class _Escaping(BaseModel):
         elided: int = Field(default=-1, ge=0)
 
-    assert int_defaults_escaping_their_bound(_Escaping) == ["elided"]
+    assert int_defaults_their_field_would_refuse(_Escaping) == ["elided"]
     assert unbounded_int_fields(_Escaping) == []  # path one stays green
     assert _Escaping().elided == -1  # the default really does slip through
     with pytest.raises(ValidationError):
@@ -408,7 +420,7 @@ def test_the_default_check_catches_a_default_factory() -> None:
     class _Factory(BaseModel):
         elided: int = Field(default_factory=lambda: -1, ge=0)
 
-    assert int_defaults_escaping_their_bound(_Factory) == ["elided"]
+    assert int_defaults_their_field_would_refuse(_Factory) == ["elided"]
     assert unbounded_int_fields(_Factory) == []
 
 
@@ -418,7 +430,7 @@ def test_a_validated_default_passes_the_default_check() -> None:
     class _Validated(BaseModel):
         elided: int = Field(default=0, ge=0, validate_default=True)
 
-    assert int_defaults_escaping_their_bound(_Validated) == []
+    assert int_defaults_their_field_would_refuse(_Validated) == []
     assert _Validated().elided == 0
 
 
@@ -428,7 +440,7 @@ def test_a_required_int_has_no_default_to_escape() -> None:
     class _Required(BaseModel):
         ordinal: int = Field(ge=1)
 
-    assert int_defaults_escaping_their_bound(_Required) == []
+    assert int_defaults_their_field_would_refuse(_Required) == []
     assert unbounded_int_fields(_Required) == []
 
 
@@ -439,7 +451,54 @@ def test_a_default_on_the_floor_is_not_flagged() -> None:
         elided: int = Field(default=0, ge=0)
         limit: int = Field(default=1, gt=0)
 
-    assert int_defaults_escaping_their_bound(_OnTheFloor) == []
+    assert int_defaults_their_field_would_refuse(_OnTheFloor) == []
+
+
+def test_the_default_check_catches_a_none_on_a_non_optional_int() -> None:
+    """Not every inadmissible default is merely the wrong magnitude.
+
+    ``None`` is what a field acquires when a ``| None`` is dropped from its
+    annotation and the default is left behind, and pydantic will not look at it:
+    the model constructs, holds ``None`` where an ``int`` was promised, and every
+    arithmetic reader of the count raises instead of disclosing.
+    """
+
+    class _NoneDefault(BaseModel):
+        elided: int = Field(default=None, ge=0)  # type: ignore[assignment]
+
+    assert int_defaults_their_field_would_refuse(_NoneDefault) == ["elided"]
+    assert _NoneDefault().elided is None  # the default really does slip through
+
+
+def test_the_default_check_catches_a_default_of_the_wrong_type() -> None:
+    """The strict reading, on its own: ``"0"`` satisfies ``ge=0`` only after coercion.
+
+    Lax validation would take it, and the model would then hold the *string*
+    ``"0"`` — which compares to nothing and serialises as a JSON string on a wire
+    surface whose contract says integer.
+    """
+
+    class _StringDefault(BaseModel):
+        elided: int = Field(default="0", ge=0)  # type: ignore[assignment]
+
+    assert int_defaults_their_field_would_refuse(_StringDefault) == ["elided"]
+    # mypy reads the annotation and calls this non-overlapping, which is the
+    # defect stated in type-checker terms: the runtime value is not what the
+    # field promises, and only the unvalidated default can make that true.
+    assert _StringDefault().elided == "0"  # type: ignore[comparison-overlap]
+
+
+def test_an_annotation_level_floor_is_read_for_the_default_too() -> None:
+    """Pydantic hoists ``Annotated`` metadata onto the ``FieldInfo``, so there is no
+    second place to look — asserted rather than assumed, since the check would be
+    silently one-sided if that ever stopped being true.
+    """
+
+    class _AnnotatedFloor(BaseModel):
+        elided: Annotated[int, GE_ZERO] = -1
+
+    assert _AnnotatedFloor.model_fields["elided"].metadata == [GE_ZERO]
+    assert int_defaults_their_field_would_refuse(_AnnotatedFloor) == ["elided"]
 
 
 # --- the anchors: ADR-0107 §3's zero, on every type that carries it ----------
