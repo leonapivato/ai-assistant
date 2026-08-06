@@ -706,10 +706,22 @@ _evaluate_drift() {
 # That equivalence is the fix: the false "clear" of #751 was a report whose
 # reasoning and whose verdict had drifted apart.
 #
-# THE WORD "clear" IS NEVER PRINTED WITHOUT THE FILE SET IT WAS DECIDED OVER.
-# Where no artifact reached (b) — the base did not move, or the artifact failed
-# an earlier clause — that is stated as "not evaluated", which is a different
-# sentence from "evaluated and clear" and must stay one.
+# THE WORD "clear" IS NEVER PRINTED WITHOUT THE FILE SET IT WAS DECIDED OVER,
+# and there are three distinct ways not to have one, each with its own sentence
+# because collapsing any two of them is how an unauditable answer starts reading
+# like an audited one:
+#
+#   NOT EVALUATED — no artifact reached (b) at all: the base did not move, or
+#                   every artifact failed an earlier clause. Nothing was tested.
+#   UNREADABLE    — the base move's listing could not be read, so §2(b) is
+#                   unavailable and the floor is untested.
+#   NOT CLAIMED   — the floor WAS tested over the complete set and found no
+#                   breach, but the set is too large to render, so the reader
+#                   cannot check it. §2(b) is unavailable in this case regardless,
+#                   so declining to claim costs nothing and concedes nothing.
+#
+# A BREACH is stated in every one of those cases where it is known, listing or
+# not: it is the conservative direction and costs the round either way.
 #
 # `_read_base_move` is re-run here for the listing. It clobbers the `drift_*`
 # arrays, which is safe at this point and only at this point: `_render_drift`
@@ -767,17 +779,35 @@ _drill_report() {
         # partial set is worse than none, and the same holds here: an omitted tail
         # is exactly where the breaching path hides, so a shortened list would be
         # #751's failure in a new costume. So the listing is omitted WHOLE and
-        # said to be omitted. What is NOT omitted is the answer: `drift_floor`
-        # below was computed by `_read_base_move` over the complete set, without
-        # any of this rendering, so the floor verdict is unaffected by the bound.
+        # said to be omitted.
+        #
+        # AND THEN NO CLEAR IS CLAIMED OVER IT. `drift_floor` is still computed by
+        # `_read_base_move` over the complete set, with none of this rendering, so
+        # the *decision* is unaffected by the bound — but a clear a reader cannot
+        # check is the shape of claim this whole change exists to remove, and the
+        # bound must not buy back a weaker version of it. A breach is different and
+        # is still reported: it is the conservative direction, and it costs the
+        # round whether or not anyone audits which path caused it.
+        #
+        # Nothing is lost by declining to claim, because in this branch §2(b) is
+        # unavailable anyway: `_evaluate_drift` applies this same arithmetic after
+        # its floor test, so an omitted listing with no breach is always `toobig`
+        # and the round is owed regardless of what the floor says.
+        #
+        # The recovery is the script's own listing, not a hand-run git command: a
+        # bare `git diff --name-status` is neither NUL-delimited nor pinned against
+        # config nor control-escaped, so on exactly the unusual names this bound
+        # might be hiding it would answer differently from what the floor read.
+        # Raising the budget is coherent rather than a bypass — at a budget that
+        # fits, §4 can publish the set, so the same number governs both.
         if [[ $((n * 20)) -gt "$drift_budget" ]]; then
             {
                 echo "    listing             OMITTED — ${n} path(s) cannot fit ADR-0027 §4's"
                 echo "                        ${drift_budget}-byte record, and §4 forbids a"
-                echo "                        truncated set, so none is printed. The floor"
-                echo "                        verdict below was still computed over all ${n}."
-                echo "                        To read the set:"
-                echo "                          git diff --name-status -M ${old:0:12} ${expected_base:0:12}"
+                echo "                        truncated set, so none is printed."
+                echo "                        To read the set, raise the budget and re-run —"
+                echo "                        the same number decides what §4 can publish:"
+                echo "                          CODEX_SHIP_DRIFT_BUDGET=<bytes> scripts/ship.sh --drill"
             } >&2
             listed=0
         fi
@@ -817,11 +847,13 @@ _drill_report() {
         # The summary is `drift_floor`, set by `_read_base_move` — the value the
         # acceptance rule itself read, over all `n` entries whether or not they
         # were listed. The `[FLOOR]` marks above are the same helper over the same
-        # endpoints, printed per path so the verdict shows its working; the
-        # verdict is not re-derived from them, which is what keeps it true when
-        # the working is omitted. The wording tracks that: an omitted listing says
-        # "over the N path(s) examined", never "listed above", because a reader
-        # must not be told to check evidence that is not on screen.
+        # endpoints, printed per path so the verdict shows its working; the verdict
+        # is not re-derived from them.
+        #
+        # A CLEAR IS ONLY EVER STATED WHERE ITS FILE SET IS ON SCREEN. The four
+        # branches are the whole cross-product of (breached?) × (listed?), spelled
+        # out rather than composed, because the one that must not exist — an
+        # unauditable clear — is easiest to reintroduce by sharing a message.
         if [[ "$drift_floor" == "1" && "$listed" -eq "$n" ]]; then
             echo "    §3 floor            BREACHED by the marked path(s) — this base move" >&2
             echo "                        costs a review round." >&2
@@ -831,7 +863,11 @@ _drill_report() {
         elif [[ "$listed" -eq "$n" ]]; then
             echo "    §3 floor            clear over the ${n} path(s) listed above." >&2
         else
-            echo "    §3 floor            clear over all ${n} path(s) examined (not listed)." >&2
+            echo "    §3 floor            NOT CLAIMED — no breach was found over all ${n}" >&2
+            echo "                        path(s), but the set is not on screen, so this is" >&2
+            echo "                        not a clear you can check and is not offered as one." >&2
+            echo "                        §2(b) is unavailable here anyway (see below), so the" >&2
+            echo "                        round is owed whatever the floor says." >&2
         fi
         case "${drift_verdict[$old]}" in
         ok) echo "    §2(b) verdict       available — the artifact covers HEAD" >&2 ;;
