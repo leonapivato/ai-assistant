@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ai_assistant.core.errors import (
+    MemoryStoreConflictError,
     MemoryStoreError,
     ModelError,
     UnknownConversationError,
@@ -278,17 +279,38 @@ async def test_two_unscoped_runs_select_the_same_conversation() -> None:
     """By design: there is no cursor and no rotation (§8).
 
     Asserted rather than left implicit, because a test demanding otherwise would be
-    demanding the durable state ADR-0077 §8 declines — and re-observation is safe
-    without it, the gate folding a repeat into a ``REINFORCE``.
+    demanding the durable state ADR-0077 §8 declines. **Selection** is the subject
+    and it is unchanged; what changed is what the second run's *write* does.
+
+    This case used to read the second run's ``conversation_id`` off a completed
+    report, on the premise that "re-observation is safe … the gate folding a repeat
+    into a ``REINFORCE``". That premise is false on ``main`` and already filed as
+    such: ``_detect_conflicts`` filters the proposal's own id, so a repeat was never
+    a conflict, was never folded, and the second observation silently *replaced* the
+    first's records through ``add``'s upsert (#736, #110). ADR-0108 §1 makes it a
+    refusal instead — and that is this fake's derived ids meeting the rule, not the
+    observation stage changing: ``FakeBeliefObserver._identify`` derives a record id
+    from content, verbatim the producer class ADR-0081 §8 named as the trigger for
+    this ruling (#735), while ``learning/observer.py`` mints and so never reaches
+    it. Whether the fake should keep deriving is #736's, not this lane's.
+
+    So selection is asserted where it stays observable — the batch the observer was
+    handed — and the refusal is pinned beside it.
     """
     harness = Harness()
     await harness.conversation_with(2)
     newest = await harness.conversation_with(2)
 
     first = await harness.stage.observe()
-    second = await harness.stage.observe()
+    assert first.conversation_id == newest
 
-    assert first.conversation_id == second.conversation_id == newest
+    with pytest.raises(MemoryStoreConflictError):
+        await harness.stage.observe()
+
+    # The second run reselected the same conversation: it read the same episodes in
+    # the same order, which is what "no cursor and no rotation" means.
+    assert len(harness.fake.batches) == 2
+    assert harness.fake.batches[-1] == harness.fake.batches[-2]
 
 
 async def test_an_unknown_conversation_is_refused_rather_than_silently_empty() -> None:

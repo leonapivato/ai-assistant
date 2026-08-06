@@ -19,6 +19,7 @@ import pytest
 from ai_assistant.core.errors import (
     AssistantError,
     ContextError,
+    MemoryStoreConflictError,
     MemoryStoreError,
     PlanningError,
 )
@@ -65,6 +66,7 @@ if TYPE_CHECKING:
         Goal,
         MemoryIngestResult,
         MemoryRecord,
+        MemoryWrite,
     )
 
 _NOW = datetime(2026, 6, 3, 10, 0, tzinfo=UTC)
@@ -468,11 +470,23 @@ async def test_learn_propagates_a_store_failure() -> None:
         await loop.learn(_preference_feedback())
 
 
-async def test_learn_resolves_a_repeated_record_id_last_write_wins() -> None:
-    """``MemoryStore.add`` is an upsert, so the loop does not de-duplicate.
+async def test_learn_refuses_a_repeated_record_id_rather_than_overwriting() -> None:
+    """A repeated record id is refused, not resolved last-write-wins (ADR-0108 §1).
 
-    Both outcomes report the shared id, which is what makes the collision
-    visible to the caller rather than hidden by it (ADR-0022 §4).
+    This case previously asserted the opposite, on ADR-0022 §4's ground that
+    ``MemoryStore.add`` is an upsert and "both outcomes report that id, so the
+    collision is visible rather than hidden". ADR-0108 partially supersedes that
+    clause. The loop still does not de-duplicate — nothing here inspects the
+    proposals against each other — but the write path now *declares* what it means,
+    and an ``ACCEPT`` means "install a new record". The collision stays visible, and
+    more so: a refusal naming the id, rather than two reported successes one of
+    which destroyed the other's record.
+
+    §4's *reasoning* survives, and so does the case it protected: a caller that
+    means to land on a stored record still does, through the fold the policy rules.
+    What §4 defended never looked like this — two proposals of one kind arriving at
+    one id with different content, nothing ruled about the record standing there,
+    which conflict detection cannot even see (#630, #110).
     """
     memory = FakeMemoryStore(now=_clock)
     proposals = [
@@ -491,12 +505,16 @@ async def test_learn_resolves_a_repeated_record_id_last_write_wins() -> None:
     ]
     loop = _loop(memory=memory, feedback=FakeFeedbackProcessor(proposals))
 
-    outcomes = await loop.learn(_preference_feedback())
+    with pytest.raises(MemoryStoreConflictError):
+        await loop.learn(_preference_feedback())
 
-    assert [outcome.result.record_id for outcome in outcomes] == ["pref-same", "pref-same"]
+    # The first proposal stands untouched. That is the whole point: the record the
+    # second write would have replaced is one no ruling was made about, so replacing
+    # it silently is the defect and refusing is the fix. The partial application is
+    # ADR-0022 §4's documented behaviour for a store failure, unchanged.
     stored = await memory.get("pref-same")
     assert stored is not None
-    assert stored.content == "prefers very short replies"
+    assert stored.content == "prefers short replies"
 
 
 async def test_learn_propagates_a_processor_failure_without_writing() -> None:
@@ -553,22 +571,29 @@ async def test_learn_propagates_a_writer_failure_without_writing() -> None:
 async def test_learn_leaves_earlier_proposals_applied_when_a_later_write_fails() -> None:
     """The partial application ADR-0022 §4 documents, pinned rather than assumed."""
 
-    class _FailsOnSecondAdd(FakeMemoryStore):
-        """The canonical store, refusing every write after the first."""
+    class _FailsOnSecondWrite(FakeMemoryStore):
+        """The canonical store, refusing every write after the first.
+
+        It overrides ``write_atomic`` rather than ``add`` because that is the door
+        an installing ruling goes through since ADR-0108 §2 — the ingestor declares
+        ``INSERT_IF_ABSENT`` rather than relying on ``add``'s upsert default. The
+        subject of this case is unchanged: a store failure part-way through a
+        proposal list, and what the loop does about it.
+        """
 
         def __init__(self) -> None:
             super().__init__(now=_clock)
             self.writes = 0
 
-        async def add(self, record: MemoryRecord) -> str:
+        async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
             """Accept the first write, then fail the way a full store fails."""
             self.writes += 1
             if self.writes > 1:
                 msg = "fake: the store is full"
                 raise MemoryStoreError(msg)
-            return await super().add(record)
+            return await super().write_atomic(writes)
 
-    memory = _FailsOnSecondAdd()
+    memory = _FailsOnSecondWrite()
     proposals = [
         MemoryUpdateProposal(
             proposed=PreferenceMemory(
