@@ -42,7 +42,9 @@
   clause to every ADR this decision touches — ADR-0072 §5 and §6, ADR-0103 §8 and
   §9, ADR-0110 §8 and §9, ADR-0074 §6 and §11, ADR-0007 §5 and its Consequences,
   ADR-0006 §5 — and finds nothing owed. No ADR's `Status` line is edited.
-- **Refs** #663, #457, #411, #729.
+- **Refs** #663, #457, #411, #729. **Files** #789 (the exit instrument, §7),
+  #790 (the band-scoped relevance read, §5), #791 (episodic recall's residue, §9)
+  and #792 (ADR-0007's post-filter caveat, §11).
 
 ## Context
 
@@ -361,7 +363,8 @@ or `sources` filter to `MemoryStore.search`, or a third read — `core/protocols
 surface, which golden rule 5 puts behind its own ratified ADR, and which this
 lane was neither given nor needs. What this lane owes is to say that the gap is
 retrieval's, that it is not a ranking problem, and that the ranking answer it
-would otherwise be reached for is refused. That is filed, not deferred silently.
+would otherwise be reached for is refused. That is filed as **#790**, not
+deferred silently.
 
 **And it is the one that actually degrades with volume**, which is why it belongs
 in leg 7's account of itself even though its fix does not. ADR-0072 §5's
@@ -434,7 +437,7 @@ prose and not to a ratified text, so nothing is owed under ADR-0082 §1 (§11).
 **The instrument has no owner and this ADR gives it one by name.** It is a
 `tests/`-side lane — an aged-store fixture and a measurement harness — with no
 `src/` change and no contract surface, and it is a prerequisite of the tuning
-work rather than a follow-up to it. It is filed as its own issue rather than left
+work rather than a follow-up to it. It is filed as **#789** rather than left
 implicit in the roadmap's exit line, because an exit test nobody owns is an exit
 test that gets asserted at the leg's close.
 
@@ -509,7 +512,7 @@ lands on only one of them.
   retrieval budget episodes may take, and from which consumer's decision. That
   half has no consumer, and the repository's standing discipline is to defer
   surface until one exists (ADR-0072 §7, ADR-0045 §1, ADR-0028 §7). It carries
-  forward on its own issue rather than on ADR-0074's list.
+  forward on **#791** rather than on ADR-0074's list.
 - **Hybrid lexical+vector retrieval** (ADR-0006 §5), gated by §7 and unfired (§7).
 - **Anything about eviction, size caps or retention.** ADR-0103 §1's framing rules
   them out for this leg and ADR-0007 §5's deferral stands untouched.
@@ -578,7 +581,7 @@ own §9 false. **Deferral discharged; no record owed.**
 `search` "stays exactly as ADR-0072 §5 ruled" are both affirmed. §11's entry —
 "Cross-conversation episodic recall and its ranking (§6). Due with leg 7's
 retrieval-under-load work" — names this lane, and §9 above answers its ordering
-half and carries its consumer half forward on its own issue. §11's entry stops
+half and carries its consumer half forward on #791. §11's entry stops
 describing a wholly open question, which is what a discharge does; no sentence of
 ADR-0074 becomes false, because §6 and §11 both frame the deferral as *the
 capability plus its ranking* and the capability is untouched. **Partial discharge;
@@ -591,7 +594,7 @@ carrying two predicates; it now carries three, the validity window having been
 added by ADR-0045 §6 and extended by ADR-0110 §3. That widening is ADR-0045's and
 is not this ADR's to record: the bullet was true when written, nothing here
 changes it, and a reader acting on it acts on a caveat that is if anything
-understated. It is filed as an issue rather than ruled on, which is the
+understated. It is filed as **#792** rather than ruled on, which is the
 park-what-isn't-this-change discipline. **No record owed.**
 
 **ADR-0006 §5 — nothing owed.** §5 leaves hybrid out of scope and its revisit
@@ -626,7 +629,7 @@ than it holds; none acquires an exception and none loses one.
   a property nobody stated (§6). It is carried to leg 8, where the
   memory-precision measure that could show it biting is built.
 - **Two things move from implicit to owned**: the exit instrument (§7) and the
-  band-scoped relevance read (§5), each on its own issue. The first is a
+  band-scoped relevance read (§5, **#790**), each on its own issue. The first is a
   prerequisite of any tuning this leg does; the second is a golden-rule-5 ADR
   whenever a lane wants §5's precedence real.
 - **Tuning gets a gate, and the gate has a cost.** #457's and #411's mitigation
