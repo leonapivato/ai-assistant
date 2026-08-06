@@ -613,10 +613,13 @@ advances nor blocks it.
   observer lane's.
 - **Anything about `add`'s signature.** §8 files that; it is not decided here.
 - **Which change carries §5's `MemoryWriteMode.UPSERT` amendment**, if not the one
-  implementing the rest of §5. That is a lane-scoping question for whoever
-  dispatches the work, not a decision: §5 requires the amendment and this ADR is
-  not ratified until it lands with the rest. What is *not* open is whether it is
-  owed.
+  implementing the rest of §5. A lane-scoping question for whoever dispatches the
+  work, not a decision: §5 requires it in the change that lands the refusal, and
+  what is *not* open is whether it is owed. It does **not** condition this ADR's
+  ratification, which follows the ordinary contract-ADR sequence in the header
+  bullet — merged and flipped to `Accepted` **before** any implementation, per
+  ADR-0015 §5. An ADR waiting on its own implementation would invert exactly the
+  rule golden rule 5 exists to keep.
 
 ## Consequences
 
