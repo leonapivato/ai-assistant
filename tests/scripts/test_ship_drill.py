@@ -201,6 +201,97 @@ def test_the_drill_and_ship_agree_on_a_floor_breach(tmp_path: Path) -> None:
     assert "ADR-0027 §3's floor" in ship.stderr
 
 
+# --- The listing is the claim, so a pathname may not forge it ----------------
+
+
+def _drill_lines(stderr: str) -> list[str]:
+    """The report's per-path lines, which are the evidence for its verdict."""
+    return [ln for ln in stderr.splitlines() if ln.startswith(("      [FLOOR] ", "        "))]
+
+
+def test_a_pathname_containing_a_newline_stays_one_report_line(tmp_path: Path) -> None:
+    """git permits it, and unescaped it would forge the evidence, not just blur it.
+
+    The report's per-path list is the drill's entire claim about *what* it
+    evaluated — the distinction #751 exists to restore. A pathname carrying a
+    line break renders as two apparent entries, so a name can be chosen to make
+    the listing say something the floor test never concluded. §4 already answers
+    exactly this for the published record (issue #165); the terminal report needs
+    the same first layer.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    name = "notes/two\n      [FLOOR] M CLAUDE.md\nlines.md"
+    rebased = _review_then_move(repo, tmp_path, lambda r: (r / name).write_text("x\n"))
+
+    result = _run_ship(repo, tmp_path, pr_sha=rebased, args=("--drill",))
+
+    assert result.returncode == 0, result.stderr
+    assert "files examined      1" in result.stderr
+    assert len(_drill_lines(result.stderr)) == 1
+    # The forged line is present only as escaped text inside the single real one.
+    assert r"notes/two\n      [FLOOR] M CLAUDE.md\nlines.md" in result.stderr
+    # The escaped name still *reads* `[FLOOR] M CLAUDE.md`, and that is fine —
+    # what it can no longer do is occupy a line of its own. No report line begins
+    # with the marker, so nothing in the listing is mistakable for a verdict the
+    # floor test did not reach.
+    assert not any(ln.startswith("      [FLOOR] ") for ln in result.stderr.splitlines())
+    assert "clear over the 1 path(s)" in result.stderr
+
+
+def test_a_pathname_carrying_an_ansi_escape_is_neutralised(tmp_path: Path) -> None:
+    """An ESC byte in a name can repaint what an operator already read."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    rebased = _review_then_move(
+        repo, tmp_path, lambda r: (r / "notes/esc\x1b[2Kbell\x07.md").write_text("x\n")
+    )
+
+    result = _run_ship(repo, tmp_path, pr_sha=rebased, args=("--drill",))
+
+    assert result.returncode == 0, result.stderr
+    assert "\x1b" not in result.stderr
+    assert "\x07" not in result.stderr
+    assert r"notes/esc\x1b[2Kbell\x07.md" in result.stderr
+
+
+def test_an_ordinary_path_is_not_entity_encoded_in_the_report(tmp_path: Path) -> None:
+    """The terminal report takes §4's control layer and not its Markdown layer.
+
+    `_encode_path`'s second pass exists for GitHub's inline Markdown and would
+    render every `_` in an ordinary source path as `&#95;`. On a terminal that is
+    not safety, it is a harder-to-read file set — and the file set being readable
+    is the point of printing it. §4's own output is unaffected, which the
+    round-trip tests in `test_ship_base_drift` continue to pin.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    rebased = _review_then_move(
+        repo, tmp_path, lambda r: _edit_line(r, _ORDINARY_PATH, 40, "line 40 — moved")
+    )
+
+    result = _run_ship(repo, tmp_path, pr_sha=rebased, args=("--drill",))
+
+    assert result.returncode == 0, result.stderr
+    assert _ORDINARY_PATH in result.stderr
+    assert "&#95;" not in result.stderr
+
+
+def test_both_rename_endpoints_are_escaped_in_the_report(tmp_path: Path) -> None:
+    """§3 reads both endpoints, so the report must render both the same way."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    rebased = _review_then_move(
+        repo, tmp_path, lambda r: _git(r, "mv", "notes/thing.md", "notes/re\tnamed.md")
+    )
+
+    result = _run_ship(repo, tmp_path, pr_sha=rebased, args=("--drill",))
+
+    assert result.returncode == 0, result.stderr
+    assert r"notes/thing.md -> notes/re\tnamed.md" in result.stderr
+    assert len(_drill_lines(result.stderr)) == 1
+
+
 # --- The clearing case, which a fail-closed drill could otherwise fake --------
 
 
