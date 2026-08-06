@@ -112,13 +112,25 @@ This ADR generalises an existing precedent rather than arguing for a novelty.
 ### 1. The seam is the verb, and the caller declares which one it means
 
 > **Normative.** Every `MemoryStore` write in `src/ai_assistant/` states its
-> collision intent at the call site. A write that means to **install a new
-> record** — one whose id was minted, derived, or received from a producer, and
-> which is expected to name nothing stored — uses `write_atomic` with
-> `MemoryWriteMode.INSERT_IF_ABSENT`. A write that means to **land at an id that
-> already names a stored record** uses `MemoryWriteMode.UPSERT`, or `add`, which
-> is that mode. No installing write may rely on a default to resolve a collision
-> it did not intend.
+> collision intent **as a `MemoryWriteMode` at the call site**. A write that means
+> to **install a new record** — one whose id was minted, derived, or received from
+> a producer, and which is expected to name nothing stored — uses `write_atomic`
+> with `MemoryWriteMode.INSERT_IF_ABSENT`. A write that means to **land at an id
+> that already names a stored record** uses `MemoryWriteMode.UPSERT`. No write may
+> rely on a default — neither `add`'s, nor `MemoryWrite.mode`'s — to resolve a
+> collision it did not intend.
+
+**`add` stays the upsert on the Protocol, and stops being how a caller here says
+so.** The two are separable and this ADR separates them. `add`'s *semantics* are
+unchanged and must be: ADR-0046 §2 defines `UPSERT` as "today's `add` semantics",
+`MemoryStore` is a contract other implementations satisfy, and §4's refusal binds
+`add` precisely because callers outside this repository exist. What changes is that
+inside `src/ai_assistant/` the intent is carried by the mode argument rather than by
+the method name — because `add` does not *say* what it does. A reader auditing which
+writes can destroy a record can find `MemoryWriteMode.UPSERT`; they cannot find a
+three-letter method name shared with every set, queue and task group in the tree,
+which is also why this clause is enforced by §2 leaving no `add` callers rather than
+by a structural check (§7 is explicit about that asymmetry).
 
 This is the ruling, and everything below is either its routing, its backstop, or
 an honest account of what it does not buy.
@@ -415,22 +427,39 @@ acts on and both change:
 So the record on ADR-0081 is a leading-token partial supersession naming both
 clauses, and #104 stays open and unclaimed by this lane.
 
-**§8's *reasoning* is separately corrected, and that part is an amendment** —
-ADR-0070 §1's "reconciles the ADR … with a fact that postdates it". Two of the three
-grounds §8 gave are contradicted by the tree:
+**§8's *reasoning* is separately assessed, and where it needs correcting that part
+is an amendment** — ADR-0070 §1's "reconciles the ADR … with a fact that postdates
+it". Of the three grounds §8 gave, **one is stale and two stand** — which is fewer
+than #630's thread concluded, and the difference is worth recording because getting
+it wrong was easy:
 
-1. §8's cost ground — a writer "could only enforce [it] by paying a
-   `get(proposed.id)` on every ingest to see something the store sees for free" —
-   has expired. ADR-0046's `INSERT_IF_ABSENT` mode buys the absence check with no
-   read at all. §8 predates the tree in which `_apply_supersede` already uses it.
-2. §8's second ground — "a cross-kind collision arriving from capture would pass a
-   writer-side rule untouched. A rule at `add` covers every caller" — is stale in
-   both halves. Capture does not call `add`, and the mode it does use already
-   refuses every collision; and `add` is not "every caller", because `write_atomic`
-   is a second door (§4).
-3. §8's third ground — that with ADR-0081 §1 closed the residue is materially
-   smaller — **stands unchanged**, and is why this is a low-priority defect
-   properly fixed rather than an incident.
+1. **The cost ground stands, and §4 honours it rather than retiring it.** §8 wrote
+   that a writer "could only enforce [it] by paying a `get(proposed.id)` on every
+   ingest to see something the store sees for free while it replaces the row —
+   giving up §1's no-I/O, cannot-be-raced property". That is still exactly true, and
+   it is *why* §4 puts the cross-kind refusal in the store: a writer cannot learn
+   the stored record's **kind** without reading it, and `INSERT_IF_ABSENT` does not
+   supply it — that mode refuses *every* collision without ever reporting what it
+   collided with, so it answers §1's routing question and not §8's.
+
+   **#630's thread argued this ground had expired, and it had not.** The argument
+   holds for the absence check §1 needs, which genuinely costs no read, and was
+   carried across to a different rule one line away. The two are easy to conflate
+   and neither buys the other: **§1's insert-if-absent costs no read at the writer;
+   §4's cross-kind check costs no read at the store** — the `SELECT` that already
+   chooses insert-versus-update. §8 predicted the second in the phrase "something
+   the store sees for free"; §4 is that prediction taken up.
+2. **The coverage ground is stale, in both halves.** §8 wrote that "a cross-kind
+   collision arriving from capture would pass a writer-side rule untouched. A rule
+   at `add` covers every caller; a rule at `ingest` covers one." Capture does not
+   call `add` at all — it writes `INSERT_IF_ABSENT` and refuses `add` explicitly,
+   for §8's own reason — so the unprotected caller §8 named had already protected
+   itself. And `add` is not "every caller": `write_atomic` is a second door, which
+   is why §4 binds both.
+3. **The residue ground stands unchanged**, and is why this is a low-priority
+   defect properly fixed rather than an incident: with ADR-0081 §1 closed, what
+   remained was a silent replacement of an *unrelated* record with no fabricated
+   warrant behind it.
 
 §8's named **trigger** also fired before this lane started, which is recorded
 because it means the deferral's own terms were met rather than merely outrun: #735
@@ -467,10 +496,24 @@ destructive write containing no word a reader can grep for — and it arrives at
 very door §2 routes every ingestor write through, which is where a reader would
 least expect to find the old default hiding. It differs from the first in one
 respect that matters: it is **mechanically checkable**, because the construction
-site is a parseable expression rather than a method name shared with legitimate
-uses. §5 therefore requires that check rather than leaving this to the same
-"visible in review" argument, and this residual is closed for this repository's own
-callers even though the default remains in `core`.
+site names a unique type in a parseable expression. §5 therefore requires that
+check rather than leaving this to the same "visible in review" argument, and this
+residual is closed for this repository's own callers even though the default
+remains in `core`.
+
+**The asymmetry between the two is deliberate and is worth naming, because it looks
+like an oversight.** `add` gets no equivalent structural check, and not because it
+matters less. It is that "is this call `MemoryStore.add`?" is not decidable from the
+source in a duck-typed tree: `add` is the name every `set`, every `TaskGroup` and
+several of this repository's own collections use, and `self._store` is typed by a
+Protocol at some call sites and by nothing at others. A check would either be a
+name heuristic with false positives on unrelated code, or a type-directed one that
+fails open exactly where a new caller is most likely to be careless. `MemoryWrite`
+has no such problem — the construction names the class. So §1 is enforced by a check
+where a check can be sound, and by §2 having left zero callers where it cannot: a
+new `store.add(...)` line is a *visible addition* in review precisely because there
+are no existing ones for it to hide among, which is a weaker guarantee than a gate
+and is stated as one.
 
 What is **not** closed by either bound is the same irreducible thing stated above: a
 caller writing `mode=MemoryWriteMode.UPSERT` deliberately, at a same-kind colliding
