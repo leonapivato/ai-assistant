@@ -419,34 +419,35 @@ carries the revisit.
 
 > **Normative.** No lane makes a **headroom** change to retrieval before that
 > measurement exists — raising `_RESULT_OVERFETCH`, decoupling or lifting the KNN
-> `k` cap to buy a larger candidate budget, paginating the KNN by some further
-> bounded number of pages to buy a bigger multiple of `limit`, or adopting hybrid
+> `k` cap to buy a larger candidate budget, deepening the candidate scan by some
+> further bounded amount to buy a bigger multiple of `limit`, or adopting hybrid
 > lexical+vector retrieval. The measurement is the warrant; a constant changed
 > without one is a guess with a commit message.
 
-> **Normative.** That gate does **not** reach a **correctness** remedy for #457.
-> A change that removes the silent failure rather than making it rarer proceeds
-> on its own merits and without waiting for the measurement, subject to §10 where
-> it needs contract surface. Three shapes qualify, and the list is not closed: a
-> pre-filter that lets the KNN see only eligible rows; an explicit under-service
-> signal a caller can refuse on; and a pagination that continues until it has
-> served `limit` eligible rows **or** exhausted the candidate space, and reports
-> which of the two ended it.
+> **Normative.** That gate does **not** reach a **correctness** remedy for #457 —
+> a change that removes or exposes the silent failure rather than making it rarer.
+> Such a remedy proceeds on its own merits and without waiting for the
+> measurement, subject to §10 where it needs contract surface. Two shapes the
+> corpus already names qualify on their face, because neither iterates: a
+> pre-filter that lets the KNN see only eligible rows, and an explicit
+> under-service signal a caller can refuse on.
 
-**The line between the two clauses is whether the change is a bet on a
-frequency, and it is not a line between mechanisms.** Pagination is the case that
-shows this and it appears on both sides deliberately: paginating a further fixed
-number of pages is a headroom change, because it moves the cliff and its case is
-that the new depth is enough; paginating to a **terminating condition** — served,
-or exhausted — is a correctness remedy, because it has no cliff to be wrong
-about and, paired with the signal, tells the caller which happened. An earlier
-draft of this section listed "paginating the KNN for reach" flatly under
-headroom, which forbade by name the mechanism #411 part 3 calls "the durable
-fix"; the two clauses could not both be satisfied by that remedy. What is gated
-is the bet, never the mechanism that carries it. A headroom change buys a bigger
-multiple of `limit` and leaves the failure mode exactly where it was, one denser
-store further out; its whole case
-is that the new multiple is enough, which is a claim about how often nearer
+> **Normative.** Whether a remedy that **iterates** — continuing past the cap
+> until served or exhausted — is a correctness remedy or a headroom change is not
+> settled here, and this ADR pre-blesses no iterating shape. It is settled by the
+> contract ADR §10 requires, and that ADR owes a termination argument against
+> ADR-0050 §1's ratified rejection of an unbounded re-search and ADR-0079 §1's
+> objection that such a sweep has no termination guarantee and depends on the
+> store's read clock.
+
+**The line between the first two clauses is whether the change is a bet on a
+frequency, and it is not a line between mechanisms.** What is gated is the bet,
+never the mechanism that carries it: the same deepening of a candidate scan is a
+headroom change when its case is that the new depth is enough, and something else
+when it runs to a condition rather than to a budget. A headroom change buys a
+bigger multiple of `limit` and leaves the failure mode exactly where it was, one
+denser store further out; its whole case is that the new multiple is enough,
+which is a claim about how often nearer
 neighbours are filtered — unanswerable without the measurement, and the reason
 #457 and #411 each offer *lists* of options rather than a fix. A remedy that
 makes the shortfall impossible or legible makes no such claim, and gating it on a
@@ -458,6 +459,23 @@ self-contradiction. **That is wrong at any frequency**, and no k-shortfall numbe
 would make it safe. This distinction was missed by an earlier draft, which gated
 "the mitigation options #457 or #411 enumerate" as one set while §8 classed #457
 as a write-path correctness exposure; the two statements could not both stand.
+
+**The third clause exists because the second one over-reached, and the correction
+is worth leaving legible.** A draft of this section listed, among the shapes that
+qualify as correctness remedies, "a pagination that continues until it has served
+`limit` eligible rows **or** exhausted the candidate space". The adversarial lens
+answered it on the corpus: ADR-0050 §1 carries a ratified rejection of "an
+unbounded re-search", ADR-0079 §1 names "the objection that sinks 're-search
+until exhausted'" as its want of a termination argument and its dependence on the
+store's read clock, and ADR-0079 §1's own design is explicitly "a single bounded
+read with a refusing ceiling, not a sweep" *because* of it. Exhaustion is not
+self-defining: against a live store it is a moving target, and against a fixed
+snapshot it is a read-clock commitment nothing on the `MemoryStore` contract makes
+today. So the shape may well be right — #411 part 3 calls it the durable fix — and
+this ADR is not the place it earns that, because earning it means making the
+termination argument the corpus twice declined to make. Naming the argument that
+is owed is worth more to the next lane than a permission it would have had to
+re-derive anyway.
 
 The first clause is the one that costs something, and it is the discipline the
 corpus already applies to itself. ADR-0103 §5 defers currency's decay parameters
@@ -527,13 +545,13 @@ under golden rule 5". That is correct and §10 does not pre-authorise it.
   lane may take it whenever it likes.
 - **Part 3 (filtered cap-boundary behaviour)** is #457's mechanism seen from the
   constant's side, and it is the part that names the durable fix — "retrieval that
-  can continue past the cap (paginate the KNN)". Which side of §7 it falls on
-  depends on how it terminates, not on the word "paginate": a pagination bounded
-  at some deeper fixed budget is a headroom change and waits for the measurement;
-  one that runs until it has served `limit` eligible rows or exhausted the
-  candidate space, reporting which, is a correctness remedy and does not. The
-  issue's own phrase — "retrieval that can continue past the cap" — reads more
-  naturally as the second, and it is the shape that actually closes #457.
+  can continue past the cap (paginate the KNN)". It **iterates**, so §7's third
+  clause governs it: this ADR classifies it neither way and pre-blesses nothing.
+  What it owes, in the contract ADR §10 requires, is the termination argument
+  ADR-0050 §1's rejection of an unbounded re-search and ADR-0079 §1's read-clock
+  objection between them demand — against what "exhausted" is measured, and what
+  the store commits to about concurrent writes while it is measured. The issue is
+  right that this is the durable fix; what it does not carry is that argument.
 
 **One staleness in #411 worth recording**: its note that "#115's premise that
 `_check_tuning` lives only in `orchestration` … is now stale" is itself now the
