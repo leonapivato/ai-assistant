@@ -341,10 +341,20 @@ and still exported** (ADR-0045 §6), which is exactly the observability the case
 needs. A lane may add an expired variant to cover the second invisibility axis, but
 it proves *occupancy* only and does not discharge (a).
 
-> **Normative.** Every cross-kind case asserts the refusal is **not** a
-> `MemoryStoreConflictError`, not merely that it is a `MemoryStoreError`. The
-> conflict class subclasses the base one, so a bare `pytest.raises(MemoryStoreError)`
-> passes on the very disposition §4 rules out and certifies nothing.
+> **Normative.** Every case exercising §4's refusal — the cross-kind `add` and
+> cross-kind `UPSERT` cases, on which §4 is the operative rule — asserts the refusal
+> is **not** a `MemoryStoreConflictError`, not merely that it is a
+> `MemoryStoreError`. The conflict class subclasses the base one, so a bare
+> `pytest.raises(MemoryStoreError)` passes on the very disposition §4 rules out and
+> certifies nothing.
+
+**This does not reach the cross-kind `INSERT_IF_ABSENT` case, which asserts the
+conflict class and must.** §4 is not the operative rule there: ADR-0046 §3 refuses
+*every* collision on that mode, earlier, and its remedy — the caller minted a
+colliding id, so re-mint and retry — is the right one whatever kind the stored
+record turns out to be. The two clauses are about different rules that happen to
+share a setup, and reading them as one requirement would demand a case that cannot
+exist.
 
 Neither of the two cases above is decoration, and neither is implied by the cases
 before them:
