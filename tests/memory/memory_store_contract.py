@@ -606,10 +606,43 @@ class MemoryStoreContract:
         await store.add(retired)
         assert await store.get("1") is None  # invisible to reads, still stored
 
-        with pytest.raises(MemoryStoreError):
+        with pytest.raises(MemoryStoreError) as excinfo:
             await store.add(_preference("1", "prefers tea"))
+        assert not isinstance(excinfo.value, MemoryStoreConflictError)
 
         assert list(await store.export()) == [retired]  # retained and unchanged
+
+    async def test_upsert_at_a_different_kind_collides_on_physical_presence(
+        self, store: MemoryStore
+    ) -> None:
+        # The same physical-presence rule on the *other* upsert-capable door. Its
+        # own case rather than a parametrisation of the one above, because the two
+        # doors reach the refusal by different routes and an implementation can get
+        # one right and the other wrong — the divergence ADR-0046 §3 forbids,
+        # arriving through a new rule.
+        #
+        # Expired rather than window-closed, so the two cases together cover both
+        # ways a row can be present-but-unreadable.
+        await store.add(_semantic("1", "coffee", expires_at=_LONG_AGO))
+        assert await store.get("1") is None
+
+        with pytest.raises(MemoryStoreError) as excinfo:
+            await store.write_atomic(
+                [MemoryWrite(record=_preference("1", "prefers tea"), mode=MemoryWriteMode.UPSERT)]
+            )
+        assert not isinstance(excinfo.value, MemoryStoreConflictError)
+
+        # `export` drops an expired record (ADR-0007), so presence is asserted the
+        # one way left: the id is still occupied, which an INSERT_IF_ABSENT of the
+        # *original* kind proves by colliding rather than succeeding.
+        with pytest.raises(MemoryStoreConflictError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("1", "coffee"), mode=MemoryWriteMode.INSERT_IF_ABSENT
+                    )
+                ]
+            )
 
     async def test_search_finds_a_matching_record(self, store: MemoryStore) -> None:
         await store.add(_semantic("c", "the user likes coffee"))
