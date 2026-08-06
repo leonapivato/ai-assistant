@@ -419,20 +419,33 @@ carries the revisit.
 
 > **Normative.** No lane makes a **headroom** change to retrieval before that
 > measurement exists — raising `_RESULT_OVERFETCH`, decoupling or lifting the KNN
-> `k` cap to buy over-fetch, paginating the KNN for reach, or adopting hybrid
+> `k` cap to buy a larger candidate budget, paginating the KNN by some further
+> bounded number of pages to buy a bigger multiple of `limit`, or adopting hybrid
 > lexical+vector retrieval. The measurement is the warrant; a constant changed
 > without one is a guess with a commit message.
 
 > **Normative.** That gate does **not** reach a **correctness** remedy for #457.
-> A change that removes the silent failure rather than making it rarer — a
-> pre-filter that lets the KNN see only eligible rows, or an explicit
-> under-service signal a caller can refuse on — proceeds on its own merits and
-> without waiting for the measurement, subject to §10 where it needs contract
-> surface.
+> A change that removes the silent failure rather than making it rarer proceeds
+> on its own merits and without waiting for the measurement, subject to §10 where
+> it needs contract surface. Three shapes qualify, and the list is not closed: a
+> pre-filter that lets the KNN see only eligible rows; an explicit under-service
+> signal a caller can refuse on; and a pagination that continues until it has
+> served `limit` eligible rows **or** exhausted the candidate space, and reports
+> which of the two ended it.
 
 **The line between the two clauses is whether the change is a bet on a
-frequency.** A headroom change buys a bigger multiple of `limit` and leaves the
-failure mode exactly where it was, one denser store further out; its whole case
+frequency, and it is not a line between mechanisms.** Pagination is the case that
+shows this and it appears on both sides deliberately: paginating a further fixed
+number of pages is a headroom change, because it moves the cliff and its case is
+that the new depth is enough; paginating to a **terminating condition** — served,
+or exhausted — is a correctness remedy, because it has no cliff to be wrong
+about and, paired with the signal, tells the caller which happened. An earlier
+draft of this section listed "paginating the KNN for reach" flatly under
+headroom, which forbade by name the mechanism #411 part 3 calls "the durable
+fix"; the two clauses could not both be satisfied by that remedy. What is gated
+is the bet, never the mechanism that carries it. A headroom change buys a bigger
+multiple of `limit` and leaves the failure mode exactly where it was, one denser
+store further out; its whole case
 is that the new multiple is enough, which is a claim about how often nearer
 neighbours are filtered — unanswerable without the measurement, and the reason
 #457 and #411 each offer *lists* of options rather than a fix. A remedy that
@@ -514,9 +527,13 @@ under golden rule 5". That is correct and §10 does not pre-authorise it.
   lane may take it whenever it likes.
 - **Part 3 (filtered cap-boundary behaviour)** is #457's mechanism seen from the
   constant's side, and it is the part that names the durable fix — "retrieval that
-  can continue past the cap (paginate the KNN)". That is a mitigation option under
-  §7's headroom clause and waits for the measurement — it buys reach past the cap
-  rather than removing the silence, which is the distinction §7 draws.
+  can continue past the cap (paginate the KNN)". Which side of §7 it falls on
+  depends on how it terminates, not on the word "paginate": a pagination bounded
+  at some deeper fixed budget is a headroom change and waits for the measurement;
+  one that runs until it has served `limit` eligible rows or exhausted the
+  candidate space, reporting which, is a correctness remedy and does not. The
+  issue's own phrase — "retrieval that can continue past the cap" — reads more
+  naturally as the second, and it is the shape that actually closes #457.
 
 **One staleness in #411 worth recording**: its note that "#115's premise that
 `_check_tuning` lives only in `orchestration` … is now stale" is itself now the
