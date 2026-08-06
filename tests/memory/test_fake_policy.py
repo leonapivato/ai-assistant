@@ -19,12 +19,16 @@ from memory_policy_contract import MemoryPolicyContract
 from pydantic import ValidationError
 
 from ai_assistant.core.types import (
+    Attestation,
+    BeliefBand,
     DataTier,
     MemoryDecisionKind,
     MemorySource,
     MemoryUpdateProposal,
     Provenance,
     SemanticMemory,
+    UserConfirmation,
+    band_of,
 )
 from ai_assistant.testing import FakeMemoryPolicy
 
@@ -44,9 +48,29 @@ def _record(record_id: str = "r") -> MemoryRecord:
     )
 
 
-def _proposal(*, sensitivity: DataTier = DataTier.PERSONAL) -> MemoryUpdateProposal:
+def _tainted_record(record_id: str = "consolidated") -> MemoryRecord:
+    """A derived belief whose warrant rests on recorded external content."""
+    return SemanticMemory(
+        id=record_id,
+        content=record_id,
+        fact=record_id,
+        provenance=Provenance(
+            source=MemorySource.OBSERVED,
+            confidence=0.6,
+            last_updated=_WHEN,
+            evidence=("episode-1",),
+            derived_from_external=True,
+        ),
+    )
+
+
+def _proposal(
+    *, sensitivity: DataTier = DataTier.PERSONAL, record: MemoryRecord | None = None
+) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(
-        proposed=_record("proposed"), rationale="because", sensitivity=sensitivity
+        proposed=record if record is not None else _record("proposed"),
+        rationale="because",
+        sensitivity=sensitivity,
     )
 
 
@@ -96,6 +120,86 @@ async def test_secret_tier_overrides_the_configured_kind() -> None:
     decision = await policy.decide(_proposal(sensitivity=DataTier.SECRET), conflicts=[])
 
     assert decision.kind is MemoryDecisionKind.ASK_USER
+
+
+@pytest.mark.parametrize("kind", list(MemoryDecisionKind), ids=str)
+async def test_a_tainted_derived_proposal_overrides_the_configured_kind(
+    kind: MemoryDecisionKind,
+) -> None:
+    """ADR-0106 §6's ceiling, which the fake owes as much as ``DefaultMemoryPolicy``.
+
+    The secret-tier override does not reach this input — a consolidation over
+    ordinary personal material is not Tier 0 — so a fake left at its default
+    ``ACCEPT`` would commit exactly the proposal ADR-0098 §4 forbids committing,
+    and would certify a consumer that relied on it. Asserted at every configured
+    kind for the reason the shared suite runs at every kind: a fake that conforms
+    only where it was left alone is contract-correct in tests and a trap in use.
+    """
+    tainted = _tainted_record()
+
+    decision = await FakeMemoryPolicy(kind).decide(_proposal(record=tainted), conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
+    assert "external" in decision.reason
+
+
+async def test_a_confirmed_tainted_proposal_returns_the_configured_kind() -> None:
+    """The override is as narrow as the clause, and stands down for the re-ingest.
+
+    ADR-0078 §5's confirmed answer is a re-ingest of the same marked proposal. A
+    fake that deferred it again would make the confirmed path — the one route a
+    tainted proposal has to landing — untestable through this double, which is the
+    trap in the other direction.
+    """
+    tainted = _tainted_record()
+    proposal = _proposal(record=tainted)
+    confirmed = MemoryUpdateProposal(
+        proposed=tainted,
+        rationale="because",
+        confirmation=UserConfirmation(
+            deferral_id="q-1", question_key=proposal.question_key, confirmed_at=_WHEN
+        ),
+    )
+
+    decision = await FakeMemoryPolicy(MemoryDecisionKind.ACCEPT).decide(confirmed, conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+@pytest.mark.parametrize(
+    "source", [s for s in MemorySource if band_of(s) is not BeliefBand.DERIVED], ids=str
+)
+async def test_a_stray_marker_outside_the_derived_band_overrides_nothing(
+    source: MemorySource,
+) -> None:
+    """ADR-0106 §2: the field means nothing outside the ``DERIVED`` band.
+
+    ADR-0106 §7 leaves the combination constructible, so a fake reading the raw
+    flag would defer a user's own assertion and every calendar import — refusing
+    far more than the contract asks and making the double useless to leg 6.
+    """
+    record = SemanticMemory(
+        id="r",
+        content="r",
+        fact="r",
+        provenance=Provenance(
+            source=source,
+            confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.9,
+            last_updated=_WHEN,
+            attestation=(
+                Attestation(reported_by="calendar:work", reported_at=_WHEN)
+                if band_of(source) is BeliefBand.ATTESTED
+                else None
+            ),
+            derived_from_external=True,
+        ),
+    )
+
+    decision = await FakeMemoryPolicy(MemoryDecisionKind.ACCEPT).decide(
+        _proposal(record=record), conflicts=[]
+    )
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
 
 
 async def test_store_temporary_uses_the_configured_ttl() -> None:
