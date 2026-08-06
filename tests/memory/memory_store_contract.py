@@ -544,18 +544,72 @@ class MemoryStoreContract:
         assert await store.get("nope") is None
 
     async def test_add_overwrites_same_id_with_full_replacement(self, store: MemoryStore) -> None:
-        # Upsert is a full replacement, not a merge: re-adding an id with a
-        # different kind must leave no trace of the previous record — not its
-        # kind, nor its subtype fields. (Overwriting across kinds also proves the
-        # backend rewrites every column, not just the payload.)
-        await store.add(_semantic("1", "old semantic note"))
-        replacement = _preference("1", "new preference note")
+        # Upsert is a full replacement, not a merge: re-adding an id must leave no
+        # trace of the previous record — not its content, not its subtype fields,
+        # and not the columns a backend indexes *beside* the payload. Varying
+        # `expires_at` and the validity window is what proves those columns are
+        # rewritten and not merely the JSON blob: a store that rewrote only the
+        # payload would keep the old retention deadline and closed window, and
+        # `get` would then answer `None` for a record that is fully open.
+        #
+        # Same-kind, deliberately. The old form of this case proved the same thing
+        # by re-adding at a *different* kind, which ADR-0108 §4 now refuses on every
+        # upsert-capable door; the cross-kind collision has its own cases below.
+        await store.add(
+            _semantic(
+                "1",
+                "old semantic note",
+                expires_at=_FAR_FUTURE,
+                validity=Validity(valid_until=_FAR_FUTURE),
+            )
+        )
+        replacement = _semantic("1", "new semantic note", last_updated=_LONG_AGO)
         await store.add(replacement)
 
         got = await store.get("1")
         assert got is not None
-        assert got.kind == "preference"  # the old semantic kind is gone
         assert got == replacement  # the whole record equals the second input
+        assert got.expires_at is None  # the old deadline is gone, not merged
+        assert got.validity.valid_until is None  # and so is the old window
+        assert got.provenance.last_updated == _LONG_AGO
+
+    async def test_add_at_a_different_kind_is_refused_and_changes_nothing(
+        self, store: MemoryStore
+    ) -> None:
+        # ADR-0108 §4's backstop on `add`, the door whose default is the upsert. A
+        # caller that means to install uses write_atomic/INSERT_IF_ABSENT (§1); this
+        # is what catches the caller that wrongly reached for the upsert anyway, and
+        # it is the one refusal that holds however wrong the declaration was.
+        #
+        # `MemoryStoreError` and not `MemoryStoreConflictError`: the latter's
+        # documented remedy is "re-mint and retry", which does not answer a caller
+        # that asked to overwrite something of a kind it did not expect.
+        stored = _semantic("1", "the user drinks coffee")
+        await store.add(stored)
+
+        with pytest.raises(MemoryStoreError) as excinfo:
+            await store.add(_preference("1", "prefers tea"))
+        assert not isinstance(excinfo.value, MemoryStoreConflictError)
+
+        assert await store.get("1") == stored  # nothing was written
+
+    async def test_add_at_a_different_kind_collides_on_physical_presence(
+        self, store: MemoryStore
+    ) -> None:
+        # Presence is physical, in `INSERT_IF_ABSENT`'s sense (ADR-0046 §3, ADR-0108
+        # §4): a record hidden from every read still occupies its id. A store that
+        # judged this on read-visibility would let an unreadable-but-retained
+        # record be silently replaced by one of another kind, which is the loss the
+        # rule exists to prevent — and retained history is exactly what is least
+        # recoverable.
+        retired = _semantic("1", "coffee", validity=Validity(valid_until=_LONG_AGO))
+        await store.add(retired)
+        assert await store.get("1") is None  # invisible to reads, still stored
+
+        with pytest.raises(MemoryStoreError):
+            await store.add(_preference("1", "prefers tea"))
+
+        assert list(await store.export()) == [retired]  # retained and unchanged
 
     async def test_search_finds_a_matching_record(self, store: MemoryStore) -> None:
         await store.add(_semantic("c", "the user likes coffee"))
@@ -1270,16 +1324,79 @@ class MemoryStoreContract:
 
     async def test_write_atomic_upsert_overwrites_a_present_id(self, store: MemoryStore) -> None:
         # An UPSERT on an existing id overwrites it, exactly as a bare add upsert
-        # does — verified with an open, different-kind replacement so get sees it.
-        await store.add(_semantic("1", "old semantic note"))
-        replacement = _preference("1", "new preference note")
+        # does — and it is a full replacement, so the retention deadline and the
+        # window the previous record carried are gone rather than merged.
+        #
+        # Same-kind, deliberately: ADR-0108 §4 refuses a cross-kind UPSERT on this
+        # door too, which is the next case.
+        await store.add(
+            _semantic(
+                "1",
+                "old semantic note",
+                expires_at=_FAR_FUTURE,
+                validity=Validity(valid_until=_FAR_FUTURE),
+            )
+        )
+        replacement = _semantic("1", "new semantic note", last_updated=_LONG_AGO)
 
         await store.write_atomic([MemoryWrite(record=replacement, mode=MemoryWriteMode.UPSERT)])
 
         got = await store.get("1")
         assert got is not None
-        assert got.kind == "preference"  # the old semantic kind is gone
         assert got == replacement
+        assert got.expires_at is None
+        assert got.validity.valid_until is None
+
+    async def test_write_atomic_upsert_at_a_different_kind_fails_the_whole_batch(
+        self, store: MemoryStore
+    ) -> None:
+        # ADR-0108 §4 binds `write_atomic`'s UPSERT as well as `add`, because
+        # `write_atomic` is a **second door** into the store: a rule stated only on
+        # `add` would read as protection while leaving the door every ingestor write
+        # now uses wide open. And the refusal is an element failure like any other,
+        # so ADR-0046 §4's all-or-nothing rule carries it — the *other*, entirely
+        # valid element of the batch is not committed either.
+        stored = _semantic("collide", "the user drinks coffee")
+        await store.add(stored)
+        innocent = _semantic("fresh", "the user cycles to work")
+
+        with pytest.raises(MemoryStoreError) as excinfo:
+            await store.write_atomic(
+                [
+                    MemoryWrite(record=innocent, mode=MemoryWriteMode.INSERT_IF_ABSENT),
+                    MemoryWrite(
+                        record=_preference("collide", "prefers tea"),
+                        mode=MemoryWriteMode.UPSERT,
+                    ),
+                ]
+            )
+        assert not isinstance(excinfo.value, MemoryStoreConflictError)
+
+        assert await store.get("collide") == stored
+        assert await store.get("fresh") is None  # nothing in the batch landed
+
+    async def test_write_atomic_insert_if_absent_at_a_different_kind_is_still_a_conflict(
+        self, store: MemoryStore
+    ) -> None:
+        # The existing rule wins on this door, and keeps its narrower remedy.
+        # INSERT_IF_ABSENT refuses *every* collision and refuses it earlier, so a
+        # cross-kind one never reaches ADR-0108 §4's check: the caller minted a
+        # colliding id and "re-mint and retry" is exactly the right advice, which is
+        # what `MemoryStoreConflictError` means and `MemoryStoreError` does not.
+        stored = _semantic("1", "the user drinks coffee")
+        await store.add(stored)
+
+        with pytest.raises(MemoryStoreConflictError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_preference("1", "prefers tea"),
+                        mode=MemoryWriteMode.INSERT_IF_ABSENT,
+                    )
+                ]
+            )
+
+        assert await store.get("1") == stored
 
     async def test_write_atomic_upsert_window_close_is_kept_by_export_not_get(
         self, store: MemoryStore, now: datetime
