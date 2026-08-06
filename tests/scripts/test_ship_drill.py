@@ -32,6 +32,7 @@ different fake is how #45 shipped a no-op with green tests.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -204,9 +205,16 @@ def test_the_drill_and_ship_agree_on_a_floor_breach(tmp_path: Path) -> None:
 # --- The listing is the claim, so a pathname may not forge it ----------------
 
 
+# A per-path entry: six spaces, the eight-column floor marker, then git's status
+# letter. Anchored tightly so the report's wrapped prose — which is also indented
+# past column six — cannot be counted as evidence, and so that a pathname
+# rendering as a second line would be *visible* as one rather than absorbed.
+_ENTRY = re.compile(r"^ {6}(?:\[FLOOR\] | {8})[A-Z][0-9]* ")
+
+
 def _drill_lines(stderr: str) -> list[str]:
     """The report's per-path lines, which are the evidence for its verdict."""
-    return [ln for ln in stderr.splitlines() if ln.startswith(("      [FLOOR] ", "        "))]
+    return [ln for ln in stderr.splitlines() if _ENTRY.match(ln)]
 
 
 def test_a_pathname_containing_a_newline_stays_one_report_line(tmp_path: Path) -> None:
@@ -290,6 +298,81 @@ def test_both_rename_endpoints_are_escaped_in_the_report(tmp_path: Path) -> None
     assert result.returncode == 0, result.stderr
     assert r"notes/thing.md -> notes/re\tnamed.md" in result.stderr
     assert len(_drill_lines(result.stderr)) == 1
+
+
+# --- A listing too large to publish is omitted whole, never truncated --------
+#
+# `_evaluate_drift` short-circuits an oversized drift set to `toobig` *without*
+# rendering it, because the path encoder costs a subprocess per pathname. The
+# drill's report has to respect the same bound or it spends exactly the work the
+# acceptance rule declined to — on a set it has usually already refused — and a
+# pre-push check a lane waits on turns into minutes of unreadable output. The
+# budget is `CODEX_SHIP_DRIFT_BUDGET`, lowered here so the case needs two files
+# rather than a thousand.
+
+_TINY_BUDGET = {"CODEX_SHIP_DRIFT_BUDGET": "20"}
+
+
+def _two_file_move(path: str) -> Callable[[Path], None]:
+    """A base move touching two files, which a 20-byte budget makes oversized.
+
+    Two rather than the thousand-odd the real default would need: the bound is
+    `n * 20 > budget`, the same arithmetic `_evaluate_drift` short-circuits on, so
+    lowering the budget exercises the identical branch at a size a test can build.
+    """
+
+    def mutate(repo: Path) -> None:
+        _edit_line(repo, path, 40, "moved")
+        (repo / "notes/second.md").write_text("x\n")
+
+    return mutate
+
+
+def test_an_oversized_listing_is_omitted_whole_and_says_so(tmp_path: Path) -> None:
+    """Omitted, not shortened — a truncated set is #751's failure in a costume.
+
+    §4 already rules that a partial file set is worse than none, because the
+    omitted tail is exactly where the breaching path hides. The same holds for
+    the report: what it must never do is print a short list that reads like a
+    complete one. So it prints none, says it printed none, and gives the command
+    that reproduces the set.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    rebased = _review_then_move(repo, tmp_path, _two_file_move(_ORDINARY_PATH))
+
+    result = _run_ship(repo, tmp_path, pr_sha=rebased, args=("--drill",), gh_env=_TINY_BUDGET)
+
+    assert result.returncode != 0, result.stderr
+    assert "files examined      2" in result.stderr
+    assert "listing             OMITTED" in result.stderr
+    assert "git diff --name-status -M" in result.stderr
+    assert _drill_lines(result.stderr) == []
+    assert _ORDINARY_PATH not in result.stderr
+    # The bound omits the working, never the answer.
+    assert "clear over all 2 path(s) examined (not listed)" in result.stderr
+    assert "unavailable — drift record exceeds §4's budget" in result.stderr
+
+
+def test_a_floor_breach_survives_an_omitted_listing(tmp_path: Path) -> None:
+    """The floor verdict is computed before the rendering and outlives it.
+
+    `_read_base_move` sets `drift_floor` over the complete set with no per-path
+    rendering at all, so bounding the *display* cannot bound the *decision*. This
+    is the assertion that makes the bound safe rather than a third way to reach a
+    false clear: the answer must still be BREACHED with nothing on screen.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    rebased = _review_then_move(repo, tmp_path, _two_file_move(_FLOOR_PATH))
+
+    result = _run_ship(repo, tmp_path, pr_sha=rebased, args=("--drill",), gh_env=_TINY_BUDGET)
+
+    assert result.returncode != 0, result.stderr
+    assert "listing             OMITTED" in result.stderr
+    assert _drill_lines(result.stderr) == []
+    assert "BREACHED somewhere in the 2 path(s) examined" in result.stderr
+    assert "clear" not in result.stderr.split("§3 floor")[1]
 
 
 # --- The clearing case, which a fail-closed drill could otherwise fake --------
