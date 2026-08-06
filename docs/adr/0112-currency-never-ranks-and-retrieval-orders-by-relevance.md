@@ -3,11 +3,13 @@
 - Status: Proposed
 - Date: 2026-08-06
 - **Durability clause.** Every reference below to ADR-NNNN is to its text as
-  merged on 2026-08-06, not to its status on any later day. Several ADRs this
-  decision composes with stand `Proposed` on `main` and their ratification flips
-  are their own lanes'; `CONTRIBUTING.md` → "Trivial ADR edits" and ADR-0070 §1
-  both class that flip as recording a ratification rather than deciding one, so
-  no clause cited here moves with it. Where a later ADR *changes* one of them,
+  merged on 2026-08-06, not to its status on any later day. Every ADR this
+  decision composes with reads `Accepted` (or partially superseded in a scope
+  this ADR does not touch) as of that date, including ADR-0110 and ADR-0111,
+  whose ratification landed while this lane held; `CONTRIBUTING.md` → "Trivial
+  ADR edits" and ADR-0070 §1 both class a status flip as recording a
+  ratification rather than deciding one, so no clause cited here moved with
+  theirs and none moves with a later one. Where a later ADR *changes* one of them,
   this ADR is read against the text quoted here and the later ADR's own record
   says what moved.
 - **This is leg 7's fork 5** (#729), and the last of that leg's forks to be
@@ -96,9 +98,10 @@ Both halves matter, and only the first is what a reader expects.
 
 **Ranking.** No code in `src/` multiplies a similarity by anything.
 `SqliteMemoryStore` orders by the vector distance the KNN returns and scores
-`1.0 - distance`; the fake store scores by term overlap; a record's `score` is
-read only as a *threshold* in conflict detection (`memory/ingest.py`,
-`testing/writer.py`) and never as a ranking factor. `presented_confidence` in
+`1.0 - distance`; the fake store scores by term overlap and sorts on it. Both
+are relevance and nothing else: no second quantity is mixed in, and outside each
+store's own ordering a record's `score` is read only as a *threshold* in conflict
+detection (`memory/ingest.py`, `testing/writer.py`), never as a ranking factor. `presented_confidence` in
 `orchestration/engine.py` computes a number for display and its docstring pins
 the reason it is safe: "`MemoryStore.search` stays confidence-neutral (ADR-0072
 §5), so retrieval order is untouched by a value computed at the moment of
@@ -119,8 +122,9 @@ The roadmap states leg 7's exit test as "measured in this leg, as retrieval
 latency and k-shortfall against a synthetically aged store", and hands the "not
 noisier" half to leg 8 because "a claim this leg has no instrument for is one it
 would assert rather than test". There is no such instrument on `main`: no
-benchmark tree, no aged-store fixture, no `pytest-benchmark`, and the only
-occurrence of "k-shortfall" in the repository is the roadmap line itself. Every
+benchmark tree, no aged-store fixture, no `pytest-benchmark`, and outside this
+ADR the only occurrence of "k-shortfall" in the repository is the roadmap line
+that asks for it. Every
 timing assertion in `tests/` is a liveness bound that explicitly disclaims being
 a latency measurement.
 
@@ -482,7 +486,9 @@ under golden rule 5". That is correct and §10 does not pre-authorise it.
 
 **One staleness in #411 worth recording**: its note that "#115's premise that
 `_check_tuning` lives only in `orchestration` … is now stale" is itself now the
-load-bearing part, since both `_check_tuning` sites remain. Nothing in the issue
+load-bearing part, since both of the two sites it names remain — `orchestration/loop.py`'s
+`retrieval_limit` and `memory/ingest.py`'s `conflict_limit`, the two that feed
+`MemoryStore.search`. Nothing in the issue
 misdescribes the tree; it is simply three issues wearing one number, and §7's gate
 lands on only one of them.
 
