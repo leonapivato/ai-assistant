@@ -2,185 +2,135 @@
 
 ADR-0108 §1 rules that every ``MemoryStore`` write under ``src/ai_assistant/``
 declares its collision intent as a ``MemoryWriteMode`` at the call site, so that
-"which writes here can destroy a standing record" is answerable by reading the
-code rather than by knowing what each verb defaults to.
+"which writes here can destroy a standing record" is answerable by reading the code
+rather than by knowing what each verb defaults to.
 
 ``MemoryWrite.mode`` defaults to ``MemoryWriteMode.UPSERT`` (ADR-0046 §2), which
-makes ``MemoryWrite(record=r)`` a **destructive write containing no word to find**
-— the second silent default beside ``MemoryStore.add``, and the one that arrives at
+makes ``MemoryWrite(record=r)`` a **destructive write containing no word to find** —
+the second silent default beside ``MemoryStore.add``, and the one that arrives at
 the very door ADR-0108 §2 routes every ingestor write through. §5 requires this
 check rather than leaving that to review.
 
-**Why this default gets a check and ``add`` does not**, which ADR-0108 §7 states
-and is repeated here because it is the obvious question: a ``MemoryWrite``
-construction names a unique class in a parseable expression, so the check is sound.
-"Is this call ``MemoryStore.add``?" is not decidable from the source in a duck-typed
-tree — ``add`` is the name every ``set`` and every ``TaskGroup`` uses, and
-``self._store`` is Protocol-typed at some call sites and untyped at others — so a
-check there would be a name heuristic with false positives, or a type-directed one
-failing open exactly where a new caller is likeliest to be careless. ADR-0108 §1 is
-therefore checked where a check can be sound, and rests on §2 having left no ``add``
-callers where it cannot.
+**Why this default gets a check and ``add`` does not**, which ADR-0108 §7 states and
+is repeated here because it is the obvious question: a ``MemoryWrite`` construction
+names a unique class in a parseable expression, so the check is sound. "Is this call
+``MemoryStore.add``?" is not decidable from the source in a duck-typed tree — ``add``
+is the name every ``set`` and every ``TaskGroup`` uses — so a check there would be a
+name heuristic with false positives, or a type-directed one failing open exactly
+where a new caller is likeliest to be careless.
 
-The check reads the **parsed source**, not a grep: a comment, a docstring, or a
-string literal mentioning ``MemoryWrite`` is not a construction, and a construction
-split across lines is still one node. It resolves every **static binding form** that
-renames the class — import alias, assignment, parameter default — and refuses to
-treat an opaque ``**mapping`` as a declaration. All four were ways past an earlier
-draft of this module, and each has a negative case below. A check that accepts
-everything is indistinguishable from a sound one on the tree it is pointed at, so
-what it *rejects* is proved rather than assumed — including the false positives it
-must not produce, which are the failure that gets a check like this deleted.
+## Two checks, because one of them makes the other sound
 
-Bindings are resolved **per lexical scope**, so one function's
-``factory=MemoryWrite`` parameter cannot make an unrelated ``factory`` elsewhere
-fail. What the check deliberately does **not** chase is indirection through a value
-the source never spells; :func:`_names_in` gives the reasoning for both, and why
-that boundary is where it is.
+The obvious check — "every ``MemoryWrite(...)`` call names its mode" — is only as
+good as its ability to recognise the call, and a name can be renamed:
+``from ... import MemoryWrite as W``; ``Write = MemoryWrite``;
+``def build(f=MemoryWrite)``. An earlier draft chased those by resolving aliases,
+and each round of that produced a new one to chase — then, once the resolver grew
+scopes, a new way for it to be *wrong* about unrelated code, which is the worse
+failure: a check that invents violations in code its author never touched gets
+deleted rather than fixed.
+
+So the alias question is not answered, it is **removed**. The second check asserts
+the class is **never bound to another name** anywhere under ``src/ai_assistant/``.
+Given that, every construction is spelled ``MemoryWrite(...)`` or
+``<module>.MemoryWrite(...)``, and a literal finder is complete — no scope analysis,
+no name resolution, and nothing to be wrong about. The two together are sound in a
+way neither is alone.
+
+This is deliberately a *convention* enforced mechanically, in the shape
+``tests/core/test_protocol_triad.py`` uses for the triad's naming: a lane that has a
+real reason to alias the class should change this check in the same PR, on purpose,
+rather than discover that aliasing quietly disabled the other one.
+
+**Where it stops.** Indirection through a value the source never spells — a
+function's return, a container element, ``functools.partial``, ``getattr`` — is not
+reachable by any AST check and is not chased. That boundary is the same one
+ADR-0108 §7 draws around ``add``: the check is aimed at the **accidental** default,
+the caller who wrote ``MemoryWrite(record=r)`` because the field has one. Reaching
+the same effect through indirection means building the bypass deliberately.
+
+Both checks read the **parsed source**, never a grep: a comment, a docstring, or a
+string mentioning ``MemoryWrite`` is not a construction, and a call split across
+lines is still one node. What each check *rejects* is proved below, because a
+predicate that accepted everything would look identical on the tree it is pointed
+at — which is the failure this module exists to prevent one layer up.
 """
 
 from __future__ import annotations
 
 import ast
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import ai_assistant
 
-if TYPE_CHECKING:
-    from collections.abc import Iterator
-
 _PACKAGE = Path(ai_assistant.__file__).parent
+_CLASS = "MemoryWrite"
 
 
-def _names_the_class(node: ast.expr, known: set[str]) -> bool:
-    """Whether ``node`` refers to the class: a known name, or ``*.MemoryWrite``."""
+def _sources() -> list[Path]:
+    return sorted(_PACKAGE.rglob("*.py"))
+
+
+def _where(source: Path, node: ast.AST) -> str:
+    return f"{source.relative_to(_PACKAGE.parent)}:{getattr(node, 'lineno', 0)}"
+
+
+def _names_the_class(node: ast.expr) -> bool:
+    """Whether ``node`` is a reference to the class, plainly spelled.
+
+    Only the literal name and the qualified ``<module>.MemoryWrite`` form. It never
+    has to decide what an arbitrary name refers to, which is the property that keeps
+    both checks free of false positives.
+    """
     if isinstance(node, ast.Name):
-        return node.id in known
-    return isinstance(node, ast.Attribute) and node.attr == "MemoryWrite"
+        return node.id == _CLASS
+    return isinstance(node, ast.Attribute) and node.attr == _CLASS
 
 
-#: The node types that open a new lexical scope. Name resolution stops at each of
-#: them in both directions: a binding made inside one is not visible outside it.
-_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+def _constructions(tree: ast.AST) -> list[ast.Call]:
+    """Every ``MemoryWrite(...)`` call in ``tree``.
 
-
-def _own_nodes(scope: ast.AST) -> Iterator[ast.AST]:
-    """Every node lexically inside ``scope`` but not inside a *nested* scope.
-
-    A nested scope's own node is yielded — so a caller can recurse into it — while
-    its contents are not, which is what keeps one function's bindings out of
-    another's.
+    Complete only because :func:`_renamings` is empty — see the module docstring.
     """
-    stack = list(ast.iter_child_nodes(scope))
-    while stack:
-        node = stack.pop()
-        yield node
-        if not isinstance(node, _SCOPES):
-            stack.extend(ast.iter_child_nodes(node))
-
-
-def _defaulted_parameters(args: ast.arguments, enclosing: set[str]) -> set[str]:
-    """Parameters whose *default* is the class, so calling them constructs one.
-
-    ``def build(factory=MemoryWrite)`` binds ``factory`` to the class on every call
-    that does not override it. The default expression is evaluated in the
-    **enclosing** scope, which is the name set it is judged against; the parameter
-    it binds belongs to the function's own.
-    """
-    positional = args.posonlyargs + args.args
-    bound = {
-        parameter.arg
-        for parameter, default in zip(
-            positional[len(positional) - len(args.defaults) :], args.defaults, strict=True
-        )
-        if _names_the_class(default, enclosing)
-    }
-    return bound | {
-        parameter.arg
-        for parameter, default in zip(args.kwonlyargs, args.kw_defaults, strict=True)
-        if default is not None and _names_the_class(default, enclosing)
-    }
-
-
-def _names_in(scope: ast.AST, enclosing: set[str]) -> set[str]:
-    """Names bound to ``MemoryWrite`` in ``scope``, inheriting ``enclosing``.
-
-    Three ways to rename the class, and a check that missed any would report a
-    clean tree while a destructive default sat in it:
-
-    - ``from ai_assistant.core.types import MemoryWrite as W``, then ``W(record=r)``;
-    - ``Write = MemoryWrite``, then ``Write(record=r)``;
-    - ``def build(factory=MemoryWrite): return factory(record=r)``.
-
-    All three are **static binding forms** — the class is named in the syntax that
-    creates the binding — so all three resolve, to a fixed point, so an alias of an
-    alias does too.
-
-    **Scoped, because the alternative failure is worse than the one it fixes.**
-    Collecting names across the whole module would let one function's
-    ``factory=MemoryWrite`` parameter make an unrelated ``factory`` in a second
-    function fail the check — a false positive landing on a contributor who touched
-    nothing relevant, and the failure that gets a check like this deleted rather
-    than fixed. Bindings are therefore resolved per lexical scope and each call is
-    judged against its own.
-
-    **Where this stops is a design boundary, not an omission.** Once a reference
-    reaches a name through a *value* the source does not spell — a function's
-    return, a container element, a class attribute read at runtime,
-    ``functools.partial``, ``getattr`` — no AST check follows it, and chasing each
-    form in turn has no terminus. This check is aimed at the **accidental** default:
-    the caller who wrote ``MemoryWrite(record=r)`` because the field has one, which
-    is the whole of what ADR-0108 §7 says is checkable. Reaching the same effect
-    through indirection means constructing the bypass deliberately — visible in
-    review, and no longer something a reader does without noticing. That is the same
-    boundary §7 draws around ``add``, stated here so a later reader can tell a
-    deliberate limit from a gap.
-    """
-    names = set(enclosing)
-    if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
-        names |= _defaulted_parameters(scope.args, enclosing)
-    while True:
-        before = len(names)
-        for node in _own_nodes(scope):
-            if isinstance(node, ast.ImportFrom | ast.Import):
-                names.update(
-                    alias.asname or alias.name
-                    for alias in node.names
-                    if alias.name.rsplit(".", 1)[-1] == "MemoryWrite"
-                )
-                continue
-            targets: list[ast.expr] = []
-            if isinstance(node, ast.Assign) and _names_the_class(node.value, names):
-                targets = list(node.targets)
-            elif (
-                isinstance(node, ast.AnnAssign)
-                and node.value is not None
-                and _names_the_class(node.value, names)
-            ):
-                targets = [node.target]
-            names.update(target.id for target in targets if isinstance(target, ast.Name))
-        if len(names) == before:
-            return names
-
-
-def _constructions(tree: ast.AST, enclosing: set[str] | None = None) -> list[ast.Call]:
-    """Every ``MemoryWrite(...)`` call in ``tree``, however it is spelled.
-
-    Matches a bare or renamed name (:func:`_names_in`) and the qualified attribute
-    form ``types.MemoryWrite(...)``. Anything else ending in ``MemoryWrite`` would
-    have to be a second class of that name, which this repository does not have and
-    which would be its own problem.
-    """
-    names = _names_in(tree, {"MemoryWrite"} if enclosing is None else enclosing)
-    found = [
+    return [
         node
-        for node in _own_nodes(tree)
-        if isinstance(node, ast.Call) and _names_the_class(node.func, names)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _names_the_class(node.func)
     ]
-    for node in _own_nodes(tree):
-        if isinstance(node, _SCOPES):
-            found.extend(_constructions(node, names))
+
+
+def _renamings(tree: ast.AST) -> list[ast.AST]:
+    """Every node that binds the class to some other name.
+
+    The three static binding forms, which are the three ways to make a construction
+    that :func:`_constructions` cannot see:
+
+    - ``from ai_assistant.core.types import MemoryWrite as W``
+    - ``Write = MemoryWrite`` (and the annotated form)
+    - ``def build(factory=MemoryWrite): ...``
+
+    A plain ``import MemoryWrite`` is not a renaming and is what every module here
+    already does.
+    """
+    found: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom | ast.Import):
+            found.extend(
+                node
+                for alias in node.names
+                if alias.name.rsplit(".", 1)[-1] == _CLASS
+                and alias.asname is not None
+                and alias.asname != _CLASS
+            )
+        elif (isinstance(node, ast.Assign) and _names_the_class(node.value)) or (
+            isinstance(node, ast.AnnAssign)
+            and node.value is not None
+            and _names_the_class(node.value)
+        ):
+            found.append(node)
+        elif isinstance(node, ast.arguments):
+            defaults = [*node.defaults, *(d for d in node.kw_defaults if d is not None)]
+            found.extend(default for default in defaults if _names_the_class(default))
     return found
 
 
@@ -189,17 +139,15 @@ def _declares_mode(call: ast.Call) -> bool:
 
     A literal ``mode=`` keyword, or a ``**{...}`` whose dict *display* carries a
     literal ``"mode"`` key. **An opaque ``**mapping`` does not count**, and that is
-    the whole point of stating it: ``MemoryWrite(record=r, **{})`` and
-    ``MemoryWrite(record=r, **kwargs)`` both take ``MemoryWriteMode.UPSERT`` from
-    the field default, so a check that waved them through would fail open on
-    exactly the construction it exists to catch — while looking, on today's tree,
-    identical to one that did not.
+    worth stating: ``MemoryWrite(record=r, **{})`` and
+    ``MemoryWrite(record=r, **kwargs)`` both take ``MemoryWriteMode.UPSERT`` from the
+    field default, so a check that waved them through would fail open on exactly the
+    construction that most looks written to get past a rule — while looking, on
+    today's tree, identical to one that did not.
 
-    Failing closed costs nothing here and is not a guess about the future: nothing
-    under ``src/ai_assistant/`` builds a ``MemoryWrite`` this way, and a caller that
-    one day needs to can pass ``mode`` alongside the unpack. A check whose only
-    bypass requires writing the bypass deliberately is the strongest one available
-    without type inference.
+    Failing closed costs nothing and is not a guess about the future: nothing under
+    ``src/ai_assistant/`` builds a ``MemoryWrite`` this way, and a caller that one
+    day needs to can pass ``mode`` alongside the unpack.
     """
     for keyword in call.keywords:
         if keyword.arg == "mode":
@@ -215,35 +163,51 @@ def _declares_mode(call: ast.Call) -> bool:
     return False
 
 
-def test_every_memorywrite_in_the_package_names_its_mode() -> None:
-    """ADR-0108 §1, mechanically: no write inherits ``MemoryWrite``'s upsert default.
+def test_the_class_is_never_bound_to_another_name() -> None:
+    """The check that makes the next one complete (module docstring, "Two checks").
 
-    The failure message names file and line, because the fix is one keyword and the
-    only hard part is finding which construction it belongs on.
+    Not a style rule. Every renaming form is a construction the literal finder walks
+    past, so an alias here does not merely obscure a call — it *disables* ADR-0108
+    §1's enforcement for that module, silently and while the suite stays green.
     """
-    undeclared: list[str] = []
-    for source in sorted(_PACKAGE.rglob("*.py")):
-        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-        undeclared.extend(
-            f"{source.relative_to(_PACKAGE.parent)}:{call.lineno}"
-            for call in _constructions(tree)
-            if not _declares_mode(call)
-        )
+    renamed = [
+        _where(source, node)
+        for source in _sources()
+        for node in _renamings(ast.parse(source.read_text(encoding="utf-8"), filename=str(source)))
+    ]
 
-    assert not undeclared, (
-        "a MemoryWrite is constructed without naming its mode, so it inherits "
-        "MemoryWriteMode.UPSERT and destroys whatever stands at that id with no "
-        "word in the call to say so (ADR-0108 §1, §7). Add mode=... at: " + ", ".join(undeclared)
+    assert not renamed, (
+        f"{_CLASS} is bound to another name, which hides every construction made "
+        "through it from the mode check below and so disables ADR-0108 §1 for that "
+        "module. Use the class directly, or change this check deliberately in the "
+        "same PR. At: " + ", ".join(renamed)
     )
 
 
-def test_the_check_can_see_an_undeclared_construction() -> None:
-    """The negative case, because a check that accepts everything looks identical.
+def test_every_construction_in_the_package_names_its_mode() -> None:
+    """ADR-0108 §1, mechanically: no write inherits ``MemoryWrite``'s upsert default.
 
-    A predicate that always passed would make the case above green forever while
-    enforcing nothing — the failure mode this whole module exists to prevent one
-    layer up, so it is proved rather than assumed.
+    The failure names file and line, because the fix is one keyword and the only
+    hard part is finding which construction it belongs on.
     """
+    undeclared = [
+        _where(source, call)
+        for source in _sources()
+        for call in _constructions(
+            ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        )
+        if not _declares_mode(call)
+    ]
+
+    assert not undeclared, (
+        f"a {_CLASS} is constructed without naming its mode, so it inherits "
+        "MemoryWriteMode.UPSERT and destroys whatever stands at that id with no word "
+        "in the call to say so (ADR-0108 §1, §7). Add mode=... at: " + ", ".join(undeclared)
+    )
+
+
+def test_the_mode_check_can_see_an_undeclared_construction() -> None:
+    """The negative case, because a check that accepts everything looks identical."""
     accepted = ast.parse("MemoryWrite(record=r, mode=MemoryWriteMode.UPSERT)")
     bare = ast.parse("MemoryWrite(record=r)")
     qualified = ast.parse("types.MemoryWrite(record=r)")
@@ -254,13 +218,7 @@ def test_the_check_can_see_an_undeclared_construction() -> None:
 
 
 def test_an_opaque_unpacking_does_not_count_as_declaring() -> None:
-    """The bypass a first draft of this check allowed, closed and pinned.
-
-    ``MemoryWrite(record=r, **{})`` takes ``MemoryWriteMode.UPSERT`` from the field
-    default exactly as ``MemoryWrite(record=r)`` does. A check that accepted any
-    ``**`` because it "cannot see inside" would pass both while claiming to enforce
-    ADR-0108 §1 — failing open on the one construction that most looks like it was
-    written to get past a rule.
+    """``**{}`` is the same destructive default as passing nothing, and reads as care.
 
     A dict *display* is different: ``**{"mode": m}`` is readable, so it is read.
     """
@@ -275,78 +233,50 @@ def test_an_opaque_unpacking_does_not_count_as_declaring() -> None:
     assert [_declares_mode(call) for call in _constructions(literal_without)] == [False]
 
 
-def test_a_renamed_class_is_still_found() -> None:
-    """Neither way of renaming the class is a way past the finder.
-
-    ``from ... import MemoryWrite as W`` and ``Write = MemoryWrite`` are the same
-    destructive default under a different spelling, and a check keyed on the literal
-    name reports a clean tree for both. Aliases of aliases resolve too, which is why
-    the resolution runs to a fixed point rather than in one pass.
-
-    The negative half matters as much: an unrelated ``W`` in a module that never
-    imported the class must **not** match, or the check acquires false positives and
-    gets loosened until it catches nothing.
-    """
-    imported = ast.parse("from ai_assistant.core.types import MemoryWrite as W\nW(record=r)\n")
-    assigned = ast.parse("Write = MemoryWrite\nWrite(record=r)\n")
-    chained = ast.parse("A = MemoryWrite\nB = A\nB(record=r)\n")
-    qualified_alias = ast.parse("W = types.MemoryWrite\nW(record=r)\n")
-    positional_default = ast.parse("def build(f=MemoryWrite):\n    return f(record=r)\n")
-    keyword_default = ast.parse("def build(*, f=MemoryWrite):\n    return f(record=r)\n")
-    unrelated = ast.parse("from somewhere import Widget as W\nW(record=r)\n")
+def test_the_renaming_check_sees_every_binding_form() -> None:
+    """Each form the literal finder would walk past is caught by the other check."""
+    imported = ast.parse("from ai_assistant.core.types import MemoryWrite as W")
+    assigned = ast.parse("Write = MemoryWrite")
+    annotated = ast.parse("Write: type[MemoryWrite] = MemoryWrite")
+    qualified_alias = ast.parse("W = types.MemoryWrite")
+    positional_default = ast.parse("def build(f=MemoryWrite): ...")
+    keyword_default = ast.parse("def build(*, f=MemoryWrite): ...")
 
     for tree in (
         imported,
         assigned,
-        chained,
+        annotated,
         qualified_alias,
         positional_default,
         keyword_default,
     ):
-        assert [_declares_mode(call) for call in _constructions(tree)] == [False]
-    assert _constructions(unrelated) == []
+        assert _renamings(tree), ast.dump(tree)
 
 
-def test_a_name_bound_in_one_scope_does_not_reach_another() -> None:
-    """The false positive that scoping exists to prevent, pinned as a case.
+def test_the_renaming_check_leaves_unrelated_code_alone() -> None:
+    """The false positives it must not produce, which is the other half of soundness.
 
-    A wrong entry in the name set does not merely miss a construction — it *invents*
-    them, in code the author never touched. Here ``make`` legitimately takes the
-    class as a default and declares its mode; ``use`` takes an unrelated callable
-    that happens to share the parameter's name. A module-wide name set would fail
-    ``use``'s call, and the contributor's only remedy would be to rename a variable
-    or delete the check. Both were on offer and the check would have lost.
+    A check that fires on code its author never touched gets deleted rather than
+    fixed, so what it *ignores* is pinned as deliberately as what it catches. Note
+    the third case in particular: a same-named class from somewhere else is not this
+    one, and no amount of name matching should pretend otherwise.
     """
-    two_scopes = ast.parse(
-        "def make(factory=MemoryWrite):\n"
-        "    return factory(record=r, mode=m)\n"
-        "def use(factory):\n"
-        "    return factory(record=r)\n"
-    )
+    plain_import = ast.parse("from ai_assistant.core.types import MemoryWrite")
+    same_name = ast.parse("from ai_assistant.core.types import MemoryWrite as MemoryWrite")
+    unrelated_alias = ast.parse("from elsewhere import Widget as W\nWrite = Widget")
+    unrelated_default = ast.parse("def build(f=Widget, *, g=None): ...")
+    a_construction = ast.parse("MemoryWrite(record=r, mode=m)")
 
-    found = _constructions(two_scopes)
-
-    # Exactly one construction — `make`'s, which declares — and `use`'s call is not
-    # one at all.
-    assert [call.lineno for call in found] == [2]
-    assert [_declares_mode(call) for call in found] == [True]
-
-
-def test_an_unrelated_parameter_default_is_not_an_alias() -> None:
-    """A parameter defaulting to something else is not a binding to the class."""
-    other = ast.parse("def build(f=Widget, *, g=None):\n    return f(record=r)\n")
-    no_default = ast.parse("def build(f):\n    return f(record=r)\n")
-
-    assert _constructions(other) == []
-    assert _constructions(no_default) == []
+    for tree in (plain_import, same_name, unrelated_alias, unrelated_default, a_construction):
+        assert _renamings(tree) == [], ast.dump(tree)
 
 
 def test_a_lexical_mention_is_not_a_construction() -> None:
     """Reading the parse tree is the point: prose about ``MemoryWrite`` is not one.
 
-    Both this module's own docstring and several contract docstrings discuss
-    ``MemoryWrite`` at length, and a grep-based check would fail on all of them —
-    then be "fixed" by loosening it until it caught nothing.
+    This module's own docstring and several contract docstrings discuss the class at
+    length, and a grep-based check would fail on all of them — then be "fixed" by
+    loosening it until it caught nothing.
     """
     prose = ast.parse('"""A MemoryWrite(record=r) is what this paragraph describes."""')
     commented = ast.parse("x = 1  # MemoryWrite(record=r)")
