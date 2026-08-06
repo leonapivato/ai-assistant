@@ -1,7 +1,21 @@
 # 109. Currency's confirming instant is stored on `Provenance`, and the fold selects it at fold time
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-06
+- **Note (2026-08-06): ratified.** `Proposed` → `Accepted`, after **both**
+  required reviews came back green on the content this ADR merged with:
+  adversarial **APPROVE with no findings** and architecture **APPROVE with no
+  findings**, both at tree `0077300c31d8`, round 6, 1241 lines net, churn
+  `1.3×` (1675 touched, reported exact), each posted to PR #774 by `just ship`
+  (comment `5201055894`). Recorded per ADR-0070 §1 — the ratifying edit records
+  that review's outcome, it does not replace it — and taken from that comment
+  rather than from a report. Those approvals covered the `Proposed` tree PR
+  #774 merged with — its base never moved between review and merge, so no
+  ADR-0027 §2(b) gap needs recording there — and this ratification edit is a
+  separate trivial change recording their outcome, not covered by them.
+  The decision it ratifies is the operator ruling posted on #744
+  (2026-08-06), which this ADR carries; ratification was performed by the
+  dispatcher against that ruling.
 - **This is a contract change.** §2 adds one optional field to `Provenance` in
   `core/types.py` — a type every subsystem that proposes, stores, folds or
   renders a belief holds, and which `Goal` carries too (ADR-0068 §2).
