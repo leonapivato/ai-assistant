@@ -857,6 +857,15 @@ what §4 above decided against.
      different, the observer's **latest** cited `occurred_at` where the batch is
      deliberately out of order, the processor's `event.created_at`, and the
      capture path's `None`.
+   - **A producer case whose confirming instant is in the producer's own
+     future**, which is the only thing that checks §4 above's fourth clause. The
+     calendar reader, given an occurrence whose `reported_at` is later than
+     `read_at`, stores that `reported_at` unchanged — not `None`, not `read_at`,
+     and not a clamp. Without it an implementation could have the reader drop a
+     future instant and still pass every other case here, because the fold's
+     future-dated case constructs its target by hand rather than through a
+     producer. It is the producer half of what §5 above's future-dated fold case
+     checks at the writer.
    - **The store round-trip, both directions.** An exact non-`None` instant
      survives `SqliteMemoryStore` write-then-read; and a stored blob whose JSON
      carries no `last_confirmed_at` key decodes as `None`. The second is what makes
