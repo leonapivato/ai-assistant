@@ -310,6 +310,28 @@ class MemoryStore(Protocol):
         Adding a record whose ``id`` already exists overwrites the previous one
         (an upsert), so ``id`` is the caller's idempotency key. All backends share
         this behaviour; the shared conformance suite enforces it.
+
+        **The upsert is a claim, not a default to fall back on** (ADR-0108 §1). A
+        caller that means to *install* — to write a record whose id was minted,
+        derived, or taken from a producer, and which it expects to name nothing
+        stored — uses :meth:`write_atomic` with
+        ``MemoryWriteMode.INSERT_IF_ABSENT`` instead. That refuses the collision
+        inside the same write that would otherwise destroy the standing record, so
+        the check costs no read and cannot be raced. ``add`` is for the caller that
+        means to land on whatever is already there; the accidental collision and
+        the deliberate one are indistinguishable in the bytes, so the verb is what
+        says which was meant.
+
+        **A cross-kind collision is refused** (ADR-0108 §4). Where ``record.id``
+        names a stored record of a different ``kind``, nothing is written. This is
+        the same refusal :meth:`write_atomic`'s ``UPSERT`` mode makes, stated on
+        both doors because an upsert-capable door that did not make it would be
+        the way around it. "Names a stored record" is physical presence, in
+        ``write_atomic``'s sense: an expired or window-closed row still collides.
+
+        Raises:
+            MemoryStoreError: ``record.id`` names a stored record of a different
+                ``kind`` — nothing is written — or the write fails.
         """
         ...
 
@@ -328,12 +350,22 @@ class MemoryStore(Protocol):
         Returns the ids written, in the order of ``writes``. An empty batch is a
         no-op and returns an empty sequence.
 
+        **An ``UPSERT`` element refuses a cross-kind collision** (ADR-0108 §4):
+        where its id names a stored record of a different ``kind``, the whole batch
+        fails and nothing is committed, exactly as any other element's failure
+        does. ``INSERT_IF_ABSENT`` needs no such clause — it already refuses
+        *every* collision, and refuses it earlier, so a cross-kind one raises
+        ``MemoryStoreConflictError`` on that standing ground with the narrower
+        "re-mint and retry" remedy intact.
+
         Raises:
             MemoryStoreConflictError: an ``INSERT_IF_ABSENT`` element's id already
                 names a stored record. Nothing is written; the caller may re-mint
                 and retry.
-            MemoryStoreError: any other backend failure, or a malformed batch (two
-                writes to the same id, ADR-0046 §3). Nothing is written.
+            MemoryStoreError: an ``UPSERT`` element's id names a stored record of a
+                different ``kind`` (ADR-0108 §4), any other backend failure, or a
+                malformed batch (two writes to the same id, ADR-0046 §3). Nothing
+                is written.
         """
         ...
 
@@ -704,6 +736,22 @@ class MemoryWriter(Protocol):
         keep that precedence: a self-citing proposal whose evidence does not
         resolve, or whose conflict set is over the ceiling, is still refused before
         any policy is asked.
+
+        **An installing ruling states that it installs, and a colliding id is
+        refused** (ADR-0108 §1, §2, §3). ``ACCEPT`` and ``STORE_TEMPORARY`` write
+        the proposal as a *new* record: the ruling is that it contradicts nothing
+        retrieved, so an id already naming a stored record is an accident in every
+        case, and the write is **refused** — nothing written, no window closed. The
+        writer does **not** re-mint the proposal's id and does not retry. That id
+        is the producer's, and re-minting it would edit a record the producer made
+        (ADR-0081 §9) and return an id nobody proposed; the refusal is a
+        ``MemoryStoreConflictError``, whose documented remedy — re-mint and retry —
+        is the producer's to take. This is the writer declaring what it means,
+        not a store default doing it for free: :meth:`MemoryStore.add` remains an
+        upsert, and a writer reaching for it here would silently destroy the
+        standing record (#630). ``REINFORCE`` is the opposite case and is
+        unaffected: it folds *at the target the ruling named*, so landing on a
+        stored record is the decision rather than a collision, and it upserts.
 
         **A correction resolves every conflict it is shown, or it does not land**
         (ADR-0079 §1). A writer's conflict limit is a *ceiling*, not a truncation
