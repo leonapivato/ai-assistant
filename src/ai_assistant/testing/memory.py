@@ -173,20 +173,56 @@ class FakeMemoryStore:
         resource is what closes the *mid-call* window too, so the id returned and
         the row it names can never come from two different versions of one record
         — the shape ``SqliteMemoryStore.add`` snapshots for (ADR-0056).
+
+        **The cross-kind refusal is judged inside the resource**, from the snapshot
+        (ADR-0108 §4). Reading stored state is what the persistent store does under
+        its connection lock, so a fake judging it outside would certify a consumer
+        against a check the production store cannot make there.
+
+        Raises:
+            MemoryStoreError: ``record.id`` names a stored record of a different
+                ``kind`` (ADR-0108 §4). Nothing is written.
         """
         snapshot = record.model_copy(deep=True)
         async with self._resource.held():
+            self._refuse_cross_kind(snapshot)
             self._records[snapshot.id] = snapshot
         return snapshot.id
+
+    def _refuse_cross_kind(self, record: MemoryRecord) -> None:
+        """Refuse an upsert landing on a stored record of a different kind.
+
+        ADR-0108 §4's backstop, on **both** upsert-capable doors — so a consumer
+        certified against this fake meets the same refusal the shipped store makes,
+        which is the whole reason the fake is canonical (ADR-0026 §4). Presence is
+        physical, matching ``INSERT_IF_ABSENT``: an expired or window-closed record
+        still occupies its id and still collides.
+
+        A plain ``MemoryStoreError`` and deliberately not
+        ``MemoryStoreConflictError``, whose documented remedy is "re-mint and
+        retry" — which does not answer a caller that asked to overwrite something
+        of a kind it did not expect (ADR-0108 §4, on ADR-0081 §3's reasoning).
+
+        Raises:
+            MemoryStoreError: ``record.id`` names a stored record of a different
+                ``kind``.
+        """
+        stored = self._records.get(record.id)
+        if stored is not None and stored.kind != record.kind:
+            msg = (
+                f"cannot write {record.id!r} as a {record.kind} record: "
+                f"a {stored.kind} record is already stored under that id"
+            )
+            raise MemoryStoreError(msg)
 
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
         """Apply every write in one atomic unit — all commit, or none do.
 
         Emulates atomicity the same way the real in-memory store does, so the fake
         honours the contract the durable backend does: the batch is validated up
-        front (no repeated id, no ``INSERT_IF_ABSENT`` collision) and every
-        mutation is staged, then applied only once every check has passed — a
-        mid-batch failure mutates nothing (ADR-0046 §4).
+        front (no repeated id, no ``INSERT_IF_ABSENT`` collision, no cross-kind
+        ``UPSERT``) and every mutation is staged, then applied only once every
+        check has passed — a mid-batch failure mutates nothing (ADR-0046 §4).
 
         The whole batch — the caller's ``Sequence`` and each element's mutable
         record — is snapshotted on the **first executed line**, before the first
@@ -202,8 +238,9 @@ class FakeMemoryStore:
             MemoryStoreConflictError: an ``INSERT_IF_ABSENT`` element's id names a
                 stored record — physical presence, so an expired or window-closed
                 row still collides (ADR-0046 §3). Nothing is written.
-            MemoryStoreError: the batch names the same id twice (ADR-0046 §3).
-                Nothing is written.
+            MemoryStoreError: an ``UPSERT`` element's id names a stored record of a
+                different ``kind`` (ADR-0108 §4), or the batch names the same id
+                twice (ADR-0046 §3). Nothing is written.
         """
         staged = [(write.record.model_copy(deep=True), write.mode) for write in writes]
         ids = [record.id for record, _ in staged]
@@ -215,6 +252,11 @@ class FakeMemoryStore:
                 if mode is MemoryWriteMode.INSERT_IF_ABSENT and record.id in self._records:
                     msg = f"cannot insert {record.id!r}: a record with that id is already stored"
                     raise MemoryStoreConflictError(msg)
+                # Only an UPSERT can reach a collision past the check above, so
+                # this judges exactly the door ADR-0108 §4 exists to close. It runs
+                # in the validation pass, before anything is committed, so the
+                # refusal mutates nothing.
+                self._refuse_cross_kind(record)
             for record, _ in staged:
                 self._records[record.id] = record
         return ids
