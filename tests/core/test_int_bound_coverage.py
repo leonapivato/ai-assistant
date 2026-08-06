@@ -137,10 +137,17 @@ def _the_field_would_accept(field: FieldInfo, value: object) -> bool:
     reading here: it coerces ``"0"`` to ``0`` and would pass a default that
     leaves the constructed model holding a ``str`` where its annotation promises
     an ``int``. Nothing in ``core`` declares a default this refuses.
+
+    Validating the *whole* annotation is also what reaches a floor declared on an
+    element rather than on the field — ``tuple[Annotated[int, Ge(0)], ...]`` keeps
+    its constraint inside the annotation, where ``field.metadata`` is empty and
+    pydantic has nothing to hoist. The adapter descends; a reader of
+    ``field.metadata`` alone would not.
     """
-    adapter: TypeAdapter[object] = TypeAdapter(
-        Annotated[(field.annotation, *field.metadata)], config=ConfigDict(strict=True)
+    declared = (
+        Annotated[(field.annotation, *field.metadata)] if field.metadata else field.annotation
     )
+    adapter: TypeAdapter[object] = TypeAdapter(declared, config=ConfigDict(strict=True))
     try:
         adapter.validate_python(value)
     except ValidationError:
@@ -231,18 +238,28 @@ def int_defaults_their_field_would_refuse(model: type[BaseModel]) -> list[str]:
     not readable without running it, and running arbitrary project code is not
     this check's business. ``core`` declares none on an int today, so the strict
     reading costs nothing and fails closed if one appears.
+
+    **Which fields are in scope is decided by the same walk path one uses**, not
+    by ``field.metadata``. A floor declared on an element —
+    ``tuple[Annotated[int, Ge(0)], ...]`` — leaves ``field.metadata`` empty, so a
+    check gated on it would skip the field silently and a default of ``(-1,)``
+    would stand. A field path one *fails* is skipped here instead: it has no floor
+    for a default to be inadmissible against, and reporting it twice would blur
+    which of the two checks regressed.
     """
     hints = get_type_hints(model, include_extras=True)
-    return [
-        name
-        for name, field in model.model_fields.items()
-        # a bounded int field whose default pydantic will never look at
-        if _declares_a_lower_bound(field.metadata)
-        and _int_leaves(hints.get(name), bounded=True)
-        and not field.is_required()
-        and not field.validate_default
-        and (field.default_factory is not None or not _the_field_would_accept(field, field.default))
-    ]
+    flagged = []
+    for name, field in model.model_fields.items():
+        bounded_leaves = _int_leaves(
+            hints.get(name), bounded=_declares_a_lower_bound(field.metadata)
+        )
+        if not bounded_leaves or not all(bounded_leaves):
+            continue  # not an int field, or path one's subject rather than this one
+        if field.is_required() or field.validate_default:
+            continue  # nothing to omit, or pydantic checks the default itself
+        if field.default_factory is not None or not _the_field_would_accept(field, field.default):
+            flagged.append(name)
+    return flagged
 
 
 def _core_models() -> list[type[BaseModel]]:
@@ -499,6 +516,35 @@ def test_an_annotation_level_floor_is_read_for_the_default_too() -> None:
 
     assert _AnnotatedFloor.model_fields["elided"].metadata == [GE_ZERO]
     assert int_defaults_their_field_would_refuse(_AnnotatedFloor) == ["elided"]
+
+
+def test_the_default_check_reaches_a_floor_declared_on_a_collections_element() -> None:
+    """The one place the hoisting above does *not* happen, and the escape it opens.
+
+    A constraint on the element of a ``tuple`` stays inside the annotation:
+    ``field.metadata`` is empty, because there is nothing declared *on the field*
+    to lift. A default-check gated on ``field.metadata`` would skip this field
+    without reporting anything, and the model would construct holding ``(-1,)``.
+    """
+
+    class _NestedFloor(BaseModel):
+        counts: tuple[Annotated[int, GE_ZERO], ...] = (-1,)
+
+    assert _NestedFloor.model_fields["counts"].metadata == []  # nothing to hoist
+    assert unbounded_int_fields(_NestedFloor) == []  # path one sees the element floor
+    assert int_defaults_their_field_would_refuse(_NestedFloor) == ["counts"]
+    assert _NestedFloor().counts == (-1,)  # the default really does slip through
+    with pytest.raises(ValidationError):
+        _NestedFloor(counts=(-1,))  # while an explicit one is still refused
+
+
+def test_an_admissible_nested_default_is_not_flagged() -> None:
+    """The discriminating half of the case above: the empty tuple ``core`` would use."""
+
+    class _NestedOk(BaseModel):
+        counts: tuple[Annotated[int, GE_ZERO], ...] = ()
+
+    assert int_defaults_their_field_would_refuse(_NestedOk) == []
 
 
 # --- the anchors: ADR-0107 §3's zero, on every type that carries it ----------
