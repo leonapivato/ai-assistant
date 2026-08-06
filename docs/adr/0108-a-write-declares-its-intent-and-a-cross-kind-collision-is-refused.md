@@ -293,7 +293,13 @@ narrower one.
 > is a cross-kind `UPSERT` commits **nothing**, including the valid element ordered
 > before it.
 
-Neither is decoration, and neither is implied by the cases above them:
+> **Normative.** Every cross-kind case asserts the refusal is **not** a
+> `MemoryStoreConflictError`, not merely that it is a `MemoryStoreError`. The
+> conflict class subclasses the base one, so a bare `pytest.raises(MemoryStoreError)`
+> passes on the very disposition §4 rules out and certifies nothing.
+
+Neither of the two cases above is decoration, and neither is implied by the cases
+before them:
 
 - **A store can judge the collision on read-visibility** and pass every
   single-collision case, because those all use a live record. It would then let a
@@ -309,6 +315,16 @@ Neither is decoration, and neither is implied by the cases above them:
   single-element case exercises. This is exactly the divergence ADR-0046 §3 forbids
   between a sequential SQLite apply and a stage-then-swap fake, arriving through a
   new door.
+- **A store can raise the wrong subclass and pass a base-class assertion.** §4's
+  choice of `MemoryStoreError` over `MemoryStoreConflictError` is the whole of what
+  it says about *remedy* — "re-mint and retry" is right for a minted-id collision
+  and wrong for a caller that asked to overwrite something of a kind it did not
+  expect — and it is invisible to `pytest.raises(MemoryStoreError)`. The exclusion
+  is stated as "not the conflict class" rather than "exactly the base class",
+  matching the two on-`main` precedents (`assert not isinstance(refusal,
+  UnresolvedEvidenceError)` in `MemoryWriterContract`): it forbids the disposition
+  §4 rules out, and does not forbid a future subclass some later ADR introduces
+  with reasons of its own.
 
 ### 6. What this changes in ADR-0022 §4, and in ADR-0081 §8
 
