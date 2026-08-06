@@ -225,14 +225,24 @@ _CORROBORATED = "prefers window seats"
 #: keep somebody's window and expiry, so a case where the two agree passes whichever
 #: record the fold took them from — which is the gap #745 reports.
 #:
+#: **Both ends of each window differ**, not only `valid_from`: the assertions compare
+#: whole `Validity` values, and with a shared `valid_until` a fold that took the
+#: target's start and the incoming record's end would compare equal and pass while
+#: moving when the surviving belief stops being live.
+#:
 #: Every instant is chosen against `_fixed_now` (2026-06-01), which those two cases
 #: make the store's clock as well as the ingestor's: the windows open before it and
-#: the expiries fall after it, so both records are readable throughout and a missing
-#: survivor means the fold got the rule wrong rather than that the clock retired it.
-_TARGET_WINDOW = Validity(valid_from=datetime(2026, 2, 1, tzinfo=UTC))
-_TARGET_EXPIRES_AT = datetime(2027, 1, 1, tzinfo=UTC)
-_INCOMING_WINDOW = Validity(valid_from=datetime(2026, 3, 1, tzinfo=UTC))
-_INCOMING_EXPIRES_AT = datetime(2026, 12, 1, tzinfo=UTC)
+#: both close and expire after it, so both records are readable throughout and a
+#: missing survivor means the fold got the rule wrong rather than that the clock
+#: retired it.
+_TARGET_WINDOW = Validity(
+    valid_from=datetime(2026, 2, 1, tzinfo=UTC), valid_until=datetime(2027, 6, 1, tzinfo=UTC)
+)
+_TARGET_EXPIRES_AT = datetime(2027, 9, 1, tzinfo=UTC)
+_INCOMING_WINDOW = Validity(
+    valid_from=datetime(2026, 3, 1, tzinfo=UTC), valid_until=datetime(2027, 3, 1, tzinfo=UTC)
+)
+_INCOMING_EXPIRES_AT = datetime(2027, 5, 1, tzinfo=UTC)
 #: The incoming record's transaction stamp, distinct from the target's `_WHEN`.
 _INCOMING_WHEN = datetime(2026, 5, 1, tzinfo=UTC)
 
