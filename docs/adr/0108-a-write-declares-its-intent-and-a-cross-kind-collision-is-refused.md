@@ -268,6 +268,17 @@ both doors by construction rather than by two implementers remembering. In
 > `MemoryWriter.ingest`; and cases in `MemoryStoreContract` pinning both verbs'
 > collision behaviour, plus cases in `MemoryWriterContract` pinning the routing.
 
+> **Normative.** §1 is enforced mechanically, not left to review: a test asserts
+> that **every `MemoryWrite` construction under `src/ai_assistant/` names its
+> `mode` explicitly**, over the parsed source rather than by grep. `MemoryWrite`'s
+> field carries `MemoryWriteMode.UPSERT` as its default (ADR-0046 §2), so
+> `MemoryWrite(record=r)` *is* a destructive write with no word in it for a reader
+> to find — the second silent default, beside `add`, and the one that reaches the
+> door §2 routes every ingestor write through. The default itself stays: it is
+> ADR-0046's, `core/types.py` is not this ADR's to change, and removing it would
+> break every construction outside this repository's own callers for a benefit a
+> check on those callers already delivers.
+
 Three backends, not two: `MemoryStoreContract` runs against `InMemoryMemoryStore`,
 `FakeMemoryStore` and `SqliteMemoryStore`, and ADR-0081 §8 anticipated "the same
 conformance-suite rewrite across all three backends". A refusal landed in two of
@@ -431,15 +442,33 @@ non-inferential design, and the goal is correspondingly narrower and honest:
 **destruction requires an explicit, greppable claim rather than being the default
 of every write.**
 
-**A caller added later can still reach for `add` and get the old default.** This is
-the real cost of ruling as §1 does rather than flipping `add`'s default (§8), and
-it is the property that makes a rule read as protection while not being one. Three
-things bound it, none of which abolishes it: §4's refusal binds `add` too, so the
-worst outcome (an episode overwriting a belief) is closed for every caller
-regardless of diligence; `add`'s own docstring, after §5, states that its upsert is
-a claim and that a minted id must not use it; and `src/` contains no `add` call
-after §2, so a new one is a visible addition in review rather than a line lost among
-others.
+**There are two silent defaults, not one, and only one of them is checkable.**
+
+The first is `add` itself: a caller added later can still reach for it and get the
+old upsert. This is the real cost of ruling as §1 does rather than flipping `add`'s
+default (§8), and it is the property that makes a rule read as protection while not
+being one. Three things bound it, none of which abolishes it: §4's refusal binds
+`add` too, so the worst outcome — an episode overwriting a belief — is closed for
+every caller regardless of diligence; `add`'s own docstring, after §5, states that
+its upsert is a claim and that a minted id must not use it; and `src/` contains no
+`add` call after §2, so a new one is a visible addition in review rather than a line
+lost among others.
+
+The second is subtler and was nearly missed: **`MemoryWrite.mode` defaults to
+`UPSERT`** (ADR-0046 §2), so `write_atomic([MemoryWrite(record=r)])` is a
+destructive write containing no word a reader can grep for — and it arrives at the
+very door §2 routes every ingestor write through, which is where a reader would
+least expect to find the old default hiding. It differs from the first in one
+respect that matters: it is **mechanically checkable**, because the construction
+site is a parseable expression rather than a method name shared with legitimate
+uses. §5 therefore requires that check rather than leaving this to the same
+"visible in review" argument, and this residual is closed for this repository's own
+callers even though the default remains in `core`.
+
+What is **not** closed by either bound is the same irreducible thing stated above: a
+caller writing `mode=MemoryWriteMode.UPSERT` deliberately, at a same-kind colliding
+minted id, still destroys. The check makes the claim explicit; it cannot make it
+true.
 
 **Nothing here closes the lost update.** Two concurrent ingests can still both
 resolve conflicts before either writes. ADR-0046 §5 ruled that `write_atomic` does
