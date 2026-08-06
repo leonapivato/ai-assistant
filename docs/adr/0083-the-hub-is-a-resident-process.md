@@ -1,7 +1,44 @@
 # 83. The hub is a resident process: lifecycle, exclusivity, and an internal scheduler
 
-- Status: Accepted
+- Status: Accepted, §7 amended by ADR-0111
 - Date: 2026-07-31
+- **Amended: 2026-08-06 by
+  [ADR-0111](0111-a-scheduled-walk-is-chunked-and-resumes-from-a-durable-cursor.md)
+  (§7 — its acceptance of unbounded starvation no longer reaches a chunked job,
+  and its revisit condition has fired).** §7's reasoning that *"a tick is a walk
+  to exhaustion whose duration is a function of the backlog, not of the
+  interval"*, and its ruling that *"**Jobs run serially, and starvation is
+  accepted rather than engineered away.** A long job delays its siblings"*, were
+  written before any job on the list walked an accumulating store. ADR-0111 §4
+  bounds a chunked job's single run by a deadline and its chunk by a count, so a
+  chunked job occupies the loop for at most one run budget plus one chunk per
+  interval; ADR-0111 §8 records that this is the answer to §7's own revisit
+  condition — *"Revisit when a job's typical runtime approaches its interval,
+  which is what consolidation (leg 7) is likely to do first"* — which leg 7's
+  consolidation has fired. A reader holding only this ADR would build that job as
+  a walk to exhaustion and would read §7's acceptance of starvation as unbounded,
+  which is ADR-0082 §1's test met on its second limb, so the record is owed.
+  **This is an amendment and not a supersession** (ADR-0070 §1): §7's decisions
+  all stand and ADR-0111 depends on each of them — the fixed delay after
+  completion and a job structurally unable to overlap itself (a chunked run is
+  re-armed at completion plus its interval like any other, and the scheduler is
+  not told whether the work was exhausted), the serial loop, the job table and
+  its defaults, observation's disabled default, the `gt=timedelta(0)` discipline
+  that ADR-0111 §4's new duration follows, and *"No job gets new store surface"*,
+  which ADR-0111 §1 keeps by placing the cursor below the façade rather than in
+  `ai_assistant/service/`. **§13's deferral of the observation cursor is
+  discharged, not amended**: ADR-0111 is the decision §13 said the cursor owed,
+  including what a build does with a cursor it does not understand (ADR-0111 §7,
+  which applies §6's own test and finds §6 unmet — a cursor answers no query, so
+  discarding one is never silently wrong). Under §15's own rule, *"A deferral
+  discharged by the ADR it named is a stacked addition, not an amendment"*, so the
+  two halves are classified differently on purpose. This `Status` line carries no
+  leading token, so under ADR-0082 §2 the qualifier belongs on it beside this
+  note. ADR-0111 ships in the same change as this note, which is the existence
+  condition §15 states; while it is `Proposed`, this line names a decision that is
+  drafted rather than ratified, the form §15 records `main` as already carrying.
+  Appended per ADR-0070 §1: no text below is rewritten and §7's sentences stand as
+  written. Refs #632, #710, #729.
 - Amended: 2026-07-31 (§2 — it names the wrong environment variable for
   `Settings.data_dir`). The sentence reads *"`AI_ASSISTANT_DATA_DIR` starts
   working for free through pydantic-settings"*. That variable name is wrong and
