@@ -69,6 +69,15 @@ An under-specified brief is the largest source of rework. Each one carries:
   longer apply — an agent that follows a stale issue faithfully has still done
   the wrong work.
 - **The ADR number, or that none is needed.** Never let an agent pick one.
+- **A lane delivers exactly one PR.** If the work needs two — a contract ADR
+  and its implementation is the standing case — that is two lanes, briefed
+  separately, the second only after the first has merged. A lane carrying a
+  stack overloads its context, and an implementation written in the same
+  context as the ADR is built against the draft in its author's head rather
+  than the ratified text; the merged PR is the second brief's authority.
+  Golden rule 5 already sequences the *PRs* — this sequences the *lanes* the
+  same way. The Protocol triad is one PR and so still one lane
+  (`CONTRIBUTING.md` → "Adding a Protocol"); it is the ADR that ships alone.
 - **Cross-lane interactions** in both directions: what this lane will see if
   another merges first, and what it must not assume. Say **where in the merge
   order it sits and why** (§5). A lane told it merges last plans for the rebase
