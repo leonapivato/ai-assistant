@@ -309,11 +309,23 @@ narrower one.
 > **Normative.** Two further conformance cases are required, because §4's two
 > qualifiers are each independently satisfiable by a wrong implementation that
 > passes every case above. **(a) Physical presence, on both doors**: a cross-kind
-> `add` *and* a cross-kind `UPSERT` at an id held by an **expired or window-closed**
-> record are each refused, and that record is still returned by `export`
+> `add` *and* a cross-kind `UPSERT` at an id held by a **window-closed** record are
+> each refused, and that record is **still returned by `export`, unchanged**,
 > afterwards. **(b) Rollback**: a multi-element `write_atomic` whose *later* element
 > is a cross-kind `UPSERT` commits **nothing**, including the valid element ordered
 > before it.
+
+**Window-closed and not expired, and the distinction is load-bearing rather than a
+choice of example.** Both are ways for a row to be present-but-unreadable, so either
+would exercise §4's physical-presence qualifier — but only one of them can also
+witness "nothing is written". An expired record is gone from *everything* including
+`export` (ADR-0007), so after a refusal there is no contract-visible way to see it
+at all: an implementation that mutated the row and *then* raised would pass, since
+`get` and `export` hide the damage either way and a following `INSERT_IF_ABSENT`
+still collides on the id. A window-closed record is off the read path but **retained
+and still exported** (ADR-0045 §6), which is exactly the observability the case
+needs. A lane may add an expired variant to cover the second invisibility axis, but
+it proves *occupancy* only and does not discharge (a).
 
 > **Normative.** Every cross-kind case asserts the refusal is **not** a
 > `MemoryStoreConflictError`, not merely that it is a `MemoryStoreError`. The
