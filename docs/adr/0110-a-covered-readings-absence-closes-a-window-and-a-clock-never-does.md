@@ -30,10 +30,14 @@
   §3's deferred question** — "Whether lapsed currency may close a validity window
   is not decided here" — with the answer **no** (§8). §13 applies ADR-0070 §1's
   test to ADR-0103 §8's routing clause and finds it unmet.
-- **Records a dated note on ADR-0093** and nothing else on any earlier ADR. §13
-  makes the judgement clause by clause under ADR-0070 §1 and ADR-0082 §1,
-  including for the two readings where the opposite answer is available:
-  ADR-0093 §4's second sentence and ADR-0103 §8.
+- **Partially supersedes ADR-0093 §4's second sentence** — "An entry missing from
+  a later reading is not evidence that the entry was withdrawn" — narrowing it by
+  exception to a reading that declares the coverage it exhausted (§3). §4's first
+  sentence and every other ADR-0093 ruling stand; the record is on that ADR's
+  `Status` line and in its appended dated note, both landing in this change.
+  **Nothing else on any earlier ADR.** §13 makes the judgement clause by clause
+  under ADR-0070 §1 and ADR-0082 §1, including for ADR-0103 §8, where the opposite
+  answer is available and does not survive inspection.
 - Refs #112, #639, #729 (leg 7 fork 4), #631, #632.
 
 ## Context
@@ -652,7 +656,7 @@ The judgement ADR-0082 §1 requires is made here, clause by clause, by applying
 ADR-0070 §1's test to each earlier ADR's text: would a reader holding only that
 ADR now act differently, or read one of its clauses more widely than it now holds?
 
-**ADR-0093 §4 and §11 — a record is owed, and it is a dated note.** §11 defers
+**ADR-0093 §4 and §11 — a record is owed, and it is a partial supersession.** §11 defers
 "Retracting an attested belief when its source stops reporting it" with the
 firing condition "Fires with ADR-0092's override mechanism"; this ADR is that
 decision and the condition has fired, so §11's entry stops describing an open
@@ -673,15 +677,36 @@ is the reviewable part:
   shape, recording ADR-0092's discharge of §5/§7/§10's policy choice with the words
   "**The deferral is discharged, not overturned.**"
 
-**This ADR takes the second reading**, on the ground that §11's entry names this
-decision, this ADR, and this firing condition, and that treating a deferral the
-earlier ADR itself scheduled as a supersession of the clause it was deferred
-against would make every discharge in the corpus a supersession. The record is
-therefore an **appended dated note on ADR-0093**, landing in this same change.
-Under ADR-0082 §2 no `Status` qualifier is written, because that line is led by
-`Partially superseded by ADR-0095`; the note is the whole record. If a reviewer
-holds the first reading, what changes is one `Status` line and not one clause
-below it, and this section is where that argument belongs.
+**This ADR takes the first reading — a partial supersession — after taking the
+second one to review and having it answered on the text.** The draft argued that
+§11's entry names this decision, this ADR and this firing condition, so a reader
+holding ADR-0093 entire was told a later ADR would rule it and does not now act
+differently; and that treating a deferral the earlier ADR itself scheduled as a
+supersession would make every discharge in the corpus one. The architecture lens
+answered it by naming what §11 does and does not do, which is the answer:
+**§11 defers the *work* and nowhere qualifies or suspends §4's rule.** Its entry
+restates the prohibition — "§4 forbids proposing absence, which makes this real
+work rather than a special case" — rather than marking §4 provisional, so §4's
+sentence is unqualified as it stands and a reader acting on it acts differently
+after §3. That is ADR-0070 §1's test met, and its answer is supersession.
+
+The two are genuinely different shapes and the distinction survives: ADR-0092
+discharged ADR-0045 §5/§7/§10 without narrowing any sentence of ADR-0045 —
+those sections *left a choice to a later lane*, and a lane taking it makes none
+of their sentences false. §4 leaves no choice; it states a rule. A discharge that
+also narrows a standing clause is both, and it is the narrowing that decides the
+record.
+
+**The record is therefore ADR-0093's `Status` line and its appended dated note,
+both landing in this same change.** ADR-0110's pair is appended beside ADR-0095's
+in the accumulating form ADR-0070 §4 and `docs/adr/template.md` require, and its
+scope names exactly the sentence and exactly §3's case. ADR-0082 §2's rule that a
+leading-token line carries no qualifier governs *amendments*; a partial
+supersession is one of ADR-0070 §4's canonical status tokens and belongs on the
+line, which is why an earlier draft's appeal to §2 here was misplaced. This
+paragraph is left standing rather than rewritten so the argument that was made
+and the answer it got are both legible — the practice ADR-0045's 2026-07-30 note
+follows for its own overtaken paragraph.
 
 **ADR-0103 §3 and §8 — nothing owed.** §3's sentence "Whether lapsed currency may
 close a validity window is not decided here (§8)" is a deferral, discharged here

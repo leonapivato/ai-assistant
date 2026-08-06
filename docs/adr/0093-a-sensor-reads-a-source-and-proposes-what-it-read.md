@@ -1,6 +1,8 @@
 # 93. A sensor reads a source and proposes what it read; the clock bounds the read, so nothing needs a cursor
 
-- Status: Partially superseded by ADR-0095 (the contract's name and the package its concretes live in)
+- Status: Partially superseded by ADR-0095 (the contract's name and the package
+  its concretes live in) and ADR-0110 (§4's second sentence: an entry absent from
+  a reading that declares the coverage it exhausted)
 - Date: 2026-08-02
 - Partially superseded: 2026-08-02 by ADR-0095 — **two decisions are replaced and
   nothing else is.** The contract below named `Sensor` is named `Reader`;
@@ -20,10 +22,10 @@
   without a triad and refused it, so §10's `core` Protocol and its triad
   obligation stand exactly as written. This line is an appended note; the
   `Status` field above is this ADR's only status. See ADR-0095.
-- Note (2026-08-06): **§11's fourth deferral is discharged by
-  [ADR-0110](0110-a-covered-readings-absence-closes-a-window-and-a-clock-never-does.md);
-  §4's first sentence is untouched and §4's second is read with §11, as it was
-  written to be.** §11 defers "Retracting an attested belief when its source stops
+- Partially superseded: 2026-08-06 by
+  [ADR-0110](0110-a-covered-readings-absence-closes-a-window-and-a-clock-never-does.md)
+  — **§4's second sentence is narrowed by exception; §4's first sentence and every
+  other ruling here stand, and §11's fourth deferral is discharged.** §11 defers "Retracting an attested belief when its source stops
   reporting it" with the condition "Fires with ADR-0092's override mechanism, whose
   id discipline it shares". ADR-0092 has merged, the condition is met, and ADR-0110
   is that decision (#639).
@@ -39,15 +41,23 @@
   ingest left it untouched.
 
   **§4's second sentence — "An entry missing from a later reading is not evidence
-  that the entry was withdrawn" — is qualified by that rule, and this is recorded
-  as a discharge rather than a supersession.** Read alone the sentence is
-  unqualified; read with §11, which defers this exact retraction by name in the same
-  Decision, a reader holding this ADR was told a later ADR would rule it and what
-  would unblock it, so that reader acts on ADR-0110 rather than differently. That is
-  the shape ADR-0045's 2026-08-02 note records for ADR-0092's discharge of its
-  §5/§7/§10 policy choice — "**The deferral is discharged, not overturned.**"
-  ADR-0110 §13 states both readings, takes this one, and says what would change
-  under the other. **§4's reasoning is not weakened but completed**: of the four
+  that the entry was withdrawn" — is narrowed by exception, and that is a partial
+  supersession rather than a discharged deferral.** ADR-0110 §13 argued the
+  opposite reading — that §11 defers this exact retraction by name in the same
+  Decision, so a reader holding this ADR entire was told a later ADR would rule it
+  — and the architecture review answered it on the text, by naming what §11 does
+  and does not do: **§11 defers the work and nowhere qualifies or suspends §4's
+  rule**, and its own entry restates the prohibition ("§4 forbids proposing
+  absence") rather than provisionally lifting it. So a reader holding §4 does act
+  differently after ADR-0110, which is ADR-0070 §1's supersession test met, and
+  ADR-0082 §1's record follows. That section expressly admits this route — a
+  reviewer "may require the record added or removed by showing the test comes out
+  the other way — by naming the sentence of the earlier ADR that does, or does
+  not, become false or over-wide" — and this is that, with the sentence named. The
+  scope is exactly that sentence and exactly the case ADR-0110 §3 conditions; the
+  narrower reading is preserved below rather than erased, because the record of
+  which argument was made and answered is worth more than a tidy line. **§4's
+  reasoning is not weakened but completed**: of the four
   cases it called indistinguishable from the reading, §5's refuse-don't-truncate
   rule and §8's raise-don't-return rule already removed the truncated file and the
   permission error, and ADR-0110 §2 separates the last pair — a bounded read from a
@@ -57,10 +67,13 @@
   §2's placement, §3's two cadences and its additive `SourceReading`, §4's band and
   episode rules, §5's bound and no-cursor argument, §6, §7, §7a, §7b, §8's failure
   postures, §9's gates, §10's surface and §11's other deferrals are untouched. This
-  is ADR-0070 §1's appended dated note; no ratified text below is rewritten. Under
-  [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §2 no
-  `Status` qualifier is written, because this ADR's `Status` line is led by
-  `Partially superseded by` — the note is the whole record. ADR-0110 lands **in the
+  is ADR-0070 §1's appended dated note; no ratified text below is rewritten. The
+  `Status` line above gains ADR-0110's pair beside ADR-0095's rather than replacing
+  it, in the accumulating form ADR-0070 §4 and `docs/adr/template.md` require of a
+  second partial supersession, and the scope names no `ADR-NNNN` token. ADR-0082
+  §2's rule that a leading-token line carries no qualifier governs **amendments**,
+  and this is not one — a partial supersession is one of ADR-0070 §4's canonical
+  status tokens and belongs on the line. ADR-0110 lands **in the
   same change as this note**, so this note never names an ADR that does not exist;
   it stands `Proposed`, which is the form ADR-0075 established and ADR-0045's
   2026-07-28 note records `main` carrying three times over. Refs #639, #112, #729.
