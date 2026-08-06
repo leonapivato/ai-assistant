@@ -971,6 +971,18 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     fold test written against it a test of nothing. Nothing needs the cited episodes
     to compute it: the producers captured their instants before ADR-0086 §3's bound
     could displace anything, so the bound displaces citations and nothing else.
+
+    Args:
+        target: The stored record the ruling folds into.
+        incoming: The proposed record being folded in.
+        now: This writer's clock reading, which defines "our future" for
+            :func:`_confirming_instant` and for nothing else. Passed in rather
+            than read here, so the caller keeps the guard that turns a bad
+            reading into a ``MemoryStoreError``.
+
+    Returns:
+        The survivor: the target's record on ADR-0103 §6's arm, the incoming
+        record wearing the target's id on the ordinary one.
     """
     union = tuple(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence]))
     evidence, elided = _bounded_evidence(
