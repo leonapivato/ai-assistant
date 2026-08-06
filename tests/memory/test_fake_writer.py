@@ -37,18 +37,30 @@ def _fixed_now() -> datetime:
     return datetime(2026, 6, 1, tzinfo=UTC)
 
 
-def _proposal(record_id: str, *, evidence: tuple[str, ...] = ()) -> MemoryUpdateProposal:
+def _proposal(
+    record_id: str,
+    *,
+    evidence: tuple[str, ...] = (),
+    validity: Validity | None = None,
+    expires_at: datetime | None = None,
+    last_updated: datetime | None = None,
+) -> MemoryUpdateProposal:
+    # The three lifecycle fields are optional and default to what every case that
+    # does not care about them already had — an open window, no expiry, the fixed
+    # clock — so only the fold case that asserts on them spells them out.
     content = "prefers concise emails"
     return MemoryUpdateProposal(
         proposed=PreferenceMemory(
             id=record_id,
             content=content,
             preference=content,
+            validity=validity if validity is not None else Validity(),
+            expires_at=expires_at,
             provenance=Provenance(
                 source=MemorySource.OBSERVED,
                 confidence=0.6,
                 evidence=evidence,
-                last_updated=_fixed_now(),
+                last_updated=last_updated if last_updated is not None else _fixed_now(),
             ),
         ),
         rationale="because",
@@ -162,6 +174,20 @@ def _inferred(record_id: str, *, validity: Validity | None = None) -> Preference
     )
 
 
+#: The lifecycle fields the fold case below gives its two records **distinctly**,
+#: so which record each one came from is asserted rather than defaulted (#745): with
+#: the two agreeing, the case passes whichever record the fold took them from.
+#: Chosen against `_fixed_now` (2026-06-01), the store's clock and the writer's —
+#: the windows open before it and the expiries fall after it, so both records are
+#: readable throughout and a missing survivor means the fold got the rule wrong.
+_TARGET_WINDOW = Validity(valid_from=datetime(2026, 2, 1, tzinfo=UTC))
+_TARGET_EXPIRES_AT = datetime(2027, 1, 1, tzinfo=UTC)
+_TARGET_WHEN = datetime(2026, 1, 1, tzinfo=UTC)
+_INCOMING_WINDOW = Validity(valid_from=datetime(2026, 3, 1, tzinfo=UTC))
+_INCOMING_EXPIRES_AT = datetime(2026, 12, 1, tzinfo=UTC)
+_INCOMING_WHEN = datetime(2026, 5, 1, tzinfo=UTC)
+
+
 async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -> None:
     """The fake folds ADR-0103 §6's pairing the way ``MemoryIngestor`` does (#646).
 
@@ -171,6 +197,14 @@ async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -
     the old ``max`` would let an `orchestration` test see an ``OBSERVED`` survivor
     at 1.0, which production cannot write at all: ``Provenance`` refuses it
     (ADR-0077 §7) and the ingest writes nothing.
+
+    **The lifecycle fields are part of what the two copies have to agree about**
+    (#745), so the records carry distinct ones: the target's ``validity`` and
+    ``expires_at`` survive, because they are the belief's own properties and §6
+    gives the incoming record exactly two contributions, while ``last_updated``
+    comes from the incoming record because it is transaction time (ADR-0045 §3)
+    rather than a belief property. A fake that diverged here would hand a consumer
+    a survivor with a lifetime production would not have written.
     """
     store = FakeMemoryStore(now=_fixed_now)
     await store.add(
@@ -187,11 +221,13 @@ async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -
         id="imported",
         content="prefers concise emails, as the mail client has it",
         preference="prefers concise emails",
+        validity=_TARGET_WINDOW,
+        expires_at=_TARGET_EXPIRES_AT,
         provenance=Provenance(
             source=MemorySource.EXTERNAL,
             confidence=1.0,
             evidence=("t-ev",),
-            last_updated=_fixed_now(),
+            last_updated=_TARGET_WHEN,
             attestation=Attestation(reported_by="mail:work", reported_at=_fixed_now()),
         ),
     )
@@ -200,7 +236,15 @@ async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -
         store=store, policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE), now=_fixed_now
     )
 
-    result = await writer.ingest(_proposal("observed", evidence=("cited-episode",)))
+    result = await writer.ingest(
+        _proposal(
+            "observed",
+            evidence=("cited-episode",),
+            validity=_INCOMING_WINDOW,
+            expires_at=_INCOMING_EXPIRES_AT,
+            last_updated=_INCOMING_WHEN,
+        )
+    )
 
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
     assert result.record_id == "imported"
@@ -210,7 +254,14 @@ async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it() -
     assert survivor.provenance.confidence == 1.0
     assert survivor.provenance.attestation == imported.provenance.attestation
     assert survivor.content == imported.content
+    # The belief's own lifetime is the target's; the incoming record's is left
+    # behind with its confidence and its text.
+    assert survivor.validity == _TARGET_WINDOW
+    assert survivor.expires_at == _TARGET_EXPIRES_AT
     assert set(survivor.provenance.evidence) == {"t-ev", "cited-episode"}
+    # Transaction time is the incoming record's: the store has just changed its
+    # mind about this belief, and keeping `_TARGET_WHEN` would deny that.
+    assert survivor.provenance.last_updated == _INCOMING_WHEN
 
 
 async def test_supersede_refuses_a_future_dated_target_without_writing() -> None:
