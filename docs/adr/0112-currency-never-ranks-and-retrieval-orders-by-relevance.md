@@ -410,19 +410,43 @@ assert rather than test". This ADR does not assert it either. It records that
 leg 8's memory-precision measure is what would show the gap biting, and §Consequences
 carries the revisit.
 
-### 7. Leg 7's retrieval obligation is the measurement, and no tuning precedes it
+### 7. Leg 7's retrieval obligation is the measurement, and tuning — not correctness — waits on it
 
 > **Normative.** Leg 7's retrieval exit obligation is the measurement the roadmap
 > names — retrieval latency and k-shortfall against a synthetically aged store —
 > and it is a lane of its own. This ADR neither builds it nor prescribes its
 > fixture, thresholds or harness.
 
-> **Normative.** No lane selects among the mitigation options #457 or #411
-> enumerate, and no lane adopts hybrid lexical+vector retrieval, before that
-> measurement exists. The measurement is the warrant; a constant changed without
-> one is a guess with a commit message.
+> **Normative.** No lane makes a **headroom** change to retrieval before that
+> measurement exists — raising `_RESULT_OVERFETCH`, decoupling or lifting the KNN
+> `k` cap to buy over-fetch, paginating the KNN for reach, or adopting hybrid
+> lexical+vector retrieval. The measurement is the warrant; a constant changed
+> without one is a guess with a commit message.
 
-The second clause is the one that costs something, and it is the discipline the
+> **Normative.** That gate does **not** reach a **correctness** remedy for #457.
+> A change that removes the silent failure rather than making it rarer — a
+> pre-filter that lets the KNN see only eligible rows, or an explicit
+> under-service signal a caller can refuse on — proceeds on its own merits and
+> without waiting for the measurement, subject to §10 where it needs contract
+> surface.
+
+**The line between the two clauses is whether the change is a bet on a
+frequency.** A headroom change buys a bigger multiple of `limit` and leaves the
+failure mode exactly where it was, one denser store further out; its whole case
+is that the new multiple is enough, which is a claim about how often nearer
+neighbours are filtered — unanswerable without the measurement, and the reason
+#457 and #411 each offer *lists* of options rather than a fix. A remedy that
+makes the shortfall impossible or legible makes no such claim, and gating it on a
+frequency would be a category error: #457's exposure is that
+`MemoryIngestor._detect_conflicts` can be handed an incomplete conflict set and
+cannot tell, so `DefaultMemoryPolicy`'s asserted-conflict gates can turn what
+should be an `ASK_USER` into a `SUPERSEDE` — the profile silently committing a
+self-contradiction. **That is wrong at any frequency**, and no k-shortfall number
+would make it safe. This distinction was missed by an earlier draft, which gated
+"the mitigation options #457 or #411 enumerate" as one set while §8 classed #457
+as a write-path correctness exposure; the two statements could not both stand.
+
+The first clause is the one that costs something, and it is the discipline the
 corpus already applies to itself. ADR-0103 §5 defers currency's decay parameters
 to leg 8's measurement on exactly this ground — "a number invented here would
 arrive with the authority of a ratified decision and the evidence of a guess" —
@@ -462,7 +486,16 @@ both cite #457 at the point where the obligation lands. Two clauses of it have
 strengthened since filing: every `SUPERSEDE` leaves a window-closed record that
 eats over-fetch headroom, and ADR-0110 §3 adds a *second* producer of
 window-closed records, so the headroom pressure grows with reconciliation as well
-as with correction. Its option list is untouched by this ADR and is gated by §7.
+as with correction. Its option list is untouched by this ADR and is **split** by
+§7: its headroom option (raising `_RESULT_OVERFETCH` / decoupling the `k` cap,
+which #457 itself calls "a mitigation, not a fix") waits for the measurement,
+while its pre-filter and under-service-signal options are correctness remedies
+and do not. The under-service signal is the one worth naming, because it is
+available at the lowest cost and needs no frequency to justify: #457 states it as
+`search` reporting that "it returned fewer than `limit` rows *and* exhausted its
+candidate budget, so a caller can refuse rather than silently believe it saw
+everything". Whether it lands on the `MemoryStore` contract is §10's question and
+not pre-authorised here.
 
 **#457's own ADR judgement is right and is restated here.** It observes that a
 threshold-complete read would be "a `MemoryStore` Protocol obligation, so an ADR
@@ -482,7 +515,8 @@ under golden rule 5". That is correct and §10 does not pre-authorise it.
 - **Part 3 (filtered cap-boundary behaviour)** is #457's mechanism seen from the
   constant's side, and it is the part that names the durable fix — "retrieval that
   can continue past the cap (paginate the KNN)". That is a mitigation option under
-  §7 and waits for the measurement.
+  §7's headroom clause and waits for the measurement — it buys reach past the cap
+  rather than removing the silence, which is the distinction §7 draws.
 
 **One staleness in #411 worth recording**: its note that "#115's premise that
 `_check_tuning` lives only in `orchestration` … is now stale" is itself now the
@@ -519,7 +553,8 @@ lands on only one of them.
   half has no consumer, and the repository's standing discipline is to defer
   surface until one exists (ADR-0072 §7, ADR-0045 §1, ADR-0028 §7). It carries
   forward on **#791** rather than on ADR-0074's list.
-- **Hybrid lexical+vector retrieval** (ADR-0006 §5), gated by §7 and unfired (§7).
+- **Hybrid lexical+vector retrieval** (ADR-0006 §5), gated by §7's headroom
+  clause and unfired (§7).
 - **Anything about eviction, size caps or retention.** ADR-0103 §1's framing rules
   them out for this leg and ADR-0007 §5's deferral stands untouched.
 
@@ -638,11 +673,13 @@ than it holds; none acquires an exception and none loses one.
   band-scoped relevance read (§5, **#790**), each on its own issue. The first is a
   prerequisite of any tuning this leg does; the second is a golden-rule-5 ADR
   whenever a lane wants §5's precedence real.
-- **Tuning gets a gate, and the gate has a cost.** #457's and #411's mitigation
-  options wait for a measurement that does not exist yet, which means the
-  under-service they describe stays open for at least one more lane. That is the
-  trade: the alternative is picking among four options on the strength of a
-  plausible story about a store nobody has aged.
+- **Headroom tuning gets a gate; correctness does not.** #457's and #411's
+  *headroom* options wait for a measurement that does not exist yet — the trade
+  being that the alternative is picking among them on the strength of a plausible
+  story about a store nobody has aged. What does **not** wait is a remedy that
+  removes the silent failure, which matters because #457's exposure is a write-path
+  correctness one and no frequency makes it safe (§7). So the gate costs a denser
+  store's worth of headroom, not an open correctness hole.
 - **Nothing in this leg now needs leg 8's numbers to ship.** Shapes 2 and 3 each
   required a currency threshold or a placement rule before leg 8's measurement
   could supply one; shape 1 requires neither, which is why it is the shape that
@@ -651,7 +688,7 @@ than it holds; none acquires an exception and none loses one.
   measurably degrading retrieval quality — the revisit ADR-0110 §8 already carries
   for its own response, arriving here as a question about rank rather than about
   standing; if the exit measurement (§7) shows k-shortfall biting at ordinary
-  volumes, which reopens #457's and #411's option lists with the warrant §7
+  volumes, which reopens #457's and #411's headroom options with the warrant §7
   requires; if a consumer for cross-conversation episodic recall appears and its
   budget question turns out to need an ordering answer after all (§9); or if
   ADR-0072 §5's per-band composition is built and the flood failure survives it,
@@ -695,11 +732,14 @@ than it holds; none acquires an exception and none loses one.
   belongs — the discipline ADR-0110 §10 applied to its own writer-surface question
   after an earlier draft did the opposite.
 - **Fixing the post-KNN over-fetch in this lane**, as #729's fork-5 text proposes
-  ("fixed or instrumented in this lane"). Rejected in §7: the instrument is the
-  half that can be built without a number, and the fix is a choice among four
-  options whose merits are all claims about frequencies nobody has measured.
-  Taking the instrument and gating the fix is the same sentence read in the order
-  that can actually be executed.
+  ("fixed or instrumented in this lane"). Rejected in §7, but only for the
+  *headroom* half: the instrument is what can be built without a number, and a
+  headroom change is a choice among options whose merits are all claims about
+  frequencies nobody has measured. Taking the instrument and gating those is the
+  same sentence read in the order that can actually be executed. A **correctness**
+  remedy is not rejected and not gated — it is simply not this docs-only lane's
+  to write, and §7's second clause says so rather than letting the gate swallow
+  it.
 - **Deferring the whole fork until leg 8's measurement.** Rejected. The shape
   question is decidable from the corpus — ADR-0110 §8 supplies what shape 1
   consists of, ADR-0103 §9 supplies the reason shapes 2 and 3 have nothing to
