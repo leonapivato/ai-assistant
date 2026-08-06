@@ -160,6 +160,15 @@ accepted (ADR-0027 §2):
 It also refuses on a dirty tree, on `main`, and when the PR head is behind local
 `HEAD`.
 
+**Before pushing a rebase, ask `ship` which path applies rather than working it
+out** — `scripts/ship.sh --drill` (`just drill`) runs this same acceptance rule
+and writes nothing, so a round that is owed is discovered while it is still
+cheap. It reports the inputs it judged, not just a verdict: the base move's file
+set with floor paths marked, and where it made no floor claim, which of its three
+reasons applies — none of which is a clear. **Rebase first**: it refuses an
+un-rebased `HEAD`, because the merge base has not moved there yet and the floor
+would be tested over an empty file set (issue #751).
+
 **A base move costs a review round when it lands in ADR-0027 §3's floor:**
 `src/ai_assistant/core/protocols.py` and `src/ai_assistant/core/types.py` — the
 contract surface — plus `docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md`,
