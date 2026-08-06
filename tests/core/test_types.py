@@ -44,6 +44,7 @@ from ai_assistant.core.types import (
     UserConfirmation,
     Validity,
     band_of,
+    rests_on_recorded_external_content,
 )
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -567,6 +568,144 @@ def test_external_is_neither_asserted_nor_derived() -> None:
     """`EXTERNAL` gets its own band; folding it either way was rejected (ADR-0072 §2)."""
     assert band_of(MemorySource.EXTERNAL) is BeliefBand.ATTESTED
     assert band_of(MemorySource.EXTERNAL) not in {BeliefBand.ASSERTED, BeliefBand.DERIVED}
+
+
+# --- the derived-taint marker and its predicate (ADR-0106 §1, §2, §10) -------
+
+
+def test_a_record_decoded_without_the_marker_reads_false() -> None:
+    """ADR-0106 §10's first clause, and the whole of its no-backfill argument.
+
+    Decoded from a mapping that has never heard of the field — the shape a record
+    stored before this decision deserialises from — rather than merely constructed
+    without it, because the claim is about the *read* path. A pre-field derived
+    record decodes ``False`` and that is true of it: no ``EXTERNAL`` citation
+    exists to have been recorded. A pre-field attested record decodes ``False``
+    too and that says nothing about it at all, which is why the predicate below
+    and not the field is what any consumer asks.
+    """
+    stored = {"source": MemorySource.OBSERVED.value, "confidence": 0.6, "last_updated": _WHEN}
+
+    prov = Provenance.model_validate(stored)
+
+    assert prov.derived_from_external is False
+
+
+def test_the_predicate_is_true_for_an_attested_record_carrying_no_marker() -> None:
+    """ADR-0106 §10's second clause: it fails an implementation that reads the field.
+
+    An import's externality is already recorded — the ``ATTESTED`` band is reached
+    only through a source whose whole meaning is that someone else reported the
+    belief — so the marker is absent there by design (ADR-0106 §1). A predicate
+    that read ``derived_from_external`` instead of the band would call the most
+    plainly external record in the store untainted.
+    """
+    prov = Provenance(
+        source=MemorySource.EXTERNAL,
+        confidence=0.9,
+        last_updated=_WHEN,
+        attestation=_ATTESTED_BY,
+    )
+
+    assert prov.derived_from_external is False
+    assert rests_on_recorded_external_content(prov) is True
+
+
+def test_the_predicate_is_false_for_a_user_assertion_carrying_the_marker() -> None:
+    """ADR-0106 §10's third clause: it fails an implementation that drops the band guard.
+
+    ADR-0106 §7 forbids a band-keyed validator on the field, so this record
+    constructs — and an unguarded disjunction would report the user's own word as
+    resting on external content, which ADR-0098 §1 forbids in principle. The
+    record is malformed rather than adversarial, and the honest answer honours the
+    classifier the corpus keys everything else on (ADR-0072 §4).
+    """
+    prov = Provenance(
+        source=MemorySource.USER_ASSERTED,
+        confidence=1.0,
+        last_updated=_WHEN,
+        derived_from_external=True,
+    )
+
+    assert rests_on_recorded_external_content(prov) is False
+
+
+@pytest.mark.parametrize("marked", [True, False])
+@pytest.mark.parametrize(
+    "source", [s for s in MemorySource if band_of(s) is BeliefBand.DERIVED], ids=str
+)
+def test_the_predicate_reads_the_marker_in_the_derived_band(
+    source: MemorySource, marked: bool
+) -> None:
+    """The one band where the field decides, over every source in it.
+
+    Without this the two cases above are jointly satisfied by a predicate that
+    ignores the field entirely and answers from ``band_of`` alone.
+    """
+    prov = Provenance(
+        source=source, confidence=0.6, last_updated=_WHEN, derived_from_external=marked
+    )
+
+    assert rests_on_recorded_external_content(prov) is marked
+
+
+def test_the_marker_survives_a_json_round_trip() -> None:
+    """It is durable state on a stored record, not a transient of the write path."""
+    prov = Provenance(
+        source=MemorySource.INFERRED, confidence=0.6, last_updated=_WHEN, derived_from_external=True
+    )
+
+    restored = Provenance.model_validate_json(prov.model_dump_json())
+
+    assert restored.derived_from_external is True
+    assert restored == prov
+
+
+@pytest.mark.parametrize("marked", [True, False])
+@pytest.mark.parametrize("source", list(MemorySource), ids=str)
+def test_no_validator_conditions_the_marker_on_the_band(source: MemorySource, marked: bool) -> None:
+    """The absence is the decision (ADR-0106 §7), so every band constructs both ways.
+
+    A validator asserting ``ATTESTED ⟹ True`` would refuse, on *decode*, every
+    attested record ``readers.calendar`` has already written — ADR-0086 §3's "does
+    it refuse something that already worked", answered yes. ADR-0092 §1 could land
+    such a validator because ADR-0092 §2 had verified the band was empty; that
+    verification has expired, and on this axis "now or never" is answered *never*.
+    Stated over the whole enum rather than over the two interesting members, so a
+    ``MemorySource`` added later is covered without an edit here.
+    """
+    prov = Provenance(
+        source=source,
+        confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.6,
+        last_updated=_WHEN,
+        attestation=_attestation_for(source),
+        derived_from_external=marked,
+    )
+
+    assert prov.derived_from_external is marked
+
+
+def test_a_goal_carries_the_marker_too() -> None:
+    """It is a ``Provenance`` field, so it reaches everything that carries one.
+
+    Not an obligation ADR-0106 places on goals — its clauses are about memory
+    proposals — but the field's *presence* here is what the placement argument
+    (ADR-0045 §2) buys, and pinning it stops a later lane moving the marker onto
+    ``MemoryBase``, where ``Goal`` would silently lose it.
+    """
+    goal = Goal(
+        id="g",
+        statement="ship the thing",
+        provenance=Provenance(
+            source=MemorySource.INFERRED,
+            confidence=0.6,
+            last_updated=_WHEN,
+            derived_from_external=True,
+        ),
+        created_at=_WHEN,
+    )
+
+    assert rests_on_recorded_external_content(goal.provenance) is True
 
 
 def test_band_values_are_stable_strings() -> None:

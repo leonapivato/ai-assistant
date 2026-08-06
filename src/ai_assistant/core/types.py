@@ -600,6 +600,66 @@ def band_of(source: MemorySource) -> BeliefBand:
             assert_never(source)
 
 
+def rests_on_recorded_external_content(provenance: Provenance) -> bool:
+    """Whether a record's warrant traces to recorded external content (ADR-0106 §1).
+
+    Not a claim about influence: it reports what was **recorded**, never what a
+    model may have read. Text whose recorded origin is not external can still
+    have reached a belief — through a plan rationale our own model authored over
+    an attacker's sentence, say — and no field on the record says so (ADR-0098
+    §5). A ``False`` here is therefore *nothing external is recorded in this
+    belief's warrant*, and never *nothing external influenced it*. No consumer,
+    surface or ADR may state or imply otherwise.
+
+    **Two-part, because the two bands record externality differently.** In the
+    ``ATTESTED`` band it is already recorded — the band is reached only through
+    :attr:`MemorySource.EXTERNAL`, whose whole meaning is that a connected source
+    reported the belief — so a marker there would be a second spelling of a fact
+    :func:`band_of` gives for free, and a second spelling is a second thing that
+    can disagree. In the ``ASSERTED`` band it is false by ADR-0098 §1: the user's
+    own utterance is not external "however it was composed — a user who pastes an
+    email into a turn is exercising judgement". Only in ``DERIVED`` does nothing
+    on the record answer the question, and :attr:`Provenance.derived_from_external`
+    is the field that fills that gap.
+
+    **The band guard is load-bearing, not tidiness.** ADR-0106 §7 forbids a
+    band-keyed validator on that field, so a ``USER_ASSERTED`` provenance carrying
+    ``derived_from_external=True`` stays constructible; an unguarded disjunction
+    would report a user's own assertion as resting on external content, which
+    ADR-0098 §1 forbids in principle. Such a record is malformed rather than
+    adversarial, and the honest response is to honour the classifier the corpus
+    keys everything else on — ADR-0072 §4's "the standing is keyed on ``source``"
+    — rather than a boolean ADR-0106 §2 says means nothing in that band.
+
+    **It takes a :class:`Provenance` rather than a :class:`MemorySource`**, which
+    is the one place it departs from :func:`band_of`, and the departure is forced:
+    the predicate needs both the source and the field, and ``Provenance`` is the
+    object that holds them. It stays a pure function of an immutable value, so it
+    disturbs ADR-0068 exactly as little as ``band_of`` does.
+
+    **Every consumer asking "does this rest on recorded external content?" calls
+    this**, and none reads ``derived_from_external`` directly for that question
+    (ADR-0106 §2). The hand-rolled version is short enough that every consumer
+    would write it and one of them would write only its second half — which is
+    the defect the function exists to make unwritable. It is *not* the ceiling
+    ADR-0106 §6 states on the ``MemoryPolicy`` gate: that ceiling is band-scoped
+    on purpose, because an ``ATTESTED`` proposal satisfies this predicate and must
+    still be allowed to commit.
+
+    Args:
+        provenance: The provenance of the record being classified.
+
+    Returns:
+        ``True`` exactly when :func:`band_of` places the record in the
+        ``ATTESTED`` band, or places it in the ``DERIVED`` band **and** its
+        ``derived_from_external`` is set.
+    """
+    band = band_of(provenance.source)
+    return band is BeliefBand.ATTESTED or (
+        band is BeliefBand.DERIVED and provenance.derived_from_external
+    )
+
+
 class MemoryKind(StrEnum):
     """The category of a memory record (the discriminated-union tag)."""
 
@@ -783,6 +843,51 @@ class Provenance(BaseModel):
     committed; the instant is a measurement made once, when the confirming event
     was in hand, and no later retention or displacement can unmake it.
 
+    **``derived_from_external`` is a marker for the ``DERIVED`` band and speaks
+    nowhere else** (ADR-0106 §2). It answers, for a belief this system worked out,
+    whether the material it was worked out *from* included recorded external
+    content — the fact ADR-0098 §5 said the ruling point had no field to read. It
+    is narrower than :func:`rests_on_recorded_external_content`, deliberately: a
+    calendar import carries ``source=EXTERNAL`` and leaves this field at its
+    default, so reading the field alone would call the most plainly external
+    record in the store untainted. The **predicate** is what any consumer asks;
+    this field is one of its two inputs.
+
+    **It never clears, and a user's assertion is the only exit** (ADR-0106 §4). No
+    fold, merge, reinforcement or supersession removes it: a fold's value is the
+    **disjunction** of both sides, so a tainted belief reinforced by a clean
+    observation stays tainted. Without that, the laundering the marker exists to
+    stop simply moves one step along — consolidate tainted material, then reinforce
+    it once from a clean source and watch the marker clear. It is the same ratchet
+    ADR-0103 §3 puts on evidence-strength, from the other direction: evidence is
+    never unseen, and a warrant is never un-received. The exit is ADR-0072 §4's
+    supersession by the user, which writes the user's own word at a fresh id — not
+    external by ADR-0098 §1, and never obliged to inherit taint from what it
+    retires.
+
+    **No validator conditions it on the band, and that absence is the decision**
+    (ADR-0106 §7). A validator asserting ``ATTESTED ⟹ True`` would refuse, on
+    *decode*, every attested record ``readers.calendar`` has already written —
+    ADR-0086 §3's "does it refuse something that already worked", answered yes.
+    ADR-0092 §1 could land such a validator because ADR-0092 §2 had verified the
+    band was empty; that verification has expired, and on this axis the answer to
+    "now or never" is **never**. So the rule is stated over producers and callers
+    and checked at the seams that write, and a stray flag outside the ``DERIVED``
+    band stays constructible and means nothing — which is why both the predicate
+    above and ADR-0106 §6's gate ceiling are band-guarded rather than trusting it.
+
+    **The default is ``False`` and nothing is backfilled** (ADR-0106 §2). A
+    pre-field *derived* record decodes ``False``, and that is true of it: no
+    ``EXTERNAL`` citation exists to have been recorded. A pre-field *attested*
+    record decodes ``False`` too and that says nothing about it at all — its
+    externality is :func:`band_of`'s to report. The only conservative migration
+    available would mark every legacy derived record tainted, since no migration
+    can distinguish the influenced ones, putting every belief a deployment holds
+    behind a user question forever on no evidence; that asserts a taint the system
+    cannot know in the same breath as refusing to assert a cleanliness it cannot
+    know. Both directions are unavailable for one reason, and the honest position
+    is to state what is recorded and name what is not.
+
     **No validator constrains ``last_confirmed_at``, and that absence is the
     decision** (ADR-0109 §8). Not required, because a required instant would refuse
     every record already in a store, on the *read* path, at deserialisation — the
@@ -831,6 +936,15 @@ class Provenance(BaseModel):
         description=(
             "What reported this belief and when that source said so; set if and "
             "only if ``band_of(source)`` is ``ATTESTED`` (ADR-0092 §1)."
+        ),
+    )
+    derived_from_external: bool = Field(
+        default=False,
+        description=(
+            "Whether a **derived** belief's warrant traces to recorded external "
+            "content (ADR-0106 §2). No meaning outside the ``DERIVED`` band, where "
+            "``band_of`` already answers the question; ask "
+            "``rests_on_recorded_external_content`` rather than reading this."
         ),
     )
     last_confirmed_at: UtcInstant | None = Field(
