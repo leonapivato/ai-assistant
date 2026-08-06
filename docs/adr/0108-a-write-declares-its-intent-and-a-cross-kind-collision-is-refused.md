@@ -329,17 +329,28 @@ narrower one.
 > is a cross-kind `UPSERT` commits **nothing**, including the valid element ordered
 > before it.
 
-**Window-closed and not expired, and the distinction is load-bearing rather than a
-choice of example.** Both are ways for a row to be present-but-unreadable, so either
-would exercise §4's physical-presence qualifier — but only one of them can also
-witness "nothing is written". An expired record is gone from *everything* including
-`export` (ADR-0007), so after a refusal there is no contract-visible way to see it
-at all: an implementation that mutated the row and *then* raised would pass, since
-`get` and `export` hide the damage either way and a following `INSERT_IF_ABSENT`
-still collides on the id. A window-closed record is off the read path but **retained
-and still exported** (ADR-0045 §6), which is exactly the observability the case
-needs. A lane may add an expired variant to cover the second invisibility axis, but
-it proves *occupancy* only and does not discharge (a).
+> **Normative.** (a) is required for **both** ways a row is present-but-unreadable,
+> on **both** doors: a window-closed stored record and an expired one. The expired
+> pair proves only that the write is refused — that is all the contract can observe
+> there — and does not discharge the window-closed pair's unchanged-record
+> assertion.
+
+**Window-closed and expired are not interchangeable, and neither covers the other.**
+Both hide a row from reads, and §4's presence rule is meant to be blind to both, so
+a backend that got one right and the other wrong is exactly what the pair catches:
+treating an **expired** row as *absent* would let a live record of another kind land
+on top of it, silently, while every window-closed case still passed. Hence both are
+required rather than one being an example of the other.
+
+They are not required for the same thing, though, which is why (a)'s
+unchanged-record assertion names only the window-closed row. An expired record is
+gone from *everything* including `export` (ADR-0007), so once the write is refused
+there is no contract-visible way to look at the row at all: an implementation that
+damaged it and *then* raised would pass, since `get` and `export` hide the damage
+either way. A window-closed record is off the read path but **retained and still
+exported** (ADR-0045 §6) — the only present-but-unreadable state that can witness
+"nothing is written" as well as the refusal. So: refusal proved on both, survival
+proved where survival is observable.
 
 > **Normative.** Every case exercising §4's refusal — the cross-kind `add` and
 > cross-kind `UPSERT` cases, on which §4 is the operative rule — asserts the refusal
