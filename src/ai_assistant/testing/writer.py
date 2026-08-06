@@ -305,9 +305,9 @@ class FakeMemoryWriter:
         # `_merge` result, which has already bounded the union it formed.
         match decision.kind:
             case MemoryDecisionKind.ACCEPT:
-                return await self._store.add(_installed(proposed))
+                return await self._install(_installed(proposed))
             case MemoryDecisionKind.STORE_TEMPORARY:
-                return await self._store.add(
+                return await self._install(
                     _installed(
                         proposed.model_copy(update={"expires_at": self._expiry(decision.ttl)})
                     )
@@ -323,9 +323,48 @@ class FakeMemoryWriter:
                         _retirement_set(target, conflicts, proposal=proposal, resolved=resolved),
                         proposed,
                     )
-                return await self._store.add(_installed(_merge(target, proposed)))
+                return await self._fold(_installed(_merge(target, proposed)))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
+
+    async def _install(self, record: MemoryRecord) -> str:
+        """Write ``record`` as a **new** record, refusing a colliding id.
+
+        Contract behaviour, mirroring ``MemoryIngestor`` (ADR-0108 §2). The ruling
+        that reached here is that the proposal contradicts nothing retrieval
+        surfaced, so a stored id is an accident in every case and the write is
+        refused rather than silently replacing a record no ruling was made about
+        (#630). ``INSERT_IF_ABSENT`` buys that check with no read and no race
+        (ADR-0108 §1), and the conflict propagates unchanged — the proposal's id is
+        the producer's, so re-minting it would edit a record the producer made
+        (ADR-0081 §9).
+
+        Raises:
+            MemoryStoreConflictError: ``record.id`` already names a stored record.
+                Nothing is written.
+            MemoryStoreError: Any other store failure. Nothing is written.
+        """
+        written = await self._store.write_atomic(
+            [MemoryWrite(record=record, mode=MemoryWriteMode.INSERT_IF_ABSENT)]
+        )
+        return written[0]
+
+    async def _fold(self, record: MemoryRecord) -> str:
+        """Write ``record`` at the fold target's id, declaring the overwrite.
+
+        Contract behaviour, mirroring ``MemoryIngestor``: ADR-0108 §2's one
+        deliberate upsert. ``_merge`` keeps the target's id, and the target is the
+        one the ruling named, so landing on a stored record is the decision rather
+        than a collision — ADR-0022 §4's protected case, stated instead of
+        defaulted.
+
+        Raises:
+            MemoryStoreError: The store refused the write. Nothing is written.
+        """
+        written = await self._store.write_atomic(
+            [MemoryWrite(record=record, mode=MemoryWriteMode.UPSERT)]
+        )
+        return written[0]
 
     async def _apply_supersede(self, targets: list[MemoryRecord], proposed: MemoryRecord) -> str:
         """Retire the whole set and write ``proposed`` at a fresh id (ADR-0079 §3).
