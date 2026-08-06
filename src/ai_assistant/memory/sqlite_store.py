@@ -567,8 +567,10 @@ class SqliteMemoryStore:
 
         Raises:
             MemoryStoreError: If the embedder fails or returns a wrong-sized
-                vector, or the write fails (the write is transactional — a
-                failure leaves the store unchanged).
+                vector, if ``record.id`` names a stored record of a different
+                ``kind`` (ADR-0108 §4, refused in :meth:`_persist_record`), or the
+                write fails (the write is transactional — a failure leaves the
+                store unchanged).
         """
         snapshot = record.model_copy(deep=True)
         vector = await self._embed_one(snapshot.content)
@@ -595,6 +597,22 @@ class SqliteMemoryStore:
         Both callers open that transaction with :meth:`_transaction`, so the write
         lock is already held when the ``SELECT`` below runs and the rowid it reads
         cannot be deleted out from under the vector write that follows (#526).
+
+        **The cross-kind refusal lives here** (ADR-0108 §4), which is why it costs
+        nothing and why it cannot be reached around. The ``SELECT`` this method
+        already runs to choose insert-versus-update reads one more column, so no
+        statement is added; and because this is the *shared* body of ``add`` and
+        ``write_atomic``, one refusal covers both upsert-capable doors rather than
+        two implementers each remembering. In ``INSERT_IF_ABSENT`` mode
+        :meth:`_write_atomic_sync` has already refused any collision before this
+        runs, so the two rules never interact. The caller's transaction rolls the
+        refusal back, so nothing this method touched is committed.
+
+        Raises:
+            MemoryStoreError: ``record.id`` names a stored record of a different
+                ``kind``. Deliberately *not* :class:`MemoryStoreConflictError`,
+                whose remedy is "re-mint and retry": this is a producer fault a
+                retry does not answer (ADR-0108 §4, on ADR-0081 §3's reasoning).
         """
         conn = self._conn
         blob = sqlite_vec.serialize_float32(list(vector))
@@ -605,7 +623,13 @@ class SqliteMemoryStore:
             if record.validity.valid_until is not None
             else None
         )
-        row = conn.execute("SELECT rowid FROM records WHERE id = ?", (record.id,)).fetchone()
+        row = conn.execute("SELECT rowid, kind FROM records WHERE id = ?", (record.id,)).fetchone()
+        if row is not None and row[1] != record.kind:
+            msg = (
+                f"cannot write {record.id!r} as a {record.kind} record: "
+                f"a {row[1]} record is already stored under that id"
+            )
+            raise MemoryStoreError(msg)
         if row is None:
             cursor = conn.execute(
                 "INSERT INTO records(id, kind, data, expires_at, valid_until, about_person) "
@@ -639,9 +663,11 @@ class SqliteMemoryStore:
             MemoryStoreConflictError: an ``INSERT_IF_ABSENT`` element's id names a
                 stored record — physical presence, so an expired or window-closed
                 row still collides (ADR-0046 §3). Nothing is written.
-            MemoryStoreError: the batch names the same id twice (ADR-0046 §3), or
-                any backend failure (with the ``sqlite3`` cause retained). Nothing
-                is written.
+            MemoryStoreError: an ``UPSERT`` element's id names a stored record of a
+                different ``kind`` (ADR-0108 §4, refused in
+                :meth:`_persist_record`), the batch names the same id twice
+                (ADR-0046 §3), or any backend failure (with the ``sqlite3`` cause
+                retained). Nothing is written.
         """
         # Snapshot every record *before the first await*, so a caller aliasing a
         # submitted record and mutating it across the embedding awaits cannot
@@ -693,6 +719,13 @@ class SqliteMemoryStore:
             # (a NOT NULL or vec constraint) — is reported as recoverable. The
             # presence check now runs under the write lock, so that raced INSERT is
             # itself no longer reachable from a second process (#526).
+            #
+            # `_persist_record`'s cross-kind refusal (ADR-0108 §4) also arrives
+            # here, as a plain MemoryStoreError and deliberately not as a conflict:
+            # its remedy is not "re-mint and retry" but "the caller asked to
+            # overwrite something that is not the kind of thing it thought". This
+            # arm's job is unchanged either way — the transaction has rolled back,
+            # so nothing in the batch was committed.
             raise
         except Exception as exc:
             # Any *other* mid-transaction failure — notably a malformed vector that

@@ -138,29 +138,60 @@ class InMemoryMemoryStore:
 
         Returns:
             The stored record's id.
+
+        Raises:
+            MemoryStoreError: ``record.id`` names a stored record of a different
+                ``kind`` (ADR-0108 §4). Nothing is written.
         """
+        self._refuse_cross_kind(record)
         # Deep copy so a caller mutating the record (including nested fields like
         # validity, which drives read filtering) after add cannot reach stored
         # state — matching FakeMemoryStore and the serialised persistent store.
         self._records[record.id] = record.model_copy(deep=True)
         return record.id
 
+    def _refuse_cross_kind(self, record: MemoryRecord) -> None:
+        """Refuse an upsert landing on a stored record of a different kind.
+
+        ADR-0108 §4's backstop, applied on **both** upsert-capable doors, so a
+        caller that wrongly claims an upsert still cannot vaporise a belief with an
+        episode. Presence is physical, matching ``INSERT_IF_ABSENT``: an expired or
+        window-closed record still occupies its id and still collides.
+
+        A plain ``MemoryStoreError``, deliberately not ``MemoryStoreConflictError``
+        whose documented remedy is "re-mint and retry" — a retry does not answer a
+        caller that asked to overwrite something of a kind it did not expect
+        (ADR-0108 §4, on ADR-0081 §3's reasoning).
+
+        Raises:
+            MemoryStoreError: ``record.id`` names a stored record of a different
+                ``kind``.
+        """
+        stored = self._records.get(record.id)
+        if stored is not None and stored.kind != record.kind:
+            msg = (
+                f"cannot write {record.id!r} as a {record.kind} record: "
+                f"a {stored.kind} record is already stored under that id"
+            )
+            raise MemoryStoreError(msg)
+
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
         """Apply every write in one atomic unit — all commit, or none do.
 
         A ``dict`` has no transaction, so atomicity is *emulated*: the whole batch
-        is validated up front (no repeated id, no ``INSERT_IF_ABSENT`` collision)
-        and every mutation is staged, then applied only once every check has
-        passed — so a mid-batch failure mutates nothing (ADR-0046 §4, in-call
-        all-or-nothing). This is the whole guarantee a non-durable store owes;
-        crash atomicity is vacuous for it.
+        is validated up front (no repeated id, no ``INSERT_IF_ABSENT`` collision,
+        no cross-kind ``UPSERT``) and every mutation is staged, then applied only
+        once every check has passed — so a mid-batch failure mutates nothing
+        (ADR-0046 §4, in-call all-or-nothing). This is the whole guarantee a
+        non-durable store owes; crash atomicity is vacuous for it.
 
         Raises:
             MemoryStoreConflictError: an ``INSERT_IF_ABSENT`` element's id names a
                 stored record — physical presence, so an expired or window-closed
                 row still collides (ADR-0046 §3). Nothing is written.
-            MemoryStoreError: the batch names the same id twice (ADR-0046 §3).
-                Nothing is written.
+            MemoryStoreError: an ``UPSERT`` element's id names a stored record of a
+                different ``kind`` (ADR-0108 §4), or the batch names the same id
+                twice (ADR-0046 §3). Nothing is written.
         """
         self._reject_repeated_ids(writes)
         # Stage first: validate every element against the *pre-batch* state, then
@@ -171,6 +202,10 @@ class InMemoryMemoryStore:
             if write.mode is MemoryWriteMode.INSERT_IF_ABSENT and write.record.id in self._records:
                 msg = f"cannot insert {write.record.id!r}: a record with that id is already stored"
                 raise MemoryStoreConflictError(msg)
+            # An INSERT_IF_ABSENT element never reaches here with a collision of
+            # any kind, so this only ever judges an UPSERT — the door ADR-0108 §4
+            # exists to close, and the one `add` shares.
+            self._refuse_cross_kind(write.record)
             # Deep copy so a caller mutating the record after the call cannot reach
             # stored state, matching ``add``.
             staged.append(write.record.model_copy(deep=True))
