@@ -134,7 +134,11 @@ from typing import TYPE_CHECKING, Protocol
 import pytest
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import MemoryStoreError, UnresolvedEvidenceError
+from ai_assistant.core.errors import (
+    MemoryStoreConflictError,
+    MemoryStoreError,
+    UnresolvedEvidenceError,
+)
 from ai_assistant.core.protocols import MemoryWriter
 from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
@@ -909,6 +913,39 @@ class MemoryWriterContract:
         assert stored is not None
         assert stored.expires_at is not None
         assert stored.expires_at.tzinfo is not None
+
+    @pytest.mark.parametrize(
+        "kind", [MemoryDecisionKind.ACCEPT, MemoryDecisionKind.STORE_TEMPORARY], ids=str
+    )
+    async def test_an_installing_ruling_at_an_already_stored_id_is_refused(
+        self, make_writer: WriterFactory, kind: MemoryDecisionKind
+    ) -> None:
+        """The defect #630 filed, pinned as a refusal (ADR-0108 §1, §2, §3).
+
+        An installing ruling says the proposal contradicts nothing retrieval
+        surfaced, so an id that already names a stored record is an accident in
+        every case — a minting producer whose factory collided. The standing record
+        is **not** among the conflicts and never could be: conflict detection
+        filters the proposal's own id (#110), so no ruling was ever made about the
+        record a bare upsert would have destroyed.
+
+        ``MemoryStoreConflictError`` specifically, and the assertion is explicit
+        because the subclass **is** a ``MemoryStoreError``: the producer's remedy is
+        the documented one — re-mint and re-propose — and a writer that raised the
+        base class would tell it nothing it could act on.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        standing = _preference("collide", "the user drinks coffee")
+        await store.add(standing)
+        writer = make_writer(store, FakeMemoryPolicy(kind))
+
+        with pytest.raises(MemoryStoreConflictError):
+            await writer.ingest(_proposal(_preference("collide", "the user drinks tea")))
+
+        # Nothing written, and nothing re-minted around the collision: the id is the
+        # producer's, so a writer that minted another would edit a record the
+        # producer made and report an id nobody proposed (ADR-0081 §9).
+        assert list(await store.export()) == [standing]
 
     @pytest.mark.parametrize(
         "kind", [MemoryDecisionKind.REJECT, MemoryDecisionKind.ASK_USER], ids=str
