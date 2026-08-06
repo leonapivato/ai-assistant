@@ -54,10 +54,10 @@ _RETIREMENT_CLASS = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED, Mem
 
 
 def _rule_on_admissibility(proposal: MemoryUpdateProposal) -> MemoryDecision | None:
-    """The two rulings that precede any conflict reasoning, or ``None``.
+    """The three rulings that precede any conflict reasoning, or ``None``.
 
-    Both are properties of the proposal alone, so neither needs to look at what it
-    contradicts — and neither commits anything, so ADR-0004 §3 holds whichever
+    All three are properties of the proposal alone, so none needs to look at what
+    it contradicts — and none commits anything, so ADR-0004 §3 holds whichever
     fires:
 
     1. **Secret-tier data defers** (ADR-0004 §3). Tier 0 belongs in the OS keyring,
@@ -69,6 +69,22 @@ def _rule_on_admissibility(proposal: MemoryUpdateProposal) -> MemoryDecision | N
        Placed before the conflict rules because it is an *admissibility* floor: a
        belief with no warrant is not worth deferring to the user about, whatever it
        happens to contradict.
+    3. **An unconfirmed derived belief whose warrant rests on recorded external
+       content defers** (ADR-0106 §6, ADR-0098 §4). Behind *both* of the rulings
+       above, and each ordering is load-bearing rather than incidental:
+
+       - A proposal that is both secret and tainted takes the **secret** path and
+         is not queued at all, because ADR-0078 §1 refuses to queue a secret
+         proposal; a taint rule ordered first would queue one.
+       - A tainted derived proposal citing **nothing** is a ``REJECT`` and not a
+         question. Ordered first, this rule would put an unwarranted belief in
+         front of the user as though answering could make it admissible, and
+         ADR-0077 §5 rejects it whatever the user says. ADR-0078 §5a could observe
+         that such a proposal "is rejected at its first ingest, so it is never
+         deferred and never confirmed"; a consolidator's *first* ingest is exactly
+         where a citation-less proposal arrives, so the case is live here rather
+         than unreachable, and "a floor that holds only while a coincidence holds
+         is not a floor".
     """
     if proposal.sensitivity is DataTier.SECRET:
         return MemoryDecision(
@@ -80,7 +96,62 @@ def _rule_on_admissibility(proposal: MemoryUpdateProposal) -> MemoryDecision | N
             kind=MemoryDecisionKind.REJECT,
             reason="a derived belief citing no evidence has no warrant (ADR-0077 §5)",
         )
+    if _rests_on_external_content_unconfirmed(proposal):
+        return MemoryDecision(
+            kind=MemoryDecisionKind.ASK_USER,
+            reason=(
+                "this belief's warrant rests on recorded external content, so it is "
+                "not committed without your answer (ADR-0106 §6)"
+            ),
+        )
     return None
+
+
+def _rests_on_external_content_unconfirmed(proposal: MemoryUpdateProposal) -> bool:
+    """Whether ADR-0106 §6's ceiling fires on ``proposal``.
+
+    Three conditions, and each is exactly as wide as the clause makes it.
+
+    **Band-scoped, and deliberately not stated over
+    :func:`~ai_assistant.core.types.rests_on_recorded_external_content`.** The two
+    differ in both directions and each difference matters. An ``ATTESTED``
+    proposal satisfies that predicate by definition — a reader's import rests on
+    recorded external content, that being what a reader is — so a ceiling stated
+    over it would refuse every calendar occurrence leg 6 writes. ADR-0098 §4 drew
+    the same line: the distinction the rule needs is between "a **faithful
+    transcription** — a reader saying what its source says, at a band that already
+    caps its standing — and a **model-authored generalisation about the user** that
+    an attacker's sentence helped produce. Only the second is ruled here." The
+    ``DERIVED`` band is where the second lives.
+
+    **Keyed on the band and not on the raw field**, for the mirror reason. ADR-0106
+    §7 forbids a band-keyed validator, so a ``USER_ASSERTED`` provenance carrying
+    ``derived_from_external=True`` stays constructible; a rule reading the raw flag
+    would defer a user's own assertion on the strength of a boolean ADR-0106 §2
+    says means nothing in that band, and ADR-0098 §1 is explicit that the user's own
+    utterance is not external "however it was composed".
+
+    **A confirmation passes it** (ADR-0078 §5, ADR-0106 §6). The confirmed answer
+    is a *re-ingest*: the coordinator rebuilds the proposal with the user's
+    authority and calls the writer again, marker and all. Without the carve-out
+    this rule fires a second time and defers the answered question — "The user
+    answers, and is asked again" (ADR-0078 §3) — and a tainted consolidation could
+    never land, which would make the containment a refusal wearing a question's
+    clothes. Being reached by asking the user is not the *auto*-acceptance
+    ADR-0098 §4 forbids.
+
+    Args:
+        proposal: The proposal being ruled on.
+
+    Returns:
+        Whether the proposal is a derived, tainted, unconfirmed one.
+    """
+    provenance = proposal.proposed.provenance
+    return (
+        band_of(provenance.source) is BeliefBand.DERIVED
+        and provenance.derived_from_external
+        and proposal.confirmation is None
+    )
 
 
 def _cites_nothing_it_must_cite(record: MemoryRecord) -> bool:
@@ -130,16 +201,24 @@ def _rule_on_confirmation(
 
     * **Ahead of the conflict rules**, because the assertion arms would otherwise
       re-defer the answer to the question they just asked, forever.
-    * **Behind the floor**, because both of the floor's rulings are properties of
-      the proposal alone and neither commits anything, so nothing a confirmation
-      says can make either safe to skip. Putting the confirmed rule first let a
-      ``DataTier.SECRET`` proposal carrying a confirmation reach step 2, rule
+    * **Behind the floor**, because every one of the floor's rulings is a property
+      of the proposal alone and none commits anything, so nothing a confirmation
+      says can make any of them safe to *skip*. Putting the confirmed rule first
+      let a ``DataTier.SECRET`` proposal carrying a confirmation reach step 2, rule
       ``SUPERSEDE``, and land secret payload in the store — ADR-0004 §3's "never in
       the memory database", defeated through the one path built to respect the
       user's word. The combination is unconstructable anyway
       (``MemoryUpdateProposal``'s own validator refuses it), so this is belt and
       braces over something already impossible, which is the right amount of care
       for a rule whose failure mode is a credential in a database.
+
+      The floor's third ruling (ADR-0106 §6) is the one a confirmation can settle,
+      and it settles it **in place** rather than by being reached first: that rule
+      reads ``proposal.confirmation`` itself and does not fire when one is present,
+      so the answered proposal falls through to here on the ordinary path. The
+      difference from the secret rule is principled — ADR-0078 §1 refuses to queue
+      a secret proposal at all, so there is no question to answer, whereas a
+      tainted proposal *is* queued and answering it is the entire point.
 
     Three steps, in order:
 
@@ -295,19 +374,28 @@ class DefaultMemoryPolicy:
        (ADR-0077 §5). ``EPISODIC`` records are exempt (ADR-0074 §4), and
        ``ASSERTED``/``ATTESTED`` proposals are untouched — they legitimately cite
        nothing (:func:`_cites_nothing_it_must_cite`).
-    3. A proposal carrying a :class:`~ai_assistant.core.types.UserConfirmation` —
+    3. An **unconfirmed** proposal in the ``DERIVED`` band whose provenance carries
+       ``derived_from_external`` defers to the user (ADR-0106 §6): a belief this
+       system worked out from recorded external material is never committed on the
+       strength of a producer's say-so, however trusted that producer. The ruling
+       is ``ASK_USER`` rather than ``REJECT`` — the contract admits both, and this
+       policy takes the question, because a silent refusal on a scheduler's path
+       destroys the belief, tells nobody, and leaves the user unable to keep a
+       summary they would have wanted (ADR-0098 §4, #668). Last of the
+       admissibility floor, for the reasons in :func:`_rule_on_admissibility`.
+    4. A proposal carrying a :class:`~ai_assistant.core.types.UserConfirmation` —
        the user's answer to a question this policy earlier deferred — is judged by
        :func:`_rule_on_confirmation`: it re-defers when the live set holds an
        assertion the user was never shown, supersedes the confirmed assertion when
        one is live, and otherwise **falls through** to the rules below. Behind
-       rules 1 and 2 and ahead of every rule after it; the placement is argued in
+       rules 1 to 3 and ahead of every rule after it; the placement is argued in
        that function.
-    4. An inference never silently overrides a user-asserted memory — defer.
-    5. A user-asserted proposal that contradicts a *prior assertion* defers to
+    5. An inference never silently overrides a user-asserted memory — defer.
+    6. A user-asserted proposal that contradicts a *prior assertion* defers to
        the user (``ASK_USER``): two things the user said cannot both stay live,
        yet neither may be destroyed on a topical-similarity signal, so the user
        resolves it (ADR-0050 §2, #245).
-    6. A user-asserted proposal *supersedes* the conflicting beliefs: it rules
+    7. A user-asserted proposal *supersedes* the conflicting beliefs: it rules
        ``SUPERSEDE`` naming the best-ranked ``OBSERVED``/``INFERRED``/``EXTERNAL``
        conflict, and the applier retires the *whole* retirement set it leads —
        which is now the whole set retrieval surfaced, since the writer refuses
@@ -316,18 +404,19 @@ class DefaultMemoryPolicy:
        ADR-0040, ADR-0050 §1, ADR-0092 §4, #244). ``EXTERNAL`` is in that class
        since ADR-0092 §4: a connected source is an *input*, so the user's
        correction retires the import rather than sitting live beside it.
-    7. A user-asserted proposal with nothing to supersede is trusted and
-       accepted — which, since rule 6 took ``EXTERNAL``, means nothing conflicted
+    8. A user-asserted proposal with nothing to supersede is trusted and
+       accepted — which, since rule 7 took ``EXTERNAL``, means nothing conflicted
        with it at all.
-    8. A proposal that conflicts with an existing (non-asserted) record rules
+    9. A proposal that conflicts with an existing (non-asserted) record rules
        ``REINFORCE`` over it, folding into it (ADR-0040 §4).
-    9. Weak evidence (below ``min_confidence``) is stored temporarily, with an
-       expiry, rather than committed.
-    10. Otherwise the proposal is accepted.
+    10. Weak evidence (below ``min_confidence``) is stored temporarily, with an
+        expiry, rather than committed.
+    11. Otherwise the proposal is accepted.
 
-    Rules 4 and 6 are the same asymmetry read in both directions: an assertion
-    outranks an inference, and never the reverse. Rule 3 is the one ratified way
-    through it — the user's own answer (ADR-0045 §7, ADR-0078 §5).
+    Rules 5 and 7 are the same asymmetry read in both directions: an assertion
+    outranks an inference, and never the reverse. Rule 4 is the one ratified way
+    through it — the user's own answer (ADR-0045 §7, ADR-0078 §5) — and it is the
+    way through rule 3 as well.
     """
 
     def __init__(
@@ -364,13 +453,13 @@ class DefaultMemoryPolicy:
         conflicts: Sequence[MemoryRecord],
     ) -> MemoryDecision:
         """Rule on a proposed memory update. See the class docstring for rules."""
-        # Rules 1 and 2: properties of the proposal alone, ruled on before any
+        # Rules 1 to 3: properties of the proposal alone, ruled on before any
         # conflict is read (:func:`_rule_on_admissibility`).
         inadmissible = _rule_on_admissibility(proposal)
         if inadmissible is not None:
             return inadmissible
 
-        # Rule 3: a *confirmed* proposal, judged only after the floor above and
+        # Rule 4: a *confirmed* proposal, judged only after the floor above and
         # ahead of every conflict rule below (:func:`_rule_on_confirmation`,
         # ADR-0078 §5a). `None` falls through to the ordinary rules — deliberately,
         # because the confirmed path overrides the arms that would re-defer an
@@ -386,7 +475,7 @@ class DefaultMemoryPolicy:
     def _rule_on_conflicts(
         self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
     ) -> MemoryDecision:
-        """Rules 4 to 10: the ordinary conflict and confidence rules.
+        """Rules 5 to 11: the ordinary conflict and confidence rules.
 
         The ruling a proposal gets when the admissibility floor let it through and
         no confirmation settled it — which is *every* proposal today except a

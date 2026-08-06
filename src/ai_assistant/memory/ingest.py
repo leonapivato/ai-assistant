@@ -962,6 +962,26 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     ADR-0103 §1's promise not to disturb ADR-0086's citation bound holds — and it
     now displaces citations and nothing else.
 
+    **``derived_from_external`` is the disjunction of both sides, on both arms**
+    (ADR-0106 §4). It joins ``confidence`` and ``evidence`` in the combining
+    minority rather than the majority that takes ``incoming``'s value, and the
+    asymmetry runs the wrong way for the majority style here: a new field written
+    as ``incoming.provenance.derived_from_external`` would clear a tainted target
+    the first time a clean proposal reinforced it, which is exactly the laundering
+    the marker exists to stop. The direction that has to be exercised is therefore
+    a **tainted target reinforced by an untainted incoming** — the opposite
+    direction passes an implementation that merely copies the incoming field and
+    proves nothing.
+
+    The corroboration arm takes the disjunction too, and not the target's value
+    alone. ADR-0103 §6 withholds the incoming record's *belief properties* from
+    the survivor, and taint is not one of them: it is a fact about what warrant
+    was received, and a warrant is never un-received. The survivor there is
+    ``ATTESTED``, where ADR-0106 §2 says the field means nothing anyway — but
+    writing the disjunction keeps one rule over both arms instead of two that can
+    drift, and ADR-0106 §4's clause is stated over the fold rather than over
+    either side.
+
     **The union is bounded here, before the ``Provenance`` is constructed**, so
     the constructor's validators run on the value that is stored — the surrounding
     ``model_copy(update=...)`` skips them (ADR-0026 §2). ADR-0040 §5a's "retains
@@ -1011,6 +1031,9 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     # Selected once, before the arms: ADR-0109 §6 makes the rule identical on both,
     # and computing it in one place is what stops the two arms drifting.
     confirmed_at = _confirming_instant(target.provenance, incoming.provenance, now=now)
+    # Likewise selected once, before the arms: ADR-0106 §4 states the rule over the
+    # fold as a disjunction of both sides, so neither arm may read one side alone.
+    tainted = target.provenance.derived_from_external or incoming.provenance.derived_from_external
     if _corroborates(target, incoming):
         corroborated = Provenance(
             source=target.provenance.source,
@@ -1019,6 +1042,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
             evidence_elided=elided,
             last_updated=incoming.provenance.last_updated,
             attestation=target.provenance.attestation,
+            derived_from_external=tainted,
             last_confirmed_at=confirmed_at,
         )
         return target.model_copy(update={"provenance": corroborated})
@@ -1029,6 +1053,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
         evidence_elided=elided,
         last_updated=incoming.provenance.last_updated,
         attestation=incoming.provenance.attestation,
+        derived_from_external=tainted,
         last_confirmed_at=confirmed_at,
     )
     return incoming.model_copy(update={"id": target.id, "provenance": provenance})
