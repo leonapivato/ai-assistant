@@ -197,7 +197,7 @@ exists and this clause chooses it rather than inventing one.
 > **Normative.** A cursor names a position in an order the walked store already
 > maintains, which must be total over the walked rows and must not reorder rows
 > under later writes. It is not a set of processed identifiers, not a wall-clock
-> instant, and not a fraction of the work.
+> instant, not an offset into a paged read, and not a fraction of the work.
 
 Each excluded shape has a specific failure. **A set of identifiers** is unbounded
 durable state that grows with the store, so the mechanism that exists to make a
@@ -208,6 +208,17 @@ a clock correction, an instant supplied by a caller rather than by the store —
 sits permanently behind the position and is never reached, which is the coverage
 failure the cursor exists to fix arriving through the cursor itself. **A fraction**
 is not a position at all; it cannot survive the store changing size.
+
+**The offset exclusion is the one a reader is most likely to reach for**, because
+the read surfaces these jobs already use are paged. `MemoryStore.list_beliefs`
+enumerates live beliefs a page at a time, and ADR-0110 §6 records the property
+that makes an offset unusable as a resumption position: its offset paging "may
+skip or repeat a record" over a mutating store. An offset is a count into a
+result set, so a row inserted or deleted below it moves every later row's number
+— which is the "must not reorder" half of the clause failing on the most ordinary
+write the store takes. The order underneath the page is fine to walk; the *page
+number* is not the position. ADR-0110 §6 files improving that paging with this
+lane, and this clause is the answer: it is not improved, it is not used.
 
 > **Normative.** A cursor absent from the store means the walk has not started
 > and the job begins at the first row of its order. A cursor is never initialised
@@ -565,6 +576,16 @@ appended dated note is the whole record.
   question an ADR deferred to you by name is the discharge ADR-0083 §15
   describes. §5's halt is what §6's "does not record that chunk as done" already
   required; no sentence of ADR-0106 becomes false or over-wide.
+- **ADR-0110 §6 and §9.** They decline the enumeration's mechanics to this lane
+  by name — "it is the scheduler chunking-and-cursor lane's (#632, #710)" — and
+  §9 records that the reference is by issue only "because a citation to a number
+  no ref carries is a Tier 1 defect under ADR-0088 §6 as ADR-0090 §1 narrows it".
+  Supplying the mechanics a clause deferred to you is the discharge ADR-0083 §15
+  describes, so no record is owed and none is written. §2's offset exclusion is
+  the one place this ADR answers something §6 files with this lane, and it
+  answers it by declining the shape rather than by changing anything §6 decided:
+  `MemoryStore.list_beliefs`' paging is untouched and its known behaviour over a
+  mutating store stays exactly what §6 says it is.
 - **ADR-0104.** §2's rules are quoted here as the model and are restated at a
   different seam, not changed; §6 keeps the migration outside the scheduler
   entirely, which is why §7 leaves #738 to ADR-0104's ground. Every sentence of
@@ -605,12 +626,22 @@ written**, and each note records what has become narrower and why.
 - **What a scheduled job may conclude.** This ADR decides how a job walks and
   resumes; the semantics of what it writes are its own ADR's. **Consolidation's
   taint, band and refusal rulings are ADR-0106's** and are untouched.
-- **What closes a validity window, and what demotion means.** A concurrent lane
-  is authoring **ADR-0110** on that question. A demotion sweep would be a
-  scheduled walking job and would inherit every clause above; what it may
-  conclude about a record is that ADR's and not this one's. Where the seam looks
-  ambiguous, read it this way: **§§1–8 bind the walk, ADR-0110 binds the verdict.**
-  No claim is made here about ADR-0110's status, contents, or whether it lands.
+- **What closes a validity window, and what demotion means.** **ADR-0110** decides
+  it, and the seam between the two ADRs is stated on both sides. A reconciliation
+  sweep is a scheduled walking job and inherits every clause above; what it may
+  conclude about a record is ADR-0110's and not this ADR's. Read the seam this
+  way: **§§1–8 bind the walk, ADR-0110 binds the verdict.** ADR-0110 §6 states
+  the property that makes the split safe from its side — each close "is justified
+  by one record and one reading and by nothing else", so a reconciliation
+  examining only part of the live set "closes **fewer** windows and never a
+  different one" — and its §9 files cursor placement, chunking, backoff,
+  halt-on-refusal and resumption here by issue rather than by number, because
+  this ADR's number was unissued when it was written. That composition is checked
+  and not merely asserted: §3's at-least-once ordering can only repeat a close's
+  input, which §6's first clause makes harmless, and §5's halt can only leave
+  windows unexamined, which §6 rules closes fewer and never different. Its status
+  on any later day is its own lane's; this ADR reads it as merged on 2026-08-06,
+  per the durability clause above.
 - **The observation job's selector.** ADR-0077 §8 ratifies a *window* — "that
   conversation's most recent `observation_batch_size` turns", or the same window
   over the most recently active conversation — and calls it "today's only
