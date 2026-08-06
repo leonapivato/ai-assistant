@@ -346,12 +346,28 @@ def test_an_oversized_listing_is_omitted_whole_and_says_so(tmp_path: Path) -> No
     assert result.returncode != 0, result.stderr
     assert "files examined      2" in result.stderr
     assert "listing             OMITTED" in result.stderr
-    assert "git diff --name-status -M" in result.stderr
+    # The recovery is the script's own pinned, escaped listing at a larger budget,
+    # not a hand-run git command: a bare `git diff --name-status` is neither
+    # NUL-delimited nor pinned against config nor control-escaped, so on exactly
+    # the unusual names this bound might be hiding it would answer differently
+    # from what the floor actually read.
+    assert "CODEX_SHIP_DRIFT_BUDGET=<bytes> scripts/ship.sh --drill" in result.stderr
+    assert "git diff --name-status" not in result.stderr
     assert _drill_lines(result.stderr) == []
     assert _ORDINARY_PATH not in result.stderr
-    # The bound omits the working, never the answer.
-    assert "clear over all 2 path(s) examined (not listed)" in result.stderr
+    # And having omitted the set, it claims nothing over it. The floor WAS
+    # computed — `drift_floor` is set by `_read_base_move` with no rendering at
+    # all — but a clear the reader cannot check is the shape of claim this whole
+    # change removes, so the bound must not buy back a weaker version of it.
+    assert "§3 floor            NOT CLAIMED" in result.stderr
+    # No "clear over …" anywhere: the report's own affirmative form. (Its prose
+    # says "not a clear you can check" while declining to make one, which is the
+    # point, so the match is on the claim rather than on the bare word.)
+    assert "clear over" not in result.stderr
+    # Declining to claim concedes nothing: §2(b) is unavailable here regardless,
+    # because `_evaluate_drift` applies this same arithmetic after its floor test.
     assert "unavailable — drift record exceeds §4's budget" in result.stderr
+    assert result.returncode != 0
 
 
 def test_a_floor_breach_survives_an_omitted_listing(tmp_path: Path) -> None:
