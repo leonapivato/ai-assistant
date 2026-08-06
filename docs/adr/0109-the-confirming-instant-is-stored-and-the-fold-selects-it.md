@@ -857,15 +857,21 @@ what §4 above decided against.
      different, the observer's **latest** cited `occurred_at` where the batch is
      deliberately out of order, the processor's `event.created_at`, and the
      capture path's `None`.
-   - **A producer case whose confirming instant is in the producer's own
-     future**, which is the only thing that checks §4 above's fourth clause. The
-     calendar reader, given an occurrence whose `reported_at` is later than
-     `read_at`, stores that `reported_at` unchanged — not `None`, not `read_at`,
-     and not a clamp. Without it an implementation could have the reader drop a
-     future instant and still pass every other case here, because the fold's
-     future-dated case constructs its target by hand rather than through a
-     producer. It is the producer half of what §5 above's future-dated fold case
-     checks at the writer.
+   - **A future-dated case for each of the three producers that supply an
+     instant**, which is the only thing that checks §4 above's fourth clause.
+     Every source instant it names is a `UtcInstant` with no upper bound —
+     `Attestation.reported_at` by ADR-0092 §3's ruling, and
+     `EpisodicMemory.occurred_at` and `FeedbackEvent.created_at` because nothing
+     constrains them either — so each producer is separately capable of dropping
+     or clamping one:
+     the calendar reader given a `reported_at` later than `read_at`, the observer
+     given a batch whose latest cited `occurred_at` is in the future, and the
+     processor given a `FeedbackEvent` whose `created_at` is. Each asserts the
+     source instant is stored **unchanged** — not `None`, not the producer's own
+     clock, and not a clamp. One producer's case does not stand in for another's,
+     and the fold's future-dated case stands in for none of them: it constructs
+     its target by hand rather than through a producer. These are the producer
+     half of what §5 above's future-dated fold case checks at the writer.
    - **The store round-trip, both directions.** An exact non-`None` instant
      survives `SqliteMemoryStore` write-then-read; and a stored blob whose JSON
      carries no `last_confirmed_at` key decodes as `None`. The second is what makes
