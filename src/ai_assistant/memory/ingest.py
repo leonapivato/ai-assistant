@@ -990,26 +990,6 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     wrong but impossible — a ``DERIVED`` record carries none, and an ``EXTERNAL``
     survivor without one is refused by the same iff validator.
 
-    **The union is bounded here, before the ``Provenance`` is constructed**, so
-    the constructor's validators run on the value that is stored — the surrounding
-    ``model_copy(update=...)`` skips them (ADR-0026 §2). ADR-0040 §5a's "retains
-    **both** records' evidence" holds up to :data:`MAX_EVIDENCE_CITATIONS` and is
-    partially superseded beyond it (ADR-0086 §3, §11): the oldest are displaced and
-    counted. The fold is the one install drawing from **two** sources, so both
-    records' ``evidence_elided`` are summed — including when the union fits and
-    nothing is displaced, since an incoming record carrying a count of its own
-    would otherwise have that history dropped (ADR-0086 §4).
-
-    **The ``attestation`` is the incoming one** (ADR-0092 §6), and this is required
-    rather than optional: the ``Provenance`` below is built field by field, so
-    ``Provenance``'s iff validator would raise on an attested fold that carried
-    none. The rule follows this function's own shape — ``source`` and
-    ``last_updated`` already come from the incoming record because newer content
-    wins, and the attestation describes the content that survived. It therefore
-    never disagrees with the ``source`` beside it, including in the awkward case
-    where one source's record is reinforced by another's report: the survivor
-    honestly says who reported the text it now holds.
-
     Args:
         target: The stored record the ruling folds into.
         incoming: The proposed record being folded in.
