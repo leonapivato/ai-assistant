@@ -77,6 +77,25 @@
   same change as this note**, so this note never names an ADR that does not exist;
   it stands `Proposed`, which is the form ADR-0075 established and ADR-0045's
   2026-07-28 note records `main` carrying three times over. Refs #639, #112, #729.
+- Note (2026-08-06): **ADR-0110 is ratified, so the `Status` line above now names
+  a partial supersession that has landed rather than one that is drafted.**
+  ADR-0110 was flipped `Proposed` → `Accepted` in the separate lane #633 requires,
+  after both of its required reviews — adversarial and architecture — came back
+  APPROVE with no findings at tree `7a9b09acfec2`, round 4, posted to PR #783 by
+  `just ship`. **Nothing about the scope changes**: what is narrowed and what
+  survives are exactly what the note above records — §4's second sentence, by
+  exception, in exactly the case ADR-0110 §3 conditions — and the `Status` line is
+  already correct and is unchanged. This note exists only because the note above
+  drew the drafted-versus-ratified distinction itself, in the sentence beginning
+  "it stands `Proposed`" — a conditional that stops applying rather than becoming
+  false, and which therefore leaves a reader holding only this ADR unable to tell
+  which of the two states obtains. That is ADR-0085's 2026-08-05 note one document
+  over, and its mechanism is taken with it: recording the change is ADR-0070 §1's
+  second permitted in-place header edit, "**recording a supersession that has
+  landed**", and doing it as an appended note rather than by editing the earlier
+  one is §1's own rule that an amendment *adds* and does not overwrite. The
+  earlier note is a dated record of the moment it was written and is left standing
+  exactly as written, as is every sentence below both notes. Refs #639, #633.
 - **Decides a `core` contract and implements none of it.** Golden rule 5 and
   ADR-0015 §5 put a contract ADR in its own PR, merged before anything implements
   against it. The Protocol, its shared conformance suite and its canonical fake in

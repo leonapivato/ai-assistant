@@ -141,6 +141,26 @@
   drafted rather than ratified, the form `main` already carries. Appended per
   ADR-0070 §1: no text below is rewritten and §8's sentence stands as written.
   Refs #632, #729.
+- Note (2026-08-06): **ADR-0111 is ratified, so the note above names an amendment
+  that has landed rather than one that is drafted.** ADR-0111 was flipped
+  `Proposed` → `Accepted` in the separate lane #633 requires, after its required
+  review — adversarial, the only lens a change deciding no contract surface owes —
+  came back APPROVE with no findings at tree `95cb527050f5`, round 2, posted to
+  PR #784 by `just ship`. **Nothing about the scope changes**: what is narrowed
+  and what survives are exactly what the note above records, §11's deferral stays
+  a discharged stacked addition, the observation job's selector stays this ADR's
+  ground, and this ADR's `Status` line still carries no qualifier because its
+  leading `Partially superseded by` token forbids one (ADR-0082 §2). This note
+  exists only because the note above drew the drafted-versus-ratified distinction
+  itself, in the sentence beginning "while it is `Proposed`" — a conditional that
+  stops applying rather than becoming false, and which therefore leaves a reader
+  holding only this ADR unable to tell which of the two states obtains. Recording
+  it as an appended dated note rather than by editing the earlier one is ADR-0070
+  §1's own mechanism, under which an amendment *adds* and does not overwrite;
+  ADR-0085's 2026-08-05 note is the corpus's precedent for doing it in the
+  ratifying lane. The earlier note is a dated record of the moment it was written
+  and is left standing exactly as written, as is every sentence below both notes.
+  Refs #632, #710, #633.
 - Note (2026-07-31): **The ADR-0081 amendment qualifier moves off the `Status`
   line into the note below; nothing about the amendment changes.** The line read
   `Accepted, §5's check-not-a-guarantee clause amended by ADR-0081`. Taking the
