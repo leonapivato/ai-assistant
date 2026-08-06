@@ -426,12 +426,25 @@ advances nor blocks it.
   with one element embeds through the same `_embed_one` and writes through the same
   `_persist_record` as `add`; ADR-0046 §2 already ruled the degenerate batch legal
   and equivalent.
-- **An ingest that would have silently overwritten now raises.** This is a
-  behaviour change visible to `LearningLoop` and to the orchestration write stage,
-  both of which already treat `MemoryStoreError` as the class that crosses the seam
-  (ADR-0028 §5) and degrade rather than fail the turn. The observable difference is
-  a `memory_degraded` turn where there was previously a silent data loss, which is
-  the trade this ADR is making.
+- **An ingest that would have silently overwritten now raises**, and the raise is
+  a `MemoryStoreConflictError` — a `MemoryStoreError`, so ADR-0028 §5's "that is
+  what crosses this seam" stays true and no existing handler is bypassed. Two
+  consumers see the difference and they see it differently, which is worth stating
+  because it is not uniform: `LearningLoop.learn` **propagates**, leaving earlier
+  proposals applied, which is ADR-0022 §4's own documented behaviour for a store
+  failure and is unchanged here; the observation stage's `_ingest` likewise
+  propagates anything that is not the citation race it discriminates (ADR-0077 §5).
+  So the trade is a *loud* failure where there was previously a silent data loss —
+  not a degraded turn. That is the right direction for a write whose whole defect
+  was that it reported success, and it is a real behaviour change for a caller that
+  today gets a healthy result.
+- **A producer that derives its record ids from content now collides loudly on
+  re-proposal.** `FakeBeliefObserver` is exactly that producer (#735, #736) and is
+  the only one in the tree; the shipped `learning/observer.py` mints. What it was
+  doing before was silently replacing its own earlier records — the fold its
+  docstring promises never fires, because conflict detection filters the proposal's
+  own id (#110). This ADR does not decide what that fake should do instead (§9);
+  it makes the existing gap audible rather than creating one.
 - **The next lane that adds a `MemoryStore` caller has a table to consult**, and a
   conformance suite that will fail it if it picks the wrong verb for a cross-kind
   write. It will not fail it for picking the wrong verb for a same-kind one — §7's
