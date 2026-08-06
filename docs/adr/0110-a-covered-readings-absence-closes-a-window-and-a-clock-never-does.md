@@ -336,7 +336,9 @@ independent reason that an absence-close has no proposal to attach a ruling to.
 That property is what lets this ADR stop where it does. How the live set is
 enumerated — the page size, the chunking, a durable cursor, resumption after a
 restart, what happens when a chunk raises — is scheduler mechanics, and it is
-ADR-0111's lane (#632, #710). Nothing in it can make a close under §3 wrong; the
+the scheduler chunking-and-cursor lane's (#632, #710), whose ADR is in flight
+and is deliberately not cited by number here (below). Nothing in it can make a
+close under §3 wrong; the
 worst an interrupted walk produces is a belief that stays live one cycle longer,
 which the next reading closes.
 
@@ -345,7 +347,7 @@ already enumerates live beliefs filtered by band, in a specified total order, a
 page at a time, honouring both read-time axes before the cut. A reconciliation
 reads `bands=[ATTESTED]` and filters on `reported_by` in the consumer. That its
 offset paging "may skip or repeat a record" over a mutating store is precisely
-what §6's first clause makes harmless here, and precisely the property ADR-0111
+what §6's first clause makes harmless here, and precisely the property that lane
 owns improving.
 
 ### 7. ADR-0093 §4 stands, and what it stands over
@@ -429,8 +431,12 @@ in `export` (ADR-0045 §6).
   is untouched, and nothing here is permission to weight `MemoryStore.search` by
   anything.
 - **Scheduler mechanics.** Cursor placement, chunking, backoff, halt-on-refusal
-  and resumption are ADR-0111's (#632, #710). §6 states the property that keeps
-  the seam clean and declines the rest.
+  and resumption belong to the scheduler chunking-and-cursor lane (#632, #710).
+  §6 states the property that keeps the seam clean and declines the rest. **That
+  lane's ADR is in flight and is not cited by number**, because a citation to a
+  number no ref carries is a Tier 1 defect under ADR-0088 §6 as ADR-0090 §1
+  narrows it — an unissued number is not a forward reference, it is a citation to
+  nothing. The seam is named by its issues instead, which are stable.
 - **Eviction, size caps, and any retention consequence.** ADR-0103 §1's framing
   rules them out for this leg and ADR-0007 §5's deferral stands. A closed window
   is not a deletion and creates no reclamation.
@@ -638,7 +644,8 @@ owed.**
 - **The implementing lane owes**: the `SourceReading` field and its value object
   with the additive migration story ADR-0093 §3's pattern implies; the writer
   boundary's close under §5's four constraints; the reconciliation itself,
-  sequenced with ADR-0111's scheduler work; and the conformance judgement §10
+  sequenced with the scheduler chunking work (#632, #710); and the conformance
+  judgement §10
   defers to it.
 - **#639 and #112 close on ratification** (§11, §12), and ADR-0045 §10's three
   surviving deferrals move to their own issue.
@@ -694,5 +701,6 @@ owed.**
   reading to avoid a `None`, which is the trade ADR-0093 §3 already refused for the
   facet half and ADR-0109 §2 refused for `last_confirmed_at`.
 - **Rule the enumeration's mechanics here too**, since §6 depends on one existing.
-  Rejected as scope: they are ADR-0111's (#632, #710), and §6's monotonicity is
+  Rejected as scope: they are the scheduler chunking-and-cursor lane's (#632,
+  #710), and §6's monotonicity is
   precisely what makes deciding them separately safe.
