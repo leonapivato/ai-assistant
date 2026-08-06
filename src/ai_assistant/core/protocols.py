@@ -317,10 +317,19 @@ class MemoryStore(Protocol):
         stored — uses :meth:`write_atomic` with
         ``MemoryWriteMode.INSERT_IF_ABSENT`` instead. That refuses the collision
         inside the same write that would otherwise destroy the standing record, so
-        the check costs no read and cannot be raced. ``add`` is for the caller that
-        means to land on whatever is already there; the accidental collision and
-        the deliberate one are indistinguishable in the bytes, so the verb is what
-        says which was meant.
+        the check costs no read and cannot be raced. The accidental collision and
+        the deliberate one are indistinguishable in the bytes, so nothing but the
+        caller's declaration can tell them apart.
+
+        **Callers inside this package declare it as a ``MemoryWriteMode``, not by
+        reaching for this method.** ``add`` remains the upsert and remains part of
+        this contract — implementations outside this repository satisfy it, which is
+        why the cross-kind refusal below binds it too — but a method name does not
+        *say* what it does, and "which writes can destroy a record" has to stay
+        answerable by reading. So the one fold that deliberately lands on a stored
+        record states ``MemoryWriteMode.UPSERT`` through :meth:`write_atomic`
+        (ADR-0108 §2), and a new ``add`` call here is a choice to defend in review
+        rather than a line to reach for.
 
         **A cross-kind collision is refused** (ADR-0108 §4). Where ``record.id``
         names a stored record of a different ``kind``, nothing is written. This is
