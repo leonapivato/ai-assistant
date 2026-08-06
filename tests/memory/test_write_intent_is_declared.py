@@ -99,16 +99,39 @@ def _constructions(tree: ast.AST) -> list[ast.Call]:
     ]
 
 
+#: The module that defines the class, absolutely spelled.
+_MODULE = "ai_assistant.core.types"
+
+#: What a *relative* import of it looks like from inside this package:
+#: ``from ..core.types import`` (from a sibling subpackage) or ``from .types
+#: import`` (from within ``core`` itself).
+_RELATIVE_MODULES = frozenset({"types", "core.types"})
+
+
 def _is_the_module(node: ast.ImportFrom) -> bool:
     """Whether ``node`` imports from the module that defines the class.
 
-    ``ai_assistant.core.types``, and the relative spellings that resolve to it.
-    **A same-named class from anywhere else is not this one**:
+    **A same-named class from anywhere else is not this one.**
     ``from vendor.api import MemoryWrite as ExternalWrite`` is somebody else's type
-    and none of this check's business, and flagging it would be exactly the
+    and none of this check's business; flagging it would be exactly the
     false-positive failure the negative cases below exist to prevent.
+
+    The absolute form is matched **exactly, not by suffix**. A suffix test reads as
+    equivalent and is not: ``vendor.core.types`` ends with ``core.types``, so a
+    third-party module happening to end in the same two segments would be taken for
+    ours — the very failure this function exists to prevent, arriving through the
+    code written to prevent it.
+
+    A relative import is matched by spelling *and* level, sound for a different
+    reason: a relative import cannot leave the package it is written in, so any of
+    these inside ``src/ai_assistant/`` resolves to our module and nobody else's.
+    (The package uses absolute imports throughout today; this is here so the check
+    does not quietly stop working if that changes.)
     """
-    return (node.module or "").endswith("core.types")
+    module = node.module or ""
+    if node.level:
+        return module in _RELATIVE_MODULES or module.endswith(".core.types")
+    return module == _MODULE
 
 
 def _renamings(tree: ast.AST) -> list[ast.AST]:
@@ -258,6 +281,7 @@ def test_the_renaming_check_sees_every_binding_form() -> None:
     """Each form the literal finder would walk past is caught by the other check."""
     imported = ast.parse("from ai_assistant.core.types import MemoryWrite as W")
     relative = ast.parse("from ..core.types import MemoryWrite as W")
+    relative_sibling = ast.parse("from .types import MemoryWrite as W")
     assigned = ast.parse("Write = MemoryWrite")
     annotated = ast.parse("Write: type[MemoryWrite] = MemoryWrite")
     qualified_alias = ast.parse("W = types.MemoryWrite")
@@ -267,6 +291,7 @@ def test_the_renaming_check_sees_every_binding_form() -> None:
     for tree in (
         imported,
         relative,
+        relative_sibling,
         assigned,
         annotated,
         qualified_alias,
@@ -294,6 +319,9 @@ def test_the_renaming_check_leaves_unrelated_code_alone() -> None:
     # alone would block a module that never touched this contract at all.
     foreign_same_name = ast.parse("from vendor.api import MemoryWrite as ExternalWrite")
     foreign_module_import = ast.parse("import vendor.api.MemoryWrite as ExternalWrite")
+    # And the near-miss that a suffix test would wave through: a third-party
+    # module whose last two segments happen to be ours.
+    foreign_colliding_suffix = ast.parse("from vendor.core.types import MemoryWrite as VendorWrite")
 
     for tree in (
         plain_import,
@@ -303,6 +331,7 @@ def test_the_renaming_check_leaves_unrelated_code_alone() -> None:
         a_construction,
         foreign_same_name,
         foreign_module_import,
+        foreign_colliding_suffix,
     ):
         assert _renamings(tree) == [], ast.dump(tree)
 
