@@ -753,6 +753,46 @@ class Provenance(BaseModel):
     bound** rather than a total: a displaced citation that is later re-cited, or
     two elided histories folded together, both double-count, and making it exact
     would need the ids back.
+
+    **``last_updated`` and ``last_confirmed_at`` are two clocks, and reading one
+    for the other is the confusion this pairing exists to prevent** (ADR-0109 §2).
+    ``last_updated`` is transaction time — when *we* last revised the belief
+    (ADR-0045 §3) — so a calendar's months-old report imported this morning has a
+    ``last_updated`` of this morning and a currency read off it would call that
+    belief perfectly fresh. ``last_confirmed_at`` is when the *world* last
+    confirmed the belief: the user stating it, the reporting source's own
+    ``reported_at``, or the latest ``occurred_at`` among the episodes cited
+    (ADR-0103 §9). The two legitimately disagree in **both** directions — a
+    ``reported_at`` in our future is stored unchanged (ADR-0092 §3), so an attested
+    record's confirming instant may sit after the write that stored it.
+
+    **``last_confirmed_at`` of ``None`` is ADR-0103 §9's *unknown*, which is
+    neither stale nor fresh.** It is the state of a record whose confirming instant
+    the store does not hold: every record written before ADR-0109 (the field is
+    additive with a default, so nothing migrates and nothing fabricates a decline
+    that was never measured), every episode — an episode cites nothing, nothing
+    retires one, and "is this still true?" is not a question about it — and every
+    :class:`Goal`, which is not a belief whose currency lapses. No surface,
+    consumer or writer renders, treats or ranks an unknown as a confirmed one, and
+    none reads it as stale either.
+
+    **Currency itself — the elapsed interval — is never stored** (ADR-0109 §1,
+    §3). It is computed at read, from this instant and the reading component's own
+    clock, and is *unknown* both where the field is ``None`` and where the instant
+    is in that component's future. A stored interval would be stale before it was
+    committed; the instant is a measurement made once, when the confirming event
+    was in hand, and no later retention or displacement can unmake it.
+
+    **No validator constrains ``last_confirmed_at``, and that absence is the
+    decision** (ADR-0109 §8). Not required, because a required instant would refuse
+    every record already in a store, on the *read* path, at deserialisation — the
+    same failure the missing ``max_length`` above avoids, at its widest scope. Not
+    ordered against ``last_updated``, because the paragraph above makes the
+    later-than case ordinary rather than pathological. And not pinned to
+    ``attestation.reported_at``, because a corroborating fold keeps the *target's*
+    attestation while the survivor's instant may be the incoming derived record's
+    (ADR-0103 §6): the two fields are not redundant, and their disagreement after a
+    fold is meaningful rather than drift.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -791,6 +831,16 @@ class Provenance(BaseModel):
         description=(
             "What reported this belief and when that source said so; set if and "
             "only if ``band_of(source)`` is ``ATTESTED`` (ADR-0092 §1)."
+        ),
+    )
+    last_confirmed_at: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "When the *world* last confirmed this belief, on the clock of whatever "
+            "confirmed it — the user's utterance, the source's ``reported_at``, or "
+            "the latest ``occurred_at`` among the episodes cited (ADR-0103 §9). "
+            "``None`` is *unknown*, never stale and never fresh. Not transaction "
+            "time: that is ``last_updated`` (ADR-0109 §2)."
         ),
     )
 
