@@ -1294,10 +1294,10 @@ class MemoryIngestor:
         # result, which has already applied the same rule to the union it formed.
         match decision.kind:
             case MemoryDecisionKind.ACCEPT:
-                return await self._store.add(_installed(proposed))
+                return await self._install(_installed(proposed))
             case MemoryDecisionKind.STORE_TEMPORARY:
                 expires_at = self._expiry(decision.ttl)
-                return await self._store.add(
+                return await self._install(
                     _installed(proposed.model_copy(update={"expires_at": expires_at}))
                 )
             case MemoryDecisionKind.REINFORCE | MemoryDecisionKind.SUPERSEDE:
@@ -1319,9 +1319,70 @@ class MemoryIngestor:
                         _retirement_set(target, conflicts, proposal=proposal, resolved=resolved),
                         proposed,
                     )
-                return await self._store.add(_installed(_merge(target, proposed)))
+                return await self._fold(_installed(_merge(target, proposed)))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
+
+    async def _install(self, record: MemoryRecord) -> str:
+        """Write ``record`` as a **new** record, refusing a colliding id.
+
+        ADR-0108 §2's routing for the installing rulings. The ruling that reached
+        here is that the proposal contradicts nothing retrieval surfaced, so an id
+        already naming a stored record is an accident in every case — a minting
+        producer whose factory collided — and the honest response is a refusal
+        rather than a silent replacement of a record no ruling was made about
+        (#630, and #110 for why conflict detection cannot see it).
+
+        **The absence check costs no read and cannot be raced** (ADR-0108 §1):
+        ``INSERT_IF_ABSENT`` is enforced by the store inside the transaction that
+        writes, not by a ``get`` this method would have to pay for and could be
+        raced against. A one-element batch is otherwise exactly ``add`` — ADR-0046
+        §2 rules the degenerate batch legal and equivalent, and
+        ``SqliteMemoryStore`` shares ``_persist_record`` and ``_embed_one``
+        between the two.
+
+        **Nothing is re-minted.** ``_apply_supersede`` re-mints its correction's id
+        on collision, and that is not a precedent here: that id is the *ingestor's*
+        own, while this one is the producer's. Re-minting it would edit a record
+        the producer made (ADR-0081 §9) and return an id nobody proposed. The
+        conflict propagates, and its documented remedy — re-mint and re-propose —
+        is the producer's to take.
+
+        Raises:
+            MemoryStoreConflictError: ``record.id`` already names a stored record.
+                Nothing is written.
+            MemoryStoreError: Any other store failure. Nothing is written.
+        """
+        written = await self._store.write_atomic(
+            [MemoryWrite(record=record, mode=MemoryWriteMode.INSERT_IF_ABSENT)]
+        )
+        return written[0]
+
+    async def _fold(self, record: MemoryRecord) -> str:
+        """Write ``record`` at the fold target's id, declaring the overwrite.
+
+        ADR-0108 §2's one deliberate upsert. A ``REINFORCE`` folds at the *target
+        the ruling named* (:func:`_merge` keeps the target's id), so landing on a
+        stored record is the decision rather than a collision — this is exactly the
+        case ADR-0022 §4 protected when it defended the upsert, and it survives as
+        something this caller **states** rather than something every write silently
+        carries.
+
+        It goes through ``write_atomic`` rather than ``add``, though ``add`` *is*
+        the upsert verb, because a mode named at the call is a declaration and a
+        method name is not: a write that can destroy a standing record then says so
+        in a word a reader can grep for.
+
+        Raises:
+            MemoryStoreError: The store refused the write — including a cross-kind
+                collision, ADR-0108 §4's backstop, which a ``REINFORCE`` cannot
+                reach because its target came from a kind-filtered search. Nothing
+                is written.
+        """
+        written = await self._store.write_atomic(
+            [MemoryWrite(record=record, mode=MemoryWriteMode.UPSERT)]
+        )
+        return written[0]
 
     async def _apply_supersede(self, targets: list[MemoryRecord], proposed: MemoryRecord) -> str:
         """Close every ``target``'s window and write ``proposed`` as a new record.
