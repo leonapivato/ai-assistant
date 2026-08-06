@@ -64,6 +64,7 @@ from importlib import import_module
 from typing import (
     TYPE_CHECKING,
     Annotated,
+    NewType,
     TypeAliasType,
     get_args,
     get_origin,
@@ -98,6 +99,13 @@ AT = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
 #: for the reason :func:`_declares_a_lower_bound` gives, and it is the same object
 #: the corpus's own declarations carry.
 GE_ZERO = Field(ge=0).metadata[0]
+
+#: A count spelled as a distinct static type over ``int``, for the walk's fixture.
+#:
+#: Module level rather than inside the test: under postponed annotations a model's
+#: field types are resolved against its module's namespace, so a locally-bound name
+#: is not there to be found.
+Count = NewType("Count", int)
 
 
 def _declares_a_lower_bound(metadata: Iterable[object]) -> bool:
@@ -177,8 +185,16 @@ def _int_leaves(
     """
     if annotation is FrozenJson or id(annotation) in seen:
         return []
-    if isinstance(annotation, TypeAliasType):
-        return _int_leaves(annotation.__value__, bounded=bounded, seen=seen | {id(annotation)})
+    if isinstance(annotation, NewType | TypeAliasType):
+        # Both wrap another type and pydantic validates them as what they wrap, so
+        # a floor is owed exactly as it would be on the wrapped ``int`` and the walk
+        # has to reach through. They are spelled differently and that is all:
+        # ``NewType("Count", int)`` keeps its target on ``__supertype__``, a
+        # ``type X = …`` alias on ``__value__``.
+        inner = (
+            annotation.__supertype__ if isinstance(annotation, NewType) else annotation.__value__
+        )
+        return _int_leaves(inner, bounded=bounded, seen=seen | {id(annotation)})
     origin = get_origin(annotation)
     if origin is Annotated:
         args = get_args(annotation)
@@ -248,6 +264,11 @@ def int_defaults_their_field_would_refuse(model: type[BaseModel]) -> list[str]:
     which of the two checks regressed.
     """
     hints = get_type_hints(model, include_extras=True)
+    # ``validate_default`` is settable per field *and* for a whole model, and the
+    # field's own setting is ``None`` rather than ``False`` when it defers. Reading
+    # only the field would report every default on a model that validates all of
+    # them — a false failure, and the one direction this check must not invent.
+    by_default = bool(model.model_config.get("validate_default", False))
     flagged = []
     for name, field in model.model_fields.items():
         bounded_leaves = _int_leaves(
@@ -255,7 +276,8 @@ def int_defaults_their_field_would_refuse(model: type[BaseModel]) -> list[str]:
         )
         if not bounded_leaves or not all(bounded_leaves):
             continue  # not an int field, or path one's subject rather than this one
-        if field.is_required() or field.validate_default:
+        validated = by_default if field.validate_default is None else field.validate_default
+        if field.is_required() or validated:
             continue  # nothing to omit, or pydantic checks the default itself
         if field.default_factory is not None or not _the_field_would_accept(field, field.default):
             flagged.append(name)
@@ -407,6 +429,41 @@ def test_the_walk_does_not_descend_into_a_json_holder() -> None:
         payload: FrozenJson = None
 
     assert unbounded_int_fields(_Holder) == []
+
+
+def test_the_walk_reaches_through_a_newtype() -> None:
+    """A ``NewType`` is a static distinction over the same runtime type.
+
+    Pydantic validates it as the supertype, so an unbounded one accepts ``-1``
+    exactly as a bare ``int`` would while looking, to a walk that stops at the
+    wrapper, like no int field at all.
+    """
+
+    class _Wrapped(BaseModel):
+        forgotten: Count = Count(0)
+        floored: Count = Field(default=Count(0), ge=0)
+
+    assert unbounded_int_fields(_Wrapped) == ["forgotten"]
+    assert _Wrapped(forgotten=Count(-1)).forgotten == -1  # really does accept one
+
+
+def test_a_model_that_validates_every_default_is_not_reported() -> None:
+    """``validate_default`` is a model-level setting too, and the field defers to it.
+
+    Reading only ``field.validate_default`` — which is ``None`` rather than
+    ``False`` when unset — would report every default on such a model, inventing
+    a failure for the one configuration that makes the check unnecessary.
+    """
+
+    class _ValidatesAll(BaseModel):
+        model_config = ConfigDict(validate_default=True)
+
+        elided: int = Field(default=-1, ge=0)
+
+    assert _ValidatesAll.model_fields["elided"].validate_default is None
+    assert int_defaults_their_field_would_refuse(_ValidatesAll) == []
+    with pytest.raises(ValidationError):
+        _ValidatesAll()  # pydantic itself refuses the default, so nothing is owed
 
 
 def test_a_bool_field_is_not_treated_as_an_int() -> None:
