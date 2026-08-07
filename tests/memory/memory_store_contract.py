@@ -2304,6 +2304,96 @@ class MemoryStoreContract:
         resumed = await store.walk_records("survivor", limit=5)
         assert [r.id for r in resumed.records] == ["w-post-clear"]
 
+    async def record_walk_position_beyond_the_store(self, store: MemoryStore, walk: str) -> None:
+        """Record a well-formed position above every key this store has issued.
+
+        A second hook beside :meth:`record_unusable_walk_position`, because the two
+        are different failures and only one of them looks broken. A malformed
+        position is obviously unusable; a *number* beyond the high-water mark is
+        well-formed, parses, compares, and is unreachable forever — which is why it
+        needs its own case and its own way in. Unreachable through the Protocol by
+        construction: a position is only ever issued for a record that was examined.
+        """
+        raise NotImplementedError
+
+    async def test_a_walk_restarts_rather_than_raising_on_a_position_beyond_the_store(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0111 §7: nothing may resume from a position the contents do not support.
+
+        The dangerous half of ADR-0114 §4's discard rule, and the one a suite that
+        only plants *malformed* text never reaches. A number above every key the
+        store has ever issued names a range no record can ever occupy — §1's
+        guarantee is that each new key exceeds every key already issued — so the
+        walk answers "nothing left to examine" on every run while the store fills
+        up behind it. That is the silent skip the whole contract exists to prevent,
+        arriving through the cursor itself, and it reports success while it happens.
+
+        Records added *after* the bad position is planted are the assertion that
+        matters: a store that merely restarted once would pass a weaker check.
+        """
+        await store.add(_semantic("w-a", "alpha"))
+        await store.add(_semantic("w-b", "bravo"))
+        await self.record_walk_position_beyond_the_store(store, "beyond")
+
+        first = await store.walk_records("beyond", limit=5)
+        await store.add(_semantic("w-c", "charlie"))
+        second = await store.walk_records("beyond", limit=5)
+
+        assert [record.id for record in first.records] == ["w-a", "w-b"]
+        assert [record.id for record in second.records] == ["w-a", "w-b", "w-c"]
+
+    async def test_a_position_above_the_records_present_is_kept_not_discarded(
+        self, store: MemoryStore
+    ) -> None:
+        """The other side of that rule, and the reason it is keyed on the high-water mark.
+
+        Walking to the end and then deleting the top records leaves a position above
+        everything the store now holds, and that position is **good**: ADR-0114 §2
+        makes it a bound rather than a reference, and §1's never-reissued key is what
+        puts the next record above it. An implementation that ceilinged on the keys
+        *present* would pass the case above and rewind this walk, re-reading every
+        surviving record — at-least-once, so not unsafe, but it would make a delete
+        silently undo a walk's progress.
+        """
+        for index in range(3):
+            await store.add(_semantic(f"w-{index}", "alpha"))
+        assert await _walk_to_exhaustion(store, "kept", limit=5) == ["w-0", "w-1", "w-2"]
+        assert await store.delete("w-2") is True
+        assert await store.delete("w-1") is True
+
+        await store.add(_semantic("w-new", "alpha"))
+
+        resumed = await store.walk_records("kept", limit=5)
+        assert [record.id for record in resumed.records] == ["w-new"]
+
+    async def test_the_chunk_read_stops_at_its_limit_rather_than_scanning_the_tail(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0114 §1: the read's work is bounded by ``limit``, not by what remains.
+
+        Asserted on the *position* rather than by timing, which is what makes it a
+        contract case rather than a benchmark: a read that stopped after ``limit``
+        records carries the position of the ``limit``-th, and one that walked further
+        — to sort the tail, or to fill a chunk — would carry a later one. An
+        implementation that materialises every unwalked record before slicing passes
+        every other clause here and makes one chunk's cost a function of the whole
+        store, which is the unbounded chunk ADR-0111 §4 forbids.
+        """
+        for index in range(20):
+            await store.add(_semantic(f"w-{index:02d}", "alpha"))
+
+        chunk = await store.walk_records("bounded-tail", limit=1)
+        assert chunk.position is not None
+        await store.advance_walk("bounded-tail", position=chunk.position)
+
+        assert [record.id for record in chunk.records] == ["w-00"]
+        # The position is the first record's, so the read stopped there: had it
+        # examined the tail, the position it carried would be a later record's.
+        assert [r.id for r in (await store.walk_records("bounded-tail", limit=1)).records] == [
+            "w-01"
+        ]
+
     async def test_a_walk_restarts_rather_than_raising_on_an_unusable_position(
         self, store: MemoryStore
     ) -> None:

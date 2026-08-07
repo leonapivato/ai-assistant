@@ -94,7 +94,7 @@ def check_walk_limit(limit: int) -> int:
     return limit
 
 
-def resume_key(recorded: str | None) -> int:
+def resume_key(recorded: str | None, *, issued_through: int) -> int:
     """Read a recorded position back, restarting the walk on anything unusable.
 
     A position that is absent, unreadable, malformed, written in a form this
@@ -105,6 +105,28 @@ def resume_key(recorded: str | None) -> int:
     discarding one returns nothing wrong to any client and costs only the repeated
     walk ADR-0111 §3 already accepted; refusing over one would take a resident
     process down over scaffolding.
+
+    **A well-formed number can be unsupported too, and that case is the dangerous
+    one.** A position above every key the store has ever issued names a range no
+    record can ever occupy: §1's guarantee is that each new key exceeds every key
+    already issued, so a cursor beyond the high-water mark sits above all of them
+    for good. The walk then answers "nothing left to examine" on every run while
+    the store fills up behind it — ADR-0111 §7's "Nothing may resume from a
+    position the store's contents do not support", and the silent skip the whole
+    contract exists to prevent, arriving through the cursor itself.
+
+    **The ceiling is the high-water mark and deliberately not ``max`` of the keys
+    present.** Walking to the end and then deleting the top records leaves a
+    position above everything the store now holds, and that position is perfectly
+    good: §2 makes a position a bound rather than a reference, and §1's
+    never-reissued key is what makes the next record land above it. Ceiling on
+    what is *present* would rewind that walk and re-read every surviving record.
+
+    Args:
+        recorded: The stored position, or ``None`` where the walk has none.
+        issued_through: The largest key this store has ever issued — SQLite's
+            ``sqlite_sequence`` high-water mark, an in-memory store's own counter.
+            ``0`` where it has issued none.
 
     Returns:
         The recorded key, or ``0`` — the position before the first record, which
@@ -118,7 +140,9 @@ def resume_key(recorded: str | None) -> int:
         key = int(recorded)
     except TypeError, ValueError:
         return 0
-    return max(key, 0)
+    if not 0 <= key <= issued_through:
+        return 0
+    return key
 
 
 def mint_position(walk: str, key: int) -> WalkPosition:
