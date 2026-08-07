@@ -1293,6 +1293,82 @@ class MemoryWrite(BaseModel):
     mode: MemoryWriteMode = MemoryWriteMode.UPSERT
 
 
+# --- memory: the resumable walk's position and its chunk (ADR-0114 §2) -------
+# Two frozen models rather than a ``str`` alias and a tuple, for the reason
+# :class:`MemoryWrite` is frozen: a value that governs whether records are
+# *skipped* must not be reconstructible by accident from something that happens
+# to be a string. A record id and a walk position are both text and mean
+# entirely different things, and a seam accepting either accepts the wrong one
+# silently.
+
+
+class WalkPosition(BaseModel):
+    """How far a named walk over a store has reached (ADR-0114 §2).
+
+    **Opaque to its caller.** No caller may parse, order, compare,
+    arithmetically derive, persist or synthesise one: the only admissible source
+    is the :class:`RecordChunk` that carried it, and the only admissible use is
+    passing it to
+    :meth:`~ai_assistant.core.protocols.MemoryStore.advance_walk` for the walk it
+    came from. The token is the *store's* own order key — a ``rowid`` in a SQLite
+    store, an insertion index elsewhere — and nothing about that key is on a
+    :data:`MemoryRecord`, so a caller deriving a position from a record it read
+    would be inventing one. A caller that could compose a position could compose
+    a wrong one, which silently skips every record at or below it and reports
+    success while it happens (ADR-0104 §2).
+
+    **A position is bound to the walk it was issued for**, and the store refuses
+    one presented to a different walk (ADR-0114 §2). That is a check rather than
+    an obligation because the store issued the token itself and holds the walk
+    name in the same call, so refusing the mismatch costs it nothing. What the
+    binding does **not** do is authenticate issuance: a well-formed token naming
+    the right walk that no chunk read ever issued is a breach of opacity by the
+    caller, and no implementation is obliged to detect one.
+
+    **A position is a bound, not a reference.** Deleting, purging or retiring
+    records below a recorded position does not disturb it — the position says
+    where the walk has *reached*, and the next chunk is whatever the store now
+    holds after it. That holds because a store never reissues a key it has
+    already issued (ADR-0114 §1); without that guarantee the sentence would be
+    false in the one case that matters.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    token: NonBlankEncodableText = Field(
+        description="The store's opaque encoding of this position. Never parsed by a caller.",
+    )
+
+
+class RecordChunk(BaseModel):
+    """One chunk of a resumable walk over a store (ADR-0114 §1).
+
+    Carries the *eligible* records of the chunk together with the position of
+    the last record the chunk **examined** — which are different sets, because
+    the read's work is bounded by records examined rather than by records
+    returned (ADR-0111 §4).
+
+    **An absent ``position`` means the walk is exhausted, and nothing else.**
+    That — never an empty ``records`` — is how a caller learns there was nothing
+    left to examine. A chunk may legitimately carry a position and *no* records,
+    meaning the range it examined held nothing eligible, and a caller advances on
+    it exactly as on any other. Reading an empty ``records`` as exhaustion stops
+    a walk short forever at the first dead range; re-reading without advancing
+    rescans that range every run and never progresses.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    records: tuple[MemoryRecord, ...] = Field(
+        default=(),
+        description="The retained, live records among those this chunk examined, in walk order.",
+    )
+    position: WalkPosition | None = Field(
+        default=None,
+        description="Position of the last record examined; absent exactly when none was.",
+    )
+
+
 # --- data sensitivity tiers (ADR-0004) ---------------------------------------
 # Sits inside the memory run, but is not memory's alone: `tools` and
 # `permissions` read it through `TierReach` further down, which is what a

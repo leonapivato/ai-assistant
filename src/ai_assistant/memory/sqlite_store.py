@@ -42,8 +42,15 @@ from ai_assistant.core.errors import (
     MemoryStoreConflictError,
     MemoryStoreError,
 )
-from ai_assistant.core.types import MemoryRecord, MemoryWriteMode, band_of
+from ai_assistant.core.types import MemoryRecord, MemoryWriteMode, RecordChunk, band_of
 from ai_assistant.memory._transactions import transaction
+from ai_assistant.memory._walk import (
+    check_walk_limit,
+    check_walk_name,
+    mint_position,
+    read_position,
+    resume_key,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -51,7 +58,13 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import Embedder
-    from ai_assistant.core.types import BeliefBand, Embedding, MemoryKind, MemoryWrite
+    from ai_assistant.core.types import (
+        BeliefBand,
+        Embedding,
+        MemoryKind,
+        MemoryWrite,
+        WalkPosition,
+    )
 
 _ADAPTER: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
 # ``search`` applies the kind and expiry filters *after* the vector KNN (sqlite-vec
@@ -284,12 +297,33 @@ class SqliteMemoryStore:
                 "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
             conn.execute(
+                # ``AUTOINCREMENT`` rather than a bare ``INTEGER PRIMARY KEY``,
+                # which is the difference between a *unique* key and a
+                # never-reissued one (ADR-0114 §1). SQLite's ordinary rowid
+                # algorithm issues one more than the largest rowid **currently in
+                # use**, so deleting the highest row releases its number to the
+                # next insert — and a walk that has already passed that number
+                # never returns the new record, reports success, and leaves nothing
+                # downstream aware the record existed. ``AUTOINCREMENT`` keeps a
+                # high-water mark in ``sqlite_sequence`` and never reissues, which
+                # is that clause exactly.
                 "CREATE TABLE IF NOT EXISTS records("
-                "rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
+                "rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, "
                 "kind TEXT NOT NULL, data TEXT NOT NULL, "
                 "expires_at INTEGER, valid_until INTEGER, about_person TEXT)"
             )
+            conn.execute(
+                # A table of its own rather than a row in ``meta``: ``meta`` is
+                # verified as an *exact* key set by the re-embedding migration
+                # (``_verify`` in ``memory/reembed.py``), so a cursor parked there
+                # would fail a build-and-swap that is otherwise none of its
+                # business. Keeping them apart also gives ``clear`` its ADR-0114 §4
+                # discard as a single statement.
+                "CREATE TABLE IF NOT EXISTS walk_positions("
+                "walk TEXT PRIMARY KEY, position TEXT NOT NULL)"
+            )
             self._migrate_records(conn)
+            self._migrate_walk_key(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS vec_records "
@@ -377,8 +411,11 @@ class SqliteMemoryStore:
                 conn.execute("ALTER TABLE records ADD COLUMN about_person TEXT")
             return
         conn.execute(
+            # Carries ``AUTOINCREMENT`` so a store on the legacy epoch schema pays
+            # for one rebuild rather than two: :meth:`_migrate_walk_key` finds the
+            # key already adopted and returns.
             "CREATE TABLE records_migrated("
-            "rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
+            "rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, "
             "kind TEXT NOT NULL, data TEXT NOT NULL, "
             "expires_at INTEGER, valid_until INTEGER, about_person TEXT)"
         )
@@ -401,6 +438,69 @@ class SqliteMemoryStore:
             )
         conn.execute("DROP TABLE records")
         conn.execute("ALTER TABLE records_migrated RENAME TO records")
+
+    def _migrate_walk_key(self, conn: sqlite3.Connection) -> None:
+        """Adopt the never-reissued walk key over an existing table (ADR-0114 §1).
+
+        A one-time rebuild, and the largest piece of work ADR-0114 creates. It is
+        bounded: it changes how **new** positions are issued, not what any existing
+        row's position is, and every current ``rowid`` stays exactly where it is so
+        the ``vec_records`` join — by ``rowid``, with no foreign key — keeps
+        working. A deployment that has never run a scheduled walk loses nothing by
+        it, which is every deployment on the schema this replaces.
+
+        **Seeding the high-water mark is the ordinary thing rather than a
+        contrivance**: copying the rows with their original ``rowid``s is itself
+        what sets ``sqlite_sequence`` to ``max(rowid)``, because that is what
+        adopting ``AUTOINCREMENT`` over an existing table does. So the first key
+        issued afterwards is greater than every key *present* at that moment, which
+        is precisely the guarantee ADR-0114 §1's third clause states — and no more.
+        A number some long-deleted row once held may be issued again, and that is
+        sound rather than merely tolerated: no walk position exists before the walk
+        surface does, so no cursor has ever named that range. A legacy database
+        holding only ``rowid`` 1 is indistinguishable from one that held 2 and
+        deleted it — neither ``records`` nor ``meta`` retains a deleted maximum and
+        there is no ``sqlite_sequence`` to consult — so seeding above the largest
+        value the store *ever* held is not a thing any implementation could do.
+
+        Detected from the table's own DDL rather than from a schema-version row,
+        because this store has never carried one: :meth:`_migrate_records`
+        shape-sniffs through ``PRAGMA table_info`` for the same reason, and
+        ``AUTOINCREMENT`` is not a column attribute ``table_info`` reports.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, like its sibling and for
+        its reasons: the DDL and the row copy roll back together on any failure, a
+        crash mid-rebuild is discarded on the next open, and the shape check itself
+        sits inside the write lock so two processes upgrading one file cannot both
+        decide to rebuild.
+        """
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'records'"
+        ).fetchone()
+        if row is None or "AUTOINCREMENT" in str(row[0]).upper():
+            return
+        conn.execute(
+            "CREATE TABLE records_walkable("
+            "rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, "
+            "kind TEXT NOT NULL, data TEXT NOT NULL, "
+            "expires_at INTEGER, valid_until INTEGER, about_person TEXT)"
+        )
+        # Streamed through a dedicated read cursor rather than ``fetchall()``, as
+        # the sibling rebuild is, so migrating a large store does not materialise
+        # ``records`` whole. Reads and writes are on different tables, so the scan
+        # cursor stays valid across the inserts.
+        read = conn.execute(
+            "SELECT rowid, id, kind, data, expires_at, valid_until, about_person FROM records"
+        )
+        for source in read:
+            conn.execute(
+                "INSERT INTO records_walkable"
+                "(rowid, id, kind, data, expires_at, valid_until, about_person) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                source,
+            )
+        conn.execute("DROP TABLE records")
+        conn.execute("ALTER TABLE records_walkable RENAME TO records")
 
     def _micros_from_json(self, data: str, key: str, *, nested: str | None = None) -> int | None:
         """Read a stored ISO instant from a record's JSON, as a µs epoch or None.
@@ -1064,6 +1164,104 @@ class SqliteMemoryStore:
             raise MemoryStoreError(msg) from exc
         return [row[0] for row in rows]
 
+    async def walk_records(self, walk: str, *, limit: int) -> RecordChunk:
+        """Read the next chunk of ``walk`` without changing anything (ADR-0114 §1).
+
+        Raises:
+            ValueError: ``walk`` is not non-blank encodable text, or ``limit`` is
+                not exactly an ``int`` in ``[1, 2**63)``.
+            MemoryStoreError: The store cannot be read, a stored record is corrupt,
+                or the injected clock's reading is not a conforming one.
+        """
+        check_walk_name(walk)
+        check_walk_limit(limit)
+        async with self._lock:
+            # Read inside the lock, so the one reading that judges this chunk cannot
+            # go stale while the call queues behind another (matching `get`).
+            now = self._now()
+            rows = await _run_to_completion(self._walk_records_sync, walk, limit)
+        eligible = [
+            record
+            for record in (self._decode(data) for _, data in rows)
+            # Both axes on one reading of the clock: retention (ADR-0007) and the
+            # validity window at both ends (ADR-0045 §6) — the same predicate `get`
+            # and `search` apply, so the walk cannot hand a producer content those
+            # reads would hide.
+            if (record.expires_at is None or record.expires_at > now)
+            and record.validity.live_at(now)
+        ]
+        # Bound to the last record **examined**, which is why the position is
+        # taken from `rows` rather than from `eligible`: a chunk over a wholly
+        # ineligible stretch must still advance, or the walk stalls there for good.
+        position = mint_position(walk, rows[-1][0]) if rows else None
+        return RecordChunk(records=tuple(eligible), position=position)
+
+    def _walk_records_sync(self, walk: str, limit: int) -> list[tuple[int, str]]:
+        """Take the next ``limit`` rows in rowid order, filtering nothing.
+
+        Deliberately applies **no** lifecycle predicate in SQL. The contract bounds
+        this read by records *examined*, and a query that filtered here would take
+        ``limit`` *eligible* rows instead — an unbounded scan over a long expired or
+        window-closed run, which is the hazard ADR-0111 §4's per-chunk deadline
+        exists to close. The decode-side filter above is therefore the whole of the
+        eligibility test, and it costs a decode per examined row, which is the same
+        trade ``list_beliefs`` already takes at a personal store's scale.
+
+        A deferred transaction: the cursor read and the row read see one snapshot,
+        and nothing here writes — two consecutive chunk reads with no intervening
+        advance return the same records.
+        """
+        with self._transaction("read a memory walk chunk", immediate=False) as conn:
+            row = conn.execute(
+                "SELECT position FROM walk_positions WHERE walk = ?", (walk,)
+            ).fetchone()
+            after = resume_key(None if row is None else str(row[0]))
+            return [
+                (int(rowid), str(data))
+                for rowid, data in conn.execute(
+                    "SELECT rowid, data FROM records WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                    (after, limit),
+                )
+            ]
+
+    async def advance_walk(self, walk: str, *, position: WalkPosition) -> None:
+        """Record how far ``walk`` has reached (ADR-0114 §3).
+
+        Raises:
+            ValueError: ``walk`` is not non-blank encodable text, or ``position``
+                is malformed or was issued for a different walk. Every recorded
+                position — this walk's and every sibling's — is left as it was,
+                because both checks run before any statement.
+            MemoryStoreError: The store cannot be written.
+        """
+        check_walk_name(walk)
+        key = read_position(walk, position)
+        async with self._lock:
+            await _run_to_completion(self._advance_walk_sync, walk, key)
+
+    def _advance_walk_sync(self, walk: str, key: int) -> None:
+        """Record ``key`` unless the walk already stands at or beyond it.
+
+        ``IMMEDIATE``, so the read of the current position and the write that
+        depends on it cannot interleave with another writer's across processes —
+        the same read-then-write hazard every other mutation here takes the write
+        lock for.
+        """
+        with self._transaction(f"advance the memory walk {walk!r}") as conn:
+            row = conn.execute(
+                "SELECT position FROM walk_positions WHERE walk = ?", (walk,)
+            ).fetchone()
+            # Never backwards, and not an error: a walk is at-least-once, so a
+            # resumed run can legitimately hold a stale position. Repeated work is
+            # the cost; records skipped forever would be the alternative.
+            if key <= resume_key(None if row is None else str(row[0])):
+                return
+            conn.execute(
+                "INSERT INTO walk_positions(walk, position) VALUES (?, ?) "
+                "ON CONFLICT(walk) DO UPDATE SET position = excluded.position",
+                (walk, str(key)),
+            )
+
     async def delete(self, record_id: str) -> bool:
         """Delete one record, returning whether it existed."""
         async with self._lock:
@@ -1083,7 +1281,11 @@ class SqliteMemoryStore:
         return True
 
     async def clear(self) -> int:
-        """Delete every record in this store, returning the number removed."""
+        """Delete every record in this store, returning the number removed.
+
+        Every recorded walk position goes with the records, in the same
+        transaction (ADR-0114 §4).
+        """
         async with self._lock:
             return await _run_to_completion(self._clear_sync)
 
@@ -1095,6 +1297,19 @@ class SqliteMemoryStore:
             (count,) = conn.execute("SELECT COUNT(*) FROM records").fetchone()
             conn.execute("DELETE FROM vec_records")
             conn.execute("DELETE FROM records")
+            # Discarded with the records rather than left to be detected later: a
+            # position naming rows this call removed is exactly the cursor-disagrees
+            # -with-store state ADR-0111 §7 has to handle, and not creating it is
+            # better than handling it.
+            conn.execute("DELETE FROM walk_positions")
+            # `DELETE FROM records` does **not** clear `sqlite_sequence` — SQLite's
+            # truncate optimisation leaves the high-water mark standing — and that
+            # is load-bearing rather than incidental (ADR-0114 §4). A walker holding
+            # a chunk's position across this call will advance to a position just
+            # discarded, and nothing compares against it because the walk now has
+            # none; that is harmless only because every record added afterwards is
+            # issued a key above it. Were the sequence reset, that stale position
+            # would sit *above* live records no walk would ever read again.
         return int(count)
 
     async def export(self) -> list[MemoryRecord]:

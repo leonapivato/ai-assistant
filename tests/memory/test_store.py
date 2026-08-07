@@ -263,6 +263,16 @@ class TestInMemoryMemoryStoreContract(MemoryStoreContract):
     #: suspension point a later revision could add.
     reads_without_suspending = True
 
+    async def record_unusable_walk_position(self, store: MemoryStore, walk: str) -> None:
+        """Park text this build cannot read where this store keeps its positions.
+
+        Reaches past the Protocol on purpose: every position the contract hands out
+        is by construction usable, so ADR-0114 §4's discard-and-restart is reachable
+        only by planting one the way an older or newer build would have left it.
+        """
+        assert isinstance(store, InMemoryMemoryStore)
+        store._walks[walk] = "written-by-a-build-that-is-not-this-one"
+
     @pytest.fixture
     def store(self) -> MemoryStore:
         return InMemoryMemoryStore(now=_fixed_now)

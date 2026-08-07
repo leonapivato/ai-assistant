@@ -19,13 +19,26 @@ from typing import TYPE_CHECKING
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
-from ai_assistant.core.types import MemoryWriteMode, band_of
+from ai_assistant.core.types import MemoryWriteMode, RecordChunk, band_of
+from ai_assistant.memory._walk import (
+    check_walk_limit,
+    check_walk_name,
+    mint_position,
+    read_position,
+    resume_key,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import BeliefBand, MemoryKind, MemoryRecord, MemoryWrite
+    from ai_assistant.core.types import (
+        BeliefBand,
+        MemoryKind,
+        MemoryRecord,
+        MemoryWrite,
+        WalkPosition,
+    )
 
 #: One past the largest value ``list_beliefs`` accepts for ``limit``/``offset``:
 #: the signed 64-bit ceiling a SQLite bind parameter tops out at (ADR-0073 §2).
@@ -100,6 +113,20 @@ class InMemoryMemoryStore:
         """
         self._records: dict[str, MemoryRecord] = {}
         self._clock = checked_clock(now, owner="InMemoryMemoryStore")
+        # The walk's order key, issued once per stored record and never reissued
+        # (ADR-0114 §1). A dict preserves insertion order and re-assigning an
+        # existing key keeps its original position, which is the upsert behaviour
+        # the persistent store's `rowid` already has — but insertion order is not a
+        # *key*, and a position has to name one. `_sequence` only ever increases:
+        # `delete`, `purge_expired` and `clear` drop entries from `_keys` and none
+        # of them touches it, so a number a removed record held is never handed to
+        # a later one and a walk that has passed it cannot skip that record.
+        self._keys: dict[str, int] = {}
+        self._sequence = 0
+        # Recorded as text, as the persistent store records it, so "a position this
+        # build cannot use" is the same shape in both and ADR-0114 §4's
+        # discard-and-restart is one behaviour rather than two.
+        self._walks: dict[str, str] = {}
 
     def _now_utc(self) -> datetime:
         """The guarded clock's reading, as `memory`'s own error (ADR-0026 §4).
@@ -148,7 +175,21 @@ class InMemoryMemoryStore:
         # validity, which drives read filtering) after add cannot reach stored
         # state — matching FakeMemoryStore and the serialised persistent store.
         self._records[record.id] = record.model_copy(deep=True)
+        self._issue_key(record.id)
         return record.id
+
+    def _issue_key(self, record_id: str) -> None:
+        """Give a newly stored record its walk position, or leave an upsert's alone.
+
+        An upsert keeps the key it already holds, which is what the persistent
+        store's ``rowid`` does on the same path — so a record revised in place stays
+        where it is in the walk and is not revisited by a cursor that has passed it.
+        That is ADR-0111 §2's named limit, and the two stores agree about it rather
+        than one of them quietly re-queueing the record.
+        """
+        if record_id not in self._keys:
+            self._sequence += 1
+            self._keys[record_id] = self._sequence
 
     def _refuse_cross_kind(self, record: MemoryRecord) -> None:
         """Refuse an upsert landing on a stored record of a different kind.
@@ -211,6 +252,7 @@ class InMemoryMemoryStore:
             staged.append(write.record.model_copy(deep=True))
         for record in staged:
             self._records[record.id] = record
+            self._issue_key(record.id)
         return [record.id for record in staged]
 
     @staticmethod
@@ -375,12 +417,23 @@ class InMemoryMemoryStore:
 
     async def delete(self, record_id: str) -> bool:
         """Delete one record, returning whether it existed."""
+        self._keys.pop(record_id, None)
         return self._records.pop(record_id, None) is not None
 
     async def clear(self) -> int:
-        """Delete every record, returning the number removed."""
+        """Delete every record, returning the number removed.
+
+        Discards every recorded walk position in the same operation (ADR-0114 §4),
+        and deliberately does **not** reset ``_sequence``: a walker can be holding
+        a chunk's position across this call and will then advance to a position
+        discarded here, which is harmless only because every record added
+        afterwards is issued a key above it. Resetting would leave that stale
+        position sitting above live records no walk would read again.
+        """
         count = len(self._records)
         self._records.clear()
+        self._keys.clear()
+        self._walks.clear()
         return count
 
     async def export(self) -> list[MemoryRecord]:
@@ -404,4 +457,54 @@ class InMemoryMemoryStore:
         expired = [rid for rid, record in self._records.items() if self._is_expired(record, now)]
         for rid in expired:
             del self._records[rid]
+            self._keys.pop(rid, None)
         return len(expired)
+
+    async def walk_records(self, walk: str, *, limit: int) -> RecordChunk:
+        """Read the next chunk of ``walk`` without changing anything (ADR-0114 §1).
+
+        Raises:
+            ValueError: ``walk`` is not non-blank encodable text, or ``limit`` is
+                not exactly an ``int`` in ``[1, 2**63)``.
+            MemoryStoreError: The injected clock's reading is not a conforming one.
+        """
+        check_walk_name(walk)
+        check_walk_limit(limit)
+        # Read once per chunk, so one chunk is judged against one reading of the
+        # clock — matching every other read here and the persistent store.
+        now = self._now_utc()
+        after = resume_key(self._walks.get(walk))
+        # `limit` bounds records *examined*, not records returned: a scan that ran
+        # on until it had `limit` eligible records would be unbounded over a long
+        # ineligible run, which is the hazard ADR-0111 §4 forbids.
+        examined = sorted(
+            ((key, rid) for rid, key in self._keys.items() if key > after),
+        )[:limit]
+        eligible = [
+            self._records[rid].model_copy(deep=True)
+            for _, rid in examined
+            if self._is_readable(self._records[rid], now)
+        ]
+        # Absent exactly when nothing was examined — never merely when nothing was
+        # eligible, which is how a walk crosses a dead range instead of stalling on
+        # it forever.
+        position = mint_position(walk, examined[-1][0]) if examined else None
+        return RecordChunk(records=tuple(eligible), position=position)
+
+    async def advance_walk(self, walk: str, *, position: WalkPosition) -> None:
+        """Record how far ``walk`` has reached (ADR-0114 §3).
+
+        Raises:
+            ValueError: ``walk`` is not non-blank encodable text, or ``position``
+                is malformed or was issued for a different walk. Every recorded
+                position — this walk's and every sibling's — is left exactly as it
+                was.
+        """
+        check_walk_name(walk)
+        key = read_position(walk, position)
+        # Never backwards. An advance at or behind the recorded position is a no-op
+        # rather than an error: a walk is at-least-once, so a resumed run can hold a
+        # stale position legitimately, and the worst outcome under this rule is
+        # repeated work rather than records skipped forever.
+        if key > resume_key(self._walks.get(walk)):
+            self._walks[walk] = str(key)

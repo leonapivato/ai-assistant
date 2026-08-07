@@ -832,6 +832,14 @@ def test_every_integer_setting_is_discovered() -> None:
         # refusing and never by truncating.
         "calendar_max_entries",
         "calendar_max_bytes",
+        # ADR-0111 §4's chunk bound. Acknowledged here for the reason every figure
+        # above is, and the ``bool`` guard is load-bearing in its own way: the ADR
+        # pins the field to "exactly an ``int``" precisely because ``True`` would
+        # otherwise load as a chunk size of one, and a walk taking one record per
+        # chunk spends a model call per record while reporting health. The range is
+        # ``MemoryStore.walk_records``' own, so a configured chunk size is always an
+        # admissible limit and the two figures cannot disagree at run time.
+        "scheduler_chunk_size",
         "calendar_max_expansion",
         "calendar_max_content_bytes",
     }
@@ -1037,6 +1045,13 @@ def test_every_duration_setting_is_discovered() -> None:
         "retention_purge_interval",
         "conversation_sweep_interval",
         "observation_interval",
+        # Leg 7's interval and ADR-0111 §4's run budget. The interval follows §7's
+        # convention exactly — disabled is ``None``, never ``0`` — and the budget
+        # does **not**, for ``hub_read_timeout``'s reason one clause on: a chunked
+        # run with no budget is the unbounded walk ADR-0083 §7 accepted the absence
+        # of a bound on, so "off" is not an available value here either.
+        "consolidation_interval",
+        "scheduler_run_budget",
         # ADR-0084 §3's read deadline. It is **not** nullable, and that is the one
         # place ADR-0084 departs from ADR-0083 §7's convention: "a hub with no frame
         # cap or no read deadline has exactly the failure §3 exists to prevent, so
