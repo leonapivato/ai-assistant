@@ -605,6 +605,33 @@ cannot disagree — which is a stronger alignment than the one with `list_belief
 that the earlier draft reached for, because the setting is what actually calls this
 read.
 
+### 6a. Every refusal in this contract is a `ValueError`
+
+> **Normative.** All three refusals these operations state — a walk name that is
+> not `NonBlankEncodableText`, a `limit` that is not exactly an `int` or is outside
+> `[1, 2**63)`, and a position bound to a different walk — are raised as
+> **`ValueError`** by every implementation. A failure of the store itself is a
+> `MemoryStoreError` as everywhere else, and no implementation reports a caller's
+> bad argument as one.
+
+**Naming the class is what makes "the same refusal on every backend" mean
+anything.** Without it a SQLite implementation can surface its binding failure as a
+`MemoryStoreError` while an in-memory one raises `ValueError`; both refuse, both
+satisfy every clause of §8 as an earlier draft wrote it, and a caller cannot handle
+one invalid call uniformly — which is the backend divergence §5 and §6 exist to
+close, surviving in the one place neither of them looked. Adversarial review found
+it on round 15.
+
+**`ValueError` because `list_beliefs` already says so**, one method over on this
+same Protocol and for this same argument: it raises `ValueError` "If `limit` or
+`offset` falls outside `0 <= value < 2**63`", and `Observer.observe` raises one for
+a batch that breaks its bound. A second convention for the neighbouring read would
+be a difference nobody would look for, which is the argument §6 already makes about
+the over-wide end. The position mismatch joins them rather than taking a store
+error, because it is decided from the arguments alone — the store has not been
+touched when it is refused, and a caller passing another walk's position has a bug
+of exactly the kind a bad `limit` is.
+
 ### 7. Serialisation: the cursor needs none, and the job may still owe one
 
 > **Normative.** This ADR requires no serialisation primitive for the cursor
@@ -636,8 +663,8 @@ half of that disjunct.
 > twice with no advance returns the same records; that a walk advanced to a chunk's
 > position returns the *following* records and never repeats one; that an advance to
 > a position at or behind the recorded one leaves the walk where it was; that two
-> a position issued for one walk is refused by another walk's advance, leaving that
-> walk's recorded position untouched — asserted by walking `A` forward and then
+> a position issued for one walk is refused — as a `ValueError` — by another walk's
+> advance, leaving that walk's recorded position untouched — asserted by walking `A` forward and then
 > presenting `A`'s position to `B`, whose next chunk must still begin at the first
 > record; that two
 > walk names hold independent positions; that a chunk carries no position exactly
