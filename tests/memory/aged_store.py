@@ -682,11 +682,26 @@ def boundary_is_ambiguous(ranked: Sequence[Ranked], *, limit: int, tolerance: fl
     an unconditional row of slack would also absolve a store that dropped an
     eligible row from the middle of the ranking, and the instrument would then
     report that fabricated loss as a k-shortfall.
+
+    So proximity is necessary and not sufficient, and the question asked is the
+    one that matters: *would exchanging these two rows change the served count?*
+    It would not when they agree on eligibility — the budget then holds the same
+    number of servable records either way — and it would not when the prefix
+    already holds ``limit`` of them, because the count is capped there. Both cases
+    used to be granted a row of slack that no float32 disagreement could have
+    spent, and each of them is a hole a dropped row elsewhere would have fitted
+    through. The count is recomputed under the exchange rather than reasoned
+    about, so the answer stays right if ``served_prediction`` ever changes shape.
     """
     budget = candidate_budget(limit)
     if budget >= len(ranked) or budget < 1:
         return False
-    return abs(ranked[budget].distance - ranked[budget - 1].distance) <= tolerance
+    inside, outside = ranked[budget - 1], ranked[budget]
+    if abs(outside.distance - inside.distance) > tolerance:
+        return False
+    served = sum(1 for entry in ranked[:budget] if entry.eligible)
+    exchanged = served - int(inside.eligible) + int(outside.eligible)
+    return min(limit, served) != min(limit, exchanged)
 
 
 def served_prediction(ranked: Sequence[Ranked], *, limit: int) -> int:

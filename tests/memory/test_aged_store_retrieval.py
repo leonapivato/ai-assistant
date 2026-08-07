@@ -567,6 +567,64 @@ def test_the_instrument_reads_the_constants_it_is_measuring() -> None:
     assert candidate_budget(_VEC_KNN_MAX_K // _RESULT_OVERFETCH) == _VEC_KNN_MAX_K
 
 
+def test_the_candidate_cut_is_ambiguous_only_when_a_swap_could_change_the_count() -> None:
+    """Pin the one predicate that decides whether a served count may be off by one.
+
+    It licenses the instrument's only tolerance, so every case it wrongly admits
+    is a hole a genuinely dropped row fits through. Proximity at the cut is
+    necessary and not sufficient: an exchange changes nothing when the two rows
+    agree on eligibility, and nothing when the prefix already holds ``limit``
+    eligible rows. Built by hand rather than sampled from a planted store, because
+    the interesting rankings are the ones a fixture will not produce on demand.
+    """
+    limit = 2
+    budget = candidate_budget(limit)
+
+    def ranking(eligibility: Sequence[bool], *, gap: float) -> tuple[Ranked, ...]:
+        """Rank one row per flag, stepping by 1.0 except across the cut."""
+        entries: list[Ranked] = []
+        distance = 0.0
+        for index, eligible in enumerate(eligibility):
+            if index:
+                distance += gap if index == budget else 1.0
+            entries.append(Ranked(record_id=f"r{index}", distance=distance, eligible=eligible))
+        return tuple(entries)
+
+    close, far = 1e-9, 1.0
+    # One eligible row inside the budget, so the prefix is short of `limit`.
+    starved = [False] * (budget + 2)
+    starved[0] = True
+    full = [True] * (budget + 2)
+
+    # Ineligible inside, eligible outside, prefix short of `limit`: exchanging
+    # them moves the served count, so the row of slack is genuinely owed.
+    differing = list(starved)
+    differing[budget - 1], differing[budget] = False, True
+    assert boundary_is_ambiguous(ranking(differing, gap=close), limit=limit, tolerance=1e-5)
+
+    # The same rows, well separated: no float32 disagreement is possible.
+    assert not boundary_is_ambiguous(ranking(differing, gap=far), limit=limit, tolerance=1e-5)
+
+    # Both sides ineligible, and both sides eligible: the budget holds the same
+    # number of servable rows either way, so no slack is owed.
+    for eligibility in (starved, full):
+        pair = list(eligibility)
+        pair[budget - 1] = pair[budget] = eligibility[budget - 1]
+        assert not boundary_is_ambiguous(ranking(pair, gap=close), limit=limit, tolerance=1e-5)
+
+    # Differing across the cut, but the prefix already holds `limit` eligible
+    # rows, so the count is capped and the exchange cannot move it.
+    capped = list(full)
+    capped[budget - 1], capped[budget] = False, True
+    assert not boundary_is_ambiguous(ranking(capped, gap=close), limit=limit, tolerance=1e-5)
+
+    # Nothing sits outside the budget, so there is no exchange to make.
+    assert not boundary_is_ambiguous(
+        ranking([True] * budget, gap=close), limit=limit, tolerance=1e-5
+    )
+    assert not boundary_is_ambiguous((), limit=limit, tolerance=1e-5)
+
+
 def test_the_reported_percentile_is_the_percentile_and_not_the_maximum() -> None:
     """Guard the figure the latency table publishes, on a sample whose answer is known.
 
