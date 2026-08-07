@@ -327,6 +327,37 @@ here the store issued the position itself and holds the walk name in the same ca
 so refusing the mismatch costs it nothing. Where a check is available, an obligation
 is the wrong instrument. Adversarial review found it on round 12.
 
+**What the walk binding does *not* do is authenticate issuance, and that is
+refused rather than overlooked.** Adversarial review proposed on round 13 that a
+token be unforgeable as well as walk-identifying — that `advance_walk("B",
+WalkPosition("B:50"))` must be refused unless the store can prove it issued that
+token — and the direction is declined for three reasons, recorded here because a
+refused direction that lives only in a pull request is a judgement a later reader
+cannot check.
+
+- **It defends a boundary that does not exist.** The caller is an `orchestration`
+  stage in the same process, holding the same `MemoryStore` handle, which already
+  offers `delete`, `clear` and `write_atomic`. A component willing to fabricate a
+  cursor can empty the store outright; there is nothing a forged position buys it.
+  ADR-0094 §5's "a claim carried in a submission is not evidence of the standing it
+  claims" is a rule about a **spoke**, across a seam this system actually draws, and
+  ADR-0098's threat model is ingested content rather than the hub's own components.
+- **It does not solve the realistic failure.** The plausible bug is not a
+  fabricated token but a **stale legitimate** one — a caller reusing a position it
+  should not have kept, which §2's first clause already forbids. A stale token is
+  authentic, so a MAC or a signature accepts it and the forward jump happens
+  anyway. Only recorded issuance state with expiry would catch it, and that is the
+  unbounded "set of processed identifiers" ADR-0111 §2 refuses for the cursor
+  itself, reintroduced as its guard.
+- **The cost is not notional.** Authentication means a secret in a local store: a
+  key to generate, persist beside the data it protects, and rotate — inside the
+  component whose job is a personal SQLite file (ADR-0004 §3 puts secrets in the OS
+  keyring, not here).
+
+The round-12 binding is kept because it was the opposite case: the store already
+held both the name and the position it issued, so the check cost nothing. This one
+would cost a key to buy a guarantee that misses the failure it is aimed at.
+
 **Frozen models rather than a string alias**, for the reason `MemoryWrite` is
 frozen: a value that governs whether records are skipped must not be
 reconstructible by accident from something that happens to be a string. A record
@@ -700,6 +731,11 @@ conforming.
   Protocol constrains what an implementation must have, not what it may not".
   `Engine.purge_expired` and `Engine.ingest` are the standing proof. This is
   recorded as a non-decision so the implementation lane does not relitigate it.
+- **Any authentication of a walk position.** §2 binds a position to its walk and
+  stops there: this contract adds no MAC, no signature and no issuance ledger, and
+  a lane may not read §2's binding as promising unforgeability. The argument is in
+  §2 and the shape it would take belongs to whichever ADR first draws a trust
+  boundary inside the hub, which none does today.
 - **A compare-and-swap, an `IF_UNCHANGED` write mode, or a concurrency token on
   `MemoryRecord`.** ADR-0110 §5a scopes all three to ADR-0046 §5's own lane and
   #248, in terms, and this ADR takes nothing of that ground.
