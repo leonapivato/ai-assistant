@@ -122,10 +122,12 @@ async def advance_walk(
 ) -> None: ...
 ```
 
-> **Normative.** The chunk read returns at most `limit` records, in the store's
+> **Normative.** The chunk read examines at most `limit` records, in the store's
 > own insertion order, beginning strictly after the position recorded for `walk`,
-> together with the position of the last record it returns. It writes nothing: two
-> consecutive reads with no intervening advance return the same records.
+> and returns the eligible ones among them together with the position of the last
+> record it **examined**. Its work is bounded by `limit` whatever the eligibility of
+> those records. It writes nothing: two consecutive reads with no intervening
+> advance return the same records.
 
 > **Normative.** The order a walk reads is keyed on a value the store issues once
 > per stored record. Every key a store issues is **greater than every key it has
@@ -213,12 +215,11 @@ saying the read "yields every record the store holds".
 > one whose window is closed or not yet open. The instant is read once per chunk,
 > so one chunk is judged against one reading of the clock.
 
-> **Normative.** Ineligible records are skipped and the read continues past them
-> until it has `limit` eligible records or reaches the end of the order, and the
-> position a chunk carries is that of the last record it **returns**. So a chunk
-> with no records means the walk is exhausted rather than that it met a stretch of
-> ineligible ones, and the cursor is never advanced past a record the caller has
-> not seen.
+> **Normative.** A chunk carries **no position exactly when there was nothing left
+> to examine**, and that — never an empty record list — is how a caller learns the
+> walk is exhausted. A chunk may carry a position and no records, meaning the range
+> it examined held nothing eligible, and a caller advances on it exactly as on any
+> other.
 
 **A caller filter and the lifecycle predicate fail in opposite directions, which is
 why one is refused and the other required.** A caller filter would make a walk's
@@ -246,13 +247,38 @@ same live set for the same reason. A later job that genuinely needs retired reco
 is asking for as-of retrieval, which ADR-0045 §1 defers and this ADR does not
 supply.
 
+**The bound is on records *examined*, not records returned, and that is forced by
+ADR-0111 §4 rather than chosen.** §4's second clause makes a per-operation deadline
+"a precondition of being chunked at all", and a read that scanned forward until it
+had `limit` *eligible* records would have no bound at all: a store with a long run
+of expired or closed-window rows makes one call walk arbitrarily many of them, and
+`limit=1` over an all-ineligible tail scans to the end of the store. That is the
+serial loop held for as long as the scan takes, with no figure in `Settings` that
+would say so — exactly the hazard §4's second clause was added to close.
+Adversarial review found it on round 9, in the fix that closed the retention hole
+on round 7.
+
+**Which is why exhaustion is signalled by the absent position and not by an empty
+record list.** With the bound on examination, a chunk over a dead range legitimately
+returns nothing, and a caller reading that as "exhausted" would stop short forever;
+a caller that instead re-read without advancing would rescan the same range every
+run and never progress. The position is the honest signal: it is absent only when
+there was nothing left to look at, so a walk over an all-ineligible tail advances
+through it a bounded chunk at a time and terminates.
+
 **What the predicate cannot do is revisit a record whose eligibility changes below
 the cursor**, and no mechanism is offered for it. A window that opens after the
-walk has passed its record is never reached, which is precisely the limit ADR-0111
+walk has examined its record is never reached, which is precisely the limit ADR-0111
 §2 names — "a row updated in place below the cursor keeps its position and is not
 revisited" — and its ruling stands: "A job whose correctness requires reconsidering
 changed rows cannot express its selection as a high-water mark alone, and this ADR
-gives it no other mechanism."
+gives it no other mechanism." **This is the one place the bounded scan costs
+something real**, and it is named rather than buried: a record whose `valid_from` is
+in the future can be examined, found not yet live, and passed. ADR-0045 §6 records
+that this ADR's own mechanisms "never set `valid_from` to the future" while a
+producer may, so the case is possible rather than produced; an unbounded scan is a
+starvation risk on every run. The bounded scan is the better trade and ADR-0111 §4
+does not leave it open anyway.
 
 The remaining cost is that a consolidator reading only beliefs still pays for the
 episodes in between, which is the same trade `list_beliefs` already takes when it
@@ -269,8 +295,9 @@ scale".
 
 > **Normative.** `core/types.py` gains two frozen models: a `WalkPosition`
 > carrying one opaque token typed `NonBlankEncodableText`, and a `RecordChunk`
-> carrying the records of one chunk and the position of its last record. A chunk
-> that returns no records carries no position.
+> carrying the eligible records of one chunk and the position of the last record
+> the chunk examined. The position is absent exactly when the chunk examined
+> nothing, and a chunk may carry a position with no records.
 
 Two facts force opacity rather than recommend it. The position is the *store's*
 order key — `rowid` in `SqliteMemoryStore`, an insertion index elsewhere — and
@@ -512,8 +539,8 @@ half of that disjunct.
 > twice with no advance returns the same records; that a walk advanced to a chunk's
 > position returns the *following* records and never repeats one; that an advance to
 > a position at or behind the recorded one leaves the walk where it was; that two
-> walk names hold independent positions; that a chunk carries no position when it
-> carries no records; and that `clear` leaves no walk resumable.
+> walk names hold independent positions; that a chunk carries no position exactly
+> when it examined nothing; and that `clear` leaves no walk resumable.
 
 > **Normative.** The suite additionally asserts the two dispositions a wrong
 > implementation passes every other clause on: that a walk whose recorded position
@@ -532,10 +559,17 @@ half of that disjunct.
 > **Normative.** The suite asserts the lifecycle predicate on both axes: an
 > expired record is never yielded; a record whose validity window is closed is
 > never yielded, nor is one whose window has not yet opened; and a walk over a
-> stretch of records that are **all** ineligible returns the eligible records
-> **beyond** that stretch rather than an empty chunk. The last case fails an
-> implementation that treats a dead range as the end of the walk, which ends every
-> walk early and silently the moment a retention purge lags.
+> stretch of records that are **all** ineligible returns an empty chunk **carrying
+> a position**, and that advancing on it and reading again returns the eligible
+> records beyond the stretch. The last case fails an implementation that returns no
+> position for a dead range, which stalls the walk there for good.
+
+> **Normative.** The suite asserts that the chunk read's work is bounded by
+> `limit` records examined and not by `limit` records returned, over a store whose
+> ineligible run is longer than `limit`: the read returns having examined `limit`
+> records, and a walk over an all-ineligible tail reaches the end in a bounded
+> number of chunks rather than in one long scan. An implementation that scans until
+> it has filled the chunk passes every other clause here and breaches ADR-0111 §4.
 
 > **Normative.** The suite asserts that `clear` does not reset the key sequence:
 > after a `clear`, a newly added record's position is greater than every position
