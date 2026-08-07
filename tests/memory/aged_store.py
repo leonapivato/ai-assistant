@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from array import array
 from dataclasses import dataclass
 from enum import StrEnum
@@ -93,6 +94,11 @@ DIMENSIONS = 256
 #: rather than a label.
 _CENTROID_TERMS = 64
 _DIRECTION_TERMS = 16
+
+#: The only forms :meth:`ClusteredEmbedder._parse` accepts. Anchored and fully
+#: numeric, so an ordinary word in a record's tail cannot be read as a topic.
+_TOPIC_TOKEN = re.compile(r"t\d+")
+_POSITION_TOKEN = re.compile(r"p\d+")
 
 #: The topic ``AgedStoreSpec.closed_concentration`` piles retired records into —
 #: the "well-corrected topic" ADR-0112 §8 describes, the one whose queries meet
@@ -228,14 +234,24 @@ class ClusteredEmbedder:
         return [value / norm for value in vector]
 
     def _parse(self, text: str) -> tuple[str, str]:
+        """Read the topic and position tokens, recognising only their complete forms.
+
+        A prefix test let any later word beginning with ``t`` or ``p`` override
+        them: ``"t1 p5 tail"`` read its topic as ``tail``, so records planted into
+        different topics but ending in the same ordinary word would have shared a
+        centroid and quietly collapsed the very density axis they were planted to
+        vary. The planted tails (``u``/``a``/``s`` plus digits) never triggered it,
+        which is why no measurement was wrong — and why nothing caught it either.
+        The first match wins, so a stray token is inert rather than authoritative.
+        """
         topic = ""
-        position = text
+        position = ""
         for token in text.split():
-            if token.startswith("t"):
+            if not topic and _TOPIC_TOKEN.fullmatch(token):
                 topic = token
-            elif token.startswith("p"):
+            elif not position and _POSITION_TOKEN.fullmatch(token):
                 position = token
-        return topic, position
+        return topic, position or text
 
 
 def _closed_count(live: int, closed_fraction: float) -> int:
@@ -652,6 +668,25 @@ def filtered_neighbours(ranked: Sequence[Ranked], *, limit: int) -> int:
 def candidate_budget(limit: int) -> int:
     """The ``fetch_k`` ``SqliteMemoryStore._search_sync`` spends for ``limit``."""
     return min(limit * _RESULT_OVERFETCH, _VEC_KNN_MAX_K)
+
+
+def boundary_is_ambiguous(ranked: Sequence[Ranked], *, limit: int, tolerance: float) -> bool:
+    """Whether the candidate cut falls between two records too close to order reliably.
+
+    The oracle and ``sqlite-vec`` accumulate the same ``float32`` components with
+    different arithmetic, so where the records either side of ``fetch_k`` are
+    within ``tolerance`` of each other the two rankings may disagree about which
+    one the budget reached — and the served count may legitimately differ by one.
+
+    **Everywhere else there is no such licence**, which is the point of asking:
+    an unconditional row of slack would also absolve a store that dropped an
+    eligible row from the middle of the ranking, and the instrument would then
+    report that fabricated loss as a k-shortfall.
+    """
+    budget = candidate_budget(limit)
+    if budget >= len(ranked) or budget < 1:
+        return False
+    return abs(ranked[budget].distance - ranked[budget - 1].distance) <= tolerance
 
 
 def served_prediction(ranked: Sequence[Ranked], *, limit: int) -> int:
