@@ -57,6 +57,17 @@ class TestFakeMemoryStoreContract(MemoryStoreContract):
     def store(self) -> MemoryStore:
         return FakeMemoryStore(now=_fixed_now)
 
+    async def record_unusable_walk_position(self, store: MemoryStore, walk: str) -> None:
+        """Park text this build cannot read where the fake keeps its positions.
+
+        Reaches past the Protocol on purpose: every position the contract hands
+        out is by construction a usable one, so the only way to exercise ADR-0114
+        §4's discard-and-restart is to plant an unusable one the way a older or
+        newer build would have left it behind.
+        """
+        assert isinstance(store, FakeMemoryStore)
+        store._walks[walk] = "written-by-a-build-that-is-not-this-one"
+
     @pytest.fixture
     def store_factory(self) -> Callable[[Callable[[], datetime]], MemoryStore]:
         return lambda now: FakeMemoryStore(now=now)

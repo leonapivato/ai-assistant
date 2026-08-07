@@ -769,6 +769,68 @@ class Settings(BaseSettings):
             "(ADR-0083 §7, §13); set a duration to enable it."
         ),
     )
+    # Ships **disabled** for observation's reason rather than the calendar
+    # reader's, and the argument is the job's shape rather than its maturity.
+    # ADR-0111 §11 declines to set a default for a job it does not land, so this
+    # lane takes it: a consolidation run spends a model call per chunk,
+    # unattended, and every tainted proposal it produces becomes a question some
+    # user has to answer (ADR-0106 §6). A deployment that has not decided it wants
+    # that should not acquire it by upgrading. The field exists so that enabling
+    # it is configuration.
+    consolidation_interval: _OptionalDuration = Field(
+        default=None,
+        gt=timedelta(0),
+        description=(
+            "How often the hub distils many stored records into few durable beliefs "
+            "(ADR-0106, ADR-0111). Disabled by default because each run spends model "
+            "calls unattended and may raise questions a user must answer; set a "
+            "duration to enable it, and never 0."
+        ),
+    )
+
+    # --- What bounds one chunked run (ADR-0111 §4) -----------------------
+    # Two bounds doing different jobs, neither substituting for the other. The
+    # *chunk count* bounds what a crash discards and what a run may overrun by;
+    # the *run budget* bounds how long a chunked job delays its siblings on
+    # ADR-0083 §7's serial loop. Bounding only by count leaves a run's duration a
+    # function of per-record cost — a model call, here — which is unknowable at
+    # configuration time; bounding only by time leaves the unit of loss unbounded,
+    # so a slower machine discards more work on interruption.
+    #
+    # These are the *scheduler's* mechanics rather than a job's quality
+    # parameters: they bound a run, not what a run may conclude, which is the
+    # division ADR-0103 §5 draws and ADR-0106 §12 leaves to leg 8.
+    scheduler_run_budget: _DurationSetting = Field(
+        default=timedelta(minutes=5),
+        gt=timedelta(0),
+        description=(
+            "How long one chunked scheduled run may spend before returning with its "
+            "work unfinished (ADR-0111 §4). Checked at a chunk boundary, so a run "
+            "overruns by at most one chunk's duration."
+        ),
+    )
+    # ``_IntegerSetting`` rather than a bare ``int`` for the reason every integer
+    # setting here carries it: ``bool`` is an ``int`` subclass, so ``True`` would
+    # otherwise load as a chunk size of one. The range is
+    # ``MemoryStore.walk_records``' own, so a configured chunk size is always an
+    # admissible limit and the two figures cannot disagree — a setting the store
+    # would refuse must fail at load, not on the job's first scheduled run hours
+    # later inside a background task.
+    #
+    # Fifty is small on purpose (ADR-0111 §4): the chunk is both the unit of loss
+    # and the unit of overrun, and this job spends a model call per chunk, so a
+    # deployment whose per-record cost is high wants it lower — which is precisely
+    # why it is a field rather than a constant.
+    scheduler_chunk_size: _IntegerSetting = Field(
+        default=50,
+        ge=1,
+        lt=2**63,
+        description=(
+            "How many records one chunk of a scheduled walk examines (ADR-0111 §4). "
+            "Bounded by records *examined* rather than returned, so the figure stays "
+            "a real bound over a run of ineligible records."
+        ),
+    )
 
     # --- The local API's transport (ADR-0084 §3) -------------------------
     # The four figures ADR-0084 §3 names rather than leaving to the

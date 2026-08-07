@@ -29,12 +29,21 @@ proved by a single implementation.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
+
+from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
-from ai_assistant.core.types import MemoryWriteMode, band_of
+from ai_assistant.core.types import (
+    MemoryWriteMode,
+    NonBlankEncodableText,
+    RecordChunk,
+    WalkPosition,
+    band_of,
+)
 from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
@@ -69,6 +78,124 @@ def _check_page_bounds(limit: int, offset: int) -> None:
             raise ValueError(msg)
 
 
+# --- the walk surface's checks and its opaque token (ADR-0114) ---------------
+# Duplicated from ``ai_assistant.memory._walk`` for ``_check_page_bounds``'s
+# reason and no other: ``ai_assistant.testing`` may not import a subsystem
+# (golden rule 1). A fake looser than the contract would certify consumers a real
+# store rejects (ADR-0026 §7), so these enforce exactly the real stores' rules,
+# and the shared suite runs the same cases against all three.
+
+#: The validator :data:`NonBlankEncodableText` applies, run explicitly on entry:
+#: these aliases are pydantic ``Annotated`` validators and Python runs nothing for
+#: an ordinary method call (ADR-0114 §5).
+_WALK_NAME: Final = TypeAdapter[str](NonBlankEncodableText)
+
+
+def _check_walk_name(walk: str) -> None:
+    r"""Refuse a walk name that is empty, whitespace-only or unencodable.
+
+    Never normalised: two names differing only in case or spacing are two walks
+    (ADR-0114 §5). Checked here rather than left to the annotation because
+    ``walk_records("\ud800", …)`` is an ordinary Python call, and a fake that
+    accepted one would certify a consumer SQLite refuses at bind time.
+
+    Raises:
+        ValueError: If ``walk`` is not non-blank encodable text.
+    """
+    try:
+        _WALK_NAME.validate_python(walk)
+    except ValidationError as exc:
+        msg = f"walk name must be non-blank encodable text, got {walk!r}"
+        raise ValueError(msg) from exc
+
+
+def _check_walk_limit(limit: int) -> None:
+    """Refuse a chunk limit that is not exactly an ``int`` in ``[1, 2**63)``.
+
+    ``bool`` is refused with the rest and is the case that matters most: it is an
+    ``int`` subclass, so ``True`` satisfies every range comparison and would
+    quietly become a one-record chunk. Zero is refused rather than answering with
+    an empty page as ``list_beliefs`` does, because a chunk that examines nothing
+    carries no position and an absent position *means the walk is exhausted*
+    (ADR-0114 §6).
+
+    Raises:
+        ValueError: If ``limit`` is not exactly an ``int``, or is out of range.
+    """
+    if type(limit) is not int:
+        msg = f"limit must be exactly an int, got {type(limit).__name__}: {limit!r}"
+        raise ValueError(msg)
+    if not 1 <= limit < _PAGE_BOUND:
+        msg = f"limit must be in [1, 2**63), got {limit}"
+        raise ValueError(msg)
+
+
+def _resume_key(recorded: str | None) -> int:
+    """Read a recorded position back, restarting the walk on anything unusable.
+
+    Absent, unreadable or malformed all mean the same thing: discard and restart
+    from the first record, never raise (ADR-0114 §4, ADR-0111 §7). ``0`` is the
+    position before the first record rather than a sentinel — there is no integer
+    below the order's floor, and the obvious choice silently skips every record at
+    or below it (ADR-0104 §2).
+    """
+    if recorded is None:
+        return 0
+    try:
+        key = int(recorded)
+    except TypeError, ValueError:
+        return 0
+    return max(key, 0)
+
+
+def _mint_position(walk: str, key: int) -> WalkPosition:
+    """Encode ``key`` as a position bound to ``walk``.
+
+    JSON rather than a delimiter join, so a walk name containing the delimiter
+    cannot make one walk's position parse as another's.
+    """
+    return WalkPosition(token=json.dumps({"w": walk, "k": key}, ensure_ascii=False))
+
+
+def _read_position(walk: str, position: object) -> int:
+    """Decode ``position``'s order key, refusing anything not this walk's.
+
+    Validates the argument before reading any field:
+    ``WalkPosition.model_construct(token=…)`` builds an instance without running
+    the model's validator, so a malformed token — or none at all — reaches here
+    with the declared type satisfied, and reading ``position.token`` first would
+    raise ``AttributeError``, which ADR-0114 §6a makes a breach rather than a
+    variant. General over malformation and stopping exactly there: a well-formed
+    token naming the right walk that no chunk read issued stays undetected by
+    design (ADR-0114 §2).
+
+    Raises:
+        ValueError: If ``position`` is not a
+            :class:`~ai_assistant.core.types.WalkPosition`, carries no usable
+            token, or is bound to a different walk.
+    """
+    if not isinstance(position, WalkPosition):
+        msg = f"position must be a WalkPosition, got {type(position).__name__}"
+        raise ValueError(msg)
+    token = getattr(position, "token", None)
+    if not isinstance(token, str):
+        msg = "position carries no token"
+        raise ValueError(msg)
+    try:
+        decoded = json.loads(token)
+    except ValueError as exc:
+        msg = f"position token is malformed: {token!r}"
+        raise ValueError(msg) from exc
+    if not isinstance(decoded, dict) or type(decoded.get("k")) is not int:
+        msg = f"position token is malformed: {token!r}"
+        raise ValueError(msg)
+    issued_for = decoded.get("w")
+    if issued_for != walk:
+        msg = f"position was issued for walk {issued_for!r}, not {walk!r}"
+        raise ValueError(msg)
+    return int(decoded["k"])
+
+
 def _newest_revision_first(records: list[MemoryRecord]) -> list[MemoryRecord]:
     """ADR-0073 §2's total order: ``last_updated`` descending, ``id`` ascending.
 
@@ -100,6 +227,15 @@ class FakeMemoryStore:
         self._records: dict[str, MemoryRecord] = {}
         self._clock = checked_clock(now, owner="FakeMemoryStore")
         self._resource = SuspendableResource()
+        # The walk's never-reissued order key (ADR-0114 §1). `_sequence` only ever
+        # rises: `delete`, `purge_expired` and `clear` drop entries from `_keys`
+        # and none of them touches it, so a number a removed record held is never
+        # handed to a later one and an exhausted walk cannot skip that record.
+        # Positions are recorded as text, as the real stores record them, so "a
+        # position this build cannot use" is one shape across all three.
+        self._keys: dict[str, int] = {}
+        self._sequence = 0
+        self._walks: dict[str, str] = {}
 
     def suspend_next_operation(self) -> LoopSuspension:
         """Hold the next call that enters the modelled resource open inside it.
@@ -187,6 +323,7 @@ class FakeMemoryStore:
         async with self._resource.held():
             self._refuse_cross_kind(snapshot)
             self._records[snapshot.id] = snapshot
+            self._issue_key(snapshot.id)
         return snapshot.id
 
     def _refuse_cross_kind(self, record: MemoryRecord) -> None:
@@ -259,7 +396,21 @@ class FakeMemoryStore:
                 self._refuse_cross_kind(record)
             for record, _ in staged:
                 self._records[record.id] = record
+                self._issue_key(record.id)
         return ids
+
+    def _issue_key(self, record_id: str) -> None:
+        """Give a newly stored record its walk position, leaving an upsert's alone.
+
+        An upsert keeps the key it already holds, which is what the persistent
+        store's ``rowid`` does on the same path: a record revised in place stays
+        where it is in the walk and is not revisited by a cursor that has passed
+        it. That is ADR-0111 §2's named limit, and the three stores agree about it
+        rather than one of them quietly re-queueing the record.
+        """
+        if record_id not in self._keys:
+            self._sequence += 1
+            self._keys[record_id] = self._sequence
 
     async def get(self, record_id: str) -> MemoryRecord | None:
         """Return the record with ``record_id``, or ``None`` if not readable.
@@ -415,16 +566,76 @@ class FakeMemoryStore:
         # query's relevance, and nothing was ranked here (ADR-0073 §2).
         return [record.model_copy(update={"score": None}, deep=True) for record in page]
 
+    async def walk_records(self, walk: str, *, limit: int) -> RecordChunk:
+        """Read the next chunk of ``walk`` without changing anything (ADR-0114 §1).
+
+        Routed through the modelled resource, like every other read (#397).
+
+        Raises:
+            ValueError: ``walk`` is not non-blank encodable text, or ``limit`` is
+                not exactly an ``int`` in ``[1, 2**63)``. Both are checked on the
+                coroutine's first executed line, before the resource is held, so a
+                refused call takes nothing and changes nothing.
+            MemoryStoreError: The injected clock's reading is not a conforming one.
+        """
+        _check_walk_name(walk)
+        _check_walk_limit(limit)
+        async with self._resource.held():
+            now = self._now_utc()
+            after = _resume_key(self._walks.get(walk))
+            # `limit` bounds records *examined*, not records returned: a scan that
+            # ran on until it had `limit` eligible records would be unbounded over
+            # a long ineligible run, which is the hazard ADR-0111 §4 forbids.
+            examined = sorted((key, rid) for rid, key in self._keys.items() if key > after)[:limit]
+            eligible = [
+                self._records[rid].model_copy(deep=True)
+                for _, rid in examined
+                if self._is_readable(self._records[rid], now)
+            ]
+            # Absent exactly when nothing was examined — never merely when nothing
+            # was eligible, which is how a walk crosses a dead range instead of
+            # stalling on it for good.
+            position = _mint_position(walk, examined[-1][0]) if examined else None
+        return RecordChunk(records=tuple(eligible), position=position)
+
+    async def advance_walk(self, walk: str, *, position: WalkPosition) -> None:
+        """Record how far ``walk`` has reached (ADR-0114 §3).
+
+        Raises:
+            ValueError: ``walk`` is not non-blank encodable text, or ``position``
+                is malformed or was issued for a different walk. Both are checked
+                before the resource is held, so every recorded position — this
+                walk's and every sibling's — is left exactly as it was.
+        """
+        _check_walk_name(walk)
+        key = _read_position(walk, position)
+        async with self._resource.held():
+            # Never backwards, and not an error: a walk is at-least-once, so a
+            # resumed run can legitimately hold a stale position. Repeated work is
+            # the cost; records skipped forever would be the alternative.
+            if key > _resume_key(self._walks.get(walk)):
+                self._walks[walk] = str(key)
+
     async def delete(self, record_id: str) -> bool:
         """Delete one record, returning whether it existed."""
         async with self._resource.held():
+            self._keys.pop(record_id, None)
             return self._records.pop(record_id, None) is not None
 
     async def clear(self) -> int:
-        """Delete every record, returning the number removed."""
+        """Delete every record, returning the number removed.
+
+        Discards every recorded walk position in the same operation (ADR-0114 §4),
+        and deliberately does **not** reset ``_sequence``: a walker can be holding
+        a chunk's position across this call and will then advance to a position
+        discarded here, which is harmless only because every record added
+        afterwards is issued a key above it.
+        """
         async with self._resource.held():
             count = len(self._records)
             self._records.clear()
+            self._keys.clear()
+            self._walks.clear()
         return count
 
     async def export(self) -> list[MemoryRecord]:
@@ -454,4 +665,5 @@ class FakeMemoryStore:
             ]
             for rid in expired:
                 del self._records[rid]
+                self._keys.pop(rid, None)
         return len(expired)

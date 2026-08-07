@@ -613,6 +613,7 @@ class _ARealMemoryStore:
         lambda *a: None
     )
     get_many = write_atomic = staticmethod(lambda *a: None)
+    walk_records = advance_walk = staticmethod(lambda *a, **k: None)
 
 
 class _DecoyFixture:

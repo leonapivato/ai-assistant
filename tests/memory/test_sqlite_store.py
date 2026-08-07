@@ -1106,6 +1106,102 @@ def _write_legacy_db(
     legacy.close()
 
 
+def _write_pre_walk_db(path: Path, records: list[MemoryRecord], *, drop_top: bool = True) -> None:
+    """Create a database on the schema that immediately precedes the walk surface.
+
+    Every column current — ``INTEGER`` epoch lifecycle columns and
+    ``about_person`` — so ``_migrate_records`` returns early and
+    ``_migrate_walk_key`` is the only migration under test. What is missing is the
+    one thing ADR-0114 §1 needs: ``rowid INTEGER PRIMARY KEY`` **without**
+    ``AUTOINCREMENT``, which is what every deployment carries today.
+
+    ``drop_top`` deletes the highest-positioned record before the migration runs,
+    which is the case ADR-0114 §8 requires and the only one that can fail: with a
+    bare rowid, SQLite reissues that released number to the next insert, so a walk
+    that has already run to exhaustion never returns the new record. A store
+    created fresh under the new schema cannot fail on this.
+    """
+    legacy = sqlite3.connect(path)
+    legacy.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    legacy.executemany(
+        "INSERT INTO meta(key, value) VALUES (?, ?)",
+        [("embedding_model", "hashing-8"), ("dimensions", "8")],
+    )
+    legacy.execute(
+        "CREATE TABLE records(rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
+        "kind TEXT NOT NULL, data TEXT NOT NULL, "
+        "expires_at INTEGER, valid_until INTEGER, about_person TEXT)"
+    )
+    legacy.executemany(
+        "INSERT INTO records(id, kind, data) VALUES (?, ?, ?)",
+        [(r.id, r.kind, r.model_dump_json()) for r in records],
+    )
+    if drop_top:
+        legacy.execute("DELETE FROM records WHERE rowid = (SELECT MAX(rowid) FROM records)")
+    legacy.commit()
+    legacy.close()
+
+
+async def test_walk_key_migration_reaches_a_record_added_over_a_gap_at_the_top(
+    tmp_path: Path,
+) -> None:
+    """ADR-0114 §8: the migration clause, over a store that predates the walk surface.
+
+    The sequence that breaks a merely-unique key, run end to end across the
+    migration: a legacy store whose highest-positioned record was deleted before
+    the upgrade, walked to exhaustion, then written to. Without ``AUTOINCREMENT``
+    the new record is issued the freed number, sits below the cursor, and is never
+    returned, never proposed and never mentioned.
+    """
+    db = tmp_path / "pre-walk.db"
+    _write_pre_walk_db(db, [_semantic(str(index), f"legacy {index}") for index in range(1, 4)])
+
+    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    try:
+        first = await store.walk_records("upgrade", limit=10)
+        assert [record.id for record in first.records] == ["1", "2"]
+        assert first.position is not None
+        await store.advance_walk("upgrade", position=first.position)
+        assert (await store.walk_records("upgrade", limit=10)).position is None
+
+        await store.add(_semantic("post", "written after the upgrade"))
+
+        resumed = await store.walk_records("upgrade", limit=10)
+        assert [record.id for record in resumed.records] == ["post"]
+    finally:
+        store.close()
+
+
+async def test_walk_key_migration_leaves_every_existing_rowid_where_it_was(
+    tmp_path: Path,
+) -> None:
+    """ADR-0114 §1: the migration changes how positions are *issued*, not what they are.
+
+    ``records`` and ``vec_records`` are joined by ``rowid`` with no foreign key, so
+    a rebuild that renumbered rows would silently point every stored vector at the
+    wrong record — a defect no read would report and ``search`` would answer
+    wrongly forever.
+    """
+    db = tmp_path / "pre-walk.db"
+    _write_pre_walk_db(
+        db, [_semantic(str(index), f"legacy {index}") for index in range(1, 4)], drop_top=False
+    )
+    before = sqlite3.connect(db)
+    original = dict(before.execute("SELECT id, rowid FROM records").fetchall())
+    before.close()
+
+    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    try:
+        after = dict(store._conn.execute("SELECT id, rowid FROM records").fetchall())
+        assert after == original
+        table_sql = store._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'records'"
+        ).fetchone()[0]
+        assert "AUTOINCREMENT" in table_sql.upper()
+    finally:
+        store.close()
+
+
 def _epoch_or_none(instant: datetime | None) -> float | None:
     return instant.timestamp() if instant is not None else None
 
@@ -1731,6 +1827,22 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
     @pytest.fixture
     def store(self, make_store: Callable[..., SqliteMemoryStore]) -> MemoryStore:
         return make_store()
+
+    async def record_unusable_walk_position(self, store: MemoryStore, walk: str) -> None:
+        """Write a position this build cannot read into ``walk_positions``.
+
+        Reaches past the Protocol on purpose: every position the contract hands out
+        is by construction usable, so ADR-0114 §4's discard-and-restart is reachable
+        only by planting one the way an older or newer build would have left it. The
+        column is ``TEXT`` precisely so a future encoding is storable and this
+        build's response to one is a restart rather than a fault.
+        """
+        assert isinstance(store, SqliteMemoryStore)
+        store._conn.execute(
+            "INSERT INTO walk_positions(walk, position) VALUES (?, ?) "
+            "ON CONFLICT(walk) DO UPDATE SET position = excluded.position",
+            (walk, "written-by-a-build-that-is-not-this-one"),
+        )
 
     @pytest.fixture
     def store_factory(

@@ -155,6 +155,7 @@ if TYPE_CHECKING:
         PermissionRuling,
         PlanExport,
         Question,
+        RecordChunk,
         SourceGrant,
         SourceReading,
         StepTransition,
@@ -162,6 +163,7 @@ if TYPE_CHECKING:
         ToolDefinition,
         ToolResult,
         TurnOutcome,
+        WalkPosition,
     )
 
 
@@ -296,6 +298,16 @@ class MemoryStore(Protocol):
     about one id and about many; :meth:`search` is *retrieval* and :meth:`get_many`
     is neither — it resolves ids the caller already holds, in one snapshot, so a
     batch is internally consistent where a loop of singles is not (ADR-0086 §6).
+
+    A fourth read is the *resumable enumeration* a scheduled job walks:
+    :meth:`walk_records` returns a chunk in the store's own insertion order and
+    :meth:`advance_walk` records how far a named walk has reached (ADR-0114).
+    They are two operations rather than one on purpose — reading never advances
+    anything — so a caller can make a chunk's effects durable *between* them,
+    which is the ordering ADR-0111 §3 obliges and which a combined operation would
+    make unexpressible. Neither is a retrieval: the walk ranks nothing and its
+    order is a position rather than a judgement of relevance, so it is no part of
+    what ADR-0112 governs.
 
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060). How :meth:`add` and :meth:`write_atomic` observe the records they
@@ -585,6 +597,179 @@ class MemoryStore(Protocol):
         """
         ...
 
+    async def walk_records(self, walk: NonBlankEncodableText, *, limit: int) -> RecordChunk:
+        """Read the next chunk of a named walk, changing nothing (ADR-0114 §1).
+
+        The resumable enumeration a scheduled job walks. It examines at most
+        ``limit`` records **in the store's own insertion order**, beginning
+        strictly after the position recorded for ``walk``, and returns the
+        eligible ones among them together with the position of the last record it
+        **examined**.
+
+        **It writes nothing.** Two consecutive reads with no intervening
+        :meth:`advance_walk` return the same records. Splitting the read from the
+        advance is what lets a caller put its effects *between* the two, which is
+        the ordering ADR-0111 §3 obliges; an operation that advanced as it read
+        would make a cursor leading its effects the only available behaviour.
+
+        **The order is keyed on a value the store issues once per stored record,
+        and never reissues.** Every key a store issues is greater than every key
+        it has already issued, and no key is reissued after the record holding it
+        is deleted, purged, retired or superseded, or after the store is emptied.
+        A merely *unique* key is not enough: releasing a deleted top record's
+        number to the next insert hands a new record a position an exhausted walk
+        has already passed, so the walk never returns it, reports success, and
+        nothing downstream knows the record existed. That guarantee runs from the
+        moment a store begins issuing keys under this contract, and the first key
+        it issues then is greater than every key present at that moment; keys
+        issued before the store carried a walk surface are outside it, and no
+        implementation is obliged to know what they were.
+
+        **The read takes no caller filter, and it honours the store's own
+        lifecycle predicate.** Those are different things and they fail in
+        opposite directions. A caller filter would make a position mean "the last
+        record matching *this* filter", so two callers sharing a name with
+        different filters would advance each other past unexamined records. The
+        lifecycle predicate cannot do that: it is fixed and identical for every
+        caller of every walk. Any selection over a chunk is the caller's.
+
+        **Only records retained *and* live at the instant it reads are
+        yielded** — the same predicate :meth:`get` and :meth:`search` apply, on
+        both ends of the validity window. An expired record is never yielded and
+        neither is one whose window is closed or not yet open. The instant is read
+        **once per chunk**, so one chunk is judged against one reading of the
+        clock. Omitting this would make the walk the one read in the store that
+        breaches retention, handing expired content — or a belief the user has
+        already corrected — to a producer that will write a *new* durable belief
+        from it (ADR-0045 §6). The walk sides with ``get``/``search`` rather than
+        with :meth:`export`, because everything that *derives* new content reads
+        the live set.
+
+        A record whose eligibility changes *below* the cursor is not revisited,
+        which is ADR-0111 §2's named limit: a window that opens after the walk
+        examined its record is never reached. A job whose correctness requires
+        reconsidering changed rows cannot express its selection as a high-water
+        mark alone, and this contract gives it no other mechanism.
+
+        Args:
+            walk: Names the walk whose position this read resumes from. Opaque to
+                the store: never interpreted, never normalised, and never shared
+                between two names, so two names differing only in case or spacing
+                are two walks. **Validated on entry**, before it reaches a query, a
+                key or any stored state — the annotation states the intent and the
+                entry check is what enforces it, because these aliases are pydantic
+                validators and Python runs nothing for a plain method call.
+            limit: Maximum number of records to **examine**, not to return. The
+                bound is on examination because a read that scanned forward until
+                it had ``limit`` *eligible* records would have no bound at all: a
+                long run of expired or window-closed rows makes one call walk
+                arbitrarily many of them, which is the unbounded chunk ADR-0111 §4
+                forbids.
+
+        Returns:
+            The chunk: its eligible records in walk order, and the position of the
+            last record examined. That position is absent **exactly when there was
+            nothing left to examine**, and that — never an empty record list — is
+            how a caller learns the walk is exhausted. A chunk may carry a position
+            and no records, meaning the range it examined held nothing eligible;
+            a caller advances on it exactly as on any other.
+
+        Raises:
+            ValueError: If ``walk`` is not
+                :data:`~ai_assistant.core.types.NonBlankEncodableText` — empty,
+                whitespace-only, or unencodable. Or if ``limit`` is not **exactly
+                an ``int``** or falls outside ``1 <= limit < 2**63``. Every
+                implementation checks both on entry, before the value reaches a
+                query or a slice, so the refusal is the same refusal on every
+                backend and none substitutes a different bound. ``bool`` is
+                refused with the rest: it is an ``int`` subclass, so ``True``
+                satisfies every range comparison and would quietly become a
+                one-record chunk. **Zero is refused rather than answering with an
+                empty page** as :meth:`list_beliefs` does, because here it is not
+                harmless: a chunk that examines nothing carries no position, and an
+                absent position *means the walk is exhausted* — so a job
+                configured to a zero chunk would report a completed walk having
+                read nothing at all. ``-1`` is refused for the mirror reason
+                :meth:`list_beliefs` gives: SQLite reads ``LIMIT -1`` as *no limit*,
+                so a forwarded argument returns the whole store from inside a job
+                whose entire purpose is to be bounded.
+            MemoryStoreError: If the store cannot be read, or a stored record is
+                corrupt.
+        """
+        ...
+
+    async def advance_walk(self, walk: NonBlankEncodableText, *, position: WalkPosition) -> None:
+        """Record how far a named walk has reached (ADR-0114 §3).
+
+        Writes the given position durably before returning, so a walk that has
+        advanced has advanced whatever follows.
+
+        **The caller advances only to a position from a chunk whose effects are
+        already durable.** That is a caller-ordering precondition **no store can
+        enforce** — the advance is a call like any other, and the store sees the
+        same two calls in the same order whether or not the work between them
+        landed. So every lane that ships a walking job ships a test for it: a
+        failure or a cancellation arriving after the chunk's work has begun and
+        before its effects are durable must leave the walk's recorded position
+        **unchanged**, so the chunk is re-processed on the next run. A job tested
+        only on its success path satisfies no clause of this contract.
+
+        **The cursor never moves backwards.** An advance to a position at or
+        behind the one recorded for that walk leaves the recorded position
+        unchanged and is **not an error**. That makes the caller's mistakes
+        harmless in the safe direction: a scheduled walk is at-least-once, so a
+        resumed run can legitimately hold a stale position, and under this rule
+        the worst outcome is repeated work — which the gate already folds into a
+        ``REINFORCE`` rather than a duplicate (ADR-0077 §8). Without it the worst
+        outcome is a walk rewound past records the *next* advance skips forever.
+        Only the store can honour this, because only the store can compare two
+        positions — the same fact that makes a position's opacity cost the caller
+        nothing.
+
+        **No transaction handle and no record writes cross this seam.** Every
+        producer the corpus has reaches memory through the orchestration write
+        stage (ADR-0078 §3, ADR-0106 §6), so a walker's effects are committed
+        inside a transaction it does not hold, and a ``writes=`` parameter here
+        would be surface with no consumer. What that costs is exactly one repeated
+        chunk on a crash between a chunk's effects and its advance, which
+        ADR-0111 §3 ratifies as the designed cost.
+
+        Args:
+            walk: Names the walk whose position is recorded. Opaque, as on
+                :meth:`walk_records`, and validated on entry the same way.
+            position: A position **this walk's** chunk read returned. The only
+                admissible source is that read and the only admissible use is this
+                call.
+
+        Raises:
+            ValueError: If ``walk`` is not
+                :data:`~ai_assistant.core.types.NonBlankEncodableText`. Or if
+                ``position`` is one the store can tell is invalid **from the value
+                itself** — a malformed or missing token, or a value that is not a
+                :class:`~ai_assistant.core.types.WalkPosition` at all, ``None``
+                included. An implementation may not reach a different exception
+                class by reading a field before it validates:
+                ``AttributeError``, ``TypeError`` and a bare ``KeyError`` are
+                breaches of this clause rather than variants of it, and
+                ``model_construct`` builds an instance *without* running the
+                model's validator, so a malformed token does reach the store with
+                the declared type satisfied. Or if ``position`` is bound to a
+                **different** walk — a defined refusal on every backend rather
+                than a silent no-op, since an implementation makes the bound walk
+                recoverable from the token it hands out. That is the whole of what
+                the store detects: a well-formed token naming the right walk that
+                no chunk read ever issued is a breach of opacity by the caller,
+                and no implementation is obliged to notice one.
+            MemoryStoreError: If the store cannot be written. A caller's bad
+                argument is never reported as one.
+
+        Note:
+            Each refusal above leaves **every** recorded walk position exactly as
+            it was — the named walk's and every sibling's. A refused call changes
+            nothing.
+        """
+        ...
+
     async def delete(self, record_id: str) -> bool:
         """Delete one record.
 
@@ -601,6 +786,28 @@ class MemoryStore(Protocol):
 
         This empties the store's own (Tier 1) rows only; it is not a
         whole-system erase (ADR-0007 §4).
+
+        **Every recorded walk position is discarded with the records, in the same
+        operation** (ADR-0114 §4). No walk resumes from a position naming rows a
+        ``clear`` removed; leaving them would produce exactly the cursor-disagrees
+        -with-store state ADR-0111 §7 has to detect, and not creating it is better
+        than detecting it.
+
+        **The key sequence is *not* reset**, and the two halves together are what
+        make an in-flight walk safe across a ``clear``. A walker can be holding a
+        chunk's position when another caller empties the store, and it will then
+        advance to a position this method has already discarded; that advance is
+        the first for its walk, so nothing compares against it and the store
+        records it. That is harmless **only** because every record added after the
+        ``clear`` is issued a key above every key issued before it, so the stale
+        position names a point below all of them and the next chunk returns every
+        one. An implementation that reset its high-water mark here would instead
+        leave that stale position sitting *above* live records that would never be
+        read again.
+
+        Returns:
+            The number of records removed. Discarded walk positions are not
+            counted: they are operational state rather than records.
         """
         ...
 
@@ -614,6 +821,11 @@ class MemoryStore(Protocol):
         export must include it (ADR-0045 §6, amending ADR-0007 §3). Only *expired*
         records (past ``expires_at``) are excluded: retention still wins over
         history, so a record the system promised to forget cannot resurface here.
+
+        **Walk positions are absent**, and nothing about one is Tier 1: a position
+        is a row position rather than content, which ADR-0111 §9 classifies as
+        Tier 2. This is stated because ``export`` is ADR-0007's data-rights
+        surface and a lane extending it would have no reason to know that.
         """
         ...
 

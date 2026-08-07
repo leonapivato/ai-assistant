@@ -48,6 +48,7 @@ from ai_assistant.core.types import (
     Provenance,
     SemanticMemory,
     Validity,
+    WalkPosition,
     band_of,
 )
 
@@ -138,6 +139,51 @@ def _preference(
         preference=content,
         provenance=_provenance(source=source, last_updated=last_updated),
     )
+
+
+#: Positions no chunk read could have issued, each reaching a different line of a
+#: careless implementation (ADR-0114 §8). ``model_construct`` bypasses the model's
+#: validator — that is what it is for — so each arrives with the declared type
+#: satisfied, exactly as a real caller's mistake would; building them through
+#: validation would test pydantic rather than the store. The list is exemplary and
+#: the obligation is the general rule: a variant not named here is still refused.
+#: ``S106`` reads ``token=`` as a credential; a walk position is an opaque cursor
+#: into a row order, and ADR-0114 §2 declines to authenticate it at all.
+_MALFORMED_POSITIONS: tuple[object, ...] = (
+    WalkPosition.model_construct(token=""),
+    WalkPosition.model_construct(token="   "),  # noqa: S106 — a row position, not a secret
+    WalkPosition.model_construct(token="\ud800"),  # noqa: S106 — a row position, not a secret
+    WalkPosition.model_construct(),
+    "not-a-position",
+    None,
+)
+_MALFORMED_POSITION_IDS = ("empty", "blank", "surrogate", "no-token", "wrong-type", "none")
+
+#: A well-formed position for the cases where the *name* is what is under test, so
+#: the refusal they assert cannot be the position's. Same ``S106`` note as above.
+_ANY_POSITION = WalkPosition(token="anything")  # noqa: S106 — a row position, not a secret
+
+#: An upper bound on chunk reads in a walk loop, so a store that fails to advance
+#: fails an assertion rather than hanging the suite. Every walk case below holds
+#: fewer than a dozen records, so reaching this bound is a defect by construction.
+_WALK_ROUNDS = 50
+
+
+async def _walk_to_exhaustion(store: MemoryStore, walk: str, *, limit: int) -> list[str]:
+    """Walk ``walk`` to its end, advancing on each chunk, collecting ids in order.
+
+    Advances **after** reading, which is the ordering ADR-0114 §3 obliges of every
+    caller and the whole reason the read and the advance are two operations.
+    """
+    seen: list[str] = []
+    for _ in range(_WALK_ROUNDS):
+        chunk = await store.walk_records(walk, limit=limit)
+        if chunk.position is None:
+            return seen
+        seen.extend(record.id for record in chunk.records)
+        await store.advance_walk(walk, position=chunk.position)
+    msg = f"walk {walk!r} did not exhaust in {_WALK_ROUNDS} chunks — the cursor is not advancing"
+    raise AssertionError(msg)
 
 
 #: What a failure of either input-observation case below means, in one place
@@ -480,6 +526,68 @@ class _ExportOp(_ReadOp):
         return store.export()
 
 
+class _WalkRecordsOp(_ReadOp):
+    """``walk_records`` — ADR-0114's chunk read, its own lock site.
+
+    In for :class:`_ListBeliefsOp`'s reason one contract on: the method holds the
+    connection lock across its own ``_run_to_completion`` like every other read, so
+    leaving it out would preserve exactly the gap #397 is about at the newest read
+    on the surface.
+    """
+
+    name = "walk_records"
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Read one walk's chunk — the call that is cancelled."""
+        return store.walk_records("cancel-a", limit=5)
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Read a second, independent walk's chunk concurrently."""
+        return store.walk_records("cancel-b", limit=5)
+
+
+class _AdvanceWalkOp:
+    """``advance_walk`` — the cursor write, its own lock site.
+
+    A write rather than a read, so it takes the write shape: two *independent*
+    walks, so the concurrent second succeeds whatever the cancelled first's
+    indeterminate effect turns out to be.
+    """
+
+    name = "advance_walk"
+
+    def __init__(self) -> None:
+        """Hold the two positions :meth:`prepare` mints, one per walk."""
+        self._positions: dict[str, WalkPosition] = {}
+
+    async def prepare(self, store: MemoryStore) -> None:
+        """Seed a record and mint each walk its own position.
+
+        Both are minted here rather than inside :meth:`second`, so each of the two
+        calls the case drives enters the resource exactly **once** — the count the
+        scenario asserts, and the reason this op cannot read its own position on
+        the way past.
+        """
+        await store.add(_semantic("cancel-walk", "alpha"))
+        for walk in ("cancel-a", "cancel-b"):
+            chunk = await store.walk_records(walk, limit=5)
+            assert chunk.position is not None
+            self._positions[walk] = chunk.position
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Advance walk A — the call that is cancelled."""
+        return store.advance_walk("cancel-a", position=self._positions["cancel-a"])
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Advance walk B concurrently, from a position of its own."""
+        return store.advance_walk("cancel-b", position=self._positions["cancel-b"])
+
+    async def verify(self, store: MemoryStore) -> None:
+        """The store survived: the record is intact and walk B advanced whole."""
+        assert await store.get("cancel-walk") is not None
+        assert (await store.walk_records("cancel-b", limit=5)).position is None
+
+
 #: Every locked ``MemoryStore`` operation ADR-0060's case is run against: each is a
 #: distinct ``async with self._lock`` site with its own ``_run_to_completion``. The
 #: writes came first (#370); the reads are the same invariant on the other half of
@@ -495,6 +603,8 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _SearchOp,
     _ListBeliefsOp,
     _ExportOp,
+    _WalkRecordsOp,
+    _AdvanceWalkOp,
 )
 
 
@@ -2016,3 +2126,441 @@ class MemoryStoreContract:
             resolved = set(await call)
 
             assert resolved == {"obs-batch-asked"}, _LATE_FILTER
+
+    # --- the resumable walk (ADR-0114 §8) ------------------------------------
+    # Each clause below names the case that can fail, because each has a wrong
+    # implementation the neighbouring test waves through. A suite that only walks
+    # a store nobody writes to passes an offset masquerading as a position, which
+    # is the single defect ADR-0111 §2 spends its longest paragraph on; one that
+    # never hands the store an unusable position passes an implementation that
+    # raises, which under ADR-0111 §7 would take the hub down over scaffolding.
+
+    async def record_unusable_walk_position(self, store: MemoryStore, walk: str) -> None:
+        """Record a position this build cannot use, however this store records one.
+
+        Overridden by every concrete subclass, because *how* a position is stored
+        is each implementation's and the contract deliberately says nothing about
+        it. The obligation the hook serves is universal — ADR-0114 §4 requires
+        discard-and-restart rather than a raise — and it is unreachable from the
+        outside, since every position the Protocol hands out is by construction a
+        usable one.
+        """
+        raise NotImplementedError
+
+    async def test_a_walk_with_no_recorded_position_starts_at_the_first_record(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0114 §4: no recorded position means the walk has not started.
+
+        Never a sentinel — there is no integer below the order's floor, and the
+        obvious choice silently skips every record at or below it (ADR-0104 §2).
+        """
+        await store.add(_semantic("w-first", "alpha"))
+        await store.add(_semantic("w-second", "bravo"))
+
+        chunk = await store.walk_records("fresh", limit=10)
+
+        assert [record.id for record in chunk.records] == ["w-first", "w-second"]
+
+    async def test_reading_a_chunk_twice_without_advancing_returns_the_same_records(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0114 §1: the chunk read writes nothing.
+
+        Fails an implementation that advances as it reads — the convenient shape,
+        and the one that puts the cursor permanently ahead of the caller's effects
+        in the direction ADR-0111 §3 forbids.
+        """
+        await store.add(_semantic("w-a", "alpha"))
+        await store.add(_semantic("w-b", "bravo"))
+
+        first = await store.walk_records("twice", limit=1)
+        second = await store.walk_records("twice", limit=1)
+
+        assert [r.id for r in first.records] == [r.id for r in second.records] == ["w-a"]
+        assert first.position == second.position
+
+    async def test_advancing_moves_the_walk_to_the_following_records(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0114 §1, §3: a walk resumes strictly after the recorded position."""
+        for index in range(4):
+            await store.add(_semantic(f"w-{index}", "alpha"))
+
+        first = await store.walk_records("forward", limit=2)
+        assert first.position is not None
+        await store.advance_walk("forward", position=first.position)
+        second = await store.walk_records("forward", limit=2)
+
+        assert [r.id for r in first.records] == ["w-0", "w-1"]
+        assert [r.id for r in second.records] == ["w-2", "w-3"]
+
+    async def test_a_walk_reaches_every_record_exactly_once(self, store: MemoryStore) -> None:
+        """ADR-0114 §1: the order is total, and no chunk repeats another's record."""
+        expected = [f"w-{index:02d}" for index in range(7)]
+        for record_id in expected:
+            await store.add(_semantic(record_id, "alpha"))
+
+        seen = await _walk_to_exhaustion(store, "once", limit=2)
+
+        assert seen == expected
+
+    async def test_advancing_to_a_position_at_or_behind_the_recorded_one_is_a_no_op(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0114 §3: the cursor never moves backwards, and that is not an error.
+
+        A walk is at-least-once, so a resumed run can legitimately hold a stale
+        position. Under this clause the worst outcome is repeated work; without it
+        the worst outcome is a walk rewound past records the *next* advance skips
+        forever, and the two costs are not comparable.
+        """
+        for index in range(4):
+            await store.add(_semantic(f"w-{index}", "alpha"))
+        first = await store.walk_records("backwards", limit=1)
+        assert first.position is not None
+        await store.advance_walk("backwards", position=first.position)
+        second = await store.walk_records("backwards", limit=1)
+        assert second.position is not None
+        await store.advance_walk("backwards", position=second.position)
+
+        await store.advance_walk("backwards", position=first.position)  # behind
+        await store.advance_walk("backwards", position=second.position)  # equal
+
+        resumed = await store.walk_records("backwards", limit=1)
+        assert [r.id for r in resumed.records] == ["w-2"]
+
+    async def test_two_walk_names_hold_independent_positions(self, store: MemoryStore) -> None:
+        """ADR-0114 §5: a position is per walk name, and names are never merged.
+
+        Two names differing only in case are two walks: a store that quietly
+        normalised them would merge two jobs' positions and skip records for one.
+        """
+        for index in range(3):
+            await store.add(_semantic(f"w-{index}", "alpha"))
+        chunk = await store.walk_records("Job", limit=2)
+        assert chunk.position is not None
+        await store.advance_walk("Job", position=chunk.position)
+
+        advanced = await store.walk_records("Job", limit=3)
+        untouched = await store.walk_records("job", limit=3)
+
+        assert [r.id for r in advanced.records] == ["w-2"]
+        assert [r.id for r in untouched.records] == ["w-0", "w-1", "w-2"]
+
+    async def test_a_chunk_carries_no_position_exactly_when_it_examined_nothing(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0114 §1: an absent position is the exhaustion signal, not an empty list."""
+        empty = await store.walk_records("exhaustion", limit=5)
+        assert empty.position is None
+        assert empty.records == ()
+
+        await store.add(_semantic("w-only", "alpha"))
+        held = await store.walk_records("exhaustion", limit=5)
+        assert held.position is not None
+        await store.advance_walk("exhaustion", position=held.position)
+
+        assert (await store.walk_records("exhaustion", limit=5)).position is None
+
+    async def test_clear_leaves_no_walk_resumable(self, store: MemoryStore) -> None:
+        """ADR-0114 §4: ``clear`` discards every recorded position with the records.
+
+        Leaving them produces exactly the cursor-disagrees-with-store state
+        ADR-0111 §7 has to detect, and not creating it beats detecting it.
+        """
+        for index in range(3):
+            await store.add(_semantic(f"w-{index}", "alpha"))
+        chunk = await store.walk_records("cleared", limit=2)
+        assert chunk.position is not None
+        await store.advance_walk("cleared", position=chunk.position)
+
+        await store.clear()
+        await store.add(_semantic("w-after", "alpha"))
+
+        resumed = await store.walk_records("cleared", limit=5)
+        assert [r.id for r in resumed.records] == ["w-after"]
+
+    async def test_clear_does_not_reset_the_key_sequence(self, store: MemoryStore) -> None:
+        """ADR-0114 §4, §8: a ``clear`` must not rewind the high-water mark.
+
+        The half that makes an in-flight walk safe across a ``clear``. A walker
+        holding a chunk's position when another caller empties the store will
+        advance to a position ``clear`` already discarded, and nothing compares
+        against it because the walk now has none — harmless *only* because every
+        record added afterwards is issued a key above it. An implementation that
+        reset its mark passes every other clause here and fails this one, leaving
+        that stale position sitting above live records no walk would read again.
+        """
+        for index in range(3):
+            await store.add(_semantic(f"w-{index}", "alpha"))
+        held = await store.walk_records("survivor", limit=3)
+        assert held.position is not None
+
+        await store.clear()
+        await store.add(_semantic("w-post-clear", "alpha"))
+        await store.advance_walk("survivor", position=held.position)  # the stale advance
+
+        resumed = await store.walk_records("survivor", limit=5)
+        assert [r.id for r in resumed.records] == ["w-post-clear"]
+
+    async def test_a_walk_restarts_rather_than_raising_on_an_unusable_position(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0114 §4, §8: an unusable cursor is discarded, never a state fault.
+
+        Fails an implementation that treats one as a fault, which under ADR-0111
+        §7 would take a resident process down over scaffolding — a cursor holds no
+        evidence and answers no query, so discarding one returns nothing wrong to
+        any client.
+        """
+        await store.add(_semantic("w-a", "alpha"))
+        await store.add(_semantic("w-b", "bravo"))
+        await self.record_unusable_walk_position(store, "damaged")
+
+        chunk = await store.walk_records("damaged", limit=5)
+
+        assert [r.id for r in chunk.records] == ["w-a", "w-b"]
+
+    async def test_a_record_added_mid_walk_is_reached_without_shifting_the_position(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0114 §8: fails an implementation that records an offset and calls it a position.
+
+        An offset is a count into a result set, so a record inserted below it moves
+        every later record's number — the defect ADR-0111 §2 spends its longest
+        paragraph on, and one a suite that only walks a static store never sees.
+        """
+        await store.add(_semantic("w-0", "alpha"))
+        await store.add(_semantic("w-1", "alpha"))
+        chunk = await store.walk_records("growing", limit=2)
+        assert chunk.position is not None
+        await store.advance_walk("growing", position=chunk.position)
+
+        await store.add(_semantic("w-2", "alpha"))
+
+        assert [r.id for r in (await store.walk_records("growing", limit=5)).records] == ["w-2"]
+
+    async def test_a_key_is_never_reissued_after_a_delete(self, store: MemoryStore) -> None:
+        """ADR-0114 §1, §8: the sequence that breaks a merely-unique key.
+
+        Walk to the end, delete the record holding the highest position, add
+        another, and the walk must reach it. A bare SQLite ``rowid`` releases the
+        deleted number to the next insert, so the new record is issued a position
+        the walk has already passed, never returned, and never mentioned — the
+        silent skip arriving through the one axis ADR-0111 §2 named as safe.
+        """
+        await store.add(_semantic("w-0", "alpha"))
+        await store.add(_semantic("w-top", "alpha"))
+        assert await _walk_to_exhaustion(store, "reissue", limit=5) == ["w-0", "w-top"]
+
+        assert await store.delete("w-top") is True
+        await store.add(_semantic("w-new", "alpha"))
+
+        assert [r.id for r in (await store.walk_records("reissue", limit=5)).records] == ["w-new"]
+
+    async def test_a_key_is_never_reissued_after_a_purge(self, store: MemoryStore) -> None:
+        """ADR-0114 §8: the same sequence reached through ``purge_expired``.
+
+        Run for its own door because ``purge_expired`` reclaims rows on a path
+        ``delete`` does not, and a store that got one right can get the other
+        wrong. Letting the newest expiring record be reclaimed is ordinary rather
+        than exotic, which is why the clause names both.
+        """
+        await store.add(_semantic("w-0", "alpha"))
+        await store.add(_semantic("w-top", "alpha", expires_at=_LONG_AGO))
+        assert await _walk_to_exhaustion(store, "purged", limit=5) == ["w-0"]
+
+        assert await store.purge_expired() == 1
+        await store.add(_semantic("w-new", "alpha"))
+
+        assert [r.id for r in (await store.walk_records("purged", limit=5)).records] == ["w-new"]
+
+    async def test_the_walk_never_yields_an_expired_record(self, store: MemoryStore) -> None:
+        """ADR-0114 §1: retention binds the walk exactly as it binds ``get``/``search``.
+
+        Otherwise this is the one read in the store that breaches retention, and
+        it hands expired content to a producer that writes a *new* durable belief
+        from it (ADR-0045 §6).
+        """
+        await store.add(_semantic("w-gone", "alpha", expires_at=_LONG_AGO))
+        await store.add(_semantic("w-live", "alpha"))
+
+        chunk = await store.walk_records("retained", limit=5)
+
+        assert [r.id for r in chunk.records] == ["w-live"]
+
+    async def test_the_walk_never_yields_a_record_outside_its_validity_window(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0114 §1: both ends of the window, as ``get`` and ``search`` enforce them.
+
+        A window-closed record is a belief the user has already corrected; a
+        not-yet-open one is not yet believed. Handing either to a consolidator
+        resurrects retired content through the one door nobody was watching.
+        """
+        await store.add(_semantic("w-closed", "alpha", validity=Validity(valid_until=_LONG_AGO)))
+        await store.add(_semantic("w-unopened", "alpha", validity=Validity(valid_from=_FAR_FUTURE)))
+        await store.add(_semantic("w-live", "alpha"))
+
+        chunk = await store.walk_records("windowed", limit=5)
+
+        assert [r.id for r in chunk.records] == ["w-live"]
+
+    async def test_a_wholly_ineligible_stretch_yields_a_chunk_that_still_carries_a_position(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0114 §8: a dead range advances rather than stalling the walk for good.
+
+        Fails an implementation that returns no position for a range holding
+        nothing eligible: a caller reading that as exhaustion stops short forever,
+        and one that re-read without advancing would rescan the range every run.
+        """
+        for index in range(3):
+            await store.add(_semantic(f"w-dead-{index}", "alpha", expires_at=_LONG_AGO))
+        await store.add(_semantic("w-live", "alpha"))
+
+        dead = await store.walk_records("deadrange", limit=3)
+        assert dead.records == ()
+        assert dead.position is not None
+        await store.advance_walk("deadrange", position=dead.position)
+
+        beyond = await store.walk_records("deadrange", limit=3)
+        assert [r.id for r in beyond.records] == ["w-live"]
+
+    async def test_the_chunk_bound_counts_records_examined_not_records_returned(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0114 §1, §8: the bound is on examination, which ADR-0111 §4 forces.
+
+        An implementation that scanned on until it had ``limit`` *eligible*
+        records passes every other clause here and has no bound at all: ``limit=1``
+        over an all-ineligible tail scans to the end of the store, holding the
+        serial loop for as long as that takes with no figure in ``Settings`` that
+        would say so.
+        """
+        for index in range(5):
+            await store.add(_semantic(f"w-dead-{index}", "alpha", expires_at=_LONG_AGO))
+        await store.add(_semantic("w-live", "alpha"))
+
+        chunks = 0
+        seen: list[str] = []
+        for _ in range(_WALK_ROUNDS):
+            chunk = await store.walk_records("bounded", limit=2)
+            if chunk.position is None:
+                break
+            chunks += 1
+            seen.extend(record.id for record in chunk.records)
+            await store.advance_walk("bounded", position=chunk.position)
+
+        # Six records, two examined per chunk: three chunks, never one long scan.
+        assert chunks == 3
+        assert seen == ["w-live"]
+
+    @pytest.mark.parametrize("walk", ["", "   ", "\ud800"], ids=["empty", "blank", "surrogate"])
+    async def test_both_walk_operations_refuse_an_inadmissible_name(
+        self, store: MemoryStore, walk: str
+    ) -> None:
+        """ADR-0114 §5, §6a: the same ``ValueError`` on every backend, from both doors.
+
+        Called directly rather than through a validated model, which is how every
+        caller reaches it: these aliases are pydantic validators and Python runs
+        nothing for an ordinary method call, so the entry check is the whole of the
+        enforcement. Without it SQLite raises out of its driver on a lone surrogate
+        while an in-memory store accepts it happily.
+        """
+        with pytest.raises(ValueError, match="walk name"):
+            await store.walk_records(walk, limit=5)
+        with pytest.raises(ValueError, match="walk name"):
+            await store.advance_walk(walk, position=_ANY_POSITION)
+
+    @pytest.mark.parametrize(
+        "limit",
+        [-1, 0, 2**63, True, 1.5, "5", None],
+        ids=["negative", "zero", "over-wide", "bool", "float", "str", "none"],
+    )
+    async def test_the_chunk_read_refuses_an_inadmissible_limit(
+        self, store: MemoryStore, limit: object
+    ) -> None:
+        """ADR-0114 §6, §6a: exactly an ``int`` in ``[1, 2**63)``, refused not clamped.
+
+        Run against a **non-empty, unexhausted** walk, because that is what makes
+        the zero case able to fail: a chunk that examines nothing carries no
+        position, and an absent position *means the walk is exhausted*, so a store
+        that accepted ``limit=0`` would answer with the exact shape telling a
+        caller its walk was finished having read nothing at all.
+
+        ``True`` is the case that matters most and the one a reader would not think
+        to write: ``bool`` is an ``int`` subclass, so it satisfies every range
+        comparison and would quietly become a one-record chunk. ``-1`` is not
+        symmetric with the over-wide end and only one of them looks dangerous —
+        SQLite reads ``LIMIT -1`` as *no limit*, so a forwarded argument returns
+        the whole store from inside a job whose entire purpose is to be bounded.
+        """
+        await store.add(_semantic("w-present", "alpha"))
+
+        with pytest.raises(ValueError, match="limit"):
+            await store.walk_records("bounds", limit=limit)  # type: ignore[arg-type] # the point
+
+    async def test_the_advance_refuses_another_walks_position_and_changes_nothing(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0114 §2, §8: the cross-walk refusal, as *no observable change at all*.
+
+        Run against a walk that **already holds a position**, and asserted on the
+        next chunk rather than on the recorded position, because the two weaker
+        forms each pass a real defect. Against a fresh ``B`` the case cannot fail
+        at all — ``B`` has no position to lose. Asserting only that ``B`` resumes
+        *after* its prior position passes an implementation that writes ``A``'s
+        position and then raises, since a cursor dragged from 20 to 50 is still
+        strictly after 20 while positions 21-50 are gone.
+        """
+        for index in range(6):
+            await store.add(_semantic(f"w-{index}", "alpha"))
+        far = await store.walk_records("A", limit=5)
+        assert far.position is not None
+        await store.advance_walk("A", position=far.position)
+        near = await store.walk_records("B", limit=1)
+        assert near.position is not None
+        await store.advance_walk("B", position=near.position)
+        kept = await store.walk_records("B", limit=2)
+
+        with pytest.raises(ValueError, match="issued for walk"):
+            await store.advance_walk("B", position=far.position)
+
+        assert await store.walk_records("B", limit=2) == kept
+
+    @pytest.mark.parametrize("position", _MALFORMED_POSITIONS, ids=_MALFORMED_POSITION_IDS)
+    async def test_the_advance_refuses_an_invalid_position_and_disturbs_no_walk(
+        self, store: MemoryStore, position: object
+    ) -> None:
+        """ADR-0114 §6a, §8: general over malformation, and every recorded position survives.
+
+        ``model_construct`` bypasses the model's validator — that is what it is for
+        — so each of these reaches the store with the declared type satisfied,
+        exactly as a real caller's mistake would; building the position through
+        validation would test pydantic rather than the store. Each shape reaches a
+        different line of a careless implementation: reading ``position.token``
+        before validating raises ``AttributeError``, and an ``isinstance``-then-read
+        guard passes every case whose token merely has the wrong *value*. Those are
+        breaches of §6a rather than variants of it, which is why the assertion is
+        on ``ValueError`` and nothing wider.
+
+        **A second, independently progressed walk is watched alongside**, because
+        §6a says *every* recorded position survives a refusal and a test watching
+        only the named walk passes an implementation that disturbs a sibling's.
+        """
+        for index in range(6):
+            await store.add(_semantic(f"w-{index}", "alpha"))
+        for name, size in (("named", 2), ("sibling", 3)):
+            chunk = await store.walk_records(name, limit=size)
+            assert chunk.position is not None
+            await store.advance_walk(name, position=chunk.position)
+        kept_named = await store.walk_records("named", limit=9)
+        kept_sibling = await store.walk_records("sibling", limit=9)
+
+        with pytest.raises(ValueError):  # noqa: PT011 — the class is the obligation
+            await store.advance_walk("named", position=position)  # type: ignore[arg-type] # the point
+
+        assert await store.walk_records("named", limit=9) == kept_named
+        assert await store.walk_records("sibling", limit=9) == kept_sibling
