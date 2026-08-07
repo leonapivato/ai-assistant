@@ -39,6 +39,7 @@ from ai_assistant.models import (
 )
 from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import (
+    ConsolidationStage,
     ConversationLifecycle,
     Engine,
     GrantOperations,
@@ -475,6 +476,38 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
                 None
                 if ingestion_reader is None
                 else IngestionStage(reader=ingestion_reader, writes=writes, grants=grants)
+            ),
+            # Leg 7's consolidation stage (ADR-0106, ADR-0111, ADR-0114), over the
+            # *same* write stage the three producers above use and the *same*
+            # memory store it walks. Both are composition-root obligations no type
+            # expresses (ADR-0028 §4): a second write stage would rule `ASK_USER` on
+            # a thousand consolidations and park not one question, and a second
+            # store would have it propose beliefs citing records the write path
+            # cannot resolve — which ADR-0114's Alternatives give as the decisive
+            # reason the walk sits *on* `MemoryStore` rather than beside it.
+            #
+            # **The observer's provider, deliberately reused.** ADR-0077 §3's
+            # no-fallback rule is what this producer needs and it is exactly what
+            # `_build_observer_provider` builds — one named route that never falls
+            # back — and the reasoning reads here with more force: a consolidation
+            # prompt carries a whole chunk of stored records, and the work is
+            # deferrable by construction, because a run that fails does not record
+            # its chunk as done. A second `consolidation_model` family would be
+            # config surface with no decision behind it; ADR-0106 §12 leaves this
+            # job's quality parameters to leg 8's measurement.
+            #
+            # **Always wired, unlike `ingestion` above**, because nothing about it
+            # is conditional on a source or a grant: the job is armed by its
+            # interval alone, which is `None` until an operator sets it. The two
+            # bounds are ADR-0111 §4's `Settings` fields, so the delay this job can
+            # impose on a sibling is a figure an operator can read off the
+            # configuration.
+            consolidation=ConsolidationStage(
+                memory=memory,
+                writes=writes,
+                model=observer_model,
+                chunk_size=settings.scheduler_chunk_size,
+                run_budget=settings.scheduler_run_budget,
             ),
             # The four grant operations (ADR-0102 §1, §7), over the *same* store
             # passed to the drivers above — a second store would let a user grant a

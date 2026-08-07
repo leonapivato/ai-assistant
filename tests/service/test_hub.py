@@ -69,6 +69,7 @@ class FakeEngine:
         self.purged = 0
         self.observed = 0
         self.ingested = 0
+        self.consolidated = 0
         #: Run inside ``start()``. Tests use it to signal the process at a point
         #: where the hub's own handlers are certainly installed.
         self.on_start: Callable[[], None] | None = None
@@ -107,6 +108,14 @@ class FakeEngine:
         # façade carries fails the hub's *startup*, not just the job.
         self.ingested += 1
         _marker.info("fake_engine_ingested")
+
+    async def consolidate(self) -> None:
+        # Leg 7's chunked walk (ADR-0106, ADR-0111). Present for `ingest`'s reason:
+        # `jobs_for` builds §7's whole table before filtering it by interval, so a
+        # stand-in missing a method the real façade carries fails the hub's
+        # *startup* rather than only the job it would have armed.
+        self.consolidated += 1
+        _marker.info("fake_engine_consolidated")
 
     async def aclose(self) -> None:
         self.closed += 1
