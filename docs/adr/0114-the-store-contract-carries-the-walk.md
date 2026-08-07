@@ -459,6 +459,20 @@ that line beside the appended dated note.
   above). ADR-0083 §15's rule covers this shape: "Examining a revisit condition and
   finding it unmet changes nothing." The fifteen-method surface is neither widened
   nor narrowed.
+- **ADR-0112.** It rules what *orders* a retrieval and refuses currency any part
+  in it. The chunk read of §1 ranks nothing: it yields records in the store's own
+  insertion order, which is a position rather than a judgement of relevance, and
+  §2's opacity keeps it from being read as one. No clause about ordering is
+  engaged, widened or narrowed, and this ADR grants the walk no retrieval role —
+  the position ADR-0106 §8 took for the taint marker, for the same reason.
+- **ADR-0113.** It adds one keyword-only `bands` parameter to `MemoryStore.search`;
+  this ADR adds two operations beside that method and changes neither `search` nor
+  its parameters. The two decisions are disjoint in substance and collide only in
+  the file they land in, which the Consequences below dispose of as a sequencing
+  matter under ADR-0068 §2. Nothing of ADR-0113 is read more widely, and §1's
+  refusal of filters on the *walk* takes no view on filters elsewhere: a relevance
+  read and a resumable enumeration want opposite things, which is ADR-0072 §7's own
+  ground for splitting the two branches in the first place.
 
 **The record is well-formed from the moment it is written**, on ADR-0083 §15's
 ground: "The existence condition is that the naming ADR ships in the same change,
@@ -479,6 +493,20 @@ pay.** `SqliteMemoryStore`, the in-memory store and `FakeMemoryStore` all
 implement the pair, and `MemoryStoreContract` grows the clauses of §8. That is the
 cost of putting the walk on the store contract rather than beside it, and it is
 paid once for every store that will ever be walked by a scheduled job.
+
+**Two contract ADRs now want `MemoryStore`, and their implementations sequence
+rather than race.** ADR-0113 decides one keyword-only `bands` parameter on
+`MemoryStore.search`; this ADR decides two operations beside it. The two are
+disjoint in substance — a filter on a relevance read, and a resumable enumeration
+— and neither needs the other, so the order between them is a scheduling choice.
+What they are not disjoint in is the *file*: both land in `core/protocols.py`,
+which `CONTRIBUTING.md` names as "the one high-collision edit" and which nothing
+mechanical referees. Their implementation lanes therefore sequence as separate
+`core` PRs, which is ADR-0068 §2's rule and the disposition ADR-0106's
+Consequences reached for this same shape one type over, when it and ADR-0103's
+lane both wanted `Provenance`. Whichever lands second rebases onto the first; this
+ADR takes no view on which that is, and neither lane's ratification is a
+precondition on the other's.
 
 **A second walked store will want the same shape and does not inherit it.** #785's
 conversation-index walk is the next one, and §9 leaves it its own decision. If a
