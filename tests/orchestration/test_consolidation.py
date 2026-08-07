@@ -1375,3 +1375,46 @@ async def test_a_reply_that_breaks_the_decoder_is_counted_rather_than_raised(rep
     assert report.discarded_unusable == 1
     assert report.exhausted is True, "the walk advanced rather than the run raising"
     assert (await store.walk_records(CONSOLIDATION_WALK, limit=50)).records == ()
+
+
+async def test_a_decoy_object_before_the_envelope_does_not_lose_the_beliefs() -> None:
+    """ADR-0071's scan: the first *envelope*, not the first object (ADR-0077 §4).
+
+    A model narrating before it answers — ``Here is context {"note": …}`` and then
+    the real reply — is ordinary. An extractor stopping at the first decoded object
+    would hand ``_entries`` a dict with no ``beliefs`` list, count the whole reply
+    as one unusable envelope, and advance the walk having silently lost every
+    belief in it: a consolidation that never happened and that nothing reports.
+
+    ``ModelBackedObserver`` and ``planning.planner`` both prefer the envelope and
+    keep the first object only as a fallback; this is the third extractor and it
+    now matches.
+    """
+    store = await _seeded([_record("r1"), _record("r2")])
+    writes, _ = _gated(store)
+    reply = f'Here is some context {{"note": "thinking out loud"}}\n{_ONE_BELIEF}'
+
+    report = await _stage(store=store, writes=writes, reply=reply).run()
+
+    assert report.proposed == 1, "the decoy must be stepped over, not mistaken for the reply"
+    assert report.discarded_unusable == 0
+    assert len(writes.proposals) == 1
+
+
+async def test_a_reply_with_no_envelope_at_all_is_still_one_unusable_entry() -> None:
+    """The fallback's purpose: an object that is not an envelope is not a free pass.
+
+    Kept as ``first`` so the scan has something to return, and ``_entries`` then
+    refuses it for carrying no ``beliefs`` list — one unusable entry, counted. The
+    two halves matter together: without the fallback a decoy-only reply would read
+    as *no object at all*, which is the same disposition by accident rather than by
+    decision.
+    """
+    store = await _seeded([_record("r1"), _record("r2")])
+    writes, _ = _gated(store)
+
+    report = await _stage(store=store, writes=writes, reply='{"note": "no envelope here"}').run()
+
+    assert report.discarded_unusable == 1
+    assert report.proposed == 0
+    assert report.exhausted is True

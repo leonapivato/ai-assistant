@@ -963,34 +963,55 @@ def _entries(content: str) -> list[object] | None:
 
 
 def _extract_object(content: str) -> dict[str, object] | None:
-    """Decode the first JSON object in ``content``, tolerating surrounding prose.
+    r"""Decode the reply's envelope, tolerating prose and decoy objects around it.
+
+    ADR-0071's ``raw_decode`` scan, in the shape ``ModelBackedObserver`` and
+    ``planning.planner`` already use. **It returns the first object that carries a
+    ``beliefs`` list, not the first object it decodes**, and keeps the first object
+    as a fallback only if no envelope is found. A reply like
+    ``Here is context {"note": "x"}\n{"beliefs": [...]}`` is ordinary — a model
+    narrating before it answers — and an extractor that stopped at ``{"note": "x"}``
+    would discard a perfectly good consolidation and count it unusable, silently
+    losing every belief in it.
+
+    ``index = end`` after a decoded object, so the scan steps *over* a decoy rather
+    than re-entering it one character along; only a miss advances by one.
 
     Bounded by :data:`_MAX_EXTRACTION_MISSES` failed attempts, so a brace-dense
-    reply cannot make this quadratic on the event loop.
+    reply cannot make this quadratic on the event loop. A decoded object never
+    counts as a miss, so any number of valid JSON fragments may precede the
+    envelope.
 
     **A candidate raising for a bounded reason that is not a syntax miss is a miss
     like any other**, so nothing escapes this scan: CPython's digit-limit
     ``ValueError`` on an over-long integer literal, and the ``RecursionError`` a
-    pathologically nested payload raises out of ``raw_decode``. Both are shapes a
-    reply can carry while staying well under :data:`_MAX_REPLY_CHARS`, and letting
-    either escape would turn malformed model output into a raised run — leaving the
-    cursor unadvanced and the same reply re-derived on the next run, forever, which
-    is precisely what ADR-0077 §4's discard-and-count exists to prevent.
-    ``ModelBackedObserver`` and ``planning.planner`` both catch the pair here, and
-    this extractor is the third of the three.
+    pathologically nested payload raises out of the C scanner. Both are shapes a
+    reply can carry while staying under :data:`_MAX_REPLY_CHARS`, and letting either
+    escape would turn malformed model output into a raised run — the cursor
+    unadvanced and the same reply re-derived on the next run, forever, which is what
+    ADR-0077 §4's discard-and-count exists to prevent.
     """
     decoder = json.JSONDecoder()
+    first: dict[str, object] | None = None
     misses = 0
-    for index, character in enumerate(content):
-        if character != "{":
+    index = 0
+    length = len(content)
+    while index < length:
+        if content[index] != "{":
+            index += 1
             continue
         try:
-            decoded, _ = decoder.raw_decode(content, index)
+            candidate, end = decoder.raw_decode(content, index)
         except ValueError, RecursionError:
             misses += 1
             if misses >= _MAX_EXTRACTION_MISSES:
-                return None
+                break
+            index += 1
             continue
-        if isinstance(decoded, dict):
-            return decoded
-    return None
+        if isinstance(candidate, dict):
+            if isinstance(candidate.get("beliefs"), list):
+                return candidate
+            if first is None:
+                first = candidate
+        index = end
+    return first
