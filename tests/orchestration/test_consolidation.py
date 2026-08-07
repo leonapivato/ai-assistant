@@ -1332,3 +1332,46 @@ async def test_an_oversized_reply_is_refused_before_it_is_decoded() -> None:
     assert report.discarded_unusable == 1, "an over-long reply is one unusable envelope"
     assert report.discarded_over_limit == 0, "nothing was validated, so nothing was capped"
     assert report.exhausted is True, "an unusable reply is not a fault"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # 60_000 deep is ~120_013 characters — under `_MAX_REPLY_CHARS`, so the
+        # size bound does not reach it first, and past the depth at which the C
+        # scanner raises. A shallower payload decodes cleanly and tests nothing.
+        '{"beliefs": ' + "[" * 60_000 + "]" * 60_000 + "}",
+        '{"beliefs": [' + "9" * 8_000 + "]}",
+    ],
+    ids=["deeply-nested", "over-long-integer"],
+)
+async def test_a_reply_that_breaks_the_decoder_is_counted_rather_than_raised(reply: str) -> None:
+    """ADR-0077 §4: malformed model output is discarded and counted, never raised.
+
+    Two shapes that break ``raw_decode`` for a bounded reason that is not a syntax
+    error, and both stay under the reply-size bound so the length check does not
+    reach them first: a pathologically nested payload raises ``RecursionError`` out
+    of the C scanner, and an over-long integer literal raises CPython's digit-limit
+    ``ValueError``.
+
+    **The nesting depth is chosen against both bounds and not guessed.** The C
+    scanner decodes 20_000 levels without complaint, so a shallower payload proves
+    nothing; 60_000 raises, and at ~120_013 characters it still fits inside
+    :data:`_MAX_REPLY_CHARS`, so the reply-size guard added for a different reason
+    does not mask the case. The first draft of this test used 4_000 and passed
+    against the unfixed extractor.
+
+    Letting either escape turns malformed output into a raised run — the cursor
+    unadvanced, the same reply re-derived every run, forever — which is the
+    permanent stall this lane already fixed once by another route.
+    ``ModelBackedObserver`` and ``planning.planner`` both catch the pair; this
+    asserts the third extractor does too.
+    """
+    store = await _seeded([_record("r1"), _record("r2")])
+    writes, _ = _gated(store)
+
+    report = await _stage(store=store, writes=writes, reply=reply).run()
+
+    assert report.discarded_unusable == 1
+    assert report.exhausted is True, "the walk advanced rather than the run raising"
+    assert (await store.walk_records(CONSOLIDATION_WALK, limit=50)).records == ()
