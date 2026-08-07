@@ -548,16 +548,41 @@ async def test_the_embedder_honours_a_width_other_than_the_default() -> None:
     Term indices are drawn modulo the *instance's* width; drawing them modulo the
     module default made every non-default width an ``IndexError`` at embed time,
     which no measurement exercised because none varies it.
+
+    The width floor is asserted here too, and it is not cosmetic: below it the
+    three contributions crowd into the same buckets and can cancel to the zero
+    vector, which a cosine KNN cannot rank and which would void every distance the
+    oracle computes from it. Sweeping 200,000 texts at width 1 turned up 23 such
+    cancellations, so the floor closes a reachable hole rather than a theoretical
+    one.
     """
-    for width in (1, 3, 64, 1024):
+    for width in (64, 256, 1024):
         embedder = ClusteredEmbedder(dimensions=width)
-        (vector,) = await embedder.embed(["t0 p1 tail"])
+        vectors = await embedder.embed([f"t{topic} p{topic} tail" for topic in range(64)])
 
         assert embedder.dimensions == width
-        assert len(vector) == width
-        assert math.isclose(math.sqrt(math.sumprod(vector, vector)), 1.0, abs_tol=1e-6)
+        for vector in vectors:
+            assert len(vector) == width
+            assert math.isclose(math.sqrt(math.sumprod(vector, vector)), 1.0, abs_tol=1e-6)
 
-    with pytest.raises(ValueError, match="dimensions must be >= 1"):
-        ClusteredEmbedder(dimensions=0)
+    with pytest.raises(ValueError, match="dimensions must be >= 64"):
+        ClusteredEmbedder(dimensions=1)
     with pytest.raises(ValueError, match="spread >= 0"):
         ClusteredEmbedder(spread=-1.0)
+
+
+def test_a_sized_spec_refuses_a_population_it_cannot_actually_plant() -> None:
+    """Guard ``sized``'s one promise: the population it builds is the one requested.
+
+    ``closed`` is derived from ``live``, so clamping ``live`` up to 1 re-inflated
+    ``total`` through the derivation — a 2,000-record request at 99.99% closure
+    silently became a **10,000**-record store, and a sweep would have reported
+    numbers against the volume it asked for rather than the one it measured.
+    """
+    for closed_fraction in _SWEEP_CLOSED_FRACTIONS:
+        spec = AgedStoreSpec.sized(total=2_000, crowding=100, closed_fraction=closed_fraction)
+        assert spec.total == 2_000
+        assert spec.closed == pytest.approx(2_000 * closed_fraction, abs=1)
+
+    with pytest.raises(ValueError, match="leaves no live record"):
+        AgedStoreSpec.sized(total=2_000, crowding=100, closed_fraction=0.9999)

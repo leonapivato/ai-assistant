@@ -159,16 +159,25 @@ class ClusteredEmbedder:
         """Initialise the embedder.
 
         Args:
-            dimensions: Vector width.
+            dimensions: Vector width. Floored at :data:`_CENTROID_TERMS`, because
+                a centroid drawn from that many components cannot be a *direction*
+                in fewer buckets than it has terms — it collapses onto the ones it
+                shares, and at the extreme every component of every vector lands
+                in the same bucket, where a centroid and a position can cancel to
+                the zero vector a cosine KNN has no answer for.
             spread: How far a record sits from its topic's centroid. Larger
                 spreads loosen every cluster at once; it is the geometric half of
                 the density axis, the other half being records per cluster.
 
         Raises:
-            ValueError: If ``dimensions`` is below one or ``spread`` is negative.
+            ValueError: If ``dimensions`` is below the floor or ``spread`` is
+                negative.
         """
-        if dimensions < 1 or spread < 0.0:
-            msg = f"dimensions must be >= 1 and spread >= 0, got {dimensions} and {spread}"
+        if dimensions < _CENTROID_TERMS or spread < 0.0:
+            msg = (
+                f"dimensions must be >= {_CENTROID_TERMS} and spread >= 0, "
+                f"got {dimensions} and {spread}"
+            )
             raise ValueError(msg)
         self._dimensions = dimensions
         self._spread = spread
@@ -204,7 +213,16 @@ class ClusteredEmbedder:
         for index, sign in _terms("nudge", text, _DIRECTION_TERMS, width):
             vector[index] += sign * self._nudge
         norm = math.sqrt(math.sumprod(vector, vector))
-        return [value / norm for value in vector] if norm else vector
+        if norm == 0.0:
+            # Reachable only where the width is small enough for the three
+            # contributions to land in the same buckets and cancel. The width
+            # floor makes it unreachable in practice; refusing rather than
+            # returning the zero vector is what keeps that a *fact* instead of an
+            # assumption, since a zero vector silently voids every distance the
+            # oracle and the KNN compute from it.
+            msg = f"embedding for {text!r} cancelled to the zero vector at width {width}"
+            raise ValueError(msg)
+        return [value / norm for value in vector]
 
     def _parse(self, text: str) -> tuple[str, str]:
         topic = ""
@@ -294,15 +312,42 @@ class AgedStoreSpec:
             closed_concentration: Passed through.
             preference_share: Passed through.
             seed: Passed through.
+
+        Raises:
+            ValueError: If the requested combination leaves no live record, or if
+                the population it yields is not the one asked for. ``closed`` is
+                derived from ``live`` and the fraction, so a ``live`` clamped up to
+                1 would silently re-inflate ``total`` — a
+                ``total=2000, closed_fraction=0.9999`` request became a
+                **10,000**-record store, which is exactly the wrong volume to
+                report a sweep against. Refusing is the only honest answer,
+                because the caller's stated ``total`` cannot be met.
         """
-        return cls(
-            live=max(1, round(total * (1.0 - closed_fraction))),
+        live = round(total * (1.0 - closed_fraction))
+        if live < 1:
+            msg = (
+                f"a {total}-record population with {closed_fraction} closed leaves no live "
+                f"record; raise total or lower closed_fraction"
+            )
+            raise ValueError(msg)
+        spec = cls(
+            live=live,
             topics=max(1, total // crowding),
             closed_fraction=closed_fraction,
             closed_concentration=closed_concentration,
             preference_share=preference_share,
             seed=seed,
         )
+        # Two roundings compose here (live from the fraction, closed from live),
+        # so the population can miss `total` by one. More than that is the clamp
+        # failure above wearing another shape.
+        if abs(spec.total - total) > 1:
+            msg = (
+                f"asked for {total} records with {closed_fraction} closed but the spec "
+                f"yields {spec.total} ({spec.live} live, {spec.closed} closed)"
+            )
+            raise ValueError(msg)
+        return spec
 
     @property
     def cluster_density(self) -> float:
