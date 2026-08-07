@@ -52,6 +52,7 @@ as well as a failing one.
 
 from __future__ import annotations
 
+import math
 import statistics
 import time
 from dataclasses import dataclass
@@ -192,6 +193,46 @@ async def _timed_search(
     return len(got), (time.perf_counter() - started) * 1000.0
 
 
+def _percentile(ordered: Sequence[float], fraction: float) -> float:
+    """The nearest-rank percentile of an already-sorted sample.
+
+    Stated rather than improvised, because the obvious ``int(n * fraction)`` index
+    returns the **maximum** for any sample where ``n * fraction`` reaches ``n - 1``
+    — at 20 samples an asserted and reported "p95" was the largest observation,
+    which overstates the tail and makes the reported figure something other than
+    what it is labelled.
+    """
+    return ordered[max(0, math.ceil(fraction * len(ordered)) - 1)]
+
+
+async def _grade_against_the_oracle(
+    store: SqliteMemoryStore, aged: AgedStore, *, query: str, limit: int
+) -> None:
+    """Assert one search returned rows that really are among the true nearest.
+
+    Counting rows is not enough to know a timing is a timing of *retrieval*: a
+    store that returned any ``limit`` rows at all would satisfy a count assertion
+    and every latency ceiling, and the measurement would report a fast wrong
+    answer as a healthy one. So each measured volume grades one of its own
+    searches rather than borrowing the grounding case's much smaller store.
+
+    The cutoff is taken over the **eligible** ranking, not the whole one. These
+    populations are 30% window-closed, and a closed record is nearer to the query
+    than plenty of live ones; grading against the unfiltered ranking would demand
+    that ``search`` return rows ADR-0045 §6 requires it to hide.
+    """
+    ranked = await aged.rank(query, kinds=None)
+    cutoff = [entry for entry in ranked if entry.eligible][limit - 1].distance
+    oracle_distance = {entry.record_id: entry.distance for entry in ranked}
+    got = await store.search(query, limit=limit, kinds=None)
+    assert len(got) == limit
+    for record in got:
+        assert oracle_distance[record.id] <= cutoff + _DISTANCE_TOLERANCE, (
+            f"{record.id} is not among the {limit} nearest live records of a "
+            f"{aged.spec.total}-record store"
+        )
+
+
 async def test_retrieval_latency_scales_with_the_live_record_count(
     make_store: Callable[[str], SqliteMemoryStore],
     profile: Profile,
@@ -215,15 +256,17 @@ async def test_retrieval_latency_scales_with_the_live_record_count(
             served.append(count)
 
         latencies.sort()
-        p50 = statistics.median(latencies)
-        p95 = latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))]
+        p50 = _percentile(latencies, 0.50)
+        p95 = _percentile(latencies, 0.95)
         rows.append(
             f"{spec.live:>8} {spec.total:>8} {p50:>9.2f} {p95:>9.2f} "
             f"{latencies[-1]:>9.2f} {p50 * 1000 / spec.total:>8.2f}"
         )
 
-        # A measurement that queried an empty store would report a fast lie.
+        # A measurement that queried an empty store would report a fast lie, and
+        # one that queried a *wrong* store would report a fast lie that counts.
         assert min(served) == 10, f"a query at live={live} was under-served before any filtering"
+        await _grade_against_the_oracle(store, aged, query=aged.topic_query(0), limit=10)
         ceiling = _LATENCY_FIXED_MS + _LATENCY_PER_RECORD_MS * spec.total
         assert p95 < ceiling, (
             f"p95 {p95:.1f}ms at live={live} exceeds the {ceiling:.1f}ms trip-wire"
@@ -477,3 +520,44 @@ def test_the_instrument_reads_the_constants_it_is_measuring() -> None:
     assert candidate_budget(1) == _RESULT_OVERFETCH
     assert candidate_budget(_VEC_KNN_MAX_K) == _VEC_KNN_MAX_K
     assert candidate_budget(_VEC_KNN_MAX_K // _RESULT_OVERFETCH) == _VEC_KNN_MAX_K
+
+
+def test_the_reported_percentile_is_the_percentile_and_not_the_maximum() -> None:
+    """Guard the figure the latency table publishes, on a sample whose answer is known.
+
+    The naive ``ordered[int(n * 0.95)]`` returns the largest observation for
+    ``n = 20``, which is what this instrument first reported as a p95 — a labelled
+    number that was in fact a different statistic. Nearest-rank is the convention
+    and this is where it is pinned.
+    """
+    sample = [float(value) for value in range(1, 21)]
+
+    assert _percentile(sample, 0.95) == 19.0
+    assert _percentile(sample, 0.95) != max(sample)
+    assert _percentile(sample, 0.50) == 10.0
+    assert _percentile(sample, 1.0) == max(sample)
+    assert _percentile([4.0], 0.95) == 4.0
+    for count in (1, 2, 5, 19, 20, 40):
+        ordered = [float(value) for value in range(count)]
+        assert _percentile(ordered, 0.95) == ordered[math.ceil(0.95 * count) - 1]
+
+
+async def test_the_embedder_honours_a_width_other_than_the_default() -> None:
+    """Guard the embedder's configurable width, which the fixture advertises.
+
+    Term indices are drawn modulo the *instance's* width; drawing them modulo the
+    module default made every non-default width an ``IndexError`` at embed time,
+    which no measurement exercised because none varies it.
+    """
+    for width in (1, 3, 64, 1024):
+        embedder = ClusteredEmbedder(dimensions=width)
+        (vector,) = await embedder.embed(["t0 p1 tail"])
+
+        assert embedder.dimensions == width
+        assert len(vector) == width
+        assert math.isclose(math.sqrt(math.sumprod(vector, vector)), 1.0, abs_tol=1e-6)
+
+    with pytest.raises(ValueError, match="dimensions must be >= 1"):
+        ClusteredEmbedder(dimensions=0)
+    with pytest.raises(ValueError, match="spread >= 0"):
+        ClusteredEmbedder(spread=-1.0)
