@@ -206,15 +206,21 @@ async def _measured_search(  # noqa: PLR0913 — the graded call needs all of it
 ) -> int:
     """Run one search, grade it against the oracle, and return how many rows it served.
 
-    Every k-shortfall the instrument reports comes through here, because an
+    Every measurement the instrument reports comes through here, because an
     under-return is only evidence about the over-fetch budget once the alternative
-    explanations are excluded. Two things are checked, and the first is the one
-    that makes the second meaningful:
+    explanations are excluded. Three things are checked, in the order that makes
+    each one mean something:
 
+    * **Every returned row is eligible.** Checked first and by identity, because
+      the distance test below cannot see this: the ineligible records are by
+      construction the *nearer* ones, so a leaked ``PREFERENCE`` or window-closed
+      row sits comfortably inside any cutoff drawn from the eligible ranking. A
+      store that leaked one while dropping an eligible row would otherwise have
+      matched the predicted count and passed.
     * **The rows are the right rows.** The eligible records inside the candidate
       budget are a prefix of the eligible ranking, so a served row's distance can
       never exceed the last served position's. A store that dropped one eligible
-      row and back-filled with a farther one fails here.
+      row and back-filled with a farther eligible one fails here.
     * **The count is exact**, unless the oracle itself reports the candidate cut
       falling between two records too close to order reliably. An unconditional
       row of slack — which this used to allow everywhere — would equally absolve a
@@ -224,6 +230,21 @@ async def _measured_search(  # noqa: PLR0913 — the graded call needs all of it
     predicted = served_prediction(ranked, limit=limit)
     count, _ = await _timed_search(store, query, limit=limit, kinds=kinds)
     got = await store.search(query, limit=limit, kinds=kinds)
+
+    eligible = [entry for entry in ranked if entry.eligible]
+    eligible_ids = {entry.record_id for entry in eligible}
+    for record in got:
+        assert record.id in eligible_ids, (
+            f"{where}: {record.id} is not eligible for this query, so search returned a row "
+            f"its kind, retention or validity-window filter should have dropped"
+        )
+    if count:
+        oracle_distance = {entry.record_id: entry.distance for entry in ranked}
+        cutoff = eligible[min(count, len(eligible)) - 1].distance
+        for record in got:
+            assert oracle_distance[record.id] <= cutoff + _DISTANCE_TOLERANCE, (
+                f"{where}: {record.id} is not among the {count} nearest eligible records"
+            )
 
     if boundary_is_ambiguous(ranked, limit=limit, tolerance=_DISTANCE_TOLERANCE):
         assert abs(count - predicted) <= _ORACLE_SLACK, (
@@ -235,15 +256,6 @@ async def _measured_search(  # noqa: PLR0913 — the graded call needs all of it
             f"{where}: served {count} where the oracle predicts {predicted}, with an "
             f"unambiguous candidate cut, so this is a disagreement and not float32"
         )
-
-    if count:
-        oracle_distance = {entry.record_id: entry.distance for entry in ranked}
-        eligible = [entry for entry in ranked if entry.eligible]
-        cutoff = eligible[min(count, len(eligible)) - 1].distance
-        for record in got:
-            assert oracle_distance[record.id] <= cutoff + _DISTANCE_TOLERANCE, (
-                f"{where}: {record.id} is not among the {count} nearest eligible records"
-            )
     return count
 
 
@@ -257,34 +269,6 @@ def _percentile(ordered: Sequence[float], fraction: float) -> float:
     what it is labelled.
     """
     return ordered[max(0, math.ceil(fraction * len(ordered)) - 1)]
-
-
-async def _grade_against_the_oracle(
-    store: SqliteMemoryStore, aged: AgedStore, *, query: str, limit: int
-) -> None:
-    """Assert one search returned rows that really are among the true nearest.
-
-    Counting rows is not enough to know a timing is a timing of *retrieval*: a
-    store that returned any ``limit`` rows at all would satisfy a count assertion
-    and every latency ceiling, and the measurement would report a fast wrong
-    answer as a healthy one. So each measured volume grades one of its own
-    searches rather than borrowing the grounding case's much smaller store.
-
-    The cutoff is taken over the **eligible** ranking, not the whole one. These
-    populations are 30% window-closed, and a closed record is nearer to the query
-    than plenty of live ones; grading against the unfiltered ranking would demand
-    that ``search`` return rows ADR-0045 §6 requires it to hide.
-    """
-    ranked = await aged.rank(query, kinds=None)
-    cutoff = [entry for entry in ranked if entry.eligible][limit - 1].distance
-    oracle_distance = {entry.record_id: entry.distance for entry in ranked}
-    got = await store.search(query, limit=limit, kinds=None)
-    assert len(got) == limit
-    for record in got:
-        assert oracle_distance[record.id] <= cutoff + _DISTANCE_TOLERANCE, (
-            f"{record.id} is not among the {limit} nearest live records of a "
-            f"{aged.spec.total}-record store"
-        )
 
 
 async def test_retrieval_latency_scales_with_the_live_record_count(
@@ -318,9 +302,19 @@ async def test_retrieval_latency_scales_with_the_live_record_count(
         )
 
         # A measurement that queried an empty store would report a fast lie, and
-        # one that queried a *wrong* store would report a fast lie that counts.
+        # one that queried a *wrong* store would report a fast lie that counts. The
+        # grading is the same one the k-shortfall cases use — one owner, so the
+        # latency volumes cannot drift onto a weaker check than the sweep's.
         assert min(served) == 10, f"a query at live={live} was under-served before any filtering"
-        await _grade_against_the_oracle(store, aged, query=aged.topic_query(0), limit=10)
+        graded = aged.topic_query(0)
+        await _measured_search(
+            store,
+            await aged.rank(graded, kinds=None),
+            query=graded,
+            limit=10,
+            kinds=None,
+            where=f"latency volume live={live}",
+        )
         ceiling = _LATENCY_FIXED_MS + _LATENCY_PER_RECORD_MS * spec.total
         assert p95 < ceiling, (
             f"p95 {p95:.1f}ms at live={live} exceeds the {ceiling:.1f}ms trip-wire"
