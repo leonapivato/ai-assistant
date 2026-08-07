@@ -74,8 +74,9 @@ beside a `meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)` table, which is exact
 the pair §1 pointed at. `Reembedder` in `memory/reembed.py` already runs a chunked
 resumable walk over that shape, keyed on `_CURSOR_KEY` in `meta`, reading each
 chunk with `WHERE rowid > ? ORDER BY rowid LIMIT ?` and writing the cursor inside
-the same transaction as the chunk's rows. It is the working proof that the
-mechanism is sufficient — and it is not a precedent that can be reused, because
+the same transaction as the chunk's rows. It is the working proof that the *shape*
+is right — though not, as §1 below finds, that the bare declaration supplies the
+key the shape needs — and it is not a precedent that can be reused, because
 it is an offline tool holding a `sqlite3.Connection` it opened itself against a
 `Path`. ADR-0104 §6 rules that "No part of the system runs this migration on its
 own"; a scheduled job cannot open a database, because ADR-0083 §8 makes every job
@@ -121,6 +122,43 @@ async def advance_walk(self, walk: str, *, position: WalkPosition) -> None: ...
 > own insertion order, beginning strictly after the position recorded for `walk`,
 > together with the position of the last record it returns. It writes nothing: two
 > consecutive reads with no intervening advance return the same records.
+
+> **Normative.** The order a walk reads is keyed on a value the store issues once
+> per stored record, strictly increasing over the life of the store, and **never
+> reissued** — not after the record holding it is deleted, purged, retired or
+> superseded, and not after the store is emptied of every record above it. An
+> implementation whose key can be reissued does not satisfy this contract.
+
+**A key that is merely unique is not enough, and SQLite's default is exactly that
+key.** `records` in `SqliteMemoryStore` declares `rowid INTEGER PRIMARY KEY`
+without `AUTOINCREMENT`, and SQLite's ordinary rowid algorithm issues one more than
+the **largest rowid currently in use** — so deleting the highest row releases its
+number for the next insert. That is reachable through three paths the store already
+has: a single `delete`, a `clear`, and `purge_expired`. Walk to the end, let the
+newest record be forgotten, add another, and the new record is issued the position
+the walk has already passed; `WHERE rowid > ?` never returns it, the walk reports
+success, and nothing downstream knows the record existed. It is the silent skip
+ADR-0111 §2 exists to prevent, arriving through the one axis §2 named as safe, and
+adversarial review found it on round 1.
+
+**So `rowid` is the right axis and the bare declaration is not the right key.**
+The clause above states the property rather than the DDL, because the property is
+what a second implementation has to satisfy and SQLite's `AUTOINCREMENT` is only
+the mechanism that is to hand here — it keeps a high-water mark in `sqlite_sequence`
+and never reissues, which is the clause exactly. Two constraints bound the lane
+that takes it: existing rows keep their current values, because `vec_records` joins
+`records` by `rowid` with no foreign key and `Reembedder` carries each original
+forward explicitly; and the high-water mark is seeded above the largest value the
+store has ever held rather than above the largest it holds now, or the first insert
+after a migration reintroduces the defect the migration was for.
+
+**ADR-0104 §2 is not falsified by this and its cursor is not at risk.** That
+migration walks bare `rowid` too, and it is safe for a reason a recurring walk
+cannot borrow: it holds a fingerprint of the source and "re-runs the whole
+migration on any doubt", so a source that changed underneath it is detected and
+restarted wholesale. A scheduled walk has no wholesale restart to fall back on —
+that is the whole of why it has a cursor — so it needs the guarantee in the key
+instead of in a check around it.
 
 **Splitting the read from the advance is ADR-0111 §3 made expressible rather than
 merely stated.** §3 rules that a cursor "may lag its effects and may never lead
@@ -174,12 +212,16 @@ id and a position are both text and mean entirely different things, and a seam
 that accepts either accepts the wrong one silently.
 
 **A position is a bound, not a reference, which is why deletion does not disturb
-it.** `delete`, `purge_expired` and a retirement all remove or rewrite rows below
-a recorded position, and none of them invalidates it: the position says *where the
-walk has reached*, and the next chunk is whatever the store now holds after it.
-This is the property ADR-0111 §2 names as the limit of a high-water mark — "a row
-updated in place below the cursor keeps its position and is not revisited" — and
-it is stated here as the reason the contract needs no repair operation.
+it — given §1's never-reissued key, and only given it.** `delete`, `purge_expired`
+and a retirement all remove or rewrite rows below a recorded position, and none of
+them invalidates it: the position says *where the walk has reached*, and the next
+chunk is whatever the store now holds after it. That reasoning is sound exactly
+because a deleted record's key is not handed to a later one; without §1's clause
+the same sentence would be false in the one case that matters, which is why the
+clause is there and not left as an implementation detail. This is also the property
+ADR-0111 §2 names as the limit of a high-water mark — "a row updated in place below
+the cursor keeps its position and is not revisited" — and it is stated here as the
+reason the contract needs no repair operation.
 
 ### 3. The cursor advances behind the effects, never backwards, and never by itself
 
@@ -343,6 +385,23 @@ half of that disjunct.
 > treats an unusable cursor as a fault; the second fails one that records an offset
 > and calls it a position.
 
+> **Normative.** The suite asserts §1's never-reissued key directly, over the
+> sequence that breaks a merely-unique one: walk to the end of the store, delete
+> the record holding the highest position, add a new record, and assert the walk
+> reaches it. The case runs for `delete`, and for a `purge_expired` that reclaims
+> the highest-positioned record.
+
+> **Normative.** The suite asserts the refusals §5 and §6 state, since a clause
+> nothing exercises is an obligation nobody meets: a blank walk name is refused by
+> **both** operations, and the chunk read refuses a negative `limit` and a `limit`
+> of `2**63` while returning an empty chunk for `0`.
+
+The last clause is there because the negative case is not symmetric with the
+over-wide one and only one of them looks dangerous. SQLite reads `LIMIT -1` as *no
+limit*, so an implementation forwarding the argument returns the whole store where
+the contract says it must refuse — an unbounded read inside a job whose entire
+purpose is to be bounded, and one every positive-path case above passes.
+
 Each clause names the case that can fail, because each has a wrong implementation
 the neighbouring test waves through. A suite that only walks a store nobody writes
 to passes an offset masquerading as a position, which is the single defect ADR-0111
@@ -494,6 +553,13 @@ implement the pair, and `MemoryStoreContract` grows the clauses of §8. That is 
 cost of putting the walk on the store contract rather than beside it, and it is
 paid once for every store that will ever be walked by a scheduled job.
 
+**The SQLite store additionally owes a one-time migration**, because §1's key is a
+property its current `records` declaration does not have. That is the largest piece
+of work this ADR creates and it is bounded: it changes how new positions are
+issued, not what any existing row's position is, and it must leave every current
+`rowid` where it is so the `vec_records` join keeps working. A deployment that has
+never run a scheduled walk loses nothing by it, which is every deployment today.
+
 **Two contract ADRs now want `MemoryStore`, and their implementations sequence
 rather than race.** ADR-0113 decides one keyword-only `bands` parameter on
 `MemoryStore.search`; this ADR decides two operations beside it. The two are
@@ -564,6 +630,18 @@ the record, so the seam would need no new type. Rejected because the id order is
 the insertion order — ids are minted by an injected factory and nothing makes them
 monotone — so a walk keyed on them would satisfy §2's letter and fail its
 substance, and the failure would be a silent skip.
+
+**Keeping bare `rowid` and accepting the reuse window.** The cheapest option: no
+migration, no `sqlite_sequence`, and the defect only fires when the
+highest-positioned record is removed and another is added behind an exhausted
+walk. Rejected because that sequence is ordinary rather than exotic — capture a
+record and forget it, or let `purge_expired` reclaim the newest expiring one — and
+because of *how* it fails. A skipped record is never read, never proposed, and
+never mentioned; the run logs a completion, the cursor looks healthy, and nothing
+in the system holds a fact that would let anyone notice. §1's clause buys a
+one-time migration to remove a permanent, silent and unbounded coverage hole, which
+is the same trade ADR-0104 §2 made when it spent a fingerprint rather than accept a
+stale resume.
 
 **Advancing the cursor inside the read.** One operation, no ordering for a lane to
 get wrong. Rejected in §1: it makes a cursor that leads its effects the only

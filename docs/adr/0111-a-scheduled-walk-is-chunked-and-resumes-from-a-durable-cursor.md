@@ -36,9 +36,28 @@
   so under ADR-0082 §2 the qualifier belongs on it beside this note. ADR-0114
   ships in the same change as this note, which is the existence condition ADR-0083
   §15 states; while it is `Proposed`, this line names a decision that is drafted
-  rather than ratified, the form §15 records `main` as already carrying. Appended
-  per ADR-0070 §1: no text below is rewritten and the Surface bullet stands as
-  written. Refs #632, #729.
+  rather than ratified, the form §15 records `main` as already carrying.
+
+  **One sentence of §Consequences is narrower than it reads, and it was already so
+  when the review read it.** That section says a subsystem wanting a scheduled walk
+  "must have — or add — a total, non-reordering key over the rows it walks", and
+  adds that "`src/ai_assistant/memory/sqlite_store.py` has one". It has the right
+  *axis* and not the key: `records` declares `rowid INTEGER PRIMARY KEY` without
+  `AUTOINCREMENT`, so SQLite issues one more than the largest rowid **currently in
+  use** and reissues a deleted high row's number to the next insert — reachable
+  through `delete`, `clear` and `purge_expired` alike, and producing exactly the
+  silent skip §2 exists to prevent. ADR-0114 §1 states the never-reissued property
+  as a clause and leaves the mechanism to its implementing lane. **The argument
+  §Consequences carries is unaffected and every marked clause is right**: §2's
+  requirement of an order that is total and does not reorder under later writes is
+  what the bare declaration fails, so the sentence understates the work rather than
+  misdirecting it, and §Consequences' own "a store that does not will discover it
+  here rather than after the job ships" is what happened. ADR-0089 §3 puts that
+  prose outside the marked regime and ADR-0070 §1 forbids rewriting it, so it is
+  recorded here rather than repaired.
+
+  Appended per ADR-0070 §1: no text below is rewritten and the Surface bullet
+  stands as written. Refs #632, #729.
 - **Note (2026-08-06): ratified.** `Proposed` → `Accepted`, in the separate lane
   #633 requires, after the required review came back green on the content this
   ADR merged with: adversarial **APPROVE with no findings**, round 2, 888 lines
