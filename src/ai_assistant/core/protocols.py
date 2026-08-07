@@ -1216,6 +1216,72 @@ class MemoryWriter(Protocol):
         """
         ...
 
+    async def ingest_reading(self, reading: SourceReading) -> Sequence[MemoryIngestResult]:
+        """Ingest one reading's proposals, closing what its coverage warrants.
+
+        The **reading-level** write path (ADR-0115 §1). :meth:`ingest` stays the
+        seam for a single proposal and is unchanged; this exists because ADR-0110
+        §3's absence reconciliation is a read-modify-write spanning the ingest, and
+        ADR-0110 §5a refuses an implementation over an unserialised one. Only the
+        writer can hold its own serialisation across the ingest, so the whole
+        reading has to arrive in **one call** — which is the sole reason this member
+        exists, and the reason it takes a whole ``SourceReading`` rather than its
+        parts (a caller able to pair one reading's proposals with another reading's
+        coverage would close records over a slice nobody exhausted).
+
+        **A consumer puts the reading through here in one call** (ADR-0115 §2). It
+        may not ingest the proposals individually and ask for a reconciliation
+        separately, nor assemble a reading it did not receive in order to pass parts
+        of two.
+
+        **Where ``reading.coverage`` is ``None`` nothing is reconciled**, and this
+        degenerates to ingesting each proposal in turn — which is every reading in
+        the tree until a reader lane opts in, so this member changes no behaviour on
+        arrival (ADR-0115 §4).
+
+        How this observes the reading it is handed is governed by this module's
+        input-observation clause (ADR-0065), over the reading **whole** — its
+        ``proposals``, its ``coverage`` and its ``source`` alike, no field exempt
+        (ADR-0115 §6). ``coverage`` is the value that *authorises* a retirement and
+        ``source`` decides which records ADR-0110 §3 can reach at all, so an
+        implementation reading either across an await is one a caller can steer.
+
+        **It neither enqueues nor holds a ``DeferralStore``** (ADR-0115 §5). A writer
+        does not learn to queue (ADR-0028); the durable question an ``ASK_USER``
+        ruling raises is parked by the orchestration write stage, from the returned
+        results, after this call has completed.
+
+        Args:
+            reading: What one reader pass produced. Its ``proposals`` are ingested in
+                their own order; its ``coverage`` decides whether any window closes;
+                its ``source`` scopes which attested records a close can reach.
+
+        Returns:
+            One result per proposal in ``reading.proposals``, **in that order** — the
+            cardinality and the ordering are both contract. ADR-0110 §4 defines
+            presence as "the record's id is among the ``MemoryIngestResult.record_id``
+            values that ingesting ``R``'s proposals returned" and suspends absence
+            entirely where *any* proposal stored nothing, so a return that collapsed,
+            reordered or omitted results would make both unanswerable — and the
+            caller needs the pairing to park what deferred.
+
+        Raises:
+            MemoryStoreError: As :meth:`ingest` raises for any one proposal — the
+                error propagates, the proposals ingested before it stay applied, and
+                **no window closes**, because a reading that was never fully
+                accounted for warrants no absence (ADR-0115 §3, §4). Also where an
+                implementation cannot serialise a **covered** reading's ingest,
+                selection and closes as one sequence: it refuses with this class
+                before ingesting anything, preserving the underlying cause, rather
+                than ingesting and silently declining to reconcile — an outcome no
+                caller could tell from a reading that warranted no absence
+                (ADR-0115 §3). And as ADR-0110 §5's close raises for a window it
+                cannot represent.
+            UnresolvedEvidenceError: As :meth:`ingest` raises, for the proposal that
+                raised it.
+        """
+        ...
+
 
 @runtime_checkable
 class ContextProvider(Protocol):

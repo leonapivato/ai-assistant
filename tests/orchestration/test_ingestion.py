@@ -47,13 +47,14 @@ from ai_assistant.testing import (
 from ai_assistant.testing.readers import DEFAULT_READER_NAME
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.protocols import MemoryWriter, Reader, SourceGrants
     from ai_assistant.core.types import (
         MemoryIngestResult,
         MemoryUpdateProposal,
         SourceGrant,
+        SourceReading,
     )
 
 #: The instant every store fake in this module reads its clock at. Deliberately
@@ -78,6 +79,19 @@ class _FailingWriter:
             msg = "the store is broken"
             raise MemoryStoreError(msg)
         return await self._inner.ingest(proposal)
+
+    async def ingest_reading(self, reading: SourceReading) -> Sequence[MemoryIngestResult]:
+        """Fail the *n*-th proposal of the reading, delegating the rest.
+
+        The script counts proposals rather than calls, so a reading of three with
+        ``fail_on=2`` leaves the first applied and never reaches the third — which is
+        ADR-0115 §3's and §4's partial-ingest shape, driven through the seam the
+        stage actually uses.
+        """
+        results: list[MemoryIngestResult] = []
+        for proposal in reading.proposals:
+            results.append(await self.ingest(proposal))
+        return results
 
 
 def _awaited_names(func: Callable[..., object]) -> list[str]:
@@ -614,7 +628,17 @@ def test_no_await_stands_between_the_check_and_the_read() -> None:
     Awaiting a coroutine does not yield to the event loop, so with nothing between
     the ``live()`` answer and ``read()`` this stage cannot sit on a stale answer at
     all. The awaits are asserted **exhaustively and in order** — gate, read,
-    re-check, then the write loop — because an extra await anywhere in this body is
-    the defect whatever it happens to sit next to.
+    re-check, then the reading's write — because an extra await anywhere in this body
+    is the defect whatever it happens to sit next to.
+
+    **The per-proposal ``write`` loop became one ``write_reading``** (ADR-0115 §2),
+    and this sentence records it rather than a list quietly changing. The count went
+    *down*: the whole reading, including the absence reconciliation its coverage may
+    warrant, is one call, because ADR-0110 §5a refuses that read-modify-write over
+    anything less than a single hold of the writer's own serialisation. The span this
+    test exists to protect — the ``live()`` answer through ``read()`` — is untouched,
+    and the grant window is not widened: the re-check has already run and the reading
+    has already been accepted, so the writes happen on the strength of a read this
+    stage was permitted to take.
     """
-    assert _awaited_names(IngestionStage.ingest) == ["live", "read", "live", "write"]
+    assert _awaited_names(IngestionStage.ingest) == ["live", "read", "live", "write_reading"]

@@ -154,6 +154,8 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     PreferenceMemory,
     Provenance,
+    ReadCoverage,
+    SourceReading,
     UserConfirmation,
     Validity,
     band_of,
@@ -465,6 +467,53 @@ async def _plant_episodes(store: MemoryStore, record_ids: Sequence[str]) -> None
 
 def _proposal(record: MemoryRecord) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(proposed=record, rationale="because", sensitivity=DataTier.PERSONAL)
+
+
+#: The reader identity the reading-level cases attest their records to.
+_ATTESTED_SOURCE = "calendar:work"
+
+
+def _wide_coverage() -> ReadCoverage:
+    """A coverage wide enough to contain the bounded windows below (ADR-0110 §2)."""
+    return ReadCoverage(covers_until=_long_ago() + timedelta(days=365))
+
+
+def _attested_in_window(record_id: str) -> MemoryRecord:
+    """A live attested belief bounded inside :func:`_wide_coverage`.
+
+    Built directly rather than through :func:`_preference`, which derives its
+    attestation from the band and carries no window: both halves are exactly what
+    this record needs to say. ADR-0110 §3 makes a record demotable only where an
+    attestation names the reading's source (condition 1) **and** its envelope window
+    is bounded (condition 3) — a fully open window states no position in the source's
+    world and is contained by no bounded coverage, so it is never absence-demotable.
+    """
+    return PreferenceMemory(
+        id=record_id,
+        content=_CONTENT,
+        preference=_CONTENT,
+        validity=Validity(valid_until=_long_ago() + timedelta(days=30)),
+        provenance=Provenance(
+            source=MemorySource.EXTERNAL,
+            confidence=0.6,
+            last_updated=_long_ago(),
+            attestation=Attestation(reported_by=_ATTESTED_SOURCE, reported_at=_long_ago()),
+        ),
+    )
+
+
+def _reading(
+    *,
+    proposals: tuple[MemoryUpdateProposal, ...],
+    coverage: ReadCoverage | None,
+) -> SourceReading:
+    """One reader pass, as ADR-0115 §1's member takes it."""
+    return SourceReading(
+        source=_ATTESTED_SOURCE,
+        read_at=_long_ago(),
+        proposals=proposals,
+        coverage=coverage,
+    )
 
 
 #: The two rulings that name a target record and fold the proposal against it.
@@ -2801,3 +2850,103 @@ class MemoryWriterContract:
         assert result.decision.kind is kind
         assert result.record_id is None
         assert await store.export() == []
+
+    # --- the reading-level member (ADR-0115 §7's shared clauses) --------------
+
+    async def test_a_reading_returns_one_result_per_proposal_in_order(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0115 §1's cardinality and ordering, which two later clauses need.
+
+        ADR-0110 §4 reads presence off "the ``MemoryIngestResult.record_id`` values
+        that ingesting ``R``'s proposals returned" and suspends absence entirely
+        where *any* proposal stored nothing. A return that collapsed, reordered or
+        omitted results would make both unanswerable — and the consumer needs the
+        pairing to park what deferred.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        writer = make_writer(store, FakeMemoryPolicy())
+        proposals = tuple(_proposal(_preference(f"thing {index}")) for index in range(3))
+
+        results = await writer.ingest_reading(_reading(proposals=proposals, coverage=None))
+
+        assert len(list(results)) == 3
+        assert [result.record_id for result in results] == [
+            proposal.proposed.id for proposal in proposals
+        ]
+
+    async def test_a_reading_declaring_no_coverage_ingests_and_closes_nothing(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0115 §4's arm, and the behaviour every reading in the tree takes.
+
+        No reader declares a coverage, so this is the whole of what the member does
+        today: the proposals land and ADR-0093 §4's refusal stays the operative
+        behaviour. It is not an error and not a refusal.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        writer = make_writer(store, FakeMemoryPolicy())
+        live = _attested_in_window("already-here")
+        await store.add(live)
+
+        results = await writer.ingest_reading(
+            _reading(proposals=(_proposal(_preference("new")),), coverage=None)
+        )
+
+        assert len(list(results)) == 1
+        held = await store.get(live.id)
+        assert held is not None, "no coverage warrants no absence, so nothing closes"
+
+    async def test_a_reading_in_which_a_proposal_stored_nothing_closes_no_window(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0110 §4's suspension clause, at the seam that has to honour it.
+
+        A proposal ruled ``ASK_USER`` stores nothing, and the entry *is* in the
+        source — the ingest simply stored nothing for it. Counting that as an
+        absence would close the window of the very attested record the user is being
+        asked about, on the strength of the question. One such proposal suspends
+        absence for the whole reading.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        writer = make_writer(store, _RulesExactly(MemoryDecisionKind.ASK_USER))
+        live = _attested_in_window("would-have-closed")
+        await store.add(live)
+
+        results = await writer.ingest_reading(
+            _reading(proposals=(_proposal(_preference("new")),), coverage=_wide_coverage())
+        )
+
+        assert [result.record_id for result in results] == [None]
+        held = await store.get(live.id)
+        assert held is not None, "one stored-nothing proposal suspends absence entirely"
+
+    async def test_the_reading_is_observed_whole_before_the_first_await(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0115 §6, over every field the operation reads — no field exempt.
+
+        ``coverage`` authorises a retirement and ``source`` decides which records
+        ADR-0110 §3 can reach, and both are read after the ingest awaits. A model
+        tampered past ``frozen=True`` is inside this repository's threat model
+        (ADR-0018 §3, ADR-0021 §4), so a member that read the caller's object would
+        let a caller steer what it retires *after* handing the work over.
+
+        Mutating all three at once is deliberate: the clause is over the whole value,
+        and a member copying two of the three would pass a narrower case.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        writer = make_writer(store, FakeMemoryPolicy())
+        live = _attested_in_window("outside-the-declared-coverage")
+        await store.add(live)
+        reading = _reading(proposals=(_proposal(_preference("new")),), coverage=None)
+
+        task = asyncio.create_task(writer.ingest_reading(reading))
+        await asyncio.sleep(0)
+        object.__setattr__(reading, "coverage", _wide_coverage())
+        object.__setattr__(reading, "source", _ATTESTED_SOURCE)
+        object.__setattr__(reading, "proposals", ())
+        await task
+
+        held = await store.get(live.id)
+        assert held is not None, "the reading as handed over declared no coverage"

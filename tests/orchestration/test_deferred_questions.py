@@ -46,6 +46,7 @@ from ai_assistant.core.types import (
     Provenance,
     QuestionState,
     SemanticMemory,
+    SourceReading,
     Validity,
 )
 from ai_assistant.memory import DefaultMemoryPolicy
@@ -396,6 +397,14 @@ class _GatedWriter:
         if self._raises is not None:
             raise self._raises
         return await self._inner.ingest(proposal)
+
+    async def ingest_reading(self, reading: SourceReading) -> Sequence[MemoryIngestResult]:
+        """Delegate the reading-level path unchanged (ADR-0115 §1).
+
+        Not gated: every case in this module drives the single-proposal seam, and a
+        second gate here would be a lever nothing pulls.
+        """
+        return await self._inner.ingest_reading(reading)
 
 
 class _InterceptedStore:

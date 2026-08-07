@@ -28,6 +28,7 @@ a test can assert what its subject actually delegated.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, assert_never
@@ -58,7 +59,13 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
-    from ai_assistant.core.types import MemoryDecision, MemoryRecord, MemoryUpdateProposal
+    from ai_assistant.core.types import (
+        MemoryDecision,
+        MemoryRecord,
+        MemoryUpdateProposal,
+        ReadCoverage,
+        SourceReading,
+    )
 
 _DEFAULT_CONFLICT_THRESHOLD = 0.75
 
@@ -115,6 +122,11 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+#: How many attested beliefs one absence-reconciliation page enumerates
+#: (ADR-0110 §6). Mirrors ``memory/ingest.py``'s constant; tuning, not contract.
+_ABSENCE_PAGE = 50
+
+
 class FakeMemoryWriter:
     """A ``MemoryWriter`` test double that really writes to an injected store.
 
@@ -169,6 +181,10 @@ class FakeMemoryWriter:
         self._conflict_limit = conflict_limit
         self._clock = checked_clock(now, owner="FakeMemoryWriter")
         self._id_factory = id_factory
+        # Mirrors `MemoryIngestor`'s lock (#262). A fake that skipped it would let
+        # `ingest_reading` claim ADR-0115 §3's guarantee without providing it, and a
+        # conformance suite cannot tell the difference — so the fake provides it.
+        self._lock = asyncio.Lock()
         self.calls: list[MemoryUpdateProposal] = []
 
     async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
@@ -207,6 +223,16 @@ class FakeMemoryWriter:
                 cannot be closed, or on any other store or applier failure.
         """
         observed = proposal.model_copy(deep=True)
+        return await self._locked_ingest(observed)
+
+    async def _ingest(self, observed: MemoryUpdateProposal) -> MemoryIngestResult:
+        """Resolve, rule and apply one already-observed proposal, without the lock.
+
+        Split out of :meth:`ingest` so :meth:`ingest_reading` can drive it inside a
+        hold it already owns — the same shape ``MemoryIngestor`` uses, and for the
+        same reason: ``asyncio.Lock`` is not reentrant, so the covered path cannot
+        call the locking entry point per proposal.
+        """
         self.calls.append(observed.model_copy(deep=True))
         await self._require_resolvable_evidence(observed.proposed)
         conflicts = await self._conflicts_for(observed.proposed)
@@ -227,6 +253,99 @@ class FakeMemoryWriter:
         # consumer's test pass while the real writer's caller enqueues a question
         # showing the user no conflicting assertion at all.
         return MemoryIngestResult(decision=decision, record_id=record_id, conflicts=resolved)
+
+    async def ingest_reading(self, reading: SourceReading) -> Sequence[MemoryIngestResult]:
+        """Ingest one reading's proposals, then close what its coverage warrants.
+
+        ADR-0115 §1's member, mirroring ``MemoryIngestor.ingest_reading`` so that
+        every consumer sees the same behaviour behind the Protocol. It holds this
+        fake's own lock across the covered path — the ingest, the selection and the
+        closes as one sequence (§3) — because a fake that only *claimed* the
+        guarantee would satisfy the shared suite while giving a consumer a subject
+        whose isolation is imaginary, which is the failure a canonical fake exists to
+        prevent rather than to model.
+
+        Args:
+            reading: Observed whole before the first ``await`` (ADR-0065, §6).
+
+        Returns:
+            One result per proposal, in the reading's own order (§1).
+
+        Raises:
+            MemoryStoreError: As :meth:`ingest` raises, or as a close raises for an
+                unrepresentable window. Nothing is caught or converted.
+            UnresolvedEvidenceError: As :meth:`ingest` raises.
+        """
+        observed = reading.model_copy(deep=True)
+        if observed.coverage is None:
+            return [await self._locked_ingest(proposal) for proposal in observed.proposals]
+        async with self._lock:
+            results = [await self._ingest(proposal) for proposal in observed.proposals]
+            await self._close_absent(
+                source=observed.source, coverage=observed.coverage, results=results
+            )
+            return results
+
+    async def _locked_ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
+        """One proposal under the ordinary per-proposal hold."""
+        async with self._lock:
+            return await self._ingest(proposal)
+
+    async def _close_absent(
+        self,
+        *,
+        source: str,
+        coverage: ReadCoverage,
+        results: Sequence[MemoryIngestResult],
+    ) -> int:
+        """ADR-0110 §3's closes, called only with :attr:`_lock` held.
+
+        §4's suspension clause first: where any proposal stored nothing — a
+        ``REJECT``, or an ``ASK_USER`` deferral — the reading warrants no absence at
+        all, because the entry *is* in the source and the ingest simply stored
+        nothing for it. Keyed on ``record_id`` being ``None`` rather than on a
+        remembered list of rulings, so a ruling added later lands on the right side.
+        """
+        if any(result.record_id is None for result in results):
+            return 0
+        present = {result.record_id for result in results}
+        now = self._now_utc()
+        closes = [
+            MemoryWrite(record=_close_window(record, now), mode=MemoryWriteMode.UPSERT)
+            for record in await self._absence_candidates(
+                source=source, coverage=coverage, present=present
+            )
+        ]
+        if not closes:
+            return 0
+        await self._store.write_atomic(closes)
+        return len(closes)
+
+    async def _absence_candidates(
+        self,
+        *,
+        source: str,
+        coverage: ReadCoverage,
+        present: set[str | None],
+    ) -> list[MemoryRecord]:
+        """The live records ADR-0110 §3's four conditions make demotable."""
+        candidates: list[MemoryRecord] = []
+        offset = 0
+        while True:
+            page = await self._store.list_beliefs(
+                bands=[BeliefBand.ATTESTED], limit=_ABSENCE_PAGE, offset=offset
+            )
+            for record in page:
+                attestation = record.provenance.attestation
+                if attestation is None or attestation.reported_by != source:
+                    continue  # §3 condition 1.
+                if record.id in present:
+                    continue  # §3 condition 4.
+                if coverage.contains(record.validity):
+                    candidates.append(record)  # §3 conditions 2 and 3.
+            if len(page) < _ABSENCE_PAGE:
+                return candidates
+            offset += _ABSENCE_PAGE
 
     async def _require_resolvable_evidence(self, record: MemoryRecord) -> None:
         """Refuse a ``DERIVED`` proposal citing a record the store does not hold.
