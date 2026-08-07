@@ -44,12 +44,14 @@ consolidator would legitimately prompt differently, exactly as a second
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
+import structlog
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import checked_clock
@@ -75,6 +77,8 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import MemoryStore, ModelProvider
     from ai_assistant.core.types import MemoryRecord
     from ai_assistant.orchestration.writes import MemoryWriteStage
+
+_log = structlog.get_logger(__name__)
 
 #: The walk this job advances. One name identifies the (job, order) pair ADR-0111
 #: §1 describes, and the store never interprets or normalises it (ADR-0114 §5).
@@ -176,6 +180,36 @@ def _uuid() -> str:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _check_bound(name: str, value: int) -> None:
+    """Refuse a non-positive or non-integral bound at construction.
+
+    ``ModelBackedObserver`` validates its own two bounds this way and for
+    ADR-0022 §4a's reason, which reads the same here: a bound the caller got wrong
+    should fail where it was set, not on the first run that silently does half the
+    work. ``max_proposals=-1`` is the case that makes it more than tidiness — it
+    slices ``usable[:-1]``, quietly dropping the last good belief, while the
+    over-limit count reports ``len(usable) - (-1)``, claiming more discards than
+    there were entries. ``True`` is an ``int`` subclass and would become a cap of
+    one.
+
+    ``chunk_size`` needs no check here: it is handed to
+    :meth:`~ai_assistant.core.protocols.MemoryStore.walk_records`, which refuses
+    anything that is not exactly an ``int`` in ``[1, 2**63)`` on entry, on every
+    backend (ADR-0114 §6). A second bound here would be a second place for the two
+    to disagree.
+
+    Raises:
+        TypeError: If ``value`` is not an ``int`` (``bool`` included).
+        ValueError: If ``value`` is below 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"{name} must be an integer, got {value!r}"
+        raise TypeError(msg)
+    if value < 1:
+        msg = f"{name} must be at least 1, got {value}"
+        raise ValueError(msg)
 
 
 def _confidence(step: MemorySource, supports: int) -> float:
@@ -306,6 +340,7 @@ class ConsolidationStage:
             walk: The walk name whose position this job advances. One job, one
                 name; a second consolidating job would take a second (ADR-0111 §1).
         """
+        _check_bound("max_proposals", max_proposals)
         self._memory = memory
         self._writes = writes
         self._model = model
@@ -364,7 +399,18 @@ class ConsolidationStage:
                 intact (ADR-0013 §5).
             ValueError: If the injected clock's reading does not conform.
         """
-        deadline = self._clock() + self._run_budget
+        # **The budget is measured on the event loop's monotonic clock, never on
+        # the injected `Clock`.** `core.clock` scopes that seam to wall-clock
+        # instants and says so in terms: "a **monotonic** clock for measuring
+        # elapsed duration [is a] different contract, which this one neither
+        # covers nor should be stretched to" (ADR-0026 §Consequences). A civil
+        # clock moved backwards by NTP or an operator would leave `now < deadline`
+        # true for as long as the correction lasts, and a serial job (ADR-0083 §7)
+        # would hold the loop for exactly that long — the unbounded run ADR-0111
+        # §4 exists to prevent, reached through the thing meant to bound it.
+        # `Scheduler._due` already draws this line for the same reason.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._run_budget.total_seconds()
         chunks = examined = proposed = committed = deferred = rejected = 0
         unusable = over_limit = self_cited = 0
         exhausted = halted = False
@@ -382,7 +428,7 @@ class ConsolidationStage:
         while True:
             # At a chunk *boundary*, so no chunk is abandoned part-way: a run may
             # overrun its budget by at most one chunk's duration (ADR-0111 §4).
-            if self._clock() >= deadline:
+            if loop.time() >= deadline:
                 break
             chunk = await self._memory.walk_records(self._walk, limit=self._chunk_size)
             if chunk.position is None:
@@ -407,7 +453,7 @@ class ConsolidationStage:
             # effects rather than leading them.
             await self._memory.advance_walk(self._walk, position=chunk.position)
             chunks += 1
-        return ConsolidationReport(
+        report = ConsolidationReport(
             chunks=chunks,
             examined=examined,
             proposed=proposed,
@@ -420,6 +466,8 @@ class ConsolidationStage:
             exhausted=exhausted,
             halted=halted,
         )
+        _record_run(report)
+        return report
 
     async def _consolidate(self, records: Sequence[MemoryRecord]) -> _ChunkOutcome:
         """Turn one chunk into proposals and route each through the write stage."""
@@ -659,6 +707,47 @@ class _ChunkOutcome:
     def with_refused(self) -> _ChunkOutcome:
         """The queue refused a question, so the run halts and the chunk stays open."""
         return replace(self, refused=True)
+
+
+def _record_run(report: ConsolidationReport) -> None:
+    """Write the one operational record a run owes (ADR-0111 §9).
+
+    §9 requires that "a run that halts under §5 without processing its remaining
+    work is recorded as a **completed run that did not exhaust its work**, not as a
+    failure" — because recording a halt as a failure makes a queue at its cap
+    indistinguishable from a broken store, and recording it as an ordinary
+    completion makes a job that has stopped making progress invisible. The
+    ``disposition`` field is what an operator reads: ``exhausted``, ``budget_spent``
+    or ``halted``.
+
+    **The job records it, not the scheduler**, because ``Scheduler._run_job``
+    states in terms that "the job's result is never logged. The scheduler is
+    generic over jobs and cannot know which results are safe to render — an
+    ``ObservationReport`` names beliefs, which is Tier 1 content". That reasoning is
+    right and is left alone; this report is the case it could not know about, and
+    the job knows: every field is a count or a disposition, so the whole of it is
+    Tier 2 and passes ADR-0004 §5.
+
+    **Exactly one record per run**, which is §9's second clause. The scheduler's own
+    ``hub_scheduler_job_completed`` says the job ran and how long it took; this says
+    what the run concluded, at ``info``, so nothing an operator's monitoring treats
+    as a fault is emitted for a refusal the corpus rules correct.
+    """
+    _log.info(
+        "consolidation_run_finished",
+        disposition=(
+            "halted" if report.halted else "exhausted" if report.exhausted else "budget_spent"
+        ),
+        chunks=report.chunks,
+        examined=report.examined,
+        proposed=report.proposed,
+        committed=report.committed,
+        deferred=report.deferred,
+        rejected=report.rejected,
+        refused_self_citing=report.refused_self_citing,
+        discarded_unusable=report.discarded_unusable,
+        discarded_over_limit=report.discarded_over_limit,
+    )
 
 
 def _render(records: Sequence[MemoryRecord]) -> str:
