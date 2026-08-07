@@ -114,6 +114,8 @@ async def assemble_by_band(
         kinds: Restrict every call to these memory kinds, as
             :meth:`MemoryStore.search` takes them. Passed through rather than
             decided here — the caller owns which kinds belong in its prompt.
+            Observed **once**, before the first read, so every band is filtered on
+            the same kinds even if the caller mutates the sequence it passed.
 
     Returns:
         Up to ``limit`` records, ordered by band precedence and, within a band, by
@@ -125,6 +127,17 @@ async def assemble_by_band(
             the caller owns what a degraded retrieval means for its turn, and
             partial composition is a policy this function does not invent (#805).
     """
+    # Materialised on the first executed line, before any await, and only the copy
+    # is read thereafter — ADR-0065 §3's discharge, owed here for a reason the store
+    # methods' own version does not cover. Each ``search`` already snapshots
+    # ``kinds`` per call (#436), so every individual call is coherent; what is not,
+    # without this, is the *composition*. This function reads the caller's sequence
+    # three times with two awaits in between, so a caller mutating it mid-flight
+    # gets a result whose asserted band was filtered on one kind set and whose
+    # derived band was filtered on another — one answer describing two versions of
+    # one input, which is the incoherence ADR-0065 exists to prevent, reappearing
+    # one layer above the seam that already closed it.
+    wanted_kinds = None if kinds is None else tuple(kinds)
     if limit <= 0:
         return []
 
@@ -134,7 +147,7 @@ async def assemble_by_band(
         remaining = limit - len(composed)
         if remaining <= 0:
             break
-        found = await store.search(query, limit=remaining, kinds=kinds, bands=[band])
+        found = await store.search(query, limit=remaining, kinds=wanted_kinds, bands=[band])
         for record in found:
             if record.id in seen:
                 # ADR-0113 §5's cross-call rule. Arriving here means a fold moved
