@@ -1,7 +1,73 @@
 # 113. The band-scoped relevance read is a `bands` filter on `search`, bound before the cut
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-06
+- **Note (2026-08-07): ratified.** `Proposed` → `Accepted`, in the separate lane
+  #633 requires, after **both** required lenses came back green on the content
+  this ADR merged with: adversarial **APPROVE with no findings** and architecture
+  **APPROVE with no findings**, round 6, 810 lines net across 7 commits, churn
+  `1.1×` (924 touched), posted to PR #796 by `just ship`. That is the outcome
+  ADR-0070 §1 requires the ratifying edit to record — "the ratifying edit records
+  that review's outcome, it does not replace it" — and it is taken from that
+  comment rather than from a report.
+
+  **This note's date is UTC, as is every timestamp it cites**, and the sequence is
+  stated because a local-time reader would otherwise have to reconstruct it: #796
+  merged at `2026-08-07T02:23:40Z` and this flip follows it on the same UTC day.
+  A `git log` rendered in this clone's `-0400` offset shows that merge one
+  calendar day earlier, as `2026-08-06 22:23`; that is a display frame, not a
+  different instant, and it is the same offset the durability clause below already
+  names for the `Date` line above. That line is this ADR's authoring date and the
+  flip does not touch it.
+
+  **Two lenses ran on the decision; this ratifying edit takes one, and the two
+  facts are not in tension.** The header's contract bullet classes this ADR as
+  "the ADR deciding that surface" under `CONTRIBUTING.md` → "Report the review,
+  then mark it ready", because §1 adds a `bands` parameter to
+  `MemoryStore.search` in `core/protocols.py`; that is why architecture as well as
+  adversarial is recorded above, taken while this ADR still stood `Proposed`,
+  which is the sequence ADR-0015 §5 asks for. The ratifying edit is reviewed
+  adversarial-only because `CONTRIBUTING.md` → "Trivial ADR edits" exempts "the
+  `Proposed` → `Accepted` ratification flip" from a separate review *of the edit
+  itself* — "not licence to rewrite a ratified decision in place" — ADR-0015 §5
+  exempts trivial ADRs by name, and `scripts/ship.sh` fires its own architecture
+  requirement on a diff touching `core/protocols.py` or `core/types.py`, which
+  this diff does not.
+
+  **The anchor is not the merged head, and the identity is established through
+  the tree rather than assumed**: the comment's
+  `<!-- ship:0fc802864dfa42247f5b3aab7c10fb2af3904885 -->` anchor is the
+  pre-merge branch head, which is *not* an ancestor of `main` because #796 was
+  rebase-merged. Both were resolved with `git rev-parse` rather than trusted:
+  `0fc802864dfa^{tree}` and `3624982d13d6^{tree}` — the commit the PR merged as —
+  are the same tree, `e0199af53382`. The content the review read is therefore the
+  content that landed, notwithstanding the rewritten hash.
+
+  **No `blocker` or `major` finding was waived**, and neither review record
+  contains the word. The terminal round of each lens raised nothing; the five
+  adversarial and four architecture dispositions the comment carries are earlier
+  rounds' findings, each repaired in this ADR's own text before the terminal round
+  re-read it, and #796's description enumerates the five against the clause that
+  repaired each.
+
+  **Beyond the `Status` line, not one word below is edited** — not a clause, not
+  a tense — which is ADR-0070 §1's own test applied to the ratifying edit first:
+  no decision text is touched and no normative clause acquires, loses or alters
+  an obligation. The line carries no leading `Partially superseded by` token, so
+  ADR-0082 §2 would permit an amendment qualifier on it; none is written, because
+  a ratification is not an amendment and has none to record.
+
+  **That the status-claim sweep is empty is a result rather than an omission, and
+  the sites are named so it can be checked rather than trusted.** The only tracked
+  files naming this ADR outside this document are ADR-0114 — §10's "No record is
+  owed on" entry and its Consequences' sequencing paragraph, both of which name
+  what this ADR *decides* and take no view on its standing, the latter saying in
+  terms that "neither lane's ratification is a precondition on the other's" — and
+  `uv.lock`, where `0113` occurs only inside hash fragments. `docs/roadmap.md`
+  does not mention this ADR at all. **No clause below was written forward for this
+  event to make true**: this ADR closes no issue on ratification and conditions no
+  obligation on it, which is why the sweep finds nothing rather than finding it
+  already satisfied. Refs #790, #729, #633.
 - **Durability clause.** Every reference below to ADR-NNNN is to its text as it
   stood at this ADR's base, `ba48c25`, not to its status on any later day. Every
   ADR this decision composes with reads `Accepted` there (or partially superseded
