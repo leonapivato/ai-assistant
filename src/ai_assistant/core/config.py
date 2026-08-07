@@ -769,24 +769,6 @@ class Settings(BaseSettings):
             "(ADR-0083 §7, §13); set a duration to enable it."
         ),
     )
-    # Ships **disabled** for observation's reason rather than the calendar
-    # reader's, and the argument is the job's shape rather than its maturity.
-    # ADR-0111 §11 declines to set a default for a job it does not land, so this
-    # lane takes it: a consolidation run spends a model call per chunk,
-    # unattended, and every tainted proposal it produces becomes a question some
-    # user has to answer (ADR-0106 §6). A deployment that has not decided it wants
-    # that should not acquire it by upgrading. The field exists so that enabling
-    # it is configuration.
-    consolidation_interval: _OptionalDuration = Field(
-        default=None,
-        gt=timedelta(0),
-        description=(
-            "How often the hub distils many stored records into few durable beliefs "
-            "(ADR-0106, ADR-0111). Disabled by default because each run spends model "
-            "calls unattended and may raise questions a user must answer; set a "
-            "duration to enable it, and never 0."
-        ),
-    )
 
     # --- What bounds one chunked run (ADR-0111 §4) -----------------------
     # Two bounds doing different jobs, neither substituting for the other. The
@@ -800,6 +782,14 @@ class Settings(BaseSettings):
     # These are the *scheduler's* mechanics rather than a job's quality
     # parameters: they bound a run, not what a run may conclude, which is the
     # division ADR-0103 §5 draws and ADR-0106 §12 leaves to leg 8.
+    #
+    # **They land ahead of the job that will read them, and that is ADR-0111 §4's
+    # marked clause rather than an oversight.** §4 states that "``Settings`` gains
+    # ``scheduler_run_budget``, a ``timedelta`` defaulting to five minutes, and
+    # ``scheduler_chunk_size``", so the obligation is the ADR's and does not wait on
+    # a caller. A chunked job arriving without them would be deciding its own bounds
+    # on the way past, which is what naming the figures was meant to prevent
+    # (ADR-0074 §9.3). The first reader is leg 7's consolidation walk.
     scheduler_run_budget: _DurationSetting = Field(
         default=timedelta(minutes=5),
         gt=timedelta(0),
