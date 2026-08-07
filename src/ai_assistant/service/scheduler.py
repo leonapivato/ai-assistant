@@ -155,7 +155,7 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
     table rather than present and skipped, and ``hub_ready`` reports the names that
     are actually armed.
 
-    Four jobs, and each is a decision an ADR argues rather than describes:
+    Five jobs, and each is a decision an ADR argues rather than describes:
 
     * **Retention purge** — ``MemoryStore.purge_expired`` *and*
       ``DeferralStore.purge``, as **one** job, because ADR-0078 §10 item 8 says the
@@ -196,6 +196,25 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       fourth state of §7a's matrix fails at load, where a scheduler that omitted
       the requested job would instead report health while running nothing.
 
+    * **Consolidation** — leg 7's chunked walk (ADR-0106, ADR-0111), and the third
+      kind of disabled default in one table. It is not the calendar reader's, whose
+      default is only about consent, and it is not observation's, whose default is
+      about a cursor that did not exist: this job **has** its cursor (ADR-0114) and
+      needs no grant, so nothing technical is missing and nobody's files are read.
+      What it spends is a model call per chunk, unattended, and every tainted
+      proposal it makes becomes a question a user has to answer (ADR-0106 §6). A
+      deployment that has not decided it wants that should not acquire it by
+      upgrading, so ``consolidation_interval`` is ``None`` until an operator sets
+      it. ADR-0111 §11 declines the default for a job it does not land; the lane
+      that landed the job took it.
+
+      **It is the job ADR-0083 §7's revisit condition named** — "revisit when a
+      job's typical runtime approaches its interval, which is what consolidation
+      (leg 7) is likely to do first" — and the answer is ADR-0111 §4's bounded run
+      rather than concurrency. Its run budget and chunk size are ``Settings``, so
+      the delay it imposes on a sibling is a figure an operator can read off the
+      configuration rather than an unknown.
+
     **Confirmation deadlines are deliberately not here.** The roadmap names them as
     this scheduler's, and §7 is the one place that sentence does not survive contact
     with what is ratified below it: there is no operation to reclaim an expired
@@ -219,6 +238,7 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
         ("conversation_sweep", settings.conversation_sweep_interval, engine.start),
         ("observation", settings.observation_interval, engine.observe),
         ("calendar_reader", settings.calendar_reader_interval, engine.ingest),
+        ("consolidation", settings.consolidation_interval, engine.consolidate),
     )
     return tuple(
         Job(name=name, interval=interval, run=run)

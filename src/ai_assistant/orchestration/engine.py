@@ -148,6 +148,10 @@ if TYPE_CHECKING:
         SourceGrant,
         TurnResult,
     )
+    from ai_assistant.orchestration.consolidation import (
+        ConsolidationReport,
+        ConsolidationStage,
+    )
     from ai_assistant.orchestration.conversations import ConversationLifecycle
     from ai_assistant.orchestration.grants import GrantOperations
     from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
@@ -609,6 +613,7 @@ class Engine:
         questions: QuestionStage,
         grant_operations: GrantOperations,
         ingestion: IngestionStage | None = None,
+        consolidation: ConsolidationStage | None = None,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
         max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
@@ -750,6 +755,20 @@ class Engine:
                 refuses rather than reporting an empty success, because a job that
                 reports health while ingesting nothing is the failure mode this
                 corpus keeps naming (ADR-0022 §4a).
+            consolidation: The chunked consolidation stage (ADR-0106, ADR-0111), or
+                ``None`` where this deployment wires none. It writes through the
+                *same* write stage every other producer here uses — ADR-0106 §6
+                obliges it by name, because a job calling ``MemoryWriter.ingest``
+                directly would rule ``ASK_USER`` on a thousand consolidations and
+                persist not one question — and it walks the **same ``MemoryStore``
+                instance** ``memory`` names, or it would propose beliefs citing
+                records the write path cannot resolve.
+
+                **Optional for ``ingestion``'s reason**, one job over: the
+                consolidation job ships disabled, so an engine without the stage is
+                an ordinary deployment rather than a half-built one. And
+                :meth:`consolidate` refuses rather than reporting an empty success,
+                for the same reason again.
             closers: The resources the façade owns, as async close callables, in
                 the order :meth:`aclose` must run them. The composition root hands
                 these over so the façade is the defined owner that releases every
@@ -838,6 +857,7 @@ class Engine:
         self._questions = questions
         self._grants = grant_operations
         self._ingestion = ingestion
+        self._consolidation = consolidation
         self._closers = tuple(closers)
         self._id_factory = id_factory
         self._max_outstanding = max_outstanding_confirmations
@@ -1066,6 +1086,67 @@ class Engine:
             )
             raise ConfigurationError(msg)
         return await self._tracked(self._ingestion.ingest())
+
+    async def consolidate(self) -> ConsolidationReport:
+        """Distil stored records into durable beliefs, one bounded run (ADR-0106).
+
+        The **maintenance surface**'s third scheduled operation. ADR-0083 §8 already
+        settled that this is "new *concrete* surface on a class in
+        ``orchestration``, not ``core`` contract surface", and ADR-0085 §1 fixes the
+        promoted ``AssistantEngine`` Protocol at fifteen *request* methods with
+        lifecycle deliberately off it — "a Protocol constrains what an
+        implementation must have, not what it may not". :meth:`purge_expired` and
+        :meth:`ingest` are the standing proof, and ADR-0114 §9 records this as a
+        non-decision so the implementing lane does not relitigate it.
+
+        **Takes no argument, deliberately**, which is what makes it a legal
+        ``JobBody`` and keeps the whole of the chunking below the façade where
+        ADR-0111 §1 put the cursor. The scheduler holds an ``Engine`` and nothing
+        else — no store, no cursor, no subsystem import — and "neither reads it,
+        writes it, nor passes it".
+
+        **One run, not a walk to exhaustion.** It commits chunks until its work is
+        exhausted or its run budget is spent, then returns; the scheduler re-arms it
+        from completion plus its interval exactly like a job that finished, because
+        it is not told which happened and does not need to be (ADR-0111 §4). A run
+        that halts at a chunk it could not record as done is a **completed run that
+        did not exhaust its work**, never a failure — recording it as one would make
+        a queue at its cap indistinguishable from a broken store (ADR-0111 §9).
+
+        Tracked like every other public method, so shutdown drains the write it is
+        in the middle of before closing the connections it is writing through
+        (ADR-0042 §2).
+
+        Returns:
+            What the run did, in Tier 2 counts and two dispositions. Every count
+            zero is a **successful** pass over material that justified nothing, and
+            no caller may read it as a failure.
+
+        Raises:
+            RuntimeError: If the engine is shutting down. The scheduler treats this
+                as *stop* rather than as a job failure (ADR-0083 §8), which is what
+                :data:`ENGINE_SHUTTING_DOWN` exists for.
+            ConfigurationError: If this engine was built with no consolidation
+                stage, for :meth:`ingest`'s reason: an empty report would be
+                indistinguishable from material that justified nothing, so a
+                deployment whose stage failed to wire would look healthy forever
+                while consolidating nothing — the shape ADR-0022 §4a refuses.
+            MemoryStoreError: If the store could not be read or the write path
+                failed. The cursor is left where it was, so the chunk in flight is
+                re-processed on the next run (ADR-0111 §3).
+            ModelError: Propagated unwrapped from the provider, its classification
+                intact (ADR-0013 §5). Same disposition: nothing is recorded as done.
+            DeferralStoreError: If a deferred question could not be parked.
+        """
+        self._reject_if_closing()
+        if self._consolidation is None:
+            msg = (
+                "no consolidation stage is wired, so there is nothing to consolidate; "
+                "it needs a model provider and the memory store the write stage "
+                "persists to (ADR-0106 §6, ADR-0111 §4)"
+            )
+            raise ConfigurationError(msg)
+        return await self._tracked(self._consolidation.run())
 
     async def converse(
         self,

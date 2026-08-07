@@ -90,6 +90,17 @@ and which model route read the episodes (``ObservationReport``,
 ``ObservedProposal``). The producer holds no store, so selecting the batch could
 never have been its job (ADR-0077 §1).
 
+``ConsolidationStage`` is the **consolidation stage** (ADR-0106, ADR-0111,
+ADR-0114), the fourth producer's stage and the only one that is also its own
+producer. It walks the memory store a bounded chunk at a time from a durable
+cursor, asks an injected ``ModelProvider`` what each chunk justifies believing,
+and puts every proposal through the same write path — computing the derived-taint
+marker itself, from the input set it selected, and discarding whatever the model
+emitted for that field (ADR-0106 §3). The producer is module-private rather than a
+`core` Protocol because it has one implementation and ADR-0028 §7 refuses a
+generic seam until a second exists; ADR-0114 decides two store operations and two
+types and no third contract.
+
 ``IngestionStage`` is the **ingestion stage** (ADR-0093 §6), the third producer's
 stage: it reads the injected ``Reader`` once, within that reader's own bound, and
 puts every belief the reading proposes through the same write path — because a
@@ -101,6 +112,10 @@ source's own content, which is what makes a periodic re-read honest without new
 durable state.
 """
 
+from ai_assistant.orchestration.consolidation import (
+    ConsolidationReport,
+    ConsolidationStage,
+)
 from ai_assistant.orchestration.conversations import (
     AssembledHistory,
     CaptureReport,
@@ -142,6 +157,8 @@ __all__ = [
     "MIN_FRAME_BYTES",
     "AssembledHistory",
     "CaptureReport",
+    "ConsolidationReport",
+    "ConsolidationStage",
     "ConversationLifecycle",
     "DataExport",
     "Engine",
