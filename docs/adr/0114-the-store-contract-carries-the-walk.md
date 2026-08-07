@@ -374,9 +374,11 @@ rather than a missing refusal.
 > as opaque, never interprets it, never normalises it, and never shares a position
 > between two names.
 
-> **Normative.** A walk name is `NonBlankEncodableText` on both operations, so a
-> blank, whitespace-only or unencodable name is refused by the type before any
-> implementation sees it, uniformly across every backend.
+> **Normative.** A walk name is declared `NonBlankEncodableText` on both
+> operations, and **every implementation validates it on entry** — before it
+> reaches a query, a key, or any stored state — so that an empty, whitespace-only
+> or unencodable name is refused identically on every backend. The annotation
+> states the intent; the entry check is what enforces it.
 
 This is ADR-0111 §1's "A cursor is per walked order and per job. Two jobs walking
 the same store do not share a position, and one job walking two orders holds one
@@ -384,18 +386,30 @@ position in each", discharged with one parameter rather than a matrix: the name
 identifies the (job, order) pair, and a store that maintains a second order gives
 it a second set of names.
 
-**The name is typed rather than merely validated, because it becomes store state
-and the backends disagree about what a `str` is.** A bare `str` would let
-`walk_records("\ud800", …)` through the contract; SQLite cannot UTF-8 encode a
-lone surrogate when binding it as a `meta` key, so one backend raises a
-`UnicodeEncodeError` out of the driver while an in-memory one accepts it happily —
-backend-dependent behaviour on a value the contract said nothing about.
-`EncodableText`'s validator exists for exactly this class and names the same
-example, and `NonBlankEncodableText` adds the empty and whitespace-only cases that
-`""` alone would miss. **Not normalised**, which §5's first clause states: two
-names differing only in case or spacing are two walks, because a store that quietly
-merged them would merge two jobs' positions and skip records for one of them.
-Adversarial review found the bare `str` on round 5.
+**The name is checked because it becomes store state, and the backends disagree
+about what a `str` is.** `walk_records("\ud800", …)` is an ordinary Python call:
+SQLite cannot UTF-8 encode a lone surrogate when binding it as a `meta` key, so one
+backend raises a `UnicodeEncodeError` out of the driver while an in-memory one
+accepts it happily — backend-dependent behaviour on a value the contract had said
+nothing about. `EncodableText`'s validator exists for exactly this class and names
+`"\ud800"` itself; `NonBlankEncodableText` adds the empty and whitespace-only cases
+a `""` check alone misses.
+
+**The check has to be an obligation on the implementation, and an earlier draft
+made it a property of the annotation.** That draft said the name was "refused by
+the type before any implementation sees it", which is false: these aliases are
+pydantic `Annotated` validators, and Python runs nothing for a plain method call —
+they bind on a model field or through an explicit adapter and nowhere else. The
+corpus already knows this and already has the remedy at precisely this kind of
+seam: `wire/codec.py` and `orchestration/grants.py` each hold a module-level
+`TypeAdapter[str](NonBlankEncodableText)` and validate what arrives. The clause
+above asks these operations for the same thing, so the uniformity it promises is
+bought by the check rather than asserted of the notation. Adversarial review found
+the bare `str` on round 5 and the false claim about it on round 6.
+
+**Not normalised**, which §5's first clause states: two names differing only in
+case or spacing are two walks, because a store that quietly merged them would merge
+two jobs' positions and skip records for one of them.
 
 > **Normative.** A walk position is operational state, never user content. It is
 > absent from `export`, and nothing about it is Tier 1.
@@ -488,7 +502,9 @@ half of that disjunct.
 > walk name that is empty, whitespace-only, or a lone surrogate, and the chunk read
 > refuses a negative `limit` and a `limit` of `2**63` while returning an empty
 > chunk for `0`. Every one of these refusals is asserted to be the same refusal on
-> every implementation.
+> every implementation, and each case is exercised by **calling the operation
+> directly** — the way every caller reaches it — rather than by constructing a
+> validated model around the argument first.
 
 The last clause is there because the negative case is not symmetric with the
 over-wide one and only one of them looks dangerous. SQLite reads `LIMIT -1` as *no
