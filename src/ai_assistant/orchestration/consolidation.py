@@ -980,7 +980,10 @@ def _extract_object(content: str) -> dict[str, object] | None:
     Bounded by :data:`_MAX_EXTRACTION_MISSES` failed attempts, so a brace-dense
     reply cannot make this quadratic on the event loop. A decoded object never
     counts as a miss, so any number of valid JSON fragments may precede the
-    envelope.
+    envelope. The comparison is ``>`` and not ``>=``, so exactly that many misses
+    are *tolerated* rather than one fewer — the two siblings spell it the same way,
+    and off by one here means a reply whose envelope sits behind exactly the budget
+    is discarded whole.
 
     **A candidate raising for a bounded reason that is not a syntax miss is a miss
     like any other**, so nothing escapes this scan: CPython's digit-limit
@@ -1004,7 +1007,7 @@ def _extract_object(content: str) -> dict[str, object] | None:
             candidate, end = decoder.raw_decode(content, index)
         except ValueError, RecursionError:
             misses += 1
-            if misses >= _MAX_EXTRACTION_MISSES:
+            if misses > _MAX_EXTRACTION_MISSES:
                 break
             index += 1
             continue

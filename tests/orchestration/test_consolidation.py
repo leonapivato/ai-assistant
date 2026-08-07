@@ -43,6 +43,7 @@ from ai_assistant.core.types import (
 from ai_assistant.memory import DefaultMemoryPolicy
 from ai_assistant.orchestration import MemoryWriteStage, QuestionStage
 from ai_assistant.orchestration.consolidation import (
+    _MAX_EXTRACTION_MISSES,
     CONSOLIDATION_WALK,
     ConsolidationStage,
 )
@@ -1418,3 +1419,25 @@ async def test_a_reply_with_no_envelope_at_all_is_still_one_unusable_entry() -> 
     assert report.discarded_unusable == 1
     assert report.proposed == 0
     assert report.exhausted is True
+
+
+async def test_an_envelope_behind_exactly_the_miss_budget_is_still_found() -> None:
+    """The budget tolerates that many misses, not one fewer.
+
+    ``_MAX_EXTRACTION_MISSES`` malformed object starts, then the real envelope. At
+    ``>=`` the scan breaks on the last permitted miss and never reaches it, so the
+    reply counts unusable and the walk advances having discarded every belief in
+    it — the same silent loss as the decoy case, at the boundary instead of at the
+    front. Both siblings use ``>``.
+
+    A boundary case rather than a round number, because only the boundary can tell
+    the two comparisons apart.
+    """
+    store = await _seeded([_record("r1"), _record("r2")])
+    writes, _ = _gated(store)
+    reply = "{" * _MAX_EXTRACTION_MISSES + _ONE_BELIEF
+
+    report = await _stage(store=store, writes=writes, reply=reply).run()
+
+    assert report.proposed == 1
+    assert report.discarded_unusable == 0
