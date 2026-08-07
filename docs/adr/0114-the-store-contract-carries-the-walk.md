@@ -663,12 +663,15 @@ half of that disjunct.
 > twice with no advance returns the same records; that a walk advanced to a chunk's
 > position returns the *following* records and never repeats one; that an advance to
 > a position at or behind the recorded one leaves the walk where it was; that two
-> a position issued for one walk is refused — as a `ValueError` — by another walk's
-> advance, leaving that walk's recorded position untouched — asserted by walking `A` forward and then
-> presenting `A`'s position to `B`, whose next chunk must still begin at the first
-> record; that two
 > walk names hold independent positions; that a chunk carries no position exactly
 > when it examined nothing; and that `clear` leaves no walk resumable.
+
+> **Normative.** The suite asserts the cross-walk refusal over a walk that
+> **already holds a position**: walk `A` forward, advance `B` to a position of its
+> own, present `A`'s position to `B`'s advance, and require both the `ValueError`
+> and that `B`'s next chunk begins strictly after `B`'s prior position. Run against
+> a fresh `B` the case cannot fail — an implementation that clears or overwrites
+> `B`'s cursor before raising passes it, because `B` had nothing to lose.
 
 > **Normative.** The suite additionally asserts the two dispositions a wrong
 > implementation passes every other clause on: that a walk whose recorded position
