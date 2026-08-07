@@ -66,6 +66,8 @@ from aged_store import (
     AgedStoreSpec,
     ClusteredEmbedder,
     Instants,
+    Ranked,
+    boundary_is_ambiguous,
     candidate_budget,
     eligible_total,
     filtered_neighbours,
@@ -193,6 +195,58 @@ async def _timed_search(
     return len(got), (time.perf_counter() - started) * 1000.0
 
 
+async def _measured_search(  # noqa: PLR0913 — the graded call needs all of its context
+    store: SqliteMemoryStore,
+    ranked: Sequence[Ranked],
+    *,
+    query: str,
+    limit: int,
+    kinds: Sequence[MemoryKind] | None,
+    where: str,
+) -> int:
+    """Run one search, grade it against the oracle, and return how many rows it served.
+
+    Every k-shortfall the instrument reports comes through here, because an
+    under-return is only evidence about the over-fetch budget once the alternative
+    explanations are excluded. Two things are checked, and the first is the one
+    that makes the second meaningful:
+
+    * **The rows are the right rows.** The eligible records inside the candidate
+      budget are a prefix of the eligible ranking, so a served row's distance can
+      never exceed the last served position's. A store that dropped one eligible
+      row and back-filled with a farther one fails here.
+    * **The count is exact**, unless the oracle itself reports the candidate cut
+      falling between two records too close to order reliably. An unconditional
+      row of slack — which this used to allow everywhere — would equally absolve a
+      regression that lost an eligible row in the middle of the ranking, and the
+      instrument would publish that fabricated loss as a k-shortfall.
+    """
+    predicted = served_prediction(ranked, limit=limit)
+    count, _ = await _timed_search(store, query, limit=limit, kinds=kinds)
+    got = await store.search(query, limit=limit, kinds=kinds)
+
+    if boundary_is_ambiguous(ranked, limit=limit, tolerance=_DISTANCE_TOLERANCE):
+        assert abs(count - predicted) <= _ORACLE_SLACK, (
+            f"{where}: served {count}, oracle predicts {predicted}, and the candidate "
+            f"cut is ambiguous — but not by as much as this"
+        )
+    else:
+        assert count == predicted, (
+            f"{where}: served {count} where the oracle predicts {predicted}, with an "
+            f"unambiguous candidate cut, so this is a disagreement and not float32"
+        )
+
+    if count:
+        oracle_distance = {entry.record_id: entry.distance for entry in ranked}
+        eligible = [entry for entry in ranked if entry.eligible]
+        cutoff = eligible[min(count, len(eligible)) - 1].distance
+        for record in got:
+            assert oracle_distance[record.id] <= cutoff + _DISTANCE_TOLERANCE, (
+                f"{where}: {record.id} is not among the {count} nearest eligible records"
+            )
+    return count
+
+
 def _percentile(ordered: Sequence[float], fraction: float) -> float:
     """The nearest-rank percentile of an already-sorted sample.
 
@@ -304,12 +358,13 @@ async def test_k_shortfall_against_filtered_neighbour_density(
         query = aged.topic_query(index)
         ranked = await aged.rank(query, kinds=kinds)
         entitled = min(_SWEEP_LIMIT, eligible_total(ranked))
-        predicted = served_prediction(ranked, limit=_SWEEP_LIMIT)
-        count, _ = await _timed_search(store, query, limit=_SWEEP_LIMIT, kinds=kinds)
-
-        assert abs(count - predicted) <= _ORACLE_SLACK, (
-            f"store served {count} where the oracle predicts {predicted} "
-            f"(query {index}, crowding {crowding}, closed {closed_fraction})"
+        count = await _measured_search(
+            store,
+            ranked,
+            query=query,
+            limit=_SWEEP_LIMIT,
+            kinds=kinds,
+            where=f"query {index}, crowding {crowding}, closed {closed_fraction}",
         )
         densities.append(filtered_neighbours(ranked, limit=_SWEEP_LIMIT))
         if count < entitled:
@@ -363,10 +418,8 @@ async def test_k_shortfall_concentrates_where_correction_does(
     for label, topic in (("corrected", HOT_TOPIC), ("untouched", HOT_TOPIC + 1)):
         query = aged.topic_query(topic)
         ranked = await aged.rank(query, kinds=kinds)
-        predicted = served_prediction(ranked, limit=limit)
-        count, _ = await _timed_search(store, query, limit=limit, kinds=kinds)
-        assert abs(count - predicted) <= _ORACLE_SLACK, (
-            f"store served {count} on the {label} topic where the oracle predicts {predicted}"
+        count = await _measured_search(
+            store, ranked, query=query, limit=limit, kinds=kinds, where=f"{label} topic"
         )
         measured[label] = (
             min(limit, eligible_total(ranked)),
@@ -431,10 +484,8 @@ async def test_k_shortfall_arrives_earlier_once_the_knn_cap_clamps_the_over_fetc
     observed: dict[int, tuple[int, int]] = {}
     for limit in (boundary, boundary * 2):
         entitled = min(limit, eligible_total(ranked))
-        predicted = served_prediction(ranked, limit=limit)
-        count, _ = await _timed_search(store, query, limit=limit, kinds=None)
-        assert abs(count - predicted) <= _ORACLE_SLACK, (
-            f"store served {count} at limit={limit} where the oracle predicts {predicted}"
+        count = await _measured_search(
+            store, ranked, query=query, limit=limit, kinds=None, where=f"limit={limit}"
         )
         budget = candidate_budget(limit)
         rows.append(f"{limit:>7} {budget:>8} {budget / limit:>9.2f} {entitled:>9} {count:>7}")
@@ -556,14 +607,26 @@ async def test_the_embedder_honours_a_width_other_than_the_default() -> None:
     cancellations, so the floor closes a reachable hole rather than a theoretical
     one.
     """
+    topics = 64
     for width in (64, 256, 1024):
         embedder = ClusteredEmbedder(dimensions=width)
-        vectors = await embedder.embed([f"t{topic} p{topic} tail" for topic in range(64)])
+        # `tail` begins with `t`, which a prefix-matching parser read as the topic
+        # token — every one of these would have shared one centroid, and this case
+        # would have asserted nothing about topic separation while appearing to.
+        vectors = await embedder.embed([f"t{topic} p0 tail" for topic in range(topics)])
 
         assert embedder.dimensions == width
         for vector in vectors:
             assert len(vector) == width
             assert math.isclose(math.sqrt(math.sumprod(vector, vector)), 1.0, abs_tol=1e-6)
+        # Same position, different topics: the topic token must be what separates
+        # them, or the density axis is measuring one cluster wearing many labels.
+        assert len({tuple(vector) for vector in vectors}) == topics
+        similarities = [math.sumprod(vectors[0], other) for other in vectors[1 : min(topics, 16)]]
+        assert max(similarities) < 0.5, (
+            f"topics are not separated at width {width}: nearest cross-topic "
+            f"similarity {max(similarities):.3f}"
+        )
 
     with pytest.raises(ValueError, match="dimensions must be >= 64"):
         ClusteredEmbedder(dimensions=1)
