@@ -114,8 +114,10 @@ The semantics above and below are the contract; the spelling is the implementing
 lane's, in ADR-0073 §1's form:
 
 ```python
-async def walk_records(self, walk: str, *, limit: int) -> RecordChunk: ...
-async def advance_walk(self, walk: str, *, position: WalkPosition) -> None: ...
+async def walk_records(self, walk: NonBlankEncodableText, *, limit: int) -> RecordChunk: ...
+async def advance_walk(
+    self, walk: NonBlankEncodableText, *, position: WalkPosition
+) -> None: ...
 ```
 
 > **Normative.** The chunk read returns at most `limit` records, in the store's
@@ -220,9 +222,9 @@ bounded by `limit` either way, so the cost is a constant factor on a bounded rea
 > passing it to the cursor advance for the walk it came from.
 
 > **Normative.** `core/types.py` gains two frozen models: a `WalkPosition`
-> carrying one opaque token, and a `RecordChunk` carrying the records of one chunk
-> and the position of its last record. A chunk that returns no records carries no
-> position.
+> carrying one opaque token typed `NonBlankEncodableText`, and a `RecordChunk`
+> carrying the records of one chunk and the position of its last record. A chunk
+> that returns no records carries no position.
 
 Two facts force opacity rather than recommend it. The position is the *store's*
 order key — `rowid` in `SqliteMemoryStore`, an insertion index elsewhere — and
@@ -369,16 +371,31 @@ rather than a missing refusal.
 ### 5. A walk is named, and two names never share a position
 
 > **Normative.** A position is recorded per walk name. The store treats the name
-> as opaque, never interprets it, and never shares a position between two names. A
-> blank name is refused.
+> as opaque, never interprets it, never normalises it, and never shares a position
+> between two names.
+
+> **Normative.** A walk name is `NonBlankEncodableText` on both operations, so a
+> blank, whitespace-only or unencodable name is refused by the type before any
+> implementation sees it, uniformly across every backend.
 
 This is ADR-0111 §1's "A cursor is per walked order and per job. Two jobs walking
 the same store do not share a position, and one job walking two orders holds one
 position in each", discharged with one parameter rather than a matrix: the name
 identifies the (job, order) pair, and a store that maintains a second order gives
-it a second set of names. Refusing a blank name is the same discipline every
-`NonBlankEncodableText` field in `core/types.py` already applies — a walk whose
-name is `""` is one an implementation would silently share with the next one.
+it a second set of names.
+
+**The name is typed rather than merely validated, because it becomes store state
+and the backends disagree about what a `str` is.** A bare `str` would let
+`walk_records("\ud800", …)` through the contract; SQLite cannot UTF-8 encode a
+lone surrogate when binding it as a `meta` key, so one backend raises a
+`UnicodeEncodeError` out of the driver while an in-memory one accepts it happily —
+backend-dependent behaviour on a value the contract said nothing about.
+`EncodableText`'s validator exists for exactly this class and names the same
+example, and `NonBlankEncodableText` adds the empty and whitespace-only cases that
+`""` alone would miss. **Not normalised**, which §5's first clause states: two
+names differing only in case or spacing are two walks, because a store that quietly
+merged them would merge two jobs' positions and skip records for one of them.
+Adversarial review found the bare `str` on round 5.
 
 > **Normative.** A walk position is operational state, never user content. It is
 > absent from `export`, and nothing about it is Tier 1.
@@ -467,9 +484,11 @@ half of that disjunct.
 > this and does not satisfy the clause.
 
 > **Normative.** The suite asserts the refusals §5 and §6 state, since a clause
-> nothing exercises is an obligation nobody meets: a blank walk name is refused by
-> **both** operations, and the chunk read refuses a negative `limit` and a `limit`
-> of `2**63` while returning an empty chunk for `0`.
+> nothing exercises is an obligation nobody meets: **both** operations refuse a
+> walk name that is empty, whitespace-only, or a lone surrogate, and the chunk read
+> refuses a negative `limit` and a `limit` of `2**63` while returning an empty
+> chunk for `0`. Every one of these refusals is asserted to be the same refusal on
+> every implementation.
 
 The last clause is there because the negative case is not symmetric with the
 over-wide one and only one of them looks dangerous. SQLite reads `LIMIT -1` as *no
