@@ -494,9 +494,12 @@ extending it would have no reason to know that.
 
 ### 6. The chunk bound is `scheduler_chunk_size`'s, and zero is refused
 
-> **Normative.** The chunk read refuses a `limit` outside `1 <= limit < 2**63`,
-> raising rather than clamping. Zero is refused with the rest, and no
-> implementation substitutes a different bound.
+> **Normative.** The chunk read refuses a `limit` that is not **exactly an `int`**
+> — `bool` included, and every non-integer with it — and refuses one outside
+> `1 <= limit < 2**63`, raising rather than clamping. Zero is refused with the rest.
+> Every implementation checks this on entry, before the value reaches a query or a
+> slice, so the refusal is the same refusal on every backend, and none substitutes a
+> different bound.
 
 The over-wide end is `list_beliefs`' own reason, quoted rather than re-derived:
 "Python's `int` is unbounded and SQLite's parameter binding is not, so an over-wide
@@ -520,6 +523,20 @@ alternative — an explicit exhaustion flag beside the position — adds a field
 `RecordChunk` for a case no caller wants, and leaves the ambiguous call
 constructible. Zero is not a bounded request for work; it is a request for no work,
 and it can make no progress by definition.
+
+**"Exactly an `int`" is the other half, and it is the same lesson §5 learned about
+the walk name one section earlier.** An annotation validates nothing on an ordinary
+method call, so `limit=True` satisfies `1 <= limit < 2**63` — `bool` is an `int`
+subclass and `True == 1` — and quietly becomes a one-record chunk, while `limit=1.5`
+passes the same comparison without being a count at all and then meets whatever the
+backend does with it. `core/config.py` already refuses exactly this for exactly this
+reason, in the words ADR-0111 §4 quotes when it pins `scheduler_chunk_size`: `bool`
+"is an `int` subclass, so `True` would otherwise load as a chunk size of one", which
+is why those fields are `_IntegerSetting` rather than bare `int`. The entry check
+here is that rule at the seam the setting is handed to. Adversarial review found the
+gap on round 11, having found its twin on the walk name on round 6; an ADR that
+required the check for one argument and not the other was inconsistent with itself
+rather than merely incomplete.
 
 **The bound now matches the setting that feeds it exactly.** ADR-0111 §4 pins
 `scheduler_chunk_size` to an `int` in `[1, 2**63)` and refuses a bad value at load,
@@ -610,8 +627,11 @@ half of that disjunct.
 > walk name that is empty, whitespace-only, or a lone surrogate, and the chunk read
 > refuses a `limit` of `-1`, of `0`, and of `2**63` — the zero case run against a
 > **non-empty, unexhausted** walk, where a wrong implementation answers with the
-> positionless chunk that means exhaustion. Every one of these refusals is asserted
-> to be the same refusal on
+> positionless chunk that means exhaustion — and refuses `True`, `1.5`, a `str` and
+> `None`, none of which is exactly an `int`. `True` is the case that matters most,
+> because it satisfies every range comparison and is the one a reader would not
+> think to write. Every one of these refusals is asserted to be the same refusal
+> on
 > every implementation, and each case is exercised by **calling the operation
 > directly** — the way every caller reaches it — rather than by constructing a
 > validated model around the argument first.
