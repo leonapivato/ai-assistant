@@ -567,8 +567,12 @@ async def test_the_embedder_honours_a_width_other_than_the_default() -> None:
 
     with pytest.raises(ValueError, match="dimensions must be >= 64"):
         ClusteredEmbedder(dimensions=1)
-    with pytest.raises(ValueError, match="spread >= 0"):
-        ClusteredEmbedder(spread=-1.0)
+    # A NaN and an infinity both fail `spread < 0.0`, so only the finite check
+    # refuses them — and an infinite spread normalises to a vector of NaNs, which
+    # ranks against nothing and loses no comparison it should lose.
+    for bad in (-1.0, math.inf, math.nan):
+        with pytest.raises(ValueError, match="spread a finite value"):
+            ClusteredEmbedder(spread=bad)
 
 
 def test_a_sized_spec_refuses_a_population_it_cannot_actually_plant() -> None:
@@ -586,3 +590,43 @@ def test_a_sized_spec_refuses_a_population_it_cannot_actually_plant() -> None:
 
     with pytest.raises(ValueError, match="leaves no live record"):
         AgedStoreSpec.sized(total=2_000, crowding=100, closed_fraction=0.9999)
+    # Zero reached a raw ZeroDivisionError; a negative silently collapsed the
+    # store to one topic, reporting a density nobody asked for.
+    for crowding in (0, -5):
+        with pytest.raises(ValueError, match="must both be >= 1"):
+            AgedStoreSpec.sized(total=2_000, crowding=crowding, closed_fraction=0.5)
+
+
+def test_the_instants_refuse_a_timeline_that_leaves_closed_records_live() -> None:
+    """Guard the fixture's premise: a record it calls window-closed is closed at ``now``.
+
+    This is the failure that would not announce itself. With ``closed`` after
+    ``now`` every ``SUPERSEDE`` and ``ABSENCE`` record is still live, so the
+    planted population consumes no candidates as filtered rows — and the
+    instrument would publish a k-shortfall rate against a store that was never
+    aged, with a census that counts exactly what it meant to plant.
+    """
+    ordered = _INSTANTS
+    assert ordered.opened < ordered.closed <= ordered.now
+
+    with pytest.raises(ValueError, match="closed must not be after now"):
+        Instants(
+            now=datetime(2026, 3, 1, tzinfo=UTC),
+            written=datetime(2026, 1, 1, tzinfo=UTC),
+            closed=datetime(2026, 4, 1, tzinfo=UTC),
+            opened=datetime(2026, 2, 1, tzinfo=UTC),
+        )
+    with pytest.raises(ValueError, match="opened must precede closed"):
+        Instants(
+            now=ordered.now,
+            written=ordered.written,
+            closed=ordered.opened,
+            opened=ordered.closed,
+        )
+    with pytest.raises(ValueError, match="written must not be after now"):
+        Instants(
+            now=ordered.now,
+            written=datetime(2027, 1, 1, tzinfo=UTC),
+            closed=ordered.closed,
+            opened=ordered.opened,
+        )
