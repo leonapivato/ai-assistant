@@ -155,7 +155,7 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
     table rather than present and skipped, and ``hub_ready`` reports the names that
     are actually armed.
 
-    Five jobs, and each is a decision an ADR argues rather than describes:
+    Four jobs, and each is a decision an ADR argues rather than describes:
 
     * **Retention purge** — ``MemoryStore.purge_expired`` *and*
       ``DeferralStore.purge``, as **one** job, because ADR-0078 §10 item 8 says the
@@ -196,32 +196,39 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       fourth state of §7a's matrix fails at load, where a scheduler that omitted
       the requested job would instead report health while running nothing.
 
-    * **Consolidation** — leg 7's chunked walk (ADR-0106, ADR-0111), and the third
-      kind of disabled default in one table. It is not the calendar reader's, whose
-      default is only about consent, and it is not observation's, whose default is
-      about a cursor that did not exist: this job **has** its cursor (ADR-0114) and
-      needs no grant, so nothing technical is missing and nobody's files are read.
-      What it spends is a model call per chunk, unattended, and every tainted
-      proposal it makes becomes a question a user has to answer (ADR-0106 §6). A
-      deployment that has not decided it wants that should not acquire it by
-      upgrading, so ``consolidation_interval`` is ``None`` until an operator sets
-      it. ADR-0111 §11 declines the default for a job it does not land; the lane
-      that landed the job took it.
+    **Consolidation is deliberately not here, and its absence is the decision.**
+    Leg 7's chunked walk (ADR-0106, ADR-0111) is built and wired —
+    ``Engine.consolidate`` exists and its stage is constructed by the composition
+    root — but no row arms it and ``Settings`` carries no interval to arm it with.
 
-      **Arming it owes ADR-0111 §4's in-chunk deadline check, which is open**
-      (#820): a chunk's writes reach the ``Embedder`` through
-      ``MemoryStore.write_atomic``, and that runs unbounded in a worker thread, so
-      a hung backend holds this serial loop past any run budget. §4 makes such a
-      deadline "a precondition of being chunked at all". The exposure is shared
-      with the two jobs that already write, and this is simply the first *chunked*
-      job, where §4's clause bites.
+    ADR-0111 §4's second clause makes a per-operation deadline "a precondition of
+    being chunked at all", and says in terms that this "must be checked rather than
+    assumed": "a job whose chunk reaches an operation with no deadline is not a job
+    that may be chunked under this ADR, and its lane owes that operation a deadline
+    before it may be scheduled." A consolidation chunk's model call is bounded by
+    ``model_timeout_seconds``; its **writes** reach the ``Embedder`` through
+    ``MemoryStore.write_atomic``, which runs in a worker thread with no deadline, so
+    a hung backend holds this serial loop past any run budget.
 
-      **It is the job ADR-0083 §7's revisit condition named** — "revisit when a
-      job's typical runtime approaches its interval, which is what consolidation
-      (leg 7) is likely to do first" — and the answer is ADR-0111 §4's bounded run
-      rather than concurrency. Its run budget and chunk size are ``Settings``, so
-      the delay it imposes on a sibling is a figure an operator can read off the
-      configuration rather than an unknown.
+    **That is why the row is absent rather than present with a ``None``
+    interval.** A disabled default is ADR-0083 §7's instrument for a job that
+    *may* be armed and that a deployment has not chosen; §4's bar is different and
+    stricter — the configuration must not be reachable at all. Shipping the field
+    would leave it one setting away.
+
+    The exposure is shared with the two jobs above that write, and is not this
+    job's doing; what is specific is that consolidation is the first **chunked**
+    job, which is where §4's clause bites. **#820 owns the deadline, and the lane
+    that closes it adds the field and this row** — ADR-0111 §11's "enabling any job
+    the scheduler ships disabled is an implementation lane's act", with the
+    precondition made structural rather than documentary.
+
+    **It is also the job ADR-0083 §7's revisit condition named** — "revisit when a
+    job's typical runtime approaches its interval, which is what consolidation
+    (leg 7) is likely to do first" — and the answer is ADR-0111 §4's bounded run
+    rather than concurrency. Its run budget and chunk size are already ``Settings``,
+    so the delay it will impose on a sibling is a figure an operator can read off
+    the configuration rather than an unknown.
 
     **Confirmation deadlines are deliberately not here.** The roadmap names them as
     this scheduler's, and §7 is the one place that sentence does not survive contact
@@ -246,7 +253,6 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
         ("conversation_sweep", settings.conversation_sweep_interval, engine.start),
         ("observation", settings.observation_interval, engine.observe),
         ("calendar_reader", settings.calendar_reader_interval, engine.ingest),
-        ("consolidation", settings.consolidation_interval, engine.consolidate),
     )
     return tuple(
         Job(name=name, interval=interval, run=run)
