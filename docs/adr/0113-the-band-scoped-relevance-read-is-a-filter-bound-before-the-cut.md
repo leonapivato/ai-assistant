@@ -327,8 +327,11 @@ matching nothing (ADR-0073 §2) — is deliberate and stays.
 > **Normative.** The band decides **which records are ranked** (§2) and contributes
 > nothing to **how ranked records compare**. It is not a term in any ordering, not
 > an addend or factor in any score, not a weight, and not a threshold a record is
-> dropped below. Within the result of one call the order is relevance alone, and
-> the store never compares a record of one band against a record of another.
+> dropped below. Within the result of one call the order is relevance alone,
+> whichever bands are selected: where a call spans more than one — including the
+> `bands=None` default, which spans every band and is today's behaviour unchanged —
+> records of different bands are compared to one another by relevance and by
+> nothing else.
 
 > **Normative.** ADR-0112 §1 binds unchanged and is not narrowed here: neither
 > currency nor evidence-strength is a term in any ordering, score, weight or cut
@@ -358,9 +361,15 @@ about which field's name is on the multiplicand" — and ADR-0112 §2 declined t
 the weighting door at the supersession price ADR-0072's Consequences quotes. A
 `bands` argument mixes nothing: it restricts the eligible set on the caller's own
 instruction, and every record that comes back is ordered against every other by
-similarity and by nothing else. Two calls with different `bands` produce two
-independently-ordered results; neither carries a cross-band comparison, because the
-store never makes one.
+similarity and by nothing else — including across bands, where the call spans more
+than one. **The prohibition is on the band *influencing* a comparison, never on the
+comparison happening**, and an earlier draft got this backwards: it forbade the
+store to compare records of different bands at all, which would have made the
+`bands=None` default — every band, and the behaviour every caller has today —
+impossible to implement. The architecture lens caught it. What a band-scoped call
+buys the consumer is not the absence of cross-band comparison but the guarantee
+that the records it truncates against are the ones it asked for (§2); the two are
+easy to conflate and only the second is this ADR's.
 
 **Precedence still lives in the consumer, and this read hands it nothing.** The
 store does not know which band the caller will place first, what budget each gets,
