@@ -333,6 +333,22 @@ already disposes of it correctly, leaving it to be detected is worse than not
 creating it. It is also the shape #738 reports in the migration's own domain, where
 a store with "rows present, cursor absent" sticks instead of being discarded.
 
+**`clear` discards the positions and must not reset the key sequence, and the two
+halves are what make an in-flight walk safe across one.** §1's clause already
+forbids the reset — "or after the store is emptied" is that case — and this is
+where the reason shows. A walker can be holding a chunk's position when another
+caller empties the store, and it will then advance to a position §4 has already
+discarded; the advance is the first for that walk, so nothing compares against it
+and the store records it. That is harmless **only** because the key sequence did
+not reset: every record added after the `clear` is issued a key above every key
+issued before it, so a cursor sitting at a stale position names a point below all of
+them and the next chunk returns every one. Reset the sequence and the same sequence
+skips them silently — the walker's own stale position now sits *above* live records
+that will never be read again. So no special disposition is needed for a stale
+advance, and the invariant is doing the work; adversarial review found on round 3
+that nothing in §8 made an implementation prove it, which is the gap that mattered
+rather than a missing refusal.
+
 ### 5. A walk is named, and two names never share a position
 
 > **Normative.** A position is recorded per walk name. The store treats the name
@@ -418,6 +434,13 @@ half of that disjunct.
 > the record holding the highest position, add a new record, and assert the walk
 > reaches it. The case runs for `delete`, and for a `purge_expired` that reclaims
 > the highest-positioned record.
+
+> **Normative.** The suite asserts that `clear` does not reset the key sequence:
+> after a `clear`, a newly added record's position is greater than every position
+> the store issued before it, and a walk holding a position from before the `clear`
+> that advances to it afterwards still reaches every record added since. An
+> implementation that resets its high-water mark in `clear` passes every other
+> clause here and fails this one.
 
 > **Normative.** The lane migrating an existing store ships a test over a store
 > **populated before the walk surface existed** and carrying a gap at its top — its
