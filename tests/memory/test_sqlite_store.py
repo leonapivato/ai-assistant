@@ -1844,6 +1844,23 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
             (walk, "written-by-a-build-that-is-not-this-one"),
         )
 
+    async def record_walk_position_beyond_the_store(self, store: MemoryStore, walk: str) -> None:
+        """Write a rowid above ``sqlite_sequence``'s high-water mark for ``records``.
+
+        Above what the table has ever *issued*, not merely above what it holds:
+        the second is an ordinary state after a delete and must be left alone.
+        """
+        assert isinstance(store, SqliteMemoryStore)
+        row = store._conn.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'records'"
+        ).fetchone()
+        beyond = (0 if row is None else int(row[0])) + 1_000
+        store._conn.execute(
+            "INSERT INTO walk_positions(walk, position) VALUES (?, ?) "
+            "ON CONFLICT(walk) DO UPDATE SET position = excluded.position",
+            (walk, str(beyond)),
+        )
+
     @pytest.fixture
     def store_factory(
         self, make_store: Callable[..., SqliteMemoryStore]

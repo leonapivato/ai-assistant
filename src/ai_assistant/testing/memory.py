@@ -130,7 +130,7 @@ def _check_walk_limit(limit: int) -> None:
         raise ValueError(msg)
 
 
-def _resume_key(recorded: str | None) -> int:
+def _resume_key(recorded: str | None, *, issued_through: int) -> int:
     """Read a recorded position back, restarting the walk on anything unusable.
 
     Absent, unreadable or malformed all mean the same thing: discard and restart
@@ -138,6 +138,13 @@ def _resume_key(recorded: str | None) -> int:
     position before the first record rather than a sentinel — there is no integer
     below the order's floor, and the obvious choice silently skips every record at
     or below it (ADR-0104 §2).
+
+    A well-formed number **above every key this store has ever issued** is
+    unsupported too, and is the dangerous case: it names a range no record can
+    ever occupy, so the walk would answer "nothing left" on every run while the
+    store filled up behind it. The ceiling is the high-water mark and not the
+    largest key *present*, because walking to the end and then deleting the top
+    records leaves a legitimate position above everything the store now holds.
     """
     if recorded is None:
         return 0
@@ -145,7 +152,9 @@ def _resume_key(recorded: str | None) -> int:
         key = int(recorded)
     except TypeError, ValueError:
         return 0
-    return max(key, 0)
+    if not 0 <= key <= issued_through:
+        return 0
+    return key
 
 
 def _mint_position(walk: str, key: int) -> WalkPosition:
@@ -582,11 +591,22 @@ class FakeMemoryStore:
         _check_walk_limit(limit)
         async with self._resource.held():
             now = self._now_utc()
-            after = _resume_key(self._walks.get(walk))
+            after = _resume_key(self._walks.get(walk), issued_through=self._sequence)
             # `limit` bounds records *examined*, not records returned: a scan that
             # ran on until it had `limit` eligible records would be unbounded over
             # a long ineligible run, which is the hazard ADR-0111 §4 forbids.
-            examined = sorted((key, rid) for rid, key in self._keys.items() if key > after)[:limit]
+            # Stops at `limit` rather than sorting the whole unwalked tail, so the
+            # work does not grow with what is left to walk. `_keys` is already in
+            # ascending key order and stays that way: `_issue_key` only appends a
+            # fresh, larger key, an upsert leaves an existing entry alone, and a
+            # delete disturbs no other.
+            examined: list[tuple[int, str]] = []
+            for rid, key in self._keys.items():
+                if key <= after:
+                    continue
+                examined.append((key, rid))
+                if len(examined) == limit:
+                    break
             eligible = [
                 self._records[rid].model_copy(deep=True)
                 for _, rid in examined
@@ -613,7 +633,7 @@ class FakeMemoryStore:
             # Never backwards, and not an error: a walk is at-least-once, so a
             # resumed run can legitimately hold a stale position. Repeated work is
             # the cost; records skipped forever would be the alternative.
-            if key > _resume_key(self._walks.get(walk)):
+            if key > _resume_key(self._walks.get(walk), issued_through=self._sequence):
                 self._walks[walk] = str(key)
 
     async def delete(self, record_id: str) -> bool:

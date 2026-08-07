@@ -1215,7 +1215,10 @@ class SqliteMemoryStore:
             row = conn.execute(
                 "SELECT position FROM walk_positions WHERE walk = ?", (walk,)
             ).fetchone()
-            after = resume_key(None if row is None else str(row[0]))
+            after = resume_key(
+                None if row is None else str(row[0]),
+                issued_through=self._issued_through(conn),
+            )
             return [
                 (int(rowid), str(data))
                 for rowid, data in conn.execute(
@@ -1223,6 +1226,25 @@ class SqliteMemoryStore:
                     (after, limit),
                 )
             ]
+
+    @staticmethod
+    def _issued_through(conn: sqlite3.Connection) -> int:
+        """The largest ``rowid`` this table has ever issued (ADR-0114 §1).
+
+        ``AUTOINCREMENT``'s own high-water mark, which is exactly the property §1
+        states: every key issued exceeds every key already issued, and the mark is
+        what makes that true across a delete of the top row and across a ``clear``.
+        Read from ``sqlite_sequence`` rather than from ``max(rowid)``, because those
+        two disagree in precisely the case a cursor depends on — walk to the end,
+        delete the top records, and ``max(rowid)`` falls below a position that is
+        still perfectly good.
+
+        ``0`` where the table has issued nothing: ``sqlite_sequence`` carries no row
+        for a table until its first insert, and a store that has issued no key can
+        support no recorded position.
+        """
+        row = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'records'").fetchone()
+        return 0 if row is None else int(row[0])
 
     async def advance_walk(self, walk: str, *, position: WalkPosition) -> None:
         """Record how far ``walk`` has reached (ADR-0114 §3).
@@ -1254,7 +1276,10 @@ class SqliteMemoryStore:
             # Never backwards, and not an error: a walk is at-least-once, so a
             # resumed run can legitimately hold a stale position. Repeated work is
             # the cost; records skipped forever would be the alternative.
-            if key <= resume_key(None if row is None else str(row[0])):
+            if key <= resume_key(
+                None if row is None else str(row[0]),
+                issued_through=self._issued_through(conn),
+            ):
                 return
             conn.execute(
                 "INSERT INTO walk_positions(walk, position) VALUES (?, ?) "

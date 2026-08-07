@@ -273,6 +273,11 @@ class TestInMemoryMemoryStoreContract(MemoryStoreContract):
         assert isinstance(store, InMemoryMemoryStore)
         store._walks[walk] = "written-by-a-build-that-is-not-this-one"
 
+    async def record_walk_position_beyond_the_store(self, store: MemoryStore, walk: str) -> None:
+        """Park a number above this store's own issued-key counter."""
+        assert isinstance(store, InMemoryMemoryStore)
+        store._walks[walk] = str(store._sequence + 1_000)
+
     @pytest.fixture
     def store(self) -> MemoryStore:
         return InMemoryMemoryStore(now=_fixed_now)
