@@ -967,6 +967,17 @@ def _extract_object(content: str) -> dict[str, object] | None:
 
     Bounded by :data:`_MAX_EXTRACTION_MISSES` failed attempts, so a brace-dense
     reply cannot make this quadratic on the event loop.
+
+    **A candidate raising for a bounded reason that is not a syntax miss is a miss
+    like any other**, so nothing escapes this scan: CPython's digit-limit
+    ``ValueError`` on an over-long integer literal, and the ``RecursionError`` a
+    pathologically nested payload raises out of ``raw_decode``. Both are shapes a
+    reply can carry while staying well under :data:`_MAX_REPLY_CHARS`, and letting
+    either escape would turn malformed model output into a raised run — leaving the
+    cursor unadvanced and the same reply re-derived on the next run, forever, which
+    is precisely what ADR-0077 §4's discard-and-count exists to prevent.
+    ``ModelBackedObserver`` and ``planning.planner`` both catch the pair here, and
+    this extractor is the third of the three.
     """
     decoder = json.JSONDecoder()
     misses = 0
@@ -975,7 +986,7 @@ def _extract_object(content: str) -> dict[str, object] | None:
             continue
         try:
             decoded, _ = decoder.raw_decode(content, index)
-        except ValueError:
+        except ValueError, RecursionError:
             misses += 1
             if misses >= _MAX_EXTRACTION_MISSES:
                 return None
