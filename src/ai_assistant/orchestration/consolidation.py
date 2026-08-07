@@ -212,6 +212,37 @@ def _check_bound(name: str, value: int) -> None:
         raise ValueError(msg)
 
 
+def _check_budget(value: timedelta) -> None:
+    """Refuse a run budget that is not an exact, strictly positive ``timedelta``.
+
+    ``Settings`` refuses the same values at load (ADR-0111 §4's third clause: the
+    duration is "refused at load unless it is finite and strictly positive"), and
+    this constructor is exported, so a caller wiring it directly would otherwise
+    get behaviour §4 forbids. ``timedelta(0)`` is the case that looks harmless and
+    is not: the budget is spent before the first chunk boundary, so the run walks
+    nothing and returns a report of zeroes — the pass that "reports health while
+    doing nothing" ADR-0022 §4a refuses, and here it would recur every interval
+    forever while the store grew.
+
+    ``type(...) is timedelta`` rather than ``isinstance``, which is what closes the
+    other end: a subclass overriding ``total_seconds`` to return infinity makes the
+    deadline unreachable and the run unbounded — the hazard ``core/config.py``
+    spends ``allow_inf_nan=False`` on one field over, where infinity "would silently
+    disable the deadline". A native ``timedelta`` cannot hold a non-finite value, so
+    excluding subclasses is the whole check rather than a first step.
+
+    Raises:
+        TypeError: If ``value`` is not exactly a ``timedelta``.
+        ValueError: If it is not strictly positive.
+    """
+    if type(value) is not timedelta:
+        msg = f"run_budget must be a timedelta, got {type(value).__name__}: {value!r}"
+        raise TypeError(msg)
+    if value <= timedelta(0):
+        msg = f"run_budget must be strictly positive, got {value}"
+        raise ValueError(msg)
+
+
 def _confidence(step: MemorySource, supports: int) -> float:
     """This producer's confidence for ``supports`` distinct records taken by ``step``.
 
@@ -341,6 +372,7 @@ class ConsolidationStage:
                 name; a second consolidating job would take a second (ADR-0111 §1).
         """
         _check_bound("max_proposals", max_proposals)
+        _check_budget(run_budget)
         self._memory = memory
         self._writes = writes
         self._model = model
