@@ -750,12 +750,14 @@ half of that disjunct.
 > directly** — the way every caller reaches it — rather than by constructing a
 > validated model around the argument first.
 
-> **Normative.** Any `position` argument that did not come from a chunk read of
-> the named walk is refused with a `ValueError`, **however it was constructed and
-> whatever is wrong with it** — a bad token, a missing one, the wrong type, or no
-> position at all. An implementation may not reach a different exception class by
-> reading a field before it validates: `AttributeError`, `TypeError` and a bare
-> `KeyError` are all breaches of §6a, not variants of it.
+> **Normative.** A `position` the store can tell is invalid **from the value
+> itself** is refused with a `ValueError`, however it was constructed — a malformed
+> token, a missing one, a value that is not a `WalkPosition`, or none at all. An
+> implementation may not reach a different exception class by reading a field
+> before it validates: `AttributeError`, `TypeError` and a bare `KeyError` are
+> breaches of §6a, not variants of it. This rule reaches only what is decidable
+> from the argument; a **well-formed token naming the right walk that no chunk
+> read ever issued** stays where §2 puts it, undetected by design.
 
 > **Normative.** The suite exercises that rule over a walk that has already been
 > advanced, asserting no observable change in the form the cross-walk case uses:
@@ -767,7 +769,17 @@ half of that disjunct.
 > The list is exemplary and the clause above is the obligation: a variant not named
 > here is still refused.
 
-**The rule is stated generally because the failure space is not enumerable and the
+**The rule is general over malformation and stops exactly there, and an earlier
+draft of it overshot into the case §2 declined.** That draft refused any position
+"that did not come from a chunk read of the named walk", which is the unissued-token
+detection §2's second clause deliberately does not require and §9 declines the
+mechanism for — a contradiction inside one document, and the more dangerous
+direction of the two because it reads like a safety guarantee. It is general over
+what a store can *decide from the argument* and silent about what it cannot.
+Adversarial review found the overshoot on round 21, having proposed the underlying
+mechanism on round 13 and had it refused.
+
+**Generality is the point, because the malformation space is not enumerable and the
 enumeration was becoming the specification.** `model_construct` bypasses a model's
 validator entirely — that is its purpose — so it can produce a position with a bad
 token, with no token, or with fields no version of the type ever had, and each of
