@@ -156,10 +156,16 @@ about whether the write is refused.
 
 > **Normative.** The refusal ADR-0081 §1 states is raised as a distinct
 > `MemoryStoreError` subclass declared in `core/errors.py`, and every
-> `MemoryWriter` implementation raises that class for that refusal and no other.
-> It is documented on `MemoryWriter.ingest` and asserted in the shared
+> `MemoryWriter` implementation raises it for that refusal and no other. It is
+> documented on `MemoryWriter.ingest` and asserted in the shared
 > `MemoryWriterContract`, so a caller can distinguish it on **every**
 > implementation rather than on the one it happens to hold.
+
+> **Normative.** The refusal's **two arms are separately distinguishable**, by
+> class. Where the destination was chosen by the *producer* — `ACCEPT` and
+> `STORE_TEMPORARY` install at `proposed.id` — the base class is raised. Where it
+> was chosen by the *policy* — `REINFORCE` installs at the ruling's `target_id` —
+> a subclass of it is raised. No implementation reports one arm as the other.
 
 The shape, stated as ADR-0072 §2 stated `band_of`'s rather than left to the lane;
 the spelling is the implementing lane's:
@@ -167,7 +173,31 @@ the spelling is the implementing lane's:
 ```python
 class SelfConsumingWriteError(MemoryStoreError):
     """A ruling would install the proposal at an id the proposal cites."""
+
+
+class FoldOntoCitedRecordError(SelfConsumingWriteError):
+    """...and the destination is the fold target the policy chose."""
 ```
+
+**The split is what keeps §3's bound from swallowing the case it does not
+reach.** The two arms differ in *who chose the id the write lands at*, and only
+one of them is the case this ADR legitimises. `proposed.id` is minted by the
+producer and cited by the producer, so an install refused there is a producer bug
+exactly as ADR-0081 §Context describes and remains one. `target_id` is the
+policy's pick over the proposal's own content, which a generalising producer
+cannot foresee. A single class for both would let a caller acting correctly on the
+second silently absorb the first — converting a bug into a normal outcome, which is
+the opposite of what §3 says it does. Architecture review found it on round 1.
+
+**The discriminator costs the writer nothing**, which is why it is a class rather
+than a judgement left to the caller: `MemoryIngestor._refuse_self_consuming_write`
+already receives the `MemoryDecision`, so the ruling that produced the destination
+is in hand at the raise site with no extra input and no store read — the property
+ADR-0081 §1 spends its longest paragraph protecting.
+
+**A subclass rather than two siblings**, so a caller that wants the family rather
+than the arm has one name to catch, and so `except SelfConsumingWriteError` keeps
+its plain meaning: *a write was refused for consuming its own citation*.
 
 **A subclass rather than a flag on the existing error**, because the corpus has
 already ruled how this distinction is drawn: ADR-0111 §9's "the distinction is
@@ -234,19 +264,28 @@ wait for a third consumer — governs hoisting a *generic seam*, and an error cl
 that one caller must distinguish to avoid a permanent stall is not that: the
 alternative is not "wait and see", it is "the job cannot ship".
 
-**A producer fault is still a producer fault.** A hand-built proposal citing its
-own id is exactly what ADR-0081 §Context describes and is still a bug; nothing
-here makes it less so. What changes is that "the writer refused this write" and
-"the producer is broken" stop being the same statement — which they ceased to be
-the moment a conforming producer could reach the refusal.
+**A producer fault is still a producer fault, and §2's split is what makes that
+sentence do work.** A hand-built proposal citing its own id is exactly what
+ADR-0081 §Context describes and is still a bug; nothing here makes it less so, and
+it keeps the base class while the legitimate case takes the subclass. What changes
+is that "the writer refused this write" and "the producer is broken" stop being the
+same statement — which they ceased to be the moment a conforming producer could
+reach the refusal — and what does *not* change is that the second statement is
+still available to anyone who needs it.
 
 ### 4. What a caller may do with it, and what it may not
 
-> **Normative.** A caller that catches this class treats it as a ruling on **one
-> proposal**: it may continue with other proposals and may record the chunk it was
-> processing as done. It may not fabricate a `MemoryDecision`, may not report the
-> proposal as accepted, deferred or rejected by any policy, and may not re-submit
-> the same proposal unchanged in the same run.
+> **Normative.** A caller may take the continue-branch **only** on the
+> policy-chosen arm of §2. Catching it there, the caller treats the refusal as a
+> ruling on **one proposal**: it may continue with other proposals and may record
+> the chunk it was processing as done. It may not fabricate a `MemoryDecision`, may
+> not report the proposal as accepted, deferred or rejected by any policy, and may
+> not re-submit the same proposal unchanged in the same run.
+
+> **Normative.** The producer-chosen arm propagates. No caller continues past it,
+> counts it as an ordinary disposition, or catches the **base** class in order to
+> reach both — which would absorb a producer bug into the path built for the case
+> that is not one.
 
 **No fabricated ruling**, which is ADR-0081 §3's and ADR-0005 §3's rule and is not
 touched: "a ruling is the policy's to make and a writer inventing one puts a
@@ -411,11 +450,13 @@ this ADR does not land, neither does the note.
 > where a real writer raises the subclass would certify a consumer the real writer
 > breaks (ADR-0026 §7).
 
-> **Normative.** That suite case asserts the class on a `REINFORCE` whose
-> `target_id` the proposal cites, not only on an `ACCEPT` at a cited
-> `proposed.id`. The `REINFORCE` arm is the one a conforming producer reaches, and
-> a case exercising only the `ACCEPT` arm passes an implementation that raises the
-> subclass on the arm nobody hits and the base class on the arm everybody does.
+> **Normative.** The suite asserts **both** arms of §2 separately and asserts
+> which class each one raises: an `ACCEPT` at a cited `proposed.id` raises the base
+> and **not** the subclass, and a `REINFORCE` whose `target_id` the proposal cites
+> raises the subclass. A case exercising only one arm passes an implementation that
+> raises the same class for both, which is the conflation §2 exists to prevent; a
+> case asserting only `isinstance` against the base passes it too, because the
+> subclass satisfies that check.
 
 > **Normative.** The lane landing a consolidator ships a test that a chunk whose
 > generalisation is refused under this rule leaves the run **continuing** — the
@@ -424,11 +465,12 @@ this ADR does not land, neither does the note.
 > re-derive the same refusal. A test that stops at the raised class does not
 > satisfy this clause: what is under test is that the stall is gone.
 
-Each names the case that can fail. The `REINFORCE` clause is there because that
-arm is invisible to a suite built from ADR-0081 §Context's worked example, which
-is an `ACCEPT`. The continuation clause is there because catching an exception and
-then halting anyway satisfies every other clause here and leaves the job exactly as
-stuck as it was.
+Each names the case that can fail. The two-arm clause is there because the
+`REINFORCE` arm is invisible to a suite built from ADR-0081 §Context's worked
+example, which is an `ACCEPT` — and because asserting the *base* class on both arms
+is the shape a reader reaches for and the one that certifies the conflation. The
+continuation clause is there because catching an exception and then halting anyway
+satisfies every other clause here and leaves the job exactly as stuck as it was.
 
 ## Consequences
 
@@ -444,13 +486,14 @@ implementation pays a subclass and a suite case; no caller that does not care
 changes, because the subclass is still a `MemoryStoreError`. That is the smallest
 change that makes the distinction ADR-0111 §9 requires drawable.
 
-**The refusal stops being evidence of a bug, and that is a real loss worth
-naming.** Under ADR-0081 §3 a `MemoryStoreError` from this site meant "some
-producer is broken", and an operator could act on it. Now it means either that or
-"a generalising producer landed on one of its own citations", and only the caller's
-count distinguishes them. §4's counting clause is what keeps the first case
-visible; without it the change would trade a stall for a silence, which is the
-worse of the two.
+**The refusal keeps being evidence of a bug on the arm where it was one.** Under
+ADR-0081 §3 a `MemoryStoreError` from this site meant "some producer is broken",
+and an operator could act on it. §2's split preserves that: the producer-chosen arm
+keeps the base class and §4 makes it propagate, so a producer that cites its own
+minted id still fails loudly and still stops the run. What the subclass carves out
+is the arm where the destination was never the producer's to choose. An earlier
+draft used one class for both and would have traded the stall for a silence — the
+worse of the two — which architecture review caught on round 1.
 
 **A conforming producer can now be refused repeatedly and legitimately.** A
 consolidator over a store whose material keeps generalising onto itself will keep
@@ -487,6 +530,14 @@ would prevent the proposal rather than refusing it, which sounds better. Rejecte
 because it requires running conflict detection outside the gate — golden rule 1's
 seam and ADR-0005 §3's "a ruling is the policy's to make" — with the producer's own
 thresholds, which is a second copy of the policy that will disagree with the first.
+
+**One class for both arms of the refusal.** The draft this ADR was reviewed from,
+and the smaller surface. Rejected because it makes the two cases indistinguishable
+at exactly the point §4 tells a caller to continue: a consolidator that cited its
+own minted id — a genuine bug, and the case ADR-0081 §Context was written about —
+would be counted and passed over on every run, forever, by a caller doing precisely
+what this ADR told it to do. The distinction costs one subclass and no new input,
+because the ruling that chose the destination is already at the raise site.
 
 **Letting the caller match on the message.** Free, and forbidden in terms by
 ADR-0111 §9 and by ADR-0083 §6, which records what the corpus already paid to learn
