@@ -1191,6 +1191,190 @@ class MemoryStoreContract:
         assert "legacy" in {record.id for record in await store.export()}
         assert "legacy" in {record.id for record in await store.search("accumulated")}
 
+    # --- band-scoped relevance read: search(bands=...) (ADR-0113) --------------
+    # ADR-0113 §7 states what this half owes and warns which clauses a suite
+    # naturally writes *instead*, each of which certifies a store that implements
+    # nothing: a band case whose fixture is balanced, an empty-sequence case folded
+    # into the ``None`` case, and a conjunction case whose two filters select the
+    # same records. Each is written here in the form that bites.
+
+    async def test_search_filters_by_band(self, store: MemoryStore) -> None:
+        # ADR-0113 §1 and §3, the shape ``list_beliefs`` already has: ``None`` is
+        # every band, an empty sequence selects nothing, and a band selects the
+        # *whole* band — both sources of DERIVED together, because ADR-0072 §4
+        # keeps them indistinguishable and the filter is keyed on the band.
+        await store.add(_semantic("asserted", "coffee told", source=MemorySource.USER_ASSERTED))
+        await store.add(_semantic("observed", "coffee watched", source=MemorySource.OBSERVED))
+        await store.add(_semantic("inferred", "coffee reasoned", source=MemorySource.INFERRED))
+        await store.add(_semantic("external", "coffee reported", source=MemorySource.EXTERNAL))
+        every = {"asserted", "observed", "inferred", "external"}
+
+        assert {r.id for r in await store.search("coffee")} == every
+        assert {r.id for r in await store.search("coffee", bands=None)} == every
+        derived = await store.search("coffee", bands=[BeliefBand.DERIVED])
+        assert {r.id for r in derived} == {"observed", "inferred"}
+        pair = await store.search("coffee", bands=[BeliefBand.ASSERTED, BeliefBand.ATTESTED])
+        assert {r.id for r in pair} == {"asserted", "external"}
+
+    async def test_search_with_an_empty_band_sequence_selects_nothing(
+        self, store: MemoryStore
+    ) -> None:
+        """``bands=()`` is *nothing*, never "no filter" (ADR-0113 §3).
+
+        Asserted apart from the ``None`` case on ADR-0113 §7's instruction, because
+        the failure it guards is an implementation reading an empty filter as an
+        absent one — which produces the **opposite** outcome, every record instead
+        of none, and which a case that only ever passes ``None`` and a populated
+        sequence never asks about. The seeded record matches the query, so "nothing"
+        here is the filter's doing and not the query's.
+        """
+        await store.add(_semantic("1", "coffee"))
+
+        assert await store.search("coffee", bands=[]) == []
+        assert await store.search("coffee", bands=()) == []
+        assert {r.id for r in await store.search("coffee", bands=None)} == {"1"}
+
+    async def test_search_composes_bands_and_kinds_by_conjunction(self, store: MemoryStore) -> None:
+        """A record is eligible when its band is selected *and* its kind is (§3).
+
+        The full 2x2, so each filter has a record that passes it while failing the
+        other — in **both** directions, which ADR-0113 §7 requires by name. A
+        fixture whose two filters select the same records tests neither, and a store
+        that unions the filters instead of intersecting them fails three of four.
+        """
+        await store.add(_semantic("as", "coffee fact told", source=MemorySource.USER_ASSERTED))
+        await store.add(_preference("ap", "coffee pref told", source=MemorySource.USER_ASSERTED))
+        await store.add(_semantic("ds", "coffee fact inferred", source=MemorySource.INFERRED))
+        await store.add(_preference("dp", "coffee pref inferred", source=MemorySource.INFERRED))
+
+        found = await store.search(
+            "coffee", bands=[BeliefBand.ASSERTED], kinds=[MemoryKind.PREFERENCE]
+        )
+
+        assert [r.id for r in found] == ["ap"]
+
+    async def test_search_binds_the_band_before_the_ranking_cut(self, store: MemoryStore) -> None:
+        """ADR-0113 §2, the clause an implementation passes in name and fails in fact.
+
+        **This is the case the decision actually rests on.** A balanced fixture
+        proves nothing: with a handful of records per band, nothing floods, the
+        candidate budget is never exhausted, and a post-cut band filter passes.
+        What bites is the skew the accumulation arc produces by design — leg 3's
+        observer and ADR-0106's consolidation are both machines for growing the
+        derived band — so this seeds enough *nearer* out-of-band records to exhaust
+        any plausible candidate budget and then asks for the small band.
+
+        The arithmetic, stated because the fixture size is load-bearing rather than
+        arbitrary: ``SqliteMemoryStore`` over-fetches ``limit * 8`` candidates, so
+        at ``limit=2`` a post-KNN filter sees 16 and every one of them is a flood
+        record. The flood is 40 — an order of magnitude past the cut — so the margin
+        survives a store whose over-fetch differs, without the suite reaching for a
+        constant that belongs to one implementation.
+
+        Note what is asserted and what deliberately is not. Asserting only that
+        every returned record is in the selected band is **satisfied by returning
+        nothing**, which is exactly what the broken implementation does; ADR-0113 §7
+        names that as the clause a suite naturally writes. So this asserts the
+        assertions *come back*. That the flood is absent is checked too, but it is
+        the weaker half.
+        """
+        for i in range(40):
+            await store.add(_semantic(f"flood-{i}", "coffee", source=MemorySource.INFERRED))
+        for i in range(3):
+            await store.add(
+                _semantic(f"mine-{i}", "coffee please", source=MemorySource.USER_ASSERTED)
+            )
+
+        found = await store.search("coffee", limit=2, bands=[BeliefBand.ASSERTED])
+
+        assert found, (
+            "a band-scoped search returned none of the user's own assertions while "
+            "every one of them is live — the band was filtered after the ranking "
+            "cut, which is ADR-0072 §5's flood failure (ADR-0113 §2)"
+        )
+        assert {r.id for r in found} <= {"mine-0", "mine-1", "mine-2"}
+
+    async def test_a_short_band_scoped_result_is_not_padded_from_another_band(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0113 §5: every returned record's band is one the caller selected.
+
+        The failure this guards is silent and worse than under-service. A store that
+        tops a short in-band page up with the next-nearest neighbour of another band
+        hands the consumer an inference in the slot precedence reserved for an
+        assertion, and the consumer cannot detect it — the composed prompt would
+        carry the record under the wrong band. A short result is the *correct*
+        answer to a band with nothing more to give.
+
+        The fixture makes padding tempting: three eligible records, a ``limit`` of
+        ten, and forty nearer records of another band standing by to fill it.
+        """
+        for i in range(40):
+            await store.add(_semantic(f"flood-{i}", "coffee", source=MemorySource.INFERRED))
+        for i in range(3):
+            await store.add(
+                _semantic(f"mine-{i}", "coffee please", source=MemorySource.USER_ASSERTED)
+            )
+
+        found = await store.search("coffee", limit=10, bands=[BeliefBand.ASSERTED])
+
+        assert {r.id for r in found} == {"mine-0", "mine-1", "mine-2"}
+
+    async def test_a_band_scoped_search_still_populates_score(self, store: MemoryStore) -> None:
+        """``score`` is populated, because this *is* a retrieval (ADR-0113 §7).
+
+        Worth its own case precisely because the two band-scoped reads now differ on
+        exactly this field: ``list_beliefs`` **clears** ``score`` to ``None``
+        (ADR-0073 §2) since it ranks nothing, and ``search`` populates it whether or
+        not a band was selected. An implementation that grew ``bands`` by delegating
+        to its enumeration would return the right records with the field wrong.
+        """
+        await store.add(_semantic("a", "coffee told", source=MemorySource.USER_ASSERTED))
+
+        found = await store.search("coffee", bands=[BeliefBand.ASSERTED])
+
+        assert [r.id for r in found] == ["a"]
+        assert all(record.score is not None for record in found)
+
+    async def test_a_band_scoped_search_returns_detached_snapshots(
+        self, store: MemoryStore
+    ) -> None:
+        # Detachment, as every ``MemoryStore`` read (ADR-0113 §7). Under ADR-0068
+        # the record graph is frozen, so the mutations that would reach stored state
+        # are unrepresentable rather than merely isolated — the same idiom the
+        # ``list_beliefs`` case below uses, asserted here because a band-scoped read
+        # is the one a store might have implemented by handing back its own objects.
+        await store.add(
+            _semantic("a", "coffee told", source=MemorySource.USER_ASSERTED, validity=Validity())
+        )
+
+        found = await store.search("coffee", bands=[BeliefBand.ASSERTED])
+        assert [record.id for record in found] == ["a"]
+        with pytest.raises(ValidationError):
+            found[0].validity.valid_until = _LONG_AGO  # would retire the stored belief
+        with pytest.raises(ValidationError):
+            found[0].provenance.confidence = 0.1  # nested model is frozen too
+
+        again = await store.search("coffee", bands=[BeliefBand.ASSERTED])
+        assert [record.id for record in again] == ["a"]
+        assert again[0].provenance.confidence == 1.0  # USER_ASSERTED is certain
+
+    async def test_a_band_selected_with_a_blank_query_still_matches_nothing(
+        self, store: MemoryStore
+    ) -> None:
+        """``bands`` does not turn ``search`` into an enumeration (ADR-0113 §3).
+
+        ``search``'s other refusals are unchanged, and this is the one a band
+        parameter invites a store to relax: an empty query with a band selected is
+        still *nothing*, never "the whole band". Relaxing it would quietly give
+        ``search`` a second personality — ``list_beliefs`` without the stable order
+        or the paging — reachable by passing one argument and omitting another.
+        """
+        await store.add(_semantic("a", "coffee told", source=MemorySource.USER_ASSERTED))
+
+        assert await store.search("   ", bands=[BeliefBand.ASSERTED]) == []
+        assert await store.search("coffee", limit=0, bands=[BeliefBand.ASSERTED]) == []
+
     # --- band-scoped enumeration: list_beliefs (ADR-0073 §2) ------------------
     # One clause per obligation in ADR-0073 §2, as §8 requires. Two of them are
     # about the *arguments doing anything* and a suite of small explicit values
@@ -2069,6 +2253,39 @@ class MemoryStoreContract:
             found = {record.id for record in await call}
 
             assert found == {"obs-search-s"}, _LATE_FILTER
+
+    async def test_search_observes_its_bands_filter_before_its_first_await(
+        self, store: MemoryStore
+    ) -> None:
+        """``core.protocols``' input clause, on ``search``'s ``bands`` (ADR-0113 §7).
+
+        The same obligation as the ``kinds`` case above, on the parameter ADR-0113
+        adds, and ADR-0113 §7 discharges it the same way: ``bands`` is materialised
+        on the coroutine's **first executed line** alongside ``kinds``.
+
+        It is asserted separately rather than folded into the ``kinds`` case because
+        the two are materialised by different code — ``SqliteMemoryStore`` folds
+        ``bands`` through a source mapping on its way to SQL while ``kinds`` becomes
+        a plain ``frozenset`` — so a store can easily observe one early and the
+        other late. Both seeded records match the query and pass the kind filter, so
+        the band filter is the only thing deciding the result and a late read is the
+        only way the second can appear in it.
+        """
+        async with self._observation_subject(store, vacuous=self.reads_without_suspending) as (
+            subject,
+            arm,
+        ):
+            await subject.add(_semantic("obs-band-d", "delta", source=MemorySource.INFERRED))
+            await subject.add(_semantic("obs-band-a", "delta", source=MemorySource.EXTERNAL))
+            bands = [BeliefBand.DERIVED]
+            # Armed after the seeding writes, so the collaborator that stops the
+            # read is not spent on a precondition.
+            gate = None if arm is None else arm("search")
+            async with held_at_its_first_await(gate, subject.search("delta", bands=bands)) as call:
+                bands.append(BeliefBand.ATTESTED)  # grow the caller's own list mid-flight
+            found = {record.id for record in await call}
+
+            assert found == {"obs-band-d"}, _LATE_FILTER
 
     async def test_list_beliefs_observes_its_filters_before_its_first_await(
         self, store: MemoryStore

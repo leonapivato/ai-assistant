@@ -478,6 +478,7 @@ class MemoryStore(Protocol):
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
     ) -> list[MemoryRecord]:
         """Return the records most relevant to ``query``, best first.
 
@@ -485,10 +486,99 @@ class MemoryStore(Protocol):
         record whose window is closed or not yet open is omitted, both ends
         enforced, exactly as an expired one is (ADR-0045 §6).
 
+        **The band filter binds before the ranking cut** (ADR-0113 §2). An
+        implementation may not let a record outside the selected bands consume the
+        candidate budget the cut is taken from: the records it ranks are the
+        selected bands' records, never the selected-band members of a band-neutral
+        top ``limit``. A store that cannot bind the band before its cut does not
+        conform — the implementing lane stops and brings back an ADR rather than
+        shipping the weaker form. This is the clause an implementation can pass in
+        name and fail in substance, and it is why the band filter is a contract
+        decision rather than a parameter: applied *after* the cut it reproduces the
+        failure ADR-0072 §5 refuses by name, where "a flood of low-confidence
+        inferences can displace an assertion *below the cut*". At a realistic band
+        skew that is not a degradation but a total one — asking for the user's own
+        assertions returns none of them while every one is live.
+
+        **That binds the band axis alone and promises no full page.** ``kind``,
+        ``expires_at`` and both window ends keep the post-cut placement ADR-0045 §6
+        and ADR-0007 ratified for them, so an in-band record failing one of those
+        may still consume the candidate budget, and a call may return fewer than
+        ``limit`` records while eligible ones exist. What is ruled here is *where a
+        predicate binds*, not how much of a page a caller gets; the remaining
+        shortfall is issue #457's and is neither closed nor widened (ADR-0113 §8).
+
+        **The band is an eligibility axis, never an ordering one** (ADR-0113 §4).
+        It decides which records are ranked and contributes nothing to how ranked
+        records compare: it is not a term in any ordering, not an addend or factor
+        in any score, not a weight, and not a threshold a record is dropped below.
+        Within one call the order is relevance alone, whichever bands are selected —
+        where a call spans more than one, including the ``bands=None`` default,
+        records of different bands are compared to one another by relevance and by
+        nothing else. The prohibition is on the band *influencing* a comparison,
+        never on the comparison happening. ``search`` stays band-neutral and
+        confidence-neutral in the sense ADR-0072 §5 ruled and ADR-0112 §1 affirmed;
+        neither currency nor evidence-strength is a term in any ordering here, and
+        this parameter supplies neither quantity and creates no place to put one.
+
+        **``bands`` does not turn this into an enumeration.** ``search``'s other
+        refusals are unchanged: a blank query and a non-positive ``limit`` still
+        match nothing, so an empty query with a band selected is still nothing
+        rather than "the whole band" (ADR-0113 §3). That is deliberately unlike
+        ``list_beliefs``, whose out-of-range ``limit`` and ``offset`` are *refused*.
+
+        **Precedence is not this read's.** The store does not know which band the
+        caller will place first, what budget each gets, or whether a band is being
+        read at all. A consumer applying ADR-0072 §5's precedence issues one call
+        per band and composes; the budget and the order stay with it (ADR-0113 §6).
+
+        **Within one call the bands partition; across calls they do not.** Every
+        returned record's band is one the caller selected — ``band_of`` is total, so
+        a record has exactly one band at one instant — and an implementation may not
+        return an out-of-band record, in particular may not pad a short result with
+        the next-nearest neighbour of another band to fill a page. A short result is
+        the correct answer to a band with nothing more to give; padding converts an
+        under-service into a wrong-band result the consumer cannot detect.
+
+        Across calls **no disjointness is promised and none may be assumed**, and
+        the mechanism is on the write path rather than hypothetical: ``add`` is an
+        upsert keyed on the caller's id and a ``REINFORCE`` fold takes the incoming
+        provenance's source at the target's id (ADR-0045 §5b), so a fold moves a
+        record between bands at a stable id. A consumer composing band-scoped reads
+        therefore **deduplicates by record id**, keeping the copy from the
+        higher-precedence band in ADR-0072 §5's order and counting it once against
+        that band's budget — resolving the race by arrival order would decide
+        precedence by loop order, which is the one thing §5 is about. A record that
+        changes band between two of a turn's calls may instead be **missed** by all
+        of them; that is accepted, not closed, and no consumer-side rule recovers
+        it. A consumer may not read a short band-scoped result as evidence that the
+        band holds nothing more. No multi-band snapshot and no cross-call read
+        consistency of any kind is offered (ADR-0113 §5).
+
         Args:
             query: The search text.
             limit: Maximum number of records to return.
             kinds: If given, restrict results to these memory kinds.
+            bands: If given, restrict results to these belief bands. ``None`` means
+                every band — today's behaviour, so every existing caller is
+                preserved unchanged; an **empty sequence selects nothing**, and is
+                stated rather than left to be read off ``list_beliefs`` because that
+                is how one implementation comes to treat ``bands=()`` as "no filter",
+                the opposite outcome, on a parameter whose suite never asked. Keyed
+                on :class:`~ai_assistant.core.types.BeliefBand` and never on
+                ``MemorySource``, for ``list_beliefs``' reason: a source filter would
+                push ``band_of`` into every caller and let one ask for half a band —
+                ``OBSERVED`` without ``INFERRED`` — which ADR-0072 §4 keeps
+                indistinguishable to the supersession law. Duplicates are set
+                semantics and change nothing. ``bands`` and ``kinds`` compose by
+                **conjunction**: a record is eligible when its band is selected *and*
+                its kind is.
+
+        Returns:
+            Matching records, most relevant first, each carrying its relevance
+            ``score`` — **populated**, because this is a retrieval, the opposite of
+            ``list_beliefs``' clearing rule (ADR-0073 §2). Each is a detached
+            snapshot, as with every ``MemoryStore`` read.
         """
         ...
 

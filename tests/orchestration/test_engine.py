@@ -227,6 +227,7 @@ class RaisingMemoryStore(FakeMemoryStore):
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
     ) -> list[MemoryRecord]:
         msg = "retrieval is down"
         raise MemoryStoreError(msg)
@@ -2609,11 +2610,12 @@ class RecordingPlanner(OneStepPlanner):
 
 
 class RecordingSearchStore(FakeMemoryStore):
-    """A store that records the ``kinds`` filter each ``search`` reached it with."""
+    """A store recording the ``kinds`` and ``bands`` each ``search`` reached it with."""
 
     def __init__(self) -> None:
         super().__init__(now=lambda: AT)
         self.kinds: list[Sequence[MemoryKind] | None] = []
+        self.bands: list[Sequence[BeliefBand] | None] = []
 
     async def search(
         self,
@@ -2621,9 +2623,11 @@ class RecordingSearchStore(FakeMemoryStore):
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
     ) -> list[MemoryRecord]:
         self.kinds.append(kinds)
-        return await super().search(query, limit=limit, kinds=kinds)
+        self.bands.append(bands)
+        return await super().search(query, limit=limit, kinds=kinds, bands=bands)
 
 
 async def test_converse_runs_under_a_conversation_and_reports_the_one_it_ran_under() -> None:

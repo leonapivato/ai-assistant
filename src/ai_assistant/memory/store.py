@@ -315,6 +315,7 @@ class InMemoryMemoryStore:
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
     ) -> list[MemoryRecord]:
         """Return the records most relevant to ``query``, best first.
 
@@ -324,24 +325,36 @@ class InMemoryMemoryStore:
         not-yet-open validity window, both ends — ADR-0045 §6) are omitted. An
         empty or whitespace-only query matches nothing.
 
+        **The band binds before the cut** (ADR-0113 §2), which here is free rather
+        than earned: this store scores every live record and truncates once at the
+        end, so a band predicate in the same comprehension is *already* upstream of
+        the ``[:limit]`` and no candidate budget exists for an out-of-band record to
+        consume. It is written down anyway, because the reason it holds is a
+        property of this implementation rather than of the contract — the SQL store
+        pays for it (``SqliteMemoryStore._search_sync``), and a later revision that
+        introduced a candidate cut here would owe it.
+
         Args:
             query: The search text.
             limit: Maximum number of records to return; ``<= 0`` matches nothing.
             kinds: If given, restrict results to these memory kinds.
+            bands: If given, restrict results to these belief bands; ``None`` is
+                every band and ``()`` none, conjunctive with ``kinds``.
 
         Returns:
             Matching records, highest score first, each carrying its relevance
             ``score``, truncated to ``limit``.
 
         Note:
-            ``kinds`` is materialised on the coroutine's **first executed line**, as
-            in ``list_beliefs`` below and for the same reason: this method never
-            suspends, so ADR-0065's clause is vacuous here, but the snapshot keeps
-            the three implementations one shape and keeps the discharge from
-            resting on the absence of a suspension point a later revision could
-            add (#436).
+            ``kinds`` and ``bands`` are materialised on the coroutine's **first
+            executed line**, as in ``list_beliefs`` below and for the same reason:
+            this method never suspends, so ADR-0065's clause is vacuous here, but
+            the snapshot keeps the three implementations one shape and keeps the
+            discharge from resting on the absence of a suspension point a later
+            revision could add (#436).
         """
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
+        wanted_bands = None if bands is None else frozenset(bands)
         query_terms = {term for term in query.lower().split() if term}
         if limit <= 0 or not query_terms:
             return []
@@ -352,6 +365,7 @@ class InMemoryMemoryStore:
             for record in self._records.values()
             if self._is_readable(record, now)
             and (wanted is None or record.kind in wanted)
+            and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
             and (score := _relevance(query_terms, record.content)) > 0.0
         ]
         scored.sort(key=lambda record: record.score or 0.0, reverse=True)

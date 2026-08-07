@@ -21,6 +21,7 @@ import pytest
 from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.types import (
     ActionPlan,
+    BeliefBand,
     Disposition,
     ExecutionState,
     Goal,
@@ -172,9 +173,10 @@ class _SearchRecordingStore(FakeMemoryStore):
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
     ) -> list[MemoryRecord]:
         self.search_limits.append(limit)
-        return await super().search(query, limit=limit, kinds=kinds)
+        return await super().search(query, limit=limit, kinds=kinds, bands=bands)
 
 
 @pytest.mark.parametrize("over_cap", [_MAX_RECALL_LIMIT + 1, 2_500_000_000_000_000_000])
