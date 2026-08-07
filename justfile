@@ -39,12 +39,14 @@ imports:
 test *args:
     uv run pytest "$@"
 
-# What the ADRs cite, checked against the repository (ADR-0088 §6). Tier 1 — an
-# ADR file or an issue number that does not exist — exits non-zero; Tier 2 —
-# unresolved code citations and liveness disagreements — is reported and never
-# fails, and a non-empty Tier 2 list is expected (ADR-0088 §3). Tier 1 also runs
-# inside `just test`, so this recipe is the *report*, not the gate. Extra args
-# pass through, e.g. `just citations --no-tracker`.
+# Tier 1 — an ADR file or an issue number that does not exist — exits non-zero;
+# Tier 2 — unresolved code citations and liveness disagreements — is reported and
+# never fails, and a non-empty Tier 2 list is expected (ADR-0088 §3). Tier 1 also
+# runs inside `just test`, so this recipe is the *report*, not the gate. Extra
+# args pass through, e.g. `just citations --no-tracker`.
+#
+# Last line, because `just --list` shows only that one: what this recipe reports.
+# What the ADRs cite, checked against the repository (ADR-0088 §6)
 citations *args:
     uv run python scripts/check_citations.py "$@"
 
@@ -56,22 +58,26 @@ audit:
 status:
     uv run python scripts/project_status.py
 
-# Review aggregate across recently merged PRs — the cross-change view ADR-0020 §2
-# and ADR-0025 §3 both phrase their revisit condition in terms of. Reads the ship
-# comments already on GitHub; adds no instrumentation and gates nothing.
-# Extra args passed through, e.g. `just review-history --limit 40`.
+# The cross-change view ADR-0020 §2 and ADR-0025 §3 both phrase their revisit
+# condition in terms of. Reads the ship comments already on GitHub; adds no
+# instrumentation and gates nothing. Extra args passed through, e.g.
+# `just review-history --limit 40`.
+#
+# Last line, because `just --list` shows only that one: what this recipe reports.
+# Review aggregate across recently merged PRs — read-only, and gates nothing
 review-history *args:
     uv run python scripts/review_history.py "$@"
 
-# Adversarial review by Codex (a different model) vs a base branch; read-only.
 # persona is `architecture` or `adversarial`. Sends the diff to OpenAI. Omit
 # base-ref to let codex-review.sh pick origin/main when known (else local
 # main) — an empty default here, not a hardcoded "main", so that
 # resolution actually runs instead of being short-circuited by this recipe.
+#
+# Last line, because `just --list` shows only that one: what this recipe runs.
+# Review by Codex (a different model) vs a base branch; read-only
 review-codex persona base="":
     scripts/codex-review.sh "$1" "$2"
 
-# Report the local Codex review to the PR — the merge-readiness step (ADR-0015).
 # Refuses unless a review artifact covers the content the PR head carries,
 # whatever commit the artifact is filed under. Two paths are accepted
 # (ADR-0027 §2). Base unmoved: the recorded base and tree must both match the
@@ -80,6 +86,9 @@ review-codex persona base="":
 # unchanged, and the move must clear ADR-0027 §3's floor — necessary but not
 # sufficient — with the drift published per §4. CONTRIBUTING.md ("Report the
 # review, then mark it ready") carries the full conditions.
+#
+# Last line, because `just --list` shows only that one: what this recipe posts.
+# Report the local Codex review to the PR — the merge-readiness step (ADR-0015)
 ship:
     scripts/ship.sh
 
