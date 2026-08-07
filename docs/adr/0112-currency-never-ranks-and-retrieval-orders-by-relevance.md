@@ -1,7 +1,91 @@
 # 112. Currency never ranks: retrieval orders by relevance, and leg 7's retrieval obligation is a measurement
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-06
+- **Note (2026-08-07): ratified.** `Proposed` → `Accepted`, in the separate lane
+  #633 requires, after the required review came back green on the content this
+  ADR merged with: adversarial **APPROVE with no findings**, round 4, 788 lines
+  net across 6 commits, churn `1.2×` (952 touched), posted to PR #793 by `just
+  ship`. That is the outcome ADR-0070 §1 requires the ratifying edit to record —
+  "the ratifying edit records that review's outcome, it does not replace it" —
+  and it is taken from that comment rather than from a report.
+
+  **One lens, and the header bullet below is why.** The "Decides no `core`
+  surface" bullet states this ADR's required set as adversarial alone, reading
+  `CONTRIBUTING.md` → "Stop when the required reviews are green": this ADR
+  touches no Protocol and no `core` type and, under §10, decides none, so it is
+  not "the ADR deciding that surface". `scripts/ship.sh` fires its own
+  architecture requirement on a diff touching `core/protocols.py` or
+  `core/types.py`, and this diff touched neither. **This ratifying edit takes the
+  same single lens**, now for the further reason that `CONTRIBUTING.md` →
+  "Trivial ADR edits" exempts "the `Proposed` → `Accepted` ratification flip"
+  from a separate review *of the edit itself*, "not licence to rewrite a ratified
+  decision in place", and ADR-0015 §5 exempts trivial ADRs by name.
+
+  **The anchor is not the merged head, and the identity is established through
+  the tree rather than assumed**: the comment's
+  `<!-- ship:c1d327d2f6f6a857287d353217d2cc30398714d7 -->` anchor is the
+  pre-merge branch head, which is *not* an ancestor of `main` because #793 was
+  rebase-merged. Both were resolved with `git rev-parse` rather than trusted:
+  `c1d327d2f6f6^{tree}` and `5e3605d^{tree}` — the commit the PR merged as — are
+  the same tree, `c25cc9432d5e`. The content the review read is therefore the
+  content that landed, notwithstanding the rewritten hash.
+
+  **No `blocker` or `major` finding was waived**, and the three the session
+  records as *retired* were each verified against the diff at the site that
+  repaired them, which is what that record asks of a reader. Round 1's — that
+  §7's measurement gate would forbid fixing a write-path correctness failure —
+  was fixed by §7's third normative clause, "That gate does **not** reach a
+  **correctness** remedy for #457". Round 2's — that the gate would nonetheless
+  catch a pagination remedy that makes under-service detectable — was fixed by
+  the paragraph beginning "The line between the first two clauses is whether the
+  change is a bet on a frequency". Round 3's — that "until exhausted" carries no
+  termination argument — was fixed by §7's fourth normative clause, which
+  classifies an iterating remedy neither way and routes it to the contract ADR
+  §10 requires, and by the paragraph beginning "The third clause exists because
+  the second one over-reached". Round 4 re-ran the lens over the repaired text
+  and raised nothing.
+
+  **Beyond the `Status` line, not one word below is edited** — not a clause, not
+  a tense — which is ADR-0070 §1's own test applied to the ratifying edit first:
+  no decision text is touched and no normative clause acquires, loses or alters
+  an obligation. The line carries no leading `Partially superseded by` token, so
+  ADR-0082 §2 would permit an amendment qualifier on it; none is written, because
+  a ratification is not an amendment and has none to record.
+
+  **That the status-claim sweep is empty is a result rather than an omission, and
+  the sites are named so it can be checked rather than trusted.** No tracked file
+  names this ADR outside this document — `docs/roadmap.md` included; the sole
+  repository match for `0112` elsewhere is a hash fragment in `uv.lock` — so
+  nothing describes it as `Proposed` and this flip retires no conditional. The
+  durability bullet below is the one clause asserting a status, and it asserts
+  other ADRs': it was checked against the tree rather than taken, and the only
+  ADRs standing `Proposed` on `main` are ADR-0043, ADR-0089 and this one, neither
+  of the first two being cited here. The header's "No ADR's `Status` line is
+  edited" is a statement about the ADRs §11 enumerates, all of them earlier; this
+  edit touches only this ADR's own line, which is ADR-0070 §1's first permitted
+  header edit. Every other use of "ratified" below was read and none turns on a
+  document's standing: §3's "worse on two ratified counts" and §7's "ADR-0050
+  §1's ratified rejection" are what those texts decided, and §5's, §7's and §10's
+  "owes its own ratified ADR" is golden rule 5's rule. **No clause was written
+  forward for this event to make true** — this ADR closes no issue on
+  ratification and conditions no obligation on it, which is why the sweep finds
+  nothing rather than finding it already satisfied. The four issues the header
+  records as filed are open on GitHub: #789, #790, #791, #792.
+
+  **No tree claim has gone stale**, because `main` has not moved since: this
+  ADR's merge commit is `main`'s tip at this branch's point, so §Context's
+  `SqliteMemoryStore` ordering, `orchestration/loop.py`'s single band-neutral
+  `search` call, `readers/calendar.py`'s `as_of=None`, `_RESULT_OVERFETCH` and
+  `_VEC_KNN_MAX_K`, and `docs/roadmap.md`'s k-shortfall line all read exactly as
+  the review read them.
+
+  **One site was checked and deliberately left standing.** ADR-0103's 2026-08-05
+  ratification note says "§8's retrieval-side question belongs to the
+  retrieval-ranking lane, which has not been opened". That sentence was overtaken
+  when *this* ADR merged rather than by this flip; it sits inside a dated note
+  recording the moment it was written; and §11 below has already applied
+  ADR-0070 §1 to ADR-0103 §8 and found nothing owed. Refs #663, #729, #633.
 - **Durability clause.** Every reference below to ADR-NNNN is to its text as
   merged on 2026-08-06, not to its status on any later day. Every ADR this
   decision composes with reads `Accepted` (or partially superseded in a scope
