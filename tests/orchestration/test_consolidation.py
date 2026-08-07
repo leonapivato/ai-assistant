@@ -22,10 +22,13 @@ the selector, and reading it off a ruling would conflate it with §6's ceiling, 
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+import structlog.testing
 
 from ai_assistant.core.errors import MemoryStoreError, SelfConsumingWriteError
 from ai_assistant.core.types import (
@@ -52,7 +55,7 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
     from ai_assistant.core.protocols import MemoryStore
     from ai_assistant.core.types import MemoryRecord
@@ -86,6 +89,31 @@ _ONE_BELIEF_CLAIMING_TAINT = """
 
 def _now() -> datetime:
     return _AT
+
+
+@contextlib.contextmanager
+def _loop_time_after_one_chunk() -> Iterator[None]:
+    """Advance the loop's monotonic clock past the run budget after one chunk.
+
+    The budget is measured on ``loop.time()`` rather than on the injected
+    ``Clock``, so a test that drives the budget has to drive *that*. The first two
+    readings are the deadline's own and the first boundary check; every later one
+    is far past the budget, and the value is held rather than exhausted so any
+    internal asyncio call during the run gets a sane answer instead of a
+    ``StopIteration``.
+    """
+    loop = asyncio.get_event_loop()
+    original = loop.time
+    readings = iter([0.0, 0.0])
+
+    def advancing() -> float:
+        return next(readings, 10_000.0)
+
+    loop.time = advancing  # type: ignore[method-assign] # the loop's own monotonic source
+    try:
+        yield
+    finally:
+        loop.time = original  # type: ignore[method-assign] # restored
 
 
 def _provenance(
@@ -481,24 +509,60 @@ async def test_a_run_stops_at_its_budget_and_resumes_where_it_stopped() -> None:
     """
     store = await _seeded([_record(f"r{index}") for index in range(1, 5)])
     writes, _ = _gated(store)
-    ticks = iter([_AT, _AT, _AT + timedelta(minutes=10), _AT + timedelta(minutes=10)])
     stage = ConsolidationStage(
         memory=store,
         writes=writes,  # type: ignore[arg-type] # a capturing wrapper around the real stage
         model=FakeModelProvider(_ONE_BELIEF),
         chunk_size=2,
         run_budget=timedelta(minutes=5),
-        now=lambda: next(ticks),
+        now=_now,
         id_factory=lambda: "consolidated-1",
     )
 
-    report = await stage.run()
+    with _loop_time_after_one_chunk():
+        report = await stage.run()
 
     assert report.chunks == 1
     assert report.exhausted is False
     assert report.halted is False
     resumed = await store.walk_records(CONSOLIDATION_WALK, limit=50)
     assert [record.id for record in resumed.records][:2] == ["r3", "r4"]
+
+
+async def test_a_civil_clock_moved_backwards_does_not_extend_the_run() -> None:
+    """ADR-0111 §4, ADR-0026 §Consequences: the budget is not wall-clock work.
+
+    ``core.clock`` scopes the injected ``Clock`` to wall-clock instants and says a
+    monotonic clock for measuring elapsed duration "is a different contract, which
+    this one neither covers nor should be stretched to". A budget measured on the
+    civil clock is exactly that stretch: NTP or an operator moving it backwards
+    leaves ``now < deadline`` true for as long as the correction lasts, and a serial
+    job (ADR-0083 §7) holds the loop for all of it — the unbounded run §4 exists to
+    prevent, arriving through the thing meant to bound it.
+
+    Here the civil clock runs **backwards** while loop-monotonic time passes the
+    budget. The run must still stop at its chunk boundary. An implementation
+    measuring the budget with ``now`` never stops at all, so this case hangs or
+    exhausts rather than failing an assertion — which is why the store is small.
+    """
+    store = await _seeded([_record(f"r{index}") for index in range(1, 5)])
+    writes, _ = _gated(store)
+    receding = iter([_AT - timedelta(minutes=index) for index in range(60)])
+    stage = ConsolidationStage(
+        memory=store,
+        writes=writes,  # type: ignore[arg-type] # a capturing wrapper around the real stage
+        model=FakeModelProvider(_ONE_BELIEF),
+        chunk_size=2,
+        run_budget=timedelta(minutes=5),
+        now=lambda: next(receding),
+        id_factory=lambda: "consolidated-1",
+    )
+
+    with _loop_time_after_one_chunk():
+        report = await stage.run()
+
+    assert report.chunks == 1, "the budget must bound the run whatever the civil clock does"
+    assert report.exhausted is False
 
 
 async def test_a_run_over_an_unusable_cursor_restarts_rather_than_faulting() -> None:
@@ -980,3 +1044,85 @@ async def test_a_proposal_citing_the_stages_own_minted_id_ends_the_run() -> None
     assert {record.id for record in resumed.records} == {"r1", "r2"}, (
         "the chunk must not be recorded as done"
     )
+
+
+@pytest.mark.parametrize(
+    ("bound", "expected"),
+    [(0, ValueError), (-1, ValueError), (True, TypeError), (1.5, TypeError), ("2", TypeError)],
+    ids=["zero", "negative", "bool", "float", "str"],
+)
+async def test_an_inadmissible_proposal_bound_is_refused_at_construction(
+    bound: object, expected: type[Exception]
+) -> None:
+    """The bound fails where it was set, not on the first run (ADR-0022 §4a).
+
+    ``ModelBackedObserver`` validates its own two bounds this way, and
+    ``max_proposals`` needs it for more than symmetry: ``-1`` slices
+    ``usable[:-1]``, quietly dropping the last good belief, while the over-limit
+    count reports ``len(usable) - (-1)`` — more discards than there were entries, so
+    the report actively lies about what the run threw away. ``True`` is an ``int``
+    subclass and would silently become a cap of one.
+
+    ``chunk_size`` is deliberately not checked here: it is handed to
+    ``walk_records``, which refuses anything that is not exactly an ``int`` in
+    ``[1, 2**63)`` on every backend (ADR-0114 §6), and a second bound would be a
+    second place for the two to disagree.
+    """
+    store = FakeMemoryStore(now=_now)
+    writes, _ = _gated(store)
+
+    with pytest.raises(expected):
+        ConsolidationStage(
+            memory=store,
+            writes=writes,  # type: ignore[arg-type] # a capturing wrapper around the real stage
+            model=FakeModelProvider(_ONE_BELIEF),
+            max_proposals=bound,  # type: ignore[arg-type] # the point
+            now=_now,
+        )
+
+
+async def test_a_halted_run_is_recorded_distinguishably_from_an_exhausted_one() -> None:
+    """ADR-0111 §9: a halt is a completed run that did not exhaust its work.
+
+    Recording it as a failure would make a queue at its cap indistinguishable from a
+    broken store; recording it as an ordinary completion would make a job that has
+    stopped making progress invisible. The record carries a ``disposition`` an
+    operator can read, and it is the **job's** to write — ``Scheduler._run_job``
+    states that "the job's result is never logged" because it "cannot know which
+    results are safe to render", which is right and is why this report, whose every
+    field is a count or a disposition, records itself.
+
+    Asserted on the emitted event rather than on the returned report, because the
+    report already carries ``halted`` and a test reading it back would pass an
+    implementation that told nobody.
+    """
+    store = await _seeded([_record("r1", source=MemorySource.EXTERNAL), _record("r2")])
+    queue = FakeDeferralStore(now=_now, queue_limit=1)
+    writes, _ = _gated(store, deferrals=queue)
+    filler, _ = _gated(store, deferrals=queue)
+    await filler.write(_question_raising("filler", cites=["r1", "r2"]))
+
+    with structlog.testing.capture_logs() as logs:
+        report = await _stage(store=store, writes=writes).run()
+
+    assert report.halted is True
+    recorded = [entry for entry in logs if entry["event"] == "consolidation_run_finished"]
+    assert len(recorded) == 1, "exactly one operational record per run (ADR-0111 §9)"
+    assert recorded[0]["disposition"] == "halted"
+    assert recorded[0]["log_level"] == "info", (
+        "a refusal the corpus rules correct must not be emitted at a severity an "
+        "operator's monitoring treats as a fault"
+    )
+
+
+async def test_an_exhausted_run_records_a_different_disposition() -> None:
+    """The other half of the distinction: without it, ``halted`` says nothing."""
+    store = await _seeded([_record("r1"), _record("r2")])
+    writes, _ = _gated(store)
+
+    with structlog.testing.capture_logs() as logs:
+        await _stage(store=store, writes=writes, reply='{"beliefs": []}').run()
+
+    recorded = [entry for entry in logs if entry["event"] == "consolidation_run_finished"]
+    assert len(recorded) == 1
+    assert recorded[0]["disposition"] == "exhausted"
