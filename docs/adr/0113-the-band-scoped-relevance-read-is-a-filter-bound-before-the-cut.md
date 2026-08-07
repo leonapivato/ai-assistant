@@ -400,6 +400,12 @@ the band and on relevance, which is ADR-0112 §3's own sentence.
 > band's budget. This ADR adds no multi-band snapshot and no cross-call read
 > consistency of any kind.
 
+> **Normative.** A record that changes band between two of a turn's calls may
+> instead be **missed** by all of them. That is accepted, not closed: no
+> consumer-side rule recovers a record no call returned, and this ADR adds no
+> mechanism that would. A consumer may not read a short band-scoped result as
+> evidence that the band holds nothing more.
+
 **The per-call half is what makes §1's N-calls-and-compose safe**, and its two
 failure modes are silent ones. A consumer that deduplicates *within* a call hides
 an implementation returning out-of-band records; an implementation that pads
@@ -417,8 +423,43 @@ on the caller's id, `REINFORCE` folds onto the target's id (ADR-0045 §5b), and
 `memory/ingest.py`'s `_merge` builds the survivor's provenance with
 `source=incoming.provenance.source` on every arm but ADR-0103 §6's corroboration
 case — so **a fold moves a record between bands at a stable id**, which is the
-premise #733 is filed on. A record read in the `ASSERTED` call and folded to
-`ATTESTED` before the `ATTESTED` call is returned twice.
+premise #733 is filed on.
+
+**Which moves are reachable is narrower than it first appears, and it decides
+which failure a consumer gets.** The write path permits a stable-id band change in
+one direction only:
+
+- `MemoryIngestor._refuse_unsafe_fold` clause 1 refuses **any** fold onto a
+  `USER_ASSERTED` target, and its one exception does not reopen this: as
+  `_corroborates`' own text records, `_confirmation_covers` "admits only a
+  `SUPERSEDE`, which retires rather than folds". So nothing moves *out of*
+  `ASSERTED` at a stable id.
+- `_corroborates` is true only for an `ATTESTED` target with a `DERIVED` incoming,
+  and that arm keeps the **target's** source — so the one pairing that looks like a
+  downward move changes no band at all.
+- What remains is a `DERIVED` target reinforced by an `EXTERNAL` or a
+  `USER_ASSERTED` record, which folds to `ATTESTED` or `ASSERTED` at the target's
+  id. The first is #733's worked case.
+
+**Every reachable move is therefore *up* the precedence order**, and that is what an
+earlier draft of this paragraph got wrong: it illustrated the rule with a record
+read as `ASSERTED` and folded to `ATTESTED`, which clause 1 forbids outright. The
+architecture lens caught the impossible example; its suggested replacement — an
+attested target reinforced by a derived record — is the corroboration arm and
+changes no band either, so the correction here is neither the claim as filed nor
+the direction as offered, and both were checked against `memory/ingest.py` rather
+than taken.
+
+**So the consumer's read order decides which failure it gets, and §6 leaves that
+order to the consumer.** Reading in ADR-0072 §5's precedence order — `ASSERTED`,
+then `ATTESTED`, then `DERIVED` — an upward move lands the record in a band already
+read, so it is **missed**: absent from the `DERIVED` result because it is no longer
+derived, and absent from the earlier results because it was not yet promoted.
+Reading in any other order, or concurrently, the same move returns it **twice**.
+Both clauses above are therefore live, and the assembler's lane chooses its order
+knowing which residue it buys. This ADR does not choose for it (§6); what it
+refuses to do is state a rule while illustrating it with a fold the writer would
+reject.
 
 **Ruling the tie-break rather than only the deduplication is deliberate.** A
 consumer that dropped the second copy in arrival order would resolve the race by
@@ -505,10 +546,14 @@ stays green"), so the obligation is stated:
    drives one store through one call; §5's cross-call rule is a property of the
    composition, so a suite that passes says nothing about it. The case is
    constructible without concurrency and therefore deterministically: a store double
-   that returns id `x` in the `ASSERTED` call and, before the `ATTESTED` call,
-   applies the id-preserving band change `_merge` performs, then asserting that the
-   composed result retains `x` **once**, that the copy retained is the
-   higher-precedence band's, and that it is charged once to that band's budget.
+   that returns id `x` in one band's call and, before a later call, applies the
+   id-preserving band change `_merge` performs, then asserting that the composed
+   result retains `x` **once**, that the copy retained is the higher-precedence
+   band's, and that it is charged once to that band's budget. The double need not
+   restrict itself to the moves the writer permits — it is standing in for a
+   concurrent fold, and the obligation is on the composition — but a lane that
+   wants the reachable case should use §5's, a `DERIVED` record folded to
+   `ATTESTED`.
    Without it an assembler that concatenates, or that keeps whichever copy arrived
    first, is wrong in a way every mechanical check on this list passes.
 
@@ -691,7 +736,9 @@ changed (§3).
 - **The assembler inherits one obligation it would not have guessed** (§5): it
   deduplicates across its band-scoped calls by record id and keeps the
   higher-precedence copy, because a fold can move a record between bands at a
-  stable id between two reads of one turn. That constrains a lane not yet written,
+  stable id between two reads of one turn — and it learns that its choice of read
+  order decides whether that move costs it a duplicate or a miss, since every move
+  the writer permits is *up* the precedence order. That constrains a lane not yet written,
   which is the point — it is far cheaper to state now than to diagnose later as a
   belief that appeared twice in a prompt under two different bands.
 - **A latency cost is introduced and not measured.** N band-scoped calls per turn
