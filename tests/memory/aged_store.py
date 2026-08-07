@@ -113,12 +113,18 @@ def _as_stored(vector: Sequence[float]) -> tuple[float, ...]:
     return tuple(array("f", vector))
 
 
-def _terms(salt: str, key: str, count: int) -> tuple[tuple[int, float], ...]:
-    """Derive ``count`` signed unit components from ``key``, deterministically."""
+def _terms(salt: str, key: str, count: int, width: int) -> tuple[tuple[int, float], ...]:
+    """Derive ``count`` signed unit components from ``key``, deterministically.
+
+    ``width`` is the caller's vector width and not :data:`DIMENSIONS`: reading the
+    module constant here would place components outside any embedder built at a
+    different width, which is an ``IndexError`` at embed time rather than a wrong
+    answer, but only because the vector is a list.
+    """
     digest = hashlib.shake_256(f"{salt}:{key}".encode()).digest(count * 3)
     return tuple(
         (
-            int.from_bytes(digest[offset : offset + 2], "big") % DIMENSIONS,
+            int.from_bytes(digest[offset : offset + 2], "big") % width,
             1.0 if digest[offset + 2] & 1 else -1.0,
         )
         for offset in range(0, count * 3, 3)
@@ -187,14 +193,15 @@ class ClusteredEmbedder:
 
     def _embed_one(self, text: str) -> list[float]:
         topic, position = self._parse(text)
-        vector = [0.0] * self._dimensions
+        width = self._dimensions
+        vector = [0.0] * width
         if topic not in self._centroids:
-            self._centroids[topic] = _terms("centroid", topic, _CENTROID_TERMS)
+            self._centroids[topic] = _terms("centroid", topic, _CENTROID_TERMS, width)
         for index, sign in self._centroids[topic]:
             vector[index] += sign
-        for index, sign in _terms("position", position, _DIRECTION_TERMS):
+        for index, sign in _terms("position", position, _DIRECTION_TERMS, width):
             vector[index] += sign * self._spread
-        for index, sign in _terms("nudge", text, _DIRECTION_TERMS):
+        for index, sign in _terms("nudge", text, _DIRECTION_TERMS, width):
             vector[index] += sign * self._nudge
         norm = math.sqrt(math.sumprod(vector, vector))
         return [value / norm for value in vector] if norm else vector
