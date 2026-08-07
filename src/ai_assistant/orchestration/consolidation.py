@@ -803,6 +803,15 @@ def _render(records: Sequence[MemoryRecord]) -> str:
     is ADR-0042 §4's "escaping-for-a-target is rendering" applied to the one target
     it had not reached, exactly as ``interfaces.cli._safe`` does for a terminal.
 
+    **The encoding is ASCII-only, and that is the clause rather than a preference.**
+    ``ensure_ascii=False`` would emit U+2028 and U+2029 literally — JSON does not
+    escape them and Python's ``str.splitlines`` treats both as line boundaries — so
+    a span carrying one could still open a line and forge a record. Escaping every
+    non-ASCII character closes that **by construction** rather than by naming the
+    two code points: the rendered line cannot contain any line separator, present
+    or future, because it cannot contain any non-ASCII character at all. Enumerating
+    the known ones would be the shape that rots.
+
     **This stage is the first producer for which that matters.** The observer's
     payload is episodes and no episode is ``EXTERNAL`` (ADR-0093 §4), so no span it
     renders is external content in ADR-0098 §1's sense. A consolidator selects
@@ -827,7 +836,7 @@ def _render(records: Sequence[MemoryRecord]) -> str:
             if rests_on_recorded_external_content(record.provenance)
             else "this system's own"
         )
-        body = json.dumps(record.content[:_CONTENT_BUDGET], ensure_ascii=False)
+        body = json.dumps(record.content[:_CONTENT_BUDGET])
         lines.append(f"[R{index + 1}] ({record.kind}, {origin}) {body}")
     return "\n".join(lines)
 
