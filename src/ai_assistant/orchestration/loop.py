@@ -48,6 +48,7 @@ from ai_assistant.core.types import (
     TurnResult,
 )
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
+from ai_assistant.orchestration.retrieval import assemble_by_band
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -357,10 +358,27 @@ class LearningLoop:
         discuss last Tuesday?" — is a real capability deferred with its ranking
         question, because mixing raw turns with distilled beliefs in one relevance
         cut is the ordering problem leg 7 is for.
+
+        **This composes per band rather than reading once** (ADR-0072 §5, via
+        ADR-0113's ``bands`` filter). It used to make one band-neutral call and pass
+        the records on unchanged, which is precisely what §5 refuses: "a flood of
+        low-confidence inferences can displace an assertion *below the cut*". Issue
+        #663 reported it and ADR-0112 §5 diagnosed it as unfixable on the contract
+        of the day. The budget policy and the composition live in
+        :func:`~ai_assistant.orchestration.retrieval.assemble_by_band`, which is
+        where ADR-0113 §6 puts them; this method keeps only what it already owned —
+        the query, the kind filter, and what a failure means for the turn.
+
+        Degradation stays all-or-nothing, unchanged from the single-call version. A
+        failure on any band's read discards the whole retrieval, which is a sharper
+        edge than it was now that the assertions may already be in hand when the
+        derived band's call fails; that is filed as #805 rather than answered here,
+        because a partially-composed prompt is a short result that looks complete
+        and choosing between the two is a policy question, not a refactor.
         """
         try:
-            memories = await self._memory.search(
-                query, limit=self._retrieval_limit, kinds=BELIEF_KINDS
+            memories = await assemble_by_band(
+                self._memory, query, limit=self._retrieval_limit, kinds=BELIEF_KINDS
             )
         except MemoryStoreError:
             _log.warning("memory_retrieval_degraded", stage="retrieve", exc_info=True)
