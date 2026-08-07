@@ -1,7 +1,105 @@
 # 116. A self-consuming write is a refusal a producer can survive, not a fault that stops it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-07
+- **Note (2026-08-07): ratified.** `Proposed` → `Accepted`, in the separate lane
+  #633 requires, after **both** required lenses came back green on the content
+  this ADR merged with: adversarial **APPROVE with no findings** and architecture
+  **APPROVE with no findings**, round 6, 651 lines net across 7 commits, churn
+  `1.2×` (799 touched), posted to PR #813 by `just ship`. That is the outcome
+  ADR-0070 §1 requires the ratifying edit to record — "the ratifying edit records
+  that review's outcome, it does not replace it" — and it is taken from that
+  comment rather than from a report.
+
+  **This note's date is UTC, as is every timestamp it cites.** #813 merged at
+  `2026-08-07T10:44:16Z` and this flip follows it on the same UTC day. This clone
+  renders `git log` at `-0400`, an offset under which that merge reads
+  `2026-08-07 06:44` — the same calendar day, so the two frames agree here and a
+  reader need not reconcile them. The `Date` line above is this ADR's authoring
+  date in that same local frame, and the flip does not touch it.
+
+  **Both lenses ran on the decision; this ratifying edit takes one.** The header
+  classes this as a contract change "of the semantics-only kind" — golden rule 5
+  triggered by "the changed meaning of a contract method" rather than by a new
+  Protocol — so architecture as well as adversarial was required and both are
+  recorded above, taken while this ADR still stood `Proposed`, which is the
+  sequence ADR-0015 §5 and that same bullet ask for. The flip is reviewed
+  adversarial-only because `CONTRIBUTING.md` → "Trivial ADR edits" exempts "the
+  `Proposed` → `Accepted` ratification flip" from a separate review *of the edit
+  itself* — "not licence to rewrite a ratified decision in place" — ADR-0015 §5
+  exempts trivial ADRs by name, and `scripts/ship.sh` fires its own architecture
+  requirement on a diff touching `core/protocols.py` or `core/types.py`, which
+  this diff does not.
+
+  **The anchor is not the merged head, and the identity is established through the
+  tree rather than assumed**: the comment's
+  `<!-- ship:9540c875ade335a9b9eb6e273ab0892c91c2e2b6 -->` anchor is the pre-merge
+  branch head, which is *not* an ancestor of `main` because #813 was
+  rebase-merged. Both were resolved with `git rev-parse` rather than trusted:
+  `9540c875ade3^{tree}` and `6d1c367eb7e1^{tree}` — the commit the PR merged as,
+  and `main`'s tip at this branch's point — are the same tree, `7dadbb328b47`. The
+  content the review read is therefore the content that landed, notwithstanding
+  the rewritten hash.
+
+  **No `blocker` or `major` finding was waived**, and neither review record
+  contains the word. The terminal round of each lens raised nothing; the three
+  adversarial and five architecture dispositions the comment carries are earlier
+  rounds' findings, each repaired in this ADR's own text before the terminal round
+  re-read it — the last of them, a `major` at round 4, by the `STORE_TEMPORARY`
+  case §8's suite clause now names.
+
+  **Beyond the `Status` line, not one word below is edited** — not a clause, not a
+  tense — which is ADR-0070 §1's own test applied to the ratifying edit first: no
+  decision text is touched and no normative clause acquires, loses or alters an
+  obligation. The line carries no leading `Partially superseded by` token, so
+  ADR-0082 §2 would permit an amendment qualifier on it; none is written, because
+  a ratification is not an amendment and has none to record.
+
+  **ADR-0081's `Status` line is deliberately not touched.** It reads `Partially
+  superseded by ADR-0108 (…) and ADR-0116 (…)`, the accumulated two-pair form
+  ADR-0070 §4 provides, and this flip leaves it exactly as §7 above wrote it.
+  **ADR-0082 §7 settles it by name**: ADR-0070 §1's condition "is that the
+  superseding ADR **exists**, not that it is ratified — the hazard §1 names is a
+  `Status` line pointing at nothing, and an atomic pair makes that unreachable",
+  with the contrary reading filed there as "#458 … not a governance gap but a
+  reviewer failure mode". **ADR-0070 §4** points the same way from the grammar:
+  the machine-legible part is the leading token and the `ADR-NNNN` references, so
+  nothing on that line encodes this ADR's status and a consumer extracts an
+  identical value before and after — including the ADR-0108 pair beside it, which
+  this flip does not reach. And **ADR-0082 §2** has no operation to perform,
+  because a ratification is neither an amendment nor a supersession of ADR-0081.
+  Of ADR-0070 §1's permitted header edits, the supersession is already recorded
+  and the line already matches what landed, so an edit here would rewrite a
+  settled record with no decision behind it.
+
+  **One sentence of ADR-0081's dated note was checked and deliberately left
+  standing.** That note closes "while it is `Proposed`, this line names a decision
+  that is drafted rather than ratified, the form §15 records `main` as already
+  carrying." The clause is conditional: ratification does not falsify it, it ends
+  the condition it is scoped to. It also sits inside an appended dated note
+  recording the moment it was written, which ADR-0070 §1's append-only mechanism
+  puts beyond overwriting, and this note is where the lapse of that condition is
+  recorded instead. The same disposition, on the same grounds, that ADR-0114's
+  ratification took for the identical sentence on ADR-0111.
+
+  **§7's ADR-0115 entry was re-checked against this event and does not go stale.**
+  It finds no record owed on ADR-0115 §1 and §3, reasoning from what those clauses
+  *say* — §1's "by this ADR" being a classification of ADR-0115's own change under
+  ADR-0089 §1, and §3's pinning of its refusal to a plain `MemoryStoreError` being
+  undisturbed because the class §2 adds **is** one. Neither limb turns on
+  ADR-0115's standing, and ADR-0115 was ratified in this same change, so the entry
+  reads identically before and after.
+
+  **That the status-claim sweep is otherwise empty is a result rather than an
+  omission, and the sites are named so it can be checked rather than trusted.**
+  Outside this document and ADR-0081's `Status` line and dated note, no tracked
+  file names this ADR; the only other repository match for `0116` is inside
+  `uv.lock`'s hash fragments, and `docs/roadmap.md` does not mention this ADR at
+  all. **No clause below was written forward for this event to make true**: this
+  ADR closes no issue on ratification and conditions no obligation on it, and §7's
+  own well-formedness argument rests on ADR-0083 §15's existence condition —
+  "ships in the same change, not that it has ratified" — which ratification
+  satisfies rather than falsifies. Refs #472, #807, #809, #633.
 - **Durability clause.** Every reference below to ADR-NNNN is to its text as
   merged on 2026-08-07, not to its status on any later day. Where a later ADR
   changes one of them, this ADR is read against the text quoted here and the

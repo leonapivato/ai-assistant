@@ -1,7 +1,103 @@
 # 115. The writer contract carries the reading: one call, one hold, one reconciliation
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-07
+- **Note (2026-08-07): ratified, over one waived `blocker`.** `Proposed` →
+  `Accepted`, in the separate lane #633 requires. The outcome ADR-0070 §1 obliges
+  this edit to record — "the ratifying edit records that review's outcome, it does
+  not replace it" — is **not** a uniformly green set, and it is written as it
+  stands rather than smoothed: at round 18, 823 lines net across 1 commit, churn
+  reported as a lower bound of `≥1.0×` (823 touched; history was rewritten, so
+  earlier rounds are not counted), **architecture** returned **APPROVE with no
+  findings** and **adversarial** returned **BLOCK** on a single `blocker`, which
+  #810's lane **waived with its rationale** and filed as **#815**, open. All of it
+  is taken from the `just ship` comment and the description on #810 rather than
+  from a report.
+
+  **A waived `blocker` is a ratifiable state, and the texts say so directly.**
+  `CONTRIBUTING.md` → "Triage every finding" rules that "Waiving a
+  `blocker`/`major` is allowed — write the rationale in the PR or the commit", and
+  that "Review is advisory tooling, not a hard gate; the only required check is
+  `gate`", which was green. The waiver's own ground is recorded on #810: §1's
+  sentence that no implementation "may read" `SourceReading.facet` is unmarked
+  prose, so under ADR-0089 §3 it binds nothing in a marked ADR — technically
+  correct, and waived because reading `facet` breaches no clause that *is* marked,
+  every neighbouring obligation being separately marked and separately tested.
+
+  **This edit does not repair it, and that is a rule rather than a preference.**
+  The remedy #815 records is either to mark the prohibition or to soften it to a
+  description; both change what this ADR obligates, and ADR-0070 §1 puts any
+  change to what was decided outside an in-place edit entirely — `CONTRIBUTING.md`
+  → "Trivial ADR edits" says the ratification flip is "not licence to rewrite a
+  ratified decision in place", and a ratifying edit is exempt from separate review
+  precisely because it records rather than decides. #815 is where that judgement
+  is made, by a lane whose change a reviewer reads.
+
+  **This note's date is UTC, as is every timestamp it cites.** #810 merged at
+  `2026-08-07T10:05:24Z` and this flip follows it on the same UTC day. This clone
+  renders `git log` at `-0400`, an offset under which that merge reads
+  `2026-08-07 06:05` — the same calendar day, so the two frames agree here and a
+  reader need not reconcile them. The `Date` line above is this ADR's authoring
+  date in that same local frame, and the flip does not touch it.
+
+  **Both lenses ran on the decision; this ratifying edit takes one.** The header's
+  Surface bullet triggers golden rule 5 — one method on `MemoryWriter` in
+  `core/protocols.py` — so this is "the ADR deciding that surface" under
+  `CONTRIBUTING.md` → "Report the review, then mark it ready", which is why
+  architecture as well as adversarial is recorded above, both taken while this ADR
+  still stood `Proposed` (ADR-0015 §5). The flip is reviewed adversarial-only
+  because "Trivial ADR edits" exempts it from a separate review *of the edit
+  itself*, ADR-0015 §5 exempts trivial ADRs by name, and `scripts/ship.sh` fires
+  its own architecture requirement on a diff touching `core/protocols.py` or
+  `core/types.py`, which this diff does not.
+
+  **The anchor is not the merged head, and the identity is established through the
+  tree rather than assumed**: the comment's
+  `<!-- ship:00404c52be1cd422ccc6cb1a479ce561cdbf733d -->` anchor is the pre-merge
+  branch head, which is *not* an ancestor of `main` because #810 was
+  rebase-merged. Both were resolved with `git rev-parse` rather than trusted:
+  `00404c52be1c^{tree}` and `e5cfc4e6a02d^{tree}` — the commit the PR merged as —
+  are the same tree, `5ca5dc40f53f`. The content the review read is therefore the
+  content that landed, notwithstanding the rewritten hash.
+
+  **Beyond the `Status` line, not one word below is edited** — not a clause, not a
+  tense — which is ADR-0070 §1's own test applied to the ratifying edit first: no
+  decision text is touched and no normative clause acquires, loses or alters an
+  obligation. The line carries no leading `Partially superseded by` token, so
+  ADR-0082 §2 would permit an amendment qualifier on it; none is written, because
+  a ratification is not an amendment and has none to record.
+
+  **ADR-0110's `Status` line is deliberately not touched.** It reads `Partially
+  superseded by ADR-0115 (…)`, and this flip leaves it exactly as §8 above wrote
+  it. **ADR-0082 §7 settles it by name**: ADR-0070 §1's condition "is that the
+  superseding ADR **exists**, not that it is ratified — the hazard §1 names is a
+  `Status` line pointing at nothing, and an atomic pair makes that unreachable",
+  and the contrary reading is filed there as "#458 … not a governance gap but a
+  reviewer failure mode". The line was therefore well-formed when written, and
+  ratification neither repairs nor widens it. **ADR-0070 §4** points the same way
+  from the grammar: the machine-legible part is the leading token and the
+  `ADR-NNNN` references, so nothing on that line encodes this ADR's status and a
+  consumer extracts an identical value before and after. And **ADR-0082 §2** has
+  no operation to perform, because a ratification is neither an amendment nor a
+  supersession of ADR-0110. Of ADR-0070 §1's permitted header edits, the
+  supersession is already recorded and the line already matches what landed, so an
+  edit here would rewrite a settled record with no decision behind it. ADR-0110's
+  dated note is left standing for the same reason and needs no lapse recorded: it
+  says the record is written "rather than at ADR-0115's ratification" and that the
+  pair is atomic, both of which stay true.
+
+  **That the status-claim sweep is otherwise empty is a result rather than an
+  omission, and the sites are named so it can be checked rather than trusted.** No
+  tracked file describes this ADR as `Proposed`, pending or unratified. Outside
+  this document the only matches for `0115` are ADR-0110's `Status` line and dated
+  note, ADR-0116 (§7's "no record is owed" entry and two Context passages, each
+  turning on what this ADR *decides* and none on its standing), and `uv.lock`,
+  where the digits occur only inside hash fragments; `docs/roadmap.md` does not
+  mention this ADR at all. **No clause below was written forward for this event to
+  make true**: §8's own "It is written now rather than at ratification" is
+  satisfied by ratification rather than falsified by it, this ADR closes no issue
+  on ratification, and it conditions no obligation on it. Refs #729, #639, #803,
+  #248, #458, #815, #633.
 - **Durability clause.** Every reference below to ADR-NNNN is to its text as merged
   on 2026-08-07, not to its status on any later day. Where a later ADR changes one
   of them, this ADR is read against the text quoted here and the later ADR's own
