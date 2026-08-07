@@ -297,21 +297,29 @@ behind the hub's API.
    read my calendar" has nowhere to be recorded, and the grant model is its own
    decision (#629). *Exit: the assistant knows something true about
    the user's day it was never told, from a source the user granted.*
-7. **Memory at volume.** Consolidation (many episodes distilled into few
-   durable beliefs, run by the hub's scheduler), the decay and salience ADR-0072
-   §10 files against this leg by name, retrieval ranking under load, and the
-   re-embedding migration (#425) — which leg 5 makes a legible refusal to start
-   rather than an automated fix, leaving the automation to this leg and to
-   ADR-0006 §4, run as an offline tool that takes the hub's own instance lock
-   (ADR-0083 §1, §10). Consolidation is also the job most likely to make the
-   scheduler's serial, one-at-a-time shape worth revisiting (ADR-0083 §7).
+7. **Memory at volume.** Decided and built (ADR-0110 through ADR-0116; the
+   batch record is #729). Consolidation is a chunked scheduler job resuming
+   from a durable cursor the store contract carries (ADR-0111, ADR-0114),
+   shipped built but unarmed until the write path's embedding call has a
+   deadline (#820); the question this leg was expected to raise — whether
+   consolidation makes the scheduler's serial, one-at-a-time shape worth
+   revisiting — was answered the other way: the scheduler stays serial and
+   chunking is the answer (ADR-0111, amending ADR-0083 §7). Demotion is the
+   covered-reading rule — a covered reading's absence closes a window, and a
+   clock never does (ADR-0110, ADR-0115) — with currency barred from ranking
+   (ADR-0112) and retrieval ordered by relevance through a band-scoped read
+   bound before the KNN cut (ADR-0113). The re-embedding migration (#425)
+   landed earlier as the offline tool taking the hub's own instance lock
+   (ADR-0083 §1, §10). Decay *parameters* stay with leg 8's measurement.
    **The leg is about quality, not size** (ADR-0103 §1): what ages is a second
    quantity, never the evidence a belief was built on, and nothing here destroys
    evidence to reclaim space — which leaves ADR-0007 §5's size-caps slice
    deferred where it already was rather than pulling it into this leg.
    *Exit: months of use make retrieval better, not slower — measured in this
    leg, as retrieval latency and k-shortfall against a synthetically aged store.
-   The "not noisier" half is handed to leg 8 as an entry claim, because it needs
+   The instrument exists (#799, from #789) and its measurements are on record;
+   the ruling on them is the operator's and is not yet made. The "not noisier"
+   half is handed to leg 8 as an entry claim, because it needs
    the memory-precision measure leg 8 builds; a claim this leg has no instrument
    for is one it would assert rather than test.*
 8. **Minimal evaluation.** The `EvaluationTrace` slice — Tier-2 operational
