@@ -607,12 +607,16 @@ read.
 
 ### 6a. Every refusal in this contract is a `ValueError`
 
-> **Normative.** All three refusals these operations state — a walk name that is
-> not `NonBlankEncodableText`, a `limit` that is not exactly an `int` or is outside
-> `[1, 2**63)`, and a position bound to a different walk — are raised as
-> **`ValueError`** by every implementation. A failure of the store itself is a
+> **Normative.** Every refusal these operations state is raised as **`ValueError`**
+> by every implementation: a walk name that is not `NonBlankEncodableText`; a
+> `limit` that is not exactly an `int` or is outside `[1, 2**63)`; a position whose
+> token is not `NonBlankEncodableText`, or that is not a `WalkPosition` at all; and
+> a position bound to a different walk. A failure of the store itself is a
 > `MemoryStoreError` as everywhere else, and no implementation reports a caller's
 > bad argument as one.
+
+> **Normative.** Each of those refusals leaves every recorded walk position exactly
+> as it was. A refused call changes nothing.
 
 **Naming the class is what makes "the same refusal on every backend" mean
 anything.** Without it a SQLite implementation can surface its binding failure as a
@@ -621,6 +625,18 @@ satisfy every clause of §8 as an earlier draft wrote it, and a caller cannot ha
 one invalid call uniformly — which is the backend divergence §5 and §6 exist to
 close, surviving in the one place neither of them looked. Adversarial review found
 it on round 15.
+
+**The position is validated on entry like the other two, because a frozen model is
+not a validated one at the call site.** `WalkPosition.model_construct(token=…)`
+builds an instance without running its validator — that is what `model_construct`
+is for — so a malformed token reaches the store with the declared type satisfied,
+and SQLite leaks an encoding failure from its binding where an in-memory store
+accepts it. That is the same divergence §5's entry check closes for the walk name,
+reaching the one argument §5 does not cover, and leaving it out would contradict
+this section's own boundary between a caller's bad argument and a store failure.
+Adversarial review found it on round 18, after the same class had been closed for
+names on round 6 and for limits on round 11; with the position it is closed for
+every argument these two operations take.
 
 **`ValueError` because `list_beliefs` already says so**, one method over on this
 same Protocol and for this same argument: it raises `ValueError` "If `limit` or
