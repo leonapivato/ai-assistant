@@ -1,6 +1,6 @@
 """Session-wide pytest configuration.
 
-Its one job is to record which tests actually **ran and passed**, so that
+Its main job is to record which tests actually **ran and passed**, so that
 ``tests/core/test_protocol_triad.py`` can assert the Protocol-triad rule
 against real executed assertions rather than against files that merely exist.
 A conformance suite bound to a fake by a class pytest never collects runs zero
@@ -11,6 +11,12 @@ itself.
 Collection alone is not enough for the same reason, which is why the record is
 built from call-phase reports and the triad check is reordered to run last --
 it is the only test in the suite whose subject is the rest of the suite.
+
+It also registers ``--aged-store-scale``, the one option the leg-7 retrieval
+instrument needs (issue #789). It lives here because ``pytest_addoption`` is
+honoured only in the rootdir conftest, and it is a *volume* switch rather than a
+selection one: both scales run the same tests, so it is deliberately absent from
+``_FILTERING_OPTIONS`` below.
 """
 
 from __future__ import annotations
@@ -40,6 +46,32 @@ _FILTERING_OPTIONS = (
 
 #: The check whose subject is every other test, so it has to run after them.
 _TRIAD_CHECK = "tests/core/test_protocol_triad.py"
+
+#: Volume profiles the leg-7 retrieval instrument can run at. ``gate`` is sized
+#: to keep the Definition-of-Done gate quick; ``full`` is the on-demand run that
+#: produces the numbers ADR-0112 §7 gates retrieval tuning on.
+_AGED_STORE_SCALES = ("gate", "full")
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register the aged-store instrument's volume switch (issue #789)."""
+    parser.addoption(
+        "--aged-store-scale",
+        choices=_AGED_STORE_SCALES,
+        default=_AGED_STORE_SCALES[0],
+        help=(
+            "Volume profile for the leg-7 retrieval instrument "
+            "(tests/memory/test_aged_store_retrieval.py). Selects how large a "
+            "store the latency and k-shortfall measurements are taken against; "
+            "it deselects nothing."
+        ),
+    )
+
+
+@pytest.fixture(scope="session")
+def aged_store_scale(request: pytest.FixtureRequest) -> str:
+    """Which volume profile the leg-7 retrieval instrument runs at."""
+    return str(request.config.getoption("--aged-store-scale"))
 
 
 @dataclass
