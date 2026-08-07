@@ -1,6 +1,6 @@
 # 81. No write consumes the evidence its own proposal cites
 
-- Status: Partially superseded by ADR-0108 (§8's first deferred item and its assignment to the #104 lane)
+- Status: Partially superseded by ADR-0108 (§8's first deferred item and its assignment to the #104 lane) and ADR-0116 (§3's ruling that the refusal earns no new error class, and §9's matching declined bullet)
 - Date: 2026-07-29
 - Partially superseded: 2026-08-05 by ADR-0108 — **§8's first deferred item is
   ruled, and its assignment of that item to the #104 lane no longer holds. Of the
@@ -67,6 +67,49 @@
   This record lands in ADR-0108's own (`Proposed`) change, in the shape this ADR
   used for its ADR-0077 note (commit `4bc008b`), so the review that can still
   change ADR-0108 §4 reads it alongside.
+- **Partially superseded: 2026-08-07 by
+  [ADR-0116](0116-a-self-consuming-write-is-a-refusal-a-producer-can-survive.md), in
+  the scope the `Status` line names — §3's ruling that this refusal earns no new
+  error class, and §9's matching declined bullet.** §1's refusal itself is
+  **untouched and relied on**: a write that installs the proposal at an id the
+  proposal cites is still refused, still writes nothing, and ADR-0116 §1 states in
+  a clause that nothing it decides weakens it. What changes is the **class** the
+  refusal carries, so a caller can tell it from a broken store without matching on
+  a message (ADR-0111 §9, ADR-0083 §6).
+
+  **§3's ground was a measurement of the consumers that existed, and it has
+  expired.** §3 wrote that the refusal "is therefore **never** a race and
+  **always** a producer fault", and §9 declined "a new `MemoryStoreError`
+  subclass" because "there is no race to distinguish and **no caller with a second
+  branch**". The "never a race" half stands and ADR-0116 relies on it. The other
+  half no longer holds: leg 7's consolidator reaches this refusal while following
+  every producer rule the corpus states — it cites the records it consolidated by
+  ADR-0077 §5's own label→id mapping, generalises over them, and the policy may
+  then rule `REINFORCE` onto one of those cited records, so `target_id ∈ evidence`
+  with no producer bug anywhere. §Context's survey — "**Nothing reachable produces
+  the shape today**" — was true when written and weighed `proposed.id`, which a
+  producer chooses; the `REINFORCE` arm's destination is chosen by the **policy**,
+  which is what a generalising producer makes live. That caller has two branches
+  that differ in what they do, so the subclass now has the consumer §9 said it
+  lacked.
+
+  **Recorded as a supersession rather than argued into an amendment**, on ADR-0070
+  §1's test: §3 *decided* no new error class and ADR-0116 §2 adds one, so a
+  decision moves rather than a text being reconciled with itself. The scope is
+  deliberately one ruling — **§§1, 1a, 1b, 2, 4, 5, 6, 7 stand untouched**, as do
+  §8's two deferrals (the first discharged by ADR-0108 §4, the second still the
+  belief-presentation lane's) and the rest of §9. Not one of those clauses
+  acquires, loses or alters an obligation.
+
+  This `Status` line already carried a leading partial-supersession token for
+  ADR-0108, so ADR-0116's pair is **added beside it** rather than replacing it, in
+  the form `docs/adr/template.md` states; under ADR-0082 §2 no amendment qualifier
+  is written on that line and this dated note is the whole of the record. ADR-0116
+  ships in the same change as this note, which is the existence condition ADR-0083
+  §15 states; while it is `Proposed`, this line names a decision that is drafted
+  rather than ratified, the form §15 records `main` as already carrying.
+
+  Appended per ADR-0070 §1: no text below is rewritten. Refs #472, #807, #809.
 - **This is a contract change, of the semantics-only kind.**
   `MemoryWriter.ingest` gains one refusal clause (§1): a ruling that would
   *install* the proposal at an id that same proposal cites is refused rather
