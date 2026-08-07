@@ -317,8 +317,10 @@ behind the hub's API.
    deferred where it already was rather than pulling it into this leg.
    *Exit: months of use make retrieval better, not slower — measured in this
    leg, as retrieval latency and k-shortfall against a synthetically aged store.
-   The instrument exists (#799, from #789) and its measurements are on record;
-   the ruling on them is the operator's and is not yet made. The "not noisier"
+   The instrument exists and is runnable on demand (#799, from #789); the
+   measurements it produced are recorded in #799's report and #729's close-out,
+   not as a committed artifact, and the ruling on them is the operator's and is
+   not yet made. The "not noisier"
    half is handed to leg 8 as an entry claim, because it needs
    the memory-precision measure leg 8 builds; a claim this leg has no instrument
    for is one it would assert rather than test.*
