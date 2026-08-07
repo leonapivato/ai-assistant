@@ -48,9 +48,11 @@
   §5 filed: ADR-0072 §5's per-band composition is unimplemented *because* neither
   read on the contract serves it, and ADR-0112 §10 declined to pre-authorise the
   surface that would. This is that surface's ADR.
-- **Reintroduces no ranking quantity.** §4 holds ADR-0112 §1 exactly as ruled:
-  neither currency nor evidence-strength nor the band itself is a term in any
-  order, score, weight or cut. A filter selects what is ranked; it does not rank.
+- **Reintroduces no ranking quantity.** §4 holds ADR-0112 §1 exactly as ruled and
+  keeps the band on the other side of the line it draws: the band is an
+  **eligibility** axis deciding which records are ranked, never an **ordering** one
+  contributing to how they compare. A filter selects what is ranked; it does not
+  rank.
 - **Amends and supersedes nothing.** §11 applies ADR-0070 §1's test clause by
   clause to every ADR this decision touches — ADR-0072 §5 and §7, ADR-0073 §1, §2,
   §9 and §10, ADR-0112 §1, §3, §5, §7, §8 and §10, ADR-0045 §6, ADR-0007 §2 and its
@@ -320,14 +322,34 @@ selected is still nothing rather than "the whole band". That contrast with
 `list_beliefs` — whose `limit` and `offset` are *refused* out of range rather than
 matching nothing (ADR-0073 §2) — is deliberate and stays.
 
-### 4. The band selects; it never ranks
+### 4. The band is an eligibility axis, never an ordering one
 
-> **Normative.** Within the returned set the order is relevance alone. The band is
-> not a term in any order, score, weight or cut, and neither is currency nor
-> evidence-strength. `MemoryStore.search` remains band-neutral and
+> **Normative.** The band decides **which records are ranked** (§2) and contributes
+> nothing to **how ranked records compare**. It is not a term in any ordering, not
+> an addend or factor in any score, not a weight, and not a threshold a record is
+> dropped below. Within the result of one call the order is relevance alone, and
+> the store never compares a record of one band against a record of another.
+
+> **Normative.** ADR-0112 §1 binds unchanged and is not narrowed here: neither
+> currency nor evidence-strength is a term in any ordering, score, weight or cut
+> applied to retrieved records. This ADR supplies neither quantity and creates no
+> place to put one. `MemoryStore.search` remains band-neutral and
 > confidence-neutral in the sense ADR-0072 §5 ruled and ADR-0112 §1 affirmed.
 
-A filter and a weight are different things, and this clause exists because the
+**The eligibility/ordering distinction is load-bearing and an earlier draft
+collapsed it.** That draft mirrored ADR-0112 §1's wording onto the band — "not a
+term in any order, score, weight or cut" — which reads cleanly for currency,
+because no clause anywhere admits a currency *filter*. For the band it collides
+head-on with §2: a filter that binds before the ranking cut necessarily decides
+what the cut is taken over. The architecture lens caught the two marked clauses
+contradicting each other, and under ADR-0089 §3 that could not be repaired by the
+prose beside them — in a marked ADR "unmarked text is read to determine what a
+marked clause *means*; it never supplies an obligation", so a clause has to carry
+its own scope. Splitting eligibility from ordering is what carries it: the band
+answers *which records*, relevance answers *in what order*, and neither answer
+reaches the other's question.
+
+A filter and a weight are different things, and this section exists because the
 parameter is the most plausible route by which they get confused.
 
 **What ADR-0072 §5 rules is what the store's ranking may *mix*.** ADR-0103 §8 put
