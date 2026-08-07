@@ -46,6 +46,7 @@ from ai_assistant.orchestration.consolidation import (
     CONSOLIDATION_WALK,
     ConsolidationStage,
 )
+from ai_assistant.service.scheduler import Job, Scheduler
 from ai_assistant.testing import (
     FakeDeferralStore,
     FakeMemoryPolicy,
@@ -53,6 +54,7 @@ from ai_assistant.testing import (
     FakeMemoryWriter,
     FakeModelProvider,
 )
+from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -64,6 +66,15 @@ if TYPE_CHECKING:
 #: The content the ADR-0116 §8 cases seed and propose, so the writer's lexical
 #: conflict detection surfaces the cited records and the fold has a target.
 _BELIEF_TEXT = "the user works late on Thursdays"
+
+
+class _UnboundedDuration(timedelta):
+    """A ``timedelta`` whose elapsed value is not finite, for the constructor case."""
+
+    def total_seconds(self) -> float:
+        """Report an unreachable deadline."""
+        return float("inf")
+
 
 #: The instant every fake clock in this module reads.
 _AT = datetime(2026, 3, 4, 10, 0, tzinfo=UTC)
@@ -1126,3 +1137,80 @@ async def test_an_exhausted_run_records_a_different_disposition() -> None:
     recorded = [entry for entry in logs if entry["event"] == "consolidation_run_finished"]
     assert len(recorded) == 1
     assert recorded[0]["disposition"] == "exhausted"
+
+
+@pytest.mark.parametrize(
+    ("budget", "expected"),
+    [
+        (timedelta(0), ValueError),
+        (timedelta(seconds=-1), ValueError),
+        (_UnboundedDuration(days=1), TypeError),
+        (300, TypeError),
+    ],
+    ids=["zero", "negative", "unbounded-subclass", "not-a-duration"],
+)
+async def test_an_inadmissible_run_budget_is_refused_at_construction(
+    budget: object, expected: type[Exception]
+) -> None:
+    """ADR-0111 §4: finite and strictly positive, checked where it is wired.
+
+    ``Settings`` refuses these at load, but this constructor is exported and a
+    direct caller would otherwise get behaviour §4 forbids. ``timedelta(0)`` is the
+    one that looks harmless: the budget is spent before the first chunk boundary, so
+    the run walks nothing and returns zeroes — a pass that reports health while
+    doing nothing (ADR-0022 §4a), recurring every interval while the store grows.
+
+    The subclass case is the other end, and it is why the check is ``type(...) is``
+    rather than ``isinstance``: overriding ``total_seconds`` to return infinity
+    makes the deadline unreachable and the run unbounded, which is what
+    ``core/config.py`` spends ``allow_inf_nan=False`` to prevent one field over.
+    """
+    store = FakeMemoryStore(now=_now)
+    writes, _ = _gated(store)
+
+    with pytest.raises(expected):
+        ConsolidationStage(
+            memory=store,
+            writes=writes,  # type: ignore[arg-type] # a capturing wrapper around the real stage
+            model=FakeModelProvider(_ONE_BELIEF),
+            run_budget=budget,  # type: ignore[arg-type] # the point
+            now=_now,
+        )
+
+
+async def test_a_halted_run_reaches_the_scheduler_as_a_completion_not_a_failure() -> None:
+    """ADR-0111 §9 end to end, through the real ``Scheduler``.
+
+    §9's third clause is that a halted run "is recorded as a **completed run** that
+    did not exhaust its work, **not as a failure**", and only ``Scheduler._run_job``
+    records a run as completed. So the generic ``hub_scheduler_job_completed`` is
+    required to fire here — §9 asks for it — and what it cannot carry is the "did
+    not exhaust its work" half, which is what ``consolidation_run_finished`` adds.
+
+    The pair is therefore not the "second record for the same refusal" §9's second
+    clause forbids: that clause bars a second record **at a severity an operator's
+    monitoring treats as a fault**, and its own §Context is about a warning-level
+    failure record plus an asyncio ERROR traceback. Both records here are ``info``
+    and neither says failure — which this case asserts rather than argues.
+    """
+    store = await _seeded([_record("r1", source=MemorySource.EXTERNAL), _record("r2")])
+    queue = FakeDeferralStore(now=_now, queue_limit=1)
+    writes, _ = _gated(store, deferrals=queue)
+    filler, _ = _gated(store, deferrals=queue)
+    await filler.write(_question_raising("filler", cites=["r1", "r2"]))
+    stage = _stage(store=store, writes=writes)
+    scheduler = Scheduler([Job(name="consolidation", interval=timedelta(hours=1), run=stage.run)])
+
+    with structlog.testing.capture_logs() as logs:
+        scheduler.start()
+        # One turn of the loop is enough: every job is due at its first tick
+        # (ADR-0083 §7), so the run happens before the first sleep.
+        await settle()
+        await scheduler.aclose()
+
+    events = [entry["event"] for entry in logs]
+    assert "hub_scheduler_job_failed" not in events, "a halt is not a failure (ADR-0111 §9)"
+    assert events.count("hub_scheduler_job_completed") == 1
+    halts = [entry for entry in logs if entry["event"] == "consolidation_run_finished"]
+    assert [entry["disposition"] for entry in halts] == ["halted"]
+    assert {entry["log_level"] for entry in logs if entry["event"] in events} <= {"info", "debug"}
