@@ -1305,3 +1305,30 @@ async def test_origin_is_marked_from_provenance_and_not_from_the_text() -> None:
     first, second = model.calls[0].messages[-1].content.splitlines()
     assert first.startswith("[R1] (semantic, third-party)")
     assert second.startswith("[R2] (semantic, this system's own)")
+
+
+async def test_an_oversized_reply_is_refused_before_it_is_decoded() -> None:
+    """``max_proposals`` caps what is kept, not what is processed to get there.
+
+    A ``ModelProvider`` bounds a call's *time* and nothing bounds its *size*, so a
+    broken or hostile provider can return millions of well-formed beliefs — each
+    decoded, validated, given an id and accumulated before the cap keeps five. That
+    is the event loop held and the heap grown for work the cap was meant to prevent,
+    and it is worse here than on the observer's path: a consolidation runs
+    unattended on ADR-0083 §7's serial scheduler, so nobody is waiting to notice.
+
+    The bound sits **before** the decode, which is what leaves ADR-0077 §4's
+    validate-then-cap order alone: the reply takes the same disposition as any other
+    undecodable envelope — one unusable entry, counted, never repaired — so nothing
+    about the counting changes.
+    """
+    store = await _seeded([_record("r1"), _record("r2")])
+    writes, _ = _gated(store)
+    flood = ", ".join(_belief(index) for index in range(4_000))
+
+    report = await _stage(store=store, writes=writes, reply=f'{{"beliefs": [{flood}]}}').run()
+
+    assert report.proposed == 0
+    assert report.discarded_unusable == 1, "an over-long reply is one unusable envelope"
+    assert report.discarded_over_limit == 0, "nothing was validated, so nothing was capped"
+    assert report.exhausted is True, "an unusable reply is not a fault"
