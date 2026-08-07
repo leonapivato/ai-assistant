@@ -12,12 +12,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
-from memory_store_contract import MemoryStoreContract
+from memory_store_contract import _BEYOND_MARGIN, MemoryStoreContract
 from pydantic import ValidationError
 
 from ai_assistant.core.types import MemorySource, Provenance, SemanticMemory
 from ai_assistant.testing import FakeMemoryStore
 from ai_assistant.testing.cancellation import SuspendedMidWrite
+from ai_assistant.testing.memory import _mint_position
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -71,7 +72,7 @@ class TestFakeMemoryStoreContract(MemoryStoreContract):
     async def record_walk_position_beyond_the_store(self, store: MemoryStore, walk: str) -> None:
         """Park a number above this fake's own issued-key counter."""
         assert isinstance(store, FakeMemoryStore)
-        store._walks[walk] = str(store._sequence + 1_000)
+        store._walks[walk] = _mint_position(walk, store._sequence + _BEYOND_MARGIN).token
 
     @pytest.fixture
     def store_factory(self) -> Callable[[Callable[[], datetime]], MemoryStore]:

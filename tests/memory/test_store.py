@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
-from memory_store_contract import MemoryStoreContract
+from memory_store_contract import _BEYOND_MARGIN, MemoryStoreContract
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import MemoryStoreError
@@ -20,6 +20,7 @@ from ai_assistant.core.types import (
     SemanticMemory,
 )
 from ai_assistant.memory import InMemoryMemoryStore
+from ai_assistant.memory._walk import mint_position
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -276,7 +277,7 @@ class TestInMemoryMemoryStoreContract(MemoryStoreContract):
     async def record_walk_position_beyond_the_store(self, store: MemoryStore, walk: str) -> None:
         """Park a number above this store's own issued-key counter."""
         assert isinstance(store, InMemoryMemoryStore)
-        store._walks[walk] = str(store._sequence + 1_000)
+        store._walks[walk] = mint_position(walk, store._sequence + _BEYOND_MARGIN).token
 
     @pytest.fixture
     def store(self) -> MemoryStore:

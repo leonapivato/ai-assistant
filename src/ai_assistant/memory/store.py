@@ -473,7 +473,7 @@ class InMemoryMemoryStore:
         # Read once per chunk, so one chunk is judged against one reading of the
         # clock — matching every other read here and the persistent store.
         now = self._now_utc()
-        after = resume_key(self._walks.get(walk), issued_through=self._sequence)
+        after = resume_key(self._walks.get(walk), walk=walk, issued_through=self._sequence)
         # `limit` bounds records *examined*, not records returned: a scan that ran
         # on until it had `limit` eligible records would be unbounded over a long
         # ineligible run, which is the hazard ADR-0111 §4 forbids.
@@ -488,7 +488,7 @@ class InMemoryMemoryStore:
         # `rowid > ? ORDER BY rowid LIMIT ?` instead.
         examined: list[tuple[int, str]] = []
         for rid, key in self._keys.items():
-            if key <= after:
+            if after is not None and key <= after:
                 continue
             examined.append((key, rid))
             if len(examined) == limit:
@@ -519,5 +519,6 @@ class InMemoryMemoryStore:
         # rather than an error: a walk is at-least-once, so a resumed run can hold a
         # stale position legitimately, and the worst outcome under this rule is
         # repeated work rather than records skipped forever.
-        if key > resume_key(self._walks.get(walk), issued_through=self._sequence):
-            self._walks[walk] = str(key)
+        current = resume_key(self._walks.get(walk), walk=walk, issued_through=self._sequence)
+        if current is None or key > current:
+            self._walks[walk] = mint_position(walk, key).token
