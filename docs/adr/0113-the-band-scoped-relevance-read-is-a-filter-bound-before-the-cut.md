@@ -55,7 +55,8 @@
   clause to every ADR this decision touches — ADR-0072 §5 and §7, ADR-0073 §1, §2,
   §9 and §10, ADR-0112 §1, §3, §5, §7, §8 and §10, ADR-0045 §6, ADR-0007 §2 and its
   Consequences — and finds nothing owed. No ADR's `Status` line is edited.
-- **Refs** #790 (the problem statement), #663, #457, #411, #789, #729, #436, #115.
+- **Refs** #790 (the problem statement), #663, #457, #411, #789, #729, #733 (the
+  band-changing fold §5 turns on), #436, #115.
   ADR-0072 (the bands, §5's precedence, §7's deferred signature), ADR-0073 (the
   other branch, and the conventions this parameter inherits), ADR-0112 (the
   ordering axis and the measurement gate), ADR-0045 §6 (the read-time predicate and
@@ -228,16 +229,36 @@ cannot get from `band_of`, and it would serve every caller the same compromise �
 
 ### 2. The band filter binds before the ranking cut
 
-> **Normative.** The result is the `limit` most relevant records **among the
-> records in the selected bands** that pass both read-time axes — never the
-> selected-band members of the `limit` most relevant records overall. An
+> **Normative.** The band predicate binds **before** the ranking cut. An
 > implementation may not let a record outside the selected bands consume the
-> candidate budget the ranking cut is taken from. Where the store cannot satisfy
-> this, the implementing lane stops and brings back an ADR rather than shipping
-> the weaker form.
+> candidate budget the cut is taken from, and the records it ranks are the
+> selected bands' records — never the selected-band members of a band-neutral top
+> `limit`. Where the store cannot bind the band before the cut, the implementing
+> lane stops and brings back an ADR rather than shipping the weaker form.
+
+> **Normative.** This binds the **band axis alone and promises no full page.**
+> `kind`, `expires_at` and both window ends keep the post-cut placement ADR-0045
+> §6 and ADR-0007 ratified for them, so an in-band record failing one of those may
+> still consume the candidate budget and a call may return fewer than `limit`
+> records while eligible ones exist. That residue is #457's and is neither closed
+> nor widened here (§8).
 
 This is the substantive half of this decision and the half a reader would not
 derive from ADR-0072 §7.
+
+**The two clauses are separated because the first one, stated as a completeness
+promise, would contradict §8.** An earlier draft of this section promised "the
+`limit` most relevant records among the records in the selected bands that pass
+both read-time axes", which reads as a full page and is not deliverable: with
+`limit=10` and eighty nearer *in-band* expired records, a store that pre-filters
+the band exactly as required still exhausts its over-fetch budget on the unchanged
+post-KNN expiry pass and returns nothing. The adversarial lens caught the two
+clauses contradicting each other, and the correction is worth leaving legible
+because the distinction is the whole architecture of this decision: **what is ruled
+here is where a predicate binds, not how much of a page a caller gets.** Binding
+the band is a correctness obligation because the band skew is unbounded and grows
+by design; filling the page is #457's exhaustiveness question, which ADR-0112 §8
+adjudicates and §8 below routes.
 
 **The ground is that the weak form reproduces the failure the read exists to
 prevent.** ADR-0072 §5 refuses a band-neutral top-k partitioned afterwards because
@@ -333,22 +354,61 @@ consumer from ordering or cutting by currency within a band. This read supplies 
 currency value and creates no place to put one; the assembler built on it orders on
 the band and on relevance, which is ADR-0112 §3's own sentence.
 
-### 5. The bands partition, so composition is concatenation
+### 5. The bands partition **within a call**; composing across calls is not a transaction
 
-> **Normative.** No record is eligible for two bands' results in one turn: `band_of`
-> is a total function of `provenance.source`, so band-scoped result sets over
-> disjoint `bands` arguments are disjoint. A consumer composing them owes no
-> deduplication step, and an implementation may not return a record whose band is
-> not selected in order to fill a page.
+> **Normative.** Within one call, every returned record's band is one the caller
+> selected: `band_of` is a total function of `provenance.source`, so a record has
+> exactly one band at one instant. An implementation may not return a record whose
+> band is not selected, and in particular may not pad a short result with the
+> next-nearest neighbour of another band in order to fill a page.
 
-Worth a clause because it is what makes §1's N-calls-and-compose safe, and because
-the two obvious failure modes are silent. A consumer that deduplicates
-defensively hides an implementation returning out-of-band records; an
-implementation that pads a short page with the next-nearest neighbour of another
-band converts the under-service §8 discusses into a *wrong-band* result the
-consumer cannot detect, since the composed prompt would then carry an inference in
-the slot precedence reserved for an assertion. A short result is the correct answer
-to a band with nothing more to give.
+> **Normative.** Across calls, no disjointness is promised and none may be assumed.
+> A consumer composing band-scoped reads **deduplicates by record id**, and where
+> the same id arrives from two bands it keeps the copy from the
+> higher-precedence band in ADR-0072 §5's order and counts it once against that
+> band's budget. This ADR adds no multi-band snapshot and no cross-call read
+> consistency of any kind.
+
+**The per-call half is what makes §1's N-calls-and-compose safe**, and its two
+failure modes are silent ones. A consumer that deduplicates *within* a call hides
+an implementation returning out-of-band records; an implementation that pads
+converts the under-service §8 discusses into a *wrong-band* result the consumer
+cannot detect, since the composed prompt would then carry an inference in the slot
+precedence reserved for an assertion. A short result is the correct answer to a
+band with nothing more to give.
+
+**The cross-call half is a correction, and the mechanism is live on `main` rather
+than hypothetical.** An earlier draft claimed no record is eligible for two bands'
+results "in one turn" and told consumers they owed no deduplication. The
+adversarial lens answered that the claim needs a snapshot spanning the calls, and
+the write path supplies the counter-example: `MemoryStore.add` is an upsert keyed
+on the caller's id, `REINFORCE` folds onto the target's id (ADR-0045 §5b), and
+`memory/ingest.py`'s `_merge` builds the survivor's provenance with
+`source=incoming.provenance.source` on every arm but ADR-0103 §6's corroboration
+case — so **a fold moves a record between bands at a stable id**, which is the
+premise #733 is filed on. A record read in the `ASSERTED` call and folded to
+`ATTESTED` before the `ATTESTED` call is returned twice.
+
+**Ruling the tie-break rather than only the deduplication is deliberate.** A
+consumer that dropped the second copy in arrival order would resolve the race by
+whichever band it happened to read first, which is precedence decided by loop
+order — the one thing ADR-0072 §5 is about. Keeping the higher-precedence copy is
+the answer §5 already implies, and stating it here stops each consumer inventing
+it. It is not a budget policy and does not reach §6: it says which copy survives a
+duplicate, not how any budget is divided.
+
+**No snapshot is added, and the refusal has a precedent.** A multi-band consistent
+read is a concurrency primitive, and ADR-0073 §5 refused exactly this shape for
+exactly this reason: it is ADR-0046 §5's deferred compare-and-swap, which that ADR
+left "for want of a consumer that runs two writers on one store". An assembler
+reading three times in one turn is not that consumer either. The corpus's
+standing posture on the same race is ADR-0073 §2's, which names it and accepts it:
+offset paging "may skip or repeat a record", because "a listing that a user re-runs
+is not a transaction". A prompt assembled from three reads is not one either — the
+difference is only that a duplicate here spends the budget twice on one belief and
+presents it in two bands, which ADR-0072 §6 makes a presentation fault. So the race
+is accepted and its one harmful consequence is closed by a consumer-side rule
+rather than by a primitive with no second writer.
 
 ### 6. The budget, the order of the bands, and what fills the prompt stay with the consumer
 
@@ -465,6 +525,11 @@ This ADR sets no expectation about it and prescribes no caching.
 - **A post-KNN band filter.** §2. It type-checks, passes a naive suite, and
   delivers none of ADR-0072 §5.
 - **Padding a short band-scoped result from another band.** §5.
+- **A multi-band consistent-snapshot read**, so that N calls in one turn see one
+  state. §5. It is ADR-0046 §5's deferred compare-and-swap wearing a third hat,
+  and an assembler is not the second concurrent writer that would justify it;
+  the race is accepted as ADR-0073 §2 accepts its own, and its harmful consequence
+  is closed by §5's consumer-side rule.
 - **Any headroom change, and the under-service signal.** §8.
 - **An `include_retired` axis, or any relaxation of the two read-time axes.**
   `search`'s axes are ADR-0007 §2's and ADR-0045 §6's and this ADR does not touch
@@ -513,7 +578,10 @@ decision and stops describing a wholly open question, which is what a discharge
 does. §1's promise that "the two reads are additive, and neither forecloses the
 other" is honoured exactly: `list_beliefs` is untouched, keeps its enumeration
 semantics, and §3 above adopts its conventions rather than diverging from them. §2's
-clearing of `score` is contrasted in §7 and not changed. **Partial discharge; no
+clearing of `score` is contrasted in §7 and not changed, and §2's named-and-accepted
+paging race is the posture §5 above adopts for the analogous cross-call one rather
+than a clause §5 narrows. §5's refusal of a concurrency primitive for want of a
+second writer is applied, not extended. **Partial discharge; no
 record owed.**
 
 **ADR-0112 §1, §3, §5, §7, §8 and §10 — nothing owed.** §5's two normative clauses
@@ -544,6 +612,14 @@ caveat is cited as the residue it describes and is read no more widely than it
 holds — it is if anything understated, which is #792's subject and not this ADR's.
 **No record owed.**
 
+**ADR-0045 §5b, ADR-0103 §6 and ADR-0046 §5 — nothing owed.** §5 above cites the
+fold's id-preserving, source-taking shape as the *fact* that makes a cross-call
+duplicate reachable, and rules nothing about the fold: whether a `REINFORCE` should
+move a record between bands at all is #733's question and not this ADR's, and this
+decision is correct either way — a read cannot rely on the write path never doing
+it. ADR-0046 §5's deferral is cited as the reason a snapshot is not added and is
+left exactly where ADR-0073 §5 left it. **No record owed.**
+
 **ADR-0103 §8, ADR-0110 §8, ADR-0074 §6, ADR-0028 §7, ADR-0021 §4, ADR-0060,
 ADR-0065 §3, ADR-0106 — nothing owed.** Each is cited as a reason, a mechanism or a
 standing clause and read no more widely than it holds; none acquires an exception
@@ -570,6 +646,12 @@ changed (§3).
 - **The `DERIVED` band keeps #457's shortfall and the other two largely shed it**
   (§8). That is an accepted, named asymmetry rather than a fix, and it is the reason
   §2 is worth having before #457 is answered.
+- **The assembler inherits one obligation it would not have guessed** (§5): it
+  deduplicates across its band-scoped calls by record id and keeps the
+  higher-precedence copy, because a fold can move a record between bands at a
+  stable id between two reads of one turn. That constrains a lane not yet written,
+  which is the point — it is far cheaper to state now than to diagnose later as a
+  belief that appeared twice in a prompt under two different bands.
 - **A latency cost is introduced and not measured.** N band-scoped calls per turn
   replace one, and this ADR sets no expectation about what that costs, because #789
   is the instrument and it does not exist yet (ADR-0112 §7). The trade is deliberate:
