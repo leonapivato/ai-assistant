@@ -1,11 +1,12 @@
 # 111. A scheduled walk is chunked, and resumes from a durable cursor that never leads its effects
 
-- Status: Accepted, its Surface bullet amended by ADR-0114
+- Status: Partially superseded by ADR-0114 (the Surface bullet's classification that this decision's cursor needs no Protocol surface, and that the cursor's mechanics sit below each subsystem's own façade)
 - Date: 2026-08-06
-- **Amended: 2026-08-06 by
-  [ADR-0114](0114-the-store-contract-carries-the-walk.md) (the Surface bullet —
-  a `MemoryStore` walk's cursor sits *on* the subsystem's façade, not below it,
-  so golden rule 5 is triggered for the lane that builds it).** That bullet reads
+- **Partially superseded: 2026-08-06 by
+  [ADR-0114](0114-the-store-contract-carries-the-walk.md), in the scope the
+  `Status` line names — a `MemoryStore` walk's cursor sits *on* the subsystem's
+  façade, not below it, so golden rule 5 is triggered for the lane that builds
+  it.** That bullet reads
   "This ADR adds two `Settings` fields (§4). It touches **no** Protocol in
   `core/protocols.py` and **no** type in `core/types.py`, so golden rule 5 is not
   triggered and no triad is owed", and locates the mechanics it decides "in
@@ -20,20 +21,33 @@
   either: `list_beliefs` is the near miss and §2 above already refuses it. A
   reader holding only this ADR dispatches the consolidation lane as
   non-contract-surface, which is the reading that produced ADR-0114; that is
-  ADR-0082 §1's test met on both limbs, so the record is owed. **This is an
-  amendment and not a supersession** (ADR-0070 §1): every ruling of §§1–9 stands
-  and ADR-0114 relies on each of them as written — §1's placement of the cursor in
+  ADR-0082 §1's test met on both limbs, so the record is owed. **This is a
+  scoped supersession and the scope is deliberately narrow** (ADR-0070 §1,
+  `docs/adr/template.md`): what it replaces is the Surface bullet's classification
+  and nothing else, so **every ruling of §§1–9 stays accepted** and ADR-0114 relies
+  on each of them as written — §1's placement of the cursor in
   the walked store, §2's total non-reordering order with its exclusion of offsets,
   instants, identifier sets and fractions, §3's lag-never-lead ordering and its
   at-least-once consequence, §4's two bounds, §5's halt, §6's absence of backoff,
-  §7's discard-and-restart, §8's serial loop and §9's records. No clause acquires,
-  loses or alters an obligation, and the Surface bullet is unmarked prose under
-  ADR-0089 §3, so nothing normative moves. **§11's "Enabling any job the scheduler
+  §7's discard-and-restart, §8's serial loop and §9's records. Not one of those
+  clauses acquires, loses or alters an obligation. **The scoped form is taken
+  because it is right under either reading of this ADR's own text**, which is what
+  settled it: read as prose, the Surface bullet says the cursor's mechanics need no
+  contract surface and ADR-0114 replaces that, so a supersession is owed; read
+  under ADR-0089's marking regime the bullet is an unmarked classification and an
+  amendment would do. An earlier draft of ADR-0114 took the amendment on the second
+  reading alone — resting a supersession-avoidance on a governance ADR that is
+  itself `Proposed` — and architecture review was right to refuse it. Scoping the
+  supersession to the bullet costs nothing under the marking reading and is
+  required under the prose one. **§11's "Enabling any job the scheduler
   ships disabled" and its filing of #785's selector are untouched**, as is §10's
   finding that no record was owed on ADR-0083 §7 — ADR-0114 §10 applies that test
   again and reaches the same answer, because the *job* still makes one public
-  `Engine` call taking no arguments. This `Status` line carries no leading token,
-  so under ADR-0082 §2 the qualifier belongs on it beside this note. ADR-0114
+  `Engine` call taking no arguments. This `Status` line now carries a leading
+  token, so under ADR-0082 §2 **no qualifier is written on it** and this dated note
+  is the whole of the record — which is where the amendment qualifier an earlier
+  draft put on that line has moved, losing nothing, because §1 requires the note
+  either way. ADR-0114
   ships in the same change as this note, which is the existence condition ADR-0083
   §15 states; while it is `Proposed`, this line names a decision that is drafted
   rather than ratified, the form §15 records `main` as already carrying.
