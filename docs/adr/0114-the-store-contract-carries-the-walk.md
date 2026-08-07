@@ -198,21 +198,65 @@ halves because there would be no between. With the split, the ordering ADR-0111 
 obliges is the ordinary sequence of two calls, and a lane that gets it wrong is
 visible in the code rather than in the store six weeks later.
 
-**The read is unfiltered, and that is a decision.** No band, kind or validity
-filter is offered, and the caller selects from the chunk it is handed.
+**The read takes no *caller* filter, and it honours the store's own lifecycle
+predicate.** Those are two different things and an earlier draft ran them together,
+saying the read "yields every record the store holds".
 
-> **Normative.** The chunk read takes no filter. It yields every record the store
-> holds, in insertion order, and any selection over a chunk is the caller's.
+> **Normative.** The chunk read takes no filter from its caller. No band, kind or
+> validity argument is offered, and any selection over a chunk is the caller's.
 
-A filter would make a walk's position mean "the last record matching *this*
-filter", so two callers sharing a name with different filters would advance each
-other past unexamined records — the silent skip ADR-0111 §2 exists to prevent,
-arriving through the read rather than through the cursor. The cost is that a
-consolidator reading only beliefs still pays for the episodes in between, which is
-the same trade `list_beliefs` already takes when it decides the band, the
-`valid_from` end of the window and its sort key on decoded records rather than in
-SQL, "which this read does not need at a personal store's scale". A chunk is
-bounded by `limit` either way, so the cost is a constant factor on a bounded read.
+> **Normative.** The chunk read yields only records that are **retained and live**
+> at the instant it reads — the same predicate `get` and `search` apply, on both
+> ends of the validity window. It never yields an expired record and never yields
+> one whose window is closed or not yet open. The instant is read once per chunk,
+> so one chunk is judged against one reading of the clock.
+
+> **Normative.** Ineligible records are skipped and the read continues past them
+> until it has `limit` eligible records or reaches the end of the order, and the
+> position a chunk carries is that of the last record it **returns**. So a chunk
+> with no records means the walk is exhausted rather than that it met a stretch of
+> ineligible ones, and the cursor is never advanced past a record the caller has
+> not seen.
+
+**A caller filter and the lifecycle predicate fail in opposite directions, which is
+why one is refused and the other required.** A caller filter would make a walk's
+position mean "the last record matching *this* filter", so two callers sharing a
+name with different filters would advance each other past unexamined records — the
+silent skip ADR-0111 §2 exists to prevent, arriving through the read. The lifecycle
+predicate cannot do that: it is fixed, identical for every caller of every walk, and
+not something two callers can disagree about.
+
+**And omitting it would make this the one read in the store that breaches
+retention.** ADR-0045 §6 is explicit that the two axes are orthogonal and that
+"**`expires_at` is retention** (a privacy deadline; an expired record is gone from
+*everything*, including `export`)", while a closed window is "off the read path but
+present in `export`". A walk yielding either would hand expired content — or a
+belief the user has already corrected — to a consolidator, which is a model-backed
+producer that will write a *new* durable belief from it. That resurrects retired
+content through the one door nobody was watching, and it would be this contract's
+doing rather than the consolidator's. Architecture review found it on round 7.
+
+**The walk sides with `get`/`search` and not with `export`**, and the choice is the
+consumer's rather than a default: `export` keeps closed windows because a
+data-rights snapshot must show what the store holds, whereas everything that
+*derives* new content reads the live set. ADR-0110 §6's reconciliation wants the
+same live set for the same reason. A later job that genuinely needs retired records
+is asking for as-of retrieval, which ADR-0045 §1 defers and this ADR does not
+supply.
+
+**What the predicate cannot do is revisit a record whose eligibility changes below
+the cursor**, and no mechanism is offered for it. A window that opens after the
+walk has passed its record is never reached, which is precisely the limit ADR-0111
+§2 names — "a row updated in place below the cursor keeps its position and is not
+revisited" — and its ruling stands: "A job whose correctness requires reconsidering
+changed rows cannot express its selection as a high-water mark alone, and this ADR
+gives it no other mechanism."
+
+The remaining cost is that a consolidator reading only beliefs still pays for the
+episodes in between, which is the same trade `list_beliefs` already takes when it
+decides the band, the `valid_from` end of the window and its sort key on decoded
+records rather than in SQL, "which this read does not need at a personal store's
+scale".
 
 ### 2. A position is opaque to its caller, and is never a value a caller composes
 
@@ -483,6 +527,14 @@ half of that disjunct.
 > reaches it. The case runs for `delete`, and for a `purge_expired` that reclaims
 > the highest-positioned record.
 
+> **Normative.** The suite asserts the lifecycle predicate on both axes: an
+> expired record is never yielded; a record whose validity window is closed is
+> never yielded, nor is one whose window has not yet opened; and a walk over a
+> stretch of records that are **all** ineligible returns the eligible records
+> **beyond** that stretch rather than an empty chunk. The last case fails an
+> implementation that treats a dead range as the end of the walk, which ends every
+> walk early and silently the moment a retention purge lags.
+
 > **Normative.** The suite asserts that `clear` does not reset the key sequence:
 > after a `clear`, a newly added record's position is greater than every position
 > the store issued before it, and a walk holding a position from before the `clear`
@@ -580,13 +632,54 @@ true of ADR-0111's own change and the second is not true of the walk it decided:
 subsystem's façade rather than below it, and golden rule 5 is triggered for the lane
 that builds it. A reader holding only ADR-0111 dispatches the consolidation lane as
 non-contract-surface, which is the reading that produced this ADR. The test is met
-on both limbs and the record is owed. **This is an amendment and not a
-supersession** (ADR-0070 §1): no clause of ADR-0111 changes meaning, none acquires
-or loses an obligation, and every ruling of §§1–9 is relied on here as written —
-§1's placement, §2's exclusions, §3's ordering, §4's bounds, §5's halt, §6's absence
-of backoff, §7's discard-and-restart, §8's serial loop and §9's records. ADR-0111's
-`Status` carries no leading token, so under ADR-0082 §2 the qualifier belongs on
-that line beside the appended dated note.
+on both limbs and the record is owed. ADR-0111's `Status` carries no leading token,
+so under ADR-0082 §2 the qualifier belongs on that line beside the appended dated
+note.
+
+**This is an amendment and not a partial supersession, and the two questions are
+decided by two different tests.** Architecture review proposed on round 7 that
+ADR-0114 partially supersede ADR-0111's cursor-placement and Surface decision, and
+the direction is refused rather than followed — recorded here because a refused
+review direction that lives only in a pull request is a judgement a later reader
+cannot check, which is the discipline ADR-0106 §6 applied to its own two refusals.
+
+- **ADR-0082 §1's test decides whether a *record* is owed** — would a reader "act
+  differently, or read one of its clauses more widely than it now holds". It is
+  met, which is why the note above exists.
+- **ADR-0070 §1's test decides whether that record is an amendment or a
+  supersession** — whether the change "alters no decision", amendment being the
+  disposition for "reconciling an ADR with its own text or with a fact that
+  postdates it". Nothing ADR-0111 *decided* moves.
+
+**§1's marked clause is satisfied by this ADR clause by clause, not narrowed by
+it.** It rules that a resumption position "is durable state of the subsystem whose
+store the job walks" — here it is state of `memory`, in the same database as the
+records; "reached only through the same public `Engine` operation the scheduler
+already calls" — the scheduler still calls one Engine operation and the cursor is
+reached inside it; "and the scheduler neither reads it, writes it, nor passes it" —
+the scheduler holds an `Engine` and nothing else, exactly as ADR-0083 §8 requires.
+§1's unmarked "the operation therefore takes no cursor argument and needs no new
+façade parameter" is about that Engine operation and stays true. What moved is a
+claim about **where the mechanics sit and what they cost**, made in an unmarked
+header bullet classifying ADR-0111's own diff.
+
+**ADR-0089 §3 governs ADR-0111 and is not being applied retroactively.** §5's
+forward-only rule means nothing ratified *before* ADR-0089 is drawn into the marked
+regime; ADR-0111 postdates it and marks its own clauses throughout, and its
+ratification note reasons in those terms — "no normative clause acquires, loses or
+alters an obligation". So §3 applies on its own terms: in a marked ADR "the marked
+clauses are the whole of what it obligates", and unmarked text "never supplies an
+obligation". A Surface bullet is the classification of a change, which ADR-0089 §1
+names as the paradigm of what is *not* normative.
+
+**And the instrument would say something false.** A leading `Partially superseded
+by` token is machine-legible under ADR-0070 §4 — "Every `ADR-NNNN` after the leading
+`Partially superseded by` is a target" — so writing one would record that ADR-0111's
+cursor-placement decision is dead. It is not dead; this ADR is built on it, and an
+implementation lane reading a supersession would have no ratified placement rule to
+build against. Under ADR-0082 §2 the token would additionally move ADR-0111's
+existing qualifier off its `Status` line, churning a ratified header to record a
+decision change that did not happen.
 
 **No record is owed on:**
 
