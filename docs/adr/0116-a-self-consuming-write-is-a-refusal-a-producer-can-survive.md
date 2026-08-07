@@ -313,24 +313,41 @@ lives: "evidence *removed* to satisfy a rule leaves a warrant nobody assessed".
 The third is new and belongs here — a retry inside the run is a second model call
 to launder the same inputs past a refusal, which spends egress to defeat a floor.
 
-### 5. A scheduled walk does not halt on it
+### 5. A scheduled walk does not halt on the policy-chosen arm
 
-> **Normative.** This refusal is a per-item disposition and never a chunk that
-> could not be recorded as done. A walking job that catches it advances its cursor
-> over the chunk exactly as it would have, and ADR-0111 §5's halt is not engaged.
+> **Normative.** The **policy-chosen** arm of §2 is a per-item disposition and
+> never a chunk that could not be recorded as done. A walking job that catches it
+> advances its cursor over the chunk exactly as it would have, and ADR-0111 §5's
+> halt is not engaged.
+
+> **Normative.** The **producer-chosen** arm is not covered by the clause above.
+> It propagates under §4, so the run ends without recording its chunk and ADR-0111
+> §5's halt applies to it like any other fault.
 
 ADR-0111 §5 states its own rule over the disposition rather than the reason, and
-names this case on the other side: "A per-item ruling that is a *normal outcome*
-of processing — a proposal the gate rejects, a turn ADR-0074 §5 says is 'skipped,
-not an error' — is not a chunk that failed to be recorded, and does not halt
-anything." A refused self-consuming write is now such an outcome. Left as a fault
+names the first arm's case on the other side: "A per-item ruling that is a *normal
+outcome* of processing — a proposal the gate rejects, a turn ADR-0074 §5 says is
+'skipped, not an error' — is not a chunk that failed to be recorded, and does not
+halt anything." A fold onto a cited record is now such an outcome. Left as a fault
 it would halt every run at the same chunk forever, which is §5 producing the
 opposite of what it was written for.
 
-**This is the whole of what the stall needed.** With the refusal catchable and the
-run continuing, the chunk is recorded, the cursor advances, and the material that
-produced the refusal is behind the walk — so the next run reads new records rather
-than re-deriving the same refusal from the same inputs.
+**The second clause is the one a reader would otherwise have to infer, and
+inferring it wrongly is the whole hazard.** §4 makes the producer-chosen arm
+propagate, so a §5 stated over "this refusal" without qualification would mandate
+two outcomes for one input — halt and continue — and a lane resolving that by
+reading §5 first would restore exactly the silence §2's split was added to prevent.
+The two arms differ in whether the run *should* keep going: a producer citing its
+own minted id is broken and stopping is right, where a generalisation landing on
+one of its citations is a normal outcome of generalising. Architecture review found
+the contradiction on round 2, one round after the split that created it.
+
+**This is the whole of what the stall needed.** With the policy-chosen arm
+catchable and the run continuing, the chunk is recorded, the cursor advances, and
+the material that produced the refusal is behind the walk — so the next run reads
+new records rather than re-deriving the same refusal from the same inputs. The
+producer-chosen arm keeps halting, which is not a stall but a bug stopping a job
+that should stop.
 
 ### 6. What this ADR does not decide
 
@@ -459,11 +476,17 @@ this ADR does not land, neither does the note.
 > subclass satisfies that check.
 
 > **Normative.** The lane landing a consolidator ships a test that a chunk whose
-> generalisation is refused under this rule leaves the run **continuing** — the
-> chunk recorded as done, the walk advanced, the refusal counted in the run's
-> report — and a second test that a run over the same store afterwards does not
-> re-derive the same refusal. A test that stops at the raised class does not
-> satisfy this clause: what is under test is that the stall is gone.
+> generalisation is refused on the **policy-chosen** arm leaves the run
+> **continuing** — the chunk recorded as done, the walk advanced, the refusal
+> counted in the run's report — and a second test that a run over the same store
+> afterwards does not re-derive the same refusal. A test that stops at the raised
+> class does not satisfy this clause: what is under test is that the stall is gone.
+
+> **Normative.** The same lane ships a test that a refusal on the
+> **producer-chosen** arm **propagates** — the run ends, the chunk is not recorded
+> as done, and the cursor is where it was. A lane shipping only the continuation
+> test above passes an implementation that catches the base class and continues on
+> both arms, which is the defect §2's split exists to make impossible.
 
 Each names the case that can fail. The two-arm clause is there because the
 `REINFORCE` arm is invisible to a suite built from ADR-0081 §Context's worked
@@ -471,6 +494,9 @@ example, which is an `ACCEPT` — and because asserting the *base* class on both
 is the shape a reader reaches for and the one that certifies the conflation. The
 continuation clause is there because catching an exception and then halting anyway
 satisfies every other clause here and leaves the job exactly as stuck as it was.
+The propagation clause is its mirror and is the one a lane is likeliest to skip,
+because nothing goes wrong in the happy path when it is missing — a caller catching
+the base class passes every continuation test ever written and swallows the bug.
 
 ## Consequences
 
