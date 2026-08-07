@@ -750,7 +750,22 @@ half of that disjunct.
 > directly** — the way every caller reaches it — rather than by constructing a
 > validated model around the argument first.
 
-The last clause is there because the negative case is not symmetric with the
+> **Normative.** The suite exercises an invalid **position** over a walk that has
+> already been advanced, asserting no observable change in the form the cross-walk
+> case uses: keep the walk's next chunk, make the invalid call, require the
+> `ValueError`, and require the next chunk to be **exactly** the kept one. Two
+> shapes are covered — a `WalkPosition` built with `model_construct` whose token is
+> empty, whitespace-only or a lone surrogate, and a `position` that is not a
+> `WalkPosition` at all, `None` included.
+
+`model_construct` is used deliberately: it bypasses the validator exactly as a real
+caller's mistake would, where building the position through validation would test
+pydantic rather than the store. The no-change assertion takes the strong form for
+the reason it does in the cross-walk case — "the recorded position is unchanged" is
+satisfied by an implementation that reads, alters and restores it, while an
+identical next chunk is not.
+
+The negative-limit clause is there because that case is not symmetric with the
 over-wide one and only one of them looks dangerous. SQLite reads `LIMIT -1` as *no
 limit*, so an implementation forwarding the argument returns the whole store where
 the contract says it must refuse — an unbounded read inside a job whose entire
