@@ -2,17 +2,27 @@
 
 - Status: Proposed
 - Date: 2026-08-06
-- **Durability clause.** Every reference below to ADR-NNNN is to its text as
-  merged on 2026-08-06, not to its status on any later day. Every ADR this
-  decision composes with reads `Accepted` (or partially superseded in a scope this
-  ADR does not touch) as of that date, including
+- **Durability clause.** Every reference below to ADR-NNNN is to its text as it
+  stood at this ADR's base, `ba48c25`, not to its status on any later day. Every
+  ADR this decision composes with reads `Accepted` there (or partially superseded
+  in a scope this ADR does not touch), including
   [ADR-0112](0112-currency-never-ranks-and-retrieval-orders-by-relevance.md), whose
-  ratification landed while this lane held; `CONTRIBUTING.md` → "Trivial ADR edits"
-  and [ADR-0070](0070-amendment-and-supersession-rules.md)
-  §1 both class a status flip as recording a ratification rather than deciding one,
-  so no clause cited here moved with it and none moves with a later one. Where a
-  later ADR *changes* one of them, this ADR is read against the text quoted here
-  and the later ADR's own record says what moved.
+  ratification landed while this lane held and is that base's tip;
+  `CONTRIBUTING.md` → "Trivial ADR edits" and
+  [ADR-0070](0070-amendment-and-supersession-rules.md) §1 both class a status flip
+  as recording a ratification rather than deciding one, so not one clause cited
+  here moved with ADR-0112's — its ratifying commit edits its `Status` line and
+  appends a dated note, and touches no other word — and none moves with a later
+  one. Where a later ADR *changes* one of them, this ADR is read against the text
+  quoted here and the later ADR's own record says what moved.
+
+  **The `Date` line above is this ADR's authoring date in this clone's `-0400`
+  frame**, the convention ADR-0112's own `Date` line follows and its ratification
+  note states. The base named here was committed at `2026-08-06T21:24:57-04:00`,
+  which is the next calendar day in UTC, so the two frames straddle midnight for
+  every ADR in this leg. The frame is written down because the corpus has already
+  paid once for its absence, and because a base SHA is the anchor that does not
+  move under either.
 - **This is a contract change.** §1 adds one keyword-only parameter — `bands` — to
   `MemoryStore.search` in `core/protocols.py`, and §2 rules where it binds relative
   to the ranking cut. Golden rule 5 therefore applies: this ADR ships as **its own
@@ -518,7 +528,13 @@ clause names as ungated, using §7's stated test rather than an exception to it.
 §8's adjudication of #457 and #411 is untouched, and §8 above adds a scoping
 observation about where the residue falls without disturbing any of it. §10's list
 of surfaces that owe their own ADR is honoured by this ADR existing.
-**Deferral discharged; no record owed.**
+
+ADR-0112's ratification note records that "the four issues the header records as
+filed are open on GitHub: #789, #790, #791, #792", and this ADR answers #790, which
+closes on its merge. That does not make the note false and owes it nothing: the
+note is dated and records the state at the instant it was written, which is the
+form ADR-0070 §1 requires of an appended note and the reason ADR-0019's no-state-
+claims rule exempts `docs/adr/`. **Deferral discharged; no record owed.**
 
 **ADR-0045 §6 and ADR-0007 §2 and its Consequences — nothing owed.** §6's ratified
 concession that `valid_from` may be filtered "in the post-filter step, not the SQL
