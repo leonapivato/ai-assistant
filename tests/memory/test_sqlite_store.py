@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Literal, cast
 
 import pytest
 import sqlite_vec
-from memory_store_contract import MemoryStoreContract
+from memory_store_contract import _BEYOND_MARGIN, MemoryStoreContract
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
     Validity,
 )
 from ai_assistant.memory import SqliteMemoryStore
+from ai_assistant.memory._walk import mint_position
 from ai_assistant.memory.sqlite_store import _run_to_completion
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing.cancellation import (
@@ -1172,6 +1173,37 @@ async def test_walk_key_migration_reaches_a_record_added_over_a_gap_at_the_top(
         store.close()
 
 
+async def test_a_walk_yields_a_legacy_record_whose_rowid_is_below_zero(
+    tmp_path: Path,
+) -> None:
+    """ADR-0114 §4: no integer stands in for "no recorded position".
+
+    ``rowid`` is an explicit ``INTEGER PRIMARY KEY``, so a pre-walk database can
+    carry an explicitly inserted negative one and the migration preserves it. §4
+    refuses a sentinel for exactly this reason and names the failure: ``0`` "silently
+    skips every row at or below it". A fresh walk that began at zero would yield the
+    positive record, report exhaustion, and never mention the other — a silent skip
+    on the very first run, before any cursor exists to blame.
+    """
+    db = tmp_path / "pre-walk.db"
+    _write_pre_walk_db(db, [], drop_top=False)
+    legacy = sqlite3.connect(db)
+    for rowid, record_id in ((-9, "below"), (-1, "just-below"), (1, "above")):
+        legacy.execute(
+            "INSERT INTO records(rowid, id, kind, data) VALUES (?, ?, ?, ?)",
+            (rowid, record_id, "semantic", _semantic(record_id, "legacy").model_dump_json()),
+        )
+    legacy.commit()
+    legacy.close()
+
+    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    try:
+        chunk = await store.walk_records("negative", limit=10)
+        assert [record.id for record in chunk.records] == ["below", "just-below", "above"]
+    finally:
+        store.close()
+
+
 async def test_walk_key_migration_leaves_every_existing_rowid_where_it_was(
     tmp_path: Path,
 ) -> None:
@@ -1854,11 +1886,11 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
         row = store._conn.execute(
             "SELECT seq FROM sqlite_sequence WHERE name = 'records'"
         ).fetchone()
-        beyond = (0 if row is None else int(row[0])) + 1_000
+        beyond = (0 if row is None else int(row[0])) + _BEYOND_MARGIN
         store._conn.execute(
             "INSERT INTO walk_positions(walk, position) VALUES (?, ?) "
             "ON CONFLICT(walk) DO UPDATE SET position = excluded.position",
-            (walk, str(beyond)),
+            (walk, mint_position(walk, beyond).token),
         )
 
     @pytest.fixture

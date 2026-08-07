@@ -163,6 +163,11 @@ _MALFORMED_POSITION_IDS = ("empty", "blank", "surrogate", "no-token", "wrong-typ
 #: the refusal they assert cannot be the position's. Same ``S106`` note as above.
 _ANY_POSITION = WalkPosition(token="anything")  # noqa: S106 — a row position, not a secret
 
+#: How far past a store's issued keys :meth:`record_walk_position_beyond_the_store`
+#: plants a position, and therefore how many records the revalidation case has to
+#: add before the high-water mark would have caught up with it.
+_BEYOND_MARGIN = 20
+
 #: An upper bound on chunk reads in a walk loop, so a store that fails to advance
 #: fails an assertion rather than hanging the suite. Every walk case below holds
 #: fewer than a dozen records, so reaching this bound is a defect by construction.
@@ -2367,6 +2372,38 @@ class MemoryStoreContract:
         resumed = await store.walk_records("kept", limit=5)
         assert [record.id for record in resumed.records] == ["w-new"]
 
+    async def test_an_unsupported_position_stays_discarded_once_the_store_grows_past_it(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0114 §4: *discarded*, not merely ignored while it happens to look wrong.
+
+        The revalidation path, and the reason a bare number is the wrong thing to
+        record. A value the store cannot use is refused today; if it survives in a
+        form a later read might accept — a raw integer, say, judged only against a
+        high-water mark that ordinary inserts keep raising — the very same value
+        becomes authoritative later, and the walk reports exhaustion having skipped
+        every record beneath it with **no advance having succeeded in between**. An
+        implementation that only range-checks on read passes every neighbouring case
+        and fails this one.
+        """
+        await store.add(_semantic("w-a", "alpha"))
+        await self.record_unusable_walk_position(store, "revalidated")
+        assert [r.id for r in (await store.walk_records("revalidated", limit=99)).records] == [
+            "w-a"
+        ]
+
+        # Grow the store well past whatever the planted position named, without
+        # ever advancing this walk.
+        for index in range(_BEYOND_MARGIN + 5):
+            await store.add(_semantic(f"w-grown-{index:05d}", "alpha"))
+
+        resumed = await store.walk_records("revalidated", limit=99)
+
+        assert resumed.records[0].id == "w-a", (
+            "a position this build refused must stay refused: the walk restarts from "
+            "the first record, not from a value that became plausible again"
+        )
+
     async def test_the_chunk_read_stops_at_its_limit_rather_than_scanning_the_tail(
         self, store: MemoryStore
     ) -> None:
@@ -2388,8 +2425,8 @@ class MemoryStoreContract:
         await store.advance_walk("bounded-tail", position=chunk.position)
 
         assert [record.id for record in chunk.records] == ["w-00"]
-        # The position is the first record's, so the read stopped there: had it
-        # examined the tail, the position it carried would be a later record's.
+        # The position is the first record's, so the chunk was bounded there rather
+        # than filled from a wider scan.
         assert [r.id for r in (await store.walk_records("bounded-tail", limit=1)).records] == [
             "w-01"
         ]

@@ -130,31 +130,27 @@ def _check_walk_limit(limit: int) -> None:
         raise ValueError(msg)
 
 
-def _resume_key(recorded: str | None, *, issued_through: int) -> int:
+def _resume_key(recorded: str | None, *, walk: str, issued_through: int) -> int | None:
     """Read a recorded position back, restarting the walk on anything unusable.
 
-    Absent, unreadable or malformed all mean the same thing: discard and restart
-    from the first record, never raise (ADR-0114 §4, ADR-0111 §7). ``0`` is the
-    position before the first record rather than a sentinel — there is no integer
-    below the order's floor, and the obvious choice silently skips every record at
-    or below it (ADR-0104 §2).
+    Absent, unreadable, malformed, bound to another walk, or above every key this
+    store has ever issued all mean the same thing: discard and restart from the
+    first record, never raise (ADR-0114 §4, ADR-0111 §7).
 
-    A well-formed number **above every key this store has ever issued** is
-    unsupported too, and is the dangerous case: it names a range no record can
-    ever occupy, so the walk would answer "nothing left" on every run while the
-    store filled up behind it. The ceiling is the high-water mark and not the
-    largest key *present*, because walking to the end and then deleting the top
-    records leaves a legitimate position above everything the store now holds.
+    ``None`` is "no recorded position" and **no integer stands in for it**: ADR-0114
+    §4 refuses a sentinel because a legacy ``rowid`` can be negative, so a walk that
+    began at ``0`` would silently skip every record at or below it. What is stored
+    is the token rather than the bare key, so a value this build refuses once it
+    refuses for good — a raw number would be ignored while it sat above the
+    high-water mark and become authoritative once inserts raised that mark past it.
     """
     if recorded is None:
-        return 0
+        return None
     try:
-        key = int(recorded)
-    except TypeError, ValueError:
-        return 0
-    if not 0 <= key <= issued_through:
-        return 0
-    return key
+        key = _read_position(walk, WalkPosition(token=recorded))
+    except ValueError:
+        return None
+    return None if key > issued_through else key
 
 
 def _mint_position(walk: str, key: int) -> WalkPosition:
@@ -591,7 +587,7 @@ class FakeMemoryStore:
         _check_walk_limit(limit)
         async with self._resource.held():
             now = self._now_utc()
-            after = _resume_key(self._walks.get(walk), issued_through=self._sequence)
+            after = _resume_key(self._walks.get(walk), walk=walk, issued_through=self._sequence)
             # `limit` bounds records *examined*, not records returned: a scan that
             # ran on until it had `limit` eligible records would be unbounded over
             # a long ineligible run, which is the hazard ADR-0111 §4 forbids.
@@ -602,7 +598,7 @@ class FakeMemoryStore:
             # delete disturbs no other.
             examined: list[tuple[int, str]] = []
             for rid, key in self._keys.items():
-                if key <= after:
+                if after is not None and key <= after:
                     continue
                 examined.append((key, rid))
                 if len(examined) == limit:
@@ -633,8 +629,9 @@ class FakeMemoryStore:
             # Never backwards, and not an error: a walk is at-least-once, so a
             # resumed run can legitimately hold a stale position. Repeated work is
             # the cost; records skipped forever would be the alternative.
-            if key > _resume_key(self._walks.get(walk), issued_through=self._sequence):
-                self._walks[walk] = str(key)
+            current = _resume_key(self._walks.get(walk), walk=walk, issued_through=self._sequence)
+            if current is None or key > current:
+                self._walks[walk] = _mint_position(walk, key).token
 
     async def delete(self, record_id: str) -> bool:
         """Delete one record, returning whether it existed."""

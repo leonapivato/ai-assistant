@@ -94,7 +94,7 @@ def check_walk_limit(limit: int) -> int:
     return limit
 
 
-def resume_key(recorded: str | None, *, issued_through: int) -> int:
+def resume_key(recorded: str | None, *, walk: str, issued_through: int) -> int | None:
     """Read a recorded position back, restarting the walk on anything unusable.
 
     A position that is absent, unreadable, malformed, written in a form this
@@ -103,46 +103,48 @@ def resume_key(recorded: str | None, *, issued_through: int) -> int:
     raise, does not refuse to open, and does not report a state fault (ADR-0114
     §4, ADR-0111 §7). A cursor holds no evidence and answers no query, so
     discarding one returns nothing wrong to any client and costs only the repeated
-    walk ADR-0111 §3 already accepted; refusing over one would take a resident
-    process down over scaffolding.
+    walk ADR-0111 §3 already accepted.
 
-    **A well-formed number can be unsupported too, and that case is the dangerous
-    one.** A position above every key the store has ever issued names a range no
-    record can ever occupy: §1's guarantee is that each new key exceeds every key
-    already issued, so a cursor beyond the high-water mark sits above all of them
-    for good. The walk then answers "nothing left to examine" on every run while
-    the store fills up behind it — ADR-0111 §7's "Nothing may resume from a
-    position the store's contents do not support", and the silent skip the whole
-    contract exists to prevent, arriving through the cursor itself.
+    **``None`` is "no recorded position", and no integer stands in for it.**
+    ADR-0114 §4 refuses a sentinel and gives the reason: "``rowid`` is an explicit
+    ``INTEGER PRIMARY KEY`` here, so it starts at ``-2**63`` … which makes the
+    obvious sentinel, ``0``, silently skip every row at or below it". Legacy rows
+    really can sit below zero — a pre-walk database may carry an explicitly
+    inserted negative ``rowid``, and the migration preserves it — so a fresh walk
+    that began at ``0`` would never yield them and would report exhaustion having
+    skipped them. The caller reads ``None`` as "no lower bound at all".
 
-    **The ceiling is the high-water mark and deliberately not ``max`` of the keys
+    **What is recorded is the token, not the bare key**, which is what makes a
+    discard stick. A raw number left in the store would be *ignored* while it sat
+    above the high-water mark and then silently become authoritative once ordinary
+    inserts raised that mark past it — skipping every record beneath it, with no
+    advance having succeeded in between. A token does not decode at all, so a value
+    this build refuses once it refuses for good.
+
+    **The ceiling is the high-water mark and deliberately not the largest key
     present.** Walking to the end and then deleting the top records leaves a
-    position above everything the store now holds, and that position is perfectly
-    good: §2 makes a position a bound rather than a reference, and §1's
-    never-reissued key is what makes the next record land above it. Ceiling on
-    what is *present* would rewind that walk and re-read every surviving record.
+    position above everything the store now holds, and that position is good: §2
+    makes it a bound rather than a reference, and §1's never-reissued key is what
+    puts the next record above it. Ceiling on what is present would rewind that
+    walk and re-read every survivor.
 
     Args:
-        recorded: The stored position, or ``None`` where the walk has none.
+        recorded: The stored token, or ``None`` where the walk has none.
+        walk: The walk it must be bound to; a token naming another is not this
+            walk's position and is discarded like any other unusable value.
         issued_through: The largest key this store has ever issued — SQLite's
             ``sqlite_sequence`` high-water mark, an in-memory store's own counter.
-            ``0`` where it has issued none.
 
     Returns:
-        The recorded key, or ``0`` — the position before the first record, which
-        is what "no recorded position" means. Never a sentinel: there is no
-        integer below the order's floor to use as one, and the obvious choice
-        silently skips every record at or below it (ADR-0104 §2).
+        The recorded key, or ``None`` where the walk starts from the beginning.
     """
     if recorded is None:
-        return 0
+        return None
     try:
-        key = int(recorded)
-    except TypeError, ValueError:
-        return 0
-    if not 0 <= key <= issued_through:
-        return 0
-    return key
+        key = read_position(walk, WalkPosition(token=recorded))
+    except ValueError:
+        return None
+    return None if key > issued_through else key
 
 
 def mint_position(walk: str, key: int) -> WalkPosition:

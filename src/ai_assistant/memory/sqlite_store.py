@@ -1217,15 +1217,21 @@ class SqliteMemoryStore:
             ).fetchone()
             after = resume_key(
                 None if row is None else str(row[0]),
+                walk=walk,
                 issued_through=self._issued_through(conn),
             )
-            return [
-                (int(rowid), str(data))
-                for rowid, data in conn.execute(
-                    "SELECT rowid, data FROM records WHERE rowid > ? ORDER BY rowid LIMIT ?",
-                    (after, limit),
-                )
-            ]
+            # No lower bound at all where the walk has no position, rather than a
+            # bound of zero: `rowid` is an explicit `INTEGER PRIMARY KEY`, so a
+            # legacy row can sit below zero and `rowid > 0` would silently skip it
+            # while reporting exhaustion — the sentinel ADR-0114 §4 refuses by name.
+            sql = "SELECT rowid, data FROM records"
+            params: list[object] = []
+            if after is not None:
+                sql += " WHERE rowid > ?"
+                params.append(after)
+            sql += " ORDER BY rowid LIMIT ?"
+            params.append(limit)
+            return [(int(rowid), str(data)) for rowid, data in conn.execute(sql, params)]
 
     @staticmethod
     def _issued_through(conn: sqlite3.Connection) -> int:
@@ -1276,15 +1282,21 @@ class SqliteMemoryStore:
             # Never backwards, and not an error: a walk is at-least-once, so a
             # resumed run can legitimately hold a stale position. Repeated work is
             # the cost; records skipped forever would be the alternative.
-            if key <= resume_key(
+            current = resume_key(
                 None if row is None else str(row[0]),
+                walk=walk,
                 issued_through=self._issued_through(conn),
-            ):
+            )
+            if current is not None and key <= current:
                 return
             conn.execute(
                 "INSERT INTO walk_positions(walk, position) VALUES (?, ?) "
                 "ON CONFLICT(walk) DO UPDATE SET position = excluded.position",
-                (walk, str(key)),
+                # The token rather than the bare key, so a value this build refuses
+                # stays refused: a raw number would be ignored while it sat above the
+                # high-water mark and become authoritative once inserts raised that
+                # mark past it, skipping everything beneath with no advance in between.
+                (walk, mint_position(walk, key).token),
             )
 
     async def delete(self, record_id: str) -> bool:
