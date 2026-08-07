@@ -1108,6 +1108,18 @@ class SqliteMemoryStore:
         cheaper mechanism meets it. If profiling ever makes the per-search scan of
         ``records`` matter, an indexed source column is a drop-in replacement that
         changes no behaviour this method promises.
+
+        **What the subquery costs on a corrupt store, stated rather than hidden.**
+        Because the restriction reads *every* row's JSON, a single malformed
+        ``data`` blob makes every band-scoped search raise, whichever band was
+        asked for — where an unfiltered search raises only when the corrupt row is
+        actually among the KNN's hits. That is a real amplification and it is
+        accepted: the store is corrupt either way, the failure is a conforming
+        ``MemoryStoreError`` that ``LoopEngine._retrieve`` degrades on, and the
+        alternative — a ``json_valid`` guard that skips unreadable rows — would
+        silently drop a live belief out of a band-scoped answer, which is worse than
+        failing loudly. An indexed column would also remove the amplification, and
+        is the other reason to reach for one.
         """
         # Over-fetch to leave room for kind-, expiry-, and window-filtered rows,
         # clamped to sqlite-vec's KNN ``k`` ceiling so an over-large ``limit``
@@ -1135,12 +1147,21 @@ class SqliteMemoryStore:
             )
             params.extend(sorted(wanted_sources))
         sql += " ORDER BY v.distance"
-        # Deliberately unwrapped, matching this method before the band clause: a
-        # ``sqlite3.Error`` here escapes as itself, where ``_list_beliefs_sync``
-        # wraps one as ``MemoryStoreError``. That inconsistency predates this change
-        # and is not widened by it — the restriction adds no failure mode the KNN
-        # did not already have — so it is filed as #806 rather than fixed here.
-        rows = self._conn.execute(sql, params).fetchall()
+        # Wrapped as ``_list_beliefs_sync`` wraps its own, because the band
+        # restriction genuinely *does* add a failure mode the plain KNN lacked.
+        # ``json_extract`` raises ``malformed JSON`` on a corrupt ``data`` blob, and
+        # it raises during the subquery — before the decode path that used to
+        # translate that same corruption. Unfiltered, a corrupt row surfaces as
+        # ``MemoryStoreError`` out of ``_micros_from_json``/``_decode``; band-scoped
+        # and unwrapped it surfaced as a raw ``sqlite3.OperationalError``, which
+        # ``LoopEngine._retrieve`` does not catch, so a corrupt store aborted the
+        # turn instead of degrading it. An earlier revision of this comment asserted
+        # the opposite and was wrong; the case is now pinned by test.
+        try:
+            rows = self._conn.execute(sql, params).fetchall()
+        except sqlite3.Error as exc:
+            msg = f"failed to search: {exc}"
+            raise MemoryStoreError(msg) from exc
         results: list[tuple[str, float]] = []
         for data, kind, expires_at, valid_until, distance in rows:
             if wanted is not None and kind not in wanted:

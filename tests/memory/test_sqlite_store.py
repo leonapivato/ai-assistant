@@ -31,6 +31,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.core.types import (
+    BeliefBand,
     MemoryKind,
     MemoryRecord,
     MemorySource,
@@ -230,6 +231,50 @@ async def test_search_filters_by_kind(make_store: Callable[..., SqliteMemoryStor
     results = await store.search("coffee", kinds=[MemoryKind.PREFERENCE])
 
     assert [r.id for r in results] == ["p"]
+
+
+async def test_a_band_scoped_search_reports_a_corrupt_row_as_a_store_error(
+    make_store: Callable[..., SqliteMemoryStore], tmp_path: Path
+) -> None:
+    """A corrupt blob leaves the band-scoped read as ``MemoryStoreError``, not raw SQL.
+
+    The band restriction runs ``json_extract`` over every row's stored JSON, so a
+    malformed blob raises **inside the subquery** — before the decode path that
+    translates that same corruption on an unfiltered search. Unwrapped, that
+    surfaced as ``sqlite3.OperationalError("malformed JSON")``, which is not what
+    ``core/protocols.py`` documents for a read and, more to the point, not what
+    ``LoopEngine._retrieve`` catches: it filters on ``MemoryStoreError``, so a
+    single corrupt row aborted the turn instead of degrading retrieval.
+
+    Both reads are asserted, because the obligation is that the band filter did not
+    *change* the failure mode. Corruption is injected against the raw file: the
+    store only ever writes valid JSON, so nothing reachable through its own API
+    produces this state, and the contract nonetheless names it ("a stored record is
+    corrupt").
+
+    Note which row is corrupted and which band is asked for — they differ. One bad
+    row makes every band-scoped search fail, whatever band it selects, because the
+    subquery reads them all. That amplification is documented on ``_search_sync``
+    and accepted; the alternative is silently dropping unreadable rows from a
+    band's answer.
+    """
+    store = make_store()
+    await store.add(_semantic("ok", "coffee", source=MemorySource.USER_ASSERTED))
+    await store.add(_semantic("bad", "coffee too", source=MemorySource.OBSERVED))
+    store.close()
+
+    raw = sqlite3.connect(tmp_path / "memory.db")
+    try:
+        raw.execute("UPDATE records SET data = ? WHERE id = ?", ("{not json", "bad"))
+        raw.commit()
+    finally:
+        raw.close()
+
+    reopened = make_store()
+    with pytest.raises(MemoryStoreError):
+        await reopened.search("coffee")
+    with pytest.raises(MemoryStoreError):
+        await reopened.search("coffee", bands=[BeliefBand.ASSERTED])
 
 
 async def test_empty_query_matches_nothing(make_store: Callable[..., SqliteMemoryStore]) -> None:
