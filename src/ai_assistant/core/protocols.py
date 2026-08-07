@@ -1200,19 +1200,38 @@ class MemoryWriter(Protocol):
                 this writer will resolve in one ingest (ADR-0079 §1) — nothing
                 written, no ruling sought; if a record the ruling would retire has
                 no representable close (ADR-0080 §3) — nothing written, every
-                record in the set unchanged; if a ruling would install the proposal
-                at an id the proposal cites, or a ``SUPERSEDE`` cannot mint an
-                uncited free id within its bound (ADR-0081 §1/§4) — nothing
-                written, every target live and unchanged; if reading conflicts or
-                writing a record failed; or if a ``REINFORCE`` or ``SUPERSEDE``
-                named a ``target_id`` that is not among the conflicts. Each of
-                those refusals raises this class and **not**
+                record in the set unchanged; if a ``SUPERSEDE`` cannot mint an
+                uncited free id within its bound (ADR-0081 §4) — nothing written,
+                every target live and unchanged; if reading conflicts or writing a
+                record failed; or if a ``REINFORCE`` or ``SUPERSEDE`` named a
+                ``target_id`` that is not among the conflicts. Each of those
+                refusals raises this class and **not**
                 ``UnresolvedEvidenceError``, which names an *evidence* failure
                 rather than a conflict set, a target's window, or a write set
-                (ADR-0080 §7, ADR-0081 §3). The self-consuming-write refusal earns
-                no subclass of its own: it is a pure function of the proposal and
-                the ruling, so it is never a race and always a producer fault, and
-                no caller has a second branch to take.
+                (ADR-0080 §7, ADR-0081 §3).
+            SelfConsumingWriteError: If an ``ACCEPT`` or ``STORE_TEMPORARY`` would
+                install the proposal at ``proposed.id`` and the proposal cites it
+                (ADR-0081 §1) — nothing written, every target live and unchanged.
+                The **producer** minted that id and the producer cited it, so
+                nothing outside it chose either value and the refusal is a producer
+                fault. A ``MemoryStoreError``, so an existing handler for that
+                class still catches it.
+            FoldOntoCitedRecordError: If a ``REINFORCE`` would fold onto a record
+                the proposal cites. A subclass of the above, because the
+                destination is the ruling's ``target_id`` — chosen by the
+                **policy**, by conflict detection over the proposal's own content,
+                which a producer generalising over the records it cites cannot
+                foresee. **This is the only arm a caller may continue past**: it
+                may treat the refusal as a ruling on one proposal, count it and
+                carry on, while the base class propagates (ADR-0116 §2, §4).
+                Catching the base in order to reach both absorbs a producer bug
+                into the path built for the case that is not one.
+
+                ADR-0081 §3 declined a subclass here on the ground that the
+                refusal "is never a race and always a producer fault, and no
+                caller has a second branch to take". ADR-0116 §3 keeps the first
+                half, bounds the second to the producer-chosen arm, and records
+                that the third expired when a scheduled bulk producer arrived.
         """
         ...
 

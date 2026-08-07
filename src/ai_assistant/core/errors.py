@@ -310,6 +310,59 @@ class UnresolvedEvidenceError(MemoryStoreError):
         )
 
 
+class SelfConsumingWriteError(MemoryStoreError):
+    """A ruling would install a proposal at an id that proposal cites (ADR-0081 §1).
+
+    Refused between the policy's ruling and the write dispatch: nothing is
+    written, no window is closed, and no decision is fabricated — a ruling is the
+    policy's to make (ADR-0005 §3). The belief would otherwise stand as its own
+    warrant, and a citation a write consumes cannot be presented honestly:
+    ADR-0077 §6's tombstone is keyed on a citation *failing* to resolve, and here
+    it resolves, to the record that replaced its referent.
+
+    **This class is the arm where the destination was the producer's own choice**
+    — ``ACCEPT`` and ``STORE_TEMPORARY`` install at ``proposed.id``, which the
+    producer minted and the producer cited. Nothing outside the producer chose
+    either value, so a refusal here is the bug ADR-0081 §Context describes and
+    remains one. :class:`FoldOntoCitedRecordError` is the other arm.
+
+    **Narrowed out of :class:`MemoryStoreError` for one caller and one question**,
+    in :class:`UnresolvedEvidenceError`'s shape and for its kind of reason: a
+    scheduled bulk producer cannot otherwise tell this refusal from a broken store
+    without matching on a message, which ADR-0111 §9 forbids and ADR-0083 §6
+    records the cost of. ADR-0081 §3 declined a subclass on the ground that there
+    was "no caller with a second branch"; ADR-0116 §3 records that this ground has
+    expired and replaces the ruling.
+
+    **Additive, not a narrowing.** A subclass *is* a ``MemoryStoreError``, so every
+    existing ``except MemoryStoreError`` still catches it and ADR-0028 §5's
+    "``MemoryStoreError`` is what crosses this seam" stays true as written.
+    """
+
+
+class FoldOntoCitedRecordError(SelfConsumingWriteError):
+    """...and the destination is the fold target the policy chose (ADR-0116 §2).
+
+    ``REINFORCE`` installs at the ruling's ``target_id``, which the **policy**
+    picked by conflict detection over the proposal's own content. A producer that
+    generalises over the records it cites — a consolidator is the case ADR-0116 was
+    written for — cannot foresee that pick, so a refusal here is a normal outcome
+    of generalising rather than a producer fault.
+
+    **This is the only arm a caller may continue past** (ADR-0116 §4). Catching it,
+    a caller treats the refusal as a ruling on one proposal: it counts the
+    proposal, carries on with the rest, and a walking job records its chunk as done
+    (§5). Catching the *base* class to reach both arms is forbidden by the same
+    section — it would absorb a producer bug into the path built for the case that
+    is not one.
+
+    Subclasses :class:`SelfConsumingWriteError` rather than sitting beside it, so a
+    caller wanting the family rather than the arm has one name to catch, and
+    ``except SelfConsumingWriteError`` keeps its plain meaning: *a write was refused
+    for consuming its own citation*.
+    """
+
+
 class ConversationStoreError(AssistantError):
     """Reading from or writing to the conversation index failed (ADR-0074 §9).
 
