@@ -468,13 +468,14 @@ this ADR does not land, neither does the note.
 > where a real writer raises the subclass would certify a consumer the real writer
 > breaks (ADR-0026 §7).
 
-> **Normative.** The suite asserts **both** arms of §2 separately and asserts
-> which class each one raises: an `ACCEPT` at a cited `proposed.id` raises the base
-> and **not** the subclass, and a `REINFORCE` whose `target_id` the proposal cites
-> raises the subclass. A case exercising only one arm passes an implementation that
-> raises the same class for both, which is the conflation §2 exists to prevent; a
-> case asserting only `isinstance` against the base passes it too, because the
-> subclass satisfies that check.
+> **Normative.** The suite asserts each of §2's **three installing rulings**
+> separately and asserts which class each one raises: an `ACCEPT` at a cited
+> `proposed.id` and a `STORE_TEMPORARY` at a cited `proposed.id` each raise the
+> base and **not** the subclass, and a `REINFORCE` whose `target_id` the proposal
+> cites raises the subclass. A case exercising only one arm passes an
+> implementation that raises the same class for both, which is the conflation §2
+> exists to prevent; a case asserting only `isinstance` against the base passes it
+> too, because the subclass satisfies that check.
 
 > **Normative.** The lane landing a consolidator ships a test that a chunk whose
 > generalisation is refused on the **policy-chosen** arm leaves the run
@@ -489,10 +490,18 @@ this ADR does not land, neither does the note.
 > test above passes an implementation that catches the base class and continues on
 > both arms, which is the defect §2's split exists to make impossible.
 
-Each names the case that can fail. The two-arm clause is there because the
+Each names the case that can fail. The three-ruling clause is there because the
 `REINFORCE` arm is invisible to a suite built from ADR-0081 §Context's worked
 example, which is an `ACCEPT` — and because asserting the *base* class on both arms
-is the shape a reader reaches for and the one that certifies the conflation. The
+is the shape a reader reaches for and the one that certifies the conflation.
+**`STORE_TEMPORARY` is named rather than left to "and the other one"**, because it
+is the ruling a suite silently drops: ADR-0081 §1 groups it with `ACCEPT` in one
+sentence, so a reader writing "the `ACCEPT` case and the `REINFORCE` case" believes
+they have covered both arms while an implementation raising the *subclass* for a
+self-citing `STORE_TEMPORARY` passes every case they wrote — and that
+implementation would then have a walking job continue past a producer bug, which is
+precisely what §2's split and §5's second clause exist to stop. Adversarial review
+found it on round 4. The
 continuation clause is there because catching an exception and then halting anyway
 satisfies every other clause here and leaves the job exactly as stuck as it was.
 The propagation clause is its mirror and is the one a lane is likeliest to skip,
