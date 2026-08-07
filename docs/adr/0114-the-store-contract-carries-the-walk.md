@@ -762,7 +762,11 @@ half of that disjunct.
 > **Normative.** The suite exercises that rule over a walk that has already been
 > advanced, asserting no observable change in the form the cross-walk case uses:
 > keep the walk's next chunk, make the invalid call, require the `ValueError`, and
-> require the next chunk to be **exactly** the kept one. It covers at least a
+> require the next chunk to be **exactly** the kept one. A second, independently
+> progressed walk is seeded and its next chunk kept alongside, and it too must be
+> exactly unchanged — §6a says *every* recorded position survives a refusal, and a
+> test watching only the named walk passes an implementation that disturbs a
+> sibling's. It covers at least a
 > `WalkPosition` built with `model_construct` whose token is empty,
 > whitespace-only or a lone surrogate; one built with `model_construct` and **no
 > `token` at all**; and a `position` that is not a `WalkPosition`, `None` included.
