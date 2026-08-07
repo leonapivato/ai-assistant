@@ -260,6 +260,23 @@ reason the contract needs no repair operation.
 > effects are already durable. No clause of this ADR may be implemented in a way
 > that lets a cursor record a chunk whose effects are not.
 
+> **Normative.** The clause above is a **caller-ordering precondition that no
+> store can enforce**, and every lane that ships a walking job ships a test for it:
+> a failure or a cancellation arriving after the chunk's work has begun and before
+> its effects are durable leaves the walk's recorded position **unchanged**, so the
+> chunk is re-processed on the next run. A job tested only on its success path
+> satisfies no clause of this ADR.
+
+**The store cannot referee this and the contract says so rather than implying
+otherwise.** The advance is a call like any other; a job that makes it before its
+effects are durable has committed a cursor ahead of its work, and the store sees
+the same two calls in the same order either way. That is the cost of §3's refusal
+to carry the effects, it is the reason the obligation is stated twice — once on the
+caller, once as a test each job owes — and it is why the Consequences below say the
+ordering is made *visible* rather than impossible. ADR-0111 §3's own asymmetry is
+what bounds the damage when a lane gets it wrong: the failure is a skipped chunk,
+which is why the test is required rather than recommended.
+
 > **Normative.** The cursor never moves backwards. An advance to a position at or
 > behind the one recorded for that walk leaves the recorded position unchanged and
 > is not an error.
@@ -638,11 +655,19 @@ third arrives, promoting the pair into a shared Protocol becomes the right move 
 which is ADR-0028 §7's discipline, and the trigger is stated here so the third lane
 recognises it rather than adding a fourth copy.
 
-**Repeated work stays a designed cost, and now has a contract that cannot express
-the alternative.** Because the advance is a separate call the caller makes after
-its effects, there is no shape in this contract under which a cursor leads its
-effects. ADR-0111 §3's guarantee stops depending on every job's lane getting an
-ordering right.
+**Repeated work stays a designed cost, and the ordering that protects it becomes
+visible rather than enforced.** Splitting the read from the advance is what lets a
+caller put its effects between them, and it is not what makes it do so: a job that
+advances and *then* fails to make its effects durable — through a raise, a
+cancellation at shutdown, or a deferral the queue never admitted — has committed a
+cursor ahead of its work, and the store cannot tell that sequence from the correct
+one, because §3 deliberately carries neither the effects nor a transaction. So
+ADR-0111 §3's guarantee still rests on each walking job's lane getting the ordering
+right; what this contract changes is that the ordering is now two calls in one
+function, where a reviewer and a test can see it, rather than an invariant spread
+across a store and a scheduler. §3's last clause is the obligation and its test,
+and adversarial review found on round 4 that an earlier draft of this paragraph
+claimed the stronger thing.
 
 **What would trigger revisiting this.** A job whose walker commits its own effects
 and can therefore use ADR-0111 §3's one-transaction clause — it would want the
