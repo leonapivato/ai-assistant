@@ -393,10 +393,13 @@ amendment or a supersession, amendment being the disposition where the change
 
 **ADR-0081 §3, and §9's matching bullet.** §3 *decided* that the refusal earns no
 new error class, and §9 lists "**A new `MemoryStoreError` subclass** for this
-refusal" among what it explicitly declined. §2 above adds one. A reader holding
-only ADR-0081 would build a `MemoryWriter` raising a bare `MemoryStoreError` and
-would refuse a lane asking for the subclass — which is acting differently, on both
-limbs. ADR-0070 §1's test then makes it a **supersession and not an amendment**:
+refusal" among what it explicitly declined. §2 above adds two — a base and the
+narrower class for the policy-chosen arm — and the count does not bear on the
+record: what §3 and §9 declined was *any* new subclass, so adding one already meets
+ADR-0082 §1's test and adding a second changes nothing about which decision moved.
+A reader holding only ADR-0081 would build a `MemoryWriter` raising a bare
+`MemoryStoreError` and would refuse a lane asking for either — which is acting
+differently, on both limbs. ADR-0070 §1's test then makes it a **supersession and not an amendment**:
 what changes is the decision itself, not a reconciliation of ADR-0081 with its own
 text. It is **partial**, and the scope is one ruling in §3 with its echo in §9;
 `docs/adr/template.md` supplies the instrument — "the parenthesis names exactly
@@ -512,15 +515,18 @@ the base class passes every continuation test ever written and swallows the bug.
 
 **The consolidation job becomes buildable, and it becomes buildable without new
 `core` surface.** It was blocked on a refusal it could reach by behaving
-correctly, with no way to tell that refusal from a broken store. One error class
-and one caller rule unblock it, where a marker would have cost a `core/types.py`
-field, an ADR of its own, a migration question for records written before it, and
-would not have fixed the first-order case.
+correctly, with no way to tell that refusal from a broken store. Two error classes
+— a base and the policy-chosen subclass §2 distinguishes — and one caller rule
+unblock it, where a marker would have cost a `core/types.py` field, an ADR of its
+own, a migration question for records written before it, and would not have fixed
+the first-order case.
 
-**`MemoryWriter.ingest` grows a documented class and no new refusal.** Every
-implementation pays a subclass and a suite case; no caller that does not care
-changes, because the subclass is still a `MemoryStoreError`. That is the smallest
-change that makes the distinction ADR-0111 §9 requires drawable.
+**`MemoryWriter.ingest` grows a documented error family and no new refusal.**
+Every implementation pays the two classes and a suite case per installing ruling;
+no caller that does not care changes, because both are still `MemoryStoreError`.
+That is the smallest change that makes **both** distinctions drawable — this
+refusal from a store fault, which ADR-0111 §9 requires, and the producer-chosen arm
+from the policy-chosen one, which §4 requires.
 
 **The refusal keeps being evidence of a bug on the arm where it was one.** Under
 ADR-0081 §3 a `MemoryStoreError` from this site meant "some producer is broken",
@@ -572,8 +578,8 @@ and the smaller surface. Rejected because it makes the two cases indistinguishab
 at exactly the point §4 tells a caller to continue: a consolidator that cited its
 own minted id — a genuine bug, and the case ADR-0081 §Context was written about —
 would be counted and passed over on every run, forever, by a caller doing precisely
-what this ADR told it to do. The distinction costs one subclass and no new input,
-because the ruling that chose the destination is already at the raise site.
+what this ADR told it to do. The distinction costs one further subclass and no new
+input, because the ruling that chose the destination is already at the raise site.
 
 **Letting the caller match on the message.** Free, and forbidden in terms by
 ADR-0111 §9 and by ADR-0083 §6, which records what the corpus already paid to learn
