@@ -595,6 +595,18 @@ def test_a_sized_spec_refuses_a_population_it_cannot_actually_plant() -> None:
     for crowding in (0, -5):
         with pytest.raises(ValueError, match="must both be >= 1"):
             AgedStoreSpec.sized(total=2_000, crowding=crowding, closed_fraction=0.5)
+    # `total` is met exactly or not at all. Two roundings compose, so some
+    # requests have no live count that lands on them; the near miss is refused
+    # rather than returned under the requested label.
+    with pytest.raises(ValueError, match="no live count yields exactly 3"):
+        AgedStoreSpec.sized(total=3, crowding=1, closed_fraction=0.5)
+    for total in range(2, 400):
+        for fraction in (0.0, 0.25, 0.5, 0.75, 0.8, 0.9):
+            try:
+                spec = AgedStoreSpec.sized(total=total, crowding=10, closed_fraction=fraction)
+            except ValueError:
+                continue
+            assert spec.total == total, f"total={total} fraction={fraction} drifted"
 
 
 def test_the_instants_refuse_a_timeline_that_leaves_closed_records_live() -> None:
@@ -629,4 +641,13 @@ def test_the_instants_refuse_a_timeline_that_leaves_closed_records_live() -> Non
             written=datetime(2027, 1, 1, tzinfo=UTC),
             closed=ordered.closed,
             opened=ordered.opened,
+        )
+    # A naive instant used to reach the ordering comparison first and surface as
+    # a raw TypeError about offsets, which says nothing about the timeline.
+    with pytest.raises(ValueError, match="opened is not"):
+        Instants(
+            now=ordered.now,
+            written=ordered.written,
+            closed=ordered.closed,
+            opened=datetime(2026, 2, 1),  # noqa: DTZ001 — naive on purpose; this is the refusal
         )

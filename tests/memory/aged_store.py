@@ -238,6 +238,16 @@ class ClusteredEmbedder:
         return topic, position
 
 
+def _closed_count(live: int, closed_fraction: float) -> int:
+    """Window-closed records accompanying ``live`` at ``closed_fraction`` of the whole.
+
+    One owner for the derivation, so :meth:`AgedStoreSpec.sized` searches for a
+    live count using exactly the arithmetic :attr:`AgedStoreSpec.closed` will
+    later apply, rather than a second copy of it that could drift.
+    """
+    return round(live * closed_fraction / (1.0 - closed_fraction))
+
+
 class ClosedBy(StrEnum):
     """Which producer closed a planted record's validity window."""
 
@@ -334,14 +344,36 @@ class AgedStoreSpec:
         if total < 1 or crowding < 1:
             msg = f"total and crowding must both be >= 1, got {total} and {crowding}"
             raise ValueError(msg)
-        live = round(total * (1.0 - closed_fraction))
-        if live < 1:
+        estimate = round(total * (1.0 - closed_fraction))
+        if estimate < 1:
             msg = (
                 f"a {total}-record population with {closed_fraction} closed leaves no live "
                 f"record; raise total or lower closed_fraction"
             )
             raise ValueError(msg)
-        spec = cls(
+        # Two roundings compose — `live` from the fraction, `closed` from `live` —
+        # so inverting the first one is not enough to land on `total`. Search the
+        # live counts either side of the estimate for one whose derivation is
+        # exact, and refuse rather than return a near miss under the requested
+        # label: at `total=3, closed_fraction=0.5` no live count works, and a
+        # 4-record store answering a 3-record request is the wrong volume however
+        # small the error.
+        live = next(
+            (
+                candidate
+                for candidate in (estimate, estimate - 1, estimate + 1, estimate - 2, estimate + 2)
+                if candidate >= 1 and candidate + _closed_count(candidate, closed_fraction) == total
+            ),
+            None,
+        )
+        if live is None:
+            msg = (
+                f"no live count yields exactly {total} records with {closed_fraction} closed; "
+                f"the nearest is {estimate} live plus {_closed_count(estimate, closed_fraction)} "
+                f"closed"
+            )
+            raise ValueError(msg)
+        return cls(
             live=live,
             topics=max(1, total // crowding),
             closed_fraction=closed_fraction,
@@ -349,16 +381,6 @@ class AgedStoreSpec:
             preference_share=preference_share,
             seed=seed,
         )
-        # Two roundings compose here (live from the fraction, closed from live),
-        # so the population can miss `total` by one. More than that is the clamp
-        # failure above wearing another shape.
-        if abs(spec.total - total) > 1:
-            msg = (
-                f"asked for {total} records with {closed_fraction} closed but the spec "
-                f"yields {spec.total} ({spec.live} live, {spec.closed} closed)"
-            )
-            raise ValueError(msg)
-        return spec
 
     @property
     def cluster_density(self) -> float:
@@ -373,7 +395,7 @@ class AgedStoreSpec:
     @property
     def closed(self) -> int:
         """How many window-closed records the spec's proportion implies."""
-        return round(self.live * self.closed_fraction / (1.0 - self.closed_fraction))
+        return _closed_count(self.live, self.closed_fraction)
 
     @property
     def total(self) -> int:
@@ -448,15 +470,26 @@ class Instants:
         a store that was never aged. Nothing downstream would notice: the census
         counts what was *labelled*, and ``search`` would simply serve rows.
 
-        Only the ordering is checked here. A naive or non-UTC instant is caught
-        where it would matter — ``checked_clock`` guards the reading
-        ``SqliteMemoryStore`` takes, and ``UtcInstant`` guards every instant that
-        reaches a record — so re-checking it would be a third owner of one rule.
+        **Awareness is checked before the ordering, and only so the ordering can
+        run.** Comparing a naive instant with an aware one is a ``TypeError`` in
+        Python, so deferring the check to ``checked_clock`` and ``UtcInstant`` —
+        which own whether an instant is *acceptable*, downstream of here — would
+        mean the comparison below raised first, with a message about offsets
+        rather than about the timeline. This check makes no judgement those two
+        do not; it establishes the precondition its own comparisons need.
 
         Raises:
-            ValueError: If the instants are not ordered ``opened < closed <= now``
-                with ``written <= now``.
+            ValueError: If any instant is naive, or if they are not ordered
+                ``opened < closed <= now`` with ``written <= now``.
         """
+        naive = sorted(
+            name
+            for name in ("now", "written", "closed", "opened")
+            if cast("datetime", getattr(self, name)).tzinfo is None
+        )
+        if naive:
+            msg = f"every instant must be timezone-aware; {', '.join(naive)} is not"
+            raise ValueError(msg)
         if not self.opened < self.closed:
             msg = f"opened must precede closed, got {self.opened} and {self.closed}"
             raise ValueError(msg)
