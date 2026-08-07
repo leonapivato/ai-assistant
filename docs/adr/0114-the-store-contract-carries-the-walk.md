@@ -293,6 +293,12 @@ scale".
 > position is the chunk read that returned it, and the only admissible use is
 > passing it to the cursor advance for the walk it came from.
 
+> **Normative.** A position is **issued for a walk and is valid only in it**. The
+> cursor advance refuses a position that the named walk did not issue, and the
+> refusal is a defined one on every backend rather than a silent no-op. An
+> implementation satisfies this statelessly by making the issuing walk recoverable
+> from the token it hands out.
+
 > **Normative.** `core/types.py` gains two frozen models: a `WalkPosition`
 > carrying one opaque token typed `NonBlankEncodableText`, and a `RecordChunk`
 > carrying the eligible records of one chunk and the position of the last record
@@ -307,6 +313,19 @@ position could compose a wrong one, which is the class of failure ADR-0104 §2
 records in its own domain: the obvious sentinel "silently skips every row at or
 below it", and the symptom was "a verification complaint about counts rather than
 anything an operator could act on".
+
+**Binding the position to its walk is what makes §5's independence structural
+rather than merely stated.** §2's opacity clause already told a caller to pass a
+position only "to the cursor advance for the walk it came from", and an obligation
+is not a mechanism: with a bare order key as the token, a caller holding walk `A`'s
+legitimate position for row 50 can hand it to walk `B`'s advance, and a conforming
+implementation records `B` at 50 and never processes rows 1–50. Every record before
+that point is skipped, `B` reports healthy progress, and nothing distinguishes the
+call from a correct one. **This is unlike §3's ordering precondition, which the
+store genuinely cannot referee** — there the effects live outside the store, whereas
+here the store issued the position itself and holds the walk name in the same call,
+so refusing the mismatch costs it nothing. Where a check is available, an obligation
+is the wrong instrument. Adversarial review found it on round 12.
 
 **Frozen models rather than a string alias**, for the reason `MemoryWrite` is
 frozen: a value that governs whether records are skipped must not be
@@ -576,6 +595,10 @@ half of that disjunct.
 > twice with no advance returns the same records; that a walk advanced to a chunk's
 > position returns the *following* records and never repeats one; that an advance to
 > a position at or behind the recorded one leaves the walk where it was; that two
+> a position issued for one walk is refused by another walk's advance, leaving that
+> walk's recorded position untouched — asserted by walking `A` forward and then
+> presenting `A`'s position to `B`, whose next chunk must still begin at the first
+> record; that two
 > walk names hold independent positions; that a chunk carries no position exactly
 > when it examined nothing; and that `clear` leaves no walk resumable.
 
