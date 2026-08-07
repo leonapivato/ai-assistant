@@ -347,7 +347,51 @@ async def test_the_kinds_filter_reaches_every_band_call() -> None:
 
     await assemble_by_band(store, "q", limit=3, kinds=[MemoryKind.SEMANTIC])
 
-    assert seen == [[MemoryKind.SEMANTIC]] * len(BAND_PRECEDENCE)
+    assert [list(asked or []) for asked in seen] == [[MemoryKind.SEMANTIC]] * len(BAND_PRECEDENCE)
+
+
+async def test_the_kinds_filter_is_observed_once_for_the_whole_composition() -> None:
+    """ADR-0065 §3's clause, owed by the composition and not only by each call.
+
+    Every ``MemoryStore.search`` already snapshots ``kinds`` on its own first
+    executed line (#436), so each of the three calls here is individually coherent.
+    The composition is not: it reads the caller's sequence three times with two
+    awaits in between, so a caller mutating it mid-flight would get an answer whose
+    asserted band was filtered on one kind set and whose derived band was filtered
+    on another — one result describing two versions of one input, which is what
+    ADR-0065 exists to prevent, reappearing one layer above the seam that already
+    closed it.
+
+    The mutation is driven from inside the reads, which is where it lands
+    deterministically and is the moment a real caller's concurrent task would reach
+    it. The caller's own list is asserted to have grown, so the case cannot pass by
+    the mutation silently failing to happen.
+    """
+    caller_kinds = [MemoryKind.SEMANTIC]
+    seen: list[tuple[MemoryKind, ...]] = []
+
+    class _MutatingStore(_ScriptedStore):
+        async def search(
+            self,
+            query: str,
+            *,
+            limit: int = 10,
+            kinds: Sequence[MemoryKind] | None = None,
+            bands: Sequence[BeliefBand] | None = None,
+        ) -> list[MemoryRecord]:
+            seen.append(tuple(kinds or ()))
+            caller_kinds.append(MemoryKind.PREFERENCE)  # the caller grows its own list
+            return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+
+    store = _MutatingStore({})
+
+    await assemble_by_band(store, "q", limit=3, kinds=caller_kinds)
+
+    assert seen == [(MemoryKind.SEMANTIC,)] * len(BAND_PRECEDENCE), (
+        "every band must be filtered on the kinds the call began with; a later "
+        "band seeing the appended kind is one answer built from two inputs"
+    )
+    assert caller_kinds == [MemoryKind.SEMANTIC, *([MemoryKind.PREFERENCE] * 3)]
 
 
 async def test_a_failing_band_read_propagates_rather_than_composing_a_partial_result() -> None:
