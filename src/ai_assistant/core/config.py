@@ -777,6 +777,18 @@ class Settings(BaseSettings):
     # some user has to answer (ADR-0106 §6). A deployment that has not decided it
     # wants that should not acquire it by upgrading. The field exists so that
     # enabling it is configuration.
+    #
+    # **Arming this job owes ADR-0111 §4's second clause a check that is not
+    # discharged today, and #820 tracks it.** §4 makes a per-operation deadline "a
+    # precondition of being chunked at all": the model call is bounded by
+    # `model_timeout_seconds`, but a chunk's writes reach `MemoryStore.write_atomic`
+    # and through it the `Embedder`, which runs in a worker thread with no deadline
+    # — so a hung embedding backend holds ADR-0083 §7's serial loop past any run
+    # budget. The exposure is not this job's doing (the calendar reader and
+    # observation write through the same seam) and this job is the first *chunked*
+    # one, which is what makes §4's clause bite here first. Left disabled and
+    # recorded rather than papered over: ADR-0111 §11 makes enabling a job an
+    # implementation lane's own act, and this is the check that lane owes.
     consolidation_interval: _OptionalDuration = Field(
         default=None,
         gt=timedelta(0),
