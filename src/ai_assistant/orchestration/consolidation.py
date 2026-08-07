@@ -119,6 +119,26 @@ _EVIDENCE_FLOOR: Final[dict[MemorySource, int]] = {
 #: ADR-0093 §4).
 _PROPOSABLE_KINDS: Final = frozenset({"semantic", "preference", "procedural"})
 
+#: The largest reply :func:`_entries` will decode, in characters. A
+#: ``ModelProvider`` bounds a call's *time* (``model_timeout_seconds``) and nothing
+#: bounds its *size*, so a broken or hostile provider can return a reply with
+#: millions of well-formed beliefs — every one of which would be decoded, validated,
+#: given an id and accumulated before ``max_proposals`` kept five. That is the event
+#: loop held and the heap grown for work the cap was supposed to have prevented, and
+#: it is worse on this path than on the observer's: a consolidation runs unattended
+#: on a serial scheduler (ADR-0083 §7), so nobody is waiting to notice.
+#:
+#: Bounding the reply **before** decoding rather than capping the entry loop is what
+#: keeps ADR-0077 §4's order intact — "validate every entry first, then apply the
+#: bound to the survivors", so a malformed entry never occupies a slot a good one
+#: could have filled. A truncated envelope does not decode, so an over-long reply
+#: takes the same disposition as any other undecodable one: one unusable entry,
+#: counted, never repaired.
+#:
+#: Generous against any honest reply: fifty records in, at most five short beliefs
+#: out, so a legitimate envelope is orders of magnitude below this.
+_MAX_REPLY_CHARS: Final = 128 * 1024
+
 #: How many decode misses :func:`_entries` tolerates before giving up, for
 #: ``planning.planner``'s reason: a failed ``raw_decode`` costs work proportional
 #: to how far into the reply it reached, so attempting one at every brace of a
@@ -923,7 +943,16 @@ def _record(
 
 
 def _entries(content: str) -> list[object] | None:
-    """Pull the ``beliefs`` list out of a reply, or ``None`` if there is none."""
+    """Pull the ``beliefs`` list out of a reply, or ``None`` if there is none.
+
+    An over-long reply is refused **before** it is decoded
+    (:data:`_MAX_REPLY_CHARS`), so the cost of a provider returning millions of
+    beliefs is one length check rather than a full decode-and-validate pass. It
+    reads as ``None`` like any other unusable envelope, which keeps ADR-0077 §4's
+    validate-then-cap order untouched and the caller's counting unchanged.
+    """
+    if len(content) > _MAX_REPLY_CHARS:
+        return None
     payload = _extract_object(content)
     if payload is None:
         return None
