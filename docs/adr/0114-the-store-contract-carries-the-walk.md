@@ -23,10 +23,12 @@
 - **No implementation lands with it.** No `src/`, no `tests/`. The consolidation
   lane, the scheduler job, and every `Settings` field ADR-0111 §4 names are an
   implementation lane's act against this text once ratified, never this ADR's.
-- **One record is owed under ADR-0082 §1, and this change writes it** — on
-  ADR-0111's Surface bullet. §10 applies the test clause by clause and states
-  what is *not* owed and why. **Nothing here supersedes anything**, wholly or in
-  part. Refs #632, #729, #785.
+- **This ADR partially supersedes ADR-0111, in one narrow scope**: the Surface
+  bullet's classification that this decision's cursor needs no Protocol surface.
+  **Every ruling of ADR-0111 §§1–9 stays accepted and this ADR is built on them.**
+  §10 applies ADR-0082 §1's and ADR-0070 §1's tests separately, states the scope and
+  why it is drawn where it is, and states what is *not* owed elsewhere. Refs #632,
+  #729, #785.
 
 ## Context
 
@@ -636,50 +638,51 @@ on both limbs and the record is owed. ADR-0111's `Status` carries no leading tok
 so under ADR-0082 §2 the qualifier belongs on that line beside the appended dated
 note.
 
-**This is an amendment and not a partial supersession, and the two questions are
-decided by two different tests.** Architecture review proposed on round 7 that
-ADR-0114 partially supersede ADR-0111's cursor-placement and Surface decision, and
-the direction is refused rather than followed — recorded here because a refused
-review direction that lives only in a pull request is a judgement a later reader
-cannot check, which is the discipline ADR-0106 §6 applied to its own two refusals.
+**This is a partial supersession scoped to the Surface bullet, and the scope is
+where the whole of the judgement sits.** Two tests run, and they answer different
+questions:
 
-- **ADR-0082 §1's test decides whether a *record* is owed** — would a reader "act
-  differently, or read one of its clauses more widely than it now holds". It is
-  met, which is why the note above exists.
-- **ADR-0070 §1's test decides whether that record is an amendment or a
-  supersession** — whether the change "alters no decision", amendment being the
-  disposition for "reconciling an ADR with its own text or with a fact that
-  postdates it". Nothing ADR-0111 *decided* moves.
+- **ADR-0082 §1 decides whether a *record* is owed** — would a reader "act
+  differently, or read one of its clauses more widely than it now holds". Met, on
+  both limbs.
+- **ADR-0070 §1 decides whether that record is an amendment or a supersession** —
+  whether the change "alters no decision", amendment being the disposition for
+  "reconciling an ADR with its own text or with a fact that postdates it".
 
-**§1's marked clause is satisfied by this ADR clause by clause, not narrowed by
-it.** It rules that a resumption position "is durable state of the subsystem whose
-store the job walks" — here it is state of `memory`, in the same database as the
-records; "reached only through the same public `Engine` operation the scheduler
-already calls" — the scheduler still calls one Engine operation and the cursor is
-reached inside it; "and the scheduler neither reads it, writes it, nor passes it" —
-the scheduler holds an `Engine` and nothing else, exactly as ADR-0083 §8 requires.
-§1's unmarked "the operation therefore takes no cursor argument and needs no new
-façade parameter" is about that Engine operation and stays true. What moved is a
-claim about **where the mechanics sit and what they cost**, made in an unmarked
-header bullet classifying ADR-0111's own diff.
+**On the second test this ADR changed its own answer, and the reasoning is recorded
+because the first answer was defensible and wrong.** An earlier draft classified the
+record as an amendment, on the ground that ADR-0089 §3 makes a marked ADR's unmarked
+text supply no obligation and a Surface bullet is the classification of a change,
+which ADR-0089 §1 names as the paradigm of what is not normative. Architecture
+review refused that twice, and its second refusal carried the fact that settles it:
+**ADR-0089 is itself `Proposed`.** An amendment resting on an unratified governance
+ADR is a supersession-avoidance bought with a rule that is not yet ratified, and the
+right disposition is the one that holds under *either* reading of ADR-0111's text —
+read as prose, the Surface bullet says the cursor's mechanics need no contract
+surface, and this ADR replaces that, so a supersession is owed; read under the
+marking regime, scoping a supersession to an unmarked bullet costs nothing. The
+scoped form is correct on both readings, and choosing it means this contract does
+not depend on how that governance question lands.
 
-**ADR-0089 §3 governs ADR-0111 and is not being applied retroactively.** §5's
-forward-only rule means nothing ratified *before* ADR-0089 is drawn into the marked
-regime; ADR-0111 postdates it and marks its own clauses throughout, and its
-ratification note reasons in those terms — "no normative clause acquires, loses or
-alters an obligation". So §3 applies on its own terms: in a marked ADR "the marked
-clauses are the whole of what it obligates", and unmarked text "never supplies an
-obligation". A Surface bullet is the classification of a change, which ADR-0089 §1
-names as the paradigm of what is *not* normative.
+**The scope is one bullet's classification and nothing else, which is what keeps the
+record true.** `docs/adr/template.md` provides exactly this instrument — "the
+parenthesis names exactly what was replaced. The remainder stays accepted" — and
+what is replaced is the claim that this decision's cursor needs no Protocol surface
+and that its mechanics sit below each subsystem's own façade. **ADR-0111 §1's marked
+clause is satisfied by this ADR clause by clause and is deliberately outside the
+scope**: a resumption position is still "durable state of the subsystem whose store
+the job walks" — state of `memory`, in the same database as the records; still
+"reached only through the same public `Engine` operation the scheduler already
+calls" — the scheduler calls one Engine operation and the cursor is reached inside
+it; and still one the scheduler "neither reads, writes, nor passes" — it holds an
+`Engine` and nothing else, as ADR-0083 §8 requires. A supersession written any wider
+would record that a placement rule this ADR is *built on* is dead, and the
+implementation lane would have none to build against.
 
-**And the instrument would say something false.** A leading `Partially superseded
-by` token is machine-legible under ADR-0070 §4 — "Every `ADR-NNNN` after the leading
-`Partially superseded by` is a target" — so writing one would record that ADR-0111's
-cursor-placement decision is dead. It is not dead; this ADR is built on it, and an
-implementation lane reading a supersession would have no ratified placement rule to
-build against. Under ADR-0082 §2 the token would additionally move ADR-0111's
-existing qualifier off its `Status` line, churning a ratified header to record a
-decision change that did not happen.
+**Under ADR-0082 §2 the record therefore lives in ADR-0111's dated note**, because
+its `Status` line now leads with the supersession token; the amendment qualifier an
+earlier draft wrote on that line moves into the note, which is §2's own operation
+and loses nothing, since §1 requires the note either way.
 
 **No record is owed on:**
 
