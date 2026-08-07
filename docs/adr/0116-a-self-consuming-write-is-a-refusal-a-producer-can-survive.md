@@ -6,12 +6,13 @@
   merged on 2026-08-07, not to its status on any later day. Where a later ADR
   changes one of them, this ADR is read against the text quoted here and the
   later ADR's own record says what moved.
-- **This is a contract change of the semantics-only kind, plus one error class.**
+- **This is a contract change of the semantics-only kind, plus one error family.**
   `MemoryWriter.ingest` keeps its signature and refuses exactly what it refuses
   today; what changes is the **class** one of its refusals carries, and therefore
-  what a caller may do about it. `core/errors.py` gains one
-  `MemoryStoreError` subclass. **No Protocol is added and `core/types.py` is
-  untouched**, so golden rule 5 is not triggered by the class itself — ADR-0083 §6
+  what a caller may do about it. `core/errors.py` gains a `MemoryStoreError`
+  subclass and one subclass of *that* — a base for the refusal and a narrower class
+  for the arm §2 distinguishes, which is two names and one new branch a caller can
+  take. **No Protocol is added and `core/types.py` is untouched**, so golden rule 5 is not triggered by the class itself — ADR-0083 §6
   rules that "a new `AssistantError` subclass is neither a Protocol nor a
   `core/types.py` model". It *is* triggered by the changed meaning of a contract
   method, which is the case `CONTRIBUTING.md` names when "a Protocol's meaning
