@@ -468,11 +468,22 @@ stays green"), so the obligation is stated:
    admits at least two mechanisms; which one it takes, and whether it wants an
    indexed column and a migration, is the lane's call and needs no further ADR
    **provided the observable obligation is met**.
-5. **The assembler** (ADR-0072 §5), which needs no contract change once this lands.
+5. **The assembler** (ADR-0072 §5), which needs no contract change once this lands
+   — and which owes a test of its own, because §5's second clause is the one
+   obligation here that **no store conformance case can reach**. `MemoryStoreContract`
+   drives one store through one call; §5's cross-call rule is a property of the
+   composition, so a suite that passes says nothing about it. The case is
+   constructible without concurrency and therefore deterministically: a store double
+   that returns id `x` in the `ASSERTED` call and, before the `ATTESTED` call,
+   applies the id-preserving band change `_merge` performs, then asserting that the
+   composed result retains `x` **once**, that the copy retained is the
+   higher-precedence band's, and that it is charged once to that band's budget.
+   Without it an assembler that concatenates, or that keeps whichever copy arrived
+   first, is wrong in a way every mechanical check on this list passes.
 
 Whether that is one lane or two is the dispatcher's call; the contract half must not
 land without its suite, and the assembler must not land without §2 being real
-underneath it.
+underneath it or without the cross-call case above.
 
 ### 8. The residue this leaves, named and routed
 
