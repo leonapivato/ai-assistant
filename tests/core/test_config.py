@@ -1045,9 +1045,6 @@ def test_every_duration_setting_is_discovered() -> None:
         "retention_purge_interval",
         "conversation_sweep_interval",
         "observation_interval",
-        # Leg 7's interval, which follows §7's convention exactly — disabled is
-        # ``None``, never ``0``.
-        "consolidation_interval",
         # ADR-0111 §4's run budget. It does **not** follow §7's nullable convention,
         # for ``hub_read_timeout``'s reason one clause on: a chunked run with no
         # budget is the unbounded walk ADR-0083 §7 accepted the absence of a bound

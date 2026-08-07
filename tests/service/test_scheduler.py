@@ -859,60 +859,46 @@ async def test_a_job_calling_a_closing_engine_gets_the_shared_message(tmp_path: 
     assert isinstance(engine, Engine)
 
 
-async def test_consolidation_is_absent_by_default_and_armed_by_its_interval(
+async def test_consolidation_is_not_armable_while_its_in_chunk_deadline_is_open(
     tmp_path: Path,
 ) -> None:
-    """Leg 7's job, over a real engine, both ways round (ADR-0106, ADR-0111).
+    """ADR-0111 §4: the arming path is withheld, not merely defaulted off (#820).
 
-    Asserted by **identity** against the façade method, not by name: `jobs_for`
-    omitting the row, binding the wrong interval, or binding ``engine.observe``
-    would leave every stage-level consolidation test green while an operator who
-    set ``consolidation_interval`` got no consolidation work, or the wrong work.
-    That is the same gap this module already closes for the retention sweep.
+    §4's second clause makes a per-operation deadline "a precondition of being
+    chunked at all", and a consolidation chunk's writes reach the ``Embedder``
+    through ``MemoryStore.write_atomic`` with no deadline. A disabled default is
+    ADR-0083 §7's instrument for a job that *may* be armed; §4's bar is stricter —
+    the configuration must not be reachable — so there is no row and no setting.
 
-    **Disabled by default** is the claim on the other side, and it is the job's
-    third kind of disabled in one table: not the calendar reader's, which is only
-    about consent, and not observation's, which was about a cursor that did not
-    exist — this job has its cursor (ADR-0114) and needs no grant. What it spends
-    is a model call per chunk, unattended, and every tainted proposal becomes a
-    question a user must answer (ADR-0106 §6).
+    Asserted rather than left to prose, because the lane that closes #820 adds both
+    back and this is what tells it the pair is the unit: a row without the setting
+    arms nothing, and a setting without the row is a config field that lies.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        default = {job.name for job in jobs_for(engine, Settings())}
-        armed = {
-            job.name: job
-            for job in jobs_for(engine, Settings(consolidation_interval=timedelta(hours=6)))
-        }
-
-        assert "consolidation" not in default
-        assert armed["consolidation"].interval == timedelta(hours=6)
-        assert armed["consolidation"].run == engine.consolidate
+        assert "consolidation" not in {job.name for job in jobs_for(engine, Settings())}
+        assert not hasattr(Settings(), "consolidation_interval")
     finally:
         await engine.aclose()
 
 
-async def test_the_armed_consolidation_job_runs_against_an_empty_store(
+async def test_the_consolidation_engine_operation_runs_against_an_empty_store(
     tmp_path: Path,
 ) -> None:
     """The composition wiring, exercised rather than assumed.
 
     ``Engine.consolidate`` refuses when no stage is wired (ADR-0022 §4a's shape),
     so a composition root that failed to build one would raise here rather than
-    report an empty success. An empty store needs no model call — a chunk with no
-    records is a range that held nothing eligible — so this stays offline and
-    deterministic while still crossing every seam the job actually uses.
+    report an empty success. Called on the façade rather than through ``jobs_for``,
+    because no row arms it yet — which is exactly what makes this the case that
+    keeps the wiring honest in the meantime. An empty store needs no model call, so
+    this stays offline and deterministic while crossing every seam the job uses.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        job = {
-            job.name: job
-            for job in jobs_for(engine, Settings(consolidation_interval=timedelta(hours=6)))
-        }["consolidation"]
+        report = await engine.consolidate()
 
-        report = await job.run()
-
-        assert report.exhausted is True  # type: ignore[attr-defined] # the job's own report
-        assert report.examined == 0  # type: ignore[attr-defined] # as above
+        assert report.exhausted is True
+        assert report.examined == 0
     finally:
         await engine.aclose()

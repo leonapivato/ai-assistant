@@ -769,36 +769,26 @@ class Settings(BaseSettings):
             "(ADR-0083 §7, §13); set a duration to enable it."
         ),
     )
-    # Ships **disabled** for observation's reason rather than the calendar
-    # reader's, and the argument is the job's shape rather than its maturity.
-    # ADR-0111 §11 declines to set a default for a job it does not land, so the
-    # lane that lands it takes it: a consolidation run spends a model call per
-    # chunk, unattended, and every tainted proposal it produces becomes a question
-    # some user has to answer (ADR-0106 §6). A deployment that has not decided it
-    # wants that should not acquire it by upgrading. The field exists so that
-    # enabling it is configuration.
+    # **Leg 7's consolidation job has no interval, and its absence is the
+    # decision.** ADR-0111 §4's second clause makes a per-operation deadline "a
+    # precondition of being chunked at all", and its prose is explicit that this
+    # "must be checked rather than assumed": "a job whose chunk reaches an
+    # operation with no deadline is not a job that may be chunked under this ADR,
+    # and its lane owes that operation a deadline before it may be scheduled."
     #
-    # **Arming this job owes ADR-0111 §4's second clause a check that is not
-    # discharged today, and #820 tracks it.** §4 makes a per-operation deadline "a
-    # precondition of being chunked at all": the model call is bounded by
-    # `model_timeout_seconds`, but a chunk's writes reach `MemoryStore.write_atomic`
-    # and through it the `Embedder`, which runs in a worker thread with no deadline
-    # — so a hung embedding backend holds ADR-0083 §7's serial loop past any run
-    # budget. The exposure is not this job's doing (the calendar reader and
-    # observation write through the same seam) and this job is the first *chunked*
-    # one, which is what makes §4's clause bite here first. Left disabled and
-    # recorded rather than papered over: ADR-0111 §11 makes enabling a job an
-    # implementation lane's own act, and this is the check that lane owes.
-    consolidation_interval: _OptionalDuration = Field(
-        default=None,
-        gt=timedelta(0),
-        description=(
-            "How often the hub distils many stored records into few durable beliefs "
-            "(ADR-0106, ADR-0111). Disabled by default because each run spends model "
-            "calls unattended and may raise questions a user must answer; set a "
-            "duration to enable it, and never 0."
-        ),
-    )
+    # A consolidation chunk's model call is bounded by `model_timeout_seconds`, but
+    # its writes reach the `Embedder` through `MemoryStore.write_atomic`, and that
+    # runs in a worker thread with no deadline — so a hung backend holds ADR-0083
+    # §7's serial loop past any run budget. Shipping the field with a `None` default
+    # would leave that configuration one setting away, which is the arming path §4
+    # forbids rather than the disabled default ADR-0083 §7 permits.
+    #
+    # The job itself lands: `Engine.consolidate` and its stage are wired and
+    # tested. What is withheld is the way to schedule it. **#820 owns the deadline,
+    # and the lane that closes it adds this field back** — which is ADR-0111 §11's
+    # "enabling any job the scheduler ships disabled is an implementation lane's act
+    # against this text once ratified", with the precondition made structural rather
+    # than documentary.
 
     # --- What bounds one chunked run (ADR-0111 §4) -----------------------
     # Two bounds doing different jobs, neither substituting for the other. The
