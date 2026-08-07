@@ -2454,6 +2454,114 @@ class CalendarFacet(ContextFacet):
 # said it would.
 
 
+class ReadCoverage(BaseModel):
+    """The interval of a source's world one reading **exhausted** (ADR-0110 §2).
+
+    A half-open ``[covers_from, covers_until)`` pair, ``None`` at either end
+    meaning unbounded — :class:`Validity`'s shape, its endpoint type and its
+    invariant, deliberately mirrored rather than reused. The two say different
+    things about different subjects: a ``Validity`` is *our* window on a belief we
+    hold, and a coverage is a claim about **the read we performed**. Naming one
+    with the other would put a record's live window and a reading's exhausted
+    slice in one type, and §3 compares them *against each other*.
+
+    **Why a reading carries this at all.** An entry absent from a reading either
+    was deleted from the source or was never inside the slice the reader looked
+    at, and ADR-0093 §4 refuses to let a reader distinguish them — correctly,
+    since "a bounded read, a truncated file, a permission error and a genuinely
+    deleted entry are indistinguishable from the reading". ADR-0093 §5 and §8
+    removed the middle two from the seam by making a read that cannot complete
+    **raise** rather than return a short reading, leaving exactly one pair for
+    coverage to separate: a bounded read and a genuine deletion. Coverage is what
+    says which region the reader is *entitled* to have found something in.
+
+    **It states what the read exhausted, and a reader may declare it only where
+    that is true of the read it performed** (ADR-0110 §2). It is never widened to
+    what the reader was configured to cover, to what the source is presumed to
+    hold, or to the reader's whole bound where the read stopped short of it — a
+    read that stopped short raises under ADR-0093 §8 and declares nothing.
+
+    **A fact about the read, not a claim about the source.** It is the same class
+    of fact as :attr:`SourceReading.read_at` — our own account of what we did —
+    and deliberately not the class ADR-0093 §10 protects ``as_of`` from becoming,
+    which is a claim only the source may make. A reader knows what it exhausted
+    because it chose the bound; it does not know, and may not assert, what the
+    source contains.
+
+    Attributes:
+        covers_from: Inclusive start of the exhausted interval; ``None`` means
+            unbounded in the past.
+        covers_until: Exclusive end of the exhausted interval; ``None`` means
+            unbounded in the future.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    covers_from: UtcInstant | None = Field(
+        default=None,
+        description="Inclusive start of the interval the read exhausted; None means unbounded.",
+    )
+    covers_until: UtcInstant | None = Field(
+        default=None,
+        description="Exclusive end of the interval the read exhausted; None means unbounded.",
+    )
+
+    @model_validator(mode="after")
+    def _coverage_is_ordered(self) -> ReadCoverage:
+        """Reject an inverted or empty coverage: when both ends are set, end > start.
+
+        :class:`Validity`'s invariant, for the same reason and with the same
+        force. A coverage whose end is at or before its start exhausted no
+        instant, so a reading declaring one asserts that it looked at nothing and
+        would still warrant an absence over every record it contains — which is
+        none, but only accidentally. Making it unrepresentable is better than
+        reasoning about it at every use.
+        """
+        if (
+            self.covers_from is not None
+            and self.covers_until is not None
+            and self.covers_until <= self.covers_from
+        ):
+            msg = "covers_until must be after covers_from"
+            raise ValueError(msg)
+        return self
+
+    def contains(self, window: Validity) -> bool:
+        """Whether ``window`` lies **wholly within** this coverage (ADR-0110 §3).
+
+        Containment of one half-open interval in another with unbounded ends,
+        defined once here rather than at each use — the "one rule, one place"
+        discipline :meth:`Validity.live_at` keeps, and for the same reason: it is
+        a pure function of the two intervals, with no clock and no policy, so it
+        is a semantic intrinsic to the type rather than subsystem logic. ADR-0110
+        §3 states the rule "so no lane has to derive it", and this is where it
+        stops being derived.
+
+        **An unbounded record end is contained only by an unbounded coverage end
+        on the same side.** So a record with a fully open window is contained only
+        by a fully unbounded coverage, and a bounded reading contains none — which
+        is ADR-0110 §3's decisive property rather than a gap in it. A record whose
+        window is fully open states no position in the source's world, so no
+        bounded reading can have exhausted the region it occupies, and an absence
+        tells you nothing about it. A record whose producer bounded its window
+        says where it lives, and a reading that exhausted that region and did not
+        find it has observed something.
+
+        Args:
+            window: The record's own envelope validity window.
+
+        Returns:
+            Whether every instant the window admits lies inside this coverage.
+        """
+        starts_inside = self.covers_from is None or (
+            window.valid_from is not None and window.valid_from >= self.covers_from
+        )
+        ends_inside = self.covers_until is None or (
+            window.valid_until is not None and window.valid_until <= self.covers_until
+        )
+        return starts_inside and ends_inside
+
+
 class SourceReading(BaseModel):
     """What one :class:`~ai_assistant.core.protocols.Reader` pass produced.
 
@@ -2521,6 +2629,27 @@ class SourceReading(BaseModel):
             shared ``Reader`` conformance suite pins rather than this type: a
             producer-side obligation about what a *reader* may emit, not a property
             of every reading-shaped value (ADR-0093 §4).
+        coverage: The interval of the source's world this read **exhausted**, and
+            ``None`` where the reading declares none (ADR-0110 §2).
+
+            **Optional, and the ``None`` is the safe default rather than a gap.**
+            Its absence means the reading declares no coverage and **warrants no
+            absence**, so ADR-0093 §4's refusal — a reader never proposes that
+            anything was withdrawn — remains the operative behaviour of every
+            reader that does not opt in. Making it required would break every
+            existing construction site and every stored reading to avoid a
+            ``None``, the trade ADR-0093 §3 already refused for the facet half and
+            ADR-0109 §2 refused for ``last_confirmed_at``.
+
+            **Declaring it is half of an opt-in, never the whole of one.** A
+            reader that wants a covered absence to demote a belief owes *both*
+            halves (ADR-0110 §3): this declaration, and a **bounded envelope
+            validity window** on the records whose absence should count. Neither
+            alone does anything — a record with a fully open window is contained
+            by no bounded coverage, so it is never absence-demotable. The cost is
+            deliberate: it makes opting in an explicit act by the lane that holds
+            the source, which is the lane that can say whether "absent" means
+            anything for that source at all.
         facet: The situational half of this reading — the other consumer's
             (ADR-0093 §3, ADR-0096 §5). ``None`` is valid and means this reader's
             source has no situational reading to contribute.
@@ -2570,6 +2699,13 @@ class SourceReading(BaseModel):
         description=(
             "The beliefs the source reported, in the reader's order. Empty is a "
             "successful reading, not a failure signal (ADR-0093 §8)."
+        ),
+    )
+    coverage: ReadCoverage | None = Field(
+        default=None,
+        description=(
+            "The interval of the source's world this read exhausted; None means "
+            "the reading declares none and warrants no absence (ADR-0110 §2)."
         ),
     )
     facet: CalendarFacet | None = Field(
