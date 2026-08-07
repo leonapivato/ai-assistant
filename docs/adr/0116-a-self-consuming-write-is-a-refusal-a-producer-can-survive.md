@@ -181,6 +181,19 @@ broken' without matching on a message string".
 still catches it and no caller that does not care is disturbed. ADR-0081 §3's
 "what every other writer-boundary refusal raises" stays true of it.
 
+> **Normative.** The clause above binds **every** `MemoryWriter` member that
+> installs a proposal, not only `ingest`. A member added later that performs an
+> installing write raises this class for this refusal on the same terms.
+
+**Stated over the members rather than over one method's name**, because the writer
+contract has grown a second install path while this ADR was drafted:
+[ADR-0115](0115-the-writer-contract-carries-the-reading.md) §1 adds
+`ingest_reading`, which ingests a whole reading's proposals and is subject to
+ADR-0081 §1 exactly as `ingest` is. A clause naming `ingest` alone would have left
+the newer path raising a bare `MemoryStoreError` for the same refusal, which is the
+backend divergence §2 exists to close arriving through a member instead of an
+implementation.
+
 **ADR-0111 §9 anticipated this list growing and left it open**: "Which classes are
 refusals is the implementing lane's list, and it is short today: `SourceNotGrantedError`
 is the one ADR-0097 §5 names, and a queue-at-cap disposition under ADR-0106 §6 is
@@ -205,6 +218,21 @@ distinct in what they do, not merely in what they log:
 
 Collapsing those two costs the first branch entirely, which is the permanent stall
 §Context describes.
+
+**One caller, not two, and the count is stated rather than inflated.** ADR-0115's
+`ingest_reading` is a second *install path* but not a second consumer of this
+class: a reader's proposals cite nothing — `CalendarReader` builds a `Provenance`
+with an `Attestation` and no `evidence` — and ADR-0081 §1b rules that "a record
+citing nothing satisfies it trivially". So the reconciliation cannot reach this
+refusal today, and this ADR does not pretend otherwise.
+
+**One is enough, because §3's ground was not a count.** §9 declined the subclass
+because there was **no** caller with a second branch, not because there were fewer
+than some threshold; a single caller that cannot function without the distinction
+falsifies that ground completely. ADR-0028 §7's promotion discipline — which does
+wait for a third consumer — governs hoisting a *generic seam*, and an error class
+that one caller must distinguish to avoid a permanent stall is not that: the
+alternative is not "wait and see", it is "the job cannot ship".
 
 **A producer fault is still a producer fault.** A hand-built proposal citing its
 own id is exactly what ADR-0081 §Context describes and is still a bug; nothing
@@ -353,6 +381,17 @@ form the template states, and the dated note carries the reasoning.
   quoted and left alone.
 - **ADR-0005 §3 and ADR-0081 §9's fabricated-`REJECT` bullet.** §4 above restates
   the prohibition at the caller and takes nothing from it.
+- **ADR-0115 §1 and §3.** §1's "No other `MemoryWriter` or `MemoryStore` member is
+  added, widened or changed **by this ADR**" is a classification of ADR-0115's own
+  change, which ADR-0089 §1 names as the paradigm of what is not normative; it is
+  not a prohibition on a later ADR, and §2 above changes no member's shape in any
+  case. §3 pins *its* refusal to a plain `MemoryStoreError` on the ground that the
+  orchestration stage and the CLI "handle `MemoryStoreError` as the recoverable
+  memory fault" — undisturbed, because the class §2 adds **is** a
+  `MemoryStoreError` and every handler that catches the base still catches it.
+  `ingest_reading` gains no obligation it did not already carry: ADR-0081 §1 bound
+  it from the moment it was decided, and §2 above only fixes which class that
+  binding raises.
 - **ADR-0083 §6 and ADR-0108 §4.** §6's classification of an `AssistantError`
   subclass is applied as written; ADR-0108 §4's cross-kind refusal is a different
   rule at a different door and is neither widened nor narrowed.
