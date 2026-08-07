@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.core.types import (
         ActionPlan,
+        BeliefBand,
         Goal,
         MemoryIngestResult,
         MemoryRecord,
@@ -91,8 +92,9 @@ class _FailingSearchStore(FakeMemoryStore):
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
     ) -> list[MemoryRecord]:
-        """Fail the way a real store fails."""
+        """Fail the way a real store fails, whichever band was asked for."""
         msg = "fake: retrieval is unavailable"
         raise MemoryStoreError(msg)
 

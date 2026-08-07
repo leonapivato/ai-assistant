@@ -470,6 +470,7 @@ class FakeMemoryStore:
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
     ) -> list[MemoryRecord]:
         """Return live records matching ``query`` by lexical overlap, best first.
 
@@ -478,15 +479,22 @@ class FakeMemoryStore:
         at now (a closed or not-yet-open validity window, both ends — ADR-0045
         §6), an empty query, and a non-positive ``limit`` all yield nothing.
 
-        ``kinds`` is materialised on the coroutine's **first executed line**, as in
-        ``list_beliefs`` below and for the same reason: it is the discharge
-        ADR-0065 §3 names second — the caller's ``Sequence`` is observed once,
-        before this method enters the modelled resource, and only the copy is read
-        afterwards (#436). That ordering is what the suite's read-side
-        input-observation case turns on here, so the entry below must stay *after*
-        the materialisation.
+        **The band binds before the cut** (ADR-0113 §2), which this store gets for
+        free: it scores every live record and truncates once, at the end, so the
+        band predicate below is already upstream of the ``[:limit]`` and there is no
+        candidate budget an out-of-band record could spend. ``SqliteMemoryStore`` is
+        where the clause costs something, and the shared suite proves it of both.
+
+        ``kinds`` and ``bands`` are materialised on the coroutine's **first executed
+        line**, as in ``list_beliefs`` below and for the same reason: it is the
+        discharge ADR-0065 §3 names second — the caller's ``Sequence`` is observed
+        once, before this method enters the modelled resource, and only the copy is
+        read afterwards (#436). That ordering is what the suite's read-side
+        input-observation cases turn on here, so the entry below must stay *after*
+        both materialisations.
         """
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
+        wanted_bands = None if bands is None else frozenset(bands)
         query_terms = {term for term in query.lower().split() if term}
         if limit <= 0 or not query_terms:
             return []
@@ -496,6 +504,11 @@ class FakeMemoryStore:
             for record in self._records.values():
                 if not self._is_readable(record, now) or (
                     wanted is not None and record.kind not in wanted
+                ):
+                    continue
+                if (
+                    wanted_bands is not None
+                    and band_of(record.provenance.source) not in wanted_bands
                 ):
                     continue
                 content = record.content.lower()

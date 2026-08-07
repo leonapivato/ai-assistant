@@ -1606,9 +1606,10 @@ class _PauseOnFirstSearch(InMemoryMemoryStore):
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
     ) -> list[MemoryRecord]:
         """Delegate, then hold the first search's result until ``resume``."""
-        matches = await super().search(query, limit=limit, kinds=kinds)
+        matches = await super().search(query, limit=limit, kinds=kinds, bands=bands)
         if self._pending:
             self._pending = False
             # After the read, so the caller is left holding a snapshot the

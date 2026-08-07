@@ -42,7 +42,13 @@ from ai_assistant.core.errors import (
     MemoryStoreConflictError,
     MemoryStoreError,
 )
-from ai_assistant.core.types import MemoryRecord, MemoryWriteMode, RecordChunk, band_of
+from ai_assistant.core.types import (
+    MemoryRecord,
+    MemorySource,
+    MemoryWriteMode,
+    RecordChunk,
+    band_of,
+)
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory._walk import (
     check_walk_limit,
@@ -67,13 +73,21 @@ if TYPE_CHECKING:
     )
 
 _ADAPTER: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
-# ``search`` applies the kind and expiry filters *after* the vector KNN (sqlite-vec
-# cannot cleanly pre-filter joined columns within a KNN), so it over-fetches
-# candidates to leave room for filtered-out rows. A tracked limitation: a caller
-# can still be under-served if more than this multiple of ``limit`` nearer
-# neighbours are all filtered out — and for a ``limit`` past ``_VEC_KNN_MAX_K /
-# _RESULT_OVERFETCH`` the effective multiple shrinks below this, since the fetch
-# is then clamped to the KNN ceiling (see ``_VEC_KNN_MAX_K``).
+# ``search`` applies the kind, expiry and window filters *after* the vector KNN, so
+# it over-fetches candidates to leave room for filtered-out rows. A tracked
+# limitation: a caller can still be under-served if more than this multiple of
+# ``limit`` nearer neighbours are all filtered out — and for a ``limit`` past
+# ``_VEC_KNN_MAX_K / _RESULT_OVERFETCH`` the effective multiple shrinks below this,
+# since the fetch is then clamped to the KNN ceiling (see ``_VEC_KNN_MAX_K``).
+#
+# **That placement is ratified, not a capability limit.** This comment used to
+# explain it as "sqlite-vec cannot cleanly pre-filter joined columns within a KNN",
+# which ADR-0113's spike and ``_search_sync``'s own band restriction below falsify:
+# the pinned sqlite-vec *does* bind a ``rowid`` restriction ahead of the cut. The
+# three post-KNN predicates keep their placement because ADR-0045 §6 and ADR-0007
+# ratified it for them and moving them is issue #457's ADR to write, not because
+# the engine forbids it (ADR-0113 §8). The band is bound before the cut because
+# ADR-0113 §2 requires it — the axis whose skew is unbounded and grows by design.
 _RESULT_OVERFETCH = 8
 # The KNN ``k`` in ``search``'s query is capped by sqlite-vec itself: a ``k`` above
 # this raises ``sqlite3.OperationalError("k value in knn query too large ... the
@@ -195,6 +209,30 @@ def _newest_revision_first(records: list[MemoryRecord]) -> list[MemoryRecord]:
     """
     by_id = sorted(records, key=lambda record: record.id)
     return sorted(by_id, key=lambda record: record.provenance.last_updated, reverse=True)
+
+
+def _sources_in(bands: Sequence[BeliefBand]) -> frozenset[str]:
+    """The stored ``provenance.source`` values whose band is among ``bands``.
+
+    ``search``'s band restriction runs in SQL against the source string stored in
+    each record's JSON blob, so the band selection has to be turned into a source
+    selection somewhere. It is **derived from** ``band_of`` rather than written out,
+    which is ADR-0113 §3's requirement and ADR-0073 §1's reason: a second,
+    hand-written ``band -> sources`` mapping is a mapping that can drift from the
+    one whose totality the gate enforces. Adding a new ``MemorySource`` therefore
+    cannot silently fall out of the filter — ``band_of`` is exhaustive over the
+    enum, so the new member lands in whichever band it declares.
+
+    The caller's ``Sequence`` is consumed here, on ``search``'s first executed line,
+    which is also ADR-0065 §3's discharge for this parameter. Duplicates in it are
+    set semantics and change nothing.
+
+    Returns:
+        The matching source values as stored (the ``StrEnum``'s values), empty when
+        ``bands`` is empty — the selection that selects nothing.
+    """
+    wanted = frozenset(bands)
+    return frozenset(str(source) for source in MemorySource if band_of(source) in wanted)
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -983,14 +1021,25 @@ class SqliteMemoryStore:
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
     ) -> list[MemoryRecord]:
         """Return the records most relevant to ``query`` by vector similarity.
+
+        **The band binds before the KNN cut and the other axes do not** (ADR-0113
+        §2). ``bands`` becomes a ``rowid`` restriction carried into the KNN itself,
+        so out-of-band rows never enter the candidate set and never spend the
+        over-fetch budget; ``kind``, ``expires_at`` and both window ends keep their
+        post-KNN pass. See :meth:`_search_sync` for why that asymmetry is the
+        ratified one rather than an accident of what SQL was convenient.
 
         Args:
             query: The search text; whitespace-only queries match nothing.
             limit: Maximum number of records to return; ``<= 0`` matches nothing.
             kinds: If given, restrict results to these memory kinds (applied
                 after the vector search, so results are over-fetched first).
+            bands: If given, restrict results to these belief bands; ``None`` is
+                every band and ``()`` none, conjunctive with ``kinds``. Applied
+                *before* the vector search, unlike ``kinds``.
 
         Returns:
             Matching records, most relevant first, each carrying a ``score``
@@ -1000,23 +1049,31 @@ class SqliteMemoryStore:
 
         Raises:
             MemoryStoreError: If the embedder fails or returns a wrong-sized
-                query vector.
+                query vector, or a stored record is corrupt.
 
         Note:
-            ``kinds`` is materialised on the coroutine's **first executed line**
-            and only the copy is read thereafter — ADR-0065 §3's second discharge,
-            as ``list_beliefs`` takes. It used to be materialised inside
-            :meth:`_search_sync`, past the embedder's ``await`` and the lock's, so
-            a caller mutating the list it passed while the embedding was in flight
-            was answered from the later version (#436).
+            ``kinds`` and ``bands`` are materialised on the coroutine's **first
+            executed lines** and only the copies are read thereafter — ADR-0065
+            §3's second discharge, as ``list_beliefs`` takes. ``kinds`` used to be
+            materialised inside :meth:`_search_sync`, past the embedder's ``await``
+            and the lock's, so a caller mutating the list it passed while the
+            embedding was in flight was answered from the later version (#436).
+            ``bands`` is folded to its source set on that same first line, which
+            both discharges the clause and is the form the SQL wants.
         """
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
+        wanted_sources = None if bands is None else _sources_in(bands)
         if limit <= 0 or not query.strip():
+            return []
+        # An empty ``bands`` selects nothing (ADR-0113 §3), and so does a selection
+        # no source maps into — the same answer by the same reasoning, and taken
+        # before the embedder is paid for a query whose result is already known.
+        if wanted_sources is not None and not wanted_sources:
             return []
         vector = await self._embed_one(query)
         async with self._lock:
             rows = await _run_to_completion(
-                self._search_sync, vector, limit, wanted, self._now_micros()
+                self._search_sync, vector, limit, wanted, wanted_sources, self._now_micros()
             )
         return [self._decode(data).model_copy(update={"score": score}) for data, score in rows]
 
@@ -1025,19 +1082,65 @@ class SqliteMemoryStore:
         vector: Embedding,
         limit: int,
         wanted: frozenset[str] | None,
+        wanted_sources: frozenset[str] | None,
         now: int,
     ) -> list[tuple[str, float]]:
+        """Run the KNN with the band bound into it, then the post-cut predicates.
+
+        **Why the band is in the SQL and the other three are not.** ADR-0113 §2
+        requires the band predicate to bind before the ranking cut, and ADR-0045 §6
+        and ADR-0007 ratified the post-cut placement of the rest. The asymmetry is
+        the ADR's, and the reason is the skew: the ``DERIVED`` band grows without
+        bound by design — leg 3's observer and ADR-0106's consolidation are both
+        machines for growing it — so a post-KNN band filter loses *all* of a small
+        band's records once the derived band is an order of magnitude larger, which
+        is ADR-0072 §5's flood failure. ADR-0113's spike measured zero assertions
+        returned out of four live ones at a 49x skew, and the shared suite's
+        skewed-fixture case pins it here.
+
+        **The restriction is a subquery over ``records`` rather than a new column.**
+        The band lives only inside each record's JSON blob, and the pinned
+        sqlite-vec binds ``v.rowid IN (SELECT ...)`` ahead of the cut — ``k`` applies
+        *after* the restriction, so asking for more candidates than the band holds
+        returns the band rather than the nearest neighbours overall. That makes a
+        schema migration unnecessary, which is why none is taken: ADR-0113 §10
+        leaves the mechanism to this lane under an observable obligation, and the
+        cheaper mechanism meets it. If profiling ever makes the per-search scan of
+        ``records`` matter, an indexed source column is a drop-in replacement that
+        changes no behaviour this method promises.
+        """
         # Over-fetch to leave room for kind-, expiry-, and window-filtered rows,
         # clamped to sqlite-vec's KNN ``k`` ceiling so an over-large ``limit``
         # serves a (possibly short) result instead of raising (see _VEC_KNN_MAX_K).
+        # The band is *not* among the filters this budget is padding for: it is
+        # bound below, so no out-of-band row is ever a candidate to be discarded.
         fetch_k = min(limit * _RESULT_OVERFETCH, _VEC_KNN_MAX_K)
         blob = sqlite_vec.serialize_float32(list(vector))
-        rows = self._conn.execute(
+        sql = (
             "SELECT r.data, r.kind, r.expires_at, r.valid_until, v.distance FROM vec_records v "
             "JOIN records r ON r.rowid = v.rowid "
-            "WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
-            (blob, fetch_k),
-        ).fetchall()
+            "WHERE v.embedding MATCH ? AND k = ?"
+        )
+        params: list[object] = [blob, fetch_k]
+        if wanted_sources is not None:
+            # Non-empty: ``search`` short-circuits an empty selection. Only the
+            # *placeholder count* is interpolated; every value is bound, so the
+            # assembled text carries no caller data — the same construction
+            # ``_list_beliefs_sync`` uses, and the reason the S608 heuristic is
+            # suppressed here rather than satisfied.
+            placeholders = ", ".join("?" * len(wanted_sources))
+            sql += (
+                " AND v.rowid IN (SELECT rowid FROM records "  # noqa: S608 — bound below
+                f"WHERE json_extract(data, '$.provenance.source') IN ({placeholders}))"
+            )
+            params.extend(sorted(wanted_sources))
+        sql += " ORDER BY v.distance"
+        # Deliberately unwrapped, matching this method before the band clause: a
+        # ``sqlite3.Error`` here escapes as itself, where ``_list_beliefs_sync``
+        # wraps one as ``MemoryStoreError``. That inconsistency predates this change
+        # and is not widened by it — the restriction adds no failure mode the KNN
+        # did not already have — so it is filed as #806 rather than fixed here.
+        rows = self._conn.execute(sql, params).fetchall()
         results: list[tuple[str, float]] = []
         for data, kind, expires_at, valid_until, distance in rows:
             if wanted is not None and kind not in wanted:
