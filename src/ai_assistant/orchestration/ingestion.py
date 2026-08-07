@@ -316,10 +316,17 @@ class IngestionStage:
         # discarded whole, and nothing durable records that it happened.
         if await self._grants.live(source=source, use=GrantScope.INGEST) is None:
             raise SourceNotGrantedError(_refusal(source))
+        # **The whole reading in one call** (ADR-0115 §2). ADR-0110 §5a refuses the
+        # absence reconciliation over an unserialised read-modify-write, and that
+        # sequence spans the ingest — so the writer has to hold its serialisation
+        # across all of it, which it can only do if the reading arrives at once. A
+        # loop here plus a separate reconciliation would leave precisely the gap the
+        # clause is about. The stage still rules on nothing and still parks what
+        # deferred; both are the write stage's, unchanged.
+        outcomes = await self._writes.write_reading(reading)
         stored = 0
         deferred = 0
-        for proposal in reading.proposals:
-            outcome = await self._writes.write(proposal)
+        for outcome in outcomes:
             if outcome.result.decision.kind is MemoryDecisionKind.ASK_USER:
                 deferred += 1
             elif outcome.result.record_id is not None:

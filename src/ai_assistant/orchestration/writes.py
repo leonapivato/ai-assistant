@@ -34,7 +34,7 @@ from ai_assistant.core.errors import DeferralIdConflictError, DeferralStoreError
 from ai_assistant.core.types import DataTier, MemoryDecisionKind
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.protocols import DeferralStore, MemoryWriter
     from ai_assistant.core.types import (
@@ -42,6 +42,7 @@ if TYPE_CHECKING:
         MemoryDecision,
         MemoryIngestResult,
         MemoryUpdateProposal,
+        SourceReading,
     )
 
 #: How many times an admission re-mints a colliding deferral id before giving up.
@@ -245,6 +246,70 @@ class MemoryWriteStage:
         # filter written to prevent it.
         observed = proposal.model_copy(deep=True)
         result = await self._writer.ingest(observed)
+        return await self._park(observed, result)
+
+    async def write_reading(self, reading: SourceReading) -> Sequence[WriteOutcome]:
+        """Put a whole reading through the writer, then park what it deferred.
+
+        **One call into the writer, not one per proposal** (ADR-0115 §2). ADR-0110
+        §5a refuses the absence reconciliation over an unserialised
+        read-modify-write, and that sequence spans the ingest — so only the writer
+        can hold its serialisation across it, and only if the whole reading arrives
+        at once. A stage that looped :meth:`write` and asked for a reconciliation
+        separately would leave exactly the gap the clause is about.
+
+        **One snapshot, taken before the await, used for both** (ADR-0115 §5). The
+        reading forwarded to the writer and the proposals enqueued afterwards are the
+        same copy, so the two cannot diverge. That is not tidiness: the tier check and
+        the queued proposal are both read *after* the call returns, and a model
+        tampered past ``frozen=True`` is inside this repository's threat model
+        (ADR-0018 §3, ADR-0021 §4). Flip a proposal's ``sensitivity`` from ``SECRET``
+        to ``PERSONAL`` while the call is in flight and an unsnapshotted stage would
+        rule on the secret (correctly, ``ASK_USER``) and then queue the credential —
+        ADR-0004 §3's "never in a database", reached through the one filter written to
+        prevent it. :meth:`write` takes the same copy for the same reason.
+
+        **A raise part-way leaves an earlier deferral unparked, and that is ruled**
+        (ADR-0115 §5, issue #814). The writer's results are what this parks from, so a
+        call that raises returns none to park. ADR-0078 §3's obligation is keyed on the
+        stage *observing* a result, which a raise never produces, so nothing is
+        breached; the question is recovered by re-proposal at the next reading of the
+        same source. It is not repaired here.
+
+        Args:
+            reading: What the reader returned, forwarded whole and once.
+
+        Returns:
+            One outcome per proposal, in the reading's order.
+
+        Raises:
+            MemoryStoreError: As the writer raises.
+            UnresolvedEvidenceError: As the writer raises.
+            DeferralStoreError: If a question could not be parked.
+        """
+        # One observation of the reading, before the first await, for `write`'s
+        # reason. `observed.proposals` below is this copy's, never the caller's.
+        observed = reading.model_copy(deep=True)
+        results = await self._writer.ingest_reading(observed)
+        return [
+            await self._park(proposal, result)
+            for proposal, result in zip(observed.proposals, results, strict=True)
+        ]
+
+    async def _park(
+        self, observed: MemoryUpdateProposal, result: MemoryIngestResult
+    ) -> WriteOutcome:
+        """Park the question an ``ASK_USER`` ruling raised, if it raised a queueable one.
+
+        The tail :meth:`write` and :meth:`write_reading` share, so the rule deciding
+        what is queued lives in one place. ``observed`` must already be this stage's
+        own snapshot — both callers take theirs before their first await.
+
+        **Nothing is enqueued for a ``DataTier.SECRET`` proposal** (ADR-0078 §1).
+        ADR-0004 §3 is unconditional that Tier 0 content lives in the OS keyring and
+        "never in a database, never in a committed file", and a durable queue is a
+        file — so this arm is what keeps such content *out* of storage.
+        """
         if result.decision.kind is not MemoryDecisionKind.ASK_USER:
             return WriteOutcome(result=result)
         if observed.sensitivity is DataTier.SECRET:

@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.protocols import MemoryWriter, Observer
-    from ai_assistant.core.types import MemoryIngestResult
+    from ai_assistant.core.types import MemoryIngestResult, SourceReading
 
 AT = datetime(2026, 7, 28, 9, 0, tzinfo=UTC)
 
@@ -105,6 +105,15 @@ class _RacingWriter:
             raise UnresolvedEvidenceError(msg, ids)
         return await self._inner.ingest(proposal)
 
+    async def ingest_reading(self, reading: SourceReading) -> Sequence[MemoryIngestResult]:
+        """Delegate the reading-level path unchanged (ADR-0115 §1).
+
+        Present so this double still satisfies ``MemoryWriter``. Nothing in this
+        module drives a reading — these cases are about the single-proposal seam —
+        so the script this double carries applies to :meth:`ingest` alone.
+        """
+        return await self._inner.ingest_reading(reading)
+
 
 class _FailingWriter:
     """A ``MemoryWriter`` that raises ``MemoryStoreError`` on its *n*-th call."""
@@ -121,6 +130,15 @@ class _FailingWriter:
             msg = "the store is broken"
             raise MemoryStoreError(msg)
         return await self._inner.ingest(proposal)
+
+    async def ingest_reading(self, reading: SourceReading) -> Sequence[MemoryIngestResult]:
+        """Delegate the reading-level path unchanged (ADR-0115 §1).
+
+        Present so this double still satisfies ``MemoryWriter``. Nothing in this
+        module drives a reading — these cases are about the single-proposal seam —
+        so the script this double carries applies to :meth:`ingest` alone.
+        """
+        return await self._inner.ingest_reading(reading)
 
 
 class _FailingObserver:

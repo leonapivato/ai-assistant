@@ -7,6 +7,7 @@ as a stand-in for a real write path: it is held to the same contract as
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -23,14 +24,17 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     PreferenceMemory,
     Provenance,
+    ReadCoverage,
+    SourceReading,
     Validity,
 )
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore, FakeMemoryWriter
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, MemoryWriter
+    from ai_assistant.core.types import BeliefBand, MemoryKind, MemoryRecord
 
 
 def _fixed_now() -> datetime:
@@ -555,3 +559,78 @@ async def test_supersede_hiding_is_read_time_relative() -> None:
     # export keeps the retired target regardless of its validity window (both
     # records here are non-expired, so both appear).
     assert {r.id for r in await store.export()} == {"existing", new_id}
+
+
+class _GatedStore(FakeMemoryStore):
+    """A store that holds the absence selection open, so a test can interleave."""
+
+    def __init__(self) -> None:
+        super().__init__(now=_gated_now)
+        self.selecting = asyncio.Event()
+        self.may_select = asyncio.Event()
+        self.may_select.set()
+
+    async def list_beliefs(
+        self,
+        *,
+        bands: Sequence[BeliefBand] | None = None,
+        kinds: Sequence[MemoryKind] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MemoryRecord]:
+        self.selecting.set()
+        await self.may_select.wait()
+        return await super().list_beliefs(bands=bands, kinds=kinds, limit=limit, offset=offset)
+
+
+def _gated_now() -> datetime:
+    return datetime(2026, 6, 1, tzinfo=UTC)
+
+
+def _intruder() -> MemoryUpdateProposal:
+    """An ordinary write that must not slip inside the reading's hold."""
+    return MemoryUpdateProposal(
+        proposed=PreferenceMemory(
+            id="intruder",
+            content="an unrelated preference",
+            preference="an unrelated preference",
+            provenance=Provenance(
+                source=MemorySource.OBSERVED, confidence=0.6, last_updated=_gated_now()
+            ),
+        ),
+        rationale="because",
+        sensitivity=DataTier.PERSONAL,
+    )
+
+
+async def test_the_fake_serialises_a_covered_reading_against_other_writes() -> None:
+    """ADR-0115 §3, proved against **this** implementation's own mechanism (§7).
+
+    §7 keeps the serialisation off the shared suite because it is not observable
+    through the Protocol — which is exactly why each implementation owes its own
+    proof, the fake included. Without one, deleting this fake's lock would leave the
+    shared contract and the production test green while every consumer that reaches
+    for the canonical double got a subject whose isolation is imaginary: a
+    concurrent ``ingest`` could land between a covered reading's selection and its
+    closes, and the stale reconciliation would retire a record just updated.
+    """
+    store = _GatedStore()
+    writer = FakeMemoryWriter(store=store, policy=FakeMemoryPolicy(), now=_gated_now)
+    reading = SourceReading(
+        source="calendar:work",
+        read_at=_gated_now(),
+        coverage=ReadCoverage(covers_until=_gated_now() + timedelta(days=30)),
+    )
+
+    store.may_select.clear()
+    covered = asyncio.create_task(writer.ingest_reading(reading))
+    await store.selecting.wait()
+
+    competing = asyncio.create_task(writer.ingest(_intruder()))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not competing.done(), "an ingest interleaved with the reading's read-modify-write"
+
+    store.may_select.set()
+    assert list(await covered) == []
+    await competing

@@ -47,7 +47,13 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
-    from ai_assistant.core.types import MemoryDecision, MemoryRecord, MemoryUpdateProposal
+    from ai_assistant.core.types import (
+        MemoryDecision,
+        MemoryRecord,
+        MemoryUpdateProposal,
+        ReadCoverage,
+        SourceReading,
+    )
 
 _DEFAULT_CONFLICT_THRESHOLD = 0.75
 
@@ -64,6 +70,13 @@ _DEFAULT_CONFLICT_LIMIT = 100
 #: id (``uuid4``) collides with vanishing probability, so a handful of attempts is
 #: already far past any real collision; the bound exists to make a *pathological*
 #: id factory (one that always collides) fail loudly rather than spin (ADR-0045 §4).
+#: How many attested beliefs one absence-reconciliation page enumerates
+#: (ADR-0110 §6). Tuning and not contract: each close is justified by one record and
+#: one reading alone, so the page size can only change how many records a walk
+#: *sees*, never which of them it closes. It is the store's own ``list_beliefs``
+#: default, which keeps a page a page the store is already built to serve.
+_ABSENCE_PAGE = 50
+
 _MAX_SUPERSEDE_ATTEMPTS = 5
 
 
@@ -1226,8 +1239,257 @@ class MemoryIngestor:
         # semantic desync one level up: beliefs retired over a statement that was
         # never stored.
         observed = proposal.model_copy(deep=True)
+        return await self._locked_ingest(observed)
+
+    async def ingest_reading(self, reading: SourceReading) -> Sequence[MemoryIngestResult]:
+        """Ingest one reading's proposals, then close what its coverage warrants.
+
+        ADR-0115 §1's member. For a reading that declares a coverage this is the
+        whole of ADR-0110 §5a's read-modify-write **in one critical section**: the
+        proposals are ingested, the live in-coverage records are selected, and the
+        closes are written, all under a single hold of ``self._lock`` — the very lock
+        every other belief write on this store takes (#262), over ``self._store``,
+        the very store those writes go to.
+
+        **Why the three steps may not be three holds.** ``write_atomic`` makes a
+        write *set* atomic and does nothing for the read that produced it (ADR-0046
+        §5: "Atomic-write-set is orthogonal to read-modify-write isolation"). Three
+        separately serialised steps leave gaps, and a write landing in one makes the
+        reading's account of what is present stale; a close computed from a stale
+        account retires a belief the store was told about after the reading looked.
+        Holding once removes the gaps rather than reasoning about what fits in them.
+
+        **The guarantee is composition-scoped, and that is the ratified reading
+        rather than a shortcut.** ``self._lock`` is per instance, so two
+        ``MemoryIngestor`` objects over one store would not serialise against each
+        other. ADR-0110 §5a offers exactly two ways to satisfy its prerequisite and
+        this takes the first: "**the composition runs one writer** and the
+        reconciliation shares its serialisation", which it says is satisfied by "a
+        single writer serialised as #262 serialises one today ... with no new
+        ``core`` surface at all". The general two-writer case is **not** closed here
+        and was never claimed to be: ADR-0046 §5 scopes that residual to "any two
+        writers not sharing that lock" and leaves it to #248, and ADR-0110 §5b
+        withholds the compare-and-swap and its concurrency token in terms, so
+        building a store-wide primitive here would be deciding a second lane's
+        contract inside this one. What holds the premise up is the composition root
+        wiring exactly one writer, which ``tests/app/test_composition.py`` asserts by
+        identity — the only place a type cannot express it (ADR-0028 §4).
+
+        **Where the reading declares no coverage there is nothing to isolate**
+        (ADR-0115 §3, §4), so this ingests each proposal in turn under the ordinary
+        per-proposal hold :meth:`ingest` takes, and closes nothing. That is every
+        reading in the tree today, so this member arrives changing no behaviour.
+
+        **A raise anywhere leaves the reconciliation unattempted** (ADR-0115 §3, §4).
+        The closes are reached only by falling off the end of the loop — never from a
+        ``finally`` or other cleanup path — because a reading that was never fully
+        accounted for warrants no absence, which is ADR-0110 §4's suspension clause
+        reached by a second road. The proposals ingested before the raise stay
+        applied, exactly as the per-proposal loop leaves them today.
+
+        **The deferral queue is not reached from here** (ADR-0115 §5). ADR-0028 ruled
+        that a writer does not learn to queue and ADR-0078 §3 puts the durable
+        question on the orchestration write stage, so this returns one result per
+        proposal and the stage parks what deferred, after this call. A durable write
+        to a second store inside a memory lock would also fix a lock order across two
+        stores that nothing acquires in either direction today.
+
+        Args:
+            reading: What one reader pass produced. Observed **whole** on this
+                coroutine's first executed line, before the first ``await``, so no
+                later step reads the caller's object (ADR-0065, ADR-0115 §6). The
+                copy is not belt-and-braces: ``coverage`` authorises a retirement and
+                ``source`` decides which records ADR-0110 §3 can reach, and both are
+                read after every ingest await, so a caller that mutated either past
+                ``frozen=True`` — inside this repository's threat model (ADR-0018 §3,
+                ADR-0021 §4) — would steer what this retires.
+
+        Returns:
+            One result per proposal, in the reading's own order (ADR-0115 §1).
+
+        Raises:
+            MemoryStoreError: As :meth:`ingest` raises for any one proposal, or as
+                ADR-0110 §5's close raises for an unrepresentable window. Nothing is
+                caught, wrapped or converted here — including ADR-0081 §1's
+                self-consuming-write refusal, whose class ADR-0116 §2 binds over
+                every installing ``MemoryWriter`` member and which reaches a caller
+                through this one exactly as it reaches one through :meth:`ingest`.
+            UnresolvedEvidenceError: As :meth:`ingest` raises.
+        """
+        # One observation of the whole reading, on this coroutine's first executed
+        # line — before the lock, which is the first await (ADR-0065, issue #366).
+        observed = reading.model_copy(deep=True)
+        if observed.coverage is None:
+            # ADR-0115 §3's second clause: no reconciliation, so no read-modify-write
+            # to isolate, and this member owes nothing beyond what `ingest` already
+            # carries for each proposal in turn.
+            return [await self._locked_ingest(proposal) for proposal in observed.proposals]
         async with self._lock:
-            return await self._ingest(observed)
+            results = [await self._ingest(proposal) for proposal in observed.proposals]
+            # Reached only by completing the loop. A raise skips it, which is the
+            # conservative direction and is why there is no `finally` here.
+            await self._close_absent(
+                source=observed.source, coverage=observed.coverage, results=results
+            )
+            return results
+
+    async def _locked_ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
+        """One proposal under the ordinary per-proposal hold.
+
+        The uncovered arm of :meth:`ingest_reading` and :meth:`ingest` do the same
+        thing; this is the shared tail so that neither grows a second copy of the
+        lock discipline. The proposal is already this object's own snapshot at both
+        call sites, so it is not copied again.
+        """
+        async with self._lock:
+            return await self._ingest(proposal)
+
+    async def _close_absent(
+        self,
+        *,
+        source: str,
+        coverage: ReadCoverage,
+        results: Sequence[MemoryIngestResult],
+    ) -> int:
+        """Close the windows one reading's coverage warrants (ADR-0110 §3).
+
+        A reading that declared what it exhausted did not merely fail to mention a
+        belief it once reported — it looked, over the region that belief occupies,
+        and did not find it. That is an observation, and ADR-0110 §1 admits it as a
+        warranting event where a clock is never one.
+
+        **Called only with :attr:`_lock` held**, from :meth:`ingest_reading`, in the
+        same hold as the ingest whose ``results`` it reads. That is the whole of
+        §5a's prerequisite, and it is why this is private: reachable from outside the
+        hold, it would be exactly the unserialised read-modify-write §5a refuses.
+
+        **Absence is the ingest's own answer and never a second matcher** (§4).
+        Presence is read off ``results`` — a record is present exactly when its id is
+        among the ``record_id`` values the ingest returned — so this forms no opinion
+        about identity of its own. ADR-0092 §7's residual (#631) is that identity is
+        re-established by similarity, so "absent from the later read" and "present
+        but rewritten" can look alike; a rule running its own matcher would give the
+        system two answers to that question and the disagreement would be silent.
+        Whatever ``_detect_conflicts`` and the policy decided is what absence means.
+
+        **No ``MemoryPolicy`` is reached and none is needed** (§5). There is no
+        proposal to rule on — nothing arrived — so there is nothing for a policy to
+        decide and no ``MemoryDecision`` to carry. That is why §3's conditions are
+        enumerated and conservative: the warrant is the reading's coverage, and it
+        has to be sufficient on its own, because no policy stands behind it.
+
+        Args:
+            source: §3's first condition — only a record this source attested is
+                reachable, which is why no assertion is. ``Provenance.attestation``
+                is present exactly when the band is ``ATTESTED`` (ADR-0092 §1), so
+                ``ASSERTED`` and ``DERIVED`` are **unreachable** here rather than
+                excluded by a check; #729's "ASSERTED is never auto-demotable" holds
+                by construction, the stronger form ADR-0080 §2 preferred.
+            coverage: §3's second and third conditions — a record is reachable only
+                if its own envelope window lies wholly within this interval.
+            results: What ingesting the reading's proposals returned. Read for two
+                facts and nothing else: which ids are live, and whether any proposal
+                stored nothing.
+
+        Returns:
+            How many windows were closed. Zero is an ordinary outcome and never a
+            failure: a reading that accounted for everything it covered closes
+            nothing, and so does one §4 suspends.
+
+        Raises:
+            MemoryStoreError: If a close would write an unrepresentable window — an
+                end at or before a set ``valid_from`` (ADR-0080 §3, via
+                :func:`_close_window`) — or as the store raises. Nothing is written
+                in that case: the batch is assembled whole before any of it lands, so
+                a reconciliation never half-applies (§5).
+        """
+        # §4's suspension clause, and it fails closed on purpose. A proposal that
+        # stored nothing — a `REJECT`, or an `ASK_USER` deferral whose question is
+        # now waiting for the user (ADR-0078) — leaves `record_id` None. The entry
+        # *is* in the source; the ingest simply stored nothing for it. Counting that
+        # as an absence would close the window of the very attested record the user
+        # is being asked about, on the strength of the question.
+        #
+        # Keyed on `record_id` being None rather than on an enumeration of rulings,
+        # which is not cosmetic: the field is documented as "Id of the record left
+        # live by the write, or None if nothing was stored", so a ruling added later
+        # lands on the correct side of this line without amending anything. An
+        # earlier draft of ADR-0110 enumerated instead and put `STORE_TEMPORARY` on
+        # the stored-nothing side, which is false (ADR-0108 §1).
+        #
+        # Deliberately coarse — one such proposal suspends absence for the whole
+        # reading — because the alternative is a per-proposal correspondence rule,
+        # which is a second matcher wearing a different hat.
+        if any(result.record_id is None for result in results):
+            return 0
+        present = {result.record_id for result in results}
+        # One instant for the whole reconciliation, determined before any write and
+        # shared by every close it performs — ADR-0080 §1's rule for one ingest,
+        # applied one act over (ADR-0110 §5).
+        now = self._now_utc()
+        closes = [
+            MemoryWrite(record=_close_window(record, now), mode=MemoryWriteMode.UPSERT)
+            for record in await self._absence_candidates(
+                source=source, coverage=coverage, present=present
+            )
+        ]
+        if not closes:
+            return 0
+        # One write set, never a loop of `add`s (§5). A partially applied
+        # reconciliation is refused for ADR-0045 §8's reason, one act over: a set of
+        # retirements that half-lands is a set of beliefs retired for a reading that
+        # was never fully accounted for.
+        await self._store.write_atomic(closes)
+        return len(closes)
+
+    async def _absence_candidates(
+        self,
+        *,
+        source: str,
+        coverage: ReadCoverage,
+        present: set[str | None],
+    ) -> list[MemoryRecord]:
+        """The live records ADR-0110 §3's four conditions make demotable.
+
+        **Called only with :attr:`_lock` held**, from :meth:`_close_absent`, so
+        the records it returns are still current when the batch built from them is
+        written — and, because that hold also spans the ingest, still current
+        relative to the reading's own account of what is present. Reading them
+        anywhere else would reintroduce exactly the stale snapshot §5a refuses.
+
+        The enumeration needs no new read surface: ``list_beliefs`` already lists
+        live beliefs filtered by band, in a specified total order, a page at a time,
+        honouring both read-time axes before the cut (ADR-0110 §6) — so a closed or
+        not-yet-open window and an expired record are gone before this sees them,
+        and "live" needs no second test here. The ``reported_by`` filter is the
+        consumer's, as §6 says it is.
+
+        **An interrupted or partial walk is safe by construction** (§6): each close
+        is justified by one record and one reading and by nothing else, so a
+        reconciliation that examines only part of the live set closes *fewer*
+        windows and never a different one. That offset paging "may skip or repeat a
+        record" over a mutating store costs nothing here for the same reason — and
+        cannot happen at all under the lock, since nothing else writes while this
+        runs. The worst an interrupted walk produces is a belief that stays live one
+        cycle longer, which the next reading closes.
+        """
+        candidates: list[MemoryRecord] = []
+        offset = 0
+        while True:
+            page = await self._store.list_beliefs(
+                bands=[BeliefBand.ATTESTED], limit=_ABSENCE_PAGE, offset=offset
+            )
+            for record in page:
+                attestation = record.provenance.attestation
+                if attestation is None or attestation.reported_by != source:
+                    continue  # §3 condition 1 — not a record this source reported.
+                if record.id in present:
+                    continue  # §3 condition 4 — the ingest left it live at its id.
+                if coverage.contains(record.validity):
+                    candidates.append(record)  # §3 conditions 2 and 3 — covered.
+            if len(page) < _ABSENCE_PAGE:
+                return candidates
+            offset += _ABSENCE_PAGE
 
     async def _ingest(self, observed: MemoryUpdateProposal) -> MemoryIngestResult:
         await self._require_resolvable_evidence(observed.proposed)

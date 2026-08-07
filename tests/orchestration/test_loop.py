@@ -68,6 +68,7 @@ if TYPE_CHECKING:
         MemoryIngestResult,
         MemoryRecord,
         MemoryWrite,
+        SourceReading,
     )
 
 _NOW = datetime(2026, 6, 3, 10, 0, tzinfo=UTC)
@@ -623,6 +624,11 @@ async def test_learn_propagates_a_writer_failure_without_writing() -> None:
 
         async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
             """Fail the way a writer whose policy cannot rule fails."""
+            msg = "fake: cannot rule on this"
+            raise AssistantError(msg)
+
+        async def ingest_reading(self, reading: SourceReading) -> Sequence[MemoryIngestResult]:
+            """Fail the same way, so the double refuses on both seams alike."""
             msg = "fake: cannot rule on this"
             raise AssistantError(msg)
 
