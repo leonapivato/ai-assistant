@@ -2724,6 +2724,30 @@ async def test_relevance_retrieval_asks_for_the_belief_kinds_and_never_episodes(
         assert MemoryKind.EPISODIC not in asked
 
 
+async def test_relevance_retrieval_reads_one_call_per_band_in_precedence_order() -> None:
+    """ADR-0072 §5's per-band composition, asserted at the loop's own seam.
+
+    This is the only place the *wiring* is visible. ``assemble_by_band`` has its own
+    suite and the stores have their conformance clause, but a ``_retrieve`` reverted
+    to one band-neutral call would leave both green while restoring the flood
+    failure the band filter exists to prevent. So the call shape is pinned here, and
+    the behaviour it buys is pinned end-to-end in ``test_loop.py``.
+
+    One call per band, each scoped to exactly one: a single call selecting all three
+    bands type-checks, reads as band-aware, and composes nothing.
+    """
+    memory = RecordingSearchStore()
+    harness = Harness(planner=NoStepPlanner(), memory=memory)
+
+    await harness.engine.converse("hello", timeout=PATIENT)
+
+    assert memory.bands == [
+        [BeliefBand.ASSERTED],
+        [BeliefBand.ATTESTED],
+        [BeliefBand.DERIVED],
+    ]
+
+
 async def test_a_resumption_is_captured_into_the_conversation_that_parked() -> None:
     """§3: recovered through the binding, never passed — and no conversation invented.
 
