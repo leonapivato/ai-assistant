@@ -319,8 +319,13 @@ behind the hub's API.
    leg, as retrieval latency and k-shortfall against a synthetically aged store.
    The instrument exists and is runnable on demand (#799, from #789); the
    measurements it produced are recorded in #799's report and #729's close-out,
-   not as a committed artifact, and the ruling on them is the operator's and is
-   not yet made. The "not noisier"
+   not as a committed artifact. Ruled met by the operator (2026-08-08, on
+   #729): latency's affine ~1.2 µs/record shape is acceptable at realistic
+   volumes, and the k-shortfall mechanism — real, but a threshold driven by
+   concentrated window-closure whose real-world incidence nobody has measured —
+   is deferred behind a named trigger rather than asserted either way: #824
+   arms the #457/#411 mitigation when leg 8's telemetry shows a real store
+   developing concentrated closure. The "not noisier"
    half is handed to leg 8 as an entry claim, because it needs
    the memory-precision measure leg 8 builds; a claim this leg has no instrument
    for is one it would assert rather than test.*
