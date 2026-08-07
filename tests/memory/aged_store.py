@@ -173,9 +173,12 @@ class ClusteredEmbedder:
             ValueError: If ``dimensions`` is below the floor or ``spread`` is
                 negative.
         """
-        if dimensions < _CENTROID_TERMS or spread < 0.0:
+        # `spread < 0.0` is false for both a NaN and an infinity, so the finite
+        # check is what actually refuses them; an infinite spread normalises to a
+        # vector of NaNs, which ranks against nothing and fails no comparison.
+        if dimensions < _CENTROID_TERMS or not math.isfinite(spread) or spread < 0.0:
             msg = (
-                f"dimensions must be >= {_CENTROID_TERMS} and spread >= 0, "
+                f"dimensions must be >= {_CENTROID_TERMS} and spread a finite value >= 0, "
                 f"got {dimensions} and {spread}"
             )
             raise ValueError(msg)
@@ -314,7 +317,12 @@ class AgedStoreSpec:
             seed: Passed through.
 
         Raises:
-            ValueError: If the requested combination leaves no live record, or if
+            ValueError: If ``total`` or ``crowding`` is below one — ``crowding=0``
+                otherwise reached an unwrapped ``ZeroDivisionError`` and a negative
+                one silently collapsed the store to a single topic, which is a
+                *different* density from the one asked for and would be reported
+                under the requested label. Also if the requested combination
+                leaves no live record, or if
                 the population it yields is not the one asked for. ``closed`` is
                 derived from ``live`` and the fraction, so a ``live`` clamped up to
                 1 would silently re-inflate ``total`` — a
@@ -323,6 +331,9 @@ class AgedStoreSpec:
                 report a sweep against. Refusing is the only honest answer,
                 because the caller's stated ``total`` cannot be met.
         """
+        if total < 1 or crowding < 1:
+            msg = f"total and crowding must both be >= 1, got {total} and {crowding}"
+            raise ValueError(msg)
         live = round(total * (1.0 - closed_fraction))
         if live < 1:
             msg = (
@@ -425,6 +436,39 @@ class Instants:
     written: datetime
     closed: datetime
     opened: datetime
+
+    def __post_init__(self) -> None:
+        """Refuse a timeline on which a record this fixture calls closed is still live.
+
+        The ordering is the fixture's whole premise, and getting it wrong fails
+        *silently*: with ``closed`` after ``now``, every record planted as
+        ``SUPERSEDE`` or ``ABSENCE`` is still live at the measurement instant, so
+        the population reports a window-closed proportion that consumes no KNN
+        candidates at all — the instrument would publish a shortfall rate against
+        a store that was never aged. Nothing downstream would notice: the census
+        counts what was *labelled*, and ``search`` would simply serve rows.
+
+        Only the ordering is checked here. A naive or non-UTC instant is caught
+        where it would matter — ``checked_clock`` guards the reading
+        ``SqliteMemoryStore`` takes, and ``UtcInstant`` guards every instant that
+        reaches a record — so re-checking it would be a third owner of one rule.
+
+        Raises:
+            ValueError: If the instants are not ordered ``opened < closed <= now``
+                with ``written <= now``.
+        """
+        if not self.opened < self.closed:
+            msg = f"opened must precede closed, got {self.opened} and {self.closed}"
+            raise ValueError(msg)
+        if not self.closed <= self.now:
+            msg = (
+                f"closed must not be after now ({self.closed} > {self.now}); a window closing "
+                f"in the future leaves every 'closed' record live at the measurement instant"
+            )
+            raise ValueError(msg)
+        if not self.written <= self.now:
+            msg = f"written must not be after now, got {self.written} and {self.now}"
+            raise ValueError(msg)
 
 
 class _LineWriter(Protocol):
