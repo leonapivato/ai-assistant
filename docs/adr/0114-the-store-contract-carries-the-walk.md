@@ -750,17 +750,35 @@ half of that disjunct.
 > directly** — the way every caller reaches it — rather than by constructing a
 > validated model around the argument first.
 
-> **Normative.** The suite exercises an invalid **position** over a walk that has
-> already been advanced, asserting no observable change in the form the cross-walk
-> case uses: keep the walk's next chunk, make the invalid call, require the
-> `ValueError`, and require the next chunk to be **exactly** the kept one. Two
-> shapes are covered — a `WalkPosition` built with `model_construct` whose token is
-> empty, whitespace-only or a lone surrogate, and a `position` that is not a
-> `WalkPosition` at all, `None` included.
+> **Normative.** Any `position` argument that did not come from a chunk read of
+> the named walk is refused with a `ValueError`, **however it was constructed and
+> whatever is wrong with it** — a bad token, a missing one, the wrong type, or no
+> position at all. An implementation may not reach a different exception class by
+> reading a field before it validates: `AttributeError`, `TypeError` and a bare
+> `KeyError` are all breaches of §6a, not variants of it.
 
-`model_construct` is used deliberately: it bypasses the validator exactly as a real
-caller's mistake would, where building the position through validation would test
-pydantic rather than the store. The no-change assertion takes the strong form for
+> **Normative.** The suite exercises that rule over a walk that has already been
+> advanced, asserting no observable change in the form the cross-walk case uses:
+> keep the walk's next chunk, make the invalid call, require the `ValueError`, and
+> require the next chunk to be **exactly** the kept one. It covers at least a
+> `WalkPosition` built with `model_construct` whose token is empty,
+> whitespace-only or a lone surrogate; one built with `model_construct` and **no
+> `token` at all**; and a `position` that is not a `WalkPosition`, `None` included.
+> The list is exemplary and the clause above is the obligation: a variant not named
+> here is still refused.
+
+**The rule is stated generally because the failure space is not enumerable and the
+enumeration was becoming the specification.** `model_construct` bypasses a model's
+validator entirely — that is its purpose — so it can produce a position with a bad
+token, with no token, or with fields no version of the type ever had, and each of
+those reaches a different line of a careless implementation: reading
+`position.token` before validating raises `AttributeError`, and an
+`isinstance`-then-read guard passes every case whose token merely has the wrong
+*value*. Naming the shapes one at a time invites an implementation that handles
+exactly the named ones, which is why the obligation above is the general rule and
+the list below it is exemplary. The `model_construct` cases are used deliberately:
+they bypass the validator exactly as a real caller's mistake would, where building
+the position through validation would test pydantic rather than the store. The no-change assertion takes the strong form for
 the reason it does in the cross-walk case — "the recorded position is unchanged" is
 satisfied by an implementation that reads, alters and restores it, while an
 identical next chunk is not.
