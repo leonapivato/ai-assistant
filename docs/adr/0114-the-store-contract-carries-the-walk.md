@@ -492,21 +492,41 @@ position, not content, and a chunk count is a number; both are Tier 2" — and t
 clause exists because `export` is ADR-0007's data-rights surface and a lane
 extending it would have no reason to know that.
 
-### 6. The chunk bound is the one `list_beliefs` already carries
+### 6. The chunk bound is `scheduler_chunk_size`'s, and zero is refused
 
-> **Normative.** The chunk read refuses a `limit` outside `0 <= limit < 2**63`,
-> raising rather than clamping, and a `limit` of `0` returns an empty chunk. The
-> refusal is the one `MemoryStore.list_beliefs` already states for its own `limit`
-> and `offset`, and no implementation substitutes a different bound.
+> **Normative.** The chunk read refuses a `limit` outside `1 <= limit < 2**63`,
+> raising rather than clamping. Zero is refused with the rest, and no
+> implementation substitutes a different bound.
 
-The reason is `list_beliefs`' own and is quoted rather than re-derived: "Python's
-`int` is unbounded and SQLite's parameter binding is not, so an over-wide value
-raises `OverflowError` out of the driver while an in-memory store answers with an
-empty page". Two reads on one Protocol disagreeing about what an over-wide limit
-does is a difference nobody would look for. ADR-0111 §4 pins `scheduler_chunk_size`
-to `[1, 2**63)` and refuses a bad value at load, so a zero never reaches this read
-from configuration; the read still defines one, because the setting is not the only
-caller.
+The over-wide end is `list_beliefs`' own reason, quoted rather than re-derived:
+"Python's `int` is unbounded and SQLite's parameter binding is not, so an over-wide
+value raises `OverflowError` out of the driver while an in-memory store answers with
+an empty page". Two reads on one Protocol disagreeing about what an over-wide limit
+does is a difference nobody would look for, and this one does not.
+
+**The zero end deliberately does *not* follow `list_beliefs`, and an earlier draft
+copied it without noticing what it collided with.** That read accepts `0` and
+answers with an empty page, which is harmless there because a page carries no
+exhaustion semantics. Here it is not harmless and not merely useless: a chunk read
+that examines nothing has no position to carry, and §1 makes an absent position mean
+**nothing remains to examine**. So `limit=0` over a store full of unwalked records
+would answer with the exact shape that tells a caller the walk is finished, and a
+job configured to a zero chunk would report a completed walk having read nothing at
+all. Adversarial review found it on round 10.
+
+**Refusing zero closes that by construction rather than by adding a signal**, which
+is the cheaper of the two repairs and the one that leaves the contract smaller: the
+alternative — an explicit exhaustion flag beside the position — adds a field to
+`RecordChunk` for a case no caller wants, and leaves the ambiguous call
+constructible. Zero is not a bounded request for work; it is a request for no work,
+and it can make no progress by definition.
+
+**The bound now matches the setting that feeds it exactly.** ADR-0111 §4 pins
+`scheduler_chunk_size` to an `int` in `[1, 2**63)` and refuses a bad value at load,
+so a configured chunk size is always an admissible `limit` here and the two figures
+cannot disagree — which is a stronger alignment than the one with `list_beliefs`
+that the earlier draft reached for, because the setting is what actually calls this
+read.
 
 ### 7. Serialisation: the cursor needs none, and the job may still owe one
 
@@ -588,8 +608,10 @@ half of that disjunct.
 > **Normative.** The suite asserts the refusals §5 and §6 state, since a clause
 > nothing exercises is an obligation nobody meets: **both** operations refuse a
 > walk name that is empty, whitespace-only, or a lone surrogate, and the chunk read
-> refuses a negative `limit` and a `limit` of `2**63` while returning an empty
-> chunk for `0`. Every one of these refusals is asserted to be the same refusal on
+> refuses a `limit` of `-1`, of `0`, and of `2**63` — the zero case run against a
+> **non-empty, unexhausted** walk, where a wrong implementation answers with the
+> positionless chunk that means exhaustion. Every one of these refusals is asserted
+> to be the same refusal on
 > every implementation, and each case is exercised by **calling the operation
 > directly** — the way every caller reaches it — rather than by constructing a
 > validated model around the argument first.
