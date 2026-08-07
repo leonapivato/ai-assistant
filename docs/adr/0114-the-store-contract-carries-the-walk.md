@@ -293,11 +293,14 @@ scale".
 > position is the chunk read that returned it, and the only admissible use is
 > passing it to the cursor advance for the walk it came from.
 
-> **Normative.** A position is **issued for a walk and is valid only in it**. The
-> cursor advance refuses a position that the named walk did not issue, and the
-> refusal is a defined one on every backend rather than a silent no-op. An
-> implementation satisfies this statelessly by making the issuing walk recoverable
-> from the token it hands out.
+> **Normative.** A position is **bound to the walk it was issued for**. The cursor
+> advance refuses a position bound to a **different** walk, as a defined refusal on
+> every backend rather than a silent no-op. An implementation satisfies this
+> statelessly by making the bound walk recoverable from the token it hands out.
+
+> **Normative.** The clause above is the whole of what the store detects. A
+> position that names the right walk but was never issued by it is a breach of §2's
+> first clause by the caller, and no implementation is obliged to detect one.
 
 > **Normative.** `core/types.py` gains two frozen models: a `WalkPosition`
 > carrying one opaque token typed `NonBlankEncodableText`, and a `RecordChunk`
@@ -327,13 +330,20 @@ here the store issued the position itself and holds the walk name in the same ca
 so refusing the mismatch costs it nothing. Where a check is available, an obligation
 is the wrong instrument. Adversarial review found it on round 12.
 
-**What the walk binding does *not* do is authenticate issuance, and that is
-refused rather than overlooked.** Adversarial review proposed on round 13 that a
-token be unforgeable as well as walk-identifying — that `advance_walk("B",
-WalkPosition("B:50"))` must be refused unless the store can prove it issued that
-token — and the direction is declined for three reasons, recorded here because a
-refused direction that lives only in a pull request is a judgement a later reader
-cannot check.
+**What the walk binding does *not* do is authenticate issuance, and the clause is
+written to what the mechanism delivers rather than past it.** An earlier draft said
+the advance refuses a position "the named walk did not issue", which requires
+distinguishing an unissued token from an issued one and so promised precisely the
+mechanism the paragraphs below decline — a clause and its own justification pulling
+against each other, which adversarial review caught on round 14 after proposing the
+mechanism on round 13. The rule is therefore stated as a **mismatch** refusal,
+which walk-recoverable tokens deliver exactly, and the fabricated same-walk token
+stays where §2's first clause already put it: a caller that synthesises a position
+has broken the contract, and the store is not obliged to notice.
+
+That mechanism — an unforgeable token — is declined for three reasons, recorded
+here because a refused direction that lives only in a pull request is a judgement a
+later reader cannot check.
 
 - **It defends a boundary that does not exist.** The caller is an `orchestration`
   stage in the same process, holding the same `MemoryStore` handle, which already
