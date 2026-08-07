@@ -23,8 +23,10 @@ from typing import TYPE_CHECKING, assert_never
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
+    FoldOntoCitedRecordError,
     MemoryStoreConflictError,
     MemoryStoreError,
+    SelfConsumingWriteError,
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.types import (
@@ -518,20 +520,37 @@ def _refuse_self_consuming_write(
             ruling (ADR-0081 §6).
 
     Raises:
-        MemoryStoreError: If the ruling would install the proposal at an id the
-            proposal cites. Nothing is written, no window is closed, and no
-            decision is returned.
+        FoldOntoCitedRecordError: If a ``REINFORCE`` would fold onto a record the
+            proposal cites — the destination the *policy* chose (ADR-0116 §2).
+        SelfConsumingWriteError: If an ``ACCEPT`` or ``STORE_TEMPORARY`` would
+            install at ``proposed.id`` and the proposal cites it — the destination
+            the *producer* chose. Both are ``MemoryStoreError``; nothing is
+            written, no window is closed, and no decision is returned.
     """
     proposed = proposal.proposed
     destination = _installed_at(decision, proposed, resolved=resolved)
     if destination is not None and destination in proposed.provenance.evidence:
+        # Which arm, by **who chose the destination** (ADR-0116 §2). `ACCEPT` and
+        # `STORE_TEMPORARY` install at `proposed.id`, minted and cited by the
+        # producer, so nothing outside it chose either value and the refusal is the
+        # producer bug ADR-0081 §Context describes. `REINFORCE` installs at the
+        # ruling's `target_id`, which the *policy* picked by conflict detection over
+        # the proposal's own content — unforeseeable to a producer generalising over
+        # the records it cites, and the only arm a caller may continue past (§4).
+        # The ruling is already in hand here, so the discrimination costs no extra
+        # input and no store read, which is the property ADR-0081 §1 protects.
+        refusal = (
+            FoldOntoCitedRecordError
+            if decision.kind is MemoryDecisionKind.REINFORCE
+            else SelfConsumingWriteError
+        )
         msg = (
             f"refusing to write {proposed.id!r}: a {decision.kind} ruling would install it at "
             f"{destination!r}, an id its own provenance cites as evidence — the belief would "
             f"stand as its own warrant, and no citation a write consumes can be presented "
             f"honestly (ADR-0081 §1)"
         )
-        raise MemoryStoreError(msg)
+        raise refusal(msg)
 
 
 def _checked_id(id_factory: Callable[[], str], *, owner: str) -> str:

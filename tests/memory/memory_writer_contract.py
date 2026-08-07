@@ -135,8 +135,10 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
+    FoldOntoCitedRecordError,
     MemoryStoreConflictError,
     MemoryStoreError,
+    SelfConsumingWriteError,
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.protocols import MemoryWriter
@@ -2152,11 +2154,28 @@ class MemoryWriterContract:
           another system rather than from an ``id_factory``. Parametrising over the
           enum also fails closed if a fifth source is added.
 
-        The refusal is a plain ``MemoryStoreError`` and specifically **not**
-        ``UnresolvedEvidenceError`` (ADR-0081 §3): here the evidence resolves
-        perfectly well, and what is wrong is that the write would consume it. The
-        assertion is explicit because the subclass **is** a ``MemoryStoreError``, so
-        ``pytest.raises`` on the base class alone would certify nothing.
+        The refusal is specifically **not** ``UnresolvedEvidenceError`` (ADR-0081
+        §3): here the evidence resolves perfectly well, and what is wrong is that
+        the write would consume it. The assertion is explicit because that subclass
+        **is** a ``MemoryStoreError``, so ``pytest.raises`` on the base class alone
+        would certify nothing.
+
+        **Which class each ruling raises is asserted by exact type** (ADR-0116 §2,
+        §8). The two arms differ in *who chose the destination*: ``ACCEPT`` and
+        ``STORE_TEMPORARY`` install at ``proposed.id``, minted and cited by the
+        producer, and raise ``SelfConsumingWriteError``; ``REINFORCE`` installs at
+        the policy's ``target_id`` and raises ``FoldOntoCitedRecordError``. Only the
+        second may be continued past, so an implementation reporting one arm as the
+        other would have a caller either stall on a normal outcome or carry on past
+        a producer bug.
+
+        ``type(...) is`` rather than ``isinstance``, which §8 names as the check
+        that certifies nothing here: the subclass satisfies ``isinstance`` against
+        the base, so an implementation raising ``FoldOntoCitedRecordError`` for
+        every arm would pass an ``isinstance`` assertion on all three rulings.
+        ``STORE_TEMPORARY`` is in the parametrisation for the same reason it is
+        named in §8 — ADR-0081 §1 groups it with ``ACCEPT`` in one sentence, so it
+        is the ruling a suite silently drops.
         """
         store = FakeMemoryStore(now=_long_ago)
         # INFERRED, so no fold refusal can fire ahead of this one for any incoming
@@ -2170,6 +2189,16 @@ class MemoryWriterContract:
             await writer.ingest(_installing_proposal(kind, source, _SELF_CITED))
 
         assert not isinstance(caught.value, UnresolvedEvidenceError)
+        expected = (
+            FoldOntoCitedRecordError
+            if kind is MemoryDecisionKind.REINFORCE
+            else SelfConsumingWriteError
+        )
+        assert type(caught.value) is expected, (
+            "the arm is decided by who chose the destination, and reporting one as "
+            "the other either stalls a caller on a normal outcome or carries it on "
+            "past a producer bug (ADR-0116 §2)"
+        )
         # Nothing written: not the proposal, and not a mutated version of the
         # record it cites.
         assert await store.export() == before
@@ -2874,6 +2903,42 @@ class MemoryWriterContract:
         assert [result.record_id for result in results] == [
             proposal.proposed.id for proposal in proposals
         ]
+
+    @pytest.mark.parametrize("kind", _INSTALLING_KINDS, ids=str)
+    async def test_the_self_consuming_refusal_reaches_the_reading_member_too(
+        self, make_writer: WriterFactory, kind: MemoryDecisionKind
+    ) -> None:
+        """ADR-0116 §2's fourth clause: the split binds **every** installing member.
+
+        ``ingest_reading`` installs proposals exactly as ``ingest`` does, so
+        ADR-0081 §1 bound it from the moment ADR-0115 decided it, and ADR-0116 §2
+        fixes which class that binding raises. A clause naming ``ingest`` alone
+        would have left the newer member raising a bare ``MemoryStoreError`` for the
+        same refusal — the divergence the split exists to close, arriving through a
+        member rather than an implementation.
+
+        Asserted here rather than assumed from the shared helper: both shipped
+        writers route the two members through one refusal site today, so this
+        passes for free — and that is exactly why it is worth pinning. A later
+        implementation that reached the reading path by a second route would satisfy
+        every ``ingest`` case above while reporting the wrong class here.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        await store.add(_preference(_SELF_CITED, source=MemorySource.INFERRED))
+        before = await store.export()
+        writer = make_writer(store, _RulesExactly(kind))
+        proposal = _installing_proposal(kind, MemorySource.OBSERVED, _SELF_CITED)
+
+        with pytest.raises(SelfConsumingWriteError) as caught:
+            await writer.ingest_reading(_reading(proposals=(proposal,), coverage=None))
+
+        expected = (
+            FoldOntoCitedRecordError
+            if kind is MemoryDecisionKind.REINFORCE
+            else SelfConsumingWriteError
+        )
+        assert type(caught.value) is expected
+        assert await store.export() == before
 
     async def test_a_reading_declaring_no_coverage_ingests_and_closes_nothing(
         self, make_writer: WriterFactory
