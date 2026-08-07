@@ -1,7 +1,41 @@
 # 110. What closes a validity window without the user: a covered reading's absence, and never a clock
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0115 (§10's ruling that the mechanism is buildable on the `core` surface that exists, and its clause that `MemoryWriter` is untouched and no new member is authorised)
 - Date: 2026-08-06
+- **Partially superseded: 2026-08-07 by
+  [ADR-0115](0115-the-writer-contract-carries-the-reading.md), in the scope the
+  `Status` line names — the reconciliation §5a requires cannot be reached through a
+  per-proposal seam, so `MemoryWriter` gains one member and golden rule 5 is
+  triggered for the lane that builds it.** §10 rules that the mechanism "is
+  buildable on the `core` surface that exists plus §10's one optional field, and it
+  authorises no other Protocol change", and that "**`MemoryWriter` is untouched, and
+  no new member is authorised here.**" The implementation lane found otherwise, in
+  three review rounds recorded on #803: §5a's prerequisite requires the ingest, the
+  selection and the closes to be one serialised sequence rather than three
+  separately serialised steps, which requires the whole reading to reach the writer
+  as one call, and no existing member carries one — while reaching the concrete
+  writer around the contract is what golden rule 1 forbids. **This is §10's own
+  prescription firing rather than being overridden**: its last sentence routes a
+  lane that "concludes it needs a new `MemoryWriter` or `MemoryStore` member" to
+  "its own ratified ADR for it under golden rule 5", and ADR-0115 is that ADR.
+
+  **Nothing else moves, and §5a moves least of all.** Every other ruling here stays
+  accepted and ADR-0115 is built on them — §1's spine, §2's coverage and its
+  invariant, §3's four conditions and containment rule, §4's presence and
+  suspension, §5's retirement obligations, §5a's serialisation prerequisite (which
+  ADR-0115 does not relax by one word, but rather supplies the seam that makes it
+  satisfiable), §5b's withholding of the compare-and-swap and its token, §§6-9, and
+  §12's adjudication of #112. **§10's `core/types.py` half also stays accepted**:
+  the one optional field on `SourceReading` is ratified, landed as #803, and is the
+  value ADR-0115 §1's member carries. What is replaced is the buildability ruling
+  and the no-new-member clause, and nothing besides. ADR-0115 §8 applies ADR-0082
+  §1's and ADR-0070 §1's tests separately and states why the scope is drawn here.
+
+  **Recorded now rather than at ADR-0115's ratification**, per ADR-0082 §7: ADR-0070
+  §1's condition is "that the superseding ADR **exists**, not that it is ratified —
+  the hazard §1 names is a `Status` line pointing at nothing, and an atomic pair
+  makes that unreachable". ADR-0115 lands in this same change, so the pair is
+  atomic and the reference resolves.
 - **Note (2026-08-06): ratified.** `Proposed` → `Accepted`, in the separate lane
   #633 requires, after **both** required reviews came back green on the content
   this ADR merged with: adversarial **APPROVE with no findings** and architecture
