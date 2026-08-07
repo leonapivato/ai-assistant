@@ -266,6 +266,71 @@ async def test_respond_does_not_assemble_context_for_a_blank_utterance() -> None
     assert planner.calls == []
 
 
+async def test_a_derived_flood_cannot_displace_an_assertion_from_the_prompt() -> None:
+    """The acceptance criterion for per-band retrieval, end to end (ADR-0072 §5).
+
+    This is the failure the whole band-scoped read exists to prevent, driven
+    through the loop rather than through the assembler: "a flood of low-confidence
+    inferences can displace an assertion *below the cut*, where no amount of
+    downstream ordering recovers it".
+
+    **It is written end-to-end deliberately, because the unit tests do not reach
+    it.** ``assemble_by_band`` has its own suite and the store has its conformance
+    clause, but nothing else pins ``LoopEngine._retrieve`` to *use* them — reverting
+    it to a single band-neutral ``search`` leaves every other test in this change
+    green while restoring the exact bug. That gap is what this closes.
+
+    The fixture makes the flood win under a band-neutral read on the fake's own
+    ranking: every record scores 1.0 (each contains the one query term), the sort is
+    stable, and the forty inferences are inserted first, so a band-neutral top-5
+    is forty-deep in inferences before it reaches the assertion. Composing per band
+    puts the assertion first because it is in the first band read, not because it
+    outscored anything — which is precisely ADR-0113 §4's distinction between
+    eligibility and ordering.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    for index in range(40):
+        await memory.add(
+            SemanticMemory(
+                id=f"guess-{index}",
+                content="dana billing",
+                fact="dana billing",
+                provenance=Provenance(
+                    source=MemorySource.INFERRED, confidence=0.6, last_updated=_NOW
+                ),
+            )
+        )
+    await memory.add(
+        SemanticMemory(
+            id="told",
+            content="dana billing owner",
+            fact="dana billing owner",
+            provenance=Provenance(
+                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW
+            ),
+        )
+    )
+    planner = FakePlanner(now=_clock)
+    loop = LearningLoop(
+        context=FakeContextProvider(),
+        memory=memory,
+        writes=_writes(FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=_clock)),
+        planner=planner,
+        feedback=FakeFeedbackProcessor(),
+        retrieval_limit=5,
+        now=_clock,
+    )
+
+    result = await loop.respond("dana")
+
+    ids = [record.id for record in result.memories]
+    assert ids[0] == "told", (
+        "the user's own assertion must reach the prompt first; a band-neutral "
+        "retrieval leaves it below the cut (ADR-0072 §5, ADR-0113 §2)"
+    )
+    assert len(ids) == 5, "the rest of the budget still goes to the derived band"
+
+
 async def test_respond_retrieves_at_most_the_configured_limit() -> None:
     memory = FakeMemoryStore(now=_clock)
     for index in range(4):
