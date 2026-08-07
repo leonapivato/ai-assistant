@@ -667,11 +667,15 @@ half of that disjunct.
 > when it examined nothing; and that `clear` leaves no walk resumable.
 
 > **Normative.** The suite asserts the cross-walk refusal over a walk that
-> **already holds a position**: walk `A` forward, advance `B` to a position of its
-> own, present `A`'s position to `B`'s advance, and require both the `ValueError`
-> and that `B`'s next chunk begins strictly after `B`'s prior position. Run against
-> a fresh `B` the case cannot fail — an implementation that clears or overwrites
-> `B`'s cursor before raising passes it, because `B` had nothing to lose.
+> **already holds a position**, and asserts it as *no observable change at all*:
+> walk `A` forward, advance `B` to a position of its own, read `B`'s next chunk and
+> keep it, then present `A`'s position to `B`'s advance and require both the
+> `ValueError` and that `B`'s next chunk is **exactly** the chunk kept before the
+> call. Nothing weaker suffices, and the two weaker forms each pass a real defect:
+> run against a fresh `B` the case cannot fail at all, because `B` has no position
+> to lose; and asserting only that `B` resumes *after* its prior position passes an
+> implementation that writes `A`'s position and then raises, since a cursor dragged
+> forward from 20 to 50 is still strictly after 20 while positions 21–50 are gone.
 
 > **Normative.** The suite additionally asserts the two dispositions a wrong
 > implementation passes every other clause on: that a walk whose recorded position
