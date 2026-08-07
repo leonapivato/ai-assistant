@@ -208,6 +208,14 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       it. ADR-0111 §11 declines the default for a job it does not land; the lane
       that landed the job took it.
 
+      **Arming it owes ADR-0111 §4's in-chunk deadline check, which is open**
+      (#820): a chunk's writes reach the ``Embedder`` through
+      ``MemoryStore.write_atomic``, and that runs unbounded in a worker thread, so
+      a hung backend holds this serial loop past any run budget. §4 makes such a
+      deadline "a precondition of being chunked at all". The exposure is shared
+      with the two jobs that already write, and this is simply the first *chunked*
+      job, where §4's clause bites.
+
       **It is the job ADR-0083 §7's revisit condition named** — "revisit when a
       job's typical runtime approaches its interval, which is what consolidation
       (leg 7) is likely to do first" — and the answer is ADR-0111 §4's bounded run

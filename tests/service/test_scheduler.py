@@ -857,3 +857,62 @@ async def test_a_job_calling_a_closing_engine_gets_the_shared_message(tmp_path: 
 
     assert str(raised.value) == ENGINE_SHUTTING_DOWN
     assert isinstance(engine, Engine)
+
+
+async def test_consolidation_is_absent_by_default_and_armed_by_its_interval(
+    tmp_path: Path,
+) -> None:
+    """Leg 7's job, over a real engine, both ways round (ADR-0106, ADR-0111).
+
+    Asserted by **identity** against the façade method, not by name: `jobs_for`
+    omitting the row, binding the wrong interval, or binding ``engine.observe``
+    would leave every stage-level consolidation test green while an operator who
+    set ``consolidation_interval`` got no consolidation work, or the wrong work.
+    That is the same gap this module already closes for the retention sweep.
+
+    **Disabled by default** is the claim on the other side, and it is the job's
+    third kind of disabled in one table: not the calendar reader's, which is only
+    about consent, and not observation's, which was about a cursor that did not
+    exist — this job has its cursor (ADR-0114) and needs no grant. What it spends
+    is a model call per chunk, unattended, and every tainted proposal becomes a
+    question a user must answer (ADR-0106 §6).
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        default = {job.name for job in jobs_for(engine, Settings())}
+        armed = {
+            job.name: job
+            for job in jobs_for(engine, Settings(consolidation_interval=timedelta(hours=6)))
+        }
+
+        assert "consolidation" not in default
+        assert armed["consolidation"].interval == timedelta(hours=6)
+        assert armed["consolidation"].run == engine.consolidate
+    finally:
+        await engine.aclose()
+
+
+async def test_the_armed_consolidation_job_runs_against_an_empty_store(
+    tmp_path: Path,
+) -> None:
+    """The composition wiring, exercised rather than assumed.
+
+    ``Engine.consolidate`` refuses when no stage is wired (ADR-0022 §4a's shape),
+    so a composition root that failed to build one would raise here rather than
+    report an empty success. An empty store needs no model call — a chunk with no
+    records is a range that held nothing eligible — so this stays offline and
+    deterministic while still crossing every seam the job actually uses.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        job = {
+            job.name: job
+            for job in jobs_for(engine, Settings(consolidation_interval=timedelta(hours=6)))
+        }["consolidation"]
+
+        report = await job.run()
+
+        assert report.exhausted is True  # type: ignore[attr-defined] # the job's own report
+        assert report.examined == 0  # type: ignore[attr-defined] # as above
+    finally:
+        await engine.aclose()
