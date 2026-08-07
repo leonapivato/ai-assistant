@@ -319,7 +319,7 @@ behind the hub's API.
    leg, as retrieval latency and k-shortfall against a synthetically aged store.
    The instrument exists and is runnable on demand (#799, from #789); the
    measurements it produced are recorded in #799's report and #729's close-out,
-   not as a committed artifact. Ruled met by the operator (2026-08-08, on
+   not as a committed artifact. Ruled met by the operator (2026-08-07, on
    #729): latency's affine ~1.2 µs/record shape is acceptable at realistic
    volumes, and the k-shortfall mechanism — real, but a threshold driven by
    concentrated window-closure whose real-world incidence nobody has measured —
