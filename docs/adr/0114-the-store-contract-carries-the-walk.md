@@ -124,10 +124,16 @@ async def advance_walk(self, walk: str, *, position: WalkPosition) -> None: ...
 > consecutive reads with no intervening advance return the same records.
 
 > **Normative.** The order a walk reads is keyed on a value the store issues once
-> per stored record, strictly increasing over the life of the store, and **never
-> reissued** — not after the record holding it is deleted, purged, retired or
-> superseded, and not after the store is emptied of every record above it. An
-> implementation whose key can be reissued does not satisfy this contract.
+> per stored record. Every key a store issues is **greater than every key it has
+> already issued**, and no key is reissued after the record holding it is deleted,
+> purged, retired or superseded, or after the store is emptied. An implementation
+> whose key can be reissued does not satisfy this contract.
+
+> **Normative.** The guarantee above runs from the moment a store begins issuing
+> keys under this contract, and the first key it issues then is **greater than
+> every key present in the store at that moment**. Keys a store issued before it
+> carried a walk surface are outside the guarantee, and an implementation is not
+> obliged to know what they were.
 
 **A key that is merely unique is not enough, and SQLite's default is exactly that
 key.** `records` in `SqliteMemoryStore` declares `rowid INTEGER PRIMARY KEY`
@@ -145,12 +151,34 @@ adversarial review found it on round 1.
 The clause above states the property rather than the DDL, because the property is
 what a second implementation has to satisfy and SQLite's `AUTOINCREMENT` is only
 the mechanism that is to hand here — it keeps a high-water mark in `sqlite_sequence`
-and never reissues, which is the clause exactly. Two constraints bound the lane
+and never reissues, which is the clause exactly. One constraint bounds the lane
 that takes it: existing rows keep their current values, because `vec_records` joins
 `records` by `rowid` with no foreign key and `Reembedder` carries each original
-forward explicitly; and the high-water mark is seeded above the largest value the
-store has ever held rather than above the largest it holds now, or the first insert
-after a migration reintroduces the defect the migration was for.
+forward explicitly. Seeding the high-water mark is then the ordinary thing —
+`max(rowid)` as it stands, which is what adopting `AUTOINCREMENT` over an existing
+table does anyway.
+
+**The second clause is where an earlier draft asked for something no store can
+supply, and the narrower rule is not a concession — it is the right rule.** That
+draft required the mark to be seeded above the largest value the store had **ever**
+held. A legacy database holding only rowid `1` is indistinguishable from one that
+held `2` and deleted it: neither `records` nor `meta` retains the deleted maximum,
+and there is no `sqlite_sequence` to consult, so the only ways to obey were to guess
+or to seed at SQLite's ceiling and refuse every future insert. Adversarial review
+found it on round 2.
+
+**Pre-contract history cannot hurt a cursor, and that is why excluding it is
+sound rather than merely necessary.** No walk position exists before the walk
+surface does — this ADR is the contract that creates it — so there is no recorded
+cursor naming a pre-adoption key. After adoption every issued key exceeds every key
+then present, and thereafter every issued key exceeds every issued key, so a new
+record's position is always **above the highest key ever issued** and therefore
+above any position a walk can have recorded. A store that reissues a number some
+long-deleted record once held is reissuing it into a range no cursor has ever named,
+which is why the guarantee is about the keys a store issues under this contract and
+not about its archaeology. `clear` is safe twice over on the same reasoning: the
+high-water mark survives it in `sqlite_sequence`, and §4's clause discards the walk
+positions along with the records regardless.
 
 **ADR-0104 §2 is not falsified by this and its cursor is not at risk.** That
 migration walks bare `rowid` too, and it is safe for a reason a recurring walk
@@ -390,6 +418,13 @@ half of that disjunct.
 > the record holding the highest position, add a new record, and assert the walk
 > reaches it. The case runs for `delete`, and for a `purge_expired` that reclaims
 > the highest-positioned record.
+
+> **Normative.** The lane migrating an existing store ships a test over a store
+> **populated before the walk surface existed** and carrying a gap at its top — its
+> highest-positioned record deleted before the migration ran — asserting that the
+> first record added afterwards is reached by a walk that has already run to
+> exhaustion. A test over a store created fresh under the new schema cannot fail on
+> this and does not satisfy the clause.
 
 > **Normative.** The suite asserts the refusals §5 and §6 state, since a clause
 > nothing exercises is an obligation nobody meets: a blank walk name is refused by
