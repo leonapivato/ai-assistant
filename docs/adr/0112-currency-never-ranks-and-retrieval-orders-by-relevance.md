@@ -10,6 +10,15 @@
   "the ratifying edit records that review's outcome, it does not replace it" —
   and it is taken from that comment rather than from a report.
 
+  **This note's date is UTC, as is every timestamp it cites**, and the sequence is
+  stated because a local-time reader would otherwise have to reconstruct it: #793
+  merged at `2026-08-07T00:44:46Z` and this flip follows it on the same UTC day,
+  minutes later. A `git log` rendered in this clone's `-0400` offset shows the
+  ratifying commit one calendar day earlier; that is a display frame, not a
+  different instant, and it is the same offset under which the `Date` line above
+  reads `2026-08-06` for an ADR whose PR merged after midnight UTC. That line is
+  this ADR's authoring date and the flip does not touch it.
+
   **One lens, and the header bullet below is why.** The "Decides no `core`
   surface" bullet states this ADR's required set as adversarial alone, reading
   `CONTRIBUTING.md` → "Stop when the required reviews are green": this ADR
