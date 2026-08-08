@@ -464,15 +464,20 @@ class CalendarReader:
         reader cannot read loses absence-demotion for as long as that entry is in
         the window.
 
-        **A degenerate saturated interval declares none too**, and no coverage is
-        the only available answer rather than a choice. ``ReadCoverage`` refuses a
-        pair whose end is at or before its start, for its own good reason — such a
-        coverage exhausted no instant — and the pair can degenerate here without any
-        misconfiguration: a clock at the representable maximum saturates both edges
-        onto it. Constructing one anyway would raise, and §8 would then report a
-        source fault against a source that parsed perfectly, which is the outcome
-        ADR-0093 §7b's saturation rule exists to prevent. Declaring no coverage
-        loses only a demotion the read could not have warranted anyway.
+        **A degenerate saturated interval declares none too, and the guard is belt
+        and braces rather than a live branch.** ``ReadCoverage`` refuses a pair
+        whose end is at or before its start, for its own good reason — such a
+        coverage exhausted no instant — and both edges collapse onto one instant
+        only for a ``read_at`` at the representable maximum with a zero
+        ``window_past``, which :func:`~ai_assistant.core.clock.checked_clock`
+        makes unreachable by refusing any reading outside the localizable range.
+        It is **read rather than asserted** for the reason
+        ``_refuse_unconformable`` keeps its own unreachable check: the
+        unreachability is another module's invariant, not this one's, and a
+        ``ValueError`` escaping this reader on a source that parsed perfectly is
+        precisely the outcome §8 and ADR-0093 §7b's saturation rule exist to
+        prevent. Declaring no coverage costs only a demotion such a read could not
+        have warranted.
 
         Args:
             window_start: The window's inclusive lower edge, already saturated.
