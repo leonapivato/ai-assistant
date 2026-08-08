@@ -903,13 +903,17 @@ type FaultClassName = Annotated[EncodableText, AfterValidator(_fault_class_name)
 TRACE_RECORD_SET_CAP: Final = 256
 
 
-def _frozen_mapping[K, V](value: Mapping[K, V]) -> Mapping[K, V]:
+def _frozen_mapping[K, V](value: Mapping[K, V]) -> FrozenMapping[K, V]:
     """Detach and freeze — the model owns a copy no caller can reach.
 
     ``frozen=True`` refuses ``trace.metrics = ...`` and not
     ``trace.metrics["k"] = ...``; ADR-0018 §3's rule is about the second.
+
+    ``FrozenMapping`` is ``FrozenDict``'s carrier, generic in its key and value:
+    immutable, hashable, and **copyable** — pairs in a tuple, no reachable
+    ``dict``, and a ``__reduce__`` so ``model_copy(deep=True)`` works.
     """
-    return MappingProxyType(dict(value))
+    return FrozenMapping(value)
 
 
 def _finite(value: int | float | bool) -> int | float | bool:
@@ -1026,6 +1030,28 @@ exposes as an immutable view, and the metric *value* type carries its own finite
 check — which makes §3's finiteness clause a property of the type instead of a
 promise about emitters. This is ADR-0018 §3's nested-state rule applied to a new
 family, in the shape the corpus already uses for `FrozenJson`.
+
+**`MappingProxyType` is refused, by the corpus and by name.** It is the obvious
+read-only wrapper and `FrozenDict`'s own docstring says why it is not used: it
+"can be neither pickled nor deep-copied, which would make any model holding one
+fail `model_copy(deep=True)` — too sharp an edge for a type this widely shared".
+A trace holding one would fail exactly the deep copy §13b's detached-snapshot
+obligation is built on, so the carrier here is `FrozenDict`'s — pairs in a tuple,
+no reachable `dict`, attribute assignment refused, and a `__reduce__` that makes
+`deepcopy` work — generic in its key and value type rather than fixed to
+`str`/`FrozenJson`.
+
+> **Normative.** The mapping carrier is immutable, hashable and **copyable**, in
+> `FrozenDict`'s form and for the reason `FrozenDict` records. `MappingProxyType`
+> is not admissible.
+
+Whether the lane reaches that by making `FrozenDict` itself generic or by adding
+a sibling beside it is **the lane's call**, because the two differ in blast radius
+rather than in this family's behaviour: generalising `FrozenDict` turns every
+existing bare annotation of it into a `disallow_any_generics` error under `mypy`
+strict, which is a separate change touching call sites this ADR has nothing to say
+about. **#849** carries the consolidation question so the answer is deliberate
+rather than whichever was cheaper on the day.
 
 **And the defaults are validated, which is not the default.** Pydantic does not
 run a field's validators over its default, so `refs: TraceRefs = {}` would hand
