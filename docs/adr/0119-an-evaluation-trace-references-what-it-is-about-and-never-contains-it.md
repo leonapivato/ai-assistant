@@ -940,8 +940,19 @@ class RecordIdSet(BaseModel):
     Truncated exactly when ``total`` exceeds ``len(ids)``; there is no separate
     flag, so the two cannot disagree.
     """
+
+    model_config = ConfigDict(frozen=True)
+
     ids: tuple[Identifier, ...] = Field(max_length=TRACE_RECORD_SET_CAP)
-    total: int = Field(ge=0)  # validated: total >= len(ids)
+    total: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _total_covers_its_ids(self) -> RecordIdSet:
+        """Refuse a total below the ids carried — the one way this pair can lie."""
+        if self.total < len(self.ids):
+            msg = f"total {self.total} is below the {len(self.ids)} ids carried"
+            raise ValueError(msg)
+        return self
 
 
 class EvaluationTrace(BaseModel):
@@ -960,6 +971,12 @@ class EvaluationTrace(BaseModel):
 Frozen, and every mapping an immutable carrier, following the corpus's existing
 treatment of nested mutable state (ADR-0018 §3): a trace a reader can rewrite
 after the fact is not a record of anything.
+
+**`RecordIdSet`'s invariant is a validator, not a comment.** `ge=0` alone accepts
+`RecordIdSet(ids=(one_id,), total=0)`, which claims the operation produced nothing
+while carrying an id a measure will happily join on — and it makes the derived
+truncation state false in the safe-looking direction. The refusal is part of the
+type, so no emitter and no store schema can construct the contradiction.
 
 **`UtcInstant`, not a merely-aware `datetime`.** ADR-0023 puts every stored
 instant in `core/types.py` behind the shared validated type — naive is rejected
@@ -998,13 +1015,35 @@ entitled to (§7).
 
 ```python
 class TracePosition(BaseModel):
-    """Opaque to its caller, never composed by one (ADR-0114 §2)."""
+    """How far a walk over the trace store has reached (§7a).
+
+    Opaque to its caller: no caller parses, orders, compares, derives or
+    synthesises one, and the only admissible source is the ``TraceChunk`` that
+    carried it (ADR-0114 §2). The token is the store's own order key — a
+    ``rowid`` in a SQLite store, an insertion index elsewhere.
+
+    A **bound, not a reference**: §10's purge deleting traces below a held
+    position does not disturb it, because the store never reissues a key.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    token: NonBlankEncodableText = Field(
+        description="The store's opaque encoding of this position. Never parsed by a caller.",
+    )
 
 
 class TraceChunk(BaseModel):
     traces: tuple[EvaluationTrace, ...]
     position: TracePosition | None   # None exactly when the walk is exhausted
 ```
+
+`TracePosition` carries a token for the reason `WalkPosition` does: a position
+with no value is either not a position at all or process-local object identity
+standing in for one, and a store cannot resume from either. It is a *separate*
+type from `WalkPosition` rather than a reuse — a key issued by one store is
+meaningless in another, and a shared type is an invitation to hand a memory
+walk's position to the trace store and be answered rather than refused.
 
 **Failures, stated so a suite can assert them:**
 
