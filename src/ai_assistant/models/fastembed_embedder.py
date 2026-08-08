@@ -327,10 +327,11 @@ class FastEmbedEmbedder:
             ModelError: If the packaged artifact is missing or the model cannot
                 otherwise be loaded, the backend fails to embed the batch, it
                 returns a result that does not satisfy the ``Embedder`` contract,
-                or too many abandoned workers from earlier calls are still running
-                for another to be started. The last is the containment refusing at
-                once rather than stranding a further thread; it means the backend
-                has stopped returning, and recovery is a hub restart (ADR-0118 §7).
+                or every worker slot is occupied so another thread may not be
+                started. The last is the containment refusing at once rather than
+                stranding a further thread; when the occupying workers are
+                abandoned ones it means the backend has stopped returning, and
+                recovery is a hub restart (ADR-0118 §7).
                 Never by fetching and failing: nothing here reaches the network.
         """
         documents = list(texts)
@@ -344,7 +345,7 @@ class FastEmbedEmbedder:
             # Deliberately **not** `EmbeddingDeadlineExpiredError`: nothing expired
             # here — this call was never started — and ADR-0118 §5 reserves that
             # class for a call that outlived its own deadline.
-            msg = f"the on-device embedding backend has stopped returning: {exc}"
+            msg = f"the on-device embedding backend has no worker to spare: {exc}"
             raise ModelError(msg) from exc
 
     def _embed_sync(self, documents: list[str]) -> list[Embedding]:
