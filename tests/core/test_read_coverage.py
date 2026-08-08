@@ -6,19 +6,25 @@ or an opaque source cursor would give a different answer to §3's containment
 question while claiming compliance), and the **containment rule** itself, which
 §3 states "so no lane has to derive it".
 
-The field's optionality gets its own cases because it is what keeps this ADR from
-being a behaviour change: no reader in the tree declares coverage, so no window
-closes until a reader lane opts in, and ADR-0093 §4's refusal stays the operative
-behaviour of every reader that exists.
+**The rule's operand is the extent, not the window** (ADR-0117 §3). ADR-0110 §3
+asked containment of a record's envelope validity window and ADR-0117 partially
+supersedes it there: the cases below are §3's own, restated over
+:class:`ReportedExtent`, because the rule is unchanged in content and only its
+subject moved. ``ReportedExtent``'s own cases live in
+``tests/core/test_reported_extent.py``.
+
+The field's optionality gets its own cases because the additive shape is what
+lets every reading that predates ADR-0110 stay valid.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import get_type_hints
 
 import pytest
 
-from ai_assistant.core.types import ReadCoverage, SourceReading, Validity
+from ai_assistant.core.types import ReadCoverage, ReportedExtent, SourceReading, Validity
 
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
 _LATER = _NOW + timedelta(days=30)
@@ -50,9 +56,10 @@ def test_a_naive_endpoint_is_refused() -> None:
     """``UtcInstant`` is the ruled endpoint type, and it rejects a naive value.
 
     §2 pins the domain rather than leaving it to the lane precisely so that
-    ``covers_*`` compares directly against ``Validity``'s two ends — "a comparison
+    ``covers_*`` compares directly against the extent's two ends — "a comparison
     across two different annotations would be a conversion for nothing, and a
-    conversion is where a timezone is lost".
+    conversion is where a timezone is lost". ADR-0117 §2 pins the extent's domain
+    for the same reason and to the same value, so the comparison stays direct.
     """
     with pytest.raises(ValueError, match=r"(?i)timezone|aware|utc"):
         ReadCoverage(covers_until=datetime(2026, 6, 1))  # noqa: DTZ001 — the point of the case
@@ -69,71 +76,88 @@ def test_a_coverage_is_frozen() -> None:
 
 
 @pytest.mark.parametrize(
-    ("coverage", "window", "contained", "why"),
+    ("coverage", "extent", "contained", "why"),
     [
-        (ReadCoverage(), Validity(), True, "unbounded coverage contains an open window"),
+        (ReadCoverage(), ReportedExtent(), True, "unbounded coverage contains an open extent"),
         (
             ReadCoverage(covers_until=_LATER),
-            Validity(),
+            ReportedExtent(),
             False,
-            "an unbounded record end needs an unbounded coverage end",
+            "an unbounded extent end needs an unbounded coverage end",
         ),
         (
             ReadCoverage(covers_until=_LATER),
-            Validity(valid_until=_LATER),
+            ReportedExtent(extends_until=_LATER),
             True,
             "the exclusive ends may coincide",
         ),
         (
             ReadCoverage(covers_until=_LATER),
-            Validity(valid_until=_LATER + timedelta(seconds=1)),
+            ReportedExtent(extends_until=_LATER + timedelta(seconds=1)),
             False,
             "one second of overhang is still an overhang",
         ),
         (
             ReadCoverage(covers_from=_NOW),
-            Validity(valid_from=_NOW),
+            ReportedExtent(extends_from=_NOW),
             True,
             "the inclusive starts may coincide",
         ),
         (
             ReadCoverage(covers_from=_NOW),
-            Validity(valid_from=_NOW - timedelta(seconds=1)),
+            ReportedExtent(extends_from=_NOW - timedelta(seconds=1)),
             False,
-            "a record starting before the coverage is not inside it",
+            "an entry starting before the coverage is not inside it",
         ),
         (
             ReadCoverage(covers_from=_NOW),
-            Validity(),
+            ReportedExtent(),
             False,
-            "an unbounded record start needs an unbounded coverage start",
+            "an unbounded extent start needs an unbounded coverage start",
         ),
         (
             ReadCoverage(covers_from=_NOW, covers_until=_LATER),
-            Validity(valid_from=_NOW, valid_until=_LATER),
+            ReportedExtent(extends_from=_NOW, extends_until=_LATER),
             True,
-            "a window may fill its coverage exactly",
+            "an extent may fill its coverage exactly",
         ),
     ],
 )
-def test_containment_of_a_window_in_a_coverage(
-    coverage: ReadCoverage, window: Validity, contained: bool, why: str
+def test_containment_of_an_extent_in_a_coverage(
+    coverage: ReadCoverage, extent: ReportedExtent, contained: bool, why: str
 ) -> None:
-    assert coverage.contains(window) is contained, why
+    assert coverage.contains(extent) is contained, why
 
 
-def test_a_fully_open_window_is_contained_only_by_a_fully_open_coverage() -> None:
+def test_a_fully_open_extent_is_contained_only_by_a_fully_open_coverage() -> None:
     """§3's decisive property, stated as its own case because §3 turns on it.
 
-    A record with a fully open window states no position in the source's world, so
-    it is never absence-demotable by a bounded reading — which is what separates
-    the bounded read from the deletion, and is the whole content of the decision.
+    A source that states no bound at either end has said nothing a bounded reading
+    could have exhausted, so such a record is never absence-demotable by one —
+    which is what separates the bounded read from the deletion, and is the whole
+    content of the decision.
     """
-    open_window = Validity()
+    open_extent = ReportedExtent()
 
-    assert ReadCoverage().contains(open_window)
-    assert not ReadCoverage(covers_from=_NOW).contains(open_window)
-    assert not ReadCoverage(covers_until=_LATER).contains(open_window)
+    assert ReadCoverage().contains(open_extent)
+    assert not ReadCoverage(covers_from=_NOW).contains(open_extent)
+    assert not ReadCoverage(covers_until=_LATER).contains(open_extent)
+
+
+def test_containment_takes_the_extent_and_never_a_validity() -> None:
+    """ADR-0117 §3's change of operand, pinned where the rule lives.
+
+    The carrier is a property of the predicate's *type* rather than a convention
+    each of the two writers keeps, which is what "one rule, one place" buys here:
+    a writer still reading ``record.validity`` cannot reach this method at all.
+    ADR-0110 §3 named ``Validity`` and ADR-0117 §1 found it unusable — a record's
+    operational window and its source's testimony are different subjects, and this
+    signature is where the corpus stops confusing them.
+    """
+    hints = get_type_hints(ReadCoverage.contains)
+
+    assert hints["extent"] is ReportedExtent
+    assert Validity not in hints.values()
 
 
 # --- §10: the field is optional, and its absence is load-bearing -------------

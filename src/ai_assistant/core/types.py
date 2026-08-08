@@ -693,6 +693,86 @@ legible (ADR-0086 §1).
 """
 
 
+class ReportedExtent(BaseModel):
+    """Where a reported entry lies in the reporting source's world (ADR-0117 §2).
+
+    A half-open ``[extends_from, extends_until)`` pair, ``None`` at either end
+    meaning unbounded — :class:`Validity`'s shape, its endpoint type and its
+    invariant, mirrored and deliberately **not** reused, for the reason ADR-0110
+    §2 declined to name coverage with ``Validity`` too. Three subjects, three
+    types: a ``Validity`` is *our* window on a belief we hold, a
+    :class:`ReadCoverage` is a claim about **the read we performed**, and an
+    extent is the source's claim about **where the entry it reported lies**.
+    Naming two of them with one type would put a record's operational window and
+    its source's testimony in one annotation, one field apart, on one record.
+
+    **It is producer testimony, and only about the entry actually reported**
+    (§2). A producer declares one only where it can truthfully say where the
+    reported entry sits: it is never trimmed to fit a coverage, never widened
+    past what the source says, and never derived from the read's own bound or
+    from the reader's configuration. Trimming manufactures the containment
+    :meth:`ReadCoverage.contains` is asked about, and widening is the same fault
+    from the other side — which is why ADR-0110 §2's never-widened discipline for
+    coverage is restated here for the extent.
+
+    **Declaring none is always available and always safe** (§2). A producer that
+    cannot express an entry's extent — a source whose entries have no position at
+    all, or an occurrence whose span is not expressible as a half-open interval —
+    declares none, and the belief is then proposed, retrievable and folded
+    exactly as it would be otherwise. Only its absence-demotability is withheld
+    (ADR-0117 §3). No source shape may make *stating* an extent raise, and no
+    producer constructs a degenerate or inverted one to avoid declining.
+
+    **Why this is not the envelope validity window.** ADR-0110 §3 originally
+    asked a producer to bound that window to say where an entry sits, and
+    ADR-0117 §1 found the two jobs incompatible for a forward-looking source:
+    ``Validity.live_at`` gates retrieval, the absence enumeration *and* conflict
+    detection, so a window stating "this meeting is on Thursday" makes the record
+    unreadable, un-demotable and invisible to the fold until Thursday arrives.
+    The extent carries the position; the envelope window keeps its one operational
+    job (ADR-0045 §2).
+
+    Attributes:
+        extends_from: Inclusive start of the reported entry's span; ``None``
+            means the source states no lower bound for it.
+        extends_until: Exclusive end of that span; ``None`` means the source
+            states no upper bound for it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    extends_from: UtcInstant | None = Field(
+        default=None,
+        description="Inclusive start of the reported entry's span; None means unbounded.",
+    )
+    extends_until: UtcInstant | None = Field(
+        default=None,
+        description="Exclusive end of the reported entry's span; None means unbounded.",
+    )
+
+    @model_validator(mode="after")
+    def _extent_is_ordered(self) -> ReportedExtent:
+        """Reject an inverted or empty extent: when both ends are set, end > start.
+
+        :class:`Validity`'s invariant and :class:`ReadCoverage`'s, for a reason of
+        this type's own (ADR-0117 §2, §6). An extent admitting no instant would be
+        contained by *every* coverage, so a record carrying one would be
+        absence-demotable by any reading at all — the unsound direction, and the
+        exact opposite of what a zero-width span means. The honest value for an
+        entry whose span cannot be expressed is **no extent**, which is why
+        declining is always available and why nothing widens a degenerate span by
+        an invented epsilon to make it representable.
+        """
+        if (
+            self.extends_from is not None
+            and self.extends_until is not None
+            and self.extends_until <= self.extends_from
+        ):
+            msg = "extends_until must be after extends_from"
+            raise ValueError(msg)
+        return self
+
+
 class Attestation(BaseModel):
     """What reported a belief, and when that source said so (ADR-0073 §4).
 
@@ -728,6 +808,29 @@ class Attestation(BaseModel):
             validator then settles the outcome structurally: no attestation means no
             ``EXTERNAL`` provenance, so the record is not proposed as an attested
             belief at all.
+        extent: Where the reported entry lies in the reporting source's own world,
+            or ``None`` where this producer states no position for it (ADR-0117
+            §2). A different fact about a different thing from ``reported_at``,
+            and neither is derived from the other: an entry reported on Monday
+            about a meeting on Thursday has both, and they disagree by design.
+
+            **Optional, and the ``None`` is meaningful rather than a gap.** Most
+            sources have no position to state — a settings export, a contact list
+            — and are not thereby deficient; a record whose attestation declares
+            no extent is simply never absence-demotable (ADR-0117 §3). Every
+            record stored before this field existed decodes with ``None``, which
+            is the safe default and needs no migration (ADR-0093 §3's additive
+            pattern). ADR-0092 §2's half-state argument does not reach it: an
+            extent is not half of the "who said so, and when" answer that section
+            made unconstructable-in-halves, but a separable third fact nothing
+            renders.
+
+            **Here rather than on :class:`Provenance` or the envelope**, so that
+            ADR-0110 §3's condition 1 (which keys on ``reported_by``) and its
+            condition 3 (which reads this) sit on one object. Since an attestation
+            is present exactly when the band is ``ATTESTED``, that placement makes
+            the absence close **structurally unreachable** outside the attested
+            band rather than excluded by a rule (ADR-0117 §2).
 
     Two consequences of ``reported_at`` being someone else's clock, both rulings
     rather than observations (ADR-0092 §3):
@@ -756,6 +859,13 @@ class Attestation(BaseModel):
         description=(
             "When that source asserts the fact was current, on the source's own "
             "clock — never ours, and never a local proxy (ADR-0092 §3)."
+        ),
+    )
+    extent: ReportedExtent | None = Field(
+        default=None,
+        description=(
+            "Where the reported entry lies in the source's own world; None where "
+            "this producer states no position for it (ADR-0117 §2)."
         ),
     )
 
@@ -2602,8 +2712,8 @@ class ReadCoverage(BaseModel):
             raise ValueError(msg)
         return self
 
-    def contains(self, window: Validity) -> bool:
-        """Whether ``window`` lies **wholly within** this coverage (ADR-0110 §3).
+    def contains(self, extent: ReportedExtent) -> bool:
+        """Whether ``extent`` lies **wholly within** this coverage (ADR-0117 §3).
 
         Containment of one half-open interval in another with unbounded ends,
         defined once here rather than at each use — the "one rule, one place"
@@ -2613,27 +2723,36 @@ class ReadCoverage(BaseModel):
         §3 states the rule "so no lane has to derive it", and this is where it
         stops being derived.
 
-        **An unbounded record end is contained only by an unbounded coverage end
-        on the same side.** So a record with a fully open window is contained only
-        by a fully unbounded coverage, and a bounded reading contains none — which
-        is ADR-0110 §3's decisive property rather than a gap in it. A record whose
-        window is fully open states no position in the source's world, so no
-        bounded reading can have exhausted the region it occupies, and an absence
-        tells you nothing about it. A record whose producer bounded its window
-        says where it lives, and a reading that exhausted that region and did not
-        find it has observed something.
+        **The rule is ADR-0110 §3's, unchanged; only its operand moved.** §3 asked
+        this question of the record's *envelope validity window*, and ADR-0117 §3
+        asks it of the reported entry's :class:`ReportedExtent` instead — because
+        that window has an operational job (ADR-0045 §6) which a forward-looking
+        source's position would break, taking retrieval, the absence enumeration
+        and conflict detection with it (ADR-0117 §1). Everything §3 argued for the
+        rule survives the change of carrier, which was the test of it.
+
+        **An unbounded extent end is contained only by an unbounded coverage end
+        on the same side.** So an extent open at either end is contained only by a
+        coverage open at that end, and a bounded reading contains none — which is
+        ADR-0110 §3's decisive property rather than a gap in it. A source that
+        states no position for an entry has told a bounded reading nothing about
+        the region that entry occupies, and an absence therefore proves nothing;
+        one that states where the entry lies has said something a reading which
+        exhausted that region and did not find it has genuinely observed. A record
+        whose attestation declares *no* extent at all satisfies the condition for
+        no reading, which its consumers decide before reaching here.
 
         Args:
-            window: The record's own envelope validity window.
+            extent: The reported entry's own span, as its producer declared it.
 
         Returns:
-            Whether every instant the window admits lies inside this coverage.
+            Whether every instant the extent admits lies inside this coverage.
         """
         starts_inside = self.covers_from is None or (
-            window.valid_from is not None and window.valid_from >= self.covers_from
+            extent.extends_from is not None and extent.extends_from >= self.covers_from
         )
         ends_inside = self.covers_until is None or (
-            window.valid_until is not None and window.valid_until <= self.covers_until
+            extent.extends_until is not None and extent.extends_until <= self.covers_until
         )
         return starts_inside and ends_inside
 
@@ -2719,13 +2838,19 @@ class SourceReading(BaseModel):
 
             **Declaring it is half of an opt-in, never the whole of one.** A
             reader that wants a covered absence to demote a belief owes *both*
-            halves (ADR-0110 §3): this declaration, and a **bounded envelope
-            validity window** on the records whose absence should count. Neither
-            alone does anything — a record with a fully open window is contained
-            by no bounded coverage, so it is never absence-demotable. The cost is
-            deliberate: it makes opting in an explicit act by the lane that holds
-            the source, which is the lane that can say whether "absent" means
-            anything for that source at all.
+            halves (ADR-0110 §3 as ADR-0117 §3 reads it): this declaration, and a
+            declared :class:`ReportedExtent` on the proposals whose absence should
+            count. Neither alone does anything — a record whose attestation states
+            no extent is contained by no coverage, so it is never
+            absence-demotable. The cost is deliberate: it makes opting in an
+            explicit act by the lane that holds the source, which is the lane that
+            can say whether "absent" means anything for that source at all.
+
+            **It is never a bounded envelope validity window.** ADR-0110 §3 asked
+            for one and ADR-0117 §4 rules the opposite: a producer does not bound
+            a record's operational window in order to obtain a demotion, and no
+            implementation may make a belief's presence on the read path depend on
+            when it was last read.
         facet: The situational half of this reading — the other consumer's
             (ADR-0093 §3, ADR-0096 §5). ``None`` is valid and means this reader's
             source has no situational reading to contribute.

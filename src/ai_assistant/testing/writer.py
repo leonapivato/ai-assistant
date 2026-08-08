@@ -330,7 +330,16 @@ class FakeMemoryWriter:
         coverage: ReadCoverage,
         present: set[str | None],
     ) -> list[MemoryRecord]:
-        """The live records ADR-0110 §3's four conditions make demotable."""
+        """The live records ADR-0110 §3's four conditions make demotable.
+
+        Condition 3 is evaluated against the **extent the record's attestation
+        declares**, as ADR-0117 §3 reads it, and never against the record's
+        envelope validity window. The rule is duplicated from ``MemoryIngestor``
+        rather than imported (golden rule 1), so ADR-0117 §3's normative clause
+        binds the two together: a fake still demoting on the envelope window while
+        the real writer demoted on the extent would drive the shared suite through
+        two different rules while reporting one.
+        """
         candidates: list[MemoryRecord] = []
         offset = 0
         while True:
@@ -343,7 +352,10 @@ class FakeMemoryWriter:
                     continue  # §3 condition 1.
                 if record.id in present:
                     continue  # §3 condition 4.
-                if coverage.contains(record.validity):
+                extent = attestation.extent
+                # §3 condition 3, over the source's own statement of where the
+                # entry lies (ADR-0117 §3). No extent, no demotion.
+                if extent is not None and coverage.contains(extent):
                     candidates.append(record)  # §3 conditions 2 and 3.
             if len(page) < _ABSENCE_PAGE:
                 return candidates

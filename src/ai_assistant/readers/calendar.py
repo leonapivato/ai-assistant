@@ -55,6 +55,8 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryUpdateProposal,
     Provenance,
+    ReadCoverage,
+    ReportedExtent,
     SemanticMemory,
     SourceReading,
 )
@@ -346,7 +348,7 @@ class CalendarReader:
         read_at = self._now()
         window_start = saturating_add(read_at, -self._window_past)
         window_end = saturating_add(read_at, self._window_future)
-        occurrences = occurrences_in_window(
+        resolved = occurrences_in_window(
             raw,
             window_start=window_start,
             window_end=window_end,
@@ -354,6 +356,8 @@ class CalendarReader:
             max_entries=self._max_entries,
             max_expansion=self._max_expansion,
         )
+        occurrences = resolved.occurrences
+        proposals, proposed_all = self._propose(occurrences, read_at)
         return SourceReading(
             source=self.name,
             read_at=read_at,
@@ -363,7 +367,16 @@ class CalendarReader:
             # filesystem rather than a claim the source made (ADR-0093 §10,
             # ADR-0092 §3).
             as_of=None,
-            proposals=self._propose(occurrences, read_at),
+            proposals=proposals,
+            # What this read **exhausted**, and only where it accounted for every
+            # entry the source held there (ADR-0117 §5). `_coverage` decides both
+            # halves; a reading that skipped anything declares none, and takes
+            # ADR-0115 §4's ruled no-coverage path.
+            coverage=self._coverage(
+                window_start,
+                window_end,
+                accounted=resolved.accounted and proposed_all,
+            ),
             # The other consumer's half of the same read, from the same
             # occurrences and the same acquisition instant (ADR-0096 §5). It is
             # built here rather than by the `context/` adapter because an adapter
@@ -424,16 +437,73 @@ class CalendarReader:
             covers_until=window_end,
         )
 
+    def _coverage(
+        self, window_start: datetime, window_end: datetime, *, accounted: bool
+    ) -> ReadCoverage | None:
+        """The interval this read exhausted, or ``None`` (ADR-0117 §5).
+
+        **The interval is the one ``occurrences_in_window`` was asked to resolve**,
+        with the same saturated edges the window decision was made on, so both ends
+        are always representable instants. It is honest for reasons this reader does
+        not have to supply: ADR-0093 §5 enforces a bound "by **refusing**, never by
+        truncating" and §8 makes a read that cannot complete raise, so a
+        ``SourceReading`` that exists at all is a read that reached its whole
+        window; and the entry cap is applied *before* the skip rule, so a source
+        busting its cap cannot become a successful "your calendar is clear". It is
+        never widened to what this reader was *configured* to cover, because for
+        this reader those are the same interval and ADR-0110 §2 forbids the
+        difference from ever appearing.
+
+        **And it is withheld outright where the read skipped anything** (§5's
+        second clause). One uninterpretable entry withholds coverage for the whole
+        reading — deliberately coarse, in the same shape ADR-0110 §4 already chose
+        when one stored-nothing proposal suspends absence for a whole reading. The
+        alternative is a coverage that is a *set* of intervals, which ADR-0110 §2's
+        single half-open pair does not admit and ADR-0117 §11 files as a different
+        decision. The cost is real and silent: a calendar carrying one entry this
+        reader cannot read loses absence-demotion for as long as that entry is in
+        the window.
+
+        **A degenerate saturated interval declares none too**, and no coverage is
+        the only available answer rather than a choice. ``ReadCoverage`` refuses a
+        pair whose end is at or before its start, for its own good reason — such a
+        coverage exhausted no instant — and the pair can degenerate here without any
+        misconfiguration: a clock at the representable maximum saturates both edges
+        onto it. Constructing one anyway would raise, and §8 would then report a
+        source fault against a source that parsed perfectly, which is the outcome
+        ADR-0093 §7b's saturation rule exists to prevent. Declaring no coverage
+        loses only a demotion the read could not have warranted anyway.
+
+        Args:
+            window_start: The window's inclusive lower edge, already saturated.
+            window_end: Its exclusive upper edge, already saturated.
+            accounted: Whether the read resolved every entry the source held —
+                both halves, the resolution's and :meth:`_propose`'s.
+
+        Returns:
+            The coverage, or ``None`` where this reading warrants no absence.
+        """
+        if not accounted or window_end <= window_start:
+            return None
+        return ReadCoverage(covers_from=window_start, covers_until=window_end)
+
     def _propose(
         self, occurrences: Sequence[Occurrence], read_at: datetime
-    ) -> tuple[MemoryUpdateProposal, ...]:
+    ) -> tuple[tuple[MemoryUpdateProposal, ...], bool]:
         """Turn in-window occurrences into attested proposals, within the budget.
+
+        Returns:
+            The proposals, and whether every in-window occurrence became one. A
+            ``False`` second element means an occurrence the source held inside the
+            read's interval was skipped, so the reading declares no coverage
+            (ADR-0117 §5).
 
         Raises:
             ContentBudgetExhaustedError: Before materialising a proposal that would
                 take the read past ``calendar_max_content_bytes``.
         """
         spent = 0
+        proposed_all = True
         proposals: list[MemoryUpdateProposal] = []
         for occurrence in occurrences:
             if occurrence.reported_at is None:
@@ -442,6 +512,13 @@ class CalendarReader:
                 # time the source did not make, and §1's validator then settles the
                 # outcome structurally: no attestation means no `EXTERNAL`
                 # provenance, so the record is not proposed as attested at all.
+                #
+                # It is also an entry the source **does** hold inside this read's
+                # interval which the reading does not account for, so it withholds
+                # the coverage (ADR-0117 §5). The facet still counts it: §5's
+                # clause acts on the reading's coverage and never on the facet, and
+                # ADR-0096 §5's asymmetry is preserved exactly as it was.
+                proposed_all = False
                 continue
             spent += occurrence.text_bytes + _RENDER_OVERHEAD_BYTES
             if spent > self._max_content_bytes:
@@ -450,7 +527,7 @@ class CalendarReader:
                 )
                 raise ContentBudgetExhaustedError(msg)
             proposals.append(self._proposal(occurrence, occurrence.reported_at, read_at))
-        return tuple(proposals)
+        return tuple(proposals), proposed_all
 
     def _proposal(
         self, occurrence: Occurrence, reported_at: datetime, read_at: datetime
@@ -492,6 +569,13 @@ class CalendarReader:
                         # than an anomaly: Monday's report, revised into the store
                         # on Tuesday (ADR-0092 §3).
                         reported_at=reported_at,
+                        # Where this entry lies in the calendar's own world
+                        # (ADR-0117 §6): the occurrence's own resolved span, in
+                        # UTC, exactly as the window decision was made on it. A
+                        # different fact from `reported_at` and never derived from
+                        # it — an entry reported on Monday about a meeting on
+                        # Thursday has both, and they disagree by design.
+                        extent=_extent(occurrence),
                     ),
                     # The band's confirming event, written as it stands: a
                     # `reported_at` in our future is stored unchanged rather than
@@ -511,6 +595,40 @@ class CalendarReader:
             # exists to prevent (ADR-0093 §4).
             sensitivity=DataTier.PERSONAL,
         )
+
+
+def _extent(occurrence: Occurrence) -> ReportedExtent | None:
+    """The occurrence's own span as producer testimony, or none (ADR-0117 §6).
+
+    ``[occurrence.start, occurrence.end)`` — entry-anchored, stable across reads,
+    and stating exactly what ADR-0110 §3's condition 3 wants stated: where in the
+    calendar's world this entry lies. It is neither trimmed to the read's window
+    nor widened past it, which ADR-0117 §2 forbids in both directions and §6
+    restates for the two shapes that invite each.
+
+    **A span with no width declines the extent, and must never raise.** ADR-0093
+    §7b gives a date-time ``DTSTART`` with no end an instantaneous occurrence, and
+    ``ReportedExtent`` refuses ``until == from`` for a reason of its own: an
+    interval admitting no instant would be contained by *every* coverage, making
+    such a record demotable by any reading at all. So the honest value is none. The
+    entry is still proposed, still retrievable and still folded exactly as it is
+    today; only its absence-demotability is withheld. Widening it by an invented
+    epsilon would state an extent the source never gave (§2, §6).
+
+    The comparison is ``<=`` rather than ``==`` because saturation can collapse a
+    positive duration too: an occurrence starting at the representable maximum has
+    an end saturated onto the same instant, and ``_duration`` has already refused a
+    genuinely negative one by skipping the component.
+
+    **An occurrence straddling the window edge needs no rule and is given none**
+    (§6). ``_overlaps`` admits it deliberately, its span is simply not contained in
+    the coverage, and ADR-0110 §3's containment therefore withholds the demotion on
+    its own — the correct answer, since the reading did not exhaust the region that
+    entry occupies.
+    """
+    if occurrence.end <= occurrence.start:
+        return None
+    return ReportedExtent(extends_from=occurrence.start, extends_until=occurrence.end)
 
 
 def _in_progress_at(occurrence: Occurrence, instant: datetime) -> bool:

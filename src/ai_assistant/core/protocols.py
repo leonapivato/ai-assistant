@@ -1254,9 +1254,35 @@ class MemoryWriter(Protocol):
         of two.
 
         **Where ``reading.coverage`` is ``None`` nothing is reconciled**, and this
-        degenerates to ingesting each proposal in turn — which is every reading in
-        the tree until a reader lane opts in, so this member changes no behaviour on
-        arrival (ADR-0115 §4).
+        degenerates to ingesting each proposal in turn (ADR-0115 §4). A reader
+        declares no coverage where it did not account for every entry its source
+        held inside the interval it read, so this arm is reached in ordinary
+        operation and not only by a reader that has never opted in (ADR-0117 §5).
+
+        **What a covered reading demotes** (ADR-0110 §3, as ADR-0117 §3 reads
+        condition 3). All four conditions are required and this member owes all
+        four: the record is **live**; its ``Provenance.attestation`` names this
+        reading's ``source``; its attestation declares a
+        :class:`~ai_assistant.core.types.ReportedExtent` that lies wholly within
+        ``reading.coverage``, by
+        :meth:`~ai_assistant.core.types.ReadCoverage.contains`; and the ingest did
+        not leave it live at its own id. A record whose attestation declares **no**
+        extent is demotable by no reading, whatever its envelope validity window,
+        because a source that states no position for an entry has told a bounded
+        reading nothing about the region that entry occupies.
+
+        **The extent, and never the envelope validity window.** ADR-0110 §3 first
+        asked condition 3 of that window and ADR-0117 §3 partially supersedes it
+        there: the window's job is the record's operational life in the store
+        (ADR-0045 §2, §6), so a producer bounding it to state a position makes
+        every entry lying ahead of the read unretrievable, unenumerable by
+        ``list_beliefs`` and invisible to conflict detection — which delivers this
+        very mechanism dead and duplicates the source on every read (ADR-0117 §1).
+        Two further clauses bind an implementation of this member: a producer never
+        bounds an envelope window in order to obtain a demotion, and **no
+        implementation may make a belief's presence on the read path depend on when
+        it was last read** (ADR-0117 §4). A belief leaves the read path on a
+        warranting event and on nothing else.
 
         How this observes the reading it is handed is governed by this module's
         input-observation clause (ADR-0065), over the reading **whole** — its

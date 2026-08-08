@@ -219,6 +219,56 @@ class Occurrence:
     text_bytes: int
 
 
+@dataclass(frozen=True)
+class WindowRead:
+    """One resolution of a source over the read's window (ADR-0117 §5).
+
+    Two facts rather than one, because ADR-0117 §5 asks a question of the read
+    that the occurrences alone cannot answer: not only *what did you find* but
+    *did you account for everything the source held there*.
+
+    Attributes:
+        occurrences: The in-window occurrences, in ascending start order. Possibly
+            empty, which is a successful reading (ADR-0093 §8).
+        accounted: Whether every entry this source held was resolved rather than
+            skipped. ``False`` where ADR-0093 §7b's skip rule fired anywhere in the
+            read — see :func:`occurrences_in_window`.
+    """
+
+    occurrences: tuple[Occurrence, ...]
+    accounted: bool
+
+
+class _Ledger:
+    """Whether this read skipped anything it should have accounted for (§7b).
+
+    Deliberately a single latching flag rather than a set of intervals. ADR-0117
+    §5 rules the withholding **coarse** — one skipped entry withholds coverage for
+    the whole reading, exactly as one stored-nothing proposal suspends absence for
+    the whole reading under ADR-0110 §4 — because ADR-0110 §2 pinned a coverage to
+    one half-open pair, so there is nowhere to punch a hole. ADR-0117 §11 files the
+    set-valued alternative as a different decision for a different lane.
+
+    It also latches on skips whose *position* is unknown, and that is the honest
+    direction rather than a limitation. A component with no usable ``DTSTART``, an
+    ``RRULE`` that will not parse, a series whose extent cannot be established: in
+    each case the read cannot say where the entry it could not interpret lies, so
+    it cannot say the interval it exhausted excludes it.
+    """
+
+    def __init__(self) -> None:
+        self._accounted = True
+
+    def unaccounted(self) -> None:
+        """Record that one entry the source held was skipped rather than resolved."""
+        self._accounted = False
+
+    @property
+    def accounted(self) -> bool:
+        """Whether every entry the source held inside the read was accounted for."""
+        return self._accounted
+
+
 def occurrences_in_window(  # noqa: PLR0913 — the source plus the five figures ADR-0093 §7a makes this function's bound; collapsing them into a settings object would hide which ones it reads
     raw: bytes,
     *,
@@ -227,8 +277,32 @@ def occurrences_in_window(  # noqa: PLR0913 — the source plus the five figures
     zone: tzinfo,
     max_entries: int,
     max_expansion: int,
-) -> tuple[Occurrence, ...]:
+) -> WindowRead:
     """Resolve the source into the occurrences that overlap the window.
+
+    **It also reports whether the read accounted for everything** (ADR-0117 §5).
+    ADR-0093 §7b skips an entry a parseable source contains but this reader cannot
+    interpret, rather than raising, and that stays exactly as ruled — but a reading
+    with such a gap may not warrant an absence, because §3's warrant is that the
+    source was read to exhaustion over the region and did not report the entry, and
+    here the source *did* report it. Worse, the close would not be recoverable:
+    ADR-0110 §3's whole error calculus is ADR-0092 §4's, that a wrongly closed
+    attested window "is re-proposed by the next scheduled read", and an entry this
+    reader cannot interpret is not re-proposed by any read until the source is
+    repaired.
+
+    Four shapes latch it, and one deliberately does not:
+
+    * a component this reader cannot reduce at all — no usable ``DTSTART``, a
+      negative or unreadable duration, an ``RRULE`` that will not parse;
+    * a series whose extent cannot be established — two masters sharing a ``UID``,
+      an override with no master, or an override whose form is opaque;
+    * a single occurrence contested by two overrides of equal specificity;
+    * an ``RDATE`` or ``EXDATE`` value this reader cannot localise (a ``PERIOD``,
+      say) — an instruction about what occurs that the read did not apply.
+    * **Not** an occurrence the source itself says does not occur — a cancelled
+      entry, or one an ``EXDATE`` excludes. Declining to emit that is reading the
+      source correctly, which ADR-0117 §5 states in as many words.
 
     Args:
         raw: The source's bytes, already bounded by ``calendar_max_bytes``.
@@ -240,8 +314,8 @@ def occurrences_in_window(  # noqa: PLR0913 — the source plus the five figures
         max_expansion: ``calendar_max_expansion``, spent across the whole read.
 
     Returns:
-        The in-window occurrences, in ascending start order. Possibly empty,
-        which is a successful reading (ADR-0093 §8).
+        The in-window occurrences and whether the read accounted for everything
+        the source held (see :class:`WindowRead`).
 
     Raises:
         SourceNotParseableError: If the bytes are not an iCalendar document.
@@ -250,10 +324,17 @@ def occurrences_in_window(  # noqa: PLR0913 — the source plus the five figures
             budget allows.
     """
     budget = _Budget(max_expansion)
+    ledger = _Ledger()
     found: list[Occurrence] = []
-    for group in _grouped(_parse(raw), zone).values():
+    for group in _grouped(_parse(raw), zone, ledger).values():
         found.extend(
-            _resolve(group, window_start=window_start, window_end=window_end, budget=budget)
+            _resolve(
+                group,
+                window_start=window_start,
+                window_end=window_end,
+                budget=budget,
+                ledger=ledger,
+            )
         )
     # The cap is applied **before** the skip rule, and the order is load-bearing:
     # 501 in-window occurrences of which all 501 are uninterpretable would, under
@@ -263,7 +344,7 @@ def occurrences_in_window(  # noqa: PLR0913 — the source plus the five figures
         msg = f"the source has more than {max_entries} occurrences in the window"
         raise EntryCapExceededError(msg)
     found.sort(key=lambda occurrence: (occurrence.start, occurrence.end, occurrence.summary))
-    return tuple(found)
+    return WindowRead(occurrences=tuple(found), accounted=ledger.accounted)
 
 
 # --- saturating arithmetic (ADR-0093 §7b) ------------------------------------
@@ -424,7 +505,7 @@ def _parse(raw: bytes) -> list[Any]:
         raise SourceNotParseableError(msg) from exc
 
 
-def _grouped(components: list[Any], zone: tzinfo) -> dict[object, list[_Entry]]:
+def _grouped(components: list[Any], zone: tzinfo, ledger: _Ledger) -> dict[object, list[_Entry]]:
     """Reduce every component and group it with the series it belongs to.
 
     Grouped by ``UID``, because that is what ties an override to its master. A
@@ -434,11 +515,14 @@ def _grouped(components: list[Any], zone: tzinfo) -> dict[object, list[_Entry]]:
     """
     groups: dict[object, list[_Entry]] = {}
     for index, component in enumerate(components):
-        entry = _reduce(component, zone)
+        entry = _reduce(component, zone, ledger)
         if entry is None:
             # Skipped, not raised: an entry a parseable source contains but this
             # reader cannot interpret proposes nothing about itself, which is what
-            # keeps §4's absence rule respected rather than strained (§7b).
+            # keeps §4's absence rule respected rather than strained (§7b) — and
+            # leaves the read unaccounted, so it warrants no absence either
+            # (ADR-0117 §5).
+            ledger.unaccounted()
             continue
         uid = component.get("UID")
         key: object = str(uid) if uid is not None else ("\x00anonymous", index)
@@ -446,8 +530,12 @@ def _grouped(components: list[Any], zone: tzinfo) -> dict[object, list[_Entry]]:
     return groups
 
 
-def _reduce(component: Any, zone: tzinfo) -> _Entry | None:
-    """Reduce one ``VEVENT``, or return ``None`` if it cannot be interpreted."""
+def _reduce(component: Any, zone: tzinfo, ledger: _Ledger) -> _Entry | None:
+    """Reduce one ``VEVENT``, or return ``None`` if it cannot be interpreted.
+
+    The ``ledger`` records only what :func:`_dates` could not localise; the caller
+    records the ``None`` returns, so a component is never counted twice.
+    """
     start = _localised(component.get("DTSTART"), zone)
     if start is None:
         return None
@@ -495,8 +583,8 @@ def _reduce(component: Any, zone: tzinfo) -> _Entry | None:
         form=form,
         recurrence_id=recurrence_id,
         rules=rules,
-        rdates=_dates(component, "RDATE", zone),
-        exdates=frozenset(_to_utc(moment) for moment in _dates(component, "EXDATE", zone)),
+        rdates=_dates(component, "RDATE", zone, ledger),
+        exdates=frozenset(_to_utc(moment) for moment in _dates(component, "EXDATE", zone, ledger)),
     )
 
 
@@ -621,8 +709,15 @@ def _zone_label(instant: datetime) -> str:
     return label if seconds == 0 else f"{label}:{seconds:02d}"
 
 
-def _dates(component: Any, name: str, zone: tzinfo) -> tuple[datetime, ...]:
-    """Every ``RDATE``/``EXDATE`` instant, localised. ``PERIOD`` values are skipped."""
+def _dates(component: Any, name: str, zone: tzinfo, ledger: _Ledger) -> tuple[datetime, ...]:
+    """Every ``RDATE``/``EXDATE`` instant, localised. ``PERIOD`` values are skipped.
+
+    A skipped value leaves the read unaccounted (ADR-0117 §5). It is an
+    instruction about what occurs that this reader did not apply, in either
+    direction: an unread ``RDATE`` omits an occurrence the source states, and an
+    unread ``EXDATE`` emits one the source excludes. Neither is "the source says
+    this does not occur", which is the one shape §5 exempts.
+    """
     prop = component.get(name)
     if prop is None:
         return ()
@@ -630,8 +725,10 @@ def _dates(component: Any, name: str, zone: tzinfo) -> tuple[datetime, ...]:
     for group in prop if isinstance(prop, list) else [prop]:
         for item in getattr(group, "dts", ()):
             localised = _localised(item, zone)
-            if localised is not None:
-                found.append(localised[0])
+            if localised is None:
+                ledger.unaccounted()
+                continue
+            found.append(localised[0])
     return tuple(found)
 
 
@@ -689,7 +786,12 @@ def _only(value: object) -> object:
 
 
 def _resolve(
-    group: list[_Entry], *, window_start: datetime, window_end: datetime, budget: _Budget
+    group: list[_Entry],
+    *,
+    window_start: datetime,
+    window_end: datetime,
+    budget: _Budget,
+    ledger: _Ledger,
 ) -> Iterator[Occurrence]:
     """Expand one ``UID``'s series, with cancellation and overrides applied.
 
@@ -708,9 +810,15 @@ def _resolve(
     # reader does not interpret. In each case the master's values for the affected
     # occurrences are known to be untrustworthy and nothing else is (§7b).
     if len(masters) != 1 or any(entry.form is _Form.OPAQUE for entry in overrides):
+        # And the series is unaccounted for, wherever it lies: this read cannot
+        # say what the source holds here, so it cannot warrant an absence over the
+        # interval it looked at (ADR-0117 §5).
+        ledger.unaccounted()
         return
     master = masters[0]
     if master.cancelled:
+        # Not a skip. The source itself says these occurrences do not occur, and
+        # declining to emit them is reading it correctly (ADR-0117 §5, §7b).
         return
 
     singles = _by_key(entry for entry in overrides if entry.form is _Form.SINGLE)
@@ -724,11 +832,16 @@ def _resolve(
     for moment in _starts(master, band_start=band_start, band_end=band_end, budget=budget):
         key = _to_utc(moment)
         governing = _governing(key, master=master, singles=singles, ranges=ranges, keys=range_keys)
-        if governing is None or governing.cancelled:
-            # `None` is the contested case: two overrides of the same form sharing
-            # a RECURRENCE-ID are genuinely contradictory — two corrections of
-            # equal specificity at the same point — so it fails closed rather than
-            # picking one (§7b).
+        if governing is None:
+            # The contested case: two overrides of the same form sharing a
+            # RECURRENCE-ID are genuinely contradictory — two corrections of equal
+            # specificity at the same point — so it fails closed rather than
+            # picking one (§7b). The source held an occurrence here and this read
+            # could not say what it is, which is a skip (ADR-0117 §5).
+            ledger.unaccounted()
+            continue
+        if governing.cancelled:
+            # Not a skip: the source says this occurrence does not occur (§5).
             continue
         occurrence = _occurrence(moment, governing=governing)
         if _overlaps(occurrence, window_start=window_start, window_end=window_end):
@@ -985,6 +1098,7 @@ __all__ = [
     "ExpansionBudgetExhaustedError",
     "Occurrence",
     "SourceNotParseableError",
+    "WindowRead",
     "occurrences_in_window",
     "saturating_add",
     "saturating_shift",
