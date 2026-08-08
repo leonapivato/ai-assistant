@@ -64,6 +64,8 @@
   the one — no clause below rests on its ratification, and the marking form used in
   this document binds as prose if that regime never lands.
 - Refs #820, #819, #829, #710, #632.
+- Related: ADR-0093 §7, whose daemon-thread ruling §7 below reuses rather than
+  re-derives.
 
 ## Context
 
@@ -369,16 +371,24 @@ stops waiting returns control to it. The chunk boundary arrives, the run budget 
 checked, and the loop is released — which is the whole of what §4 asked for, bought
 without pretending the ONNX thread died.
 
-> **Normative.** Abandoned embedding workers may not exhaust the executor the
-> SQLite stores share. The bounded embedder's work runs where its exhaustion is
-> contained to embedding, so a wedged backend degrades embedding into a repeating,
-> named fault and leaves every other subsystem's worker-thread capacity intact.
+> **Normative.** An `Embedder` implementation that dispatches synchronous work off
+> the event loop does not dispatch it to the loop's default executor. An abandoned
+> embedding worker may not consume capacity the SQLite stores need, so a wedged
+> backend degrades embedding into a repeating, named fault and leaves every other
+> subsystem's worker-thread capacity intact.
 
-> **Normative.** Hub shutdown does not block on an abandoned embedding worker. A
-> containment mechanism that makes process exit wait on a thread that will not
-> return has moved the hang rather than bounded it.
+> **Normative.** Neither hub shutdown nor interpreter shutdown blocks on an
+> abandoned embedding worker. A containment mechanism that makes process exit wait
+> on work that will not return has moved the hang rather than bounded it.
 
-**Both clauses are consequences this ADR creates and therefore owes.** The Context
+> **Normative.** Both obligations above fall on the implementation that dispatches
+> the work, not on the deadline decorator §2 wires above it. A decorator observes
+> an inner `Embedder` through the Protocol and has no reach into how that
+> implementation executes; it can stop waiting and it cannot choose where the work
+> was submitted. An implementation that dispatches nothing — `HashingEmbedder`
+> computes on the caller's thread — owes neither.
+
+**The clauses are consequences this ADR creates and therefore owes.** The Context
 above establishes the two verified facts: the default executor is shared with
 `_run_to_completion` in three stores, and a worker abandoned inside
 `FastEmbedEmbedder._loaded` holds a `threading.Lock` that every later call blocks
@@ -386,34 +396,51 @@ on. Without containment, the decision above converts "one job hangs the loop" in
 "the hub slowly stops being able to touch any database" — quieter, later, and
 harder to read, which is a worse fault than the one it replaced.
 
-**The mechanism is the lane's, on the same division ADR-0111 §9 used for its
-discriminator — but the two clauses together are a narrower gate than either
-alone, and this ADR does not pretend the obvious shape passes it.** A thread pool
-the embedder owns satisfies the containment clause and, in its obvious form,
-**fails the shutdown one**: `concurrent.futures.thread` registers an `atexit` hook
-that joins every worker, so one wedged thread turns a hub that will not embed into
-a hub that will not stop, which is what ADR-0083 §4's two-phase shutdown and
-`shutdown_drain_seconds` exist to avoid. Naming that as a satisfying shape would
-have handed the lane a mechanism that breaks a clause four lines above it.
+**The third clause is the one a lane is most likely to get wrong, so it is a
+clause and not a remark.** §2 puts the deadline in a decorator, and the natural
+next thought is that the decorator can also contain what it is bounding. It cannot.
+`FastEmbedEmbedder.embed` awaits `asyncio.to_thread(self._embed_sync, documents)`,
+and by the time the decorator's deadline fires that submission has already
+happened, on the loop's default executor, out of reach of anything above the
+Protocol. Refusing *later* calls does not retract it. So the deadline composes over
+any `Embedder` and the containment does not: it is an obligation on each
+implementation that dispatches, discharged where the dispatch is written.
 
-**What the two clauses admit, stated as constraints rather than as a choice:**
+**The corpus has already decided this exact shape, and §7 does not re-derive it.**
+ADR-0093 §7 requires a calendar reader's blocking work to run on "a **daemon thread
+the reader owns**, never on the event loop's default executor, under a deadline the
+reader owns, with **at most one outstanding worker**", and rules on the two
+mechanisms by name: the worker must be "terminable at process exit … neither
+service shutdown nor interpreter shutdown may join it … A daemon thread meets this;
+a `ThreadPoolExecutor` does not." `src/ai_assistant/readers/_source.py` is that
+ruling built, and its module docstring records both halves of the verification —
+`concurrent.futures.thread` "registers an interpreter-exit hook that joins its
+workers", and `asyncio.to_thread` "uses the loop's **default** executor, which
+`asyncio.run` shuts down (i.e. joins) before returning". The hub runs under
+`asyncio.run` (`ai_assistant.service.hub`), so both apply here unchanged.
 
-- **A thread-based mechanism must be one nothing joins at exit** — daemon workers
-  the interpreter abandons, rather than a pool whose shutdown waits. It contains
-  the capacity and it never reclaims the wedged worker: the thread survives until
-  the process does.
-- **A mechanism that refuses rather than queues** — a bound on outstanding
-  embedding calls, above whatever runs them — satisfies both clauses on its own
-  terms, because a refusal allocates nothing to be joined. It is the cheapest
-  shape and it still leaves the wedged worker where it is.
+**What the clauses admit, and what each one costs:**
+
+- **A daemon thread the embedder owns, with at most one outstanding worker** —
+  ADR-0093 §7's shape, satisfying both clauses for its stated reasons. The
+  outstanding-worker bound is what makes it a containment rather than a leak: a
+  wedged worker means the next call is refused at once instead of dispatching a
+  second one. It never reclaims the wedged thread, which survives until the
+  process does.
+- **A bound on outstanding calls is a cap and not an answer on its own.** It stops
+  accumulation and it does nothing about the first wedged worker, which is already
+  submitted. It belongs *inside* the mechanism above, as its outstanding-worker
+  bound, rather than beside it as an alternative to it.
 - **Only process isolation can end the wedged work**, because only a process can
   be killed. It is the heaviest option, it is the one that actually reclaims the
   ONNX runtime, and this ADR neither requires nor forecloses it.
 
-The first two contain the blast radius and leave the seam dead until a restart —
-which §7's closing paragraph already accepts as the remedy. The third is the only
-one that does better, and whether that is worth its cost is the lane's call with
-the profile in hand, not a judgement this ADR can make from here.
+**One thing does not transfer from ADR-0093 §7, and it is the reason §7 ends where
+it does.** That ADR could call abandonment safe because "a read holds no lock,
+opens no transaction, writes nothing". An abandoned embedding worker can hold
+`FastEmbedEmbedder._load_lock`, so abandoning it is safe for the *store* and fatal
+for the *seam*: nothing corrupts, and no later embed succeeds. Containment
+therefore buys a live hub with a dead capability, not a live hub that recovers.
 
 **Under either in-process mechanism, recovery from a fully wedged seam is a hub
 restart, and that is accepted.** Once a load has wedged under `_load_lock`, no
@@ -587,8 +614,8 @@ narrower and why.
   `None`, and this ADR neither re-adds the field nor touches that ruling.
 - **How the bounded embedder is composed with anything else in `models/`** — a
   retry wrapper, a router — beyond §3's ruling that this one does not retry.
-- **The containment mechanism**, and the executor's size if that is the shape
-  chosen (§7).
+- **Which of §7's admitted mechanisms the lane builds**, and whether the ONNX
+  runtime is worth isolating in a process to make it reclaimable.
 - **The exact class name and module of the expiry error**, and the corresponding
   class in each translating vocabulary (§5).
 - **Any conformance case for `Embedder`.** #347 closed the suite this seam is
@@ -627,16 +654,16 @@ faults to translate this one distinguishably — `SqliteMemoryStore._embed_one` 
 flatten it back into `MemoryStoreError`. The discriminator's value is exactly the
 discipline of keeping it, and there is no mechanical check that it survives.
 
-**What gets harder: the containment clause is a real constraint on a small change,
-and the shutdown clause rules out the shape most readers reach for first.** The
-obvious implementation of a deadline is four lines, and §7 makes it more than that,
-because the obvious implementation trades a hang on the scheduler loop for a slow
-starvation of every store in the process. Then the shutdown clause disqualifies the
-obvious containment — an owned `ThreadPoolExecutor`, whose `atexit` join turns a
-wedged worker into a hub that will not stop — and leaves the lane three shapes, of
-which the two cheap ones contain the fault without ever reclaiming the worker. That
-is a genuine cost of this decision and not an oversight in it: bounding a seam
-whose work cannot be interrupted buys legibility, not recovery.
+**What gets harder: the deadline is four lines and the decision is not.** §7's
+clauses make the small change a larger one, and they land somewhere §2 does not:
+the deadline composes over the seam in a decorator, and the containment has to be
+written inside `FastEmbedEmbedder`, because that is where `asyncio.to_thread`
+submits the work the decorator can only stop waiting for. So the implementation
+touches the adapter as well as the wrapper, and it converts `embed` from a
+`to_thread` one-liner into ADR-0093 §7's daemon-thread-with-one-outstanding-worker
+shape that `src/ai_assistant/readers/_source.py` already carries. That is a genuine
+cost of this decision and not an oversight in it: bounding a seam whose work cannot
+be interrupted buys legibility, not recovery.
 
 **Search's failure mode changes**, from a query that never answers to one that
 fails with a named class after the deadline. That is strictly better and it is
