@@ -19,7 +19,7 @@
   `scripts/ship.sh` fires its own architecture requirement on a diff touching
   `core/protocols.py` or `core/types.py`, which this diff does not.
 - **This ADR amends nothing and supersedes nothing.** §14 applies ADR-0082 §1's
-  test to each of the twelve places where a record looks owed, and records why
+  test to each of the fifteen places where a record looks owed, and records why
   none is.
 
 ## Context
@@ -165,10 +165,12 @@ the type is cheap here and expensive later.
 > admitted by the clause above; its message is not.
 
 > **Normative.** An **identifier** in a trace is an opaque value **minted by this
-> system** that resolves to a row it did not create — a record id, a conversation
-> id, a turn id, an execution id — or the trace's own id. It is never a label, a
-> name, a title, a query, a snippet or a digest of content, and a value a user or
-> a model chose is not an identifier for this purpose, whatever its type.
+> system** — a record id, a conversation id, a turn id, an execution id, or the
+> trace's own id. What qualifies it is its origin, never its current
+> resolvability: an identifier whose referent has since been deleted is still an
+> identifier (§10). It is never a label, a name, a title, a query, a snippet or a
+> digest of content, and a value a user or a model chose is not an identifier for
+> this purpose, whatever its type.
 
 > **Normative.** Every non-reference observation a trace carries is a number or a
 > boolean. There is no free-text field, no serialised payload and no
@@ -188,9 +190,16 @@ An id *is* derived at runtime — it is read off the row the trace is about — 
 flat "no runtime-derived string" rule would forbid the references §1 requires and
 leave no conforming trace. The second clause therefore excludes identifiers by
 name, and the third clause supplies the property the exclusion is bought with:
-minted here, opaque, resolving to a row this system created. What that property
-excludes is exactly what a leak would need — a value whose *content* is the datum
-rather than a pointer to it.
+minted here, opaque, a pointer rather than a payload. What that property excludes
+is exactly what a leak would need — a value whose *content* is the datum rather
+than an address for it.
+
+**Origin and not resolvability, deliberately.** An id that once named a row and
+no longer does is still a pointer and still carries no content, so deleting the
+referent cannot turn a compliant trace into a non-compliant one — which it would,
+retroactively and in bulk, if the test were "resolves to a row". §10 requires
+exactly that dangling to be permitted; this clause is the half of the pair that
+makes it coherent rather than a contradiction.
 
 **The third clause is needed because `Identifier` alone does not carry that
 property.** `Identifier` in `core/types.py` is a non-blank encodable string, and a
@@ -410,7 +419,7 @@ file, each meaning something different.
 ### 7. Two Protocols: an append-only sink the pipeline holds, and a store the pipeline does not
 
 > **Normative.** `core/protocols.py` gains two Protocols. `TraceSink` carries one
-> operation, an append. `TraceStore` carries the append, a bounded ordered read,
+> operation, an append. `TraceStore` carries the append, a resumable walk (§7a),
 > and a purge below an instant.
 
 > **Normative.** Every emitting site takes a **`TraceSink`** as a required
@@ -455,6 +464,52 @@ pydantic model before `emit` is called: a malformed trace is an emitter bug that
 fails at construction, in the emitter's own tests, and never reaches the sink. What
 `emit` can therefore encounter is environmental — a locked database, a full disk —
 which is precisely the class §5 subordinates.
+
+#### 7a. The walk is a total insertion order, and a page boundary is stable under concurrent appends
+
+> **Normative.** `TraceStore`'s read is a walk in the store's **total insertion
+> order** — the order in which appends landed, never `occurred_at` order — bounded
+> by a caller-supplied count and resumed from an opaque position, under ADR-0114
+> §2's rule that a position "is opaque to its caller, and is never a value a
+> caller composes".
+
+> **Normative.** A walk resumed from a position returns, exactly once and in
+> order, every trace appended after that position and still present; it returns no
+> trace at or before it. An append that lands during a walk takes a position after
+> every position already issued, so no page boundary skips or duplicates a trace.
+
+> **Normative.** The position is the caller's to hold. `TraceStore` persists no
+> cursor, names no walk, and two concurrent readers never contend.
+
+> **Normative.** A bound of zero or below is refused, as ADR-0114 §6 refuses one
+> for the chunked walk and for the same reason. Every refusal in this contract is
+> a `ValueError`, mirroring ADR-0114 §6a.
+
+**Insertion order rather than `occurred_at`, and the difference is not
+cosmetic.** §3 has the *emitter* stamp the instant, so two traces can carry the
+same instant, and a buffered or slow sink can land an earlier instant after a
+later one. An order over `occurred_at` is therefore neither total nor stable, and
+a page boundary drawn on it can skip a row that arrives behind the cursor. This is
+ADR-0114 §2's ruling reached by the same route — "a cursor is a position in a
+total insertion order, and nothing else", and whatever order a walk uses "must be
+total and must not reorder under later writes". A measure that wants a time window
+filters within the walk; it does not order by time.
+
+**An append-only store needs no snapshot, which is why this is three clauses and
+not a transaction model.** A trace is never updated and never re-ordered; the only
+thing that removes one is §10's purge, which deletes from the *old* end. So a
+resumed walk can see rows appended since the position was issued — correct, since
+they are genuinely later — and can find rows gone that were present when it
+started, which is a purge doing its job. Neither is an anomaly a snapshot would
+need to hide, and both are stated so a conformance suite can assert them rather
+than a fake and SQLite disagreeing quietly.
+
+**No cursor in the store, unlike ADR-0114's walk.** That walk is resumed by a
+scheduled *job* across process restarts, so ADR-0111 §1 put the cursor in the
+store and ADR-0114 §5 had to name walks so two could not share a position. A
+measure is a reader, not a job: it holds its own position for the length of one
+computation, and importing the naming machinery would buy durable state nothing
+here needs.
 
 ### 8. Which seams emit, and what each must carry
 
@@ -701,11 +756,11 @@ this ADR against:
   vocabulary for `refs`), a constrained label type for seam names and metric keys,
   and the `EvaluationTrace` model of §3. Field names and the exact pattern are the
   lane's within §2 and §3.
-- **`core/protocols.py`** — `TraceSink` (append) and `TraceStore` (append, a
-  bounded ordered read, a purge below an instant). The read is resumable by an
-  **opaque** position, under ADR-0114 §2's rule that "a position is opaque to its
-  caller, and is never a value a caller composes"; the position type is the lane's,
-  and reusing `MemoryStore`'s `WalkPosition` across stores is not decided here.
+- **`core/protocols.py`** — `TraceSink` (append) and `TraceStore` (append, §7a's
+  walk, a purge below an instant). §7a fixes the walk's order, its resumption
+  guarantee, its bound's refusal and where the position lives; the position
+  *type* is the lane's, and reusing `MemoryStore`'s `WalkPosition` across stores
+  is not decided here.
 - **`core/config.py`** — one field, §10's horizon.
 - **No change to any existing Protocol**, and no method added to
   `AssistantEngine`. The inspection surface is §15's.
@@ -737,7 +792,7 @@ differently, or read one of its clauses more widely than it now holds?* Applied 
 each place a record looks owed. **None is owed.**
 
 **ADR-0074's failed-turn deferral — not owed, and this is the closest of the
-twelve.** Its sentence is "A turn that raises before producing an outcome is not
+fifteen.** Its sentence is "A turn that raises before producing an outcome is not
 captured, and the gap is deliberate … what failed is *operational* information —
 Tier 2, and the subject of leg 8's `EvaluationTrace`, not of Tier 1 memory". §8
 records that turn — as a Tier 2 trace, which is what that sentence says the record
@@ -830,6 +885,12 @@ behaves identically; what changes is that a second, non-severity record now exis
 which §9's own wording — "at a severity an operator's monitoring treats as a
 fault" — was written to permit. **#710 stays open and is closed by the lane §9
 names**, not by this one.
+
+**ADR-0114 §2, §5, §6 and §6a — not owed.** §7a *applies* §2's opacity rule and
+§6/§6a's zero-refusal to a second store rather than changing either, and declines
+§5's walk-naming with its reason stated. Every sentence of ADR-0114 is about
+`MemoryStore`'s chunked walk and stays true of it; a reader holding only ADR-0114
+still names walks, still stores the cursor, and still refuses a zero chunk there.
 
 **ADR-0058 and ADR-0021 §4 — not owed.** §11 states a boundary neither of them
 crossed. `AuditTrail`'s obligations, `StepExecutor`'s four collaborators and
