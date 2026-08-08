@@ -12,7 +12,7 @@ case is not vacuous — none of which are contract.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -25,6 +25,8 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryUpdateProposal,
     Provenance,
+    ReadCoverage,
+    ReportedExtent,
     SemanticMemory,
 )
 from ai_assistant.testing import DEFAULT_READER_NAME, FakeReader, attested_proposal
@@ -79,6 +81,108 @@ async def test_a_declared_as_of_is_carried_and_defaults_to_absent() -> None:
     """``None`` is the first real source's case, and a ruling (ADR-0093 §10)."""
     assert (await FakeReader().read()).as_of is None
     assert (await FakeReader(as_of=_WHEN).read()).as_of == _WHEN
+
+
+async def test_a_declared_coverage_is_carried_and_defaults_to_absent() -> None:
+    """#804's knob, and the ``None`` is the state of every reader that has not opted in.
+
+    ADR-0110 §2 makes a coverage optional and its absence load-bearing: a reading
+    that declares none warrants no absence at all, which is where every consumer
+    that does not care about ADR-0110 §3 stays without having to ask.
+    """
+    coverage = ReadCoverage(covers_from=_WHEN, covers_until=_LATER)
+
+    assert (await FakeReader().read()).coverage is None
+    assert (await FakeReader(coverage=coverage).read()).coverage == coverage
+
+
+async def test_the_coverage_is_the_test_authors_and_is_never_synthesised() -> None:
+    """ADR-0117 §9's Reader-suite clause, where this fake can be held to it.
+
+    A coverage states what a read **exhausted** and "may not be widened to what the
+    reader was configured to cover" (ADR-0110 §2), so a fake that computed one from
+    its own configuration — from ``read_at`` and a notional window, or from the
+    span of the proposals it holds — would model exactly what the clause forbids,
+    and every consumer driven by it would be testing against a producer no
+    conforming reader may be.
+
+    Three levers move underneath a fixed ``coverage`` here and none of them reaches
+    it: the identity, the read instant, and the proposals — whose extent lies
+    **outside** the declared coverage, which is a state a real reader reaches
+    whenever an entry straddles its window edge (ADR-0117 §6) and which a fake
+    deriving a coverage from its script could not produce.
+    """
+    declared = ReadCoverage(covers_from=_WHEN, covers_until=_LATER)
+    outside = ReportedExtent(extends_from=_LATER, extends_until=_LATER + timedelta(days=400))
+    subject = FakeReader(
+        [attested_proposal("a standup", reported_by="calendar", extent=outside)],
+        name="calendar",
+        read_at=_LATER + timedelta(days=900),
+        coverage=declared,
+    )
+
+    reading = await subject.read()
+
+    assert reading.coverage == declared
+    attestation = reading.proposals[0].proposed.provenance.attestation
+    assert attestation is not None
+    assert attestation.extent == outside
+
+
+async def test_the_synthesised_reading_carries_the_declared_coverage_too() -> None:
+    """Both build paths, so the two cannot disagree about the field a consumer reads.
+
+    The default script re-synthesises its proposal per read (ADR-0092 §6) and a
+    coverage is no part of that synthesis: it is the author's value, carried onto
+    whatever the fake happens to be returning.
+    """
+    coverage = ReadCoverage(covers_until=_LATER)
+    subject = FakeReader(coverage=coverage)
+
+    first, second = await subject.read(), await subject.read()
+
+    assert first.coverage == coverage == second.coverage
+    assert first.proposals[0].proposed.id != second.proposals[0].proposed.id
+
+
+def test_a_proposal_states_no_extent_unless_the_author_gives_it_one() -> None:
+    """ADR-0117 §2's third clause, at the helper every ``Reader`` suite builds with.
+
+    Declaring none is always available and always safe, so it is the default: a
+    helper that handed every proposal an extent would make ADR-0110 §3's close fire
+    in suites that never asked for it, and would make the no-extent case — which
+    ADR-0117 §9 obliges each writer's tests to cover — the awkward one to write.
+    """
+    stated = ReportedExtent(extends_from=_WHEN, extends_until=_LATER)
+    plain = attested_proposal("a standup", reported_by="calendar")
+    positioned = attested_proposal("a standup", reported_by="calendar", extent=stated)
+
+    assert plain.proposed.provenance.attestation is not None
+    assert plain.proposed.provenance.attestation.extent is None
+    assert positioned.proposed.provenance.attestation is not None
+    assert positioned.proposed.provenance.attestation.extent == stated
+
+
+def test_the_extent_is_a_different_fact_from_the_report_time() -> None:
+    """ADR-0117 §6's last paragraph, pinned where both values are set together.
+
+    "An entry reported on Monday about a meeting on Thursday has both, and they
+    disagree by design." Neither is derived from the other, and a helper filling one
+    from the other would make every fixture in the corpus agree about a pair that
+    has to be free to differ.
+    """
+    proposal = attested_proposal(
+        "a standup",
+        reported_by="calendar",
+        reported_at=_WHEN,
+        extent=ReportedExtent(extends_from=_LATER, extends_until=_LATER + timedelta(hours=1)),
+    )
+
+    attestation = proposal.proposed.provenance.attestation
+    assert attestation is not None
+    assert attestation.reported_at == _WHEN
+    assert attestation.extent is not None
+    assert attestation.extent.extends_from == _LATER, "the entry lies well after the report"
 
 
 async def test_a_scripted_failure_is_wrapped_with_its_cause_and_a_payload_free_message() -> None:

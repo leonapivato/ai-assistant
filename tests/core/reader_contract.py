@@ -71,6 +71,8 @@ from ai_assistant.core.protocols import Reader
 from ai_assistant.core.types import BeliefBand, MemoryKind, band_of
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from ai_assistant.core.types import SourceReading
     from ai_assistant.testing.cancellation import SuspendedCall
 
@@ -126,6 +128,8 @@ def assert_conforms(reading: SourceReading, name: str) -> None:
     if reading.as_of is not None:
         assert reading.as_of.tzinfo is not None
         assert reading.as_of.utcoffset() is not None
+    if reading.coverage is not None:
+        assert_bounded_by_instants(reading.coverage.covers_from, reading.coverage.covers_until)
     for proposal in reading.proposals:
         assert proposal.proposed.kind != MemoryKind.EPISODIC.value
         assert band_of(proposal.proposed.provenance.source) is BeliefBand.ATTESTED
@@ -133,6 +137,27 @@ def assert_conforms(reading: SourceReading, name: str) -> None:
         attestation = proposal.proposed.provenance.attestation
         assert attestation is not None
         assert attestation.reported_by == name
+        if attestation.extent is not None:
+            assert_bounded_by_instants(
+                attestation.extent.extends_from, attestation.extent.extends_until
+            )
+
+
+def assert_bounded_by_instants(start: datetime | None, end: datetime | None) -> None:
+    """Assert a declared half-open pair's set ends are aware and correctly ordered.
+
+    The half of ADR-0117 §9's coverage-and-extent clause a generic suite can
+    decide. Both types already refuse a naive or inverted value at construction,
+    so this pins the *contract* rather than standing as its only defence — the
+    same reason :meth:`ReaderContract.test_both_instants_are_timezone_aware`
+    exists beside :data:`~ai_assistant.core.types.UtcInstant`.
+    """
+    for instant in (start, end):
+        if instant is not None:
+            assert instant.tzinfo is not None
+            assert instant.utcoffset() is not None
+    if start is not None and end is not None:
+        assert end > start
 
 
 class ReaderContract:
@@ -243,6 +268,49 @@ class ReaderContract:
         if reading.as_of is not None:
             assert reading.as_of.tzinfo is not None
             assert reading.as_of.utcoffset() is not None
+
+    # --- what the read exhausted, and where its entries lie (ADR-0117 §9) ----
+
+    async def test_a_declared_coverage_and_extent_are_statements_about_the_read(
+        self, reader: Reader
+    ) -> None:
+        """ADR-0117 §9's third clause, and what a generic suite can and cannot reach.
+
+        A reading's ``coverage`` and a proposal's ``extent`` are both statements
+        about the read that was performed: the first says which region of the
+        source's world this read **exhausted** (ADR-0110 §2), the second says where
+        in that world the entry it reported **lies** (ADR-0117 §2). Neither may be
+        derived from the reader's configuration, from the read's own bound, or from
+        the other — a coverage widened to what the reader was *configured* to cover
+        would warrant absences over a region nobody looked at, and an extent
+        trimmed to fit a coverage would manufacture the containment ADR-0110 §3
+        asks about.
+
+        **What is asserted here is well-formedness, and the omission is a decision
+        rather than an oversight.** Whether a value was *synthesised* is not
+        decidable from ``name`` and one ``read()`` return: an honest extent may
+        coincide exactly with the coverage (an entry spanning the whole window),
+        and an honest coverage is a function of the reader's window and its clock,
+        so every proxy for "you computed this instead of observing it" both over-
+        and under-fires. This file already takes that position once, for ADR-0093
+        §4's "rationale **naming** the source", on ADR-0093 §7's reasoning: a proxy
+        that reports a property as held is worse than no check, because it is
+        believed. So the rule binds producers through ``Reader.read``'s contract,
+        the canonical fake makes both values **scripted parameters** so no consumer
+        can be driven by a synthesised one (#804), and ``tests/core/
+        test_fake_reader.py`` pins that they are returned verbatim.
+
+        **Both are optional and neither is required of any reader.** ADR-0117 §2's
+        third clause makes declaring no extent always available and always safe,
+        and ADR-0110 §2 does the same for coverage; a source whose entries have no
+        position — a settings export, a contact list — declares neither and is not
+        thereby deficient. So this quantifies over what the subject happens to
+        declare rather than demanding either, and the empty reading's case below
+        re-asserts the same set over a subject that may declare nothing at all.
+        """
+        reading = await reader.read()
+
+        assert_conforms(reading, reader.name)
 
     # --- what may be proposed (ADR-0093 §4) ---------------------------------
 

@@ -52,6 +52,8 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryUpdateProposal,
     Provenance,
+    ReadCoverage,
+    ReportedExtent,
     SemanticMemory,
     SourceReading,
     band_of,
@@ -139,13 +141,14 @@ def _mint(factory: Callable[[], str] | None = None) -> str:
     return minted
 
 
-def attested_proposal(
+def attested_proposal(  # noqa: PLR0913 — the belief, its reporter, its id and three facts the source states about it; each is one decision a caller makes on its own
     content: str,
     *,
     reported_by: str,
     record_id: str | None = None,
     reported_at: datetime = _DEFAULT_REPORTED_AT,
     last_updated: datetime = _DEFAULT_READ_AT,
+    extent: ReportedExtent | None = None,
 ) -> MemoryUpdateProposal:
     """One well-formed proposal of the shape a ``Reader`` may emit.
 
@@ -190,6 +193,26 @@ def attested_proposal(
         last_updated: When *we* last revised the belief — transaction time, our
             clock (ADR-0045 §3). Deliberately **not** the confirming instant: a
             months-old report imported this morning is not a fresh belief.
+        extent: Where the source says this entry lies in its own world, or
+            ``None`` — the default, and the state of every producer that has no
+            position to state (ADR-0117 §2). It is what makes the belief
+            absence-demotable by a reading whose coverage contains it, so a
+            consumer testing ADR-0110 §3's close scripts one here.
+
+            **Scripted, never synthesised, which is the whole point of it being a
+            parameter** (ADR-0117 §9). A fake that derived an extent from its own
+            configuration — from the reading's ``read_at``, from a coverage, from
+            an index in the script — would model exactly what §2 forbids a real
+            producer from doing: stating a position derived from the read's own
+            bound rather than from what the source said. The value the test author
+            writes is the value the belief carries, and nothing here trims it to
+            fit a coverage or widens it to reach one.
+
+            Deliberately **not** defaulted to something demotable. A helper that
+            handed every proposal an extent would make ADR-0110 §3's close fire in
+            suites that never asked for it, and would make the no-extent case —
+            which §9 obliges each writer's tests to cover — the awkward one to
+            write rather than the free one.
 
     The ``rationale`` and the ``sensitivity`` are set rather than parameterised,
     because ADR-0093 §4 obliges a reader to make both a choice: the rationale
@@ -225,7 +248,9 @@ def attested_proposal(
                 source=MemorySource.EXTERNAL,
                 confidence=_ATTESTED_CONFIDENCE,
                 last_updated=last_updated,
-                attestation=Attestation(reported_by=reported_by, reported_at=reported_at),
+                attestation=Attestation(
+                    reported_by=reported_by, reported_at=reported_at, extent=extent
+                ),
                 last_confirmed_at=reported_at,
             ),
         ),
@@ -261,13 +286,14 @@ class FakeReader:
     conformance suite is.
     """
 
-    def __init__(  # noqa: PLR0913 — a script, an identity, two instants, a facet, a failure and an id factory; each is one knob a consumer sets on its own
+    def __init__(  # noqa: PLR0913 — a script, an identity, two instants, a coverage, a facet, a failure and an id factory; each is one knob a consumer sets on its own
         self,
         proposals: Sequence[MemoryUpdateProposal] | None = None,
         *,
         name: str = DEFAULT_READER_NAME,
         read_at: datetime = _DEFAULT_READ_AT,
         as_of: datetime | None = None,
+        coverage: ReadCoverage | None = None,
         facet: CalendarFacet | None = None,
         failure: Exception | None = None,
         id_factory: Callable[[], str] | None = None,
@@ -301,6 +327,23 @@ class FakeReader:
                 ruling rather than laxity: it may never be filled from the
                 filesystem, from the clock, or from one entry's stamp applied to
                 the rest (ADR-0093 §10).
+            coverage: What every reading this fake returns declares it
+                **exhausted**, or ``None`` — the default, and the state of every
+                reader that has not opted into ADR-0110 §3. It is half of that
+                opt-in; the other half is an ``extent`` on the proposals whose
+                absence should count (see :func:`attested_proposal`), and neither
+                alone demotes anything.
+
+                **Scripted by the test author, never synthesised from this fake's
+                configuration** (ADR-0117 §9, #804). ADR-0110 §2 rules that a
+                coverage states what a read *exhausted* and "may not be widened to
+                what the reader was configured to cover" — so a fake that built one
+                from ``read_at`` and a notional window, or from the span of the
+                proposals it happens to hold, would model exactly the thing the
+                clause forbids, and every consumer driven by it would be testing
+                against a producer no conforming reader may be. It is carried onto
+                both the scripted and the synthesised reading, so the two paths
+                cannot disagree about the field a consumer reads.
             facet: The situational half of every reading this fake returns, or
                 ``None`` — the default, and the state a consumer of a reader whose
                 source has no situational reading sees (ADR-0096 §5). Its stamp
@@ -343,6 +386,7 @@ class FakeReader:
         self._name = name.strip()
         self._read_at = read_at
         self._as_of = as_of
+        self._coverage = coverage
         self._facet = facet
         self._failure = failure
         self._id_factory = id_factory
@@ -409,6 +453,10 @@ class FakeReader:
             read_at=self._read_at,
             as_of=self._as_of,
             proposals=proposals,
+            # Whatever the test author scripted, verbatim — never derived from
+            # `read_at`, from the proposals, or from anything else this fake knows
+            # (ADR-0110 §2, ADR-0117 §9).
+            coverage=self._coverage,
             # Carried on every reading this fake builds, scripted or synthesised,
             # so the two paths cannot disagree about the field a consumer reads.
             # A facet whose stamp is not this reading's is refused here, at
