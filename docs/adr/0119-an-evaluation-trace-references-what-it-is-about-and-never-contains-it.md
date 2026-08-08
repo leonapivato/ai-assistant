@@ -353,17 +353,31 @@ quantity: say so, and let the measure drop the row from its denominator too. §5
 already accepts a stream that is incomplete; this is the same acceptance made
 explicit at one more place.
 
-**The excluded population is empty in this tree, which is why 256 is safe rather
-than merely round.** Every production caller of `MemoryStore.search` is bounded far
-below it: `tools/builtin.py`'s recall tool refuses a `limit` above
-`_MAX_RECALL_LIMIT`, which is 25; `orchestration/retrieval.py` passes the
-pipeline's own remaining budget per band; `memory/ingest.py`'s conflict detector
-passes its own small figure. The cap is an order of magnitude above the largest of
-those and the contract's default is 10. It bounds a *pathological* caller, not a
-real one, and a real one appearing later is a coverage regression this ADR would
-rather have visible in the traces than absorbed into a `Settings` field. **#848**
-tracks the day that coverage loss stops being zero, and names the three answers
-available then rather than pre-solving it.
+**Every shipped default sits far below the cap, but one configuration point can
+cross it, and that is stated rather than glossed.** `tools/builtin.py`'s recall
+tool refuses a `limit` above `_MAX_RECALL_LIMIT`, which is 25; `memory/ingest.py`'s
+conflict detector passes its own small figure; `MemoryStore.search`'s contract
+default is 10. But `LearningLoop`'s `retrieval_limit` is validated only from below
+— `_check_tuning` refuses a non-integer and anything under 1, and imposes no
+ceiling — and `orchestration/retrieval.py` passes the remaining budget straight
+through to `search`. Its default is 5, and nothing in `Settings` exposes it, so
+reaching 256 takes a deliberate composer; but "no production caller can" would be
+false, and the design must hold when one does.
+
+**It holds, because the condition is legible at the deployment level rather than
+inferred from the numbers.** A deployment configured above the cap truncates *every*
+retrieval trace, so an identity-based measure has an empty population — which is a
+much worse failure to discover in a chart than in a header. §9's allowlist
+therefore carries the configured retrieval limit, and a measure lane reads the
+condition off the configuration trace before it computes anything: this window's
+limit exceeds the cap, so precision is unavailable here, stated once and dated,
+rather than a denominator that quietly went to zero.
+
+**#848** carries the standing question — raise the cap, bound the caller, or give
+the family a spilled-ids representation — for the day a real deployment wants both
+a large retrieval and an identity-based measure. It is not pre-solved, because
+each answer costs something different and none of them is owed by any deployment
+that exists.
 
 **The emitter stamps the instant, from the `Clock` it already holds.** The store
 could stamp on append, and that would measure the write rather than the event —
@@ -655,6 +669,11 @@ and §4's correlation clause. What it may not do is add a `TraceKind` (§3).
 > identifier, a credential reference — is recorded as its presence or absence, or
 > not at all.
 
+> **Normative.** The allowlist includes the deployment's **effective retrieval
+> limit**, so a window in which that limit exceeds §3's `records` cap declares
+> itself at startup and an identity-based measure can refuse the window outright
+> instead of computing over an empty population.
+
 **This is the design call #829 leaves to this lane, and the reasoning for
 answering it with a startup stamp rather than an operator act is that a startup
 stamp needs no discipline.** #829's requirement is that the arming moment be
@@ -681,6 +700,13 @@ a path that on a normal machine contains the user's account name, and it will ho
 provider and model identifiers. A denylist would admit the next field somebody
 adds. An allowlist admits nothing until somebody names it, and the third clause
 then constrains what naming it can put in the record.
+
+**The retrieval limit is named on the list by this ADR rather than left to the
+lane**, because it is the one setting whose value decides whether a measure is
+computable at all (§3). `LearningLoop`'s `retrieval_limit` has no ceiling and is
+not a `Settings` field today, so "effective" is the figure the composition root
+actually passed — which is what a measure needs and what a `Settings` dump would
+miss. Every other member of the list is the lane's to name.
 
 **The failure mode is named rather than papered over.** A configuration trace that
 cannot be written is subordinate under §5, so startup continues and the failure is
