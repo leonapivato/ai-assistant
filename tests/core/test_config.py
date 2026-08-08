@@ -113,6 +113,34 @@ def test_load_settings_rejects_an_off_mode_embedder_from_the_environment(
         load_settings()
 
 
+def test_embedding_timeout_defaults_to_thirty_seconds() -> None:
+    # ADR-0118 §4 fixes the figure. It is a ceiling on pathology rather than a
+    # latency target: it has to clear a cold ONNX session initialisation on a slow
+    # disk plus one inference with headroom, because the on-device embedder loads
+    # lazily inside ``embed`` and a deadline that fired on an ordinary cold start
+    # would break the first write after every hub restart.
+    assert Settings().embedding_timeout_seconds == 30.0
+
+
+@pytest.mark.parametrize("value", [0, -1.0, float("inf"), float("nan")])
+def test_an_unusable_embedding_timeout_is_rejected(value: float) -> None:
+    # ``gt=0`` and ``allow_inf_nan=False`` together, and both arms matter: zero or
+    # negative expires every call before it starts, and infinity silently disables
+    # the deadline — the one outcome ADR-0118 exists to prevent, arriving as a
+    # configuration value rather than as a missing bound.
+    with pytest.raises(ValidationError):
+        Settings(embedding_timeout_seconds=value)
+
+
+def test_embedding_timeout_round_trips_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The operator's channel: ADR-0118 §8 makes the field, not a code change, the
+    # remedy for a deployment whose hardware genuinely needs longer.
+    monkeypatch.setenv("ASSISTANT_EMBEDDING_TIMEOUT_SECONDS", "90.5")
+    assert load_settings().embedding_timeout_seconds == 90.5
+
+
 def test_confirmation_ttl_defaults_to_none() -> None:
     # No lifetime by default preserves the pre-#243 behaviour: no legitimate
     # answer to a parked confirmation is refused (#310).
@@ -1016,6 +1044,14 @@ def test_every_real_setting_is_discovered() -> None:
         "model_timeout_seconds",
         "model_backoff_base_seconds",
         "model_backoff_max_seconds",
+        # ADR-0118 §4's embedding deadline. Acknowledged here rather than
+        # exempted: §4 requires it to be refused at load unless it is exactly a
+        # real number that is finite and strictly positive, and joining this tuple
+        # is what subjects it to the parametrised guards below. For this field the
+        # ``bool`` guard is the difference between "thirty seconds" and "one
+        # second" — and one second fails every cold ONNX load, turning the whole
+        # seam into a deadline that never clears.
+        "embedding_timeout_seconds",
     }
 
 

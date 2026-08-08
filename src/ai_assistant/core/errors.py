@@ -235,6 +235,50 @@ class ModelResponseError(ModelError):
     routable: ClassVar[bool] = True
 
 
+class EmbeddingDeadlineExpiredError(AssistantError):
+    """An embedding call outlived its deadline (ADR-0118 §5).
+
+    Raised by the bounded ``Embedder`` the composition root wires — every call
+    through the embedding seam passes through it, so the store's writes, the
+    store's ``search`` and the re-embedding migration are all bounded by one
+    object (ADR-0118 §2, §8).
+
+    **Its own class, and deliberately not a** :class:`ModelError`. ADR-0118 §5
+    requires the condition to be "distinct from every class an embedder raises for
+    a backend fault and from every class a store raises for a store fault", and
+    ``ModelError`` is exactly what both shipped embedders raise for a backend
+    fault — a missing vendored artifact, an unloadable model, a result that breaks
+    the contract. Sitting under it would leave the one discrimination this class
+    exists for to a message match, which ADR-0083 §6 records the cost of.
+    :class:`ModelTimeoutError` is refused for the neighbouring reason ADR-0118
+    names in terms: its documented subject is a *provider* that did not respond,
+    and ``models/retry.py`` already gives it the job of telling our deadline from
+    the provider's own. Overloading it would make one class mean both "the model
+    provider timed out" and "the local embedding runtime wedged", which are
+    different remedies.
+
+    **A fault, never a refusal** (ADR-0118 §6). It is not in the class list
+    ADR-0111 §9 reserves for refusals a deployment's configuration makes correct,
+    and nothing makes it quieter on repetition. A refusal is correct behaviour
+    under a configuration an operator chose; a wedged embedding backend is a hub
+    that has stopped being able to remember anything, and it must read that way on
+    the tenth interval as loudly as on the first.
+
+    **The work is not known to have stopped.** The deadline stops the caller
+    waiting; it cannot interrupt a synchronous worker (ADR-0118 §7, ADR-0029 §4).
+    A caller may not assume the embedding did not happen — only that it did not
+    answer in time.
+
+    **A component that translates embedder faults into its own vocabulary
+    translates this one distinguishably**, preserving it as the cause (ADR-0118
+    §5's second clause). A discriminator that dies one frame above where it was
+    raised is not a discriminator.
+
+    It carries a message and nothing else, which is what lets it round-trip the
+    wire from that message alone (ADR-0085 §10a).
+    """
+
+
 class MemoryStoreError(AssistantError):
     """Reading from or writing to long-term memory failed.
 
