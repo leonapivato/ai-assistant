@@ -268,6 +268,10 @@ observe Tier 1 content in the course of recording that it exists.
 > first 256 and the trace's returned-count metric holds the true total. No trace
 > fails construction, and no trace is dropped, because an operation was large.
 
+> **Normative.** A trace whose `records` was truncated **declares that it was**. A
+> measure needing record identity excludes a truncated trace from its population;
+> it never reads a partial list as a complete one.
+
 **The observation rule is what makes a fault-path trace honest, and it is the
 numeric axis's version of §5's argument about a dropped trace.** An operation can
 raise before a quantity exists — a `search` whose embedding fails has no candidate
@@ -335,12 +339,31 @@ read it observes has no bound of its own.** `MemoryStore.search` takes
 unbounded row on a Tier 2 store, and a cap without an overflow rule is worse than
 either — a large read would fail the trace's construction and lose the record of a
 retrieval that did happen, which is §5's failure arriving through validation.
-Truncation loses nothing a measure needs: precision is a statement about the
-results that reached the caller, which are the top-ranked ones, and the *count* is
-a required metric either way, so the total survives the truncation that the ids do
-not. 256 rather than a `Settings` field: the cap belongs to the type, so every
-implementation agrees without configuration, and it is an order of magnitude above
-any realistic `limit` — the contract's default is 10.
+The *count* is a required metric either way, so the total survives the truncation
+the ids do not. 256 rather than a `Settings` field: the cap belongs to the type, so
+every implementation agrees without configuration.
+
+**What truncation costs is coverage, not correctness, and the third clause is what
+keeps it that way.** A cross-operation join — was the record the user corrected
+among those retrieved two turns ago? — is by record identity, so a truncated list
+genuinely cannot answer it. The wrong response is to answer anyway from the first
+256, which under-counts precision's numerator and looks like a real signal. The
+right one is the response §3's observation rule already gives to an unobserved
+quantity: say so, and let the measure drop the row from its denominator too. §5
+already accepts a stream that is incomplete; this is the same acceptance made
+explicit at one more place.
+
+**The excluded population is empty in this tree, which is why 256 is safe rather
+than merely round.** Every production caller of `MemoryStore.search` is bounded far
+below it: `tools/builtin.py`'s recall tool refuses a `limit` above
+`_MAX_RECALL_LIMIT`, which is 25; `orchestration/retrieval.py` passes the
+pipeline's own remaining budget per band; `memory/ingest.py`'s conflict detector
+passes its own small figure. The cap is an order of magnitude above the largest of
+those and the contract's default is 10. It bounds a *pathological* caller, not a
+real one, and a real one appearing later is a coverage regression this ADR would
+rather have visible in the traces than absorbed into a `Settings` field. **#848**
+tracks the day that coverage loss stops being zero, and names the three answers
+available then rather than pre-solving it.
 
 **The emitter stamps the instant, from the `Clock` it already holds.** The store
 could stamp on append, and that would measure the write rather than the event —
@@ -351,8 +374,13 @@ instant a record means.
 ### 4. Traces about one operation are joinable, and the carrier is not a contract change
 
 > **Normative.** Every trace emitted while serving one `AssistantEngine` operation
-> carries that operation's correlation identifier under `TraceRef.CORRELATION`. A
-> measure over pairs of events is computable from the stream alone.
+> carries that operation's correlation identifier under `TraceRef.CORRELATION`.
+
+> **Normative.** A measure over a pair of events is computable from the stream
+> alone: by the correlation identifier where the pair falls inside one operation,
+> and by record identity where it does not. The one pair the stream cannot join is
+> one whose retrieval trace declares itself truncated (§3), which that trace says
+> outright rather than leaving to be inferred.
 
 > **Normative.** The correlation identifier is **not** added to `MemoryStore`,
 > `MemoryWriter` or any other existing Protocol's signature. Its carrier is
