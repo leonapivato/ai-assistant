@@ -153,39 +153,53 @@ the type is cheap here and expensive later.
 > **Normative.** Every `EvaluationTrace` is Tier 2 under ADR-0004 §1. No field of
 > the family, at any depth, may carry Tier 0 or Tier 1 content.
 
-> **Normative.** Every string-typed value reachable from an `EvaluationTrace` is
-> one of exactly three things: a member of an enumeration defined in
-> `core/types.py`; a literal constant written in the emitting module; or the
-> `__name__` of an exception class. No string-typed value is derived from user
-> input, model output, store content, a filesystem path, or any other datum
-> observed at runtime.
+> **Normative.** Every string-typed value reachable from an `EvaluationTrace`
+> falls in exactly one of four categories: an **identifier** as the third clause
+> below defines it; a member of an enumeration defined in `core/types.py`; a
+> literal constant written in the emitting module; or the `__name__` of an
+> exception class. A string in none of the four appears nowhere in the family.
 
-> **Normative.** Reference to Tier 1 content is by **opaque identifier minted by
-> this system** — a record id, a conversation id, a turn id, an execution id — and
-> never by a label, a name, a title, a query, a snippet or a digest of content. A
-> value a user or a model chose is not an identifier for this purpose, whatever
-> its type.
+> **Normative.** Outside the identifier category, no string-typed value in the
+> family is derived at runtime from user input, model output, store content, a
+> filesystem path, or any other observed datum. An exception's class name is
+> admitted by the clause above; its message is not.
+
+> **Normative.** An **identifier** in a trace is an opaque value **minted by this
+> system** that resolves to a row it did not create — a record id, a conversation
+> id, a turn id, an execution id — or the trace's own id. It is never a label, a
+> name, a title, a query, a snippet or a digest of content, and a value a user or
+> a model chose is not an identifier for this purpose, whatever its type.
 
 > **Normative.** Every non-reference observation a trace carries is a number or a
 > boolean. There is no free-text field, no serialised payload and no
 > open-value-type mapping anywhere in the family.
 
-**The point of stating it as three clauses about *strings* is that it is
-checkable.** "Do not put Tier 1 in a trace" is a rule a reviewer applies to
-intent; "no string in this type is derived from data" is a rule a reviewer applies
-to a line of code, and a rule a test can approximate by walking the type graph the
-way ADR-0085 §5's closure walk does. Tier 1 content is text. Numbers are not
-Tier 1: a count of returned records, a similarity score, an elapsed duration and a
-chunk size are all facts about the machine.
+**The point of stating it as clauses about *strings* is that it is checkable.**
+"Do not put Tier 1 in a trace" is a rule a reviewer applies to intent; "no string
+in this type is derived from data" is a rule a reviewer applies to a line of code,
+and a rule a test can approximate by walking the type graph the way ADR-0085 §5's
+closure walk does. Tier 1 content is text. Numbers are not Tier 1: a count of
+returned records, a similarity score, an elapsed duration and a chunk size are all
+facts about the machine.
 
-**The third clause exists because `Identifier` alone does not carry the
+**The identifier category is carved out of the origin rule rather than excused
+from it, and the carve-out is the whole reason a trace can say anything at all.**
+An id *is* derived at runtime — it is read off the row the trace is about — so a
+flat "no runtime-derived string" rule would forbid the references §1 requires and
+leave no conforming trace. The second clause therefore excludes identifiers by
+name, and the third clause supplies the property the exclusion is bought with:
+minted here, opaque, resolving to a row this system created. What that property
+excludes is exactly what a leak would need — a value whose *content* is the datum
+rather than a pointer to it.
+
+**The third clause is needed because `Identifier` alone does not carry that
 property.** `Identifier` in `core/types.py` is a non-blank encodable string, and a
 subject label under ADR-0100 satisfies it while being exactly the Tier 1 datum
 this rule is about — ADR-0100's own title says the label "resolves to nothing", so
-it is not an id in any sense but the type's. The clause names the property the
-type cannot: minted here, opaque, resolving to a row.
+it is not an id in any sense but the type's. A conformance suite can check the
+shape; only this clause can state the origin.
 
-**The second clause's third permission is narrow on purpose.** An exception's
+**The exception-class permission is narrow on purpose.** An exception's
 *class* is Tier 2 and the corpus already logs it — ADR-0111 §9 ratifies drawing
 the refusal/fault distinction "from the exception's class, never from its message
 text", and #710 records `Scheduler._log_failure` writing `error_class`. An
@@ -198,6 +212,11 @@ module chooses (§3), so an author who derives one from data breaches the second
 clause. Nothing mechanical stops that; what the clause buys is that the breach is
 a *reviewable line of code* rather than a runtime property of a payload, and §3's
 key pattern makes an accidental one loud.
+
+**A reference is permitted to dangle and is never resolved to check it.** §10
+says why deletion leaves an id pointing at nothing; the consequence here is that
+nothing in the emission path reads the referent back, so no trace write can
+observe Tier 1 content in the course of recording that it exists.
 
 ### 3. The family: one envelope, four kinds, numbers keyed by constants
 
@@ -222,6 +241,23 @@ key pattern makes an accidental one loud.
 
 > **Normative.** A metric key and a seam label are of one constrained string type
 > whose values match a lowercase identifier pattern of bounded length.
+
+> **Normative.** A metric key appears in a trace only when the quantity it names
+> was **observed**. An absent key means *not observed* and never zero, and no
+> emitter writes a placeholder for a quantity the event did not reach.
+
+> **Normative.** An absent `records` sequence means *no set of ids was observed*;
+> an empty one means *a set was observed and it was empty*. The two are distinct
+> and an emitter may not substitute one for the other.
+
+**The observation rule is what makes a fault-path trace honest, and it is the
+numeric axis's version of §5's argument about a dropped trace.** An operation can
+raise before a quantity exists — a `search` whose embedding fails has no candidate
+count, an `ingest` that raises before commit has no decision set — and the two
+available shortcuts both lie. Recording zero asserts an observation nobody made,
+and in the retrieval case asserts *precisely* #824's trigger condition. Omitting
+the trace entirely loses the fault. Absence, defined as absence, is the third
+option, and it costs a mapping that was already sparse.
 
 Keys and labels are additionally governed by §2's second clause — each is a
 literal constant in the emitting module — which is where the obligation is stated
@@ -428,14 +464,27 @@ which is precisely the class §5 subordinates.
 > `memory`'s write path emits one `MEMORY_WRITE` trace per `MemoryWriter.ingest`;
 > and `service` emits one `CONFIGURATION` trace per hub startup (§9).
 
-> **Normative.** A `RETRIEVAL` trace carries the requested `limit`, the
-> pre-filter candidate count the store fetched, the count returned, and the count
+> **Normative.** A `RETRIEVAL` trace carries every one of the following the read
+> reached (§3's observation rule governs the rest): the requested `limit`, the
+> pre-filter candidate count the store fetched, the count returned, the count
 > excluded by each read-time predicate separately — retention, validity window,
-> kind and band — together with the ids returned.
+> kind and band — and the ids returned.
 
-> **Normative.** A `MEMORY_WRITE` trace carries the write's mode, the count of each
-> `MemoryDecisionKind` the ingest produced, and the ids of the records written,
-> reinforced, superseded or retired.
+> **Normative.** A `MEMORY_WRITE` trace carries every one of the following the
+> ingest reached: the write's mode, the count of each `MemoryDecisionKind` the
+> ingest produced, and the ids of the records written, reinforced, superseded or
+> retired.
+
+**A faulting operation still emits its trace, and its trace still tells the
+truth.** A `search` whose query embedding raises never computes a candidate set; an
+`ingest` that raises before commit never has a decision set. Under §3's
+observation rule those keys are simply **absent**, the `records` field is `None`
+rather than empty, and the trace carries what the operation did reach — its
+`limit`, its elapsed time, its `FAULT` outcome and its fault class. The two clauses
+above say "the following the read reached" for exactly that reason: an
+unconditional "carries" would be unsatisfiable on the fault path, and satisfying it
+with zeros would make a read that never ran indistinguishable from one that
+excluded everything — which is #824's trigger condition, fabricated.
 
 **The store emits its own retrieval trace, and that placement is forced by
 #824.** The numbers the trigger needs do not exist outside the store: ADR-0113 §8
@@ -672,6 +721,10 @@ the `Test…Contract` subclass that runs it):
 - A test that no string-typed value reachable from `EvaluationTrace` is
   unconstrained — the type-graph walk §2 makes possible, in the spirit of
   ADR-0085 §5's closure walk.
+- A round-trip obligation on `TraceStore` that an absent metric key and an absent
+  `records` sequence survive storage as absent, never as zero and never as empty
+  (§3). A schema with `NOT NULL DEFAULT 0` columns would erase the distinction the
+  fault path depends on, silently, at the persistence layer.
 - The correlation carrier (§4) and the emitters (§8), which are wiring lanes after
   the triad, not part of it.
 
