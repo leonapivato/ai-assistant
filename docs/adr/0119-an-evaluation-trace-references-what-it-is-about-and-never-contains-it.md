@@ -903,15 +903,41 @@ type FaultClassName = Annotated[EncodableText, AfterValidator(_fault_class_name)
 TRACE_RECORD_SET_CAP: Final = 256
 
 
+class FrozenMapping[K, V](Mapping[K, V]):
+    """An immutable, hashable, copyable mapping — ``FrozenDict``, generic.
+
+    Every design point is ``FrozenDict``'s and is taken for its stated reasons.
+    ``MappingProxyType`` is refused because it "can be neither pickled nor
+    deep-copied, which would make any model holding one fail
+    ``model_copy(deep=True)``". The contents are a **tuple of pairs**, never a
+    ``dict``, because "a private ``dict`` would still be a mutable object
+    reachable as ``parameters._data``, which is a real bypass". Attribute
+    assignment and deletion are refused, lookup is a linear scan over a handful
+    of keys, equality is by contents against any ``Mapping``, ``__hash__`` is
+    over the pairs, and ``__reduce__`` restores it — which is what makes
+    ``deepcopy`` work.
+
+    ``FrozenDict`` is left exactly as it is. Folding it into this type is a
+    call-site sweep with no behavioural consequence, tracked as #849 and owed by
+    nothing here.
+    """
+
+    __slots__ = ("_items",)
+
+    _items: tuple[tuple[K, V], ...]
+
+    def __init__(self, data: Mapping[K, V] | None = None, /) -> None:
+        object.__setattr__(self, "_items", tuple((data or {}).items()))
+
+    # __setattr__, __delattr__, __getitem__, __iter__, __len__, __repr__,
+    # __eq__, __hash__ and __reduce__ as FrozenDict defines them.
+
+
 def _frozen_mapping[K, V](value: Mapping[K, V]) -> FrozenMapping[K, V]:
     """Detach and freeze — the model owns a copy no caller can reach.
 
     ``frozen=True`` refuses ``trace.metrics = ...`` and not
     ``trace.metrics["k"] = ...``; ADR-0018 §3's rule is about the second.
-
-    ``FrozenMapping`` is ``FrozenDict``'s carrier, generic in its key and value:
-    immutable, hashable, and **copyable** — pairs in a tuple, no reachable
-    ``dict``, and a ``__reduce__`` so ``model_copy(deep=True)`` works.
     """
     return FrozenMapping(value)
 
@@ -1041,17 +1067,18 @@ no reachable `dict`, attribute assignment refused, and a `__reduce__` that makes
 `deepcopy` work — generic in its key and value type rather than fixed to
 `str`/`FrozenJson`.
 
-> **Normative.** The mapping carrier is immutable, hashable and **copyable**, in
-> `FrozenDict`'s form and for the reason `FrozenDict` records. `MappingProxyType`
-> is not admissible.
+> **Normative.** The carrier is `FrozenMapping`, defined above: immutable,
+> hashable and **copyable**, `FrozenDict`'s form generic in its key and value
+> type. `MappingProxyType` is not admissible.
 
-Whether the lane reaches that by making `FrozenDict` itself generic or by adding
-a sibling beside it is **the lane's call**, because the two differ in blast radius
-rather than in this family's behaviour: generalising `FrozenDict` turns every
-existing bare annotation of it into a `disallow_any_generics` error under `mypy`
-strict, which is a separate change touching call sites this ADR has nothing to say
-about. **#849** carries the consolidation question so the answer is deliberate
-rather than whichever was cheaper on the day.
+**A new type rather than a generalised `FrozenDict`, and the choice is made here
+rather than left to the lane.** A contract that names a type nothing defines is
+not ratified, so the definition is above. `FrozenDict` stays exactly as it is:
+generalising it in place would turn every existing bare annotation of it into a
+`disallow_any_generics` error under `mypy` strict — a call-site sweep across
+modules this decision has nothing to say about, bought for no behavioural
+difference. **#849** carries the consolidation, which is a tidying this ADR does
+not owe and nothing blocks on.
 
 **And the defaults are validated, which is not the default.** Pydantic does not
 run a field's validators over its default, so `refs: TraceRefs = {}` would hand
