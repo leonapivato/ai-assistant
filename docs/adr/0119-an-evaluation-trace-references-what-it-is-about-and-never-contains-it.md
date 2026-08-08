@@ -4,7 +4,8 @@
 - Date: 2026-08-08
 - **Decides `core` surface and implements none of it.** Two new Protocols —
   `TraceSink` and `TraceStore` — in `core/protocols.py`, and the
-  `EvaluationTrace` family plus four small enumerations in `core/types.py` (§13).
+  `EvaluationTrace` family — four enumerations, two constrained string types and
+  one nested model — in `core/types.py` (§13).
   No existing Protocol gains a member and no existing signature changes:
   `MemoryStore`, `MemoryWriter` and `AssistantEngine` are all untouched, and §4
   refuses the one change that would have touched `MemoryStore`. Golden rule 5 and
@@ -229,12 +230,10 @@ observe Tier 1 content in the course of recording that it exists.
 
 ### 3. The family: one envelope, four kinds, numbers keyed by constants
 
-> **Normative.** `core/types.py` gains one model, `EvaluationTrace`, carrying its
-> own id, a `TraceKind`, the instant it occurred, an optional elapsed duration, a
-> label naming the seam, a `TraceOutcome`, an optional fault class name, a mapping
-> of `TraceRef` keys to identifiers, an optional bounded sequence of record
-> identifiers, and a mapping of label keys to `int | float | bool` values. It
-> gains no other field.
+> **Normative.** `core/types.py` gains one model, `EvaluationTrace`, whose fields
+> are those §13 sets out and no others. §13's definitions — every field, every
+> enum member, every constraint — are ratified here and are not the implementing
+> lane's to choose.
 
 > **Normative.** `TraceKind` has exactly four members at this decision:
 > `OPERATION`, `RETRIEVAL`, `MEMORY_WRITE` and `CONFIGURATION`. A later ADR may add
@@ -259,18 +258,26 @@ observe Tier 1 content in the course of recording that it exists.
 > was **observed**. An absent key means *not observed* and never zero, and no
 > emitter writes a placeholder for a quantity the event did not reach.
 
-> **Normative.** An absent `records` sequence means *no set of ids was observed*;
-> an empty one means *a set was observed and it was empty*. The two are distinct
-> and an emitter may not substitute one for the other.
+> **Normative.** Ids are carried as `records`, a mapping from a closed
+> `TraceRecordSet` key to a `RecordIdSet`, so every id sits under the disposition
+> it had. A flat sequence of ids is not permitted: a write producing one retired
+> and one reinforced record must say which was which.
 
-> **Normative.** `records` holds at most **256** ids, in the order the observed
-> operation produced them. Where the operation produced more, `records` holds the
-> first 256 and the trace's returned-count metric holds the true total. No trace
-> fails construction, and no trace is dropped, because an operation was large.
+> **Normative.** An absent `TraceRecordSet` key means *that set was not observed*;
+> a key present with an empty `RecordIdSet` means *it was observed and it was
+> empty*. The two are distinct and an emitter may not substitute one for the other.
 
-> **Normative.** A trace whose `records` was truncated **declares that it was**. A
-> measure needing record identity excludes a truncated trace from its population;
-> it never reads a partial list as a complete one.
+> **Normative.** A `RecordIdSet` holds at most **256** ids, in the order the
+> observed operation produced them, together with the `total` the operation
+> actually produced. Where that total exceeds the cap it holds the first 256, and
+> the set is **truncated** exactly when `total` exceeds the number of ids it
+> carries. No trace fails construction, and no trace is dropped, because an
+> operation was large.
+
+> **Normative.** Truncation is **per set**. A measure needing record identity
+> excludes a trace whose relevant set is truncated; it never reads a partial list
+> as a complete one, and it does not exclude a trace for a truncation in a set it
+> is not joining on.
 
 **The observation rule is what makes a fault-path trace honest, and it is the
 numeric axis's version of §5's argument about a dropped trace.** An operation can
@@ -339,9 +346,10 @@ read it observes has no bound of its own.** `MemoryStore.search` takes
 unbounded row on a Tier 2 store, and a cap without an overflow rule is worse than
 either — a large read would fail the trace's construction and lose the record of a
 retrieval that did happen, which is §5's failure arriving through validation.
-The *count* is a required metric either way, so the total survives the truncation
-the ids do not. 256 rather than a `Settings` field: the cap belongs to the type, so
-every implementation agrees without configuration.
+A `RecordIdSet` carries its own `total`, so the count survives the truncation the
+ids do not, and the two cannot disagree — truncation is *derived* from them rather
+than flagged beside them. 256 rather than a `Settings` field: the cap belongs to
+the type, so every implementation agrees without configuration.
 
 **What truncation costs is coverage, not correctness, and the third clause is what
 keeps it that way.** A cross-operation join — was the record the user corrected
@@ -606,12 +614,13 @@ here needs.
 > reached (§3's observation rule governs the rest): the requested `limit`, the
 > pre-filter candidate count the store fetched, the count returned, the count
 > excluded by each read-time predicate separately — retention, validity window,
-> kind and band — and the ids returned, under §3's `records` cap.
+> kind and band — and the ids returned, as `records[TraceRecordSet.RETURNED]`.
 
 > **Normative.** A `MEMORY_WRITE` trace carries every one of the following the
 > ingest reached: the write's mode, the count of each `MemoryDecisionKind` the
-> ingest produced, and the ids of the records written, reinforced, superseded or
-> retired, under §3's `records` cap.
+> ingest produced, and the ids of the records written, reinforced, superseded and
+> retired — **each under its own `TraceRecordSet` key**, so a correction measure
+> can tell a retired id from a reinforced one without re-deriving it.
 
 **A faulting operation still emits its trace, and its trace still tells the
 truth.** A `search` whose query embedding raises never computes a candidate set; an
@@ -868,41 +877,176 @@ provides for Tier 2 operational records outright — logs — and §1 defines th
 this store sits in. The rule this ADR is bound by is §5's content rule, and §2 is
 what it obeys, not what it bends.
 
-### 13. The contract surface this ADR names, and what the implementing lane owes
+### 13. The contract surface, ratified here rather than deferred
 
-The surface, so the triad lane has a target and a reviewer has something to check
-this ADR against:
+**A contract ADR that leaves the shape to the lane is not contract-first.** A
+triad cannot type-check a consumer or write a conformance suite against "append",
+"walk" and "purge", and a "closed vocabulary" with no members is not closed. So
+the definitions below are ratified by this ADR: names, fields, members,
+constraints, signatures, returns and failures. The lane implements them; it does
+not choose them. Everything a later ADR may still move is named at the end of this
+section.
 
-- **`core/types.py`** — `TraceKind`, `TraceOutcome`, `TraceRef` (the closed key
-  vocabulary for `refs`), a constrained label type for seam names and metric keys,
-  and the `EvaluationTrace` model of §3. Field names and the exact pattern are the
-  lane's within §2 and §3.
-- **`core/protocols.py`** — `TraceSink` (append) and `TraceStore` (append, §7a's
-  walk, a purge below an instant). §7a fixes the walk's order, its resumption
-  guarantee, its bound's refusal and where the position lives; the position
-  *type* is the lane's, and reusing `MemoryStore`'s `WalkPosition` across stores
-  is not decided here.
-- **`core/config.py`** — one field, §10's horizon.
-- **No change to any existing Protocol**, and no method added to
-  `AssistantEngine`. The inspection surface is §15's.
+#### 13a. `core/types.py`
 
-What the implementing lane owes beyond the triad
-(`CONTRIBUTING.md` → "Adding a Protocol: land the triad together" — the Protocols,
-a shared conformance suite each, a canonical fake in `ai_assistant.testing`, and
-the `Test…Contract` subclass that runs it):
+```python
+#: A seam name or a metric key: lowercase, bounded, and a literal in its
+#: emitting module (§2, §3).
+type TraceLabel = Annotated[EncodableText, AfterValidator(_trace_label)]
+#: matches r"^[a-z][a-z0-9_]{0,63}$"
+
+#: An exception class's __name__ — never its message (§2).
+type FaultClassName = Annotated[EncodableText, AfterValidator(_fault_class_name)]
+#: matches r"^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+
+#: The per-set ceiling on ids a trace stores (§3).
+TRACE_RECORD_SET_CAP: Final = 256
+
+
+class TraceKind(StrEnum):
+    OPERATION = "operation"
+    RETRIEVAL = "retrieval"
+    MEMORY_WRITE = "memory_write"
+    CONFIGURATION = "configuration"
+
+
+class TraceOutcome(StrEnum):
+    OK = "ok"
+    REFUSED = "refused"
+    FAULT = "fault"
+    INCOMPLETE = "incomplete"
+
+
+class TraceRef(StrEnum):
+    """Singular relations: at most one id each."""
+    CORRELATION = "correlation"
+    CONVERSATION = "conversation"
+    TURN = "turn"
+    EXECUTION = "execution"
+
+
+class TraceRecordSet(StrEnum):
+    """Plural id sets, each naming the disposition its ids had."""
+    RETURNED = "returned"
+    WRITTEN = "written"
+    REINFORCED = "reinforced"
+    SUPERSEDED = "superseded"
+    RETIRED = "retired"
+
+
+class RecordIdSet(BaseModel):
+    """Ids the operation produced under one disposition, and how many there were.
+
+    Truncated exactly when ``total`` exceeds ``len(ids)``; there is no separate
+    flag, so the two cannot disagree.
+    """
+    ids: tuple[Identifier, ...] = Field(max_length=TRACE_RECORD_SET_CAP)
+    total: int = Field(ge=0)  # validated: total >= len(ids)
+
+
+class EvaluationTrace(BaseModel):
+    id: Identifier
+    kind: TraceKind
+    seam: TraceLabel
+    occurred_at: AwareDatetime          # emitter-stamped, from its Clock (§3)
+    elapsed: timedelta | None = None    # ge=0 when present
+    outcome: TraceOutcome
+    fault_class: FaultClassName | None = None
+    refs: Mapping[TraceRef, Identifier] = {}
+    records: Mapping[TraceRecordSet, RecordIdSet] = {}
+    metrics: Mapping[TraceLabel, int | float | bool] = {}   # floats finite (§3)
+```
+
+Frozen, and every mapping an immutable carrier, following the corpus's existing
+treatment of nested mutable state (ADR-0018 §3): a trace a reader can rewrite
+after the fact is not a record of anything.
+
+#### 13b. `core/protocols.py`
+
+```python
+@runtime_checkable
+class TraceSink(Protocol):
+    async def emit(self, trace: EvaluationTrace) -> None:
+        """Append ``trace``. **Never raises** (§5, §7)."""
+
+
+@runtime_checkable
+class TraceStore(Protocol):
+    async def emit(self, trace: EvaluationTrace) -> None: ...
+
+    async def walk(
+        self, *, after: TracePosition | None = None, limit: int
+    ) -> TraceChunk:
+        """One chunk in insertion order, resuming after ``after`` (§7a)."""
+
+    async def purge_before(self, instant: AwareDatetime) -> int:
+        """Delete every trace older than ``instant``; return how many (§10)."""
+```
+
+`TraceStore` structurally satisfies `TraceSink`, which is the point: one concrete
+implements both and the composition root hands each collaborator the seam it is
+entitled to (§7).
+
+```python
+class TracePosition(BaseModel):
+    """Opaque to its caller, never composed by one (ADR-0114 §2)."""
+
+
+class TraceChunk(BaseModel):
+    traces: tuple[EvaluationTrace, ...]
+    position: TracePosition | None   # None exactly when the walk is exhausted
+```
+
+**Failures, stated so a suite can assert them:**
+
+- `emit` never raises. A store fault is swallowed and logged (§5). A malformed
+  trace cannot reach it: `EvaluationTrace` validates at construction.
+- `walk` refuses a `limit` of zero or below with `ValueError`, and refuses a
+  `TracePosition` it cannot read with `ValueError` — a caller-held position this
+  store did not issue is a caller bug, not the recoverable state ADR-0111 §7
+  discards for a *durable* cursor.
+- `walk` and `purge_before` raise `TraceStoreError` — new in `core/errors.py`,
+  mirroring `MemoryStoreError` — when the store cannot be read or written.
+- Every read returns a **detached snapshot**, as `AuditTrail` and `MemoryStore`
+  already do, for the reason `AuditTrail` states: `frozen=True` refuses
+  `x.outcome = …` and not `x.__dict__["outcome"] = …`.
+- Cancelling any method here is governed by the protocols module's cancellation
+  clause (ADR-0060), like every other contract in it.
+
+#### 13c. `core/config.py`, and what is not touched
+
+One field: §10's retention horizon, an optional duration refused at load unless
+finite and strictly positive, `None` meaning keep forever, defaulting to 365 days.
+
+**No change to any existing Protocol**, no method on `AssistantEngine`, and no
+change to `MemoryStore.search`'s signature (§4). The inspection surface is §15's.
+
+#### 13d. What the implementing lane owes
+
+Beyond the triad itself (`CONTRIBUTING.md` → "Adding a Protocol: land the triad
+together" — the Protocols, a shared conformance suite each, a canonical fake in
+`ai_assistant.testing`, and the `Test…Contract` subclass that runs it):
 
 - The seventh database and its correction of every live "six" claim (§6).
 - The conformance obligation that a sink whose backing store fails returns
-  normally (§5, §7).
+  normally (§5, §7), and that `walk` satisfies §7a's resumption guarantee against
+  appends landing mid-walk.
 - A test that no string-typed value reachable from `EvaluationTrace` is
   unconstrained — the type-graph walk §2 makes possible, in the spirit of
   ADR-0085 §5's closure walk.
-- A round-trip obligation on `TraceStore` that an absent metric key and an absent
-  `records` sequence survive storage as absent, never as zero and never as empty
-  (§3). A schema with `NOT NULL DEFAULT 0` columns would erase the distinction the
-  fault path depends on, silently, at the persistence layer.
+- A round-trip obligation that an absent metric key and an absent
+  `TraceRecordSet` key survive storage as absent, never as zero and never as an
+  empty set (§3). A schema with `NOT NULL DEFAULT 0` columns would erase, silently
+  and at the persistence layer, the distinction the fault path depends on.
 - The correlation carrier (§4) and the emitters (§8), which are wiring lanes after
   the triad, not part of it.
+
+#### 13e. What is still open above, and deliberately
+
+The **members** of `TraceRef` and `TraceRecordSet` may grow, and a growth is an
+additive `core/types.py` change rather than a new ADR — the closure §2 depends on
+is over the value *types*, which no new member changes. `TraceKind` may not (§3).
+Everything else above is fixed here.
 
 ### 14. What this records against earlier ADRs, under ADR-0082 §1
 
