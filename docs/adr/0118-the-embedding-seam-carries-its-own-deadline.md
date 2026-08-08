@@ -1,6 +1,6 @@
 # 118. The embedding seam carries its own deadline, and an expired embed is a named fault
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-08
 - **This is the deadline ADR-0111 §4 sent a lane to write.** §4's second clause
   makes a per-operation deadline "a precondition of being chunked at all" and says
