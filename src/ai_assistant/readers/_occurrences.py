@@ -291,18 +291,20 @@ def occurrences_in_window(  # noqa: PLR0913 — the source plus the five figures
     reader cannot interpret is not re-proposed by any read until the source is
     repaired.
 
-    Four shapes latch it, and one deliberately does not:
+    Four shapes latch it:
 
     * a component this reader cannot reduce at all — no usable ``DTSTART``, a
-      negative or unreadable duration, an ``RRULE`` that will not parse;
+      negative duration, an ``RRULE`` that will not parse;
     * a series whose extent cannot be established — two masters sharing a ``UID``,
       an override with no master, or an override whose form is opaque;
     * a single occurrence contested by two overrides of equal specificity;
     * an ``RDATE`` or ``EXDATE`` value this reader cannot localise (a ``PERIOD``,
       say) — an instruction about what occurs that the read did not apply.
-    * **Not** an occurrence the source itself says does not occur — a cancelled
-      entry, or one an ``EXDATE`` excludes. Declining to emit that is reading the
-      source correctly, which ADR-0117 §5 states in as many words.
+
+    And one shape deliberately does **not**: an occurrence the source itself says
+    does not occur — a cancelled entry, or one an ``EXDATE`` excludes. Declining to
+    emit that is reading the source correctly rather than failing to read it, which
+    ADR-0117 §5 states in as many words.
 
     Args:
         raw: The source's bytes, already bounded by ``calendar_max_bytes``.

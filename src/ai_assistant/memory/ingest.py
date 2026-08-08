@@ -1296,8 +1296,10 @@ class MemoryIngestor:
 
         **Where the reading declares no coverage there is nothing to isolate**
         (ADR-0115 §3, §4), so this ingests each proposal in turn under the ordinary
-        per-proposal hold :meth:`ingest` takes, and closes nothing. That is every
-        reading in the tree today, so this member arrives changing no behaviour.
+        per-proposal hold :meth:`ingest` takes, and closes nothing. It is not a
+        dormant arm: ADR-0117 §5 routes a read that could not account for every
+        entry its source held here, so a conforming producer takes it whenever its
+        source carries something the reader cannot interpret.
 
         **A raise anywhere leaves the reconciliation unattempted** (ADR-0115 §3, §4).
         The closes are reached only by falling off the end of the loop — never from a
