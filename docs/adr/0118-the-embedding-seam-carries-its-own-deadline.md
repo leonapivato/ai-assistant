@@ -9,35 +9,39 @@
   its lane owes that operation a deadline before it may be scheduled." #820 is that
   lane's charter. §1 below performs the check on consolidation's chunk, operation
   by operation; §§2–7 supply the deadline the check finds missing.
-- **Surface, stated so it can be checked rather than believed.** This ADR adds one
-  `Settings` field (§4) and one error class in `core/errors.py` (§5). It touches
+- **Surface. This is a substantive contract ADR under ADR-0015 §5, and golden rule
+  5 is separately not triggered.** Two different tests, easy to conflate, and this
+  bullet is written out because an earlier draft did conflate them and architecture
+  review was right to refuse it.
+
+  **ADR-0015 §5's test is met.** It defines a substantive contract ADR as "one
+  adding or changing a Protocol **or a `core/` type crossing subsystem
+  boundaries**", and §5 below does the second: it adds a class to
+  `core/errors.py`, has `models/` raise it, and *obliges* `memory/` to recognise
+  and preserve it distinctly. A `core/` type whose identity has to be legible in
+  two subsystems to do its job is exactly what that clause names. The consequence
+  is procedural and is taken in full — this ships as **its own PR, docs only,
+  `Proposed` while it is reviewed and ratified before the implementation PR that
+  depends on it** — and **both review lenses are run**.
+
+  **Golden rule 5's test is not met, and this is not a hedge.** This ADR touches
   **no** Protocol in `core/protocols.py` and **no** type in `core/types.py`, and it
   writes no text on `Embedder`: the deadline is a property of the *wired* embedder,
-  not of the contract, and §9 argues that at length rather than asserting it.
-  Golden rule 5 is therefore **not** triggered and no triad is owed — "a new
-  `AssistantError` subclass is neither a Protocol nor a `core/types.py` model, so
-  golden rule 5 is not triggered" is ADR-0083 §6's ruling verbatim, quoted
-  approvingly by ADR-0111's own header for a discriminator of exactly this shape,
-  and `scripts/ship.sh` fires its architecture requirement on a diff touching those
-  two files, which this diff does not.
+  not of the contract, and §9 argues that at length rather than asserting it. "A
+  new `AssistantError` subclass is neither a Protocol nor a `core/types.py` model,
+  so golden rule 5 is not triggered" is ADR-0083 §6's ruling verbatim, quoted
+  approvingly by ADR-0111's own header for a discriminator of the same shape. What
+  turns on it is real rather than nominal: **no triad is owed** — no Protocol
+  member, no conformance case, no canonical fake — and `scripts/ship.sh`'s
+  automatic architecture requirement, which fires on a diff touching those two
+  files, does not fire here. The lens is run by decision, not by the tool.
 
-  **The one thing that reading has to answer, because it is true and does not
-  change the classification:** §5's second clause makes the new class legible
-  *across* a subsystem boundary — raised in `models/`, translated in `memory/`.
-  That crosses nothing golden rule 1 protects. Error classes live in
-  `core/errors.py`, and under golden rule 2 everything may depend on `core`; the
-  boundary in question is already crossed today, since
-  `SqliteMemoryStore._embed_one` catches what `models/` raises and translates it.
-  What §5 changes is that the translation preserves a distinction instead of
-  discarding one, which adds no dependency in either direction.
-
-  **The procedure a contract ADR owes is nonetheless taken in full**, because the
-  cost of taking it while classified out of it is nil and the cost of the reverse
-  is not: this ships as its own PR, docs only, `Proposed` while it is reviewed and
-  ratified ahead of any implementation (ADR-0015 §5), and **both review lenses are
-  run** — the question §9 answers is precisely whether the `Embedder` contract's
-  meaning moves, and a reader is entitled to see the architecture lens applied to
-  that answer rather than to the author's confidence in it.
+  **Nothing about golden rule 1 is strained by the class crossing a boundary.**
+  Error classes live in `core/errors.py`, and under golden rule 2 everything may
+  depend on `core`; `SqliteMemoryStore._embed_one` already catches what `models/`
+  raises and translates it. What §5 changes is that the translation preserves a
+  distinction instead of discarding one, which adds no dependency in either
+  direction.
 - **No implementation lands with it.** No `src/`, no `tests/`. This ADR arms no
   job, adds no field to `core/config.py` and writes no code; it decides what the
   implementing lane builds. Enabling any job the scheduler ships disabled stays
