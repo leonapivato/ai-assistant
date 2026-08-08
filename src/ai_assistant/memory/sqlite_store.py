@@ -38,8 +38,10 @@ from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
+    EmbeddingDeadlineExpiredError,
     IncompatibleStateError,
     MemoryStoreConflictError,
+    MemoryStoreEmbeddingExpiredError,
     MemoryStoreError,
 )
 from ai_assistant.core.types import (
@@ -669,6 +671,15 @@ class SqliteMemoryStore:
         The embedder is an injected contract, so a provider fault, a wrong batch
         cardinality, or a wrong-sized vector must surface as ``MemoryStoreError``
         rather than an arbitrary exception leaking through the store's boundary.
+
+        **An expiry is translated distinguishably** (ADR-0118 §5's second clause):
+        the bounded embedder's ``EmbeddingDeadlineExpiredError`` becomes
+        ``MemoryStoreEmbeddingExpiredError`` — still a ``MemoryStoreError``, so
+        every caller that catches the family is unaffected — with the original kept
+        as the cause. Flattening it into the class a broken disk raises would kill
+        the discriminator one frame above where it was raised, and leave a caller
+        matching on message text to tell "the embedding backend has stopped
+        returning" from "this disk is broken".
         """
         try:
             vectors = await self._embedder.embed([text])
@@ -684,6 +695,10 @@ class SqliteMemoryStore:
                 raise MemoryStoreError(msg)
         except MemoryStoreError:
             raise
+        except EmbeddingDeadlineExpiredError as exc:
+            # Ahead of the general arm below, which would otherwise absorb it.
+            msg = f"embedding outlived its deadline: {exc}"
+            raise MemoryStoreEmbeddingExpiredError(msg) from exc
         except Exception as exc:  # any fault or malformed result from the embedder
             # Also catches a malformed result container/element (e.g. ``None`` or
             # a non-sized vector), whose ``len()`` raises ``TypeError`` here.
@@ -704,6 +719,10 @@ class SqliteMemoryStore:
         shape :meth:`write_atomic` already uses for its batch (ADR-0056).
 
         Raises:
+            MemoryStoreEmbeddingExpiredError: If the embedding outlived its
+                deadline (ADR-0118 §5). Nothing is written — the embedding is
+                awaited before the lock — but the work is not known to have
+                stopped (§7).
             MemoryStoreError: If the embedder fails or returns a wrong-sized
                 vector, if ``record.id`` names a stored record of a different
                 ``kind`` (ADR-0108 §4, refused in :meth:`_persist_record`), or the
@@ -801,6 +820,9 @@ class SqliteMemoryStore:
             MemoryStoreConflictError: an ``INSERT_IF_ABSENT`` element's id names a
                 stored record — physical presence, so an expired or window-closed
                 row still collides (ADR-0046 §3). Nothing is written.
+            MemoryStoreEmbeddingExpiredError: an element's embedding outlived its
+                deadline (ADR-0118 §5). Every embedding is awaited before the lock,
+                so nothing is written and no later element is embedded.
             MemoryStoreError: an ``UPSERT`` element's id names a stored record of a
                 different ``kind`` (ADR-0108 §4, refused in
                 :meth:`_persist_record`), the batch names the same id twice
@@ -1048,6 +1070,11 @@ class SqliteMemoryStore:
             validity window, both ends — ADR-0045 §6), are never returned.
 
         Raises:
+            MemoryStoreEmbeddingExpiredError: If embedding the *query* outlived its
+                deadline (ADR-0118 §5). This is the interactive read path, and
+                ADR-0118 §8 names the trade in terms: a query whose embedding is
+                pathologically slow now fails with a named class instead of never
+                answering.
             MemoryStoreError: If the embedder fails or returns a wrong-sized
                 query vector, or a stored record is corrupt.
 

@@ -407,6 +407,54 @@ class FoldOntoCitedRecordError(SelfConsumingWriteError):
     """
 
 
+class MemoryStoreEmbeddingExpiredError(MemoryStoreError):
+    """An embedding this store awaited outlived its deadline (ADR-0118 §5).
+
+    Raised where a ``memory/`` component translates an embedder fault into the
+    store's error vocabulary — ``SqliteMemoryStore._embed_one`` and
+    ``Reembedder._embed`` — with the :class:`EmbeddingDeadlineExpiredError` the
+    bounded embedder raised kept as the ``__cause__``. It is the *translation* of
+    that class, not a second name for it: the seam's own class does not subclass
+    :class:`MemoryStoreError` and must not, because a store fault and an embedder
+    fault are the two things ADR-0118 §5 asks a reader to tell apart.
+
+    **This class exists because the first clause of §5 is not sufficient on its
+    own.** Both translations above catch ``Exception`` and re-raise
+    ``MemoryStoreError(f"embedder failed: {exc}")``, which flattened a well-classed
+    timeout into the class a broken disk also raises — so §5's second clause is
+    normative: "A component that translates an embedder fault into its own error
+    vocabulary translates an expiry into a correspondingly distinct class of that
+    vocabulary, preserving the original as the cause. The condition is legible at
+    every boundary it crosses, or it is legible nowhere." A discriminator that dies
+    one frame above where it was raised is not a discriminator.
+
+    **Additive, not a narrowing.** A subclass *is* a ``MemoryStoreError``, so every
+    existing ``except MemoryStoreError`` still catches it and ADR-0028 §5's
+    "``MemoryStoreError`` is what crosses this seam" stays true as written — the
+    shape :class:`MemoryStoreConflictError` and :class:`UnresolvedEvidenceError`
+    already have.
+
+    **The read path raises it too, not only the write path.** ``search`` embeds the
+    query through the same ``_embed_one`` (ADR-0118 §8), so an interactive query
+    whose embedding is pathologically slow fails with this class rather than never
+    answering.
+
+    **A fault, never a refusal** (ADR-0118 §6), inherited from the cause: a wedged
+    embedding backend is a hub that has stopped being able to remember anything,
+    and nothing here makes it quieter on repetition.
+
+    **The work is not known to have stopped.** The deadline stops the caller
+    waiting; it cannot interrupt a synchronous worker (ADR-0118 §7). A caller may
+    not read this class as "the embedding did not happen" — only as "it did not
+    answer in time". What *is* guaranteed is the store's own transactional
+    promise, unchanged: the embedding is awaited before any lock is taken, so a
+    write that raises this wrote nothing.
+
+    It carries a message and nothing else, which is what lets it round-trip the
+    wire from that message alone (ADR-0085 §10a).
+    """
+
+
 class ConversationStoreError(AssistantError):
     """Reading from or writing to the conversation index failed (ADR-0074 §9).
 

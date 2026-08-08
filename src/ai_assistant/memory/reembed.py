@@ -49,7 +49,12 @@ from typing import TYPE_CHECKING, Any, Final, NoReturn
 
 import sqlite_vec
 
-from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
+from ai_assistant.core.errors import (
+    EmbeddingDeadlineExpiredError,
+    IncompatibleStateError,
+    MemoryStoreEmbeddingExpiredError,
+    MemoryStoreError,
+)
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory.sqlite_store import _ADAPTER, SqliteMemoryStore, _to_micros
 
@@ -631,7 +636,19 @@ class Reembedder:
         rather than an arbitrary exception escaping this seam — the shape
         ``SqliteMemoryStore._embed_one`` already uses, applied to a batch.
 
+        **Including its expiry arm** (ADR-0118 §5's second clause): a chunk whose
+        embedding outlived the bounded embedder's deadline raises
+        ``MemoryStoreEmbeddingExpiredError`` with the seam's own class as the
+        cause, so an operator watching a migration stall can tell a wedged
+        embedding backend from a broken store without reading a message. The
+        migration is bounded by that deadline even though ADR-0104 §6 keeps it
+        outside the scheduler, because it is wired the same embedder (ADR-0118 §8).
+
         Raises:
+            MemoryStoreEmbeddingExpiredError: If an embedding outlived its
+                deadline. A ``MemoryStoreError``, so the run aborts as it always
+                did — the half-built work store is left for a resumed run, exactly
+                as any other mid-chunk failure leaves it.
             MemoryStoreError: If the embedder fails or returns the wrong shape.
         """
         try:
@@ -648,6 +665,10 @@ class Reembedder:
                     raise MemoryStoreError(msg)
         except MemoryStoreError:
             raise
+        except EmbeddingDeadlineExpiredError as exc:
+            # Ahead of the general arm below, which would otherwise absorb it.
+            msg = f"embedding a re-embedding chunk outlived its deadline: {exc}"
+            raise MemoryStoreEmbeddingExpiredError(msg) from exc
         except Exception as exc:  # any fault or malformed result from the embedder
             msg = f"embedder failed: {exc}"
             raise MemoryStoreError(msg) from exc
