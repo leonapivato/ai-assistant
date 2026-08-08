@@ -364,16 +364,21 @@ through to `search`. Its default is 5, and nothing in `Settings` exposes it, so
 reaching 256 takes a deliberate composer; but "no production caller can" would be
 false, and the design must hold when one does.
 
-**It holds, because the condition is legible at the deployment level rather than
-inferred from the numbers.** A deployment configured above the cap truncates *every*
-retrieval trace, so an identity-based measure has an empty population — which is a
-much worse failure to discover in a chart than in a header. §9's allowlist
-therefore carries the **effective `search` limit** of every cardinality control
-that can drive a traced read past the cap — `retrieval_limit` and `conflict_limit`
-at this date, the latter reaching `search` as `conflict_limit + 2` — and a measure
-lane reads the condition off the configuration trace before it computes anything:
-an effective limit in this window exceeds the cap, so precision is unavailable
-here, stated once and dated, rather than a denominator that quietly went to zero.
+**It holds, because exclusion is per trace and the deployment-level record is a
+diagnostic beside it.** The exact signal is the truncation declaration on the
+individual trace, and it has to be, because a configured limit above the cap does
+not mean anything truncated: a read asking for 300 over a store holding ten
+matching records returns ten, and that trace is complete and countable. Excluding
+the whole window on the configuration alone would throw away a population that was
+never lost.
+
+What the configuration record buys is the diagnosis, which the per-trace flag
+alone does not give. §9's allowlist carries the **effective `search` limit** of
+every cardinality control that can drive a traced read past the cap —
+`retrieval_limit` and `conflict_limit` at this date, the latter reaching `search`
+as `conflict_limit + 2` — so when truncated traces do start appearing, an operator
+reads *why* off a dated record rather than inferring it, and a measure lane can say
+in advance that this window is at risk. Exclusion stays where the fact is.
 
 **#848** carries the standing question — raise the cap, bound the caller, or give
 the family a spilled-ids representation — for the day a real deployment wants both
@@ -674,10 +679,13 @@ and §4's correlation clause. What it may not do is add a `TraceKind` (§3).
 > **Normative.** For **every cardinality control that can drive a traced read past
 > §3's `records` cap** — not a named subset of them — the allowlist records the
 > **effective `search` limit that control produces at the seam**, which need not
-> equal the control's own value. A window in which any recorded effective limit
-> exceeds the cap declares itself at startup, and an identity-based measure refuses
-> that window outright instead of computing over a population it has silently lost.
-> A control added later joins the list in the change that adds it.
+> equal the control's own value. A control added later joins the list in the change
+> that adds it.
+
+> **Normative.** That record is a **diagnostic**: it says a window *could*
+> truncate, and it never itself excludes one. Exclusion from an identity-based
+> measure is **per trace**, on §3's truncation declaration, and a complete trace
+> from a deployment configured above the cap counts like any other.
 
 **This is the design call #829 leaves to this lane, and the reasoning for
 answering it with a startup stamp rather than an operator act is that a startup
@@ -708,9 +716,10 @@ then constrains what naming it can put in the record.
 
 **The cardinality controls are put on the list by this ADR rather than left to the
 lane, and the clause states the *property* rather than a roster.** They are the
-settings whose values decide whether a measure is computable at all (§3), and
-enumerating them would put a dated list in a normative clause — which is how the
-first draft of this clause got it wrong, naming the retrieval limit alone.
+settings whose values decide whether §3's cap can bind at all, and enumerating
+them would put a dated list in a normative clause — which is how the first draft
+of this clause got it wrong, naming the retrieval limit alone and leaving the
+ingestor's path invisible.
 
 Two hold the property at this date, and both are validated only from below.
 `LearningLoop`'s `retrieval_limit` — `_check_tuning` refuses under 1, no ceiling,
@@ -720,18 +729,17 @@ per-band budget, so its effective limit is its own value. `MemoryIngestor`'s
 `conflict_limit + 2` on the conflict probe.
 
 **That `+ 2` is why the clause records the effective limit and not the control.**
-A `conflict_limit` of 255 does not exceed 256 and would declare the window
-eligible, while the probe it drives asks for 257 and truncates its trace — a
-window ruled measurable by a condition that is off by two, which is the same class
-of silent miscount as the one the truncation rule exists to prevent. Comparing the
-figure that actually reaches the seam cannot go wrong that way, and it needs no
-per-control arithmetic in the clause.
+A `conflict_limit` of 255 sits under the cap while the probe it drives asks for
+257, so a diagnostic keyed to the control would say "this deployment cannot
+truncate" of one that can. It is only a diagnostic, so nothing miscounts — but a
+diagnostic that is wrong two short of its own boundary is worse than none, because
+it is the record an operator reaches for when truncated traces appear and cannot
+see why. Recording the figure that actually reaches the seam cannot go wrong that
+way, and it keeps per-control arithmetic out of the clause.
 
 Neither control is a `Settings` field, which is the other half of why "effective"
-is the right word: the figure a measure needs is the one the composition root
-actually produced, and a `Settings` dump would show neither. Stating the property
-rather than a roster is what the first draft of this clause got wrong — it named
-the retrieval limit alone, and the ingestor's path was invisible.
+is the right word: the figure to record is the one the composition root actually
+produced, and a `Settings` dump would show neither.
 
 **The failure mode is named rather than papered over.** A configuration trace that
 cannot be written is subordinate under §5, so startup continues and the failure is
