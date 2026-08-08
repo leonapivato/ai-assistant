@@ -29,6 +29,7 @@ from ai_assistant.memory import (
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.memory.reembed import Reembedder
 from ai_assistant.models import (
+    BoundedEmbedder,
     HashingEmbedder,
     PydanticAIProvider,
     RetryingProvider,
@@ -878,7 +879,46 @@ def _build_calendar_reader(settings: Settings) -> CalendarReader | None:
 
 
 def _build_embedder(settings: Settings) -> Embedder:
+    """Construct the configured :class:`Embedder`, bounded, before disk is touched.
+
+    **The composition root wires no unbounded ``Embedder`` into anything the hub
+    can reach** (ADR-0118 §2). This function returns the wrapped embedder for every
+    :class:`EmbedderKind`, and it is the single wiring point every consumer goes
+    through — :func:`build_engine`'s memory store and :func:`build_reembedder`'s
+    migration alike — so the seam is bounded once rather than at each caller.
+
+    The bound is a property of what is *wired*, not of the ``Embedder`` contract,
+    and that is why ADR-0118 §9 writes no text on the Protocol: a Protocol cannot
+    compel a composition root to wire the implementation that honours it, so the
+    clause is stated over this function instead.
+
+    :class:`~ai_assistant.models.bounded_embedder.BoundedEmbedder` is applied to
+    both modes rather than only to the on-device one. ``HashingEmbedder`` is
+    bounded by construction under ADR-0118 §1 and the deadline is inert over it —
+    wrapping it anyway costs one delegating call and keeps the guarantee true of
+    the *seam* rather than of one branch, which is what makes a future ``Embedder``
+    bounded on the day it is wired.
+
+    Args:
+        settings: Loaded application settings — ``embedder`` selects the mode and
+            ``embedding_timeout_seconds`` the deadline.
+
+    Returns:
+        The bounded embedder the memory store embeds and retrieves with.
+
+    Raises:
+        ConfigurationError: If the configured embedder cannot be prepared; see
+            :func:`_build_configured_embedder` for the cases.
+    """
+    return BoundedEmbedder.from_settings(_build_configured_embedder(settings), settings)
+
+
+def _build_configured_embedder(settings: Settings) -> Embedder:
     """Construct the configured :class:`Embedder`, before any resource is opened.
+
+    Reached only through :func:`_build_embedder`, which bounds what this returns.
+    Nothing else may call it: an unbounded embedder handed to a consumer is exactly
+    what ADR-0118 §2's second clause forbids.
 
     ADR-0006 §2's firm decision is that **on-device embedding is the default**:
     memory content is Tier-1 personal data (ADR-0004) and must not leave the device

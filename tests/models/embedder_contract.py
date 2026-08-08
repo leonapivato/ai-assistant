@@ -26,10 +26,12 @@ would assert properties of the patch rather than of the adapter.
 the honest reading of the rule rather than a gap.** ``core.protocols``' clause
 (ADR-0060) has two halves. The *resource* half — never release something while
 the work you started is still using it — has no ``Embedder`` implementation it
-can bite on: ``FastEmbedEmbedder.embed`` does hand a worker to
-``asyncio.to_thread``, so a cancelled ``embed()`` abandons a running thread, but
-that thread is the only user of what it holds and it self-releases when it
-finishes. Its one lock, ``_load_lock``, is a ``threading.Lock`` taken *and*
+can bite on: ``FastEmbedEmbedder.embed`` does hand a worker to a thread — since
+ADR-0118 §7 a daemon thread it owns rather than ``asyncio.to_thread``'s pooled
+one, which changes where the thread comes from and nothing about this clause — so
+a cancelled ``embed()`` abandons a running thread, but that thread is the only
+user of what it holds and it self-releases when it finishes. Its one lock,
+``_load_lock``, is a ``threading.Lock`` taken *and*
 released inside the worker, where an unwinding ``CancelledError`` on the event
 loop cannot reach it, and inference then runs unlocked on the backend's
 documented thread safety. There is no event-loop-held resource to hand over
@@ -231,7 +233,11 @@ class EmbedderContract:
         runs. That is exactly wrong here. No ``Embedder`` owns an event-loop
         resource to withhold, so a second ``embed`` overlapping an abandoned one
         is correct behaviour, and requiring otherwise would forbid the very shape
-        ``asyncio.to_thread`` gives ``FastEmbedEmbedder``. What the clause still
+        ``FastEmbedEmbedder``'s worker handoff has. ADR-0118 §7 bounds how many
+        workers an embedder may have *abandoned* at once, which is a different
+        thing and deliberately admits this overlap: the bound is over callers that
+        stopped waiting, not over callers that are still waiting. What the clause
+        still
         forbids is the other direction — a call left holding something with
         nothing running that will release it — which is what the overlapping and
         the subsequent ``embed`` below detect, by completing at all.

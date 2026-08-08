@@ -37,11 +37,21 @@ The seam is drawn at ``fastembed``'s boundary rather than by patching
 ``TextEmbedding`` out, because patching would assert properties of the patch
 instead of properties of this adapter. What the stub covers is exactly the code
 in this module; ``fastembed`` itself stays out of the gate, as it must.
+
+## Where the blocking work runs (ADR-0118 §7)
+
+Inference and the lazy model load are handed to a **daemon thread this embedder
+owns**, never to the event loop's default executor, and the number of abandoned
+workers is bounded. That is ADR-0118 §7's containment, and it falls here rather
+than on the deadline decorator above because a decorator observes an ``Embedder``
+through the Protocol: by the time its deadline fires, the submission has already
+happened, out of reach of anything above the seam. The mechanism itself lives in
+:mod:`ai_assistant.models._embed_worker`, whose docstring carries the reasoning
+and the two verified facts behind it.
 """
 
 from __future__ import annotations
 
-import asyncio
 import math
 import threading
 from typing import TYPE_CHECKING, Protocol
@@ -49,6 +59,7 @@ from typing import TYPE_CHECKING, Protocol
 from fastembed import TextEmbedding
 
 from ai_assistant.core.errors import ModelError
+from ai_assistant.models._embed_worker import OwnedWorkers, WorkersExhaustedError
 from ai_assistant.models.embedding_artifact import (
     EXECUTION_PROVIDERS,
     VENDORED_MODEL_NAME,
@@ -251,7 +262,17 @@ class FastEmbedEmbedder:
         # Guards the lazy load only. Without it two concurrent `embed` calls —
         # each in its own worker thread — can both see `_model is None` and
         # download/load the model twice.
+        #
+        # It is also the reason ADR-0118 §7 owes a containment ruling at all: this
+        # is a plain `threading.Lock` held across `_backend.load(...)`, so a load
+        # that never returns holds it forever and every later `embed` blocks
+        # acquiring it. The first expiry during a cold load is not one lost call,
+        # it is the seam — which is what the bound on abandoned workers contains.
         self._load_lock = threading.Lock()
+        # ADR-0118 §7's containment, on the implementation that dispatches. Named
+        # for this adapter and never for a document: the name reaches an operator's
+        # stack dump (ADR-0093 §7, reused by ADR-0118 §7).
+        self._workers = OwnedWorkers(thread_name="fastembed-embed")
 
     @staticmethod
     def _resolved_model_id() -> str:
@@ -285,8 +306,10 @@ class FastEmbedEmbedder:
     async def embed(self, texts: Sequence[str]) -> list[Embedding]:
         """Embed a batch of texts, returning one vector per input, in order.
 
-        The model is loaded on first use; the embedding itself runs in a worker
-        thread so it does not block the event loop.
+        The model is loaded on first use; the embedding itself runs on a daemon
+        thread this embedder owns, so it does not block the event loop and an
+        abandoned worker cannot consume capacity the SQLite stores need
+        (ADR-0118 §7).
 
         **An empty batch is answered before anything else** — before the
         packaged artifact is even looked for. ADR-0024 §5 requires that order:
@@ -294,16 +317,35 @@ class FastEmbedEmbedder:
         installation, so a store that indexes nothing is not made to fail by an
         artifact it never needed.
 
+        **No deadline is applied here** (ADR-0118 §2). The bound over this call
+        belongs to the decorating ``Embedder`` the composition root wires, so that
+        it composes over every implementation rather than binding this one. What
+        this method owes is that the work runs somewhere the deadline *can* fire
+        and that what it abandons is contained.
+
         Raises:
             ModelError: If the packaged artifact is missing or the model cannot
-                otherwise be loaded, the backend fails to embed the batch, or it
-                returns a result that does not satisfy the ``Embedder`` contract.
+                otherwise be loaded, the backend fails to embed the batch, it
+                returns a result that does not satisfy the ``Embedder`` contract,
+                or too many abandoned workers from earlier calls are still running
+                for another to be started. The last is the containment refusing at
+                once rather than stranding a further thread; it means the backend
+                has stopped returning, and recovery is a hub restart (ADR-0118 §7).
                 Never by fetching and failing: nothing here reaches the network.
         """
         documents = list(texts)
         if not documents:
             return []
-        return await asyncio.to_thread(self._embed_sync, documents)
+        try:
+            return await self._workers.run(lambda: self._embed_sync(documents))
+        except WorkersExhaustedError as exc:
+            # Translated at this seam because `ModelError` is what this class's
+            # boundary documents, and the internal vocabulary must not cross it.
+            # Deliberately **not** `EmbeddingDeadlineExpiredError`: nothing expired
+            # here — this call was never started — and ADR-0118 §5 reserves that
+            # class for a call that outlived its own deadline.
+            msg = f"the on-device embedding backend has stopped returning: {exc}"
+            raise ModelError(msg) from exc
 
     def _embed_sync(self, documents: list[str]) -> list[Embedding]:
         # `_loaded` sits outside the try so its own ModelError passes through
