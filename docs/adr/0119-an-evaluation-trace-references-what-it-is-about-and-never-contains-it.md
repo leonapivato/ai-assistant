@@ -125,8 +125,11 @@ Four things, each with a wrong answer that looks reasonable.
 
 > **Normative.** An `EvaluationTrace` records that a named event occurred at a
 > named seam, with its instant, its duration, its outcome, the ids it is about and
-> the numbers it observed. A trace states no rate, ratio, average or judgement,
-> and no emitter computes one.
+> the numbers it observed.
+
+> **Normative.** No `EvaluationTrace` carries a rate, ratio, average, threshold
+> verdict or other judgement over more than the one event it records, and no
+> emitter computes one.
 
 **The split is what lets measures be redecided without a contract change.** Leg
 8's three measures — memory precision, correction rate, repeated-explanation rate
@@ -210,13 +213,19 @@ key pattern makes an accidental one loud.
 > one; nothing else may.
 
 > **Normative.** `TraceOutcome` has exactly four members: `OK`, `REFUSED`, `FAULT`
-> and `INCOMPLETE`. `REFUSED` and `FAULT` are distinguished by the exception's
-> class and never by its message, the same discriminator ADR-0111 §9 binds the
-> scheduler's log record to, so the two records about one event cannot disagree.
+> and `INCOMPLETE`.
+
+> **Normative.** An emitter chooses between `REFUSED` and `FAULT` by the
+> exception's class and never by its message text — the same discriminator
+> ADR-0111 §9 binds the scheduler's log record to, so the two records about one
+> event cannot disagree.
 
 > **Normative.** A metric key and a seam label are of one constrained string type
-> whose values match a lowercase identifier pattern of bounded length. A key is a
-> literal constant in the emitting module (§2).
+> whose values match a lowercase identifier pattern of bounded length.
+
+Keys and labels are additionally governed by §2's second clause — each is a
+literal constant in the emitting module — which is where the obligation is stated
+and is not restated here.
 
 **Four kinds, and the brief's five seams fall out of them.** The dispatch names
 retrieval, memory writes, consolidation runs, scheduler jobs and failed turns.
@@ -299,9 +308,10 @@ binding it leaves the lane free to do better and unfree to do without.
 > record naming the kind, the seam and the failure's class. Emission failure is
 > never silent.
 
-> **Normative.** A trace is never emitted for the writing of a trace, and no seam
-> emits more than one trace for one crossing of it. Two components may not both
-> emit for the same event.
+> **Normative.** No trace is emitted for the writing of a trace.
+
+> **Normative.** One crossing of a seam produces at most one trace, and two
+> components may not both emit for one event.
 
 **Subordination is forced.** ADR-0074 already settled the neighbouring case in
 the other direction and for a good reason: a memory-store failure "leaves a turn
@@ -470,9 +480,9 @@ and §4's correlation clause. What it may not do is add a `TraceKind` (§3).
 > effective value of each setting on a declared list of measurement-relevant
 > settings.
 
-> **Normative.** The list is an **allowlist** named in the implementing lane and
-> extended deliberately. No setting reaches a trace by default, and no `Settings`
-> object is recorded whole.
+> **Normative.** The list is an **allowlist**: a setting reaches a
+> `CONFIGURATION` trace only by being named on it, so no `Settings` object is ever
+> recorded whole and no field added later is recorded by default.
 
 > **Normative.** A configuration value reaches the trace as a number or a boolean
 > under §2. A setting whose value cannot be reduced to one — a path, a URL, a model
