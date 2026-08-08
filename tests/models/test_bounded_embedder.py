@@ -227,6 +227,31 @@ async def test_an_inner_failure_propagates_unwrapped() -> None:
     assert caught.value is sentinel
 
 
+async def test_an_inner_timeout_error_is_not_reported_as_this_deadline_expiring() -> None:
+    """Two different failures arrive as ``TimeoutError``, and only one is ours.
+
+    ``models/retry.py`` records what conflating them costs one seam over: "an
+    instant ``TimeoutError('socket closed')`` was retried and then re-labelled
+    'exceeded its 60s deadline', with the provider's message discarded". Here it
+    would be worse than a false report — it would manufacture the exact class
+    ADR-0118 §5 reserves for a wedged embedding backend out of a fault that is not
+    one, and an operator would go looking for a hung ONNX runtime.
+    """
+    sentinel = TimeoutError("the backend timed out on its own")
+
+    class _RaisesTimeoutAtOnce(FakeEmbedder):
+        async def embed(self, texts: Sequence[str]) -> list[Embedding]:
+            raise sentinel
+
+    bounded = BoundedEmbedder(_RaisesTimeoutAtOnce(), timeout_seconds=_GENEROUS_SECONDS)
+
+    with pytest.raises(TimeoutError) as caught:
+        await bounded.embed(["alpha"])
+
+    assert caught.value is sentinel
+    assert not isinstance(caught.value, EmbeddingDeadlineExpiredError)
+
+
 async def test_an_outer_cancellation_is_not_converted_into_an_expiry() -> None:
     """``core/protocols.py``'s cancellation clause (ADR-0060 §1), at this seam.
 

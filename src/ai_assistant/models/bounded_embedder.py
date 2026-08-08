@@ -157,14 +157,19 @@ class BoundedEmbedder:
             EmbeddingDeadlineExpiredError: If the call outlived the deadline. The
                 worker the inner implementation started is **not** known to have
                 stopped: the deadline ends the wait, not the work (ADR-0118 §7).
-            Exception: Whatever the inner embedder raised, unwrapped. Its faults
-                are its own vocabulary and this seam has nothing to add to them;
-                re-labelling a missing model artifact as a deadline problem would
-                send an operator to the wrong remedy.
+            Exception: Whatever the inner embedder raised, unwrapped — including a
+                ``TimeoutError`` of its own. Its faults are its own vocabulary and
+                this seam has nothing to add to them; re-labelling a missing model
+                artifact, or a backend's own timeout, as *this* deadline expiring
+                would send an operator to the wrong remedy and would destroy the
+                very distinction ADR-0118 §5 exists to make.
         """
+        # Bound before the `try` so the `except` arm can consult it: a
+        # `TimeoutError` is only ours if this deadline actually expired.
+        deadline = asyncio.timeout(self._timeout_seconds)
         cause: TimeoutError | None = None
         try:
-            async with asyncio.timeout(self._timeout_seconds) as deadline:
+            async with deadline:
                 vectors = await self._inner.embed(texts)
             # Expiry does not always surface as an exception, and the corpus has
             # already paid for assuming it does (`models/retry.py`). `asyncio`
@@ -176,15 +181,21 @@ class BoundedEmbedder:
             if not deadline.expired():
                 return vectors
         except TimeoutError as exc:
-            # *Our* deadline: reaching this arm means `asyncio.timeout` converted
-            # the CancelledError it raised itself on expiry. An outer cancellation
-            # is left alone by `asyncio.timeout` and propagates unchanged, which is
-            # what `core/protocols.py`'s cancellation clause requires (ADR-0060 §1).
-            # Nothing else can land here — no `Embedder` documents `TimeoutError`,
-            # and an inner one would be a fault of the inner implementation that
-            # this seam would be lying about if it re-labelled it; that case is
-            # accepted as indistinguishable and is not reachable from either shipped
-            # implementation.
+            # Two different failures arrive as `TimeoutError` and conflating them
+            # produces a false report, which is exactly what `models/retry.py`
+            # records for the neighbouring seam: an inner `TimeoutError` raised
+            # instantly would be re-labelled "did not complete within its 30s
+            # deadline", with the backend's own message discarded. `retry.py` tells
+            # them apart by *where* they are caught; here the deadline can be asked
+            # directly, which is stronger — it stays right even for an inner
+            # embedder whose `TimeoutError` arrives after our own expiry has been
+            # scheduled but before it fires.
+            #
+            # An outer cancellation never reaches this arm at all: `asyncio.timeout`
+            # leaves a cancellation it did not cause alone, which is what
+            # `core/protocols.py`'s cancellation clause requires (ADR-0060 §1).
+            if not deadline.expired():
+                raise
             cause = exc
         msg = f"the embedding did not complete within its {self._timeout_seconds:g}s deadline"
         raise EmbeddingDeadlineExpiredError(msg) from cause
