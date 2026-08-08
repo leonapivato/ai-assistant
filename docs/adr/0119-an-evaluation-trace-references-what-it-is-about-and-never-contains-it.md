@@ -985,7 +985,9 @@ class RecordIdSet(BaseModel):
 
 
 class EvaluationTrace(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    #: ``validate_default`` because pydantic skips defaults otherwise, and an
+    #: unvalidated ``{}`` is a *mutable* mapping ``frozen=True`` does not protect.
+    model_config = ConfigDict(frozen=True, validate_default=True)
 
     id: Identifier
     kind: TraceKind
@@ -994,9 +996,9 @@ class EvaluationTrace(BaseModel):
     elapsed: timedelta | None = Field(default=None, ge=timedelta(0))
     outcome: TraceOutcome
     fault_class: FaultClassName | None = None
-    refs: TraceRefs = {}
-    records: TraceRecords = {}
-    metrics: TraceMetrics = {}
+    refs: TraceRefs = Field(default_factory=dict)
+    records: TraceRecords = Field(default_factory=dict)
+    metrics: TraceMetrics = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _a_fault_class_accompanies_a_failure(self) -> EvaluationTrace:
@@ -1024,6 +1026,16 @@ exposes as an immutable view, and the metric *value* type carries its own finite
 check — which makes §3's finiteness clause a property of the type instead of a
 promise about emitters. This is ADR-0018 §3's nested-state rule applied to a new
 family, in the shape the corpus already uses for `FrozenJson`.
+
+**And the defaults are validated, which is not the default.** Pydantic does not
+run a field's validators over its default, so `refs: TraceRefs = {}` would hand
+every trace constructed without refs — which is most `CONFIGURATION` traces and
+every faulting one — a plain mutable `dict` that the freezing validator never
+saw. `frozen=True` would not protect it, and the injection path this section
+closes would be open on exactly the traces least likely to be examined. So the
+config carries `validate_default=True` and the three fields use a
+`default_factory`. It is the one pydantic default this family cannot take as it
+comes, and it is called out rather than left to be noticed.
 
 **`RecordIdSet`'s invariant is a validator, not a comment.** `ge=0` alone accepts
 `RecordIdSet(ids=(one_id,), total=0)`, which claims the operation produced nothing
