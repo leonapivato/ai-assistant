@@ -263,6 +263,11 @@ observe Tier 1 content in the course of recording that it exists.
 > an empty one means *a set was observed and it was empty*. The two are distinct
 > and an emitter may not substitute one for the other.
 
+> **Normative.** `records` holds at most **256** ids, in the order the observed
+> operation produced them. Where the operation produced more, `records` holds the
+> first 256 and the trace's returned-count metric holds the true total. No trace
+> fails construction, and no trace is dropped, because an operation was large.
+
 **The observation rule is what makes a fault-path trace honest, and it is the
 numeric axis's version of §5's argument about a dropped trace.** An operation can
 raise before a quantity exists — a `search` whose embedding fails has no candidate
@@ -322,9 +327,20 @@ carry content. The strictness is spent where the risk is.
 **The bounded id sequence is separate from `refs` because a retrieval returns
 many.** `refs` answers "what is this trace about" with one id per relation;
 `records` answers "which rows did this read return", which memory precision needs
-and which a single-valued mapping cannot hold. Its bound is the same bound the
-read already has — a retrieval cannot return more than its `limit`, and the type
-carries a hard cap so a pathological caller cannot write an unbounded row.
+and which a single-valued mapping cannot hold.
+
+**The cap is a figure and the overflow is a defined representation, because the
+read it observes has no bound of its own.** `MemoryStore.search` takes
+`limit: int = 10` with no ceiling, so "as many ids as the read returned" is an
+unbounded row on a Tier 2 store, and a cap without an overflow rule is worse than
+either — a large read would fail the trace's construction and lose the record of a
+retrieval that did happen, which is §5's failure arriving through validation.
+Truncation loses nothing a measure needs: precision is a statement about the
+results that reached the caller, which are the top-ranked ones, and the *count* is
+a required metric either way, so the total survives the truncation that the ids do
+not. 256 rather than a `Settings` field: the cap belongs to the type, so every
+implementation agrees without configuration, and it is an order of magnitude above
+any realistic `limit` — the contract's default is 10.
 
 **The emitter stamps the instant, from the `Clock` it already holds.** The store
 could stamp on append, and that would measure the write rather than the event —
@@ -541,12 +557,12 @@ here needs.
 > reached (§3's observation rule governs the rest): the requested `limit`, the
 > pre-filter candidate count the store fetched, the count returned, the count
 > excluded by each read-time predicate separately — retention, validity window,
-> kind and band — and the ids returned.
+> kind and band — and the ids returned, under §3's `records` cap.
 
 > **Normative.** A `MEMORY_WRITE` trace carries every one of the following the
 > ingest reached: the write's mode, the count of each `MemoryDecisionKind` the
 > ingest produced, and the ids of the records written, reinforced, superseded or
-> retired.
+> retired, under §3's `records` cap.
 
 **A faulting operation still emits its trace, and its trace still tells the
 truth.** A `search` whose query embedding raises never computes a candidate set; an
