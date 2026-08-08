@@ -1032,6 +1032,33 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ADR-0118 §4's ceiling on pathology at the embedding seam, and the deadline
+    # ADR-0111 §4's check found missing on consolidation's chunk. The composition
+    # root wraps whichever embedder is configured above in a bounded one, so this
+    # bounds *every* call through the seam — the store's writes, the store's
+    # ``search``, and the offline re-embedding migration alike (ADR-0118 §2, §8).
+    #
+    # **It covers the whole of one ``embed`` call as its caller observes it,
+    # including a lazy model load performed inside it.** ``FastEmbedEmbedder``
+    # loads its ONNX session on the first embed, and a bound that excluded the
+    # operation touching the filesystem would be a bound with a hole exactly where
+    # the seam wedges.
+    #
+    # Thirty seconds is a ceiling on pathology rather than a latency target, the
+    # same posture ``model_timeout_seconds`` takes at 60 for a remote call. It has
+    # to clear a cold session initialisation on a slow disk plus one inference with
+    # headroom — a deadline that fired on an ordinary cold start would convert a
+    # startup cost into a recurring fault after every hub restart — and it must not
+    # be so large that the bound is nominal. ``allow_inf_nan=False`` matters for
+    # the reason stated for the model knobs above: ``gt=0`` rejects NaN but happily
+    # accepts infinity, which would silently disable the deadline.
+    embedding_timeout_seconds: _RealSetting = Field(
+        default=30.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Deadline for a single embedding call, in seconds (ADR-0118 §4).",
+    )
+
     # --- Context ---------------------------------------------------------
     # Used to localise the situational context (ADR-0008). ``timezone`` is an
     # IANA name; working hours are a local-time window, end-exclusive. Both are
