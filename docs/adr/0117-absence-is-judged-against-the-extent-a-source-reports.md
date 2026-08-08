@@ -4,10 +4,13 @@
 - Date: 2026-08-08
 - **Decides `core` surface and implements none of it.** One **optional field** on
   `Attestation` in `core/types.py`, the small frozen value object it takes, and
-  the operand of `ReadCoverage`'s containment predicate (§2, §9). **No
-  `core/protocols.py` change**: `Reader` is untouched, `MemoryWriter` is untouched
-  — ADR-0115 §1's `ingest_reading` already carries the whole reading — and
-  `MemoryStore` is untouched. Golden rule 5 and ADR-0015 §5 put a contract ADR in
+  the operand of `ReadCoverage`'s containment predicate (§2, §9). **No new Protocol
+  and no new member**: `Reader` is untouched, `MemoryStore` is untouched, and
+  ADR-0115 §1's `ingest_reading` already carries the whole reading. What does move
+  is that member's **obligation** — what a covered reading demotes — which is the
+  semantics-only kind of contract change ADR-0116's header names, and which lands
+  in both `MemoryWriter` implementations and the conformance suites together (§3,
+  §9). Golden rule 5 and ADR-0015 §5 put a contract ADR in
   its own PR, merged and ratified before anything implements against it; the
   implementation is a separate later lane. **Its required review set is therefore
   adversarial *and* architecture**, even though the PR carrying it is prose only —
@@ -265,13 +268,28 @@ prerequisite, which ADR-0115 satisfied; §6's per-record justification and its
 suspension — all are used exactly as ruled, and this ADR adds nothing to them and
 subtracts nothing from them.
 
-**One consumer changes, and it is one call site.** `ReadCoverage`'s containment
-predicate is stated over the extent rather than over a `Validity`;
-`MemoryIngestor._absence_candidates` is the only caller in the tree. Whether `core`
-expresses that as a changed parameter type on the existing predicate or as a second
-predicate beside it is spelling and is the implementing lane's, subject to there
-being exactly **one** containment rule in exactly one place — the "one rule, one
-place" discipline `Validity.live_at` and `ReadCoverage.contains` already keep.
+**The consumers that change are both writers, and they change together.**
+`ReadCoverage`'s containment predicate is stated over the extent rather than over a
+`Validity`. Two implementations call it, because ADR-0115 §1 made the reconciliation
+a `MemoryWriter` obligation rather than one class's habit:
+`MemoryIngestor._absence_candidates` and the canonical `FakeMemoryWriter` in
+`ai_assistant.testing`, which implements `ingest_reading` and runs its own §3
+selection — duplicated rather than imported, as golden rule 1 requires of a fake in a
+different subsystem. Changing one and not the other is not a partial implementation
+but a divergence: the fake would keep demoting on the envelope window while the real
+writer demoted on the extent, and the shared suite would be driving two different
+rules while reporting one.
+
+> **Normative.** The change of operand lands in **both** `MemoryWriter`
+> implementations and in the shared `MemoryWriter` conformance suite as one unit of
+> work, never in one of them alone — the triad discipline `CONTRIBUTING.md` →
+> "Adding a Protocol" states for a contract, applied to a contract obligation that
+> already has two implementations.
+
+Whether `core` expresses the predicate as a changed parameter type or as a second
+predicate beside the existing one is spelling and is the implementing lane's, subject
+to there being exactly **one** containment rule in exactly one place — the "one rule,
+one place" discipline `Validity.live_at` and `ReadCoverage.contains` already keep.
 
 ### 4. The envelope validity window stays operational, and a producer never sets one to obtain a demotion
 
@@ -407,9 +425,9 @@ design.
 
 ### 7. The fold, the facet and the read path are untouched
 
-No change to `MemoryIngestor` beyond §3's one call site is required, and the reason
-is worth recording because a reader of this ADR will reasonably ask whether the
-extent survives a fold.
+Beyond §3's change of operand in the two writers, no change to the fold is required,
+and the reason is worth recording because a reader of this ADR will reasonably ask
+whether the extent survives one.
 
 **It does, on both arms, with no change to `_merge`.** On the ordinary `REINFORCE`
 arm the survivor is the incoming record wearing the target's id, and its
@@ -479,13 +497,15 @@ lane:**
 - **`ReadCoverage`'s containment predicate** takes the extent as its operand (§3).
   Its rule is unchanged; whether the change is a parameter type or a second
   predicate is spelling, subject to one rule in one place.
-- **`core/protocols.py`** gains **nothing**. `Reader` is untouched — the extent rides
-  on the proposals it already returns. `MemoryWriter` is untouched: ADR-0115 §1's
-  `ingest_reading` already carries the whole reading, which is the seam ADR-0110 §5a
-  required. `MemoryStore` is untouched: §5's closes go through `write_atomic` and §6's
-  enumeration through `list_beliefs`. Docstrings on that file describing ADR-0110 §3's
-  conditions are the implementing lane's to correct, which is a wording change and not
-  a signature change.
+- **`core/protocols.py`** gains **no Protocol and no member**. `Reader` is untouched —
+  the extent rides on the proposals it already returns. `MemoryWriter` gains nothing:
+  ADR-0115 §1's `ingest_reading` already carries the whole reading, which is the seam
+  ADR-0110 §5a required. `MemoryStore` is untouched: §5's closes go through
+  `write_atomic` and §6's enumeration through `list_beliefs`. **`ingest_reading`'s
+  signature does not move and its obligation does**, which is the semantics-only shape
+  of a contract change ADR-0116's header names: what a covered reading demotes is part
+  of that member's contract, so the docstring stating ADR-0110 §3's conditions is
+  corrected, both implementations move, and the conformance clause below binds them.
 - **`MemoryDecisionKind`, `MemoryDecision` and `MemoryPolicy` are untouched**, per
   ADR-0110 §5: an absence-close carries no proposal and reaches no policy.
 
@@ -506,14 +526,40 @@ clauses; §5's coverage interval and its accounted-for condition; and §6's span
 its declines-rather-than-raises rule.
 
 **The conformance question is answered rather than deferred**, because unlike
-ADR-0110 §10 this ADR has a producer in hand. The shared `Reader` conformance suite
-gains the obligation that a reading's declared coverage and a proposal's declared
-extent are both statements about the read that was performed — a fake that
-synthesises either from its own configuration models exactly what §2 and ADR-0110 §2
-forbid, so both are scripted by the test author, as #804 already notes for coverage.
-Whether any clause here becomes a `MemoryWriter` or `MemoryStore` obligation is
-unchanged from ADR-0110 §10's answer: nothing here is one, since no writer and no
-store learns anything new.
+ADR-0110 §10 this ADR has both a producer and a driven suite in hand, and because the
+suite fails **silently** if it is left alone. ADR-0115 §7 allocates the work already:
+the shared `MemoryWriterContract` pins §4's no-coverage arm, ADR-0110 §4's suspension
+clause and §6's mid-call observation, while "each of ADR-0110 §3's other conditions
+independently prevents a close" is pinned by each implementation's own tests. That
+allocation is untouched. What moves is the fixture underneath it.
+
+**Every one of the shared suite's covered cases asserts a negative** — that nothing
+closed — and each is meaningful only because its stored record is *otherwise*
+demotable. Today that record earns its demotability from a bounded envelope validity
+window. Under §3 it earns nothing: it would declare no extent, be demotable by no
+reading at all, and every one of those assertions would keep passing while proving
+nothing. A suite that goes green for the wrong reason is worse than one that fails,
+which is why this is ruled here rather than left to the lane to notice.
+
+> **Normative.** The shared `MemoryWriter` conformance suite's demotable fixture
+> earns its demotability from a declared **extent** contained in the reading's
+> coverage, not from a bounded envelope validity window. A suite in which the
+> negative cases would still pass with the fixture's extent removed does not satisfy
+> this clause.
+
+> **Normative.** Each `MemoryWriter` implementation's own tests state §3's condition 3
+> over the extent — ADR-0115 §7's existing allocation, with the carrier corrected —
+> and include the case that a record whose attestation declares **no** extent is
+> demoted by no reading, whatever its envelope validity window.
+
+> **Normative.** The shared `Reader` conformance suite states that a reading's
+> declared coverage and a proposal's declared extent are both statements about the
+> read that was performed. A fake that synthesises either from its own configuration
+> models exactly what §2 and ADR-0110 §2 forbid, so both are scripted by the test
+> author, as #804 already asks for coverage.
+
+`MemoryStore` acquires no obligation: it stores and returns a record whose attestation
+carries one more optional field, and no read path consults it.
 
 ### 10. What this records against earlier ADRs
 
@@ -615,9 +661,16 @@ reading-wide claim. **Stacked additions; no record owed.**
 **ADR-0096 §5 and §6 — nothing owed.** The facet is untouched and §7 above states so,
 including that a withheld coverage does not withhold a facet. **No record owed.**
 
-**ADR-0115 §1 and §4 — nothing owed.** §1's member carries the reading whole and is
-exactly the seam this decision needs; §4's no-coverage path is what §5's second clause
-routes into. Using a mechanism as specified is not amending it. **No record owed.**
+**ADR-0115 §1, §4 and §7 — nothing owed.** §1's member carries the reading whole and
+is exactly the seam this decision needs; its signature does not move, and what its
+contract *means* moves only because ADR-0110 §3, which it references by number, has
+been superseded there rather than here. §4's no-coverage path is what §5's second
+clause routes into. §7 allocates the conformance work between the shared suite and
+each implementation's own tests, and §9 above keeps that allocation exactly as ruled
+while correcting the carrier the fixtures underneath it rely on — its clause "each of
+ADR-0110 §3's other conditions independently prevents a close" cites those conditions
+by number and stays true as written. Using a mechanism as specified is not amending
+it. **No record owed.**
 
 **ADR-0103 §6 and §9, ADR-0109 §5, ADR-0112 — nothing owed.** §6's corroboration arm
 is relied on unchanged in §7 and gains no exception. §9's test is applied twice, in §2
@@ -680,9 +733,12 @@ ranks is untouched; nothing here reaches retrieval. **No record owed.**
   what a close would have to rest on.
 - **The implementing lane owes**: the field and its value object with the additive
   migration story; `CalendarReader`'s coverage and extent; the `FakeReader` knobs
-  (#804) and what the shared `Reader` conformance suite pins; the one call site in
-  `MemoryIngestor._absence_candidates`; and the end-to-end regression #827 asks for.
-  It is one lane, after this ADR merges and is ratified.
+  (#804) and what the shared `Reader` conformance suite pins; the change of operand in
+  **both** `MemoryWriter` implementations — `MemoryIngestor` and the canonical
+  `FakeMemoryWriter` — together with the `MemoryWriterContract` fixture §9 rules on
+  and each implementation's own condition-3 tests; and the end-to-end regression #827
+  asks for. It is one lane, after this ADR merges and is ratified, and it is larger
+  than the one this ADR's own lane was first briefed as.
 - **#827, #804 and #639 close with that lane**, not with this one: this ADR decides,
   and closing an issue on a decision that has not been built is the bookkeeping
   ADR-0110 §11 avoided for the same pair.
