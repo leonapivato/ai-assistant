@@ -903,6 +903,35 @@ type FaultClassName = Annotated[EncodableText, AfterValidator(_fault_class_name)
 TRACE_RECORD_SET_CAP: Final = 256
 
 
+def _frozen_mapping[K, V](value: Mapping[K, V]) -> Mapping[K, V]:
+    """Detach and freeze — the model owns a copy no caller can reach.
+
+    ``frozen=True`` refuses ``trace.metrics = ...`` and not
+    ``trace.metrics["k"] = ...``; ADR-0018 §3's rule is about the second.
+    """
+    return MappingProxyType(dict(value))
+
+
+def _finite(value: int | float | bool) -> int | float | bool:
+    """Refuse NaN and the infinities (§3)."""
+    if isinstance(value, float) and not isfinite(value):
+        msg = f"{value!r} has no JSON representation, so it cannot be stored"
+        raise ValueError(msg)
+    return value
+
+
+type TraceMetricValue = Annotated[int | float | bool, AfterValidator(_finite)]
+type TraceRefs = Annotated[
+    Mapping[TraceRef, Identifier], AfterValidator(_frozen_mapping)
+]
+type TraceRecords = Annotated[
+    Mapping[TraceRecordSet, RecordIdSet], AfterValidator(_frozen_mapping)
+]
+type TraceMetrics = Annotated[
+    Mapping[TraceLabel, TraceMetricValue], AfterValidator(_frozen_mapping)
+]
+
+
 class TraceKind(StrEnum):
     OPERATION = "operation"
     RETRIEVAL = "retrieval"
@@ -956,21 +985,45 @@ class RecordIdSet(BaseModel):
 
 
 class EvaluationTrace(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     id: Identifier
     kind: TraceKind
     seam: TraceLabel
-    occurred_at: UtcInstant             # emitter-stamped, from its Clock (§3)
-    elapsed: timedelta | None = None    # ge=0 when present
+    occurred_at: UtcInstant   # emitter-stamped, from its Clock (§3)
+    elapsed: timedelta | None = Field(default=None, ge=timedelta(0))
     outcome: TraceOutcome
     fault_class: FaultClassName | None = None
-    refs: Mapping[TraceRef, Identifier] = {}
-    records: Mapping[TraceRecordSet, RecordIdSet] = {}
-    metrics: Mapping[TraceLabel, int | float | bool] = {}   # floats finite (§3)
+    refs: TraceRefs = {}
+    records: TraceRecords = {}
+    metrics: TraceMetrics = {}
+
+    @model_validator(mode="after")
+    def _a_fault_class_accompanies_a_failure(self) -> EvaluationTrace:
+        """``fault_class`` is present exactly when an exception decided the outcome.
+
+        ``REFUSED`` and ``FAULT`` are drawn *from* an exception's class (§3), so
+        one without a class names no discriminator; ``OK`` and ``INCOMPLETE``
+        reached no exception, so one with a class is reporting a failure that
+        did not happen.
+        """
+        failed = self.outcome in (TraceOutcome.REFUSED, TraceOutcome.FAULT)
+        if failed != (self.fault_class is not None):
+            msg = f"outcome {self.outcome} and fault_class {self.fault_class!r} disagree"
+            raise ValueError(msg)
+        return self
 ```
 
-Frozen, and every mapping an immutable carrier, following the corpus's existing
-treatment of nested mutable state (ADR-0018 §3): a trace a reader can rewrite
-after the fact is not a record of anything.
+**Frozen means frozen at both levels, which is why the mappings are annotated
+rather than merely documented.** `ConfigDict(frozen=True)` refuses
+`trace.metrics = …` and not `trace.metrics["k"] = …`, and the second is the one
+that matters here: a caller mutating a validated trace's `metrics` in place could
+put a free-form string past §2's containment rule *after* validation ran. So each
+mapping field carries a validator that detaches it into a copy the model owns and
+exposes as an immutable view, and the metric *value* type carries its own finite
+check — which makes §3's finiteness clause a property of the type instead of a
+promise about emitters. This is ADR-0018 §3's nested-state rule applied to a new
+family, in the shape the corpus already uses for `FrozenJson`.
 
 **`RecordIdSet`'s invariant is a validator, not a comment.** `ge=0` alone accepts
 `RecordIdSet(ids=(one_id,), total=0)`, which claims the operation produced nothing
@@ -1034,6 +1087,8 @@ class TracePosition(BaseModel):
 
 
 class TraceChunk(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     traces: tuple[EvaluationTrace, ...]
     position: TracePosition | None   # None exactly when the walk is exhausted
 ```
