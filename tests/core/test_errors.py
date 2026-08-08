@@ -14,6 +14,8 @@ import pytest
 
 from ai_assistant.core.errors import (
     AssistantError,
+    EmbeddingDeadlineExpiredError,
+    MemoryStoreEmbeddingExpiredError,
     MemoryStoreError,
     ModelAuthError,
     ModelContentFilterError,
@@ -114,3 +116,30 @@ def test_unresolved_evidence_snapshots_the_ids_it_was_given() -> None:
 
 def test_unresolved_evidence_names_no_ids_when_it_is_given_none() -> None:
     assert UnresolvedEvidenceError("nope").unresolved_ids == ()
+
+
+# --- the translated embedding expiry (ADR-0118 §5) ---------------------------
+# The store's half of the discriminator. Two claims are structural rather than
+# behavioural, so they are pinned here rather than at either translating seam:
+# the translation is catchable by the family, and it is *not* the seam's own
+# class wearing a second name.
+
+
+def test_a_translated_expiry_is_caught_by_an_existing_memory_store_handler() -> None:
+    """Additive under ``except MemoryStoreError`` (ADR-0028 §5 stays true)."""
+    error = MemoryStoreEmbeddingExpiredError("embedding outlived its deadline")
+
+    assert isinstance(error, MemoryStoreError)
+    assert isinstance(error, AssistantError)
+
+
+def test_the_translation_and_the_seams_own_class_are_separate_hierarchies() -> None:
+    """Neither may be caught by a handler written for the other (ADR-0118 §5).
+
+    The seam's class deliberately does not subclass ``MemoryStoreError`` — it is
+    not a store fault — and the translation is not an ``EmbeddingDeadlineExpiredError``,
+    so a caller above a store cannot reach past the boundary by catching the
+    embedder's class and get lucky.
+    """
+    assert not issubclass(MemoryStoreEmbeddingExpiredError, EmbeddingDeadlineExpiredError)
+    assert not issubclass(EmbeddingDeadlineExpiredError, MemoryStoreError)

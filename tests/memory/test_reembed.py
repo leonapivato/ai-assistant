@@ -23,7 +23,12 @@ from typing import TYPE_CHECKING
 import pytest
 import sqlite_vec
 
-from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
+from ai_assistant.core.errors import (
+    EmbeddingDeadlineExpiredError,
+    IncompatibleStateError,
+    MemoryStoreEmbeddingExpiredError,
+    MemoryStoreError,
+)
 from ai_assistant.core.types import (
     MemoryRecord,
     MemorySource,
@@ -111,11 +116,20 @@ class _CountingEmbedder:
 
     ``fail_after`` is what makes an interruption testable: the run dies partway
     with some chunks already committed, which is the state ADR-0104 §2 is about.
+    ``expire_after`` interrupts it the other way — with the deadline class the
+    bounded embedder raises (ADR-0118 §5) rather than a backend fault.
     """
 
-    def __init__(self, *, dimensions: int = _NEW, fail_after: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        dimensions: int = _NEW,
+        fail_after: int | None = None,
+        expire_after: int | None = None,
+    ) -> None:
         self._inner = HashingEmbedder(dimensions=dimensions)
         self._fail_after = fail_after
+        self._expire_after = expire_after
         self.embedded = 0
 
     @property
@@ -127,6 +141,9 @@ class _CountingEmbedder:
         return self._inner.dimensions
 
     async def embed(self, texts: Sequence[str]) -> list[Embedding]:
+        if self._expire_after is not None and self.embedded >= self._expire_after:
+            msg = f"embedding {len(texts)} text(s) outlived its 30.0s deadline"
+            raise EmbeddingDeadlineExpiredError(msg)
         if self._fail_after is not None and self.embedded >= self._fail_after:
             msg = "the embedding runtime went away"
             raise RuntimeError(msg)
@@ -289,6 +306,47 @@ async def test_an_interrupted_run_leaves_the_live_store_untouched(tmp_path: Path
     assert store.read_bytes() == before
     assert _meta(store)["dimensions"] == str(_OLD)
     assert not (tmp_path / f"memory.db{BACKUP_SUFFIX}").exists()
+
+
+async def test_an_expired_embedding_survives_the_migrations_translation(tmp_path: Path) -> None:
+    """ADR-0118 §5's second clause at the migration's own seam.
+
+    The migration is wired the same bounded embedder the store is (ADR-0118 §8),
+    so an operator watching a re-embedding stall must be able to tell a wedged
+    embedding backend from a broken store — the discrimination ADR-0083 §6 records
+    the cost of doing by message.
+    """
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record(str(index), f"memory {index}") for index in range(6)])
+    before = store.read_bytes()
+
+    stalled = _CountingEmbedder(expire_after=4)
+    with pytest.raises(MemoryStoreEmbeddingExpiredError) as caught:
+        await Reembedder(store=store, embedder=stalled, batch_size=2).run()
+
+    assert isinstance(caught.value, MemoryStoreError)  # the family still catches it
+    cause = caught.value.__cause__
+    assert isinstance(cause, EmbeddingDeadlineExpiredError)
+    assert "30.0s deadline" in str(cause)
+
+    # Nothing else about the halt changes: the live store is untouched, and the
+    # half-built work store is resumable exactly as after any other interruption.
+    assert store.read_bytes() == before
+    assert _meta(store)["dimensions"] == str(_OLD)
+    outcome = await Reembedder(store=store, embedder=_CountingEmbedder(), batch_size=2).run()
+    assert outcome.swapped
+    assert outcome.resumed == 4
+
+
+async def test_an_ordinary_embedder_fault_is_not_reported_as_an_expiry(tmp_path: Path) -> None:
+    store = tmp_path / "memory.db"
+    await _seed(store, [_record(str(index), f"memory {index}") for index in range(4)])
+
+    broken = _CountingEmbedder(fail_after=2)
+    with pytest.raises(MemoryStoreError, match="embedder failed") as caught:
+        await Reembedder(store=store, embedder=broken, batch_size=2).run()
+
+    assert not isinstance(caught.value, MemoryStoreEmbeddingExpiredError)
 
 
 async def test_a_resumed_run_re_embeds_only_what_is_left(tmp_path: Path) -> None:

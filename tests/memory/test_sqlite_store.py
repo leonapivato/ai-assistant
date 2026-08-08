@@ -25,8 +25,10 @@ from memory_store_contract import _BEYOND_MARGIN, MemoryStoreContract
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
+    EmbeddingDeadlineExpiredError,
     IncompatibleStateError,
     MemoryStoreConflictError,
+    MemoryStoreEmbeddingExpiredError,
     MemoryStoreError,
 )
 from ai_assistant.core.protocols import MemoryStore
@@ -121,8 +123,10 @@ class _FlakyEmbedder:
     """A misbehaving embedder for exercising the store's error boundary.
 
     Returns valid vectors until one of the fault flags is set: ``fail`` yields a
-    wrong-sized vector, ``boom`` raises (mimicking a provider outage), and
-    ``malformed`` returns a contract-violating result element (``None``).
+    wrong-sized vector, ``boom`` raises (mimicking a provider outage),
+    ``malformed`` returns a contract-violating result element (``None``), and
+    ``expired`` raises the bounded embedder's deadline class (ADR-0118 §5) —
+    which is what the wired embedder raises, not a stand-in for it.
     """
 
     def __init__(self) -> None:
@@ -130,6 +134,7 @@ class _FlakyEmbedder:
         self.fail = False
         self.boom = False
         self.malformed = False
+        self.expired = False
 
     @property
     def model_id(self) -> str:
@@ -140,6 +145,9 @@ class _FlakyEmbedder:
         return 8
 
     async def embed(self, texts: Sequence[str]) -> list[Embedding]:
+        if self.expired:
+            msg = "embedding 1 text(s) outlived its 30.0s deadline"
+            raise EmbeddingDeadlineExpiredError(msg)
         if self.boom:
             msg = "provider outage"
             raise RuntimeError(msg)
@@ -757,6 +765,66 @@ async def test_embedder_exception_is_wrapped_as_store_error(
     embedder.malformed = True  # a non-sized result element must not leak a TypeError
     with pytest.raises(MemoryStoreError, match="embedder failed"):
         await store.add(_semantic("1", "content"))
+
+
+async def test_an_expired_embedding_survives_the_stores_translation(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """ADR-0118 §5's second clause, on every path that embeds.
+
+    ``search`` is here beside the two write paths deliberately: it embeds the query
+    through the same ``_embed_one``, which is the exposure ADR-0118's Context
+    records as the one #820's table missed. All three must name the condition, or
+    it is legible on the write path and invisible on the interactive one.
+    """
+    embedder = _FlakyEmbedder()
+    store = make_store(embedder=embedder)
+    embedder.expired = True
+
+    paths: dict[str, Callable[[], Awaitable[object]]] = {
+        "add": lambda: store.add(_semantic("1", "content")),
+        "write_atomic": lambda: store.write_atomic([MemoryWrite(record=_semantic("2", "more"))]),
+        "search": lambda: store.search("content"),
+    }
+    for name, call in paths.items():
+        with pytest.raises(MemoryStoreEmbeddingExpiredError) as caught:
+            await call()
+        # A ``MemoryStoreError`` still, so ADR-0028 §5's "that is what crosses this
+        # seam" holds and every existing ``except MemoryStoreError`` keeps working.
+        assert isinstance(caught.value, MemoryStoreError), name
+        # ...and the seam's own class is preserved as the cause, not summarised
+        # into a message a caller would have to match on.
+        cause = caught.value.__cause__
+        assert isinstance(cause, EmbeddingDeadlineExpiredError), name
+        assert "30.0s deadline" in str(cause), name
+
+    embedder.expired = False
+    assert await store.get("1") is None  # neither write reached the store
+    assert await store.get("2") is None
+
+
+async def test_an_ordinary_embedder_fault_is_not_reported_as_an_expiry(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """The discrimination has to cut both ways, or the class means nothing.
+
+    ADR-0118 §5 asks for a class "distinct from every class an embedder raises for
+    a backend fault"; a translation that reported a provider outage as an expiry
+    would satisfy ``isinstance`` at the call site and mislead every reader of it.
+    """
+    embedder = _FlakyEmbedder()
+    store = make_store(embedder=embedder)
+
+    embedder.boom = True
+    with pytest.raises(MemoryStoreError, match="embedder failed") as caught:
+        await store.add(_semantic("1", "content"))
+    assert not isinstance(caught.value, MemoryStoreEmbeddingExpiredError)
+
+    embedder.boom = False
+    embedder.fail = True  # a wrong-sized vector is a fault the store itself detects
+    with pytest.raises(MemoryStoreError) as caught:
+        await store.search("content")
+    assert not isinstance(caught.value, MemoryStoreEmbeddingExpiredError)
 
 
 async def test_wrong_sized_query_vector_raises_store_error(
