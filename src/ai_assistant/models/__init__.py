@@ -11,10 +11,15 @@ Implements: ``ModelProvider`` and ``Embedder``.
 deliberately not re-exported here, so importing this package does not pull in the
 heavy ``fastembed``/ONNX runtime. Import it directly when the real embedder is
 needed.
+
+``BoundedEmbedder`` *is* re-exported: it wraps whichever ``Embedder`` the
+composition root builds, so it is imported on every path including the one that
+must not pay for fastembed, and it costs nothing to import (ADR-0118 §2).
 """
 
 from __future__ import annotations
 
+from ai_assistant.models.bounded_embedder import BoundedEmbedder
 from ai_assistant.models.embeddings import HashingEmbedder
 from ai_assistant.models.provider import (
     PydanticAIProvider,
@@ -25,6 +30,7 @@ from ai_assistant.models.retry import RetryingProvider
 from ai_assistant.models.routing import Route, RoutingProvider
 
 __all__ = [
+    "BoundedEmbedder",
     "HashingEmbedder",
     "PydanticAIProvider",
     "RetryingProvider",

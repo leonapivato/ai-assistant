@@ -36,7 +36,7 @@ from ai_assistant.core.types import GrantScope, Reversibility, RiskLevel
 from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.memory import MemoryIngestor, SqliteDeferralStore, SqliteMemoryStore
 from ai_assistant.memory import deferral_store as deferral_store_module
-from ai_assistant.models import HashingEmbedder
+from ai_assistant.models import BoundedEmbedder, HashingEmbedder
 from ai_assistant.orchestration import Engine
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.planning import SqlitePlanStore
@@ -129,6 +129,11 @@ async def test_build_engine_wires_the_on_device_embedder_by_default(tmp_path: Pa
     this asserts the wired *type* and dimension without ever running the model. The
     vendored artifact is a build input present wherever the gate runs (ADR-0024), the
     same assumption the model-layer embedder tests already make.
+
+    Since ADR-0118 §2 the store receives that embedder **wrapped in a bounded one**,
+    so the assertion reaches through the wrapper. Its ``dimensions`` is checked on
+    the wrapper rather than on the inner embedder, because delegating that unchanged
+    is exactly what §2 requires of it.
     """
     from ai_assistant.models.fastembed_embedder import (  # noqa: PLC0415 — local so only this test imports fastembed
         FastEmbedEmbedder,
@@ -138,7 +143,8 @@ async def test_build_engine_wires_the_on_device_embedder_by_default(tmp_path: Pa
     try:
         memory = engine._loop._memory
         assert isinstance(memory, SqliteMemoryStore)  # narrows the Protocol-typed seam
-        assert isinstance(memory._embedder, FastEmbedEmbedder)
+        assert isinstance(memory._embedder, BoundedEmbedder)
+        assert isinstance(memory._embedder._inner, FastEmbedEmbedder)
         assert memory._embedder.dimensions == 384  # BAAI/bge-small-en-v1.5, ADR-0024
     finally:
         await engine.aclose()
@@ -148,13 +154,38 @@ async def test_build_engine_wires_the_hashing_embedder_when_selected(tmp_path: P
     """The ``hashing`` knob wires the deterministic ``HashingEmbedder`` instead (ADR-0006 §2).
 
     The escape hatch for tests, offline use, and CI: selecting it avoids the vendored
-    model (and its ONNX runtime) entirely, at the cost of non-semantic retrieval.
+    model (and its ONNX runtime) entirely, at the cost of non-semantic retrieval. It
+    is bounded too (ADR-0118 §2): the deadline is inert over an embedder that reaches
+    no await, and wrapping both modes is what keeps the guarantee a property of the
+    *seam* rather than of one branch.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         memory = engine._loop._memory
         assert isinstance(memory, SqliteMemoryStore)  # narrows the Protocol-typed seam
-        assert isinstance(memory._embedder, HashingEmbedder)
+        assert isinstance(memory._embedder, BoundedEmbedder)
+        assert isinstance(memory._embedder._inner, HashingEmbedder)
+    finally:
+        await engine.aclose()
+
+
+@pytest.mark.parametrize("kind", list(EmbedderKind))
+async def test_no_unbounded_embedder_reaches_the_memory_store(
+    kind: EmbedderKind, tmp_path: Path
+) -> None:
+    """ADR-0118 §2's second clause, over every member rather than the two named above.
+
+    "The composition root wires no unbounded ``Embedder`` into anything the hub can
+    reach … ``_build_embedder`` returns the wrapped embedder for **every**
+    ``EmbedderKind``." Parametrised over the enum rather than over a list written
+    here, so a member added later fails this until it is wrapped too — the same
+    fail-closed shape ``_build_embedder``'s own ``assert_never`` has.
+    """
+    engine = build_engine(Settings(embedder=kind), data_dir=tmp_path)
+    try:
+        memory = engine._loop._memory
+        assert isinstance(memory, SqliteMemoryStore)  # narrows the Protocol-typed seam
+        assert isinstance(memory._embedder, BoundedEmbedder)
     finally:
         await engine.aclose()
 
@@ -1614,6 +1645,23 @@ class TestBuildReembedder:
         reembedder = build_reembedder(settings)
 
         assert reembedder.store == tmp_path / "memory.db"
+
+    def test_the_migration_receives_the_bounded_embedder_too(self, tmp_path: Path) -> None:
+        """ADR-0118 §2's second clause names this consumer explicitly.
+
+        "every consumer it hands an embedder to — the memory store and
+        ``build_reembedder`` alike — receives that one." The migration walks a whole
+        store through ``Embedder.embed``, so an unbounded one here would leave the
+        longest-running embedding path in the tree the only unbounded one — and
+        ADR-0104 §6 keeps it outside the scheduler, so no clause of ADR-0111 would
+        ever have reached it.
+        """
+        settings = Settings(embedder=EmbedderKind.HASHING, data_dir=tmp_path)
+
+        reembedder = build_reembedder(settings)
+
+        assert isinstance(reembedder._embedder, BoundedEmbedder)
+        assert isinstance(reembedder._embedder._inner, HashingEmbedder)
 
     def test_the_data_dir_keyword_wins_over_the_setting(self, tmp_path: Path) -> None:
         configured = tmp_path / "configured"

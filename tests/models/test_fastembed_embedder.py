@@ -31,9 +31,10 @@ import pytest
 from embedder_contract import EmbedderContract
 from network_guard import network_denied
 
-from ai_assistant.core.errors import ModelError
+from ai_assistant.core.errors import EmbeddingDeadlineExpiredError, ModelError
 from ai_assistant.core.protocols import Embedder
 from ai_assistant.models import fastembed_embedder
+from ai_assistant.models.bounded_embedder import BoundedEmbedder
 from ai_assistant.models.embedding_artifact import (
     EXECUTION_PROVIDERS,
     VENDORED_MODEL_NAME,
@@ -67,6 +68,11 @@ _STUB_DIMENSIONS = 16
 # broken implementation fails the suite instead of hanging it. Generous on
 # purpose: it is never the thing being measured.
 _RENDEZVOUS_TIMEOUT_SECONDS = 10.0
+
+# The deadline the two ADR-0118 cases below drive the seam with. Short because the
+# calls it fires against are parked by construction and never answer; not a latency
+# assertion about anything.
+_TINY_DEADLINE_SECONDS = 0.05
 
 
 class _StubTextModel:
@@ -161,12 +167,13 @@ class TestFastEmbedEmbedderContract(EmbedderContract):
     async def embedder_suspended_mid_embed(self) -> AsyncIterator[tuple[Embedder, SuspendedCall]]:
         """Park the first batch inside the worker thread ``embed`` hands it to.
 
-        The suspension goes in the loaded model, i.e. below
-        ``asyncio.to_thread`` — the handoff ADR-0060 §5 names as the reason the
-        rule is live for this embedder rather than vacuous. Blocking there is what
-        makes the case deterministic: a stub batch resolves inside a single
-        event-loop turn, so a case that cancelled a freshly started task would
-        find it already done and assert nothing.
+        The suspension goes in the loaded model, i.e. below the handoff ADR-0060
+        §5 names as the reason the rule is live for this embedder rather than
+        vacuous — since ADR-0118 §7 that handoff is a daemon thread the embedder
+        owns rather than ``asyncio.to_thread``, and nothing about this case moves
+        with it. Blocking there is what makes it deterministic: a stub batch
+        resolves inside a single event-loop turn, so a case that cancelled a
+        freshly started task would find it already done and assert nothing.
         """
         suspension = ThreadSuspension()
         armed = threading.Event()
@@ -330,31 +337,6 @@ async def test_the_model_is_loaded_once_and_reused() -> None:
     assert backend.loads == [_STUB_MODEL]
 
 
-@contextlib.contextmanager
-def _worker_threads(count: int) -> Iterator[None]:
-    """Run this loop's ``to_thread`` work on a pool of exactly ``count`` threads.
-
-    Both concurrency tests below park one worker while a second one still has to
-    start, so they need a known thread budget. The adapter calls
-    `asyncio.to_thread` internally — the tests cannot route their embeds
-    themselves — and that uses whatever default executor the running loop
-    carries, which a fixture or host is free to configure with a single worker.
-    The second embed would then never start, and the test would fail on a
-    ten-second timeout with the production code entirely correct. Establishing
-    the pool here makes the budget part of the test instead of an assumption
-    about the environment.
-
-    Nothing is restored afterwards because nothing is displaced: each test gets
-    its own event loop, a loop creates its default executor lazily on first use,
-    and this installs one before any `to_thread` call has run. The corollary is
-    that *every* `to_thread` the test triggers must happen inside the block — the
-    pool is shut down on the way out, and a later `embed` would be refused.
-    """
-    with ThreadPoolExecutor(max_workers=count) as pool:
-        asyncio.get_running_loop().set_default_executor(pool)
-        yield
-
-
 class _ArrivalSignallingLock:
     """The load lock, wrapped to announce each thread *before* it contends for it.
 
@@ -423,6 +405,10 @@ async def test_concurrent_first_calls_load_the_model_once() -> None:
     an unlocked implementation would still record one load. Here the first caller
     is held inside `load` until the second has provably reached the lock, so the
     contended case is the only case this test can observe.
+
+    Since ADR-0118 §7 the embedder owns a fresh daemon thread per call, so there
+    is no shared thread budget to establish first: two concurrent embeds are two
+    threads by construction, whatever executor the host's loop carries.
     """
     lock = _ArrivalSignallingLock()
     backend = _GatedLoadBackend()
@@ -431,30 +417,25 @@ async def test_concurrent_first_calls_load_the_model_once() -> None:
     # for why the observation point cannot come from the backend seam instead.
     embedder._load_lock = lock  # type: ignore[assignment]  # test-only lock instrumentation
 
-    with _worker_threads(2):
-        # The observer gets a pool of its own rather than a third thread from the
-        # embeds' pool: both racing embeds hold one each and neither can release
-        # it until the observer has run.
-        with ThreadPoolExecutor(max_workers=1) as observer:
-            calls = asyncio.gather(embedder.embed(["zulu"]), embedder.embed(["alpha"]))
-            both_arrived = await asyncio.get_running_loop().run_in_executor(
-                observer, lock.wait_for_arrivals, 2, _RENDEZVOUS_TIMEOUT_SECONDS
-            )
-            # Released unconditionally, so a failing run finishes and reports
-            # rather than leaving two workers parked inside `load`.
-            backend.proceed.set()
-            first, second = await calls
-
-        assert both_arrived, (
-            "the second caller never reached the load lock; the race did not happen"
+    # The observer runs off the loop because `wait_for_arrivals` blocks; a pool of
+    # its own so it cannot be starved by anything the embeds are doing.
+    with ThreadPoolExecutor(max_workers=1) as observer:
+        calls = asyncio.gather(embedder.embed(["zulu"]), embedder.embed(["alpha"]))
+        both_arrived = await asyncio.get_running_loop().run_in_executor(
+            observer, lock.wait_for_arrivals, 2, _RENDEZVOUS_TIMEOUT_SECONDS
         )
-        assert not backend.timed_out, "the backend gave up waiting; it did not drive the rendezvous"
-        assert backend.loads == [_STUB_MODEL]
-        # And the race must not have crossed the two callers' results. Still
-        # inside the pool: these embeds dispatch to it too.
-        assert first == await embedder.embed(["zulu"])
-        assert second == await embedder.embed(["alpha"])
-        assert first != second
+        # Released unconditionally, so a failing run finishes and reports
+        # rather than leaving two workers parked inside `load`.
+        backend.proceed.set()
+        first, second = await calls
+
+    assert both_arrived, "the second caller never reached the load lock; the race did not happen"
+    assert not backend.timed_out, "the backend gave up waiting; it did not drive the rendezvous"
+    assert backend.loads == [_STUB_MODEL]
+    # And the race must not have crossed the two callers' results.
+    assert first == await embedder.embed(["zulu"])
+    assert second == await embedder.embed(["alpha"])
+    assert first != second
 
 
 class _RendezvousTextModel:
@@ -482,19 +463,74 @@ async def test_concurrent_embeds_reach_the_loaded_model_together() -> None:
     # inference runs — if it were, the second caller could never reach the
     # barrier and this would fail rather than serialise.
     #
-    # Two worker threads at once is inherent to asserting concurrency, so the
-    # pool is established rather than assumed. Unlike the load-race test above,
-    # nothing here needs a third.
+    # It is also what holds ADR-0118 §7's containment to the shape that seam can
+    # actually take: the bound is over *abandoned* workers, so two healthy
+    # concurrent embeds are both dispatched. A containment that reserved the
+    # embedder for one running call at a time would refuse the second here — an
+    # interactive `search` failing because a scheduled write happened to be
+    # embedding — and this barrier would never fill.
     backend = _ModelBackend(_RendezvousTextModel(parties=2))
     embedder = _stub_embedder(backend)
 
-    with _worker_threads(2):
-        first, second = await asyncio.gather(embedder.embed(["zulu"]), embedder.embed(["alpha"]))
+    first, second = await asyncio.gather(embedder.embed(["zulu"]), embedder.embed(["alpha"]))
 
     # Un-swapped: each caller gets its own text's vector, not the other's.
     assert first == [[float(value) for value in _StubTextModel.embed_one("zulu")]]
     assert second == [[float(value) for value in _StubTextModel.embed_one("alpha")]]
     assert first != second
+
+
+async def test_the_deadline_covers_the_lazy_model_load() -> None:
+    """ADR-0118 §4's second clause, end to end over the two objects it spans.
+
+    "The deadline covers the whole of one ``embed`` call as its caller observes it,
+    including a lazy model load performed inside it. A bound that excludes the
+    operation that touches the filesystem is a bound with a hole exactly where the
+    seam wedges." Nothing here has embedded anything yet: the call is parked inside
+    ``load``, which is the case a cold hub hits first and the one that holds
+    ``_load_lock`` while it hangs.
+    """
+    backend = _GatedLoadBackend()
+    bounded = BoundedEmbedder(_stub_embedder(backend), timeout_seconds=_TINY_DEADLINE_SECONDS)
+    try:
+        with pytest.raises(EmbeddingDeadlineExpiredError):
+            await bounded.embed(["alpha"])
+
+        assert backend.loads == [_STUB_MODEL], "the call never reached the load it was parked in"
+    finally:
+        # The worker is abandoned, not stopped (ADR-0118 §7). Released so it
+        # finishes now rather than sitting on its own ten-second bound.
+        backend.proceed.set()
+
+
+async def test_a_wedged_load_is_refused_at_once_once_the_bound_is_reached() -> None:
+    """ADR-0118 §7's containment, over the failure mode it was written for.
+
+    A worker abandoned inside the lazy load holds ``_load_lock`` forever, so every
+    later call blocks acquiring it and expires too — "the first expiry during a
+    cold load is not one lost call; it is the seam". What containment buys is that
+    the accumulation stops: once the bound is reached the seam refuses *before*
+    starting a thread, with a named fault, and it keeps saying the same thing every
+    interval until an operator restarts the hub.
+
+    The refusal is a ``ModelError`` and deliberately not an
+    ``EmbeddingDeadlineExpiredError``: nothing expired, because nothing was
+    started, and ADR-0118 §5 reserves that class for a call that outlived its own
+    deadline.
+    """
+    backend = _GatedLoadBackend()
+    bounded = BoundedEmbedder(_stub_embedder(backend), timeout_seconds=_TINY_DEADLINE_SECONDS)
+    try:
+        for _ in range(2):
+            with pytest.raises(EmbeddingDeadlineExpiredError):
+                await bounded.embed(["alpha"])
+
+        with pytest.raises(ModelError, match="stopped returning") as refused:
+            await bounded.embed(["alpha"])
+
+        assert not isinstance(refused.value, EmbeddingDeadlineExpiredError)
+    finally:
+        backend.proceed.set()
 
 
 async def test_an_empty_batch_does_not_load_the_model() -> None:
