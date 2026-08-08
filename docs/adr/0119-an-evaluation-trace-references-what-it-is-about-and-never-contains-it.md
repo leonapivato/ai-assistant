@@ -368,10 +368,12 @@ false, and the design must hold when one does.
 inferred from the numbers.** A deployment configured above the cap truncates *every*
 retrieval trace, so an identity-based measure has an empty population — which is a
 much worse failure to discover in a chart than in a header. §9's allowlist
-therefore carries the configured retrieval limit, and a measure lane reads the
-condition off the configuration trace before it computes anything: this window's
-limit exceeds the cap, so precision is unavailable here, stated once and dated,
-rather than a denominator that quietly went to zero.
+therefore carries **every** effective cardinality control that can drive a traced
+read past the cap — `retrieval_limit` and `conflict_limit` at this date, the latter
+reaching `search` as `conflict_limit + 2` — and a measure lane reads the condition
+off the configuration trace before it computes anything: a control in this window
+exceeds the cap, so precision is unavailable here, stated once and dated, rather
+than a denominator that quietly went to zero.
 
 **#848** carries the standing question — raise the cap, bound the caller, or give
 the family a spilled-ids representation — for the day a real deployment wants both
@@ -669,10 +671,12 @@ and §4's correlation clause. What it may not do is add a `TraceKind` (§3).
 > identifier, a credential reference — is recorded as its presence or absence, or
 > not at all.
 
-> **Normative.** The allowlist includes the deployment's **effective retrieval
-> limit**, so a window in which that limit exceeds §3's `records` cap declares
-> itself at startup and an identity-based measure can refuse the window outright
-> instead of computing over an empty population.
+> **Normative.** The allowlist includes **every effective cardinality control that
+> can drive a traced read past §3's `records` cap** — not a named subset of them —
+> so a window in which any of them exceeds the cap declares itself at startup and
+> an identity-based measure refuses that window outright instead of computing over
+> a population it has silently lost. A control added later joins the list in the
+> change that adds it.
 
 **This is the design call #829 leaves to this lane, and the reasoning for
 answering it with a startup stamp rather than an operator act is that a startup
@@ -701,12 +705,22 @@ provider and model identifiers. A denylist would admit the next field somebody
 adds. An allowlist admits nothing until somebody names it, and the third clause
 then constrains what naming it can put in the record.
 
-**The retrieval limit is named on the list by this ADR rather than left to the
-lane**, because it is the one setting whose value decides whether a measure is
-computable at all (§3). `LearningLoop`'s `retrieval_limit` has no ceiling and is
-not a `Settings` field today, so "effective" is the figure the composition root
-actually passed — which is what a measure needs and what a `Settings` dump would
-miss. Every other member of the list is the lane's to name.
+**The cardinality controls are put on the list by this ADR rather than left to the
+lane, and the clause states the *property* rather than a roster.** They are the
+settings whose values decide whether a measure is computable at all (§3), and
+enumerating them would put a dated list in a normative clause — which is how the
+first draft of this clause got it wrong, naming the retrieval limit alone.
+
+Two hold the property at this date, and both are validated only from below.
+`LearningLoop`'s `retrieval_limit` — `_check_tuning` refuses under 1, no ceiling,
+default 5 — reaches `MemoryStore.search` through
+`orchestration/retrieval.py`'s per-band budget. `MemoryIngestor`'s `conflict_limit`
+— its own `_check_tuning`, same shape — reaches it as `conflict_limit + 2` on the
+conflict probe, so it crosses the cap two short of it. Neither is a `Settings`
+field, which is exactly why the clause says **effective**: the figure a measure
+needs is the one the composition root actually passed, and a `Settings` dump would
+show neither. Naming one and missing the other is the failure the clause is now
+shaped to prevent, rather than a roster to keep abreast.
 
 **The failure mode is named rather than papered over.** A configuration trace that
 cannot be written is subordinate under §5, so startup continues and the failure is
