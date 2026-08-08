@@ -368,12 +368,12 @@ false, and the design must hold when one does.
 inferred from the numbers.** A deployment configured above the cap truncates *every*
 retrieval trace, so an identity-based measure has an empty population — which is a
 much worse failure to discover in a chart than in a header. §9's allowlist
-therefore carries **every** effective cardinality control that can drive a traced
-read past the cap — `retrieval_limit` and `conflict_limit` at this date, the latter
-reaching `search` as `conflict_limit + 2` — and a measure lane reads the condition
-off the configuration trace before it computes anything: a control in this window
-exceeds the cap, so precision is unavailable here, stated once and dated, rather
-than a denominator that quietly went to zero.
+therefore carries the **effective `search` limit** of every cardinality control
+that can drive a traced read past the cap — `retrieval_limit` and `conflict_limit`
+at this date, the latter reaching `search` as `conflict_limit + 2` — and a measure
+lane reads the condition off the configuration trace before it computes anything:
+an effective limit in this window exceeds the cap, so precision is unavailable
+here, stated once and dated, rather than a denominator that quietly went to zero.
 
 **#848** carries the standing question — raise the cap, bound the caller, or give
 the family a spilled-ids representation — for the day a real deployment wants both
@@ -671,12 +671,13 @@ and §4's correlation clause. What it may not do is add a `TraceKind` (§3).
 > identifier, a credential reference — is recorded as its presence or absence, or
 > not at all.
 
-> **Normative.** The allowlist includes **every effective cardinality control that
-> can drive a traced read past §3's `records` cap** — not a named subset of them —
-> so a window in which any of them exceeds the cap declares itself at startup and
-> an identity-based measure refuses that window outright instead of computing over
-> a population it has silently lost. A control added later joins the list in the
-> change that adds it.
+> **Normative.** For **every cardinality control that can drive a traced read past
+> §3's `records` cap** — not a named subset of them — the allowlist records the
+> **effective `search` limit that control produces at the seam**, which need not
+> equal the control's own value. A window in which any recorded effective limit
+> exceeds the cap declares itself at startup, and an identity-based measure refuses
+> that window outright instead of computing over a population it has silently lost.
+> A control added later joins the list in the change that adds it.
 
 **This is the design call #829 leaves to this lane, and the reasoning for
 answering it with a startup stamp rather than an operator act is that a startup
@@ -713,14 +714,24 @@ first draft of this clause got it wrong, naming the retrieval limit alone.
 
 Two hold the property at this date, and both are validated only from below.
 `LearningLoop`'s `retrieval_limit` — `_check_tuning` refuses under 1, no ceiling,
-default 5 — reaches `MemoryStore.search` through
-`orchestration/retrieval.py`'s per-band budget. `MemoryIngestor`'s `conflict_limit`
-— its own `_check_tuning`, same shape — reaches it as `conflict_limit + 2` on the
-conflict probe, so it crosses the cap two short of it. Neither is a `Settings`
-field, which is exactly why the clause says **effective**: the figure a measure
-needs is the one the composition root actually passed, and a `Settings` dump would
-show neither. Naming one and missing the other is the failure the clause is now
-shaped to prevent, rather than a roster to keep abreast.
+default 5 — reaches `MemoryStore.search` through `orchestration/retrieval.py`'s
+per-band budget, so its effective limit is its own value. `MemoryIngestor`'s
+`conflict_limit` — its own `_check_tuning`, same shape — reaches `search` as
+`conflict_limit + 2` on the conflict probe.
+
+**That `+ 2` is why the clause records the effective limit and not the control.**
+A `conflict_limit` of 255 does not exceed 256 and would declare the window
+eligible, while the probe it drives asks for 257 and truncates its trace — a
+window ruled measurable by a condition that is off by two, which is the same class
+of silent miscount as the one the truncation rule exists to prevent. Comparing the
+figure that actually reaches the seam cannot go wrong that way, and it needs no
+per-control arithmetic in the clause.
+
+Neither control is a `Settings` field, which is the other half of why "effective"
+is the right word: the figure a measure needs is the one the composition root
+actually produced, and a `Settings` dump would show neither. Stating the property
+rather than a roster is what the first draft of this clause got wrong — it named
+the retrieval limit alone, and the ingestor's path was invisible.
 
 **The failure mode is named rather than papered over.** A configuration trace that
 cannot be written is subordinate under §5, so startup continues and the failure is
