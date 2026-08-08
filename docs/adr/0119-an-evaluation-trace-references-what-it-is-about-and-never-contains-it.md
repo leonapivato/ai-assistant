@@ -237,7 +237,7 @@ observe Tier 1 content in the course of recording that it exists.
 
 > **Normative.** `TraceKind` has exactly four members at this decision:
 > `OPERATION`, `RETRIEVAL`, `MEMORY_WRITE` and `CONFIGURATION`. A later ADR may add
-> one; nothing else may.
+> one; nothing else may, and §13e says the same of the other three enumerations.
 
 > **Normative.** `TraceOutcome` has exactly four members: `OK`, `REFUSED`, `FAULT`
 > and `INCOMPLETE`.
@@ -948,7 +948,7 @@ class EvaluationTrace(BaseModel):
     id: Identifier
     kind: TraceKind
     seam: TraceLabel
-    occurred_at: AwareDatetime          # emitter-stamped, from its Clock (§3)
+    occurred_at: UtcInstant             # emitter-stamped, from its Clock (§3)
     elapsed: timedelta | None = None    # ge=0 when present
     outcome: TraceOutcome
     fault_class: FaultClassName | None = None
@@ -960,6 +960,15 @@ class EvaluationTrace(BaseModel):
 Frozen, and every mapping an immutable carrier, following the corpus's existing
 treatment of nested mutable state (ADR-0018 §3): a trace a reader can rewrite
 after the fact is not a record of anything.
+
+**`UtcInstant`, not a merely-aware `datetime`.** ADR-0023 puts every stored
+instant in `core/types.py` behind the shared validated type — naive is rejected
+rather than normalised — and ADR-0030 fixes what that type accepts at a validating
+seam, down to refusing `datetime` subclasses. A trace is a stored instant like any
+other, and a second instant convention in `core` would be exactly the divergence
+those two ADRs exist to prevent. `purge_before`'s parameter takes it too: a horizon
+compared against stored instants must be canonicalised the same way, or the sweep
+and the rows it sweeps disagree about what "older" means.
 
 #### 13b. `core/protocols.py`
 
@@ -979,7 +988,7 @@ class TraceStore(Protocol):
     ) -> TraceChunk:
         """One chunk in insertion order, resuming after ``after`` (§7a)."""
 
-    async def purge_before(self, instant: AwareDatetime) -> int:
+    async def purge_before(self, instant: UtcInstant) -> int:
         """Delete every trace older than ``instant``; return how many (§10)."""
 ```
 
@@ -1041,12 +1050,25 @@ together" — the Protocols, a shared conformance suite each, a canonical fake i
 - The correlation carrier (§4) and the emitters (§8), which are wiring lanes after
   the triad, not part of it.
 
-#### 13e. What is still open above, and deliberately
+#### 13e. Nothing above is open, and enum membership least of all
 
-The **members** of `TraceRef` and `TraceRecordSet` may grow, and a growth is an
-additive `core/types.py` change rather than a new ADR — the closure §2 depends on
-is over the value *types*, which no new member changes. `TraceKind` may not (§3).
-Everything else above is fixed here.
+> **Normative.** A member added to `TraceKind`, `TraceOutcome`, `TraceRef` or
+> `TraceRecordSet` takes its own ratified ADR, merged before anything implements
+> against it. No addition to any of the four is an implementation lane's to make.
+
+**An earlier draft exempted `TraceRef` and `TraceRecordSet`** on the reasoning
+that §2's closure is over value *types*, which a new member does not change. That
+is true and it is not the test. These are `core/types.py` types exchanged across
+the `TraceSink`/`TraceStore` boundary, so a member is public contract: an emitter
+writing one a store's schema does not know is a break, and every consumer
+switching on the vocabulary silently acquires an unhandled case. ADR-0015 §5 and
+golden rule 5 do not carry an "additive" exemption, and inventing one here for two
+of four enumerations while §3 refuses it for the third would have been the
+inconsistency that makes a rule unenforceable.
+
+The cost is honest: a new disposition costs an ADR. That is the same price §3
+already sets for a new kind, and the same price the corpus pays for every other
+contract member.
 
 ### 14. What this records against earlier ADRs, under ADR-0082 §1
 
