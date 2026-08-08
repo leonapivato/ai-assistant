@@ -251,6 +251,10 @@ observe Tier 1 content in the course of recording that it exists.
 > **Normative.** A metric key and a seam label are of one constrained string type
 > whose values match a lowercase identifier pattern of bounded length.
 
+> **Normative.** Every float-valued observation in a trace is **finite**. `NaN`
+> and the infinities are refused at construction, recursively over the metric
+> mapping.
+
 > **Normative.** A metric key appears in a trace only when the quantity it names
 > was **observed**. An absent key means *not observed* and never zero, and no
 > emitter writes a placeholder for a quantity the event did not reach.
@@ -267,6 +271,20 @@ available shortcuts both lie. Recording zero asserts an observation nobody made,
 and in the retrieval case asserts *precisely* #824's trigger condition. Omitting
 the trace entirely loses the fault. Absence, defined as absence, is the third
 option, and it costs a mapping that was already sparse.
+
+**Finiteness is refused at construction because the corpus has already paid for
+the alternative twice.** `int | float | bool` admits `NaN` and the infinities;
+`_deep_freeze` in `core/types.py` refuses them for `FrozenJson` with the reason
+written down — they "have no JSON representation, so they would silently change
+value on the way through the store or an export", and `json.dumps` renders them to
+a non-JSON token instead of raising, so the encoder does not catch them. The
+numeric fields in `core/config.py` carry `allow_inf_nan=False` for the same
+reason, noting that `gt=0` "rejects NaN but happily accepts" an infinity. A metric
+map is the third place this can enter, and the failure it produces here is the
+worst of the three: a single `NaN` score from a provider poisons every average and
+every threshold computed over the walk, silently, long after the trace was
+written. §5 already accepts that the stream can be *incomplete*; it must not also
+be able to be *wrong*.
 
 Keys and labels are additionally governed by §2's second clause — each is a
 literal constant in the emitting module — which is where the obligation is stated
