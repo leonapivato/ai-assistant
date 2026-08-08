@@ -1,6 +1,6 @@
 # 110. What closes a validity window without the user: a covered reading's absence, and never a clock
 
-- Status: Partially superseded by ADR-0115 (§10's ruling that the mechanism is buildable on the `core` surface that exists, and its clause that `MemoryWriter` is untouched and no new member is authorised)
+- Status: Partially superseded by ADR-0115 (§10's ruling that the mechanism is buildable on the `core` surface that exists, and its clause that `MemoryWriter` is untouched and no new member is authorised) and ADR-0117 (§3's condition 3 and the carrier its containment rule compares — the record's envelope validity window becomes the extent its attestation reports — with §3's matching consequence sentence; and §10's buildability ruling again, which acquires one further optional `core/types.py` field)
 - Date: 2026-08-06
 - **Partially superseded: 2026-08-07 by
   [ADR-0115](0115-the-writer-contract-carries-the-reading.md), in the scope the
@@ -36,6 +36,52 @@
   the hazard §1 names is a `Status` line pointing at nothing, and an atomic pair
   makes that unreachable". ADR-0115 lands in this same change, so the pair is
   atomic and the reference resolves.
+- **Partially superseded: 2026-08-08 by
+  [ADR-0117](0117-absence-is-judged-against-the-extent-a-source-reports.md), in the
+  scope the `Status` line names — a forward-looking source's entries cannot have
+  their position stated by the envelope validity window, so §3's condition 3
+  changes its carrier and §10's buildability ruling acquires one further optional
+  `core/types.py` field.** This is the **"Revisit if"** in this ADR's own
+  Consequences firing, in the terms it set: "a reader is found whose entries have a
+  position in the source's world that the envelope window cannot state (§3's
+  condition 3 would then need a different carrier)". The reader is `CalendarReader`
+  and the finding is #827's, made against a live hub rather than reasoned about.
+  The envelope window is a read-time filter (ADR-0045 §6), so a window stating a
+  *future* entry's position is not yet open — which removes the record from
+  `MemoryStore.search`, from `MemoryStore.list_beliefs` and therefore from §6's own
+  enumeration, and from `MemoryIngestor._detect_conflicts`. The consequences are
+  that a cancelled future meeting is never demoted and that every re-read installs
+  a duplicate instead of folding. ADR-0117 moves the carrier to an optional extent
+  on `Attestation`, leaving the envelope window operational as ADR-0045 §2 placed
+  it.
+
+  **§3's rule is untouched and only its operand moves.** Conditions 1, 2 and 4, the
+  "wholly within" containment rule, the `ASSERTED`-unreachability argument and the
+  ADR-0092 §4 error calculus all stand — ADR-0117 §5 uses that calculus as its own
+  ground. §10's `core/protocols.py` clause, its `MemoryDecisionKind` clause and its
+  routing sentence stand; the routing sentence is what ADR-0117 *is*, a lane
+  concluding it needed more surface and bringing its own ratified ADR, exactly as
+  ADR-0115 §8 recorded when the same sentence fired for `MemoryWriter`. **Nothing
+  else moves**, and §§1, 2, 5, 5a, 5b, 6, 7, 8, 9, 11 and 12 are relied on
+  unchanged; ADR-0117 §10 makes the judgement clause by clause under ADR-0070 §1.
+
+  **§4 is corrected and not superseded, and the distinction is ADR-0089 §3's.** Its
+  two normative clauses — presence is the ingest's own answer, and one
+  stored-nothing proposal suspends absence — are untouched and are used as ruled.
+  What is corrected is the *unmarked* argument beside them, that a spurious close
+  is bounded because an unchanged re-report always folds, since "identical text is
+  the one case neither can miss". That is true of a **live** record and of no
+  other: `MemoryIngestor._detect_conflicts` reaches the store through
+  `MemoryStore.search`, and every `search` applies `Validity.live_at`. Under
+  ADR-0117's ruling the situation cannot arise, because envelope windows stay open;
+  the sentence is recorded here so a later lane reaching for the envelope carrier
+  does not take it as reassurance. Unmarked text supplies no obligation (ADR-0089
+  §3), so no clause moves and this is a note rather than a supersession.
+
+  **Recorded now rather than at ADR-0117's ratification**, per ADR-0082 §7:
+  ADR-0070 §1's condition is "that the superseding ADR **exists**, not that it is
+  ratified", and ADR-0117 lands in this same change, so the pair is atomic and the
+  reference resolves. Refs #828, #827, #804, #639.
 - **Note (2026-08-06): ratified.** `Proposed` → `Accepted`, in the separate lane
   #633 requires, after **both** required reviews came back green on the content
   this ADR merged with: adversarial **APPROVE with no findings** and architecture
