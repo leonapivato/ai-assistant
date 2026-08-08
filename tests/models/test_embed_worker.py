@@ -66,19 +66,19 @@ def released() -> Iterator[list[_Blocking]]:
             blocker.release()
 
 
-def _workers(*, max_abandoned: int = 2) -> OwnedWorkers:
-    return OwnedWorkers(thread_name="test-embed-worker", max_abandoned=max_abandoned)
+def _workers(*, max_workers: int = 2) -> OwnedWorkers:
+    return OwnedWorkers(thread_name="test-embed-worker", max_workers=max_workers)
 
 
-async def _until_abandoned_settles(workers: OwnedWorkers) -> None:
-    """Wait for the count to reach zero, or give up and let the assertion report it.
+async def _until_the_slots_are_free(workers: OwnedWorkers) -> None:
+    """Wait for every slot to be released, or let the assertion report that it was not.
 
     The release happens on the worker thread, so waiting on the loop alone would be
     a race on a busy machine — and a bare ``settle`` that usually passed would be
     the worst of both.
     """
     for _ in range(int(_RENDEZVOUS_TIMEOUT_SECONDS * 100)):
-        if workers.abandoned == 0:
+        if workers.live == 0:
             return
         await asyncio.sleep(0.01)
 
@@ -181,12 +181,12 @@ async def test_a_cancelled_caller_abandons_its_worker_and_the_count_says_so(
     assert workers.abandoned == 1
 
 
-async def test_an_abandoned_worker_releases_the_count_when_it_finishes(
+async def test_an_abandoned_worker_releases_its_slot_when_it_finishes(
     released: list[_Blocking],
 ) -> None:
-    """A backend that recovers clears the bound, and clears it at once.
+    """A backend that recovers frees its slots, and frees them at once.
 
-    The count is keyed to the *worker* rather than to the coroutine, and the worker
+    The slot is keyed to the *worker* rather than to the coroutine, and the worker
     is finished the instant its callable returns — so the release happens before
     the (discarded) result is delivered, and a caller that abandoned one worker is
     not refused by a thread that has already stopped working.
@@ -197,52 +197,89 @@ async def test_an_abandoned_worker_releases_the_count_when_it_finishes(
     await _abandon_one(workers, blocker)
 
     blocker.release()
-    await _until_abandoned_settles(workers)
+    await _until_the_slots_are_free(workers)
 
     assert workers.abandoned == 0
     assert await workers.run(lambda: "vectors") == "vectors"
 
 
-async def test_a_call_at_the_bound_is_refused_and_starts_nothing(
+async def test_a_call_with_every_slot_occupied_is_refused_and_starts_nothing(
     released: list[_Blocking],
 ) -> None:
     """ADR-0118 §7's containment, at the moment it bites.
 
     "A wedged worker means the next call is refused at once instead of dispatching
-    a second one." Two abandoned workers is this seam's bound, so the third call is
-    the one refused — and it must be refused *before* a thread is started, or the
-    bound would be a report rather than a containment.
+    a second one." The refusal must land *before* a thread is started, or the bound
+    would be a report rather than a containment — and the message must say how many
+    of the occupied slots are held by abandoned workers, which is the difference
+    between a hub that is busy and a hub whose backend has stopped returning.
     """
-    workers = _workers(max_abandoned=2)
+    workers = _workers(max_workers=2)
     for _ in range(2):
         blocker = _Blocking()
         released.append(blocker)
         await _abandon_one(workers, blocker)
 
     started = threading.Event()
-    with pytest.raises(WorkersExhaustedError, match="abandoned embedding worker"):
+    with pytest.raises(WorkersExhaustedError, match="2 by abandoned workers"):
         await workers.run(started.set)
 
     assert workers.abandoned == 2
     assert not started.is_set(), "the refused call started a worker anyway"
 
 
+async def test_a_burst_of_concurrent_callers_cannot_exceed_the_bound(
+    released: list[_Blocking],
+) -> None:
+    """The reservation, tested the way a check-without-a-reservation would fail.
+
+    Every caller here is admitted while the counts are still low, and every one of
+    them is then abandoned together — which is exactly what a shared deadline does
+    to a burst of concurrent embeds against a wedged backend. A bound consulted at
+    admission but only *incremented* at abandonment would let all of them through
+    and strand one thread each; the slot has to be taken before the thread starts
+    or it bounds nothing.
+    """
+    workers = _workers(max_workers=3)
+    blockers = [_Blocking() for _ in range(12)]
+    released.extend(blockers)
+
+    calls = [asyncio.ensure_future(workers.run(blocker)) for blocker in blockers]
+    refused = 0
+    for call in calls:
+        try:
+            await asyncio.wait_for(asyncio.shield(call), timeout=0.05)
+        except WorkersExhaustedError:
+            refused += 1
+        except TimeoutError:
+            call.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await call
+
+    assert workers.live == 3, "more workers were started than there are slots"
+    assert workers.abandoned == 3
+    assert refused == 9
+    assert sum(blocker.entered.is_set() for blocker in blockers) == 3
+
+
 async def test_healthy_concurrent_calls_are_not_refused(released: list[_Blocking]) -> None:
-    """The bound is over *abandoned* workers, and this is why that matters.
+    """A cap of one would not do, and this is what it would cost.
 
     ``Embedder.embed`` is reached concurrently — ``SqliteMemoryStore.search``
     embeds an interactive query on the same loop that runs the scheduler's write
-    path — so a reservation held by any *running* worker would turn ordinary
-    concurrency into a fault. More calls run at once here than the abandoned bound
-    admits, and none of them is refused.
+    path — so a mechanism that admitted one call at a time would turn ordinary
+    concurrency into a fault, and an interactive search would fail because a
+    scheduled write happened to be embedding. Every one of these overlaps every
+    other, and none is refused.
     """
-    workers = _workers(max_abandoned=1)
+    workers = _workers(max_workers=4)
     blockers = [_Blocking(result=f"batch-{index}") for index in range(4)]
     released.extend(blockers)
 
     calls = [asyncio.ensure_future(workers.run(blocker)) for blocker in blockers]
     for blocker in blockers:
         await asyncio.to_thread(blocker.entered.wait, _RENDEZVOUS_TIMEOUT_SECONDS)
+    # Only now released, so all four provably ran at once rather than in turn.
     for blocker in blockers:
         blocker.release()
 
@@ -276,18 +313,19 @@ async def test_a_worker_that_finished_first_is_not_counted_as_abandoned() -> Non
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
-    await _until_abandoned_settles(workers)
+    await _until_the_slots_are_free(workers)
 
     assert workers.abandoned == 0
     assert await workers.run(lambda: "vectors") == "vectors"
 
 
-@pytest.mark.parametrize("bound", [0, -1])
-def test_a_bound_below_one_is_rejected(bound: int) -> None:
-    # Zero would refuse every call after the first abandonment, which is a seam
-    # switched off rather than a seam contained.
-    with pytest.raises(ValueError, match="max_abandoned must be >= 1"):
-        OwnedWorkers(thread_name="test-embed-worker", max_abandoned=bound)
+@pytest.mark.parametrize("bound", [1, 0, -1])
+def test_a_bound_below_two_is_rejected(bound: int) -> None:
+    # One serialises a seam two callers legitimately reach at once and refuses the
+    # overlap the shared conformance suite requires; zero refuses everything.
+    # Neither is a contained seam — they are a switched-off one.
+    with pytest.raises(ValueError, match="max_workers must be >= 2"):
+        OwnedWorkers(thread_name="test-embed-worker", max_workers=bound)
 
 
 def test_the_callable_is_not_run_on_the_calling_thread() -> None:

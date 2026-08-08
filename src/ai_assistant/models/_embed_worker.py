@@ -7,9 +7,9 @@ survived a backend that stopped returning:
 * the work runs on a **daemon thread the embedder owns**, never on the event
   loop's default executor;
 * neither hub shutdown nor interpreter shutdown joins it;
-* the number of **abandoned** workers alive at once is bounded, and a call
-  arriving with the bound already reached is refused at once rather than
-  dispatching another one.
+* the number of workers alive at once is bounded — so the number that can be
+  *abandoned* is bounded too — and a call arriving with every slot occupied is
+  refused at once rather than dispatching another one.
 
 **Why not the default executor, and why not a ``ThreadPoolExecutor``.** ADR-0118
 §7 reuses ADR-0093 §7's ruling rather than re-deriving it, and
@@ -26,9 +26,9 @@ Context verifies this). A daemon thread the embedder owns meets both clauses.
 
 **This module is deliberately not shared with** ``readers/_source.py``. Golden
 rule 1 forbids one subsystem importing another's concrete module, and the two
-shapes are not the same anyway: a reader's ``OneWorker`` bounds *all* outstanding
-work at one, because a read holds nothing and the scheduler invokes it serially.
-Neither is true here — see :class:`OwnedWorkers` for what that changes and why.
+shapes are not the same anyway: a reader's ``OneWorker`` bounds outstanding work
+at one, because a read holds nothing and the scheduler invokes it serially.
+Neither is true here — see :data:`_MAX_WORKERS` for what that changes and why.
 
 **Abandoning a stalled embedding worker is safe for the store and fatal for the
 seam, and ADR-0118 §7 says so in terms.** ADR-0093 §7 could call abandonment
@@ -53,42 +53,61 @@ from typing import TYPE_CHECKING, Final
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-#: How many **abandoned** workers may be alive before a new call is refused.
+#: How many workers may be **alive at once** before a new call is refused.
 #:
 #: The property ADR-0118 §7 asks for is that accumulation is bounded — "what must
 #: not happen is a scheduler quietly accumulating one stuck thread per interval"
-#: (ADR-0093 §7, which §7 reuses). This is the bound, and it is deliberately
-#: **not** ADR-0093 §7's literal "at most one outstanding worker": that figure is
-#: written for a calendar reader the scheduler invokes serially, and this seam is
-#: invoked concurrently — ``SqliteMemoryStore.search`` embeds an interactive query
-#: on the same loop that runs the scheduler's write path. A reservation held by
-#: *any* running worker would turn ordinary concurrency into a fault, which
-#: ADR-0118 §8 nowhere accepts (it changes ``search``'s failure mode to a deadline
-#: expiry and to nothing else), and would contradict ``FastEmbedTextModel``'s
-#: standing requirement that two in-flight calls reach one loaded model at once.
+#: (ADR-0093 §7, which §7 reuses).
 #:
-#: So the count is over workers whose caller has *stopped waiting* — the only ones
-#: that can accumulate, because a healthy worker finishes and releases itself. Two
-#: rather than one because the shared conformance suite
-#: (``tests/models/embedder_contract.py``) requires an ``embed`` issued while one
-#: abandoned worker is still running to complete, on the ground that no
-#: ``Embedder`` owns an event-loop resource to withhold. The wedged case is still
-#: contained: a backend that stops returning strands the second worker too, and
-#: every call after that is refused at once, every interval, with a named fault.
-_MAX_ABANDONED_WORKERS: Final = 2
+#: **The bound is over live workers rather than over abandoned ones, and that is
+#: the only form of it that is actually a bound.** Abandonment cannot be admitted
+#: or refused: a caller stops waiting whether this object likes it or not, so a cap
+#: consulted at *admission* and applied to the abandoned count bounds nothing — a
+#: burst of concurrent callers all pass the check while the count is still low,
+#: start their threads, and are then abandoned together. Capping what is *alive*
+#: is checked and reserved under one lock at the only moment there is a decision to
+#: make, and since an abandoned worker is by definition a live one, it bounds the
+#: abandoned count too.
+#:
+#: **Eight, and deliberately not ADR-0093 §7's literal "at most one outstanding
+#: worker".** That figure is written for a calendar reader the scheduler invokes
+#: serially; this seam is invoked concurrently, because ``SqliteMemoryStore.search``
+#: embeds an interactive query on the same loop that runs the scheduler's write
+#: path. A cap of one would turn ordinary concurrency into a fault, which ADR-0118
+#: §8 nowhere accepts — it changes ``search``'s failure mode to a deadline expiry
+#: and to nothing else — and would contradict ``FastEmbedTextModel``'s standing
+#: requirement that two in-flight calls reach one loaded model at once. Eight is
+#: comfortably above this seam's real concurrency (one serial scheduler loop plus a
+#: handful of interactive requests) and small enough that a backend which stops
+#: returning strands eight threads and then says the same nameable thing on every
+#: later call, for as long as the hub runs.
+_MAX_WORKERS: Final = 8
+
+#: The smallest bound that is still a bound rather than a serialisation. One would
+#: refuse the overlapping call the shared conformance suite requires to complete and
+#: would forbid the two concurrent in-flight calls ``FastEmbedTextModel`` documents;
+#: zero would refuse everything.
+_MIN_MAX_WORKERS: Final = 2
 
 
 class WorkersExhaustedError(Exception):
-    """Too many abandoned workers are still alive to start another (ADR-0118 §7).
+    """Every worker slot is occupied, so this call is refused (ADR-0118 §7).
 
     A thread blocked in a backend that has stopped returning cannot be killed, so
     the deadline abandons it — and ADR-0060 requires that a resource never be
-    "left held with nothing running that will release it". Bounding the abandoned
-    count is the strongest form of that available when the runtime will not give
-    the thread back: the count cannot grow, the seam keeps reporting the fault on
-    every call, and a backend that recovers releases the workers and clears it.
+    "left held with nothing running that will release it". Bounding the live count
+    is the strongest form of that available when the runtime will not give the
+    thread back: the count cannot grow past the cap, the seam keeps reporting the
+    fault on every call, and a backend that recovers releases its workers and
+    clears it.
 
-    Nothing is started when this is raised.
+    **Nothing is started when this is raised**, which is what makes it a
+    containment rather than a report: the refusal happens before a thread exists.
+
+    A refusal under genuine congestion — every slot held by a *healthy* worker — is
+    possible and is accepted. The alternative is a queue, and a queue behind a
+    wedged worker is the hang this whole mechanism exists to bound, one layer
+    further down.
     """
 
 
@@ -120,37 +139,50 @@ class OwnedWorkers:
     choice too. A pool with a fixed set of consumers re-creates the defect: a wedged
     consumer removes capacity, and when every consumer is wedged the queue backs up
     and the hang is back one layer down. A thread per call has no queue to back up,
-    and what bounds it is the abandoned count rather than a worker budget.
+    and what bounds it is the slot taken before the thread starts.
     """
 
-    def __init__(self, *, thread_name: str, max_abandoned: int = _MAX_ABANDONED_WORKERS) -> None:
+    def __init__(self, *, thread_name: str, max_workers: int = _MAX_WORKERS) -> None:
         """Create the dispatcher.
 
         Args:
             thread_name: What each daemon thread calls itself, for an operator
                 reading a stack dump. It names the embedder, never a document.
-            max_abandoned: How many abandoned workers may be alive before a new
-                call is refused. Injected so a test can drive the bound without
-                stranding real threads; production uses
-                :data:`_MAX_ABANDONED_WORKERS`.
+            max_workers: How many workers may be alive at once. Injected so a test
+                can drive the bound without stranding real threads; production uses
+                :data:`_MAX_WORKERS`.
 
         Raises:
-            ValueError: If ``max_abandoned`` is below one. A bound of zero would
-                refuse every call after the first abandonment, including the
-                overlapping call the shared conformance suite requires to
-                complete, and would make the seam unusable rather than contained.
+            ValueError: If ``max_workers`` is below two. One would refuse the
+                overlapping call the shared conformance suite requires to complete
+                and would serialise a seam two callers legitimately reach at once;
+                zero would refuse everything. Neither is a contained seam — they
+                are a switched-off one.
         """
-        if max_abandoned < 1:
-            msg = f"max_abandoned must be >= 1, got {max_abandoned}"
+        if max_workers < _MIN_MAX_WORKERS:
+            msg = f"max_workers must be >= {_MIN_MAX_WORKERS}, got {max_workers}"
             raise ValueError(msg)
         self._thread_name = thread_name
-        self._max_abandoned = max_abandoned
+        self._max_workers = max_workers
         self._lock = threading.Lock()
+        self._live = 0
         self._abandoned = 0
 
     @property
+    def live(self) -> int:
+        """How many workers are running, abandoned or not."""
+        with self._lock:
+            return self._live
+
+    @property
     def abandoned(self) -> int:
-        """How many abandoned workers are still alive."""
+        """How many of the live workers have had their caller stop waiting.
+
+        Diagnostic rather than load-bearing: admission is decided on :attr:`live`,
+        because that is the only count a decision can be taken against. This one
+        says *why* the slots are gone, which is the difference between a hub that is
+        busy and a hub whose embedding backend has stopped returning.
+        """
         with self._lock:
             return self._abandoned
 
@@ -170,8 +202,7 @@ class OwnedWorkers:
             Whatever ``work`` returned.
 
         Raises:
-            WorkersExhaustedError: If the abandoned bound is already reached.
-                Nothing is started.
+            WorkersExhaustedError: If every slot is occupied. Nothing is started.
             CancelledError: Re-raised unchanged if the awaiting task is cancelled
                 — including by the seam's own deadline. The worker is abandoned,
                 not joined: it holds nothing another caller's *safety* depends on
@@ -180,14 +211,21 @@ class OwnedWorkers:
             Exception: Whatever ``work`` raised, unwrapped, for the caller to
                 translate at its own seam.
         """
+        # **Checked and taken under one lock**, which is the whole of why the bound
+        # is a bound. A check that only *read* a count and left the increment to
+        # some later moment would admit a burst of concurrent callers together —
+        # each seeing room, each starting a thread, and each abandoning it when the
+        # shared deadline fires — so the cap would describe a state that no longer
+        # held by the time it mattered.
         with self._lock:
-            if self._abandoned >= self._max_abandoned:
+            if self._live >= self._max_workers:
                 msg = (
-                    f"{self._abandoned} abandoned embedding worker(s) are still running; "
-                    f"the embedding backend has stopped returning and this call is refused "
+                    f"all {self._max_workers} embedding worker slots are occupied "
+                    f"({self._abandoned} by abandoned workers); this call is refused "
                     f"rather than stranding another thread"
                 )
                 raise WorkersExhaustedError(msg)
+            self._live += 1
 
         loop = asyncio.get_running_loop()
         outcome: asyncio.Future[T] = loop.create_future()
@@ -199,11 +237,19 @@ class OwnedWorkers:
             # The whole of §7's exit clause, in one flag.
             daemon=True,
         )
-        # A host out of thread resources raises here. Nothing has been counted yet
-        # and no worker exists to count, so there is nothing to release — unlike
-        # `readers/_source.py`, whose reservation is taken before the start and
-        # therefore has to be undone on this path.
-        worker.start()
+        try:
+            worker.start()
+        except BaseException:
+            # **The slot is released here and nowhere else on this path, because
+            # there is no worker to release it.** `_work`'s `finally` is the only
+            # other release and it never runs if the thread never started — so a
+            # host briefly out of thread resources would permanently narrow this
+            # seam, every later call refused for workers that do not exist. ADR-0060
+            # forbids exactly that state, a resource "left held with nothing running
+            # that will release it".
+            with self._lock:
+                self._live -= 1
+            raise
 
         try:
             return await outcome
@@ -226,14 +272,14 @@ class OwnedWorkers:
         work: Callable[[], T],
         state: _RunState,
     ) -> None:
-        """The daemon thread's body: run ``work``, release, then deliver.
+        """The daemon thread's body: run ``work``, release the slot, then deliver.
 
         **Released before the result is delivered, and the order is deliberate**,
-        as it is in ``readers/_source.py``. The count is keyed to the *worker*
-        rather than to the coroutine, and the worker is finished the instant
-        ``work`` returns — so releasing first is both true and the only order under
-        which a backend that recovers clears the bound at the moment it recovers
-        rather than one delivery later.
+        as it is in ``readers/_source.py``. The slot is keyed to the *worker* rather
+        than to the coroutine, and the worker is finished the instant ``work``
+        returns — so releasing first is both true and the only order under which a
+        backend that recovers frees its slots at the moment it recovers rather than
+        one delivery later.
         """
         result: T | None = None
         failure: BaseException | None = None
@@ -244,6 +290,7 @@ class OwnedWorkers:
         finally:
             with self._lock:
                 state.finished = True
+                self._live -= 1
                 if state.abandoned:
                     self._abandoned -= 1
         # A closed loop raises `RuntimeError`: the process is going away and nobody

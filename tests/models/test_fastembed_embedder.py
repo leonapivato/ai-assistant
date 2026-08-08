@@ -34,6 +34,7 @@ from network_guard import network_denied
 from ai_assistant.core.errors import EmbeddingDeadlineExpiredError, ModelError
 from ai_assistant.core.protocols import Embedder
 from ai_assistant.models import fastembed_embedder
+from ai_assistant.models._embed_worker import _MAX_WORKERS
 from ai_assistant.models.bounded_embedder import BoundedEmbedder
 from ai_assistant.models.embedding_artifact import (
     EXECUTION_PROVIDERS,
@@ -509,9 +510,13 @@ async def test_a_wedged_load_is_refused_at_once_once_the_bound_is_reached() -> N
     A worker abandoned inside the lazy load holds ``_load_lock`` forever, so every
     later call blocks acquiring it and expires too — "the first expiry during a
     cold load is not one lost call; it is the seam". What containment buys is that
-    the accumulation stops: once the bound is reached the seam refuses *before*
+    the accumulation stops: once every slot is occupied the seam refuses *before*
     starting a thread, with a named fault, and it keeps saying the same thing every
     interval until an operator restarts the hub.
+
+    Driven against the **production** bound rather than an injected one, because
+    what this case is for is that the shipped embedder is bounded at all — a
+    smaller bound wired in here would pass over an implementation that had none.
 
     The refusal is a ``ModelError`` and deliberately not an
     ``EmbeddingDeadlineExpiredError``: nothing expired, because nothing was
@@ -519,13 +524,16 @@ async def test_a_wedged_load_is_refused_at_once_once_the_bound_is_reached() -> N
     deadline.
     """
     backend = _GatedLoadBackend()
-    bounded = BoundedEmbedder(_stub_embedder(backend), timeout_seconds=_TINY_DEADLINE_SECONDS)
+    embedder = _stub_embedder(backend)
+    bounded = BoundedEmbedder(embedder, timeout_seconds=_TINY_DEADLINE_SECONDS)
     try:
-        for _ in range(2):
+        for _ in range(_MAX_WORKERS):
             with pytest.raises(EmbeddingDeadlineExpiredError):
                 await bounded.embed(["alpha"])
 
-        with pytest.raises(ModelError, match="stopped returning") as refused:
+        assert embedder._workers.abandoned == _MAX_WORKERS
+
+        with pytest.raises(ModelError, match="no worker to spare") as refused:
             await bounded.embed(["alpha"])
 
         assert not isinstance(refused.value, EmbeddingDeadlineExpiredError)
