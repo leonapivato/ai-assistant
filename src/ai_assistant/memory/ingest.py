@@ -1405,7 +1405,14 @@ class MemoryIngestor:
                 excluded by a check; #729's "ASSERTED is never auto-demotable" holds
                 by construction, the stronger form ADR-0080 §2 preferred.
             coverage: §3's second and third conditions — a record is reachable only
-                if its own envelope window lies wholly within this interval.
+                if the **extent its attestation declares** lies wholly within this
+                interval (ADR-0117 §3). Never its envelope validity window: that
+                window's job is the record's operational life in the store
+                (ADR-0045 §2), and a producer bounding it to state a position
+                would take retrieval, this very enumeration and conflict detection
+                down with it for every entry lying ahead of the read (ADR-0117
+                §1). A record whose attestation states no extent is demotable by
+                no reading at all.
             results: What ingesting the reading's proposals returned. Read for two
                 facts and nothing else: which ids are live, and whether any proposal
                 stored nothing.
@@ -1504,7 +1511,12 @@ class MemoryIngestor:
                     continue  # §3 condition 1 — not a record this source reported.
                 if record.id in present:
                     continue  # §3 condition 4 — the ingest left it live at its id.
-                if coverage.contains(record.validity):
+                extent = attestation.extent
+                # §3 condition 3 as ADR-0117 §3 reads it: the *source's* statement
+                # about where the entry lies, never the record's operational
+                # window. No extent means the source stated no position, so no
+                # reading has exhausted the region this record occupies.
+                if extent is not None and coverage.contains(extent):
                     candidates.append(record)  # §3 conditions 2 and 3 — covered.
             if len(page) < _ABSENCE_PAGE:
                 return candidates
