@@ -1,7 +1,47 @@
 # 60. Cancellation must not orphan a resource a seam acquired
 
-- Status: Accepted
+- Status: Accepted, §5's `Embedder` assessment amended by ADR-0118
 - Date: 2026-07-24
+- **Amended: 2026-08-08 by
+  [ADR-0118](0118-the-embedding-seam-carries-its-own-deadline.md)**, in the scope
+  that ADR's §10 names and in no other: **§5's assessment that a cancelled
+  `embed()`'s abandoned worker "wastes CPU and finishes; it corrupts nothing", and
+  that "the gap is real but currently benign", is narrower than it reads.** Both
+  halves were made about the case where a cancellation is incidental and the
+  worker completes. ADR-0118 puts a deadline over `Embedder.embed`, which fires
+  precisely in the case where the worker does *not* complete, and two facts about
+  the tree — recorded in that ADR's Context and verified there — make the
+  unfinishing case cost something §5 did not weigh. `_run_to_completion` in
+  `src/ai_assistant/memory/sqlite_store.py`, and its verbatim twins in the
+  permissions and planning stores, run their workers with
+  `loop.run_in_executor(None, worker)` — the same default pool
+  `asyncio.to_thread` uses — so abandoned embedding workers consume the capacity
+  every store operation in the hub needs. And `FastEmbedEmbedder._loaded` holds
+  `self._load_lock`, a plain `threading.Lock`, across the model load, so a worker
+  abandoned inside a load that never returns blocks every later `embed` at that
+  lock. A reader holding only this ADR would read §5 as licensing an unguarded
+  deadline over `embed`; ADR-0118 §7 makes containment of the abandoned worker
+  obligatory, and that is the difference the record exists to state. **This ADR's
+  own "Revisit if a seam grows a genuinely unbounded synchronous operation" is
+  what fired**; ADR-0118 answers it with containment at the seam rather than the
+  numeric ceiling on §1's bounded-deferral clause that the Revisit anticipated,
+  and §1's clauses are therefore untouched.
+
+  **This is an amendment and not a supersession** (ADR-0070 §1): nothing this ADR
+  *decided* changes. §1's three clauses stand in full and ADR-0118 relies on each
+  — its self-issued deadline is "its own control flow" under §1's provenance
+  qualifier, and §1's third clause is quoted there. §2's refusal of filler clauses
+  stands and ADR-0118 §9 relies on it to write no text on `Embedder`. §3's scope
+  of four conformance suites stands. §5's rulings stand: that `Embedder` is "bound
+  and unenforced rather than silent", that the abandoned worker is **not** the
+  ADR-0054 bug — which stays exactly true, and is why ADR-0118's clauses are about
+  capacity rather than safety — and that the deferral was of enforcement. §5's
+  `Embedder` follow-up, issue #347, has since closed:
+  `tests/models/embedder_contract.py` is the suite it landed, and ADR-0118 adds no
+  case to it. This `Status` line has no leading token, so under ADR-0082 §2 the
+  qualifier belongs on it and this dated note carries the substance. Appended per
+  ADR-0070 §1: no text below is rewritten and §5 stands as written. Refs #820,
+  #347.
 - **This is a contract change.** It adds a standing clause to
   `core/protocols.py` that binds every Protocol, and it extends the shared
   conformance suites and canonical fakes of four of them. Golden rule 5 therefore
