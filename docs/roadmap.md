@@ -102,7 +102,12 @@ is worth more than any breadth this roadmap defers.
 Each leg decomposes into ADR-backed slices when it is dispatched, contract
 first (`CLAUDE.md`). An exit test is stated in product terms, honouring the
 previous revision's rule: **a gap closes when a user can exercise the
-capability, not when a test can.** Legs 1–4 were built inside the in-process
+capability, not when a test can.** After a leg's last slice merges and before
+the operator rules its exit, a QA run drives the leg's ruled behaviors
+end-to-end through a live hub (`.claude/skills/qa-leg`), recorded as one issue
+— per-lane review owns the slices; the run owns the composition seams between
+them, which is where a leg's first run found a ruled mechanism no producer
+could reach (#827). Legs 1–4 were built inside the in-process
 application; the hub (leg 5) was decided early enough that they were written for
 it, and built before anything ambient or polling. Everything after leg 5 is built
 behind the hub's API.
