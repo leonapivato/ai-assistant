@@ -157,6 +157,7 @@ from ai_assistant.core.types import (
     PreferenceMemory,
     Provenance,
     ReadCoverage,
+    ReportedExtent,
     SourceReading,
     UserConfirmation,
     Validity,
@@ -476,30 +477,52 @@ _ATTESTED_SOURCE = "calendar:work"
 
 
 def _wide_coverage() -> ReadCoverage:
-    """A coverage wide enough to contain the bounded windows below (ADR-0110 §2)."""
+    """A coverage wide enough to contain the extent below (ADR-0110 §2)."""
     return ReadCoverage(covers_until=_long_ago() + timedelta(days=365))
 
 
-def _attested_in_window(record_id: str) -> MemoryRecord:
-    """A live attested belief bounded inside :func:`_wide_coverage`.
+def _attested_in_coverage(record_id: str) -> MemoryRecord:
+    """A live attested belief whose **extent** lies inside :func:`_wide_coverage`.
+
+    The demotable fixture ADR-0117 §9 rules on, and every negative case below is
+    meaningful only because this record is *otherwise* demotable — each asserts
+    that nothing closed, which proves something only if a close was available.
+
+    **Its demotability comes from the extent and from nothing else** (§9). Under
+    ADR-0110 §3 the same fixture earned it from a bounded envelope validity window;
+    ADR-0117 §3 moved the carrier, so a fixture left alone would declare no extent,
+    be demotable by no reading at all, and every negative assertion here would keep
+    passing while proving nothing. A suite that goes green for the wrong reason is
+    worse than one that fails, which is why the ADR ruled it rather than leaving it
+    to be noticed.
+
+    So the envelope window is deliberately **fully open** — the state ADR-0117 §4
+    wants every reader's proposals in, and one no bounded coverage contains — and
+    the extent is what states where the entry lies. If the ``extent=`` below is
+    removed, :meth:`MemoryWriterContract.
+    test_a_covered_reading_closes_the_window_of_a_belief_it_did_not_report` fails,
+    which is §9's own test of this clause.
 
     Built directly rather than through :func:`_preference`, which derives its
-    attestation from the band and carries no window: both halves are exactly what
-    this record needs to say. ADR-0110 §3 makes a record demotable only where an
-    attestation names the reading's source (condition 1) **and** its envelope window
-    is bounded (condition 3) — a fully open window states no position in the source's
-    world and is contained by no bounded coverage, so it is never absence-demotable.
+    attestation from the band and states no extent.
     """
     return PreferenceMemory(
         id=record_id,
         content=_CONTENT,
         preference=_CONTENT,
-        validity=Validity(valid_until=_long_ago() + timedelta(days=30)),
+        validity=Validity(),
         provenance=Provenance(
             source=MemorySource.EXTERNAL,
             confidence=0.6,
             last_updated=_long_ago(),
-            attestation=Attestation(reported_by=_ATTESTED_SOURCE, reported_at=_long_ago()),
+            attestation=Attestation(
+                reported_by=_ATTESTED_SOURCE,
+                reported_at=_long_ago(),
+                extent=ReportedExtent(
+                    extends_from=_long_ago(),
+                    extends_until=_long_ago() + timedelta(days=30),
+                ),
+            ),
         ),
     )
 
@@ -2940,18 +2963,109 @@ class MemoryWriterContract:
         assert type(caught.value) is expected
         assert await store.export() == before
 
-    async def test_a_reading_declaring_no_coverage_ingests_and_closes_nothing(
+    async def test_a_covered_reading_closes_the_window_of_a_belief_it_did_not_report(
         self, make_writer: WriterFactory
     ) -> None:
-        """ADR-0115 §4's arm, and the behaviour every reading in the tree takes.
+        """The control that makes every negative case below mean something.
 
-        No reader declares a coverage, so this is the whole of what the member does
-        today: the proposals land and ADR-0093 §4's refusal stays the operative
-        behaviour. It is not an error and not a refusal.
+        **It is here because ADR-0117 §9 requires it, and it is the only shape that
+        can satisfy that clause.** §9 rules that "a suite in which the negative cases
+        would still pass with the fixture's extent removed does not satisfy this
+        clause" — and a case asserting that *nothing* closed cannot fail when a
+        record becomes less demotable. So the suite needs one case that fails, and
+        this is it: strip the ``extent=`` from :func:`_attested_in_coverage` and this
+        case goes red while every other one stays green.
+
+        It is a guard on the fixture and not a reallocation of ADR-0115 §7's work.
+        §7 leaves "each of ADR-0110 §3's other conditions independently prevents a
+        close" to each implementation's own tests, and that stands untouched: this
+        asserts only that the composite of all four conditions closes at all, which
+        is the premise the shared negatives are subtracting from.
+
+        The fixture's envelope validity window is **fully open**, which is the half
+        that would have been unreachable before ADR-0117: the belief is live,
+        retrievable and visible to the fold throughout, and it is the extent alone
+        that says where its entry lies (§3, §4).
         """
         store = FakeMemoryStore(now=_long_ago)
         writer = make_writer(store, FakeMemoryPolicy())
-        live = _attested_in_window("already-here")
+        gone = _attested_in_coverage("no-longer-reported")
+        await store.add(gone)
+        assert gone.validity.valid_until is None, "the envelope window carries nothing here"
+
+        await writer.ingest_reading(
+            _reading(
+                proposals=(_proposal(_preference("new", _UNRELATED)),), coverage=_wide_coverage()
+            )
+        )
+
+        retained = {record.id: record for record in await store.export()}
+        assert retained[gone.id].validity.valid_until is not None, (
+            "a covered reading that did not report an in-coverage belief retires it"
+        )
+        assert retained[gone.id].validity.live_at(_AFTER_CLOSE) is False
+        assert retained[gone.id].content == _CONTENT, "retired, not destroyed"
+
+    async def test_a_belief_whose_attestation_states_no_extent_is_never_demoted(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0117 §3's second sentence, at the seam both writers implement.
+
+        "A record whose attestation declares no extent satisfies condition 3 for no
+        reading and is never absence-demotable." That is the safe default and the
+        whole migration story: every belief stored before this field existed, and
+        every producer with no position to state, is demotable by nothing.
+
+        Asserted against the *same* reading that closes the fixture above, so the
+        only difference between the two outcomes is the extent — which is what makes
+        this a statement about the carrier rather than about the coverage.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        writer = make_writer(store, FakeMemoryPolicy())
+        positioned = _attested_in_coverage("says-where-it-is")
+        silent = positioned.model_copy(
+            update={
+                "id": "states-no-position",
+                "provenance": positioned.provenance.model_copy(
+                    update={
+                        "attestation": Attestation(
+                            reported_by=_ATTESTED_SOURCE, reported_at=_long_ago()
+                        )
+                    }
+                ),
+            }
+        )
+        await store.add(positioned)
+        await store.add(silent)
+
+        await writer.ingest_reading(
+            _reading(
+                proposals=(_proposal(_preference("new", _UNRELATED)),), coverage=_wide_coverage()
+            )
+        )
+
+        retained = {record.id: record for record in await store.export()}
+        assert retained[positioned.id].validity.live_at(_AFTER_CLOSE) is False, (
+            "the control still closes"
+        )
+        assert retained[silent.id].validity.valid_until is None, (
+            "no extent means no reading has exhausted the region this entry occupies"
+        )
+
+    async def test_a_reading_declaring_no_coverage_ingests_and_closes_nothing(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0115 §4's arm, which a real reader reaches in ordinary operation.
+
+        The proposals land and nothing is reconciled. It is not an error and not a
+        refusal — and it is not only the state of a reader that never opted in:
+        ADR-0117 §5 routes a read that could not account for every entry its source
+        held into this same arm, so a conforming producer takes it whenever its
+        source carries something the reader cannot interpret.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        writer = make_writer(store, FakeMemoryPolicy())
+        live = _attested_in_coverage("already-here")
         await store.add(live)
 
         results = await writer.ingest_reading(
@@ -2975,7 +3089,7 @@ class MemoryWriterContract:
         """
         store = FakeMemoryStore(now=_long_ago)
         writer = make_writer(store, _RulesExactly(MemoryDecisionKind.ASK_USER))
-        live = _attested_in_window("would-have-closed")
+        live = _attested_in_coverage("would-have-closed")
         await store.add(live)
 
         results = await writer.ingest_reading(
@@ -3002,7 +3116,7 @@ class MemoryWriterContract:
         """
         store = FakeMemoryStore(now=_long_ago)
         writer = make_writer(store, FakeMemoryPolicy())
-        live = _attested_in_window("outside-the-declared-coverage")
+        live = _attested_in_coverage("outside-the-declared-coverage")
         await store.add(live)
         reading = _reading(proposals=(_proposal(_preference("new")),), coverage=None)
 

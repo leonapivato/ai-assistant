@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     PreferenceMemory,
     Provenance,
     ReadCoverage,
+    ReportedExtent,
     SourceReading,
     Validity,
 )
@@ -634,3 +635,110 @@ async def test_the_fake_serialises_a_covered_reading_against_other_writes() -> N
     store.may_select.set()
     assert list(await covered) == []
     await competing
+
+
+# --- ADR-0110 §3 condition 3, over this implementation's own selection --------
+
+#: The reader identity the condition-3 cases below attest their records to.
+_READER = "calendar:work"
+
+#: What the covered reading in those cases declares it exhausted. Open at the
+#: start for the reason a forward-looking read is: it has nothing to say about
+#: where an entry *began*, and closing that end would exclude everything already
+#: in progress.
+_COVERAGE = ReadCoverage(covers_until=_fixed_now() + timedelta(days=30))
+
+
+def _reported(record_id: str, *, extent: ReportedExtent | None = None) -> MemoryRecord:
+    """A live attested belief with a **fully open** envelope window.
+
+    Which is the shape ADR-0117 §4 wants a conforming producer's proposals in:
+    the belief is on the read path, visible to conflict detection and enumerable,
+    and where its entry lies is stated by the extent or by nothing at all.
+    """
+    text = f"the entry {record_id} names"
+    return PreferenceMemory(
+        id=record_id,
+        content=text,
+        preference=text,
+        validity=Validity(),
+        provenance=Provenance(
+            source=MemorySource.EXTERNAL,
+            confidence=0.6,
+            last_updated=_fixed_now(),
+            attestation=Attestation(reported_by=_READER, reported_at=_fixed_now(), extent=extent),
+        ),
+    )
+
+
+async def _read_over(store: FakeMemoryStore) -> None:
+    """One covered reading that reports nothing, through the public member."""
+    writer = FakeMemoryWriter(store=store, policy=FakeMemoryPolicy(), now=_fixed_now)
+    await writer.ingest_reading(
+        SourceReading(source=_READER, read_at=_fixed_now(), coverage=_COVERAGE)
+    )
+
+
+@pytest.mark.parametrize(
+    ("extent", "closes", "why"),
+    [
+        (
+            ReportedExtent(extends_until=_fixed_now() + timedelta(days=1)),
+            True,
+            "the source said where it lies and the read exhausted that region",
+        ),
+        (
+            ReportedExtent(extends_until=_fixed_now() + timedelta(days=90)),
+            False,
+            "an entry reaching past the horizon was not wholly looked at",
+        ),
+        (
+            ReportedExtent(),
+            False,
+            "an unbounded extent end needs an unbounded coverage end",
+        ),
+        (None, False, "no extent states no position, so no reading exhausted it"),
+    ],
+    ids=["inside", "overhangs", "unbounded", "none"],
+)
+async def test_condition_three_is_decided_by_the_extent(
+    extent: ReportedExtent | None, closes: bool, why: str
+) -> None:
+    """ADR-0117 §9's second clause, for **this** implementation (ADR-0115 §7).
+
+    §7 leaves "each of ADR-0110 §3's other conditions independently prevents a
+    close" to each writer's own tests, and ADR-0117 §9 corrects the carrier without
+    moving the allocation. The fake duplicates the rule rather than importing it
+    (golden rule 1), so a divergence here would be silent: the fake would keep
+    demoting on one carrier while ``MemoryIngestor`` demoted on another, and the
+    shared suite would drive two different rules while reporting one.
+
+    The ``None`` row is §3's own second sentence, which §9 obliges each
+    implementation to state: a record whose attestation declares no extent is
+    demotable by no reading, whatever its envelope validity window.
+    """
+    store = FakeMemoryStore(now=_fixed_now)
+    await store.add(_reported("subject", extent=extent))
+
+    await _read_over(store)
+
+    assert (await store.get("subject") is None) is closes, why
+
+
+async def test_a_bounded_envelope_window_does_not_substitute_for_an_extent() -> None:
+    """The carrier moved rather than widened (ADR-0117 §3).
+
+    A record bounded exactly as ADR-0110 §3 originally asked — ``valid_until``
+    inside the coverage — is demotable by nothing, because the window is no longer
+    consulted. Pinned separately from the ``None`` row above because a fake that
+    accepted *either* carrier would pass that row and this is what catches it.
+    """
+    store = FakeMemoryStore(now=_fixed_now)
+    bounded = _reported("bounded-but-silent").model_copy(
+        update={"validity": Validity(valid_until=_fixed_now() + timedelta(days=1))}
+    )
+    await store.add(bounded)
+
+    await _read_over(store)
+
+    assert await store.get(bounded.id) is not None

@@ -6,15 +6,22 @@ conditions hold together, and each of them is here as its own case — because
 every one of them is load-bearing, and three of them exist to stop a close rather
 than to cause one.
 
-**Which records are reachable at all is decided jointly by §3 and §6**, and it is
-worth stating once here rather than rediscovering it per case. §6 rules the
-enumeration to be ``list_beliefs``, which honours both read-time axes before the
-cut — so only a belief **live at ``now``** is ever a candidate, and a future-dated
-one is out of reach whatever its coverage says. §3 then requires the record's
-window to lie wholly inside the coverage. A reader opting in therefore bounds the
-record's **end** and leaves ``covers_from`` open (or at or before the record's
-start): the demotable set is "live now, and ending within what the read
-exhausted". The helpers below are built in exactly that shape.
+**Condition 3 is asked of the extent, not of the record's own window** (ADR-0117
+§3), and the helpers below are built in that shape rather than in ADR-0110 §3's
+original one. A producer states where its entry lies in the *source's* world
+through ``Attestation.extent``; the envelope validity window keeps its one
+operational job and states nothing (ADR-0045 §2, ADR-0117 §4). So the fixtures
+here carry a **fully open** window — which is what a conforming reader now
+proposes — and earn their demotability from the extent alone. ADR-0117 §1 is why:
+``Validity.live_at`` gates retrieval, this very enumeration *and* conflict
+detection, so a window that stated a forward-looking entry's position would put
+the record out of reach of all three.
+
+**Which records are reachable at all is still decided jointly by §3 and §6.** §6
+rules the enumeration to be ``list_beliefs``, which honours both read-time axes
+before the cut — so only a belief **live at ``now``** is ever a candidate. §3 then
+requires the declared extent to lie wholly inside the coverage, and a record whose
+attestation declares none satisfies it for no reading at all.
 
 **The serialisation cases are not ordinary tests.** ADR-0110 §5a refuses this
 mechanism outright unless its selection and its closes are serialised against
@@ -48,6 +55,7 @@ from ai_assistant.core.types import (
     PreferenceMemory,
     Provenance,
     ReadCoverage,
+    ReportedExtent,
     SemanticMemory,
     SourceReading,
     Validity,
@@ -83,41 +91,61 @@ def _coverage() -> ReadCoverage:
     return ReadCoverage(covers_until=_HORIZON)
 
 
-def _covered_window(*, days_out: int = 1) -> Validity:
-    """A window that is live at ``now`` and ends inside :func:`_coverage`.
+def _covered_extent(*, days_out: int = 1) -> ReportedExtent:
+    """An entry the source places inside :func:`_coverage`.
 
-    The shape §3 condition 3 needs and §6's enumeration permits: a bounded end
-    states where in the source's world the entry lives, and an open start keeps it
-    live now so ``list_beliefs`` can see it at all.
+    The shape §3 condition 3 needs: a bounded end says where in the source's world
+    this entry stops, and an open start is contained because ``_coverage`` leaves
+    ``covers_from`` open too. Nothing here touches the record's liveness — under
+    ADR-0117 §3 the two are independent, which is the whole point of the change.
     """
-    return Validity(valid_until=_NOW + timedelta(days=days_out))
+    return ReportedExtent(extends_until=_NOW + timedelta(days=days_out))
 
 
-def _attested(
+def _attested(  # noqa: PLR0913 — an id and one keyword per axis a case may vary independently
     record_id: str,
     *,
     reported_by: str = _SOURCE,
+    extent: ReportedExtent | None = None,
+    states_extent: bool = True,
     validity: Validity | None = None,
     content: str | None = None,
 ) -> MemoryRecord:
     """An attested belief, in the shape a calendar reader's proposal lands in.
 
+    The window is **open** unless a case says otherwise, because that is what a
+    conforming producer now proposes (ADR-0117 §4): the belief is live,
+    retrievable and visible to the fold, and its position is stated by ``extent``.
+
     ``content`` is overridable so a re-read can be modelled honestly: a reader
     mints a **fresh id** for every record it proposes (ADR-0092 §6), so a
     re-reported entry is folded by *similarity* rather than by id, and identical
     text is the one case neither matcher can miss.
+
+    Args:
+        record_id: The id to store it at.
+        reported_by: Condition 1's axis.
+        extent: Condition 3's axis. ``None`` takes :func:`_covered_extent`.
+        states_extent: ``False`` builds a record whose attestation declares **no**
+            extent — the state every belief stored before ADR-0117 is in, and the
+            one that is demotable by no reading. A separate flag rather than
+            ``extent=None`` so that "take the default" and "state nothing" cannot
+            be spelled the same way.
+        validity: The envelope window, for the cases that are *about* it.
+        content: The belief's text.
     """
     text = content if content is not None else f"the entry {record_id} names"
+    stated = (extent if extent is not None else _covered_extent()) if states_extent else None
     return PreferenceMemory(
         id=record_id,
         content=text,
         preference=text,
-        validity=validity if validity is not None else _covered_window(),
+        validity=validity if validity is not None else Validity(),
         provenance=Provenance(
             source=MemorySource.EXTERNAL,
             confidence=0.6,
             last_updated=_WHEN,
-            attestation=Attestation(reported_by=reported_by, reported_at=_WHEN),
+            attestation=Attestation(reported_by=reported_by, reported_at=_WHEN, extent=stated),
         ),
     )
 
@@ -128,7 +156,6 @@ def _asserted(record_id: str) -> MemoryRecord:
         id=record_id,
         content=f"what the user said in {record_id}",
         preference=f"what the user said in {record_id}",
-        validity=_covered_window(),
         provenance=Provenance(
             source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_WHEN
         ),
@@ -242,7 +269,8 @@ async def test_a_record_another_source_reported_is_untouched() -> None:
     )
 
     assert closed == 0
-    assert (await _window_of(store, "theirs")).valid_until == _covered_window().valid_until
+    assert (await _window_of(store, "theirs")).valid_until is None
+    assert await _is_live(store, "theirs")
 
 
 async def test_an_assertion_inside_the_coverage_is_unreachable() -> None:
@@ -261,33 +289,90 @@ async def test_an_assertion_inside_the_coverage_is_unreachable() -> None:
     )
 
     assert closed == 0
-    assert (await _window_of(store, "the-users-own")).valid_until == _covered_window().valid_until
+    assert await _is_live(store, "the-users-own")
 
 
-async def test_a_record_with_an_open_window_is_never_absence_demotable() -> None:
+async def test_a_record_that_states_no_extent_is_never_absence_demotable() -> None:
     """§3 condition 3 — the clause that separates a bounded read from a deletion.
 
-    A record whose window is fully open states no position in the source's world,
-    so no bounded reading can have exhausted the region it occupies. Closing it
-    would be doing exactly what ADR-0093 §4's indistinguishability argument
-    forbids: retracting on the strength of having looked somewhere else.
+    A source that states no position for an entry has told a bounded reading
+    nothing about the region that entry occupies, so no such reading can have
+    exhausted it. Closing anyway would be doing exactly what ADR-0093 §4's
+    indistinguishability argument forbids: retracting on the strength of having
+    looked somewhere else.
+
+    It is also the state **every belief stored before ADR-0117** is in, which is
+    what makes the field's arrival need no migration: an existing record decodes
+    with no extent and acquires no new way to be retired (§9).
     """
     store = _store()
-    await store.add(_attested("unbounded", validity=Validity()))
+    await store.add(_attested("states-no-position", states_extent=False))
 
     closed = await _reconcile(
         _ingestor(store), source=_SOURCE, coverage=_coverage(), results=_stored("other")
     )
 
     assert closed == 0
-    assert (await _window_of(store, "unbounded")).valid_until is None
+    assert (await _window_of(store, "states-no-position")).valid_until is None
+
+
+async def test_a_bounded_window_does_not_substitute_for_a_missing_extent() -> None:
+    """§3's "whatever its envelope validity window", pinned as its own case.
+
+    The carrier moved rather than widened (ADR-0117 §3), so the interval ADR-0110
+    §3 originally named is now simply not consulted. A record bounded exactly as
+    that reading asked — ``valid_until`` inside the coverage — is still demotable
+    by nothing, because it states no position in the source's world.
+
+    Without this case the change of operand would be indistinguishable from a rule
+    that accepted *either* carrier, which is a rule two writers could implement
+    differently while both passing.
+    """
+    store = _store()
+    await store.add(
+        _attested(
+            "bounded-but-silent",
+            states_extent=False,
+            validity=Validity(valid_until=_NOW + timedelta(days=1)),
+        )
+    )
+
+    closed = await _reconcile(
+        _ingestor(store), source=_SOURCE, coverage=_coverage(), results=_stored("other")
+    )
+
+    assert closed == 0
+    assert await _is_live(store, "bounded-but-silent")
+
+
+async def test_a_belief_whose_entry_lies_ahead_of_the_read_is_demotable_and_live() -> None:
+    """#639's cancelled future meeting, which ADR-0110 §3's carrier made unreachable.
+
+    Both halves matter and only one of them is about the close. The belief is on
+    the read path **now**, a month before its entry happens — which is ADR-0096 §5's
+    whole reason for proposing calendar entries as beliefs, and what a
+    position-stating envelope window would have destroyed (ADR-0117 §1). And it is
+    demotable, because the extent says where the entry lies and the reading
+    exhausted that region.
+    """
+    store = _store()
+    ahead = _covered_extent(days_out=29)
+    await store.add(_attested("meeting-next-month", extent=ahead))
+    assert await _is_live(store, "meeting-next-month"), "retrievable long before it happens"
+
+    closed = await _reconcile(
+        _ingestor(store), source=_SOURCE, coverage=_coverage(), results=_stored("other")
+    )
+
+    assert closed == 1
+    assert not await _is_live(store, "meeting-next-month")
 
 
 async def test_a_record_reaching_past_the_horizon_is_not_contained() -> None:
     """§3 condition 3 — *wholly* within, so an overhang is not covered."""
     store = _store()
     await store.add(
-        _attested("overhangs", validity=Validity(valid_until=_HORIZON + timedelta(days=5)))
+        _attested("overhangs", extent=ReportedExtent(extends_until=_HORIZON + timedelta(days=5)))
     )
 
     closed = await _reconcile(
@@ -312,10 +397,10 @@ async def test_a_record_starting_before_a_bounded_coverage_is_not_contained() ->
     assert closed == 0
 
 
-async def test_an_unbounded_coverage_contains_an_unbounded_window() -> None:
+async def test_an_unbounded_coverage_contains_an_unbounded_extent() -> None:
     """§3's containment at the one place both ends are open on both sides."""
     store = _store()
-    await store.add(_attested("wide-open", validity=Validity()))
+    await store.add(_attested("wide-open", extent=ReportedExtent()))
 
     closed = await _reconcile(
         _ingestor(store), source=_SOURCE, coverage=ReadCoverage(), results=_stored("other")
@@ -334,7 +419,7 @@ async def test_a_record_the_ingest_left_live_is_present_and_survives() -> None:
     )
 
     assert closed == 0
-    assert (await _window_of(store, "re-reported")).valid_until == _covered_window().valid_until
+    assert await _is_live(store, "re-reported")
 
 
 async def test_a_coverage_that_exhausted_no_instant_is_unrepresentable() -> None:
@@ -366,9 +451,7 @@ async def test_one_proposal_that_stored_nothing_suspends_the_whole_reading() -> 
     )
 
     assert closed == 0
-    assert (await _window_of(store, "would-have-closed")).valid_until == (
-        _covered_window().valid_until
-    )
+    assert await _is_live(store, "would-have-closed")
 
 
 async def test_an_empty_covered_reading_closes_every_covered_belief() -> None:
@@ -419,7 +502,7 @@ async def test_every_close_shares_one_instant_and_lands_in_one_write_set() -> No
     """
     store = _RecordingStore(now=_fixed_now)
     for index in range(3):
-        await store.add(_attested(f"gone-{index}", validity=_covered_window(days_out=index + 1)))
+        await store.add(_attested(f"gone-{index}", extent=_covered_extent(days_out=index + 1)))
 
     closed = await _reconcile(
         _ingestor(store), source=_SOURCE, coverage=_coverage(), results=_stored("other")
@@ -444,7 +527,7 @@ async def test_an_unrepresentable_close_refuses_and_writes_nothing() -> None:
     building never lands.
     """
     store = _LeakyStore(now=_fixed_now)
-    await store.add(_attested("would-have-closed", validity=_covered_window(days_out=2)))
+    await store.add(_attested("would-have-closed", extent=_covered_extent(days_out=2)))
     store.leak = _attested(
         "not-yet-open",
         validity=Validity(valid_from=_NOW + timedelta(days=1), valid_until=_HORIZON),
@@ -456,9 +539,7 @@ async def test_an_unrepresentable_close_refuses_and_writes_nothing() -> None:
         )
 
     assert store.batches == [], "the refusal must precede the batch, not follow it"
-    assert (await _window_of(store, "would-have-closed")).valid_until == (
-        _covered_window(days_out=2).valid_until
-    )
+    assert await _is_live(store, "would-have-closed")
 
 
 async def test_the_walk_pages_past_the_first_page_of_beliefs() -> None:
@@ -466,7 +547,7 @@ async def test_the_walk_pages_past_the_first_page_of_beliefs() -> None:
     store = _store()
     total = 120  # comfortably more than `_ABSENCE_PAGE`
     for index in range(total):
-        await store.add(_attested(f"gone-{index}", validity=_covered_window(days_out=index + 1)))
+        await store.add(_attested(f"gone-{index}", extent=_covered_extent(days_out=index + 1)))
 
     closed = await _reconcile(
         _ingestor(store),
