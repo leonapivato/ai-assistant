@@ -9,17 +9,35 @@
   its lane owes that operation a deadline before it may be scheduled." #820 is that
   lane's charter. §1 below performs the check on consolidation's chunk, operation
   by operation; §§2–7 supply the deadline the check finds missing.
-- **Surface.** This ADR adds one `Settings` field (§4) and one error class (§5).
-  It touches **no** Protocol in `core/protocols.py` and **no** type in
-  `core/types.py`, and it writes no text on `Embedder`: the deadline is a property
-  of the *wired* embedder, not of the contract, and §9 argues that at length rather
-  than asserting it. Golden rule 5 is therefore **not** triggered and no triad is
-  owed — the error class is "neither a Protocol nor a `core/types.py` model", which
-  is ADR-0083 §6's own classification, quoted approvingly by ADR-0111's header for
-  the same shape. **Both review lenses are nevertheless run**, because the question
-  §9 answers is exactly whether the `Embedder` contract's meaning moves, and a
-  reader is entitled to see the architecture lens applied to that answer rather
-  than to the author's confidence in it.
+- **Surface, stated so it can be checked rather than believed.** This ADR adds one
+  `Settings` field (§4) and one error class in `core/errors.py` (§5). It touches
+  **no** Protocol in `core/protocols.py` and **no** type in `core/types.py`, and it
+  writes no text on `Embedder`: the deadline is a property of the *wired* embedder,
+  not of the contract, and §9 argues that at length rather than asserting it.
+  Golden rule 5 is therefore **not** triggered and no triad is owed — "a new
+  `AssistantError` subclass is neither a Protocol nor a `core/types.py` model, so
+  golden rule 5 is not triggered" is ADR-0083 §6's ruling verbatim, quoted
+  approvingly by ADR-0111's own header for a discriminator of exactly this shape,
+  and `scripts/ship.sh` fires its architecture requirement on a diff touching those
+  two files, which this diff does not.
+
+  **The one thing that reading has to answer, because it is true and does not
+  change the classification:** §5's second clause makes the new class legible
+  *across* a subsystem boundary — raised in `models/`, translated in `memory/`.
+  That crosses nothing golden rule 1 protects. Error classes live in
+  `core/errors.py`, and under golden rule 2 everything may depend on `core`; the
+  boundary in question is already crossed today, since
+  `SqliteMemoryStore._embed_one` catches what `models/` raises and translates it.
+  What §5 changes is that the translation preserves a distinction instead of
+  discarding one, which adds no dependency in either direction.
+
+  **The procedure a contract ADR owes is nonetheless taken in full**, because the
+  cost of taking it while classified out of it is nil and the cost of the reverse
+  is not: this ships as its own PR, docs only, `Proposed` while it is reviewed and
+  ratified ahead of any implementation (ADR-0015 §5), and **both review lenses are
+  run** — the question §9 answers is precisely whether the `Embedder` contract's
+  meaning moves, and a reader is entitled to see the architecture lens applied to
+  that answer rather than to the author's confidence in it.
 - **No implementation lands with it.** No `src/`, no `tests/`. This ADR arms no
   job, adds no field to `core/config.py` and writes no code; it decides what the
   implementing lane builds. Enabling any job the scheduler ships disabled stays
@@ -364,21 +382,43 @@ on. Without containment, the decision above converts "one job hangs the loop" in
 "the hub slowly stops being able to touch any database" — quieter, later, and
 harder to read, which is a worse fault than the one it replaced.
 
-**The mechanism is the lane's, and two shapes plainly satisfy it**: a thread pool
-the embedder owns rather than the loop's default one, or a bound on outstanding
-embedding calls that refuses rather than queues. What this ADR takes is the
-property, on the same division ADR-0111 §9 used for its discriminator. The
-shutdown clause is stated separately because the obvious mechanism is the one that
-breaks it: a `ThreadPoolExecutor` joined at exit turns a wedged worker into a hub
-that will not stop, which is what ADR-0083 §4's two-phase shutdown and
-`shutdown_drain_seconds` exist to avoid.
+**The mechanism is the lane's, on the same division ADR-0111 §9 used for its
+discriminator — but the two clauses together are a narrower gate than either
+alone, and this ADR does not pretend the obvious shape passes it.** A thread pool
+the embedder owns satisfies the containment clause and, in its obvious form,
+**fails the shutdown one**: `concurrent.futures.thread` registers an `atexit` hook
+that joins every worker, so one wedged thread turns a hub that will not embed into
+a hub that will not stop, which is what ADR-0083 §4's two-phase shutdown and
+`shutdown_drain_seconds` exist to avoid. Naming that as a satisfying shape would
+have handed the lane a mechanism that breaks a clause four lines above it.
 
-**Recovery from a fully wedged seam is a hub restart, and that is accepted.** Once
-a load has wedged under the lock, no in-process mechanism recovers the seam; what
-containment buys is that the hub stays up, keeps serving everything that is not
-embedding, and says the same nameable thing every interval until an operator acts.
-ADR-0083 §5 maps a hub's exits into "come back" and "stay down", so a restart is a
-legible remedy rather than a lost state.
+**What the two clauses admit, stated as constraints rather than as a choice:**
+
+- **A thread-based mechanism must be one nothing joins at exit** — daemon workers
+  the interpreter abandons, rather than a pool whose shutdown waits. It contains
+  the capacity and it never reclaims the wedged worker: the thread survives until
+  the process does.
+- **A mechanism that refuses rather than queues** — a bound on outstanding
+  embedding calls, above whatever runs them — satisfies both clauses on its own
+  terms, because a refusal allocates nothing to be joined. It is the cheapest
+  shape and it still leaves the wedged worker where it is.
+- **Only process isolation can end the wedged work**, because only a process can
+  be killed. It is the heaviest option, it is the one that actually reclaims the
+  ONNX runtime, and this ADR neither requires nor forecloses it.
+
+The first two contain the blast radius and leave the seam dead until a restart —
+which §7's closing paragraph already accepts as the remedy. The third is the only
+one that does better, and whether that is worth its cost is the lane's call with
+the profile in hand, not a judgement this ADR can make from here.
+
+**Under either in-process mechanism, recovery from a fully wedged seam is a hub
+restart, and that is accepted.** Once a load has wedged under `_load_lock`, no
+mechanism that shares the process recovers the seam — the lock is held by a thread
+nothing can interrupt. What containment buys is that the hub stays up, keeps
+serving everything that is not embedding, and says the same nameable thing every
+interval until an operator acts. ADR-0083 §5 maps a hub's exits into "come back"
+and "stay down", so a restart is a legible remedy rather than a lost state, and a
+seam that fails loudly every interval is what makes an operator reach for it.
 
 ### 8. What the bound reaches, and why that is wider than §4 compels
 
@@ -583,12 +623,16 @@ faults to translate this one distinguishably — `SqliteMemoryStore._embed_one` 
 flatten it back into `MemoryStoreError`. The discriminator's value is exactly the
 discipline of keeping it, and there is no mechanical check that it survives.
 
-**What gets harder: the containment clause is a real constraint on a small change.**
-The obvious implementation of a deadline is four lines, and §7 makes it more than
-that, because the obvious implementation trades a hang on the scheduler loop for a
-slow starvation of every store in the process. The shutdown clause narrows it
-further, ruling out the first containment mechanism most readers will reach for
-unless it is built not to join.
+**What gets harder: the containment clause is a real constraint on a small change,
+and the shutdown clause rules out the shape most readers reach for first.** The
+obvious implementation of a deadline is four lines, and §7 makes it more than that,
+because the obvious implementation trades a hang on the scheduler loop for a slow
+starvation of every store in the process. Then the shutdown clause disqualifies the
+obvious containment — an owned `ThreadPoolExecutor`, whose `atexit` join turns a
+wedged worker into a hub that will not stop — and leaves the lane three shapes, of
+which the two cheap ones contain the fault without ever reclaiming the worker. That
+is a genuine cost of this decision and not an oversight in it: bounding a seam
+whose work cannot be interrupted buys legibility, not recovery.
 
 **Search's failure mode changes**, from a query that never answers to one that
 fails with a named class after the deadline. That is strictly better and it is
