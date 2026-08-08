@@ -269,9 +269,36 @@ failure that recurs should stay as loud on the tenth interval as on the first.
 > reason `core/config.py` already states: infinity "would silently disable the
 > deadline".
 
-> **Normative.** The deadline covers the whole of one `embed` call, including a
-> lazy model load performed inside it. A bound that excludes the operation that
-> touches the filesystem is a bound with a hole exactly where the seam wedges.
+> **Normative.** The deadline covers the whole of one `embed` call as its caller
+> observes it, including a lazy model load performed inside it. A bound that
+> excludes the operation that touches the filesystem is a bound with a hole exactly
+> where the seam wedges.
+
+> **Normative.** An `Embedder` the composition root wires either performs its work
+> where the deadline can fire — off the event loop, at a suspension point the
+> caller reaches — or is bounded by construction under §1. An implementation that
+> does neither is not one this hub may wire, whatever the field is set to.
+
+**Stated in the weaker, true form, because the stronger one is false and the
+corpus says so.** A deadline expressed as `asyncio.timeout` can only fire where the
+awaiting task suspends. It bounds the caller's *wait*; it does not interrupt
+synchronous work, and against an inner `embed` that never awaits it is inert.
+ADR-0060 §1 states the same limit for the rule it carries — "The rule is
+cooperative and is stated in the weaker, true form: no seam can stop work that
+declines to be cancelled" — and ADR-0029 §4's "the seam stops waiting, not … the
+tool stops working" is the same sentence one seam over.
+
+**That is why the second clause above is a clause.** The two shipped
+implementations sit on opposite sides of it, and both are admissible for stated
+reasons rather than by default. `FastEmbedEmbedder` runs an ONNX runtime that can
+stop returning, so it takes the first limb and §7 says where. `HashingEmbedder`
+takes the second: `embed` reaches no await at all — `tests/models/embedder_contract.py`
+skips its cancellation case on exactly that ground — and it needs none, because
+`_embed_one` is local pure-Python work linear in its input, waiting on nothing
+that can wedge, which is §1's construction bound met. The deadline is inert over
+it and nothing is lost, in the same way and for the same reason that nothing is
+lost by `walk_records` carrying no knob. It is also not the default embedder
+(ADR-0006 §2) and never becomes one.
 
 **Thirty seconds, and the figure is argued rather than picked.** It must clear a
 cold ONNX session initialisation on a slow disk plus one inference with headroom,
@@ -385,8 +412,9 @@ without pretending the ONNX thread died.
 > the work, not on the deadline decorator §2 wires above it. A decorator observes
 > an inner `Embedder` through the Protocol and has no reach into how that
 > implementation executes; it can stop waiting and it cannot choose where the work
-> was submitted. An implementation that dispatches nothing — `HashingEmbedder`
-> computes on the caller's thread — owes neither.
+> was submitted. An implementation that dispatches nothing owes neither, because it
+> abandons nothing — which is `HashingEmbedder`'s position, and §4's construction
+> limb rather than an exemption.
 
 **The clauses are consequences this ADR creates and therefore owes.** The Context
 above establishes the two verified facts: the default executor is shared with
@@ -454,8 +482,10 @@ seam that fails loudly every interval is what makes an operator reach for it.
 ### 8. What the bound reaches, and why that is wider than §4 compels
 
 > **Normative.** The bound applies to every call through the `Embedder` seam,
-> whatever the caller. It is not conditioned on the caller being a scheduled job,
-> a chunked job, or a job at all.
+> whatever the caller. It is not conditioned on the caller being a scheduled job, a
+> chunked job, or a job at all — and what it bounds is the caller's wait, under
+> §4's second clause, which is what makes the guarantee true of every wired
+> implementation rather than only of the one that dispatches.
 
 ADR-0111 §4's second clause is scoped to chunked jobs, and this ADR does not widen
 it. §4 is the *occasion* for the deadline, not the *extent* of the exposure, and
