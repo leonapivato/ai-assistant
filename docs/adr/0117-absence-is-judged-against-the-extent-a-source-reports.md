@@ -1,6 +1,6 @@
 # 117. Absence is judged against the extent a source reports, not against the window the store keeps
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-08
 - **Decides `core` surface and implements none of it.** One **optional field** on
   `Attestation` in `core/types.py`, the small frozen value object it takes, and
