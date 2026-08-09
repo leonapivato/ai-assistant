@@ -140,12 +140,27 @@ console = Console()
 _EXIT_OK = 0
 _EXIT_ERROR = 1
 
-#: How ``--memory-kind`` defaults from ``--kind`` when the user does not give one.
-#: Follows ``FeedbackEvent``'s own guidance — "a fact becomes a ``SemanticMemory``,
-#: not a preference" — so a correction lands as a semantic fact and a stated
-#: preference as a preference. Exhaustive over ``FeedbackKind``.
+#: How ``--memory-kind`` defaults from ``--kind`` when the user does not give one —
+#: **only where the value follows from what the user said** (ADR-0122 §2). Not
+#: exhaustive over ``FeedbackKind``, deliberately: ``CORRECTION`` has no entry, and
+#: a lookup that misses leaves the field ``None`` for ``orchestration`` to resolve.
+#:
+#: The two intents are not symmetric. A stated **preference** establishes a
+#: ``PreferenceMemory`` by its own intent — the user is not pointing at a stored
+#: belief, they are stating one — so no lookup is available and none is needed. A
+#: **correction** points at a belief that already exists, and its record type is a
+#: property of *that* belief; naming it here is not a default but a prediction, made
+#: at the one layer with no access to the target. This table used to make it anyway,
+#: citing ``FeedbackEvent``'s "a fact becomes a ``SemanticMemory``, not a
+#: preference" — an *illustration* that a correction's type varies with what it
+#: corrects, read as a rule that it is always semantic. That over-reading is #864:
+#: every correction filed as a fact, and the kind-scoped conflict probe then looking
+#: for its target only in the drawer this table named.
+#:
+#: Leaving it absent is the adapter reporting what it knows, which is what keeps
+#: golden rule 3 intact — the resolution is business logic, and none of it happens
+#: in ``interfaces/``.
 _DEFAULT_MEMORY_KIND = {
-    FeedbackKind.CORRECTION: MemoryKind.SEMANTIC,
     FeedbackKind.PREFERENCE: MemoryKind.PREFERENCE,
 }
 
@@ -735,9 +750,15 @@ def learn(
     """Teach the assistant from a correction or a stated preference.
 
     Turns what you say into a ``FeedbackEvent`` and hands it to the engine, which
-    folds it into long-term memory. ``--memory-kind`` defaults from ``--kind`` and
-    can be overridden. The result is a short summary of what memory did with it —
-    stored, reinforced, or superseded.
+    folds it into long-term memory. The result is a short summary of what memory did
+    with it — stored, reinforced, or superseded.
+
+    **``--memory-kind`` says which drawer, and says "do not look"** (ADR-0122 §6).
+    Give it and it is honoured unchanged, and the engine issues no lookup. Leave it
+    off and ``--kind preference`` still means a preference — a stated preference
+    establishes one by its own intent — while ``--kind correction`` leaves the
+    drawer for the engine to resolve from the belief you are correcting, which is
+    the only place that fact lives.
 
     **``--about`` and ``--about-person`` are two different things** (ADR-0100 §7).
     ``--about`` scopes a preference to a topic — ``--about 'email tone'``.
@@ -747,12 +768,16 @@ def learn(
     *yours*. The person flag is spelled long because ``--about`` and ``-a`` were
     already the scope axis's, on this very command.
     """
-    resolved_memory_kind = memory_kind if memory_kind is not None else _DEFAULT_MEMORY_KIND[kind]
+    # `.get`, not `[...]`: `_DEFAULT_MEMORY_KIND` is deliberately not exhaustive, and
+    # a miss is the absent value ADR-0122 §2 requires rather than a lookup error.
+    declared_memory_kind = (
+        memory_kind if memory_kind is not None else _DEFAULT_MEMORY_KIND.get(kind)
+    )
     code = asyncio.run(
         _learn_feedback(
             content,
             kind=kind,
-            memory_kind=resolved_memory_kind,
+            memory_kind=declared_memory_kind,
             subject=about,
             about_person=about_person,
         )
@@ -1175,7 +1200,7 @@ async def _learn_feedback(
     content: str,
     *,
     kind: FeedbackKind,
-    memory_kind: MemoryKind,
+    memory_kind: MemoryKind | None,
     subject: str | None,
     about_person: str | None,
 ) -> int:
@@ -1189,6 +1214,10 @@ async def _learn_feedback(
     an :class:`AssistantError` is rendered and mapped to a non-zero exit code rather
     than escaping (§7). The composition root builds the façade; this adapter closes
     it. Returns the process exit code.
+
+    ``memory_kind`` is relayed exactly as the caller resolved it, ``None`` included:
+    an absent value is a *state of the request*, not a value to fill in here
+    (ADR-0122 §2), and the field's own default would fill it in the same way.
     """
     event = FeedbackEvent(
         kind=kind,

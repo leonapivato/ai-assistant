@@ -3056,9 +3056,28 @@ class FeedbackKind(StrEnum):
 class FeedbackEvent(BaseModel):
     """A unit of explicit, memory-affecting feedback (see ADR-0009).
 
-    The learning subsystem turns this into a :class:`MemoryUpdateProposal`. It
-    carries ``memory_kind`` so a correction lands in the right typed record (a
-    fact becomes a :class:`SemanticMemory`, not a preference).
+    The learning subsystem turns this into a :class:`MemoryUpdateProposal`.
+    ``memory_kind`` says which typed record it establishes, and it is **optional**
+    (ADR-0122 §1): ``None`` means the feedback does not name a record type and one
+    is to be resolved from the belief the feedback touches — by `orchestration`,
+    before the :class:`~ai_assistant.core.protocols.FeedbackProcessor` is called.
+
+    **Absent never means "unknowable", and it is never stored.** A producer that
+    cannot know the drawer — a correction's target is a property of the belief it
+    corrects, which the producer has not read — reports what it knows by leaving
+    the field ``None``. A value present is the caller's **pin**: it is honoured
+    unchanged, and it suppresses the resolution's store read entirely (ADR-0122
+    §6). That distinction is the whole point of the field's domain: an invented
+    default and a user's deliberate choice were indistinguishable once the field
+    was filled, so a fixed table in ``interfaces/cli.py`` filed every correction as
+    a :class:`SemanticMemory` and the one command named for corrections could not
+    correct a preference (#864).
+
+    **A ``FeedbackEvent`` reaching a ``FeedbackProcessor`` carries a resolved
+    kind** (ADR-0122 §7); establishing that is the calling stage's obligation, and
+    :class:`~ai_assistant.learning.processor.RuleBasedFeedbackProcessor` raises on
+    an unresolved event rather than answering it with the silence it owes a
+    deferred target.
 
     **``subject`` and ``about_person`` are two different axes, side by side on
     purpose** (ADR-0100 §7). ``subject`` is the older field and keeps its meaning
@@ -3083,7 +3102,14 @@ class FeedbackEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     kind: FeedbackKind
-    memory_kind: MemoryKind = Field(description="The typed memory this feedback establishes.")
+    memory_kind: MemoryKind | None = Field(
+        default=None,
+        description=(
+            "The typed memory this feedback establishes, or ``None`` to have it "
+            "resolved from the belief the feedback touches (ADR-0122 §1). A value "
+            "present is the caller's pin and is honoured unchanged."
+        ),
+    )
     content: EncodableText = Field(
         description="Canonical text of the feedback, e.g. 'office is in Boston'."
     )
