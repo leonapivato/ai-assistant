@@ -6,8 +6,11 @@
   change.** §12 applies ADR-0070 §1's test and finds ADR-0017 §1's two-boundary
   enumeration — "user data may leave the device only from `models/` or from a
   designated integration seam inside `tools/`; every other egress is a bug" —
-  contradicted rather than joined. ADR-0017's `Status` line and its appended dated
-  note are the whole of the record (ADR-0070 §1, ADR-0082 §1 and §2); no ratified
+  contradicted rather than joined. The new boundary is the remote transport in
+  **both** directions: a hop moves data off two devices, and a rule naming only the
+  hub's half would leave every client send prohibited (§1). ADR-0017's `Status`
+  line and its appended dated note are the whole of the record (ADR-0070 §1,
+  ADR-0082 §1 and §2); no ratified
   text of ADR-0017 is rewritten, and its §3 conditions on designating the `tools/`
   seam are untouched.
 - **No implementation lands with it.** No `src/`, no `tests/`. The remote listener,
@@ -121,16 +124,40 @@ duty cycle rather than capability.
 
 ## Decision
 
-We will authorise a **third egress boundary** — the hub's remote listener — under
-a transport posture that keeps the API off the public internet, and admit a device
-to it only when **two independent facts** agree: an identity the transport
-attests, and a credential the owner minted at the hub.
+We will authorise a **third egress boundary** — the hub's remote transport, in both
+directions — under a transport posture that keeps the API off the public internet,
+and admit a device to it only when **two independent facts** agree: an identity the
+transport attests, and a credential the owner minted at the hub.
 
-### 1. The rule: a third egress boundary, and it is the hub's remote listener
+### 1. The rule: a third egress boundary, and it is the remote transport in both directions
 
 > **Normative.** User data may leave the device only from `models/`, from a
-> designated integration seam inside `tools/`, or from the hub's remote listener
-> to a device the owner has enrolled under §6; every other egress is a bug.
+> designated integration seam inside `tools/`, or across the hub's **remote
+> transport** between the hub and a device the owner has enrolled under §6 — its
+> two halves being the hub's remote listener and the client that connects to it;
+> every other egress is a bug.
+
+**Both halves are named because the hop moves data off *two* devices, and a rule
+naming one of them authorises half a protocol.** The response leaves the hub's
+machine, and the utterance leaves the device the owner is sitting at — the CLI on
+a second laptop sends Tier 0/1 content off that laptop, which is squarely what
+ADR-0017 §1's device-scoped rule governs. A boundary defined as "the hub's
+listener" would leave every client send prohibited while the reply it answers was
+authorised, and the first lane to notice would have discovered it with the code
+written.
+
+> **Normative.** The client half transmits only to a hub whose overlay identity it
+> has confirmed under §4, over a transport satisfying §2, and only the request it
+> was asked to make. It obtains its destination from configuration and never from
+> a discovery mechanism, a redirect, or anything a peer tells it.
+
+**The constraint on the client half is the mirror of the constraint on the
+listener, and it is what keeps the boundary symmetrical rather than merely
+two-sided.** The hub refuses a device it cannot identify; the client refuses a hub
+it cannot identify. Neither end transmits to something it took on trust, which is
+what ADR-0017 §3's transport-pinning condition is about in the one form that
+survives the move to this boundary — "transport pinned to the connected service,
+with redirects unable to carry the request or its credential to another host".
 
 > **Normative.** `models/` and the `tools/` seam are unchanged by this ADR.
 > `models/` continues under ADR-0004 §2's permission as ADR-0017 §2 records it,
@@ -163,15 +190,16 @@ accountable places", and that "'One' was never argued for; it was a count of the
 subsystems that existed." Two was a count as well. This boundary is accountable on
 every axis §4 names:
 
-- **Named.** The listener is one module in the packages ADR-0084 §6 already
-  placed — the server half in `service`, the client half in `wire` — and no new
-  package is created.
+- **Named.** Both halves are modules in the packages ADR-0084 §6 already placed —
+  the server half in `service`, the client half in `wire` — and no new package is
+  created.
 - **Few.** The recipients are exactly the devices in the enrolment record, a set
   no model, plan, tool or configuration value can add to (§6).
-- **Answerable for what it sends.** It sends the response to the request the
-  device just made, over the ratified envelope, bounded by ADR-0084 §3's frame
-  ceiling and ADR-0085 §8's contract limit. There is no path by which it
-  transmits something nobody asked for.
+- **Answerable for what it sends.** The hub sends the response to the request the
+  device just made and the client sends the request the owner asked it to make,
+  both over the ratified envelope, bounded by ADR-0084 §3's frame ceiling and
+  ADR-0085 §8's contract limit. There is no path by which either transmits
+  something nobody asked for.
 
 **And the recipient is the principal, which is the substantive difference.** A
 belief crossing this boundary is disclosed to the owner, on a machine the owner
@@ -244,13 +272,21 @@ whose subject survives the move to this boundary.
 absorbed.** An overlay whose control plane is operated by a third party tells that
 operator things about the owner, and those things are not the payload.
 
-> **Normative.** Accepting a third-party-operated overlay control plane discloses
-> to its operator: the set of devices on the overlay and the account identity that
-> owns them; each device's name, platform and public key; the network endpoints
-> each device is reachable at; and the times at which each device is online and
-> attempts to reach another. That disclosure is accepted. It discloses no request,
-> no response, and no byte of the store, and an overlay requiring the operator to
-> see any part of a request or a response is refused by §2.
+> **Normative.** Choosing an overlay whose control plane a third party operates
+> causes that operator to hold: the set of devices on the overlay and the account
+> identity that owns them; each device's name, platform and public key; the network
+> endpoints each device is reachable at; and the times at which each device is
+> online and attempts to reach another. That consequence is accepted. It gives the
+> operator no request, no response and no byte of the store, and an overlay
+> requiring the operator to see any part of a request or a response is refused by
+> §2.
+
+> **Normative.** No component of this system transmits to an overlay control plane,
+> and the overlay agent is not imported by, embedded in, linked into or launched by
+> `ai_assistant`. The hub binds an address the agent provides and the client dials
+> one; neither speaks to the agent's operator. An implementation that would have
+> this system talk to a control plane is refused by this clause and owes its own
+> egress decision.
 
 **Its honest classification is Tier 1, and it is stated rather than argued down.**
 Device names, endpoint addresses and online times are facts about where the owner
@@ -267,19 +303,58 @@ rather than about the assistant. The opposite reading is available — it is egr
 and it is metadata — which is why it is examined here rather than passed over.
 Nothing about ADR-0004 §2 changes either way (§12).
 
-**ADR-0004 §2's residency clause is examined and found unengaged, on ADR-0017
-§1's own reasoning.** "All persistent data lives on the user's machine… no cloud
-storage by default" is about data at rest. The store does not move: the hub keeps
-exclusive ownership of the databases in its data directory (ADR-0083), a spoke
-holds nothing authoritative (ADR-0094 §9), and nothing here puts a record in a
-remote service. ADR-0017 §1 declined to read that clause and left it to #95; this
-ADR declines the same, and for the same reason — narrowing a ratified clause it
-does not supersede.
+**ADR-0004 §2's residency clause is the hard one, and an earlier draft of this
+section both declared it unengaged and declined to read it — which are opposite
+moves, and architecture review was right to refuse the pair.** The clause is "all
+persistent data lives on the user's machine, under a single platform-appropriate
+data directory… No cloud storage by default", and the case against it is real: the
+control plane holds persistent records about the owner's devices, on someone
+else's machine.
+
+**Applied properly, ADR-0070 §1's test comes out at no supersession, and the
+reason is the clause's subject rather than the data's sensitivity.** Every sentence
+of the residency clause stays true after this decision: this system's persistent
+data is still the databases in `data_dir`, still on the owner's machine, still with
+no cloud storage — the store does not move, a spoke holds nothing authoritative
+(ADR-0094 §9), and the marked clause above forbids any component of this system
+from putting a record anywhere near a control plane. A reader holding only
+ADR-0004 §2 acts identically before and after: they keep the data local, which is
+exactly what happens. The clause is about **where this system's data lives**, and
+the control plane's records are not this system's data — they are a network's
+operational record, produced by a program the owner installs and administers, and
+they exist for as long as that program runs whether or not the assistant does.
+
+**What that argument does not cover is the inducement, and it is stated as an
+accepted cost rather than argued away.** §2 makes the overlay a requirement, so an
+owner who did not already run one now runs one *because of this decision*. The
+assistant does not perform the disclosure and it is the reason the disclosure
+happens. That is a fact about ADR-0004's intent rather than its text, it is the
+same shape as the question ADR-0017 §1 raised about a write-capable integration
+and deliberately left open, and it goes to the same place: **#95**, which now holds
+two instances rather than one. This ADR does not answer it, because answering it
+would be narrowing or widening a ratified clause in an ADR about a hop — the move
+ADR-0017 §5 exists to refuse.
+
+> **Normative.** The finding above is that no clause of ADR-0004 §2 becomes false
+> or over-wide, and it rests on this system transmitting nothing to a control
+> plane. If any component of this system ever does, the residency question becomes
+> live and owes its own ratified decision; no lane may treat this section as
+> having settled it.
 
 > **Normative.** The self-hosted control plane is the named exit from §3's
 > disclosure and it is not a new decision. Standing one up removes the third party
 > without changing any clause of this ADR; it is an operating act, and this ADR
 > neither schedules it nor makes it a precondition on anything.
+
+**Requiring it by default was considered and is not available, which is why the
+exit is named rather than taken.** A self-hosted control plane has to run
+somewhere always reachable, and #882's direction is categorical that nothing in
+legs 9–12 may depend on hardware that does not exist. Running it on the hub laptop
+puts it behind the same lid: existing peers survive a control-plane outage, but
+enrolling a device or rotating a key does not, so the owner's second laptop could
+be admitted only while the first is awake. That is a worse failure than the
+disclosure it avoids, and it is a deployment fact rather than a preference —
+which is what makes it revisitable the day an always-on host exists.
 
 **Revisit when** the chosen overlay's operator changes what its control plane
 collects, such that §3's enumeration stops being accurate. The enumeration is the
@@ -430,22 +505,51 @@ backup/restore decision running as its own lane (#883), and this ADR neither
 anticipates nor constrains it.
 
 > **Normative.** On the device, the credential is Tier 0 under ADR-0004 §1. It is
-> never written to any store, never committed, and never reaches a log, an audit
-> record or an error message. `core/logging.py` already redacts a key containing
-> `credential`, and no implementation may give it a name that redaction misses.
+> **persisted**, so that the owner presents it once at enrolment rather than at
+> every connect, and it is held **only** in the Tier 0 place ADR-0004 §3 names —
+> the OS keyring. It is never written to any database this system opens, never
+> committed, and never reaches a log, an audit record or an error message.
+> `core/logging.py` already redacts a key containing `credential`, and no
+> implementation may give it a name that redaction misses.
 
-> **Normative.** How the credential is held at rest on the device follows ADR-0004
-> §3, which this ADR does not narrow. If the implementing lane's answer requires
-> the `SecretStore` Protocol that ADR-0004 §3 provisions and `core/protocols.py`
-> does not declare, that Protocol is its own contract ADR, merged before anything
-> implements against it (golden rule 5, ADR-0015 §5); this ADR does not mint it.
+> **Normative.** The client reads the credential through the `SecretStore` Protocol
+> ADR-0004 §3 provisions, and through no other path to the keyring. Because
+> `core/protocols.py` does not declare it, that Protocol and its triad are a
+> **prerequisite of the client half of the remote transport** — their own contract
+> ADR, merged before anything implements against it (golden rule 5, ADR-0015 §5,
+> `CONTRIBUTING.md` → "Adding a Protocol"). This ADR does not mint it.
 
-**The gap is recorded rather than closed, because closing it here would be minting
-a Protocol in an ADR about a hop.** ADR-0084 §11 called `SecretStore` "the obvious
-home" for a credential, and the tree does not have one — today's Tier 0 credential
-is read from the process environment by the provider SDK. The device credential
-joins the provider credential in whatever change builds that Protocol; an issue
-carries it (Consequences).
+**Persistence had to be ruled, because the two obligations above are unsatisfiable
+together if it is not.** An earlier draft of this section said the credential is
+"never written to any store" and, in the next clause, that its handling follows
+ADR-0004 §3 — which requires the keyring. Architecture review found the
+contradiction: after a client restart no implementation can both retain the
+credential and not have stored it, and a reader reconciling the two by choosing
+non-persistence gets a device that asks the owner to paste a secret before every
+command, which is not a device anyone lives in. So the credential persists, the
+place is the one ADR-0004 §3 already named, and "never written to any store" is
+narrowed to what it was always about — the databases the hub and the client open.
+
+**Requiring the Protocol is this ADR's own ruling, not a restatement of ADR-0004
+§3, and the difference is worth being exact about.** §3 binds the *place* for every
+Tier 0 secret — the OS keyring — without qualification; its `SecretStore` sentence
+is scoped to "the `models/` and `tools/` layers", so on its own words it does not
+reach a client in `wire`. This ADR adds a third consumer to that discipline, which
+contradicts nothing §3 says and is therefore a stacked addition under ADR-0082 §1
+(§12). The reason is §3's own: a Protocol is what lets "the keyring backing be
+faked in tests and swapped per platform", and a third bespoke path to the keyring —
+untestable without a real keyring, and different on every platform — is exactly
+what §3 exists to prevent, arriving through a layer it did not happen to name.
+
+**The cost is real and named rather than discovered: one more contract PR ahead of
+the client half.** ADR-0084 §11 called `SecretStore` "the obvious home" for a
+credential and the tree does not have one; today's Tier 0 credential, the provider
+key, is read from the process environment by the provider SDK. The cheap
+alternative — read the device credential from an environment variable too — was
+considered and refused, because it would put a long-lived device secret in the
+environment of every command the owner runs, readable by anything that can read
+that environment, and it would be this ADR declining to apply ADR-0004 §3 while
+saying it applies it.
 
 ### 7. The remote admission rule, and why it inverts ADR-0084 §2's
 
@@ -824,9 +928,12 @@ Two clauses fail the test:
 
 - **§1's rule.** "User data may leave the device only from `models/` or from a
   designated integration seam inside `tools/`; every other egress is a bug." §1
-  above adds a third boundary, so the sentence becomes false. A reader holding only
-  ADR-0017 would read the hub's remote listener as a bug and would refuse to build
-  it — which is exactly what ADR-0084 §1 records that reader doing.
+  above adds a third boundary — the remote transport, in both directions — so the
+  sentence becomes false, and it becomes false twice over: the hub's send and the
+  client's send are each an egress it forbids. A reader holding only
+  ADR-0017 would read the hub's remote transport as a bug — in both directions —
+  and would refuse to build it, which is exactly what ADR-0084 §1 records that
+  reader doing.
 - **§2's framing of the boundaries as two.** Its heading is "The two boundaries"
   and its text enumerates `models/` and `tools/` as the complete set. Nothing in it
   becomes false about either boundary; what fails is the second limb of the test —
@@ -878,11 +985,21 @@ Every ADR naming ADR-0017 was read for *what it relied on it for*:
   ADR-0083 §15's stacked addition on its own test — the deferral is discharged by
   the ADR it named. §1's argument that a loopback listener engages neither clause
   is untouched, because this ADR does not change what a loopback listener does.
-- **ADR-0004 — no record owed.** §1's tiers are used as given. §2's residency and
-  telemetry clauses are examined in §3 above and found unengaged, which is the
-  ADR-0083 §15 pattern and changes nothing. §3's keyring rule is applied, not
-  narrowed: §6 above requires the credential to be held under it and declines to
-  invent a mechanism.
+- **ADR-0004 — no record owed, and §3 above is the showing rather than an
+  assertion.** §1's tiers are used as given. §2's **telemetry** clause is examined
+  and found unengaged: its subject is instrumentation of this system. §2's
+  **residency** clause is examined at length and every sentence of it stays true —
+  this system's persistent data is still local, and a marked clause forbids any
+  component of it from transmitting to a control plane — so a reader holding only
+  ADR-0004 §2 acts identically. The induced disclosure is named as an open question
+  about that clause's intent and handed to **#95**, where ADR-0017 §1 sent the
+  analogous one, rather than answered here. §2's egress clause is already ADR-0017's
+  and is not touched again.
+  §3's **keyring** rule is applied rather than narrowed — §6 above puts the
+  credential in the place §3 names — and §3's `SecretStore` sentence, whose own
+  scope is "the `models/` and `tools/` layers", gains a third consumer. That
+  contradicts no sentence of it and is a **stacked addition** under ADR-0082 §1:
+  recorded in this ADR and nowhere else.
 - **ADR-0094 — no record owed.** §10a's marked clause is "Nothing in **this ADR**
   authorises a spoke that is not on this machine", a statement about what ADR-0094
   authorises, and it stays true — ADR-0094 still authorises none. §2's connection
@@ -916,10 +1033,11 @@ Every ADR naming ADR-0017 was read for *what it relied on it for*:
 
 ## Consequences
 
-- **The hop is authorised and bounded.** A third egress boundary exists, its
-  recipient set is the devices the owner enrolled, its path is an overlay the owner
-  administers, and its payload is end-to-end encrypted with no third party holding
-  a key.
+- **The hop is authorised and bounded, in both directions.** A third egress
+  boundary exists — the remote transport's listener half and client half — its
+  recipient set is the devices the owner enrolled and the hub they enrolled at, its
+  path is an overlay the owner administers, and its payload is end-to-end encrypted
+  with no third party holding a key.
 - **ADR-0017 §1's rule is superseded** (§12), and its §3 conditions are untouched.
   The next lane that wants to designate the `tools/` seam inherits the same
   fourteen conditions it inherited yesterday.
@@ -932,6 +1050,11 @@ Every ADR naming ADR-0017 was read for *what it relied on it for*:
 - **`PROTOCOL_VERSION` does not move for the hop**, and the wire gains the rule it
   has been operating without: #872's question is answered as to the rule and as to
   who checks it, and scoped as to the mechanism.
+- **The client half acquires a prerequisite.** The `SecretStore` Protocol
+  ADR-0004 §3 provisions and the tree does not declare must land as its own
+  contract ADR and triad before the client half ships (§6). That is one more
+  contract PR in the sequence, and it is the cost of putting a long-lived device
+  secret where ADR-0004 §3 says Tier 0 goes rather than in a process environment.
 - **What is harder.** Enrolment is durable state the hub owns, so it is one more
   thing that must survive a restart and one more thing a restore has to think
   about. The owner acquires an operating obligation with two levers — revoke at the
@@ -952,6 +1075,10 @@ Every ADR naming ADR-0017 was read for *what it relied on it for*:
 - **What the hop feeds** — a device as a context facet, a device-scoped permission
   input, and the audit trail's "approved from where" — is filed when the listener
   lands, as `docs/roadmap.md`'s leg 9 directs (§10).
+- **#95 gains a second instance.** ADR-0017 §1 opened it for the question a
+  write-capable integration raises about ADR-0004 §2's residency clause; §3 above
+  adds the question an induced third-party control-plane record raises about the
+  same clause. Neither ADR answers it and #95 is where it lives.
 
 **Revisit when** the hub moves to a machine the owner does not carry, at which
 point §3's duty-cycle cost disappears and §2's binding rule wants re-reading
@@ -1004,6 +1131,24 @@ overlay's operator changes what §3 enumerates.
 - **A memory-hard derivation for the credential verifier.** Rejected in §6: it
   defends a human-chosen secret and there is none, and it puts a deliberate cost on
   the admission path of every connect.
+- **Holding the device credential in an environment variable**, as today's provider
+  key effectively is. Rejected in §6: it would put a long-lived device secret in
+  the environment of every command the owner runs, and it would be this ADR
+  declining to apply ADR-0004 §3 while claiming to apply it. The cost of refusing
+  it is a `SecretStore` contract ADR ahead of the client half.
+- **A self-hosted control plane required by default**, removing the third party
+  from §3 entirely. Rejected in §3 on a deployment fact rather than a preference:
+  it needs an always-on host, #882 forbids any arc-3 slice depending on hardware
+  that does not exist, and running it on the hub laptop would make enrolling a
+  device impossible while that laptop sleeps. It stays the named exit, revisitable
+  the day an always-on host exists.
+- **Partially superseding ADR-0004 §2's residency clause** for the control-plane
+  records. Rejected in §3 and in §12: every sentence of that clause stays true —
+  this system's persistent data is still local and a marked clause forbids any
+  component of it from transmitting to a control plane — so there is nothing to
+  supersede, and superseding a residency rule on behalf of a disclosure this system
+  does not perform would over-claim. The residual question about the clause's
+  *intent* goes to #95, where ADR-0017 §1 sent the analogous one.
 - **A single undifferentiated refusal on the remote listener.** The conventional
   choice, and rejected in §7: the population that can reach the listener is the
   owner's own devices, so it hides nothing from anyone outside, while making a hub
