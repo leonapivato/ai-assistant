@@ -1502,18 +1502,25 @@ class MemoryIngestor:
         # one-crossing rule; the per-reading counts ride as metrics" (ADR-0119 §8).
         # That is why the ingests below go through ``_locked_ingest``/``_ingest``
         # and never through ``ingest``, which would emit a second trace apiece.
+        # **The applied proposals accumulate where a raise cannot erase them.**
+        # "The proposals ingested before the raise stay applied", so a trace that
+        # forgot them would say a live record was never written — ADR-0119 §3's
+        # absent key means *not observed*, and these were. The list is the emitter's
+        # window onto a partial commit; ``_reconciled`` fills it as it goes.
+        applied: list[_Ingested] = []
         reconciled = await self._traces.observing(
             traces.SEAM_INGEST_READING,
-            self._reconciled(observed),
+            self._reconciled(observed, applied),
             _reconciliation_reading,
             entry={
                 traces.PROPOSALS: len(observed.proposals),
                 traces.COVERAGE_DECLARED: observed.coverage is not None,
             },
+            partial=lambda: _reconciliation_reading(_Reconciled(ingested=tuple(applied))),
         )
         return [one.result for one in reconciled.ingested]
 
-    async def _reconciled(self, observed: SourceReading) -> _Reconciled:
+    async def _reconciled(self, observed: SourceReading, applied: list[_Ingested]) -> _Reconciled:
         """Ingest one already-observed reading's proposals and close what it warrants.
 
         The body :meth:`ingest_reading` had before ADR-0119 put a trace around it,
@@ -1523,6 +1530,11 @@ class MemoryIngestor:
 
         Args:
             observed: This object's own snapshot of the reading.
+            applied: Filled in as each proposal lands, so the caller's emitter can
+                read a partial commit off it when a later proposal raises. A
+                statement-per-proposal loop rather than a comprehension for exactly
+                that: a comprehension's partial result is discarded on a raise, and
+                what it discards here is the record of writes that stayed applied.
 
         Returns:
             Each proposal's outcome, and the ids the reconciliation closed — or
@@ -1533,21 +1545,20 @@ class MemoryIngestor:
             # ADR-0115 §3's second clause: no reconciliation, so no read-modify-write
             # to isolate, and this member owes nothing beyond what `ingest` already
             # carries for each proposal in turn.
-            return _Reconciled(
-                ingested=tuple(
-                    [await self._locked_ingest(proposal) for proposal in observed.proposals]
-                )
-            )
+            for proposal in observed.proposals:
+                applied.append(await self._locked_ingest(proposal))
+            return _Reconciled(ingested=tuple(applied))
         async with self._lock:
-            ingested = tuple([await self._ingest(proposal) for proposal in observed.proposals])
+            for proposal in observed.proposals:
+                applied.append(await self._ingest(proposal))
             # Reached only by completing the loop. A raise skips it, which is the
             # conservative direction and is why there is no `finally` here.
             retired = await self._close_absent(
                 source=observed.source,
                 coverage=observed.coverage,
-                results=[one.result for one in ingested],
+                results=[one.result for one in applied],
             )
-            return _Reconciled(ingested=ingested, retired=retired)
+            return _Reconciled(ingested=tuple(applied), retired=retired)
 
     async def _locked_ingest(self, proposal: MemoryUpdateProposal) -> _Ingested:
         """One proposal under the ordinary per-proposal hold.

@@ -290,6 +290,7 @@ class MemoryTraces:
         observe: Callable[[T], Reading],
         *,
         entry: Mapping[str, int | float | bool] | None = None,
+        partial: Callable[[], Reading] | None = None,
     ) -> T:
         """Await ``work`` and record exactly one trace for it.
 
@@ -314,6 +315,18 @@ class MemoryTraces:
             entry: Quantities observed *before* the work, so they are carried on
                 the fault path too — §8 requires exactly that of a retrieval's
                 ``limit``.
+            partial: What the crossing had reached when it failed, for a crossing
+                that can leave work **applied** behind a raise. ``None`` for one
+                that cannot, where the entry quantities are the whole of the fault
+                path.
+
+                Not an optimisation: an ``ingest_reading`` whose second proposal
+                refuses has already committed its first, and a trace carrying no
+                ``WRITTEN`` id would say a record that is live was never written.
+                §3's absent key means *not observed*, so omitting an id the
+                crossing did observe is the instrument denying the work — the
+                fabrication §8's fault-path paragraph refuses in the other
+                direction, arriving through a partial commit instead of a zero.
 
         Returns:
             Whatever ``work`` returned, untouched.
@@ -330,7 +343,7 @@ class MemoryTraces:
                 outcome=TraceOutcome.REFUSED
                 if isinstance(error, _REFUSALS)
                 else TraceOutcome.FAULT,
-                reading=Reading(metrics=dict(entry or {})),
+                reading=self._merged(seam, entry, partial),
                 fault_class=fault_class_of(error),
             )
             raise
@@ -339,7 +352,7 @@ class MemoryTraces:
             occurred_at=occurred_at,
             started=started,
             outcome=TraceOutcome.OK,
-            reading=self._observed(seam, result, observe, entry=entry),
+            reading=self._merged(seam, entry, lambda: observe(result)),
         )
         return result
 
@@ -364,15 +377,16 @@ class MemoryTraces:
             _dropped(self._kind, seam, error)
             return None
 
-    def _observed[T](
+    def _merged(
         self,
         seam: str,
-        result: T,
-        observe: Callable[[T], Reading],
-        *,
         entry: Mapping[str, int | float | bool] | None,
+        produce: Callable[[], Reading] | None,
     ) -> Reading:
-        """Read ``result`` through ``observe``, merged over the entry quantities.
+        """The entry quantities, with whatever the crossing itself observed on top.
+
+        One helper for both paths, so the success reading and the partial one
+        cannot drift in how they merge or in how they fail.
 
         A mapper is first-party code in this package, so a raise here is a bug
         rather than an environmental failure — but §5 admits no exception for
@@ -383,15 +397,17 @@ class MemoryTraces:
 
         Args:
             seam: Which crossing this is, for the log record.
-            result: What the crossing returned.
-            observe: The reading.
             entry: Quantities observed before the work.
+            produce: The crossing's own reading, or ``None`` where it has none —
+                a fault path with nothing applied behind it.
 
         Returns:
             The merged reading, or the entry quantities alone.
         """
+        if produce is None:
+            return Reading(metrics=dict(entry or {}))
         try:
-            reading = observe(result)
+            reading = produce()
         # Broad by design: §5 lets no mapper bug reach the work being observed.
         except Exception as error:
             _dropped(self._kind, seam, error)
