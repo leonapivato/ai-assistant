@@ -25,6 +25,7 @@ from ai_assistant.app import (
     Composition,
     build_composition,
     build_engine,
+    build_measure_reader,
     build_reembedder,
     ensure_model_credentials,
 )
@@ -2181,3 +2182,57 @@ async def test_the_band_budget_never_asks_for_more_than_the_reported_figure() ->
 
     assert store.limits
     assert max(store.limits) == composition_module.RETRIEVAL_LIMIT
+
+
+class TestBuildMeasureReader:
+    """The composition root's third function (ADR-0120 §9).
+
+    Thin by design: §9 gives the reporting tool nothing to be wired *to*, so what
+    is on test is the one fact it may not go and get for itself — where the trace
+    store is — and the property that asking does not create one.
+    """
+
+    def test_it_points_the_reader_at_the_trace_store(self, tmp_path: Path) -> None:
+        settings = Settings(embedder=EmbedderKind.HASHING, data_dir=tmp_path)
+
+        reader = build_measure_reader(settings)
+
+        assert reader.store == tmp_path / "traces.db"
+
+    def test_the_data_dir_keyword_wins_over_the_setting(self, tmp_path: Path) -> None:
+        configured = tmp_path / "configured"
+        configured.mkdir()
+        passed = tmp_path / "passed"
+        settings = Settings(embedder=EmbedderKind.HASHING, data_dir=configured)
+
+        reader = build_measure_reader(settings, data_dir=passed)
+
+        assert reader.store == passed / "traces.db"
+
+    def test_building_a_reader_opens_no_database(self, tmp_path: Path) -> None:
+        """ADR-0120 §8's answer to a stream with nothing in it is a sentence.
+
+        A reader that opened the store on construction would create an empty
+        seventh database as a side effect of a deployment that has never run the
+        hub asking whether it has any traces — a write, by a tool that reads.
+        """
+        settings = Settings(embedder=EmbedderKind.HASHING, data_dir=tmp_path)
+
+        build_measure_reader(settings)
+
+        assert not (tmp_path / "traces.db").exists()
+
+    async def test_the_reader_reports_the_empty_stream_over_a_store_with_nothing_in_it(
+        self, tmp_path: Path
+    ) -> None:
+        """End to end against the durable store, through the walk and back."""
+        SqliteTraceStore(path=tmp_path / "traces.db").close()
+        settings = Settings(embedder=EmbedderKind.HASHING, data_dir=tmp_path)
+
+        report = await build_measure_reader(settings).report(
+            start=datetime(2026, 7, 1, tzinfo=UTC),
+            end=datetime(2026, 8, 1, tzinfo=UTC),
+            settling=timedelta(hours=1),
+        )
+
+        assert "empty" in report.render()
