@@ -607,8 +607,10 @@ The implementation is a separate lane, briefed after this ADR merges (golden rul
 ## Consequences
 
 - **The command named for corrections can correct.** A correction reaches a target
-  in whatever drawer the belief lives in, and the existing supersede path — which
-  the QA run proved sound — runs unchanged from there.
+  in whatever drawer the belief lives in, **where §3's bounded read surfaces it**,
+  and the existing supersede path — which the QA run proved sound — runs unchanged
+  from there. What the read never surfaced is still not reached (§3, issue #457);
+  what changes is that the drawer is no longer excluded by construction.
 - **The correction lands in the right drawer, not merely near it.** The corrected
   belief is readable from kind-scoped surfaces, and a correction given with
   `--about` keeps its scope on the preference branch instead of losing it to
