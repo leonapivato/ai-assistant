@@ -2582,7 +2582,7 @@ class Engine:
         utterance — raises before ``coro`` is built and emits no trace, and so does
         a result too large to return, which :meth:`_checked` refuses after this
         returns. Those are refusals of a *call*; a trace records an operation that
-        was served (§1), and #856 carries the question of whether the boundary
+        was served (§1), and #855 carries the question of whether the boundary
         should widen to them.
 
         Args:
