@@ -64,12 +64,13 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from ai_assistant import __version__
-from ai_assistant.app import build_engine, ensure_model_credentials
+from ai_assistant.app import build_composition, ensure_model_credentials
 from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.logging import configure_logging
 from ai_assistant.orchestration.engine import DrainPhase
 from ai_assistant.service import datadir
+from ai_assistant.service.configuration import ConfigurationStamp
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART, classify
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.service.scheduler import Scheduler, jobs_for
@@ -496,7 +497,13 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
         # it is the *hub's* question and not the CLI's (issue #530): a one-shot
         # command that needs no model must not start requiring a key.
         ensure_model_credentials(settings)
-        engine = build_engine(settings, data_dir=data_dir)
+        # The build returns the engine **and** the two things ADR-0119 §9's
+        # startup stamp cannot get anywhere else: the trace store's append seam,
+        # and the effective ``search`` limit of each cardinality control, which is
+        # a property of how the root constructed two collaborators and not of any
+        # ``Settings`` field.
+        composed = build_composition(settings, data_dir=data_dir)
+        engine = composed.engine
         # Built before the ``try`` so the ``finally`` can always join it, including
         # on a stop that arrives between here and step 5. An unstarted scheduler's
         # ``aclose`` is a no-op, which is what makes that unconditional join safe.
@@ -505,6 +512,26 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
         try:
             if stop.is_set():
                 return EXIT_OK
+            # ADR-0119 §9's configuration stamp, "after the stores are open and
+            # before the API accepts a request". Both bounds are satisfied
+            # anywhere between step 3 and step 6; here, at the earliest legal
+            # point, is where it buys the most: the ``CONFIGURATION`` trace is
+            # then the **first** trace of every hub run, so "a gap between a
+            # shutdown and the next configuration trace is a hub that was not
+            # running" is exact rather than approximate, and a start that fails at
+            # step 4 still leaves its configuration dated.
+            #
+            # **Not a seventh startup step.** ADR-0083 §3's sequence is fixed and
+            # each of its steps is a precondition of the next; this is neither. It
+            # cannot fail (§5 subordinates it — ``record`` never raises), nothing
+            # later depends on it, and a hub whose stamp was lost is a hub that
+            # started normally with a Tier 2 log record saying so.
+            await ConfigurationStamp(
+                sink=composed.trace_sink,
+                retrieval_search_limit=composed.retrieval_search_limit,
+                conflict_search_limit=composed.conflict_search_limit,
+            ).record(settings)
+
             # Step 4. The deletion sweep then the retention reclaim, at the
             # position ADR-0074 §8 ratified. A resident process improves on the
             # CLI here without changing anything: because the hub restarts after a

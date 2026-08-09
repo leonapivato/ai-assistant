@@ -1,14 +1,24 @@
 """Construct the production subsystems and wire them into an engine (ADR-0042 §2).
 
-:func:`build_engine` is the composition root's one function. It names every
+:func:`build_composition` is the composition root's one build. It names every
 concrete implementation, discharges the wiring obligations no type can express,
 owns the connection-owning resources it opens, and hands the façade an ordered
 shutdown path — everything ADR-0042 §2 requires of this layer.
+
+:func:`build_engine` is that build read down to its engine, and it stays the
+entry point for every caller that needs nothing else. What the second return
+value exists for is ADR-0119 §9's startup stamp: the configuration trace records
+the **effective** ``search`` limit of each cardinality control, and §9 is explicit
+that "the figure to record is the one the composition root actually produced" —
+because neither control is a ``Settings`` field, so "a ``Settings`` dump would
+show neither". :class:`Composition` is that figure leaving the one layer that
+knows it, beside the ``TraceSink`` the stamp writes through.
 """
 
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, assert_never
 
@@ -69,11 +79,103 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.config import Settings
-    from ai_assistant.core.protocols import Embedder
+    from ai_assistant.core.protocols import Embedder, TraceSink
+
+
+#: What this layer tunes :class:`LearningLoop`'s retrieval to, and **passed
+#: explicitly rather than left to the constructor's default** (ADR-0119 §9).
+#:
+#: The value is the one ``orchestration`` already defaults to, so nothing about a
+#: deployment moves. What moves is *where the figure is decided*: §9 has the
+#: configuration stamp record "the **effective** ``search`` limit that control
+#: produces at the seam", and the honest figure is the one the composition root
+#: produced, not one this module re-states from memory beside a default it does
+#: not control. Passing it makes the two the same object of knowledge — a stamp
+#: reading this constant is reading exactly what the loop was built with, and a
+#: later change to ``orchestration``'s own default cannot make the record wrong.
+RETRIEVAL_LIMIT: Final = 5
+
+#: What this layer tunes :class:`MemoryIngestor`'s conflict ceiling to, passed
+#: explicitly for :data:`RETRIEVAL_LIMIT`'s reason.
+CONFLICT_LIMIT: Final = 100
+
+#: How far the conflict probe over-asks its ceiling (ADR-0079 §1, ``memory/
+#: ingest.py``'s ``limit=self._conflict_limit + 2``).
+#:
+#: **This is the whole reason ADR-0119 §9 records an effective limit and not a
+#: control's own value.** §9: "A ``conflict_limit`` of 255 sits under the cap
+#: while the probe it drives asks for 257, so a diagnostic keyed to the control
+#: would say 'this deployment cannot truncate' of one that can."
+#:
+#: The arithmetic is duplicated from `memory` and cannot be imported: golden rule
+#: 1 puts a subsystem's internals off limits, and the ingestor exposes no
+#: effective-limit seam. ``tests/app`` pins the duplicate against the ingestor's
+#: actual behaviour, so a drift fails a test rather than quietly misreporting the
+#: figure an operator reads when truncated traces appear.
+_CONFLICT_PROBE_OVERSHOOT: Final = 2
+
+
+@dataclass(frozen=True, slots=True)
+class Composition:
+    """The built engine, plus what only this layer knows (ADR-0119 §9).
+
+    Returned by :func:`build_composition` and consumed by `service`, which stamps
+    one ``CONFIGURATION`` trace per hub startup. Everything on it beyond the
+    engine is there because the stamp cannot obtain it anywhere else: the sink is
+    opened here, and the two cardinality figures are properties of *how this layer
+    constructed two collaborators* rather than of any setting.
+
+    **Narrow by construction.** The sink is typed as a
+    :class:`~ai_assistant.core.protocols.TraceSink` and never as the concrete
+    store or as ``TraceStore``, so a holder can append a trace and cannot walk one
+    (ADR-0119 §7) — the same narrowing the ``Engine``'s two trace parameters get,
+    reaching one more consumer. `service` may not name
+    ``ai_assistant.evaluation`` at all (``lint-imports``), so the annotation and
+    the contract agree.
+
+    Attributes:
+        engine: The ready façade, exactly as :func:`build_engine` returns it.
+        trace_sink: The **append** seam of the trace store opened by this build.
+        retrieval_search_limit: The largest ``limit`` a turn's retrieval reaches
+            ``MemoryStore.search`` with. Equal to the loop's own
+            ``retrieval_limit``, because ``orchestration/retrieval.py`` fills one
+            budget of that size band by band and the first band asks for all of it.
+        conflict_search_limit: The ``limit`` the ingestor's conflict probe reaches
+            ``MemoryStore.search`` with — the ceiling **plus two** (ADR-0079 §1),
+            which is the figure §9 requires and the control's own value is not.
+    """
+
+    engine: Engine
+    trace_sink: TraceSink
+    retrieval_search_limit: int
+    conflict_search_limit: int
 
 
 def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
-    """Wire the production subsystems into a ready :class:`Engine` (ADR-0042 §2).
+    """The engine alone, for every caller that needs nothing else (ADR-0042 §2).
+
+    The composition root's entry point, unchanged in behaviour and in signature.
+    :func:`build_composition` is the same build with ADR-0119 §9's two extra
+    figures still attached; a caller that is not stamping a configuration trace
+    wants this one.
+
+    Args:
+        settings: Loaded application settings; see :func:`build_composition`.
+        data_dir: Where the SQLite stores live, overriding ``settings.data_dir``
+            when given; see :func:`build_composition`.
+
+    Returns:
+        A ready :class:`Engine`. Drive it with ``converse``/``resume`` and close
+        it with ``aclose`` when the session ends.
+
+    Raises:
+        ConfigurationError: Whatever :func:`build_composition` raises, unchanged.
+    """
+    return build_composition(settings, data_dir=data_dir).engine
+
+
+def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Composition:
+    """Wire the production subsystems into a ready :class:`Composition` (ADR-0042 §2).
 
     The one place concrete subsystems are constructed. It discharges the wiring
     obligations no type can express — **once**, here, rather than copied into
@@ -188,8 +290,11 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
     sixth somewhere else would be a second wiring convention bought for nothing.
 
     Returns:
-        A ready :class:`Engine`. Drive it with ``converse``/``resume`` and close
-        it with ``aclose`` when the session ends.
+        A :class:`Composition`: the ready :class:`Engine` — drive it with
+        ``converse``/``resume`` and close it with ``aclose`` when the session ends
+        — beside the trace sink this build opened and the two effective ``search``
+        limits it produced, which ADR-0119 §9's startup stamp records and cannot
+        read off ``Settings``.
 
     Raises:
         ConfigurationError: If the data directory cannot be prepared — blocked by
@@ -396,7 +501,19 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         # and appends its ``MEMORY_WRITE`` traces to the *same* trace store the read
         # path and the engine boundary use, so §4's correlation join has one stream
         # to join within (ADR-0119 §8).
-        writer = MemoryIngestor(store=memory, policy=DefaultMemoryPolicy(), traces_sink=traces)
+        #
+        # **``conflict_limit`` is passed rather than defaulted** (ADR-0119 §9). It
+        # is one of the two cardinality controls whose *effective* ``search`` limit
+        # the configuration stamp records, and §9 puts the figure to record here:
+        # "the figure to record is the one the composition root actually produced".
+        # A default filled in by `memory` would leave this layer stating a number
+        # it did not choose. The value is `memory`'s own, so nothing moves.
+        writer = MemoryIngestor(
+            store=memory,
+            policy=DefaultMemoryPolicy(),
+            traces_sink=traces,
+            conflict_limit=CONFLICT_LIMIT,
+        )
         # **One** write stage, over that writer and that deferral queue, shared by
         # every producer's stage (ADR-0078 §3). Two of the three composition-root
         # obligations are discharged by this single object existing: the queue the
@@ -417,6 +534,12 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             writes=writes,
             planner=ModelBackedPlanner(model),
             feedback=RuleBasedFeedbackProcessor(),
+            # Passed rather than defaulted, for the reason the ingestor's
+            # ``conflict_limit`` is (ADR-0119 §9): this is the second cardinality
+            # control, and its effective ``search`` limit is its own value —
+            # ``orchestration/retrieval.py`` fills one budget of this size band by
+            # band, so the first band asks for all of it and no band asks for more.
+            retrieval_limit=RETRIEVAL_LIMIT,
         )
         runner = StepRunner(
             plans=plans,
@@ -436,7 +559,7 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             # (the default) keeps the pre-#243 behaviour of no lifetime.
             confirmation_ttl=settings.confirmation_ttl,
         )
-        return Engine(
+        engine = Engine(
             loop=loop,
             runner=runner,
             plans=plans,
@@ -661,6 +784,18 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             # encoders are byte-identical or the vectors fail), and reading it
             # beside the engine that will measure with it adds no package edge here.
             max_payload_bytes=settings.hub_max_frame_bytes - ENVELOPE_RESERVE_BYTES,
+        )
+        # The **same** trace store again, narrowed a third way (ADR-0119 §7): a
+        # ``TraceSink`` for `service`'s startup stamp, which appends one
+        # ``CONFIGURATION`` trace and can no more walk the store than an emitter
+        # inside the pipeline can. The two figures beside it are §9's effective
+        # ``search`` limits, read off the constants this build tuned the two
+        # collaborators with rather than off ``Settings``, which holds neither.
+        return Composition(
+            engine=engine,
+            trace_sink=traces,
+            retrieval_search_limit=RETRIEVAL_LIMIT,
+            conflict_search_limit=CONFLICT_LIMIT + _CONFLICT_PROBE_OVERSHOOT,
         )
     except BaseException:
         # Close anything already opened before re-raising, so a failed build
