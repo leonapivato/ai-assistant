@@ -39,7 +39,18 @@ from ai_assistant.wire.errors import (
 #: deployment in which they differ except a half-finished upgrade, and a
 #: half-finished upgrade is precisely the state ruling 4 wants legible rather than
 #: papered over".
-PROTOCOL_VERSION: Final[int] = 1
+#:
+#: **2 since ADR-0122 §1**, which made ``FeedbackEvent.memory_kind`` optional. That
+#: is an *incompatible payload* change in the one direction the handshake exists to
+#: catch: the codec renders a defaulted field, so an unpinned correction crosses as
+#: ``"memory_kind": null``, and a version 1 hub's validation refuses ``null`` for a
+#: required ``MemoryKind``. Left at 1 both peers would still say ``1``, the
+#: handshake would pass, and the operator would get a decode error inside a
+#: ``learn`` instead of §3's message naming both versions and the action — the
+#: half-finished upgrade made illegible rather than legible (ADR-0087 §8's
+#: precedent for the same reason). Bumping applies ADR-0084 §3's mechanism; it does
+#: not change it.
+PROTOCOL_VERSION: Final[int] = 2
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

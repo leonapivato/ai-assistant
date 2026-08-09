@@ -2,10 +2,17 @@
 
 ``RuleBasedFeedbackProcessor`` maps *explicit, already-structured* feedback into
 a :class:`~ai_assistant.core.types.MemoryUpdateProposal` (ADR-0009). It performs
-no natural-language interpretation and no I/O: given the feedback's target
-``memory_kind`` and ``content`` it builds the matching typed record with
-``USER_ASSERTED`` provenance, so the existing :class:`DefaultMemoryPolicy`
+no natural-language interpretation and no I/O: given the feedback's *resolved*
+target ``memory_kind`` and its ``content`` it builds the matching typed record
+with ``USER_ASSERTED`` provenance, so the existing :class:`DefaultMemoryPolicy`
 accepts it and the loop "takes" on the first correction.
+
+Resolving an absent ``memory_kind`` is not its job and it does not do it
+(ADR-0122 §3): the pipeline holds the store, the processor holds nothing, and a
+processor that read its own target would need a store seam injected into every
+implementation behind this Protocol to answer a question that is the same for
+all of them — while `learning` stays dependent only on `core` (ADR-0009 §3). So
+an unresolved event is *refused* here rather than answered (§7).
 
 Its one seam beyond the model of the feedback itself is an injected clock, which
 stamps *transaction* time on what it proposes (ADR-0045 §3). The event supplies
@@ -81,13 +88,17 @@ class RuleBasedFeedbackProcessor:
             deferred one.
 
         Raises:
-            ValueError: If the injected clock's reading does not conform — a
-                :class:`~ai_assistant.core.clock.ClockReadingError`, which is a
-                ``ValueError`` and is left unwrapped: `learning` has no error class
-                of its own to translate it into, and the distinct subclass keeps a
-                refused *reading* separable from a failure of the clock itself
-                (ADR-0026 §2, §4). A deferred target reads no clock, so it cannot
-                raise this.
+            ValueError: If ``event.memory_kind`` is ``None`` — a producer that
+                skipped the pipeline stage owing the resolution (ADR-0122 §7); see
+                :meth:`_to_record` for why that is a raise rather than the deferred
+                target's silence. Or if the injected clock's reading does not
+                conform — a :class:`~ai_assistant.core.clock.ClockReadingError`,
+                which is a ``ValueError`` and is left unwrapped: `learning` has no
+                error class of its own to translate either into, and the distinct
+                subclass keeps a refused *reading* separable from a failure of the
+                clock itself (ADR-0026 §2, §4). A deferred target reads no clock, so
+                it cannot raise the second; an unresolved event raises the first
+                before any clock is read at all.
         """
         record = self._to_record(event)
         if record is None:
@@ -116,8 +127,32 @@ class RuleBasedFeedbackProcessor:
         stated, and ADR-0100 §3 reads that ``None`` as *the owner's*. That is the
         false record §7 requires the input route in order to avoid, reintroduced
         one layer further down.
+
+        **An unresolved ``memory_kind`` is refused, not deferred** (ADR-0122 §7).
+        The final arm's ``None`` is the right answer for a ``PROCEDURAL`` or
+        ``EPISODIC`` target ADR-0009 §6 defers: there is nothing this processor can
+        build yet, and ``process`` reporting no proposal says so. ``None`` on the
+        *field* is a different thing — a producer that skipped the stage owing the
+        resolution — and answering it with the deferred arm's silence would report
+        "nothing to propose" for feedback that had everything to propose. That is
+        the silent drop ADR-0122 exists to remove, reintroduced one layer down, and
+        it would be invisible: ``learn`` would write nothing and report nothing
+        wrong. Failing loudly is the discipline the neighbouring write path already
+        takes, where ``_apply`` raises rather than storing a proposal whose fold
+        names an absent target — "a write that loses data while reporting success is
+        worse than one that stops".
+
+        Raises:
+            ValueError: If ``event.memory_kind`` is ``None``.
         """
         match event.memory_kind:
+            case None:
+                msg = (
+                    "a FeedbackEvent reaching a FeedbackProcessor must carry a resolved "
+                    "memory_kind; the calling stage resolves an absent one before this "
+                    "call (ADR-0122 §3, §7)"
+                )
+                raise ValueError(msg)
             case MemoryKind.PREFERENCE:
                 return PreferenceMemory(
                     id=self._id_factory(),

@@ -138,6 +138,13 @@ class FakeFeedbackProcessor:
 
         The returned proposals are deep copies, so a caller that mutates one
         cannot reach the fake's script and change what a later call sees.
+
+        Raises:
+            ValueError: If the event's ``memory_kind`` is unresolved and there is no
+                script to answer with (:meth:`_to_record`, ADR-0122 §7). A *scripted*
+                fake answers with its script whatever the event carries: the script
+                is the consumer's own stated outcome, and the refusal belongs to the
+                branch that would otherwise invent a drawer.
         """
         self.events.append(event.model_copy(deep=True))
         if self._proposals is not None:
@@ -164,7 +171,28 @@ class FakeFeedbackProcessor:
         ``None``, which ADR-0100 §3 reads as the owner's, over a subject the event
         stated. It is also what keeps :func:`_derived_id`'s reasoning true: every
         field of the event reaches the synthesised record.
+
+        **An unresolved ``memory_kind`` is refused** (ADR-0122 §7). The fake covers
+        every kind precisely so a consumer can drive the branch it cares about, and
+        ``None`` is not a kind — it is a request that has not chosen one yet, which
+        the calling stage resolves before any processor is called. Synthesising a
+        record for it would let a consumer's test pass while its subject skipped the
+        resolution stage, certifying the exact silent drop §7 makes loud. This is
+        the fake keeping itself unable to be configured into breaking the discipline
+        its contract stands on, as its constructor already does for a blank
+        proposal; the ``FeedbackProcessor`` Protocol is unchanged and states no such
+        clause, so nothing here is pinned by the shared conformance suite.
+
+        Raises:
+            ValueError: If ``event.memory_kind`` is ``None``.
         """
+        if event.memory_kind is None:
+            msg = (
+                "a FeedbackEvent reaching a FeedbackProcessor must carry a resolved "
+                "memory_kind; the calling stage resolves an absent one before this "
+                "call (ADR-0122 §3, §7)"
+            )
+            raise ValueError(msg)
         record_id = self._id_factory() if self._id_factory is not None else _derived_id(event)
         provenance = self._provenance(event)
         match event.memory_kind:

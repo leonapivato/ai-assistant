@@ -42,7 +42,9 @@ import structlog
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
+    FeedbackKind,
     Goal,
+    MemoryKind,
     MemorySource,
     Provenance,
     TurnResult,
@@ -74,6 +76,41 @@ _FULL_CONFIDENCE = 1.0
 
 _DEFAULT_RETRIEVAL_LIMIT = 5
 
+#: The kinds a correction's drawer is resolved into (ADR-0122 §3), **fixed by that
+#: clause** and not asked of the processor.
+#:
+#: It is a literal here because ``FeedbackProcessor`` exposes ``process(event)`` and
+#: nothing else, so this stage has no way to ask which kinds are mintable, and
+#: inventing a declaration would be a Protocol change under golden rule 5 — surface
+#: with one implementation and one caller, ratified to spare an ADR from naming two
+#: enum members. The set matches what ADR-0009 §4 fixes
+#: ``RuleBasedFeedbackProcessor`` to mint, and it **widens by a ratified decision
+#: rather than by inference**: when ADR-0009 §6's ``PROCEDURAL``/``EPISODIC``
+#: deferral is taken up, the lane taking it partially supersedes §3 in the scope of
+#: this set, in the same change that makes those kinds mintable.
+#:
+#: Bounding it at all is what stops the correction vanishing. The store is full of
+#: episodes, and an episode recording the user ordering espresso is a plausible best
+#: match for a correction about espresso — resolved to ``EPISODIC``, ``_to_record``
+#: returns no proposal, and the user's correction is lost *entirely*, which is
+#: strictly worse than the mis-drawering ADR-0122 fixes.
+RESOLUTION_KINDS: tuple[MemoryKind, ...] = (
+    MemoryKind.PREFERENCE,
+    MemoryKind.SEMANTIC,
+)
+
+#: How wide the resolution's single ranked read is (ADR-0122 §3) — the loop's own
+#: knob, **distinct from the turn's** ``retrieval_limit``, so tuning what an answer
+#: is personalised from does not silently move what a correction is filed under.
+#:
+#: Only the best-ranked candidate decides the drawer, so this is not a budget being
+#: spent; it is padding. ``kinds`` keeps the post-cut placement ADR-0045 §6 and
+#: ADR-0007 ratified for it (ADR-0113 §2 moves the *band* alone), so a store may
+#: rank a page and filter it afterwards, and a page of one is a page a single
+#: topically similar episode can empty. ``MemoryStore.search``'s own default is the
+#: same number, which is the width this corpus already treats as "a page".
+_DEFAULT_RESOLUTION_LIMIT = 10
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -83,8 +120,8 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _check_tuning(*, retrieval_limit: int) -> None:
-    """Reject tuning that would disable retrieval while looking healthy.
+def _check_tuning(*, retrieval_limit: int, resolution_limit: int) -> None:
+    """Reject tuning that would disable a read while looking healthy.
 
     A *silent* misconfiguration, which is why it is refused at construction
     rather than left to surface as behaviour: ``retrieval_limit=0`` makes
@@ -93,24 +130,36 @@ def _check_tuning(*, retrieval_limit: int) -> None:
     presented as a healthy personal one, the exact failure
     :attr:`TurnResult.memory_degraded` exists to expose.
 
+    ``resolution_limit`` is checked for the sharper version of the same reason
+    (ADR-0122 §3). A non-positive one makes ``search`` match nothing, so **every**
+    unpinned correction would resolve by §5's fallback and land as ``SEMANTIC`` —
+    which is exactly the pre-ADR defect, restored by a number, reported as success,
+    and indistinguishable at every surface from a store that genuinely holds no
+    target. There is no reading of "resolve from the best-ranked neighbour" under
+    which asking for none of them is the request.
+
     The conflict half of this check went where the conflict tuning went, into
     ``MemoryIngestor.__init__`` (ADR-0028 §4a): relocated with the values, not
     retired.
 
     Raises:
-        TypeError: If ``retrieval_limit`` is not an integer.
-        ValueError: If ``retrieval_limit`` is not positive.
+        TypeError: If either limit is not an integer.
+        ValueError: If either limit is not positive.
     """
     # `isinstance` rather than a bare `< 1`, which `1.5` and `inf` both survive
     # — and a non-integral limit reaches `MemoryStore.search`, where a store
     # slicing by it raises `TypeError` far from the mistake. `bool` is excluded
     # because it is an `int` subclass and a flag is not a count.
-    if isinstance(retrieval_limit, bool) or not isinstance(retrieval_limit, int):
-        msg = f"retrieval_limit must be an integer, got {retrieval_limit!r}"
-        raise TypeError(msg)
-    if retrieval_limit < 1:
-        msg = f"retrieval_limit must be at least 1, got {retrieval_limit}"
-        raise ValueError(msg)
+    for name, value in (
+        ("retrieval_limit", retrieval_limit),
+        ("resolution_limit", resolution_limit),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            msg = f"{name} must be an integer, got {value!r}"
+            raise TypeError(msg)
+        if value < 1:
+            msg = f"{name} must be at least 1, got {value}"
+            raise ValueError(msg)
 
 
 class LearningLoop:
@@ -131,6 +180,7 @@ class LearningLoop:
         planner: Planner,
         feedback: FeedbackProcessor,
         retrieval_limit: int = _DEFAULT_RETRIEVAL_LIMIT,
+        resolution_limit: int = _DEFAULT_RESOLUTION_LIMIT,
         now: Clock = _utcnow,
         id_factory: Callable[[], str] = _uuid,
     ) -> None:
@@ -157,7 +207,20 @@ class LearningLoop:
                 exactly the drop ADR-0078 ends.
             planner: Turns the turn's goal into an ``ActionPlan``.
             feedback: Turns a ``FeedbackEvent`` into memory-update proposals.
+                **The processor wired here must mint every kind in**
+                :data:`RESOLUTION_KINDS` (ADR-0122 §3). Nothing in the type system
+                can state it — ``FeedbackProcessor`` exposes ``process`` and nothing
+                else — so it is a composition-root obligation in ADR-0028 §4's
+                sense, exactly like the writer's above, and a root that wires a
+                processor minting fewer has mis-wired the loop. :meth:`learn` is
+                what stops a breach of it from being silent.
             retrieval_limit: How many memories a turn retrieves.
+            resolution_limit: How wide the single ranked read is that resolves an
+                unpinned correction's drawer (ADR-0122 §3). Deliberately its own
+                knob rather than a reuse of ``retrieval_limit``: the two answer
+                different questions, and a deployment tuning what an answer is
+                personalised from must not silently move what a correction is filed
+                under.
             now: Clock for goal timestamps; injectable so turns are
                 deterministic in tests. It no longer stamps temporary-store
                 expiry — that is the writer's own clock (ADR-0028 §4b), so a
@@ -168,18 +231,18 @@ class LearningLoop:
             id_factory: Supplies goal ids; injectable for the same reason.
 
         Raises:
-            TypeError: If ``retrieval_limit`` is not an integer (see
-                :func:`_check_tuning`).
-            ValueError: If ``retrieval_limit`` is below 1 (see
-                :func:`_check_tuning`).
+            TypeError: If ``retrieval_limit`` or ``resolution_limit`` is not an
+                integer (see :func:`_check_tuning`).
+            ValueError: If either is below 1 (see :func:`_check_tuning`).
         """
-        _check_tuning(retrieval_limit=retrieval_limit)
+        _check_tuning(retrieval_limit=retrieval_limit, resolution_limit=resolution_limit)
         self._context = context
         self._memory = memory
         self._writes = writes
         self._planner = planner
         self._feedback = feedback
         self._retrieval_limit = retrieval_limit
+        self._resolution_limit = resolution_limit
         self._clock = checked_clock(now, owner="LearningLoop")
         self._id_factory = id_factory
 
@@ -257,8 +320,9 @@ class LearningLoop:
     async def learn(self, event: FeedbackEvent) -> tuple[WriteOutcome, ...]:
         """Fold one piece of feedback back into memory.
 
-        Process, then delegate: the feedback becomes proposals, and each goes
-        through the injected **write stage** — the ratified
+        Resolve, process, then delegate: an absent ``memory_kind`` is resolved
+        first (:meth:`_resolved`, ADR-0122 §3), the feedback becomes proposals, and
+        each goes through the injected **write stage** — the ratified
         :class:`~ai_assistant.core.protocols.MemoryWriter` (ADR-0028 §4) plus the
         durable queue an ``ASK_USER`` ruling parks its question in (ADR-0078 §3).
         Conflicts, the policy's ruling and the write itself all happen behind that
@@ -297,17 +361,150 @@ class LearningLoop:
             queue did with a question the ruling deferred (``None`` when it raised
             none).
 
+        **An empty answer to a *resolved* event is a mis-wiring, not a deferral**
+        (ADR-0122 §7). The two look identical at the seam and mean opposite things.
+        Where the caller **pinned** the kind, no proposal keeps exactly the meaning
+        ADR-0009 §4 and §6 give it — a target this processor defers — and is
+        returned as the empty outcome it has always been. Where *this stage*
+        resolved the kind, it chose one from :data:`RESOLUTION_KINDS` **because**
+        the processor mints it, so an empty sequence says the composition root wired
+        one that does not; reporting it as "no update proposed" would drop a
+        correction on the strength of a wiring mistake. That is what makes §3's
+        untypeable obligation enforceable in the only way such an obligation can be:
+        not checked at wiring time, and not survivable at use time.
+
         Raises:
-            MemoryStoreError: If the writer failed to read conflicts or write a
-                record, or a ``REINFORCE`` or ``SUPERSEDE`` named a ``target_id``
-                that is not among them.
+            MemoryStoreError: If the resolution's read failed (:meth:`_resolved`),
+                or the writer failed to read conflicts or write a record, or a
+                ``REINFORCE`` or ``SUPERSEDE`` named a ``target_id`` that is not
+                among them.
             DeferralStoreError: If a deferred question could not be parked. The
                 ruling is already applied, so this surfaces rather than being
                 swallowed — with the earlier proposals applied, exactly as a store
                 failure leaves them.
+            RuntimeError: If the wired ``FeedbackProcessor`` proposed nothing for an
+                event *this stage* resolved (above). Deliberately outside the
+                ``AssistantError`` subtree, which ADR-0085 §10a fixes as the wire's
+                error vocabulary — the set of conditions a client can act on. A
+                mis-wired composition root is not one of them, and minting a member
+                for it would be authoring contract surface this lane may not author;
+                it is the shape ``orchestration`` already uses for a condition of its
+                own outside that vocabulary.
         """
-        proposals = await self._feedback.process(event)
+        resolved = await self._resolved(event)
+        proposals = await self._feedback.process(resolved)
+        if not proposals and event.memory_kind is None:
+            msg = (
+                f"the wired FeedbackProcessor proposed nothing for a correction this loop "
+                f"resolved to {resolved.memory_kind}; every kind in RESOLUTION_KINDS must be "
+                f"mintable by it (ADR-0122 §3, §7) — the composition root has mis-wired the "
+                f"loop, and the user's feedback is not being stored"
+            )
+            raise RuntimeError(msg)
         return tuple([await self._writes.write(proposal) for proposal in proposals])
+
+    async def _resolved(self, event: FeedbackEvent) -> FeedbackEvent:
+        """Return ``event`` with a ``memory_kind``, resolving an absent one (ADR-0122 §3).
+
+        **A pin is authoritative and suppresses the read** (§6). A ``memory_kind``
+        already present is the caller saying "I know which drawer, do not look", so
+        this returns the event untouched and issues nothing. A resolution that ran
+        and *then* deferred to the pin would perform a search whose result it
+        discards; one that ran and *overrode* it would silently discard a choice the
+        user stated. Neither is available.
+
+        **The intent decides how an absent one is resolved**, and the two arms are
+        not symmetric. A stated ``PREFERENCE`` establishes a ``PreferenceMemory`` by
+        its own intent — the user is not pointing at a stored belief, they are
+        stating one — so it resolves without a read. Omitting that arm would be a
+        defect rather than a missing shortcut: ``interfaces/cli.py`` states the same
+        asymmetry, but it binds one adapter, and *this* is where every producer's
+        event arrives. A programmatic ``FeedbackEvent(kind=PREFERENCE, ...)`` with no
+        ``memory_kind`` would otherwise be resolved by search, and a best-ranked
+        semantic neighbour would file the user's stated preference as a fact — the
+        wrong-drawer defect this stage exists to end, reproduced on the arm it was
+        never about.
+
+        A ``CORRECTION`` points at a belief that already exists, whose record type is
+        a property of *that* belief, so it is read from the store
+        (:meth:`_resolve_drawer`).
+
+        Raises:
+            MemoryStoreError: If the resolution's read failed. It propagates: see
+                :meth:`_resolve_drawer`.
+        """
+        if event.memory_kind is not None:
+            return event
+        if event.kind is FeedbackKind.PREFERENCE:
+            return event.model_copy(update={"memory_kind": MemoryKind.PREFERENCE})
+        return event.model_copy(update={"memory_kind": await self._resolve_drawer(event.content)})
+
+    async def _resolve_drawer(self, content: str) -> MemoryKind:
+        """Name the drawer a correction belongs in — **never a conflict** (ADR-0122 §3).
+
+        One ranked read, scoped to :data:`RESOLUTION_KINDS` and unscoped by band, and
+        the best-ranked record's kind is the answer. It applies no similarity
+        threshold and makes no ruling: it selects a kind and nothing else, and
+        whether a contradiction exists remains ``MemoryIngestor``'s and the
+        ``MemoryPolicy``'s question alone. A threshold here would duplicate
+        ``conflict_threshold`` in a subsystem that may not import the constant
+        holding it, and would drift from it silently. So a neighbour scoring below
+        the ingestor's threshold simply finds no conflict there and is stored as new
+        — today's outcome for that case, in the drawer the belief lives in rather
+        than a different one.
+
+        **``kinds`` is passed to ``search`` rather than applied afterwards**, and
+        that is load-bearing. A page fetched unscoped is a page of whatever ranked
+        highest, so a store holding many topically similar episodes returns them and
+        nothing mintable, whereupon §5 files a correction whose target was sitting
+        just below the cut. Passing ``kinds`` does not move the predicate before the
+        ranking cut — ADR-0113 §2 moves the band alone — but it puts this read on
+        exactly the footing ``MemoryIngestor._detect_conflicts`` already stands on.
+
+        **Where more than one drawer matches, the best-ranked wins**, and no second
+        proposal is minted (§4). Relevance is the only ordering this corpus admits:
+        ADR-0113 §4 makes the band an eligibility axis and "never an ordering one",
+        and a kind-preference rank invented here would be exactly the second ordering
+        term ADR-0112 §1 refuses, on a weaker signal. One utterance is one belief —
+        ``search`` returning neighbours in two drawers is a fact about the store's
+        contents, not evidence that the user holds two wrong beliefs.
+
+        **An empty read is a fact, and §5 answers it**: with no live target the
+        correction is a free-standing assertion, and ``SEMANTIC`` is the drawer for
+        one. Nothing is dropped, refused or held.
+
+        **A failure is not a drawer.** The read is not wrapped, so a raising store
+        aborts the ``learn``. This is the one place ``learn`` must not copy
+        ``respond``: a turn whose retrieval fails is answered with fewer memories and
+        says so through ``memory_degraded``, because an answer with less context is
+        still an answer — but a correction whose *type* could not be resolved is
+        about to be filed in a drawer chosen by the failure rather than by the
+        belief. §5's fallback answers "the store looked and holds nothing", a fact;
+        it may not be made to answer "the store could not look", which is not one. A
+        transient failure genuinely costs a ``learn`` that might have completed;
+        that is accepted, because a failed ``learn`` is a legible fault the user
+        retries and a mis-drawered belief is a silent one they do not know to.
+
+        **A stale resolution is benign and is not raced against.** This read happens
+        outside ``MemoryIngestor``'s lock, so a record can retire between it and the
+        probe; the correction then lands in a drawer whose target has just gone,
+        finds no conflict, and is stored as new — again the pre-existing outcome, in
+        a better drawer. Nothing is written on the basis of the resolution, so there
+        is nothing for a race to corrupt.
+
+        **Retrieval's reach is not claimed to be exhaustive.** A target ranked below
+        this one read is not found, exactly as ``_detect_conflicts`` states for
+        itself — "what it never surfaced is invisible here" — and it is issue #457's,
+        neither closed nor widened by this read.
+
+        Raises:
+            MemoryStoreError: As the store raises.
+        """
+        candidates = await self._memory.search(
+            content, limit=self._resolution_limit, kinds=RESOLUTION_KINDS
+        )
+        best = next(iter(candidates), None)
+        return MemoryKind.SEMANTIC if best is None else MemoryKind(best.kind)
 
     def _goal_from(self, utterance: str) -> Goal:
         """Mint the turn's goal from what the user said.
