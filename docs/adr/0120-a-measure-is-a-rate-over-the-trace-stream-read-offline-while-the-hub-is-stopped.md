@@ -372,15 +372,26 @@ of passes.
 > `r.records[TraceRecordSet.RETURNED].ids`. The same id returned by two
 > retrievals is two surfacings.
 
-> **Normative.** A surfacing `(r, i)` is **overturned within `s`** exactly when
-> some `MEMORY_WRITE` trace `w` satisfies all four of: `i` appears in
-> `w.records[SUPERSEDED].ids` or in `w.records[RETIRED].ids`, in a set eligible
-> under §2; `r ≺ w`; `w.occurred_at ≤ r.occurred_at + s`; and `w` is attributed
-> to a **user** seam under §3.
+> **Normative.** A `MEMORY_WRITE` trace `w` is a **candidate** for the surfacing
+> `(r, i)` when all four of: `i` appears in `w.records[SUPERSEDED].ids` or in
+> `w.records[RETIRED].ids`, in a set eligible under §2; `w` is attributed to a
+> **user** seam under §3; `r ≺ w`; and `w.occurred_at ≤ r.occurred_at + s`.
+
+> **Normative.** A surfacing is **overturned within `s`** exactly when some
+> candidate for it **began after the read had finished** — that is, when
+> `w.occurred_at ≥ r.occurred_at + r.elapsed`.
+
+> **Normative.** A surfacing that is not overturned within `s` and has at least
+> one candidate is **ambiguous**, and so is one whose read or whose candidate
+> carries no `elapsed`. An ambiguous surfacing leaves the population entirely, in
+> numerator and denominator alike.
+
+> **Normative.** The report states the count of ambiguous surfacings.
 
 > **Normative.** **Memory precision** over `(W, s)` is `1 − (overturned
-> surfacings ÷ surfacings)`. It is defined only when there is at least one
-> surfacing and the last retained trace's `occurred_at` is at or after `b + s`.
+> surfacings ÷ **non-ambiguous** surfacings)`. It is defined only when there is
+> at least one non-ambiguous surfacing and the last retained trace's
+> `occurred_at` is at or after `b + s`.
 
 > **Normative.** The **machine overturn rate** over `(W, s)` is the same ratio
 > computed with the **machine** seam set in place of the user set, under the same
@@ -429,12 +440,37 @@ displaced ids travel separately under `SUPERSEDED`. A definition that joined on
 make that distinction, which is ADR-0119 §3's reason for refusing "a flat
 sequence of ids".
 
-**Insertion order decides "later", and the residue is named.** A retrieval and a
-write whose emissions interleave — a long retrieval finishing after a write that
-began later — would be ordered by their appends rather than by their starts. The
-window is at most one emission latency wide, both candidate orders have a defect,
-and `occurred_at` has the worse one: ADR-0119 §7a rules it neither total nor
-stable, so a tie or an inversion there is unresolvable rather than merely rare.
+**"After" is an interval test and not an append test, and the difference is the
+whole of why a candidate is not automatically an overturn.** Insertion order is
+total and stable, which is why the walk uses it and why `r ≺ w` is a conjunct
+here. It is not causality: ADR-0119 §3 has the *emitter* stamp `occurred_at` at
+the start of the work and the trace appends at its end, so a write that began
+before a retrieval and was still in flight when the retrieval finished appends
+after it. Reading that as "the user subsequently retired the record" would count
+a correction that was already underway as evidence about a surfacing it could not
+have been a response to — and the window is as wide as the write's own duration,
+not as narrow as an emission latency. Both facts a trace needs to rule that out
+are on it already: `occurred_at` says when the work began and `elapsed` says how
+long it took, so "`w` began at or after `r` had finished" is computable, and it
+is the predicate §4 uses.
+
+**The overlap is excluded rather than resolved, and it leaves the denominator
+too.** A candidate whose interval overlaps the read is a pair the stream genuinely
+cannot order; guessing either way puts a fabricated fact in a measure. Counting it
+as an overturn inflates the numerator, and counting it as *not* overturned leaves
+it in the denominator as evidence of correctness, which is the same fabrication
+pointed the other way and is the direction §4 is already biased in. Dropping the
+surfacing from both is the disposition ADR-0119 §3 gives an unobserved quantity —
+say so — and the count of them is what tells an operator whether the exclusion is
+rare or is the measure.
+
+**Both instants come from the same wall clock and that is the residue that
+stays.** `occurred_at` is a `Clock` reading and `elapsed` is a `perf_counter`
+delta, so a wall clock stepping between two traces could order them wrongly
+however carefully the intervals are compared. `r ≺ w` is retained as a conjunct
+precisely because it is immune to that: a clock step cannot reorder appends. The
+pair is conservative in both directions, and no smaller residue is available from
+a stream that carries two instants and no third one.
 
 **Why the numerator is scoped to user-attributed writes and the machine rate is
 reported apart.** A consolidation job that supersedes a belief is the system
@@ -637,6 +673,7 @@ summary makes no claim about a population it might have lost rows from.
 **The stream-health counts are what let a reader distrust the rest.** The report
 states, over `W`: traces walked by kind; the count excluded as truncated, as
 unattributed, as unclassified, as malformed and as counter-inconsistent; the
+count of ambiguous surfacings; the
 instant of the oldest and newest retained traces; and every `CONFIGURATION`
 trace with the gap to the trace preceding it. ADR-0119's own consequences record
 that "the stream cannot report its own completeness" — traces lost to an
