@@ -1974,6 +1974,14 @@ class MemoryWriterContract:
         at the next sync. ADR-0092's Consequences names that merge as the kind of
         thing a later reader tidies; this case is what stops the tidy-up.
 
+        **ADR-0121 §5 widened the other set**, so the two now differ in *both*
+        directions — ``EXTERNAL`` is retirable and not foldable-onto,
+        ``USER_ASSERTED`` is foldable-onto (by an agreeing restatement) and not
+        retirable — and a merge is no longer even coincidentally harmless in one
+        direction. This case keeps its job unchanged: identity of content does
+        nothing to ADR-0092 §5's argument, because the next routine sync overwrites
+        the fold whether or not the user's words matched the import's.
+
         A ``SUPERSEDE`` of the same target is *permitted* — it mints a fresh id
         (ADR-0045 §4) — and the matrix case above covers it, which is what makes the
         distinction here about the **ruling** and not about the source pair.
