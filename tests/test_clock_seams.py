@@ -19,14 +19,19 @@ contract certifies consumers the real implementation will reject.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
 
 from ai_assistant.context.sources import ClockContextSource
 from ai_assistant.core.clock import ClockReadingError
-from ai_assistant.core.errors import ContextError, MemoryStoreError, PlanningError
+from ai_assistant.core.errors import (
+    ContextError,
+    MemoryStoreError,
+    PlanningError,
+    TraceStoreError,
+)
 from ai_assistant.core.types import (
     ActionPlan,
     CurrentContext,
@@ -40,20 +45,34 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor, SqliteMemoryStore
 from ai_assistant.orchestration import (
+    ConversationLifecycle,
+    Engine,
+    GrantOperations,
     LearningLoop,
     MemoryWriteStage,
+    ObservationStage,
+    QuestionStage,
+    StepExecutor,
+    StepRunner,
 )
 from ai_assistant.planning import InMemoryPlanStore, PlanExecution
 from ai_assistant.testing import (
+    FakeActionPolicy,
+    FakeAuditTrail,
     FakeContextProvider,
+    FakeConversationStore,
     FakeDeferralStore,
     FakeEmbedder,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
+    FakeObserver,
     FakePlanner,
     FakePlanStore,
+    FakeSourceGrantStore,
+    FakeToolInvoker,
+    FakeTraceRetention,
 )
 
 if TYPE_CHECKING:
@@ -208,6 +227,74 @@ async def _plan_execution(now: Clock) -> None:
     PlanExecution(now=now).start(_plan(), execution_id="e1")
 
 
+async def _engine(now: Clock) -> None:
+    """The façade's own clock, read only to place the trace horizon (ADR-0119 §10).
+
+    Every *other* collaborator is given a conforming clock, so the reading under
+    test is the engine's and not one borrowed from a stage it drives. Driven
+    through ``purge_expired``, the one operation that reads it: the maintenance
+    surface's retention sweep, where a horizon that is a duration has to become an
+    instant.
+    """
+    memory = FakeMemoryStore(now=lambda: _AWARE)
+    conversations = FakeConversationStore(now=lambda: _AWARE)
+    deferrals = FakeDeferralStore(now=lambda: _AWARE)
+    writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: _AWARE)
+    writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
+    plans = FakePlanStore(now=lambda: _AWARE)
+    invoker = FakeToolInvoker([])
+    await Engine(
+        loop=LearningLoop(
+            context=FakeContextProvider(),
+            memory=memory,
+            writes=writes,
+            planner=FakePlanner(now=lambda: _AWARE),
+            feedback=FakeFeedbackProcessor(),
+            now=lambda: _AWARE,
+        ),
+        runner=StepRunner(
+            plans=plans,
+            registry=invoker,
+            policy=FakeActionPolicy(),
+            trail=FakeAuditTrail(),
+            executor=StepExecutor(
+                plans=plans, registry=invoker, invoker=invoker, now=lambda: _AWARE
+            ),
+            now=lambda: _AWARE,
+        ),
+        plans=plans,
+        trail=FakeAuditTrail(),
+        memory=memory,
+        deferrals=deferrals,
+        traces=FakeTraceRetention(),
+        trace_retention=timedelta(days=365),
+        conversations=ConversationLifecycle(
+            conversations=conversations,
+            memory=memory,
+            retention=timedelta(days=30),
+            now=lambda: _AWARE,
+        ),
+        observation=ObservationStage(
+            observer=FakeObserver(),
+            conversations=conversations,
+            memory=memory,
+            writes=writes,
+            batch_size=20,
+            route="anthropic:claude-opus-4-8",
+        ),
+        questions=QuestionStage(
+            writer=writer, deferrals=deferrals, memory=memory, now=lambda: _AWARE
+        ),
+        grant_operations=GrantOperations(
+            store=FakeSourceGrantStore(),
+            sources=(),
+            id_factory=lambda: "grant-1",
+            clock=lambda: _AWARE,
+        ),
+        now=now,
+    ).purge_expired()
+
+
 #: Every seam ADR-0026 §7 covers, verified against the code rather than the table:
 #: ``FakeMemoryWriter`` is an eleventh the ADR's table predates (ADR-0028), and it
 #: is in scope for §7's reason — it is a canonical double (#186).
@@ -223,6 +310,9 @@ SEAMS = [
     Seam("FakeMemoryWriter", _fake_writer, MemoryStoreError),
     Seam("FakePlanner", _fake_planner, PlanningError),
     Seam("FakePlanStore", _fake_plan_store, PlanningError),
+    # A twelfth, later than the ADR's table (ADR-0119 §10): the façade reads a
+    # clock to place the trace horizon, so its error is the sweep's own.
+    Seam("Engine", _engine, TraceStoreError),
 ]
 
 
