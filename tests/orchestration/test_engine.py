@@ -1658,6 +1658,66 @@ async def test_a_keep_forever_horizon_does_not_call_the_trace_sweep_at_all() -> 
     assert len(traces.recorded) == 1
 
 
+async def test_a_horizon_longer_than_the_calendar_deletes_nothing_instead_of_failing() -> None:
+    """Accepted configuration must not break the operation it configures.
+
+    ``Settings`` refuses a trace horizon only for being non-finite or non-positive
+    (ADR-0119 §10), so ``P999999998D`` loads — three orders of magnitude past the
+    calendar. Subtracting one of those from any real clock reading overflows, and it
+    would overflow *inside* the maintenance operation, after both Tier 1 sweeps had
+    run, on every tick: a retention job that never completes because a setting asked
+    for more history than there are dates.
+
+    Saturating is not a guess about intent. A horizon nothing can predate deletes
+    nothing, which is what the setting asked for — and it stays distinguishable from
+    "keep forever", which does not call the sweep at all.
+    """
+    traces = FakeTraceRetention()
+    ancient = _aged(4000)
+    traces.hold(ancient)
+    harness = Harness(traces=traces, trace_retention=timedelta.max)
+
+    report = await harness.engine.purge_expired()
+
+    assert report.traces == 0, "0 says 'swept, deleted nothing', where None would say 'not swept'"
+    assert traces.recorded == (ancient,)
+
+
+async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -> None:
+    """The other end of the same arithmetic, and the reason the guard is a comparison.
+
+    ``checked_clock`` accepts any reading a day clear of ``datetime.min``
+    (ADR-0026 §3's localization margin), so a clock there is a *conforming* clock —
+    and the ordinary 365-day horizon underflows against it. An implementation that
+    guarded only the huge-``timedelta`` case would still fail here, which is why the
+    guard compares the gap rather than special-casing a value.
+    """
+    traces = FakeTraceRetention()
+    ancient = _aged(4000)
+    traces.hold(ancient)
+    harness = Harness(traces=traces)
+    facade = Engine(
+        grant_operations=_grant_operations(),
+        loop=harness.engine._loop,
+        runner=harness.engine._runner,
+        plans=harness.plans,
+        trail=harness.trail,
+        memory=harness.memory,
+        deferrals=harness.deferrals,
+        traces=harness.traces,
+        trace_retention=harness.trace_retention,
+        conversations=harness.conversations,
+        observation=harness.observation,
+        questions=harness.questions,
+        now=lambda: datetime.min.replace(tzinfo=UTC) + timedelta(days=1),
+    )
+
+    report = await facade.purge_expired()
+
+    assert report.traces == 0
+    assert traces.recorded == (ancient,)
+
+
 async def test_a_failing_deferral_sweep_does_not_reach_the_trace_sweep() -> None:
     """The third call inherits the second's fate, for the second's own reason.
 

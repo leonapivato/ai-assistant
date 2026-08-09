@@ -272,6 +272,49 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
+#: The oldest instant a horizon can name, and therefore one nothing predates.
+#: A valid ``UtcInstant`` — ``canonical_utc`` accepts it — though *not* a valid
+#: clock reading, which ADR-0026 §3 keeps a day clear of this boundary so a
+#: reading survives localization. A horizon is neither localized nor read from a
+#: clock, so the boundary itself is available to it.
+_INSTANT_FLOOR: Final = datetime.min.replace(tzinfo=UTC)
+
+
+def _horizon(now: datetime, retention: timedelta) -> datetime:
+    """The instant ``retention`` before ``now``, saturating at :data:`_INSTANT_FLOOR`.
+
+    **Saturating rather than raising, because the input is accepted
+    configuration.** ADR-0119 §10 refuses a horizon only for being non-finite or
+    non-positive, so ``trace_retention`` may be any positive duration a
+    ``timedelta`` can hold — up to 999999999 days, three orders of magnitude past
+    the calendar. Subtracting one of those from any real clock reading raises
+    ``OverflowError``, and it would do so *inside* the maintenance operation,
+    after the two Tier 1 sweeps had already run, on every tick — a hub whose
+    retention job never completes because a setting asked for more history than
+    there are dates.
+
+    The saturated answer is not a guess: a horizon nothing can predate deletes
+    nothing, which is exactly what "keep traces for longer than the calendar"
+    means. It stays distinguishable from "keep forever", which is ``None`` and
+    does not call the sweep at all (:attr:`PurgeReport.traces`).
+
+    Args:
+        now: The clock reading, already guarded by
+            :func:`~ai_assistant.core.clock.checked_clock`.
+        retention: The horizon's length; positive, per ``Settings``.
+
+    Returns:
+        The instant to sweep below.
+    """
+    # Computed as a comparison rather than caught as an ``OverflowError``: this
+    # subtraction is always representable (the widest possible gap between two
+    # datetimes is exactly ``timedelta.max``), so the guard is total without
+    # depending on which operation raises first.
+    if retention > now - _INSTANT_FLOOR:
+        return _INSTANT_FLOOR
+    return now - retention
+
+
 def _utcnow() -> datetime:
     """Read the instant the trace horizon is measured back from (ADR-0119 §10).
 
@@ -1036,6 +1079,9 @@ class Engine:
         **A horizon of ``None`` means the trace sweep does not run at all** (§10):
         "keep forever" is not a floor to pass, and :attr:`PurgeReport.traces` says
         ``None`` rather than ``0`` so that "off" is legible next to "found nothing".
+        A horizon *longer than the calendar* is a different case with the same
+        outcome: it saturates and deletes nothing rather than failing the whole
+        operation every tick (:func:`_horizon`).
 
         Tracked like every other public method, so shutdown drains it before
         closing the connections it is writing through (ADR-0042 §2). The order is
@@ -1080,14 +1126,16 @@ class Engine:
         third name joined the scan with the third call.
 
         The horizon is computed here and not held: ``trace_retention`` is a
-        duration, and the instant it means is only ever *this* sweep's.
+        duration, and the instant it means is only ever *this* sweep's. It
+        saturates rather than overflowing, because the arithmetic runs on
+        configuration this system accepts (:func:`_horizon`).
         """
         records = await self._memory.purge_expired()
         questions = await self._deferrals.purge()
         traces = (
             None
             if self._trace_retention is None
-            else await self._traces.purge_before(self._clock() - self._trace_retention)
+            else await self._traces.purge_before(_horizon(self._clock(), self._trace_retention))
         )
         return PurgeReport(records=records, questions=questions, traces=traces)
 
