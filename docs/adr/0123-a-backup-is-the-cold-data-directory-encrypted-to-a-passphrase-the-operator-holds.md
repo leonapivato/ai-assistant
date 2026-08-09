@@ -491,8 +491,9 @@ recovery are not symmetric acts and the asymmetry runs in the safe direction.
 > same terms as §2.
 
 > **Normative.** Restore leaves no partial directory behind. Where it refuses or
-> fails, it removes the target directory it created and everything in it, and it
-> removes no other directory on any path.
+> fails, it removes the files it materialised and the lock file it created, and
+> then removes the target directory itself only if that leaves it empty. It removes
+> no directory that is not empty, and it removes nothing recursively.
 
 **Restoring only into a directory the tool made is ADR-0104 §1's build-and-swap
 with the swap left to the operator.** Nothing that exists is modified, so there is
@@ -527,12 +528,35 @@ faster than a reader can hold them.
 about never exists.** A target path that already exists is refused outright, so
 there is no pre-existing file of any kind to classify; the lock is created inside a
 directory that came into being seconds earlier and that nothing else has ever seen;
-and a failed run removes that directory whole, so the retry after a mistyped
-passphrase finds nothing and simply works. The tool deletes only a directory it
-created in the same run, which is an invariant it establishes rather than trusts.
-The cost is stated rather than hidden: an operator who wants the target
-pre-created — on a particular mount, with particular permissions — creates its
-parent instead and lets the tool make the leaf.
+and a failed run undoes itself file by file, so the retry after a mistyped
+passphrase finds nothing and simply works. The cost is stated rather than hidden:
+an operator who wants the target pre-created — on a particular mount, with
+particular permissions — creates its parent instead and lets the tool make the
+leaf.
+
+**The cleanup removes named files and then an empty directory, never a tree, and
+that shape is chosen rather than incidental.** Everything above is reasoning about
+*pathnames*, and a pathname is not a handle: between the `mkdir` that creates the
+target and any later operation on it, a process running as the same user can rename
+the directory away and leave a symlink in its place, after which path-based
+operations act somewhere else. A recursive removal under those conditions is the
+one step whose mistake is unrecoverable, so it is the step this decision does not
+take — refusing to remove a directory that is not empty means a target that has
+been swapped for somebody else's directory fails the cleanup instead of emptying
+it.
+
+**What that does not do is make the write path race-free, and this ADR does not
+claim it does.** An extraction whose target path was swapped writes elsewhere, and
+closing that needs creation, locking, extraction and cleanup to be performed
+relative to a held directory descriptor — which would mean giving `InstanceLock` a
+descriptor-relative form, and hardening one tool while the hub, the re-embedder and
+the measures report resolve the same directory by path beside it. That is a change
+to a shared mechanism rather than to this decision, and it is filed as #889. The
+limit is disclosed here in the shape ADR-0104 §3 uses for its own residual window —
+"it does not close it, and it is not offered as closing it" — because the adversary
+it needs is one running as the user, who can already read the store, the trail and
+any artifact this tool writes, and because that is the same posture ADR-0083 §1
+takes when it makes the instance lock advisory and says so.
 
 **The general exposure in `InstanceLock` is untouched by this and is not this ADR's
 to close.** The hub, the re-embedder and the measures report all take the lock the
