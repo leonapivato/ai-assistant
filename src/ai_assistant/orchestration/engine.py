@@ -83,11 +83,12 @@ from typing import TYPE_CHECKING, Any, Final, TypeVar, assert_never
 
 import structlog
 
-from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     ConfigurationError,
     ConversationStoreError,
     PlanningError,
+    TraceStoreError,
     UnknownContinuationError,
 )
 from ai_assistant.core.types import (
@@ -1102,12 +1103,14 @@ class Engine:
                 to reach the rest would report a sweep that half happened.
             DeferralStoreError: If the deferral queue could not be swept. The trace
                 sweep does not run in that case, for the same reason.
-            TraceStoreError: If the trace store could not be swept. This one *does*
-                reach the caller, unlike an emission failure: ADR-0119 §5
-                subordinates the instrument to the work being observed, and a sweep
-                is not the work being observed — "a purge that silently did nothing
-                would let a store grow without bound behind a horizon an operator
-                believes is enforced".
+            TraceStoreError: If the trace store could not be swept, or the clock the
+                horizon is measured back from returned a non-conforming reading
+                (ADR-0026 §4, :meth:`_now`). The store failure *does* reach the
+                caller, unlike an emission failure: ADR-0119 §5 subordinates the
+                instrument to the work being observed, and a sweep is not the work
+                being observed — "a purge that silently did nothing would let a
+                store grow without bound behind a horizon an operator believes is
+                enforced".
         """
         self._reject_if_closing()
         return await self._tracked(self._purge_expired())
@@ -1135,9 +1138,37 @@ class Engine:
         traces = (
             None
             if self._trace_retention is None
-            else await self._traces.purge_before(_horizon(self._clock(), self._trace_retention))
+            else await self._traces.purge_before(_horizon(self._now(), self._trace_retention))
         )
         return PurgeReport(records=records, questions=questions, traces=traces)
+
+    def _now(self) -> datetime:
+        """The guarded clock's reading, as the error of the sweep that read it.
+
+        ADR-0026 §4: ``core`` raises a bare ``ValueError`` because it cannot know
+        what its caller will do with the failure, and "each subsystem translates at
+        its own boundary". `orchestration` has no error of its own, so a seam here
+        borrows "the error of the stage that read the clock" — goal construction
+        raises ``PlanningError``, expiry raises ``MemoryStoreError``, and this
+        reading exists only to place the trace horizon, so it raises
+        ``TraceStoreError``. Untranslated, a mis-wired clock would reach the hub's
+        scheduler as a raw ``ValueError`` from an operation whose failures are
+        otherwise all ``AssistantError``.
+
+        **Only ``ClockReadingError``**, never bare ``ValueError``: ADR-0026 §2
+        keeps the clock's *invocation* outside the guard, so a provider that is
+        simply down must reach the caller with its own type and cause intact. A
+        boundary catching ``ValueError`` cannot tell the two apart and would report
+        a bad reading for a broken clock.
+
+        Raises:
+            TraceStoreError: If the reading is naive, indeterminate, or outside the
+                localizable range.
+        """
+        try:
+            return self._clock()
+        except ClockReadingError as exc:
+            raise TraceStoreError(str(exc)) from exc
 
     async def ingest(self) -> IngestionReport:
         """Read the configured source once and propose what it read (ADR-0093 §6).
