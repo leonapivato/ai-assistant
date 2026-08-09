@@ -196,8 +196,15 @@ default, which costs artifact size and never costs data.
 > **Normative.** For each file it copies, the backup tool records the device,
 > inode, byte length and modification time before reading it and — for a SQLite
 > database — SQLite's own file change counter. After the whole copy completes it
-> re-reads all of them, and refuses the backup if any has changed. No artifact is
-> written on that refusal.
+> re-reads all of them, and refuses the backup if any has changed.
+
+> **Normative.** The backup tool refuses a destination path that already exists.
+
+> **Normative.** The backup tool writes the encrypted stream to a temporary path
+> in the destination's own directory, and moves it to the destination by a single
+> rename only after the re-read above has passed and §9 has either verified the
+> artifact or reported it written-but-unverified. On any refusal or failure it
+> removes that temporary file, and nothing is left at the destination path.
 
 This is ADR-0104 §5's clause with the subject changed, and every term of its
 reasoning transfers: the holder of a contended lock is a hub that is meant to be
@@ -229,6 +236,22 @@ same hazard, applied per file across the copy instead of across a resumption, an
 its stat fields are insufficient for the same reason ADR-0104 gives — a same-sized
 write inside one timestamp tick moves none of them — which is why SQLite's file
 change counter is read beside them.
+
+**The artifact is built beside its destination and moved into place, because the
+check it depends on can only run after the last byte is read.** The stream has to
+land somewhere before the re-read can say whether it was worth writing, and the two
+alternatives are both foreclosed: buffering a whole data directory in memory is not
+a design, and staging the plaintext breaks §4's clause and would put an unencrypted
+copy of the entire Tier 1 store on disk in the name of protecting it. So the tool
+builds the encrypted artifact under a temporary name and promotes it by rename —
+ADR-0104 §1's build-and-swap with the artifact as the subject, including its reason
+for the same-directory placement: `os.replace` "is atomic only within one
+filesystem and same-directory is the only placement that guarantees it without
+probing". Until the rename there is no artifact, only a partial file under a name
+nothing will mistake for one; after it there is an artifact that has passed every
+check this ADR requires. **Refusing a destination that already exists** is what
+keeps the rename from being able to destroy a good backup with a bad one, and it
+makes each artifact an explicit act rather than an overwrite.
 
 **It narrows the window; it does not close it, and it is not offered as closing
 it.** A writer that modifies a file and restores its length, mtime and change
@@ -313,8 +336,8 @@ question, rather than silently dropped.
 
 > **Normative.** A backup artifact is a single regular file: a `tar` stream of the
 > copied files and the §6 manifest, encrypted whole in the **age version 1** format
-> with an scrypt passphrase recipient. The tool writes no other artifact and no
-> plaintext copy of the stream.
+> with an scrypt passphrase recipient. The tool writes no plaintext copy of the
+> stream and no second artifact beyond the temporary file §2 requires.
 
 > **Normative.** The tool depends on no executable outside the Python environment
 > to write or to read an artifact. Any library it uses to do so clears
@@ -442,15 +465,16 @@ recovery are not symmetric acts and the asymmetry runs in the safe direction.
 
 ### 7. Restore builds a fresh data directory and replaces nothing
 
-> **Normative.** Restore materialises into a target directory that is absent or
-> empty, and refuses any other target. It never merges into, writes over, or
-> deletes an existing data directory.
+> **Normative.** Restore materialises into a target directory that is absent,
+> empty, or holds nothing but a `hub.lock`, and refuses any other target. It never
+> merges into, writes over, or deletes an existing data directory.
 
 > **Normative.** Restore takes `<data_dir>/hub.lock` in the target directory before
 > it materialises anything and holds it until it exits, on the same terms as §2.
 
 > **Normative.** Restore leaves no partial directory behind. Where it refuses or
-> fails after materialising anything, it removes what it materialised.
+> fails, it removes every file it materialised; the `hub.lock` its own lock created
+> may remain.
 
 **Refusing a non-empty target is ADR-0104 §1's build-and-swap with the swap left to
 the operator.** Nothing that exists is modified, so there is no path — including a
@@ -465,6 +489,19 @@ restart the hub is watching a path, and a directory that appears under it is a
 directory a hub will start against — mid-materialisation if nothing stops it.
 The lock is what stops it, using the mechanism ADR-0083 §1 already provides rather
 than a new one.
+
+**Tolerating a lone `hub.lock` is what keeps the first clause from making a
+failed restore unrepeatable.** Taking the lock creates the file — `InstanceLock`
+opens it with `O_CREAT` and its release "deliberately" does not unlink it — so a
+run that refuses *before* materialising anything, which is exactly what a mistyped
+passphrase or a too-new artifact produces, leaves behind precisely one file and
+would strand the target under an emptiness rule written without it. The operator's
+second attempt has to work, and it has to work without their first knowing that a
+file they never created is why it did not. Tolerating it costs nothing, because the
+file grants nothing: exclusivity is the kernel's lock and not the path's existence,
+which is the reasoning `InstanceLock.release` records for leaving it. A directory
+holding only that file holds no data by construction, so nothing can be silently
+written over.
 
 ### 8. Restore verifies what it can settle, and leaves to the hub what the hub already refuses
 
@@ -526,10 +563,11 @@ this tool.
 
 ### 9. A backup is proved by restoring it, and the drill is on a second machine
 
-> **Normative.** After writing an artifact, the backup tool verifies it by
-> decrypting it and materialising it into a temporary directory, applying every
-> check §8 requires, and removes that directory afterwards. A verification failure
-> is reported as a failed backup.
+> **Normative.** After writing the artifact and before §2's rename promotes it, the
+> backup tool verifies it by decrypting it and materialising it into a temporary
+> directory, applying every check §8 requires, and removes that directory
+> afterwards. A verification failure is reported as a failed backup, and §2's
+> refusal path removes the artifact.
 
 > **Normative.** Where the tool cannot complete that verification for a reason that
 > is not a failure of the artifact — no room for the temporary copy, a refused
@@ -550,9 +588,12 @@ verification runs, which is the trade ADR-0104 already priced for a personal sto
 of text and vectors, and it is bounded by the same reasoning.
 
 **Reporting an unverifiable backup as unverified rather than failed is ADR-0104
-§3's disposition and it is right for the same reason.** The artifact exists; an
-operator told the backup failed would delete it or take another, and what actually
-happened is that a check could not run. Two facts, reported separately.
+§3's disposition and it is right for the same reason.** The artifact is sound as
+far as anything can tell; an operator told the backup failed would delete it or
+take another, and what actually happened is that a check could not run. Two facts,
+reported separately — which is also why §2's rename proceeds on this path and not
+on a verification *failure*: an artifact nobody could check is worth keeping, and
+one that was checked and did not pass is not.
 
 **The drill is normative because the leg's exit test is a claim about a machine
 nobody has tried.** Everything above is verifiable on the laptop that wrote the
