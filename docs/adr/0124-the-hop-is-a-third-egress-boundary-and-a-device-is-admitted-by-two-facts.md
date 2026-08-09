@@ -2,8 +2,12 @@
 
 - Status: Accepted
 - Date: 2026-08-09
-- **This ADR partially supersedes ADR-0017 §1, and the record lands in this
-  change.** §12 applies ADR-0070 §1's test and finds ADR-0017 §1's two-boundary
+- **This ADR partially supersedes ADR-0017 and ADR-0004, and both records land in
+  this change.** ADR-0004's two clauses are §12's; each is scoped to the one thing
+  a device boundary makes unreachable — a hub-side delete cannot purge a keyring
+  entry on another machine (§6), and a client's bootstrap credential read cannot
+  take a gate that lives behind the connection it opens (§7). ADR-0017's is the
+  larger one: §12 applies ADR-0070 §1's test and finds ADR-0017 §1's two-boundary
   enumeration — "user data may leave the device only from `models/` or from a
   designated integration seam inside `tools/`; every other egress is a bug" —
   contradicted rather than joined. The new boundary is the remote transport in
@@ -566,27 +570,51 @@ narrowed to what it was always about — the databases the hub and the client op
 > no other purpose. No other code in the client reads it, it is never passed to the
 > engine surface, and it appears in no frame but the connect frame §7 requires.
 
-**ADR-0004 §7's Tier 0 gate cannot reach this read, and the reason is structural
-rather than a cost judgement.** §7 requires access to Tier 0 data to be "gated by
-the `permissions/` layer and recorded in an **audit trail**", and both of those are
-the hub's: `permissions/` runs inside the hub and the audit trail is a Tier 1 store
-the hub owns exclusively (ADR-0083). The read this section authorises is what makes
-the hub reachable at all, so gating it on the hub is circular — the client would
-have to connect in order to earn the right to read what it needs in order to
-connect. Building a second policy layer on the device is not the escape either: a
-spoke holds nothing authoritative (ADR-0094 §9), and an authority on the edge is
-the architecture this system is not.
+**ADR-0004 §7's Tier 0 gate cannot reach this read, so it is superseded for it —
+narrowly, with replacements — rather than left engaged and unmet.** §7 requires
+access to Tier 0 data to be "gated by the `permissions/` layer and recorded in an
+**audit trail**", and both are the hub's: `permissions/` runs inside the hub and
+the audit trail is a Tier 1 store the hub owns exclusively (ADR-0083). The read
+this section authorises is what makes the hub reachable at all, so gating it there
+is circular — the client would have to connect in order to earn the right to read
+what it needs in order to connect. A second policy layer on the device is not the
+escape either: a spoke holds nothing authoritative (ADR-0094 §9), and an authority
+on the edge is the architecture this system is not.
 
-**This is a *new* instance of #74's gap and is recorded as one rather than
-inherited.** ADR-0017 §2 named the ungated Tier 0 credential read in `models/` as
-**pre-existing** — it "would remain exactly as open if this ADR were rejected" —
-and that honest framing is not available here: this read would not exist if this
-decision were rejected. So the clause above states what *can* be constrained in
-§7's own spirit of minimisation — one purpose, one path, nothing else touches it —
-and the residual goes to **#74**, which now holds two credentials rather than one.
-The day a `SecretStore` lands with a gate in front of it (#892), this read is a
-candidate consumer, and §12 records that no sentence of ADR-0004 §7 changes
-meanwhile.
+**Filing it as a gap was the wrong instrument and an earlier draft did.** It cited
+ADR-0017 §2's treatment of the `models/` credential read and issue #74 — but that
+gap is **pre-existing**, in ADR-0017's own words "would remain exactly as open if
+this ADR were rejected", and this read would not exist if this decision were
+rejected. Architecture review put it exactly right: a known violation does not
+authorise adding another. Creating an access that a ratified clause requires to be
+gated, and shipping it ungated, changes what that clause governs, and ADR-0070 §1
+is categorical about the instrument for that.
+
+> **Normative.** ADR-0004 §7's gating clause is superseded **only** for a client's
+> bootstrap credential read — the read by which a client obtains the credential and
+> enrolled hub identity it needs to reach its own hub, and nothing else. Every
+> other Tier 0 and Tier 1 access, on the hub and on the device alike, stays under
+> §7 unchanged, and no lane may cite this clause to widen the exemption to a second
+> access.
+
+> **Normative.** Three replacements stand in the exemption's place, and an
+> implementation that omits any of them does not have it: the read is confined to
+> one purpose and one path (above); custody is the operating system's own access
+> control on the keyring, which is the mechanism ADR-0004 §3 itself chose, so the
+> access is gated by the OS where it cannot be gated by `permissions/`; and every
+> use of the credential is recorded at the hub, each admission and each refusal
+> with the device it named (§7), so what the credential was used for is auditable
+> even though the read that produced it is not.
+
+**The replacements are weaker than §7 and the difference is stated rather than
+smoothed over.** An OS keyring prompt is a custody control, not a policy decision
+traceable to a user's answer about *this* access; and a hub-side record of an
+admission tells an auditor the credential was used, never that it was read — a
+device that reads it and never connects leaves no trace anywhere. That is the price
+of a bootstrap secret, it is bounded to one value on one path, and it is paid
+visibly here rather than deferred to an issue that would have made it look
+temporary. **#74** stays open on its own subject, the `models/` credential, which
+this ADR does not touch.
 
 **Requiring the Protocol is this ADR's own ruling, not a restatement of ADR-0004
 §3, and the difference is worth being exact about.** §3 binds the *place* for every
@@ -814,23 +842,37 @@ restore by accident.
 > part of the same act, so no device is left holding a credential to a store that
 > no longer exists.
 
-**Deletion crosses the device boundary no better than revocation does, and the
-pair of clauses above is how far it can be taken honestly.** ADR-0004 §6 requires
-that "deleting the user's data purges Tier 0 (keyring entries) and Tier 1 (database
-rows) together", and before this decision there was one machine, so one delete
-reached everything. Now there are two, the hub may not dial a spoke (§10), and a
-device that is offline or out of the owner's hands cannot be purged from anywhere
-else. Splitting the obligation is what makes each half achievable: the device-side
-act purges what only that device can reach, and the hub-side act kills what only
-the hub can kill.
+> **Normative.** ADR-0004 §6's clause that "deleting the user's data purges Tier 0
+> (keyring entries) and Tier 1 (database rows) together" is superseded **only** as
+> it reaches an enrolled device's credential: a delete performed at the hub does
+> not purge that device's keyring entry, and the two clauses above are what stand
+> in its place. Everything else §6 grants — view, export, delete, retention rules,
+> and the purge of every Tier 0 and Tier 1 artifact on the hub's own machine — is
+> untouched.
 
-**What remains on an unreachable device is a dead value, and that is the bound on
-the exposure rather than a promise it does not exist.** A revoked credential
-verifies against nothing (§8's first clause) and the hub identity beside it is not
-a secret, so an orphaned entry opens no door. It is still a Tier 0 entry that
-ADR-0004 §6's guarantee did not reach, and this ADR says so rather than reporting
-a purge it cannot perform — the same refusal §8's prospective clause already makes
-about what a revoked device keeps.
+> **Normative.** A delete performed at the hub reports what it did not purge: the
+> devices whose local credential it could not reach, and the act at each that
+> purges it. It may not present itself as having purged everything.
+
+**Splitting it is not a workaround, and the supersession is owed because the
+guarantee genuinely changes.** ADR-0004 §6 was written when there was one machine,
+so one delete reached everything and the sentence needed no scope. This decision
+introduces the second machine, and the hub may not dial a spoke (§10) — so after
+it, a reader holding only §6 believes a delete purged every keyring entry and is
+wrong unless they also act at the device. That is ADR-0070 §1's second limb, a
+clause read more widely than it now holds, and an earlier draft called it a stacked
+addition on the ground that §6 "stays true of every installation it governs". §6
+says no such thing; the per-installation reading was this ADR's, imported to avoid
+a supersession it owed. Architecture review named it.
+
+**The residual is bounded and made visible rather than argued away.** A revoked
+credential verifies against nothing (§8's first clause) and the hub identity beside
+it is not a secret, so an entry stranded on an unreachable device opens no door —
+it is a dead value, not a live one. It is still a Tier 0 entry ADR-0004 §6's
+guarantee no longer reaches, which is why the second clause above makes the delete
+surface *say so*: the owner learns which devices they must still visit, instead of
+reading a completed purge that was partial. That is ADR-0083's ruling 4 applied to
+a data right — a fact the user reads rather than a silent shortfall.
 
 ### 9. This change does not bump `PROTOCOL_VERSION`, and here is the rule that decides when one does
 
@@ -1092,22 +1134,30 @@ Every ADR naming ADR-0017 was read for *what it relied on it for*:
   scope is "the `models/` and `tools/` layers", gains a third consumer. That
   contradicts no sentence of it and is a **stacked addition** under ADR-0082 §1:
   recorded in this ADR and nowhere else.
-  §6's **delete** clause — "deleting the user's data purges Tier 0 (keyring
-  entries) and Tier 1 (database rows) together" — stays true of every installation
-  it governs, which is what §8 above splits it into: an act at the device that
-  purges that device's entry, and an act at the hub that revokes every enrolment.
-  A reader holding only ADR-0004 §6 still writes a delete that purges both tiers;
-  what this ADR adds is a second place one has to run, which contradicts nothing.
-  **Stacked addition**, and §8 states the residual — an unreachable device's entry
-  is not purged — rather than claiming a purge it cannot perform.
-  §7's **Tier 0 gate** is engaged and unsatisfied, and this ADR neither amends nor
-  narrows it. §6 above shows the gate is structurally unreachable for the client's
-  bootstrap read — `permissions/` and the audit trail are the hub's, and the read
-  is what makes the hub reachable — and constrains what can be constrained
-  instead. Every sentence of §7 stays exactly as true, and exactly as unmet, as it
-  was for the `models/` credential read ADR-0017 §2 recorded against **#74**;
-  the difference, stated in §6 rather than glossed, is that this instance is new
-  rather than pre-existing.
+  **Two clauses of ADR-0004 are partially superseded**, and both records land in
+  this change on ADR-0004's `Status` line and in its appended dated note.
+
+  - **§6's delete clause** — "deleting the user's data purges Tier 0 (keyring
+    entries) and Tier 1 (database rows) together" — fails ADR-0070 §1's second
+    limb once a second machine exists: a reader holding only §6 believes a hub-side
+    delete purged every keyring entry, and after this decision it does not. §8
+    above supersedes it *only* for an enrolled device's credential, puts a
+    device-side unenrolment act and a hub-side revocation in its place, and
+    requires the delete surface to report what it could not reach. Every other
+    right §6 grants is untouched.
+  - **§7's gating clause** — Tier 0 access "gated by the `permissions/` layer and
+    recorded in an audit trail" — is superseded *only* for a client's bootstrap
+    credential read, which §6 above shows cannot take that gate without
+    circularity, and only against three named replacements. Every other Tier 0 and
+    Tier 1 access stays under §7 exactly as ratified, and §7's minimisation clause
+    is untouched.
+
+  Both were drafted as stacked additions and neither is one; architecture review
+  named both, and the reasoning that a known pre-existing gap (**#74**, the
+  `models/` credential) does not authorise a new one is adopted rather than
+  argued with. #74 stays open on its own subject.
+  §3's **keyring** rule is applied rather than narrowed, and §1's tiers, §4's
+  at-rest posture and §5's redaction are all used as given.
 - **ADR-0094 — no record owed.** §10a's marked clause is "Nothing in **this ADR**
   authorises a spoke that is not on this machine", a statement about what ADR-0094
   authorises, and it stays true — ADR-0094 still authorises none. §2's connection
@@ -1184,10 +1234,10 @@ Every ADR naming ADR-0017 was read for *what it relied on it for*:
 - **What the hop feeds** — a device as a context facet, a device-scoped permission
   input, and the audit trail's "approved from where" — is filed when the listener
   lands, as `docs/roadmap.md`'s leg 9 directs (§10).
-- **#74 gains a second credential.** ADR-0017 §2 recorded the `models/` provider
-  key as an ungated Tier 0 read against it; §6 above adds the device credential,
-  and is explicit that this one is new rather than pre-existing and that the gate
-  is structurally unreachable for a bootstrap read.
+- **ADR-0004 §6 and §7 are each partially superseded, narrowly** (§12). A hub-side
+  delete now reports the devices it could not purge, and one bootstrap credential
+  read is exempt from §7's gate against three named replacements. #74 is untouched
+  and stays open on the `models/` credential.
 - **#95 gains a second instance.** ADR-0017 §1 opened it for the question a
   write-capable integration raises about ADR-0004 §2's residency clause; §3 above
   adds the question an induced third-party control-plane record raises about the
@@ -1266,6 +1316,15 @@ overlay's operator changes what §3 enumerates.
   choice, and rejected in §7: the population that can reach the listener is the
   owner's own devices, so it hides nothing from anyone outside, while making a hub
   the owner cannot reach illegible — ADR-0083's ruling 4 failure.
+- **Filing the ungated bootstrap credential read as a gap against #74**, on
+  ADR-0017 §2's precedent for the `models/` credential. Rejected in §6 after
+  architecture review: that gap is pre-existing and this read is not, so the
+  precedent does not transfer, and a known violation does not authorise a new one.
+  The instrument is a narrow supersession with named replacements.
+- **Calling the split deletion a stacked addition on ADR-0004 §6**, on the ground
+  that §6 stays true per installation. Rejected in §8: §6 says nothing about
+  installations, so the per-installation reading was this ADR's own, imported to
+  avoid a supersession it owed.
 - **Deferring #872's version rule to its own lane.** Rejected in §9: the hop is the
   first deployment in which the two halves can genuinely differ, so deferring would
   ship the case the rule exists for while the rule is still unwritten. What is
