@@ -781,8 +781,9 @@ it does not establish that a recent artifact exists on the day it is needed.
 > operator names. It opens no network connection, and it transmits the artifact
 > nowhere.
 
-> **Normative.** The backup tool refuses a destination inside the data directory it
-> is copying.
+> **Normative.** The backup tool refuses a destination whose parent directory,
+> resolved through symbolic links, is at or beneath the resolved `Settings.data_dir`
+> it is copying. It applies that test before it creates §2's temporary file.
 
 > **Normative.** This ADR designates no seam under ADR-0017 §1, creates no opt-in
 > that would enable egress, and authorises no component to transmit a backup
@@ -810,8 +811,23 @@ encryption" — does not travel, and §4 and §5 are what replace the protection
 baseline stops providing at the edge of the machine.
 
 **Refusing a destination inside the source is a small rule about a real mistake.**
-A backup written into the directory it copies grows the next backup, and is on the
-disk whose loss is the event it exists for.
+A backup written into the directory it copies grows the next backup, and sits on
+the disk whose loss is the event it exists for. §2's temporary file makes the rule
+sharper than it first looks: the temporary is created in the *destination's* own
+directory, so a destination inside the source puts a growing encrypted file into
+the tree being walked, and a copy that reaches it is copying its own output.
+
+**The test is over resolved paths because a lexical one is not a containment test
+at all.** A destination named through a symbolic link — `/safe/backup.age` where
+`/safe` points at the data directory — passes any comparison of the strings and
+lands exactly where the rule exists to prevent. Resolving first is also what the
+corpus already does with this very path: `Settings` canonicalises `data_dir`
+deliberately, and `core/config.py` says why in as many words when it declines to do
+the same for a calendar source — `data_dir` has "a second location" derived from it
+(ADR-0084 §9's socket), so there is "a two-readers-disagreeing hazard to close".
+A containment check is a second reader of the same kind, and it is closed the same
+way. Applying it before the temporary file is created is what keeps the refusal
+from arriving after the write it was meant to prevent.
 
 ### 12. What this records against earlier ADRs, under ADR-0082 §1
 
