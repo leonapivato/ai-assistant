@@ -341,20 +341,20 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         # so putting a swept table beside ``memory.db``'s retention axes would be
         # three lifetimes in one file.
         #
-        # **Nothing is handed it yet, and that is this lane's boundary rather
-        # than an omission.** ADR-0119 §13d puts the emitters (§8) and the
-        # correlation carrier (§4) in later lanes; what lands here is the store
-        # itself, open and swept-able, so the seventh database is real before
-        # anything writes to it. When the emitters arrive each takes a
-        # ``TraceSink`` — this object, narrowed by the annotation on its
-        # constructor — and the ``Engine``'s maintenance operation takes it as a
-        # ``TraceRetention``. Nothing in the pipeline ever takes it whole (§7).
+        # **One object, handed out narrowed, and never whole** (§7). The
+        # ``Engine`` below is given it as a ``TraceRetention`` — the deletion
+        # seam — so the maintenance operation can sweep it and the pipeline
+        # cannot walk it. When the emitters arrive (ADR-0119 §13d defers §8's
+        # emitters and §4's correlation carrier to later lanes) each takes the
+        # same object as a ``TraceSink``, narrowed the same way, by the
+        # annotation on its own constructor. Nothing takes it whole.
         #
-        # **So ``settings.trace_retention`` is configured and not yet enforced**,
-        # and #852 is where the third call behind ADR-0083 §7's existing
-        # retention-purge operation lands (ADR-0119 §10). Stated here rather than
-        # left to be discovered, because a horizon an operator can set and nothing
-        # applies is exactly the shape that reads as working.
+        # **``settings.trace_retention`` is enforced from here** (#852): the
+        # engine measures the horizon back from its own clock and calls
+        # ``purge_before`` as the third call behind ADR-0083 §7's existing
+        # retention-purge operation (ADR-0119 §10). No new job, no new interval,
+        # and no store surface on the scheduler, which holds an ``Engine`` and
+        # nothing else.
         traces = SqliteTraceStore(path=directory / "traces.db")
         opened.append(traces.close)
 
@@ -436,6 +436,18 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             # user's own questions live in. A second queue here would report a cap
             # kept over rows nobody can see (ADR-0078 §1, §10 item 8).
             deferrals=deferrals,
+            # The seventh database's **deletion seam**, and the third store the one
+            # maintenance operation sweeps (ADR-0119 §10). The very object opened
+            # above, narrowed by the parameter's own annotation to
+            # ``TraceRetention``: the engine may sweep the trace store and may not
+            # walk it, because a pipeline that could read its own telemetry would be
+            # measuring a system that includes the instrument (§7).
+            traces=traces,
+            # The horizon that sweep measures back from, straight off ``Settings``
+            # (ADR-0119 §10). ``None`` — the disable sentinel — means keep forever
+            # and the sweep does not run; the default is 365 days, longer than any
+            # measurement window, and there is no count or size cap to configure.
+            trace_retention=settings.trace_retention,
             # The capture/lifecycle stage, holding *both* durable stores — the same
             # `memory` again, so a captured turn is retrievable and destroyable
             # through the surfaces the user already has (ADR-0074 §9). Its

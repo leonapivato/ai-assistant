@@ -11,19 +11,23 @@ concrete (CLAUDE.md golden rule 1).
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 from datetime import UTC, datetime, timedelta
 from itertools import count
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
 from ai_assistant.core.errors import (
     ConfigurationError,
+    DeferralStoreError,
     MemoryStoreError,
     PlanningError,
     ReaderError,
+    TraceStoreError,
     UnknownConversationError,
 )
 from ai_assistant.core.types import (
@@ -83,6 +87,7 @@ from ai_assistant.orchestration import (
     learn_outcome,
     presented_confidence,
 )
+from ai_assistant.orchestration import engine as engine_module
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, DrainPhase
 from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.testing import (
@@ -101,7 +106,9 @@ from ai_assistant.testing import (
     FakeSourceGrants,
     FakeSourceGrantStore,
     FakeToolInvoker,
+    FakeTraceRetention,
     ObservationGate,
+    evaluation_trace,
     source_grant,
 )
 
@@ -110,6 +117,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import (
         CurrentContext,
+        EvaluationTrace,
         Goal,
         MemoryRecord,
         MemoryWrite,
@@ -146,6 +154,12 @@ PATIENT = timedelta(seconds=30)
 
 #: The episodic horizon the harness's capture stage stamps with (ADR-0074 §7).
 RETENTION = timedelta(days=30)
+
+#: The trace horizon the harness's maintenance operation sweeps against
+#: (ADR-0119 §10). Deliberately *not* ``RETENTION``: the two are different
+#: settings over different tiers, and a shared value would let a sweep against
+#: the wrong one pass.
+TRACE_RETENTION = timedelta(days=365)
 
 #: The observation bounds and route the harness wires (ADR-0077 §1, §3). Both are
 #: the composition root's job in production; here they are fixed so a test can
@@ -276,6 +290,8 @@ class Harness:
         reader: object | None = None,
         queue_limit: int = 50,
         drain_timeout: timedelta | None = None,
+        traces: FakeTraceRetention | None = None,
+        trace_retention: timedelta | None = TRACE_RETENTION,
     ) -> None:
         self.plans = FakePlanStore(now=lambda: AT)
         self.trail = FakeAuditTrail()
@@ -368,6 +384,12 @@ class Harness:
             now=lambda: AT,
             id_factory=lambda: next(self.ids),
         )
+        # The trace store's *deletion* seam, and only that: ADR-0119 §7 gives the
+        # engine the purge and withholds the walk, so the harness hands it a
+        # ``FakeTraceRetention`` rather than the whole store — a fake that could
+        # walk would let a test assert a reach the production wiring does not have.
+        self.traces = traces if traces is not None else FakeTraceRetention()
+        self.trace_retention = trace_retention
         self.engine = Engine(
             grant_operations=_grant_operations(),
             loop=loop,
@@ -376,12 +398,17 @@ class Harness:
             trail=self.trail,
             memory=self.memory,
             deferrals=self.deferrals,
+            traces=self.traces,
+            trace_retention=trace_retention,
             conversations=self.conversations,
             observation=self.observation,
             questions=self.questions,
             ingestion=self.ingestion,
             closers=tuple(closers),  # type: ignore[arg-type]
             id_factory=lambda: next(self.handles),
+            # The whole harness runs at one instant, so the horizon the sweep
+            # measures back from is a figure a case can name (ADR-0119 §10).
+            now=lambda: AT,
             drain_timeout=drain_timeout,
         )
 
@@ -571,6 +598,8 @@ def _fresh_facade(harness: Harness) -> Engine:
         trail=harness.trail,
         memory=harness.memory,
         deferrals=harness.deferrals,
+        traces=harness.traces,
+        trace_retention=harness.trace_retention,
         conversations=harness.conversations,
         observation=harness.observation,
         questions=harness.questions,
@@ -683,6 +712,8 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
         trail=harness.trail,
         memory=harness.memory,
         deferrals=harness.deferrals,
+        traces=harness.traces,
+        trace_retention=harness.trace_retention,
         conversations=harness.conversations,
         observation=harness.observation,
         questions=harness.questions,
@@ -740,6 +771,8 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
         trail=harness.trail,
         memory=harness.memory,
         deferrals=harness.deferrals,
+        traces=harness.traces,
+        trace_retention=harness.trace_retention,
         conversations=harness.conversations,
         observation=harness.observation,
         questions=harness.questions,
@@ -789,6 +822,8 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
         trail=harness.trail,
         memory=harness.memory,
         deferrals=harness.deferrals,
+        traces=harness.traces,
+        trace_retention=harness.trace_retention,
         conversations=harness.conversations,
         observation=harness.observation,
         questions=harness.questions,
@@ -925,6 +960,8 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
         trail=harness.trail,
         memory=harness.memory,
         deferrals=harness.deferrals,
+        traces=harness.traces,
+        trace_retention=harness.trace_retention,
         conversations=harness.conversations,
         observation=harness.observation,
         questions=harness.questions,
@@ -1563,6 +1600,136 @@ async def test_a_failing_memory_sweep_does_not_reach_the_deferral_sweep() -> Non
     assert calls["questions"] == 0
 
 
+# --- the trace horizon, swept by that same operation (ADR-0119 §10) -----
+
+
+def _aged(days: int) -> EvaluationTrace:
+    """A trace stamped ``days`` before the harness's instant."""
+    return evaluation_trace("engine", occurred_at=AT - timedelta(days=days))
+
+
+async def test_the_purge_sweeps_the_trace_store_as_its_third_call() -> None:
+    """ADR-0119 §10 taken literally, and ADR-0078 §10 item 8 reaching a third store.
+
+    "ADR-0083 §7's retention-purge row already calls two purges through one
+    ``Engine`` maintenance operation; the trace purge becomes the third call behind
+    that same operation." So the claim is not merely that traces get swept — it is
+    that *this* operation sweeps them, with no new job, no new interval and no new
+    store surface on the scheduler.
+
+    The horizon is ``now - trace_retention`` and the bound is **strict**: the
+    contract says "a trace whose ``occurred_at`` is strictly before it is deleted;
+    one at the instant is kept". Asserted with a trace exactly on the horizon,
+    because an off-by-one there is invisible against any other fixture — every
+    plausible implementation deletes the 400-day-old one.
+    """
+    traces = FakeTraceRetention()
+    horizon = _aged(365)
+    recent = _aged(1)
+    traces.hold(_aged(400), horizon, recent)
+    harness = Harness(traces=traces)
+
+    report = await harness.engine.purge_expired()
+
+    assert report.traces == 1
+    assert traces.recorded == (horizon, recent)
+
+
+async def test_a_keep_forever_horizon_does_not_call_the_trace_sweep_at_all() -> None:
+    """``None`` means keep forever, so the sweep is skipped — not called with a floor.
+
+    ADR-0119 §10: the horizon is "an optional duration… where ``None`` means 'keep
+    forever'". A floor passed to ``purge_before`` would delete nothing *today* and
+    would be a horizon the moment somebody computed it from a different instant, so
+    the distinction has to be that no call is made.
+
+    Proven by scripting the seam to raise on any purge: a test that only inspected
+    the count would pass for an implementation that swept against
+    ``datetime.min``, since that deletes nothing either.
+    """
+    traces = FakeTraceRetention()
+    traces.hold(_aged(4000))
+    traces.fail_purge()
+    harness = Harness(traces=traces, trace_retention=None)
+
+    report = await harness.engine.purge_expired()
+
+    assert report.traces is None, "None says 'not swept', where 0 would say 'swept, found nothing'"
+    assert len(traces.recorded) == 1
+
+
+async def test_a_failing_deferral_sweep_does_not_reach_the_trace_sweep() -> None:
+    """The third call inherits the second's fate, for the second's own reason.
+
+    Nothing sequences the three, so the next tick re-runs all of them; swallowing a
+    Tier 1 failure to reach the trace store would report a sweep that half happened,
+    and would do it in the direction that matters least — the trace horizon is a
+    disk-space policy, where the deferral queue's is ADR-0078 §1's exposure cap.
+    """
+    traces = FakeTraceRetention()
+    traces.hold(_aged(400))
+    harness = Harness(traces=traces)
+
+    async def refuses() -> int:
+        msg = "the deferral queue is unreadable"
+        raise DeferralStoreError(msg)
+
+    harness.deferrals.purge = refuses  # type: ignore[method-assign]
+
+    with pytest.raises(DeferralStoreError):
+        await harness.engine.purge_expired()
+
+    assert len(traces.recorded) == 1
+
+
+async def test_a_failing_trace_sweep_reaches_the_caller() -> None:
+    """Unlike an emission failure, a purge failure is loud (ADR-0119 §5, §7).
+
+    §5 subordinates the instrument to the work being observed — "no trace-store
+    failure reaches the caller" — but a sweep is not the work being observed, and
+    the contract says so where it lives: "a purge that silently did nothing would
+    let a store grow without bound behind a horizon an operator believes is
+    enforced". The scheduler logs the failure and retries on the next tick.
+    """
+    traces = FakeTraceRetention()
+    traces.fail_purge()
+    harness = Harness(traces=traces)
+    calls = _counting_purges(harness, records=1, questions=1)
+
+    with pytest.raises(TraceStoreError):
+        await harness.engine.purge_expired()
+
+    # The two Tier 1 sweeps ran and are not undone: the next tick re-runs all three.
+    assert calls == {"records": 1, "questions": 1}
+
+
+def test_the_engine_never_reads_a_trace_back() -> None:
+    """ADR-0119 §7's third clause, at the first component that holds a trace seam.
+
+    "No component of the request pipeline… holds a seam carrying the walk, and none
+    reads a trace back." The type is the guarantee — ``TraceRetention`` has no
+    ``walk`` — but the type is erased at runtime and the composition root hands over
+    an object that *does*, so a call added here would work perfectly and be caught
+    by nothing. What the clause protects is the instrument's independence: a
+    pipeline that consults its own telemetry is measuring a system that includes the
+    instrument, and leg 8's whole question becomes circular.
+
+    Read out of the source rather than exercised, for the sweep guard's reason: a
+    runtime test could only show that the operations it happened to call do not
+    walk.
+    """
+    source = Path(engine_module.__file__).read_text(encoding="utf-8")
+    walks = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "walk"
+    ]
+
+    assert walks == [], "the engine reads a trace back, which ADR-0119 §7 forbids"
+
+
 # --- the ingestion operation (ADR-0093 §6) ------------------------------
 
 
@@ -1825,6 +1992,8 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
         trail=harness.trail,
         memory=harness.memory,
         deferrals=harness.deferrals,
+        traces=harness.traces,
+        trace_retention=harness.trace_retention,
         conversations=harness.conversations,
         observation=harness.observation,
         questions=harness.questions,
@@ -1890,6 +2059,8 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         trail=harness.trail,
         memory=harness.memory,
         deferrals=harness.deferrals,
+        traces=harness.traces,
+        trace_retention=harness.trace_retention,
         conversations=harness.conversations,
         observation=harness.observation,
         questions=harness.questions,
@@ -1921,6 +2092,8 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
             trail=harness.trail,
             memory=harness.memory,
             deferrals=harness.deferrals,
+            traces=harness.traces,
+            trace_retention=harness.trace_retention,
             conversations=harness.conversations,
             observation=harness.observation,
             questions=harness.questions,
@@ -1941,6 +2114,8 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
             trail=harness.trail,
             memory=harness.memory,
             deferrals=harness.deferrals,
+            traces=harness.traces,
+            trace_retention=harness.trace_retention,
             conversations=harness.conversations,
             observation=harness.observation,
             questions=harness.questions,

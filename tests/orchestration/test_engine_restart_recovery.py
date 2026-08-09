@@ -60,6 +60,7 @@ from ai_assistant.testing import (
     FakeObserver,
     FakeSourceGrantStore,
     FakeToolInvoker,
+    FakeTraceRetention,
 )
 
 if TYPE_CHECKING:
@@ -187,6 +188,12 @@ def _make_engine(
         trail=trail,
         memory=memory,
         deferrals=deferrals,
+        # The narrow deletion seam and its horizon (ADR-0119 §7, §10). This module
+        # is about a *restarted* façade recovering a durable park, and nothing here
+        # sweeps; a fresh fake per engine is therefore right — the trace store is
+        # not part of the durable state the second process re-reads.
+        traces=FakeTraceRetention(),
+        trace_retention=timedelta(days=365),
         conversations=ConversationLifecycle(
             conversations=conversations,
             memory=memory,

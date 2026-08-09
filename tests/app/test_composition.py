@@ -43,6 +43,7 @@ from ai_assistant.orchestration import Engine
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.readers import CALENDAR_READER_NAME
+from ai_assistant.testing import evaluation_trace
 from ai_assistant.tools import InMemoryToolRegistry
 
 
@@ -1249,7 +1250,7 @@ async def test_the_trace_store_joins_the_ordered_shutdown(
         await built[0].walk(limit=1)
 
 
-async def test_nothing_in_the_pipeline_is_handed_the_trace_store(
+async def test_only_the_maintenance_operation_is_handed_the_trace_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """ADR-0119 §7, at the one place a violation would be introduced.
@@ -1260,15 +1261,84 @@ async def test_nothing_in_the_pipeline_is_handed_the_trace_store(
     contract cannot see, because the store arrives by injection precisely so that
     a subsystem never names it.
 
+    **The engine's own attribute is the one permitted holder**, and it is the whole
+    of §7's middle seam: "a ``TraceRetention`` to the ``Engine``'s maintenance
+    operation, and the ``TraceStore`` itself to nothing in the pipeline". The
+    narrowing is the annotation on the constructor rather than anything done here,
+    which is why the object identity is the same and the *reach* is not — the same
+    arrangement ``SourceGrants``/``SourceGrantStore`` uses.
+
     Asserted by identity over the engine's reachable collaborators rather than by
     naming the ones that exist today, so a stage added later is covered without
-    this test being edited.
+    this test being edited. A stage handed the store would show up here as a second
+    path even though it is the same object.
     """
     built = _spy_on_traces(monkeypatch)
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         holders = _holders_of(engine, built[0])
-        assert holders == [], f"the trace store is reachable from {holders}"
+        assert holders == ["engine._traces"], f"the trace store is reachable from {holders}"
+    finally:
+        await engine.aclose()
+
+
+async def test_the_engine_sweeps_the_configured_trace_horizon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#852 end to end: a trace past the horizon is gone after the sweep runs.
+
+    The whole of ADR-0119 §10 wired together over the *real* store — the horizon
+    from ``Settings``, the instant from the engine's own clock, the deletion from
+    the seventh database — because every piece of it was already present and
+    nothing joined them: "a horizon an operator can set and nothing applies is
+    exactly the shape that reads as working".
+
+    Ages are far from the horizon on both sides, so the assertion is about the
+    wiring and not about a boundary a wall clock could cross mid-test. The strict
+    bound itself is pinned against the seam in ``tests/orchestration/test_engine.py``
+    and by the shared ``TraceRetentionContract``.
+    """
+    built = _spy_on_traces(monkeypatch)
+    settings = Settings(embedder=EmbedderKind.HASHING, trace_retention=timedelta(days=365))
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        store = built[0]
+        now = datetime.now(UTC)
+        await store.emit(evaluation_trace("stale", occurred_at=now - timedelta(days=400)))
+        kept = evaluation_trace("fresh", occurred_at=now - timedelta(days=1))
+        await store.emit(kept)
+
+        report = await engine.purge_expired()
+
+        assert report.traces == 1
+        assert [trace.id for trace in (await store.walk(limit=10)).traces] == [kept.id]
+    finally:
+        await engine.aclose()
+
+
+async def test_a_keep_forever_horizon_sweeps_no_trace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``None`` is the disable sentinel, and it reaches the sweep as "do not run".
+
+    ADR-0119 §10 gives the horizon ``episode_retention``'s convention — ``None``
+    means keep forever — so a deployment that set it has asked for a store nothing
+    deletes from. A composition that quietly substituted the default would destroy
+    exactly the unarmed baseline #829's natural experiment depends on, which is the
+    same loss §10 refuses a count cap over.
+    """
+    built = _spy_on_traces(monkeypatch)
+    settings = Settings(embedder=EmbedderKind.HASHING, trace_retention=None)
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        store = built[0]
+        ancient = evaluation_trace("stale", occurred_at=datetime(2001, 1, 1, tzinfo=UTC))
+        await store.emit(ancient)
+
+        report = await engine.purge_expired()
+
+        assert report.traces is None
+        assert [trace.id for trace in (await store.walk(limit=10)).traces] == [ancient.id]
     finally:
         await engine.aclose()
 
@@ -1586,23 +1656,41 @@ async def test_a_configured_but_missing_source_fails_at_run_time_and_not_at_buil
         await engine.aclose()
 
 
-#: The **one** place either Tier 1 sweep may be called from (ADR-0083 §11).
+#: Every place a sweep may be called from (ADR-0083 §11, ADR-0119 §10).
 #:
 #: A file *and a function*, not a file alone: the delegating call sites are the
 #: body of ``Engine._purge_expired`` and nothing else, so a second sweeper added
 #: further down the same module is caught exactly as one added in another package.
 #: Line numbers are deliberately absent — they churn on every edit above and would
 #: turn a real guard into a chore.
+#:
+#: **Three names, because there are three stores.** ADR-0119 §10 sends the trace
+#: purge to this same operation — "the trace purge becomes the third call behind
+#: that same operation" — on ADR-0078 §10 item 8's reasoning rather than a new
+#: one, so ``purge_before`` is guarded exactly as the first two names are.
+#:
+#: The last two entries are the canonical fakes **implementing** the seam, not
+#: scheduling a sweep: ``ai_assistant.testing`` is test-only and the composition
+#: root never imports it, so neither is reachable from a deployment. They are
+#: listed rather than excluded by directory, because an excluded directory is a
+#: hole in a guard whose whole value is that it has none.
 _SWEEP_HOME = frozenset(
     {
         ("orchestration/engine.py", "Engine._purge_expired", "purge_expired"),
         ("orchestration/engine.py", "Engine._purge_expired", "purge"),
+        ("orchestration/engine.py", "Engine._purge_expired", "purge_before"),
+        ("testing/traces.py", "FakeTraceRetention.purge_before", "purge_before"),
+        ("testing/traces.py", "FakeTraceStore.purge_before", "purge_before"),
     }
 )
 
 
+#: The three sweep names, one per store the maintenance operation reaches.
+_SWEEP_NAMES = frozenset({"purge", "purge_expired", "purge_before"})
+
+
 class _SweepScan(ast.NodeVisitor):
-    """Find every call to ``purge``/``purge_expired`` and the function it sits in.
+    """Find every call to one of :data:`_SWEEP_NAMES` and the function it sits in.
 
     **Receiver-blind, exactly as the pre-inversion guard was**, and ADR-0083 §11
     says that blindness is a *feature* here: it is what makes a sweep added under a
@@ -1632,7 +1720,7 @@ class _SweepScan(ast.NodeVisitor):
         self._scope.pop()
 
     def visit_Call(self, node: ast.Call) -> None:
-        if isinstance(node.func, ast.Attribute) and node.func.attr in {"purge", "purge_expired"}:
+        if isinstance(node.func, ast.Attribute) and node.func.attr in _SWEEP_NAMES:
             self.found.add((self._module, ".".join(self._scope) or "<module>", node.func.attr))
         self.generic_visit(node)
 
@@ -1659,11 +1747,16 @@ def test_only_the_scheduler_s_own_path_sweeps_either_store() -> None:
     leg 5 would have to remove".
 
     Leg 5 added that timer, so the assertion becomes an *equality with one named
-    place*: both sweeps are called from ``Engine._purge_expired`` and nowhere else,
+    place*: every sweep is called from ``Engine._purge_expired`` and nowhere else,
     which is the scheduler's own path — its ``retention_purge`` job is
     ``Engine.purge_expired`` bound, and this is where that method delegates. §11:
     "``swept`` equals *exactly* the scheduler's own path… so that a second bespoke
     sweeper added anywhere else still fails."
+
+    ADR-0119 §10 put a **third** store behind that one operation on the same
+    reasoning, so ``purge_before`` joined the scan with it. A trace sweep on a timer
+    of its own would be the second mechanism ADR-0078 §10 item 8 forbids, arriving
+    for the store whose horizon has no read-time enforcement to fall back on.
 
     **Deleting it was the wrong move**, and §11 says why: it is the only mechanical
     expression of ADR-0078 §10 item 8, and "an instruction not to build a second
@@ -1696,10 +1789,11 @@ def test_the_sweep_guard_still_catches_a_sweeper_added_somewhere_else(tmp_path: 
     tree while catching nothing. So the scan is run over a tree that *does* contain a
     second sweeper, and it must find it.
 
-    Three decoys, one per way a second mechanism could arrive: a different package
-    entirely, a *different function in the very module that is allowed to sweep*, and
-    a sweep of some other store under a name nobody enumerated. The middle one is
-    what a file-level allowlist would have missed, and the last is what
+    Four decoys, one per way a second mechanism could arrive: a different package
+    entirely, a *different function in the very module that is allowed to sweep*, a
+    sweep of some other store under a name nobody enumerated, and a trace sweep on a
+    timer of its own (ADR-0119 §10's own "no second sweeping mechanism"). The second
+    is what a file-level allowlist would have missed, and the third is what
     receiver-blindness buys (ADR-0083 §11 calls that blindness a feature).
     """
     (tmp_path / "orchestration").mkdir()
@@ -1720,13 +1814,19 @@ def test_the_sweep_guard_still_catches_a_sweeper_added_somewhere_else(tmp_path: 
         "async def tidy(trail):\n    await trail.purge()\n",  # some other store
         encoding="utf-8",
     )
+    (tmp_path / "instrument.py").write_text(
+        # A trace sweep of its own, which is what ADR-0119 §10 forbids by name.
+        "async def age_out(traces, horizon):\n    await traces.purge_before(horizon)\n",
+        encoding="utf-8",
+    )
 
     found = _sweep_call_sites(tmp_path)
 
-    assert found != _SWEEP_HOME, "the guard passed a tree with three foreign sweepers"
+    assert found != _SWEEP_HOME, "the guard passed a tree with four foreign sweepers"
     assert ("orchestration/engine.py", "Engine._tick", "purge") in found
     assert ("timer.py", "sweep", "purge_expired") in found
     assert ("other.py", "tidy", "purge") in found
+    assert ("instrument.py", "age_out", "purge_before") in found
 
 
 def test_the_sweep_guard_accepts_only_the_permitted_home(tmp_path: Path) -> None:
@@ -1735,17 +1835,33 @@ def test_the_sweep_guard_accepts_only_the_permitted_home(tmp_path: Path) -> None
     A scan that reported everything would also "still fail for a foreign sweeper",
     and would be useless — the guard has to be able to say yes. This pins that the
     permitted set is reachable, and that the thing making it reachable is the
-    enclosing function rather than the file: the same two calls moved into a sibling
-    method of the same class do **not** satisfy it.
+    enclosing function rather than the file: the same three calls moved into a
+    sibling method of the same class do **not** satisfy it.
+
+    The canonical fakes are written out too, because they are in the permitted set:
+    a fake *implementing* ``purge_before`` by delegating to its own rows is the
+    Protocol's behaviour, not a scheduled sweep, and ``ai_assistant.testing`` is
+    reachable from no deployment.
     """
     (tmp_path / "orchestration").mkdir()
+    (tmp_path / "testing").mkdir()
     permitted = (
         "class Engine:\n"
         "    async def _purge_expired(self):\n"
         "        await self._memory.purge_expired()\n"
         "        await self._deferrals.purge()\n"
+        "        await self._traces.purge_before(self._clock())\n"
     )
     (tmp_path / "orchestration" / "engine.py").write_text(permitted, encoding="utf-8")
+    (tmp_path / "testing" / "traces.py").write_text(
+        "class FakeTraceRetention:\n"
+        "    async def purge_before(self, instant):\n"
+        "        return self._rows.purge_before(instant)\n"
+        "class FakeTraceStore:\n"
+        "    async def purge_before(self, instant):\n"
+        "        return self._rows.purge_before(instant)\n",
+        encoding="utf-8",
+    )
     assert _sweep_call_sites(tmp_path) == _SWEEP_HOME
 
     (tmp_path / "orchestration" / "engine.py").write_text(
