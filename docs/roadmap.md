@@ -534,6 +534,16 @@ actions add surface to a model that is not learning, which is the failure mode
 measures are read as ADR-0120 defines them — rates over one window of the trace
 stream, offline — and the window is the one #829 opens.
 
+**What the ruling does not say is what happens when a rate is undefined.**
+ADR-0120 §1 makes a rate undefined rather than zero when its denominator is, and
+a window with no eligible retrievals or no direct user rulings is an ordinary
+early-use state rather than a pathology — so "flat" and "not falling" have no
+reading there, and neither releasing nor pausing follows from the text. Nor does
+the gate say how many comparable windows it takes before either verdict is
+available. This document does not fill that in, because the gate is the
+operator's ruling and its undefined arm is theirs to rule too; #881 carries the
+question.
+
 ### The dedicated box is an operating act, not a leg
 
 Ruled 2026-08-09 (#879). The hub will eventually run on an always-on machine of
