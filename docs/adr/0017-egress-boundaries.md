@@ -1,8 +1,45 @@
 # 17. Egress boundaries: `models/` is not the only one
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0124 (§1's rule as an exhaustive
+  enumeration of the components that may transmit, and §2's framing of those two
+  as the complete set of boundaries)
 - Date: 2026-07-19
 - Accepted: 2026-07-20
+- Partially superseded: 2026-08-09 by ADR-0124 — **two clauses, and §3 is not
+  among them.** ADR-0124 ratifies the hop off the device that ADR-0084 §1 and §11
+  named as owing its own egress decision, and authorises a **third** boundary: the
+  hub's remote listener, transmitting to a device the owner has enrolled.
+
+  **Replaced — §1's rule as an enumeration.** "User data may leave the device only
+  from `models/` or from a designated integration seam inside `tools/`; every
+  other egress is a bug." A reader acting on that sentence reads the hub's remote
+  listener as a bug and refuses to build it, which is what ADR-0084 §1 records that
+  reader doing. The live rule is ADR-0124 §1: `models/`, the designated `tools/`
+  seam, **or** the hub's remote listener to an enrolled device; every other egress
+  is still a bug.
+
+  **Replaced — §2's framing of the boundaries as two.** Nothing in §2 becomes false
+  about either boundary it describes; what fails is that its heading and
+  enumeration are read as the closed set of everything that may transmit. There are
+  three.
+
+  **Not replaced — §3, and this is the half that matters most.** Its fourteen
+  conditions are conditions on *designating the `tools/` egress seam*, and every
+  one of them stands undischarged. ADR-0124 §1 states in a marked clause that no
+  lane may cite it toward any of them; §3's list reaches the invocation ADR exactly
+  as it did before. `tools/` remains approved and undesignated, and transmits
+  nothing.
+
+  **Not replaced — and this is the larger half.** §2's account of what `models/`
+  transmits and the three pre-existing controls it lacks (#83, #74, #89); **§4's
+  argument, which is what licenses the widening** — that the rationale is about
+  egress being accountable "never about the number of accountable places", and that
+  "'One' was never argued for; it was a count of the subsystems that existed", two
+  being a count as well; §5's instrument argument; §6's treatment of the prior
+  amendment's declining clause; §7's record of what acceptance did to ADR-0004; §8's
+  deferred injected egress capability; and §9's open list. ADR-0004 §2's residency
+  and telemetry clauses stay untouched and unread, ADR-0124 §3 examining each and
+  finding it unengaged rather than narrowing either.
 - Supersedes: ADR-0004 §2's egress clause ("The **only** component permitted to
   send user data off-device is the `models/` layer… Every other egress is a
   bug"), as amended 2026-07-19. That clause is no longer the live rule; §1 below
