@@ -30,13 +30,20 @@ cancellation case runs against a canonical fake and not only against the
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Final
 
 import structlog
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import TraceStoreError
-from ai_assistant.core.types import EvaluationTrace, TraceChunk, TracePosition
+from ai_assistant.core.types import (
+    EvaluationTrace,
+    TraceChunk,
+    TraceKind,
+    TraceOutcome,
+    TracePosition,
+)
 from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
@@ -56,6 +63,53 @@ TRACE_NOT_RECORDED = "trace_not_recorded"
 #: floor (ADR-0119 §7a). Zero because these fakes key rows from one, exactly as a
 #: ``rowid`` does, so no issued position can collide with it.
 _FLOOR = 0
+
+#: The instant :func:`evaluation_trace` stamps unless a case says otherwise, so a
+#: case that is not about time does not have to invent one.
+DEFAULT_OCCURRED_AT: Final = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+
+
+def evaluation_trace(
+    seam: str = "seam",
+    *,
+    kind: TraceKind = TraceKind.OPERATION,
+    outcome: TraceOutcome = TraceOutcome.OK,
+    occurred_at: datetime | None = None,
+    **fields: object,
+) -> EvaluationTrace:
+    """Build a valid :class:`EvaluationTrace`, defaulting everything a case is not about.
+
+    The shape :func:`~ai_assistant.testing.grants.source_grant` has, and for the
+    same reason: a case about the walk's ordering should say what it is about and
+    nothing else, and a hand-built trace repeated thirty times is thirty chances
+    to get the fault-class invariant wrong in a way that reads as a contract
+    failure.
+
+    The ``id`` is deliberately **not** a parameter. ADR-0119 §3 mints it in the
+    type, no emitter reaches for ``id=`` at all, and a builder offering one would
+    put the accidental route back within reach of every test that copies it.
+    A case that needs two traces with one id passes the same object twice, or
+    ``model_copy`` — both of which say what they are doing.
+
+    Args:
+        seam: The seam label; a lowercase literal, as §2 requires of the real
+            thing.
+        kind: Which kind of event.
+        outcome: How it ended. A failing outcome needs a ``fault_class``, which
+            is passed through ``fields`` — the model refuses the mismatch.
+        occurred_at: When, defaulting to :data:`DEFAULT_OCCURRED_AT`.
+        **fields: Anything else, passed straight to the model.
+
+    Returns:
+        The trace.
+    """
+    return EvaluationTrace(
+        kind=kind,
+        seam=seam,
+        occurred_at=occurred_at if occurred_at is not None else DEFAULT_OCCURRED_AT,
+        outcome=outcome,
+        **fields,  # type: ignore[arg-type]  # the model validates what a case passes
+    )
 
 
 def _detached(trace: EvaluationTrace) -> str:
@@ -525,8 +579,10 @@ def _dropped(trace: EvaluationTrace, error: Exception) -> None:
 
 
 __all__ = [
+    "DEFAULT_OCCURRED_AT",
     "TRACE_NOT_RECORDED",
     "FakeTraceRetention",
     "FakeTraceSink",
     "FakeTraceStore",
+    "evaluation_trace",
 ]

@@ -277,7 +277,7 @@ class SqliteSourceGrantStore:
     this store's choice** (#564): no SQLite store in this tree sets one
     deliberately, so under cross-process contention ``BEGIN IMMEDIATE`` surfaces
     ``SQLITE_BUSY`` after the driver's default. Setting one here alone would make a
-    sixth store diverge from five; #564 is where the family changes together, and
+    store diverge from six; #564 is where the family changes together, and
     #563 holds the transaction-idiom half of the same question.
     """
 
@@ -326,7 +326,7 @@ class SqliteSourceGrantStore:
             # write leaves it on disk holding Tier 1 pages (ADR-0004 §1, §4). The
             # `BEGIN IMMEDIATE` below is exactly such a write. `connect` creates
             # the file, so there is something to restrict by the time this runs
-            # (#489; the five other SQLite stores have the same ordering).
+            # (#489; the six other SQLite stores have the same ordering).
             self._restrict_permissions()
             # `BEGIN IMMEDIATE` takes the write lock before the schema is
             # inspected, so the whole of create/index is **serialised against
@@ -375,7 +375,7 @@ class SqliteSourceGrantStore:
 
         A no-op in memory, where there is no file to restrict.
 
-        **Duplicated from the five other SQLite stores on purpose** (#506): the
+        **Duplicated from the six other SQLite stores on purpose** (#506): the
         family shares this method by copy today, and consolidating it is that
         issue's, not this lane's.
         """

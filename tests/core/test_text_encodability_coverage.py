@@ -148,6 +148,12 @@ def unvalidated_text_defaults(model: type[BaseModel]) -> list[str]:
     ``test_instant_coverage.py`` closes for :data:`UtcInstant`, and it is a hole
     in the *gate* rather than in the tree: no such default exists today.
 
+    ``validate_default`` is read from the **model's config** as well as from the
+    field, because pydantic honours it in both places and only the field-level
+    setting lands on the ``FieldInfo``. ``EvaluationTrace`` sets it once on
+    ``model_config`` for every field at once (ADR-0119 §13a), which is a stronger
+    statement than four per-field flags and was reported here as four omissions.
+
     A ``default_factory`` is flagged unconditionally, because what it will
     produce cannot be read off the declaration. A **literal** default is judged
     on the value: one that contains no ``str`` at any depth can smuggle nothing
@@ -158,11 +164,12 @@ def unvalidated_text_defaults(model: type[BaseModel]) -> list[str]:
     list, exactly as the annotation check is.
     """
     hints = get_type_hints(model, include_extras=True)
+    validates_every_default = bool(model.model_config.get("validate_default"))
     flagged = []
     for name, field in model.model_fields.items():
         if not _str_leaves(hints.get(name), guarded=False):
             continue  # not a text field at all
-        if field.validate_default:
+        if field.validate_default or validates_every_default:
             continue
         opaque_factory = field.default_factory is not None
         literal_text = not field.is_required() and _holds_text(field.default)

@@ -19,6 +19,7 @@ from ai_assistant.context import (
 )
 from ai_assistant.core.config import EmbedderKind
 from ai_assistant.core.errors import ConfigurationError, ModelError
+from ai_assistant.evaluation import SqliteTraceStore
 from ai_assistant.learning import ModelBackedObserver, RuleBasedFeedbackProcessor
 from ai_assistant.memory import (
     DefaultMemoryPolicy,
@@ -311,7 +312,8 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         )
         opened.append(deferrals.close)
         # The **sixth** connection-owning Tier 1 store (ADR-0102 §7), under the same
-        # data directory and the same owner-only file mode as the other five,
+        # data directory and the same owner-only file mode as the other five
+        # Tier 1 stores,
         # because what it holds is the record of what the user permitted. ADR-0083
         # ruling 4's exclusivity needs nothing new for it: it lives inside the
         # directory the instance lock already covers, is opened by the same process,
@@ -324,6 +326,31 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         # anything done here — "what the driver cannot do is *name* ``record``".
         grants = SqliteSourceGrantStore(path=directory / "grants.db")
         opened.append(grants.close)
+        # The **seventh** connection-owning store (ADR-0119 §6), and the first
+        # that is **Tier 2** rather than Tier 1: it holds numbers, opaque ids and
+        # durations about events, and never the content those events were about
+        # (§2). ADR-0083 ruling 4's exclusivity needs nothing new for it, on
+        # ADR-0102 §12's reasoning: it lives inside the directory the instance
+        # lock already covers, is opened by the same process, is closed in the
+        # same ordered shutdown, and is reached only through the API.
+        #
+        # **A database of its own rather than a table beside an existing one**
+        # (§6). Two reasons, and the second decides: a trace about a failed write
+        # inside the failed write's own database is lost exactly when it is most
+        # wanted, and this is the only store here with a decided deletion horizon,
+        # so putting a swept table beside ``memory.db``'s retention axes would be
+        # three lifetimes in one file.
+        #
+        # **Nothing is handed it yet, and that is this lane's boundary rather
+        # than an omission.** ADR-0119 §13d puts the emitters (§8) and the
+        # correlation carrier (§4) in later lanes; what lands here is the store
+        # itself, open and swept-able, so the seventh database is real before
+        # anything writes to it. When the emitters arrive each takes a
+        # ``TraceSink`` — this object, narrowed by the annotation on its
+        # constructor — and the ``Engine``'s maintenance operation takes it as a
+        # ``TraceRetention``. Nothing in the pipeline ever takes it whole (§7).
+        traces = SqliteTraceStore(path=directory / "traces.db")
+        opened.append(traces.close)
 
         # The context provider, assembled now that the grant seam exists. Its
         # calendar facet is registered only when a source is configured — a source
@@ -557,8 +584,14 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
                 # exposure cap did, and that is what has now been bought.
                 _as_async(deferrals.close),
                 # The grant store joins the same ordered shutdown as the other five
-                # (ADR-0083 ruling 4, ADR-0102 §7).
+                # Tier 1 stores (ADR-0083 ruling 4, ADR-0102 §7).
                 _as_async(grants.close),
+                # And the trace store as the seventh (ADR-0119 §6). Closed last
+                # because it is opened last, and the list is in open order — the
+                # façade drains in-flight work before any of them, so a trace
+                # written by an operation still finishing is written before this
+                # connection goes.
+                _as_async(traces.close),
             ],
             # The shutdown budget every production engine gets, hub and CLI alike
             # (ADR-0083 §4). It belongs here rather than on the ``Engine`` default

@@ -1102,6 +1102,16 @@ def test_every_duration_setting_is_discovered() -> None:
         "calendar_window_past",
         "calendar_window_future",
         "calendar_read_timeout",
+        # ADR-0119 §10's trace horizon. Acknowledged here rather than exempted,
+        # for the reason every duration above is: joining this tuple is what
+        # subjects it to the parametrised guards below. It follows
+        # ``episode_retention``'s convention exactly — finite by default, ``None``
+        # reachable only through the disable sentinel and meaning "keep forever" —
+        # and the positive bound matters here in the direction a retention setting
+        # fails worst: a zero or negative horizon sweeps *every* trace at the first
+        # purge, which is the instrument switched off by misconfiguration rather
+        # than by a decision.
+        "trace_retention",
     }
 
 

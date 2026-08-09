@@ -2159,7 +2159,7 @@ class Engine:
 
         * **Cancelling is not abandoning.** ADR-0054 makes a cancelled store call
           keep its connection until its worker thread physically finishes and
-          re-raise only then, uniformly across all six stores. So a cancelled
+          re-raise only then, uniformly across all seven stores. So a cancelled
           task's ``CancelledError`` arrives *after* the connection is free, and
           awaiting it is still ADR-0042 §2's "awaits every tracked underlying
           operation to quiescence… before closing", satisfied literally.

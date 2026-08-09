@@ -46,10 +46,12 @@ from ai_assistant.testing.readers import (
 )
 from ai_assistant.testing.tools import FakeToolRegistry
 from ai_assistant.testing.traces import (
+    DEFAULT_OCCURRED_AT,
     TRACE_NOT_RECORDED,
     FakeTraceRetention,
     FakeTraceSink,
     FakeTraceStore,
+    evaluation_trace,
 )
 from ai_assistant.testing.writer import FakeMemoryWriter
 
@@ -58,6 +60,7 @@ __all__ = [
     "DEFAULT_GRANTED_SOURCE",
     "DEFAULT_MAX_BATCH_SIZE",
     "DEFAULT_MAX_PROPOSALS",
+    "DEFAULT_OCCURRED_AT",
     "DEFAULT_READER_NAME",
     "TRACE_NOT_RECORDED",
     "FakeActionPolicy",
@@ -89,6 +92,7 @@ __all__ = [
     "ObservedBelief",
     "PolicyCall",
     "attested_proposal",
+    "evaluation_trace",
     "revocation_of",
     "source_grant",
     "succeeds",

@@ -31,8 +31,10 @@ from ai_assistant.core.errors import (
     ModelError,
     ReaderError,
     SourceNotGrantedError,
+    TraceStoreError,
 )
 from ai_assistant.core.types import GrantScope, Reversibility, RiskLevel
+from ai_assistant.evaluation import SqliteTraceStore
 from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.memory import MemoryIngestor, SqliteDeferralStore, SqliteMemoryStore
 from ai_assistant.memory import deferral_store as deferral_store_module
@@ -1158,7 +1160,7 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
 
     Asserted as a file on disk rather than through the object graph, because the
     claim ADR-0102 §12's normative clause makes is about the *directory* — the hub
-    owns six databases exclusively (ADR-0083 ruling 4), and the sixth obeys that
+    owns seven databases exclusively (ADR-0083 ruling 4), and the sixth obeys that
     ruling by living inside the directory the instance lock already covers.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
@@ -1173,10 +1175,126 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             "grants.db",
             "memory.db",
             "plans.db",
+            "traces.db",
         ]
         assert stat.S_IMODE((tmp_path / "grants.db").stat().st_mode) == 0o600
     finally:
         await engine.aclose()
+
+
+def _spy_on_traces(monkeypatch: pytest.MonkeyPatch) -> list[SqliteTraceStore]:
+    """Record every trace store the builder constructs, still building real ones.
+
+    A recording subclass rather than a stub, for ``_spy_on_deferrals``' reason: the
+    engine it is wired into is the real one, so the assertion is about the *built*
+    store rather than about a double standing where it would have been.
+    """
+    built: list[SqliteTraceStore] = []
+
+    class _Recorded(SqliteTraceStore):
+        def __init__(self, **kwargs: object) -> None:
+            super().__init__(**kwargs)  # type: ignore[arg-type]  # the root's own keywords
+            built.append(self)
+
+    monkeypatch.setattr(composition_module, "SqliteTraceStore", _Recorded)
+    return built
+
+
+async def test_the_trace_store_is_the_seventh_database_in_the_data_directory(
+    tmp_path: Path,
+) -> None:
+    """ADR-0119 §6, in the shape ADR-0102 §12's clause took for the sixth.
+
+    Asserted as a file on disk rather than through the object graph, because the
+    claim §6 makes is about the *directory*: ADR-0083 ruling 4's exclusivity needs
+    nothing new for a seventh store that lives inside the directory the instance
+    lock already covers, is opened by the same process, and is reached only
+    through the API.
+
+    Owner-only like the other six, and that is defence in depth rather than the
+    guarantee it is elsewhere: this is the one **Tier 2** store here, so ADR-0004
+    §4's mode is kept because a store that opted out of the family's posture is
+    the one #506 would have to bring back in.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        traces = tmp_path / "traces.db"
+        assert traces.exists()
+        assert stat.S_IMODE(traces.stat().st_mode) == 0o600
+    finally:
+        await engine.aclose()
+
+
+async def test_the_trace_store_joins_the_ordered_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store this layer opens is a resource this layer owns (ADR-0042 §2).
+
+    One left out of the façade's shutdown path is a connection leaked on every
+    session — and this is the store most likely to be forgotten, because nothing
+    in the pipeline holds it yet (ADR-0119 §13d puts the emitters in a later
+    lane), so no consumer's test would notice.
+
+    Asserted through ``walk`` rather than ``emit``: ``emit`` swallows every store
+    fault by contract (§5), so a closed connection is invisible there. The read
+    seam raises, which is what makes the closure observable at all.
+    """
+    built = _spy_on_traces(monkeypatch)
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+
+    await engine.aclose()
+
+    assert len(built) == 1
+    with pytest.raises(TraceStoreError):
+        await built[0].walk(limit=1)
+
+
+async def test_nothing_in_the_pipeline_is_handed_the_trace_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0119 §7, at the one place a violation would be introduced.
+
+    "No component of the request pipeline holds a seam carrying the walk, and none
+    reads a trace back." ``lint-imports`` stops a subsystem *importing* the
+    concrete; this stops the composition root *handing* one over — the route the
+    contract cannot see, because the store arrives by injection precisely so that
+    a subsystem never names it.
+
+    Asserted by identity over the engine's reachable collaborators rather than by
+    naming the ones that exist today, so a stage added later is covered without
+    this test being edited.
+    """
+    built = _spy_on_traces(monkeypatch)
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        holders = _holders_of(engine, built[0])
+        assert holders == [], f"the trace store is reachable from {holders}"
+    finally:
+        await engine.aclose()
+
+
+def _holders_of(root: object, target: object, *, depth: int = 4) -> list[str]:
+    """Every attribute path from ``root`` that reaches ``target``.
+
+    Bounded in depth and cycle-guarded, because an engine's object graph is deep
+    and partly cyclic; four levels reaches every stage and every store the
+    composition root wires.
+    """
+    found: list[str] = []
+    seen: set[int] = set()
+
+    def visit(subject: object, path: str, remaining: int) -> None:
+        if remaining == 0 or id(subject) in seen:
+            return
+        seen.add(id(subject))
+        for name, value in vars(subject).items():
+            if value is target:
+                found.append(f"{path}.{name}")
+            elif hasattr(value, "__dict__"):
+                visit(value, f"{path}.{name}", remaining - 1)
+
+    visit(root, "engine", depth)
+    return found
 
 
 async def test_the_drivers_and_the_grant_operations_share_one_store(

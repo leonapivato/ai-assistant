@@ -47,13 +47,24 @@ quantity: a count, a version, an ordinal or a limit. The bounded floats
 (``confidence``, ``importance``, ``strength``) keep their ``ge``/``le`` and are
 simply not this module's subject.
 
-**There is no exemption list**, and the one thing the walk declines to enter is
-not one. :data:`~ai_assistant.core.types.FrozenJson` reaches ``int`` because a
-client's JSON may contain a number; that ``int`` is a value in an audit record's
-payload rather than a field of this surface, and there is no quantity to bound.
-The walk stops at the alias, which covers both
-:data:`~ai_assistant.core.types.FrozenJsonValue` and
-:data:`~ai_assistant.core.types.FrozenJsonMapping` by one rule rather than two.
+**There is no exemption list**, and the two things the walk declines to enter
+are not one. Each is a *value in an open payload* rather than a field of this
+surface, so there is no quantity to bound:
+
+* :data:`~ai_assistant.core.types.FrozenJson` reaches ``int`` because a client's
+  JSON may contain a number; that ``int`` is a value in an audit record's payload.
+  The walk stops at the alias, which covers both
+  :data:`~ai_assistant.core.types.FrozenJsonValue` and
+  :data:`~ai_assistant.core.types.FrozenJsonMapping` by one rule rather than two.
+* :data:`~ai_assistant.core.types.TraceMetricValue` reaches ``int`` because a
+  trace's metric map is ADR-0119 §3's deliberately open numeric axis — "a new
+  number costs a line, and a new kind costs an ADR". A metric is whatever
+  quantity an emitter observed, and several are signed by nature: a delta between
+  two counts, a difference between a requested and an effective limit. §3's one
+  numeric constraint is **finiteness**, and it is on the value type where a floor
+  would be; flooring the axis at zero would refuse observations the design exists
+  to carry. The walk stops at the alias, which covers
+  :data:`~ai_assistant.core.types.TraceMetrics` by the same rule.
 """
 
 from __future__ import annotations
@@ -84,6 +95,8 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemorySource,
     Provenance,
+    TraceMetrics,
+    TraceMetricValue,
 )
 
 if TYPE_CHECKING:
@@ -163,6 +176,12 @@ def _the_field_would_accept(field: FieldInfo, value: object) -> bool:
     return True
 
 
+#: The two aliases the walk declines to enter, and why (see the module docstring).
+#: Identity rather than a name test: a same-named alias elsewhere is a different
+#: type, and this is the one place the sweep is deliberately not total.
+_OPEN_VALUE_AXES = (FrozenJson, TraceMetricValue)
+
+
 def _int_leaves(
     annotation: object, *, bounded: bool, seen: frozenset[int] = frozenset()
 ) -> list[bool]:
@@ -174,16 +193,17 @@ def _int_leaves(
     in a recursive alias, and is what stops :data:`FrozenJson` recursing forever
     on the branches it takes before the stop below.
 
-    The walk **stops at** :data:`FrozenJson` and reports nothing for it: its
-    ``int`` is a number inside a client's JSON payload, not a field of this
-    surface.
+    The walk **stops at** :data:`FrozenJson` and at :data:`TraceMetricValue`, and
+    reports nothing for either: the first's ``int`` is a number inside a client's
+    JSON payload, the second's is one observation on ADR-0119 §3's open numeric
+    axis, and neither is a field of this surface with a quantity to bound.
 
     ``bool`` is a subclass of ``int`` at runtime, but a field *annotated* ``bool``
     is the type ``bool`` and not the type ``int``, so the identity test below
     does not reach it — which is correct, since a flag has no magnitude to bound.
     A ``Literal[1]`` argument is likewise the *value* ``1`` rather than the type.
     """
-    if annotation is FrozenJson or id(annotation) in seen:
+    if annotation in _OPEN_VALUE_AXES or id(annotation) in seen:
         return []
     if isinstance(annotation, NewType | TypeAliasType):
         # Both wrap another type and pydantic validates them as what they wrap, so
@@ -414,6 +434,21 @@ def test_a_gt_bound_counts_and_a_ceiling_alone_does_not() -> None:
 def test_a_zero_lower_bound_is_not_read_as_a_missing_one() -> None:
     """The truthiness trap, pinned: ``ge=0`` is the bound this module exists for."""
     assert _declares_a_lower_bound([GE_ZERO]) is True
+
+
+def test_the_walk_does_not_descend_into_a_trace_metric_map() -> None:
+    """An observation on ADR-0119 §3's open numeric axis is not a field of this surface.
+
+    The sibling of the JSON stop below, and it fails the same way without it:
+    every ``EvaluationTrace`` would be reported unbounded, and the only remedies
+    would be an exemption list or a ``ge=0`` that refuses the signed observations
+    the axis exists to carry.
+    """
+
+    class _Traced(BaseModel):
+        metrics: TraceMetrics = Field(default_factory=dict)
+
+    assert unbounded_int_fields(_Traced) == []
 
 
 def test_the_walk_does_not_descend_into_a_json_holder() -> None:
