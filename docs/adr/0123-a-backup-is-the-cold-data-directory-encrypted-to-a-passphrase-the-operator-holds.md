@@ -722,9 +722,17 @@ this tool.
 > refusal path removes the artifact.
 
 > **Normative.** The verification directory is created with owner-only permissions
-> under a parent writable only by its owner, and is removed on every path out of the
-> run. Where no such location is available the tool materialises the store nowhere
-> and reports the backup written-but-unverified under the clause below.
+> under a parent writable only by its owner. Where no such location is available the
+> tool materialises the store nowhere and reports the backup written-but-unverified
+> under the clause below.
+
+> **Normative.** The verification directory is removed on every path out of the run
+> that the process can act on. Termination the process cannot intercept is outside
+> that guarantee and is not claimed by it.
+
+> **Normative.** The verification directory is created at a path a later run
+> recognises as one, and a run removes any it finds from an earlier run before it
+> materialises its own.
 
 > **Normative.** Where the tool cannot complete that verification for a reason that
 > is not a failure of the artifact — no room for the temporary copy, a refused
@@ -748,6 +756,20 @@ than how briefly it is there. Routing an unavailable location to the
 written-but-unverified outcome rather than to a new one is what keeps that rule
 from costing the backup: the artifact is still written, and the thing the tool
 declines to do is the thing it could not do safely.
+
+**A guarantee of removal "on every path" would have been a claim no process can
+make, and the gap it hid is the exact state the rule exists to prevent.** A
+`SIGKILL`, a lid closing on a dying battery, a power cut — none of them runs a
+cleanup handler, and what is left behind is a complete plaintext copy of the Tier 1
+store sitting under a name nothing remembers. Owner-only permissions bound who can
+read it and do not bound how long it stays. So the guarantee is stated at the size
+a process can actually keep, and the remainder is closed from the other end: the
+directory is created at a path a later run recognises, and a later run sweeps one
+before making its own. That is ADR-0104 §2's disposition for its own interrupted
+work store, which the next run discards rather than trusts, and it means the window
+is bounded by the next backup rather than by nothing. It is not bounded by anything
+if no later backup is ever taken, which is the same residue §10 already names about
+a schedule that lapses.
 
 **Verifying by restoring is the only verification that answers the question.** A
 checksum over a file proves the file is the file; it does not prove the artifact
