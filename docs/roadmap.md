@@ -1,4 +1,4 @@
-# Roadmap — accumulation first: the user model, observation, and the hub
+# Roadmap — accumulation, then inhabitation: the user model, the hub, and living in it
 
 **Status: working guidance, not a ratified decision.** This document is the
 tactical companion to [`VISION.md`](../VISION.md): the *why* and *what* live
@@ -34,6 +34,20 @@ user's to steer — because a system that learns only by dictation is the
 Everything else, including capability breadth, is sequenced behind
 **accumulation**.
 
+**That arc closed on 2026-08-09, and this revision adds the one after it.**
+Legs 1–8 built the loop and then the instrument that judges it; leg 8's exit
+test was ruled met by the operator on 2026-08-09 (#878), on the evidence of the
+QA run recorded in #862 and after the two defects that run surfaced were decided
+and fixed the same day (#865, ADR-0121, ADR-0122). What the accumulation arc
+does *not* have is use. Every mechanism in it has been exercised by an operator
+driving a laptop hub deliberately; none of it has accumulated from a life being
+lived around it, and a flywheel nobody turns measures the same as one that does
+not work. So the binding constraint moves from *can the system accumulate?* to
+**is it there to accumulate from** — reach, duty cycle, and a reason to open it
+tomorrow. That theme is **inhabitation**, and the operator's ruling of
+2026-08-09 that sets it is recorded in #879; the arc section below transcribes
+that ruling rather than re-deriving it.
+
 ## Design stances
 
 These are premises this roadmap sets, not measurements (ADR-0019 §3). Each
@@ -58,7 +72,8 @@ interaction-implicit learning language covers.
    there. Tools that *act* on the world arrive later and in bulk (MCP-shaped),
    behind the contract decisions they force — ranking (#241), parameter-schema
    enforcement (ADR-0029 §7), and the rest of the egress conditions; that is
-   where the egress decision is now expected to be spent.
+   where the egress decision is now expected to be spent, and it is **leg 12**
+   that is now scheduled to spend it.
 3. **Hub and spokes, with one spoke for now.** One resident service — the hub —
    owns all state and intelligence; every interface is a stateless client of
    its API. Conversations, memory, and identity live server-side and are
@@ -67,11 +82,12 @@ interaction-implicit learning language covers.
    time being is the
    CLI on the hub's own machine, over a loopback Unix socket in the data
    directory. All large network constraints — transport security, device
-   identity and enrolment, push delivery, backup — are deliberately deferred
-   until a second physical device matters (see the later arc), and ADR-0084 §1
-   and §11 fix the price of crossing that line: a non-loopback hop is user data
-   leaving the device, so it engages ADR-0017 §1 and owes its own ratified
-   decision. It is not reached by swapping an address family. The caution this
+   identity and enrolment, push delivery, backup — were deliberately deferred
+   until a second physical device matters, and that is **leg 9**, where they now
+   come due. ADR-0084 §1 and §11 fix the price of crossing that line: a
+   non-loopback hop is user data leaving the device, so it engages ADR-0017 §1
+   and owes its own ratified decision — leg 9's first contract question. It is
+   not reached by swapping an address family. The caution this
    stance carried before the hub existed — that a slice must not bake in
    single-shot or single-client assumptions — is now the standing rule above
    rather than advice: a subsequent interface is a client of the API or it is not
@@ -97,7 +113,7 @@ Proving this loop end to end — a belief the user never dictated, formed from
 observation, visible to them, correctable by them, and improving a later turn —
 is worth more than any breadth this roadmap defers.
 
-## The legs, in order
+## The accumulation arc, in order — legs 1–8, closed 2026-08-09
 
 Each leg decomposes into ADR-backed slices when it is dispatched, contract
 first (`CLAUDE.md`). An exit test is stated in product terms, honouring the
@@ -300,7 +316,7 @@ behind the hub's API.
    in hand (ADR-0073 §4, §10). The exit test's second half rests on a surface
    nothing offers yet: `ActionPolicy` governs *actions*, not sources, so "you may
    read my calendar" has nowhere to be recorded, and the grant model is its own
-   decision (#629). *Exit: the assistant knows something true about
+   decision (#629), now scheduled as leg 11. *Exit: the assistant knows something true about
    the user's day it was never told, from a source the user granted.*
 7. **Memory at volume.** Decided and built (ADR-0110 through ADR-0116; the
    batch record is #729). Consolidation is a chunked scheduler job resuming
@@ -334,66 +350,225 @@ behind the hub's API.
    half is handed to leg 8 as an entry claim, because it needs
    the memory-precision measure leg 8 builds; a claim this leg has no instrument
    for is one it would assert rather than test.*
-8. **Minimal evaluation.** The `EvaluationTrace` slice — Tier-2 operational
-   data, no egress (ADR-0004) — plus a first few of VISION.md's success
-   measures: memory precision, correction rate, repeated-explanation rate. This
-   is also the hub's operational telemetry; a process that runs for weeks
-   cannot be debugged by rerunning it. Memory precision is also what answers the
-   half of leg 7's exit test leg 7 hands over — whether months of use made
-   retrieval noisier — so that claim enters here rather than closing there.
+8. **Minimal evaluation.** Decided and built (ADR-0119, ADR-0120; the batch
+   record is #846). A trace is an event **at a seam** that references what it is
+   about and never contains it, which is how Tier-2 operational data stays
+   Tier 2 under ADR-0004 (ADR-0119); a measure is a **rate over one window of
+   that stream**, computed offline by `ai-assistant-measures` while the hub is
+   stopped, so the instrument never competes with the process it measures
+   (ADR-0120). The three measures are VISION.md's first few — memory precision,
+   correction rate, repeated-explanation rate. The trace store is the hub's
+   seventh database, and this is also the hub's operational telemetry; a process
+   that runs for weeks cannot be debugged by rerunning it. Memory precision is
+   also what answers the half of leg 7's exit test leg 7 hands over — whether
+   months of use made retrieval noisier — so that claim entered here rather than
+   closing there.
    *Exit: "is the user model getting more accurate?" is answered by data, not
-   opinion.*
+   opinion.* **Ruled met by the operator (2026-08-09, on #878)**, on the QA run
+   recorded in #862: every ruled behavior had a reachable producer in a live hub,
+   and the first data the instrument produced immediately found two ways the
+   model was *not* getting more accurate — which is the exit test working rather
+   than a qualification on it.
+
+   **Those two findings were decided and fixed before the arc closed, not
+   carried.** #863 — a direct restatement never reinforced, so the
+   repeated-explanation rate's numerator had no live producer at a direct seam —
+   is decided by **ADR-0121**: an agreeing restatement is ruled agreement, not
+   conflict. #864 — `learn --kind correction` minting a proposal whose kind hid
+   its target from the kind-scoped conflict probe, leaving the wrong belief
+   standing — is decided by **ADR-0122**: a correction's record type is resolved
+   from its target, not declared by its caller. Both ADRs and both
+   implementations merged 2026-08-09 (#865), so the arc that follows starts from
+   the fixed policy rather than measuring around it.
+
+   **The residual is that the measures have not yet been read over a life.** The
+   instrument answers, but the window it has answered over is a fourteen-minute
+   scratch run driven deliberately by an operator. #829's entry ruling owns what
+   comes next and stays an **operating act rather than a leg**: the measurement
+   window opens with consolidation **unarmed** so a precision/latency baseline
+   accumulates first, and consolidation then arms **mid-window as a dated
+   intervention**. That ordering is not fussiness — the first arming on a real
+   store is a one-shot natural experiment, because consolidation writes durably
+   and unarming later restores no control. #865's close-out (2026-08-09)
+   sequences the window's opening immediately behind the fix batch. The boundary
+   issues those lanes filed rather than absorbed (#868–#873, #876, #877) stay in
+   the tracker; #876 and #868 are together why the repeated-explanation rate is
+   read as a lower bound rather than a rate.
+
+**The arc closed here.** Every leg met its exit test, the last of them on
+2026-08-09. Their residuals are named in the entries above and live in the
+tracker and the ADR ledger rather than in a status line here. What the arc did
+not build is any reason for the loop to keep running once the operator stops
+driving it — which is what the next one is for.
+
+## The inhabitation arc, in order — legs 9–12
+
+The direction is the operator's ruling of 2026-08-09, recorded in #879. The
+rules are the accumulation arc's, unchanged: each leg decomposes into ADR-backed
+slices when it is dispatched, contract first, and a gap closes when a user can
+exercise the capability rather than when a test can. Exit tests below are this
+document's proposals in the usual way — the operator rules them met, as on legs
+7 and 8 — except leg 9's, which is the ruling's own.
+
+**The theme is inhabitation.** The accumulation machinery exists and is now
+measured; what it lacks is a life to accumulate from. Every leg here buys reach,
+duty cycle, or a reason to open the assistant tomorrow, and the arc is ordered so
+the cheapest of those comes first.
+
+9. **Reach and daily use.** The leg that makes the hub something the owner lives
+   in rather than something they drive. Four things, in this order:
+
+   - **Backup and restore, as the first slice and not a mid-leg one.** Daily
+     accumulation is about to happen on one laptop holding the only copy of the
+     store; that is the plan's single fragile spot, and it is fragile from the
+     day accumulation starts rather than from the day the leg ends. It is also
+     the honest test of VISION.md's portable context-graph claim, which nothing
+     has yet had to satisfy.
+   - **The hop decision.** A spoke off the device moves user data off the
+     device, which ADR-0017 §1 governs and which no wire format can
+     pre-authorise (ADR-0084 §1, §11). The leading candidate is an **overlay
+     network** keeping the API off the public internet — Tailscale specifically,
+     whose device identity is also a candidate first occupant of the credential
+     slot ADR-0084 reserved and the loopback transport carries nothing in. A
+     leading candidate is not the decision: the ADR is this leg's first contract
+     question.
+   - **A remote listener beside the loopback socket**, not instead of it. The
+     three expensive retrofits ADR-0084 bought in advance and leg 5 shipped — a
+     versioned connect handshake, a defined place for a credential, a client
+     stateless by decision — are what make this additive rather than a rewrite.
+   - **A live calendar.** Leg 6's `Reader` gets a source kept fresh by a
+     co-located `vdirsyncer` — the stronger of the two source patterns ADR-0095
+     names, and one where the network is the fetcher's and never the seam's, so
+     ADR-0017 §3 stays unspent here for exactly the reason it did in leg 6.
+
+   *Exit: the assistant is in daily use — ordinary conversations on ordinary
+   days, reachable from somewhere other than the hub's own machine, and losing
+   the laptop does not lose the model.*
+
+   **What the hop feeds once it lands**, inherited from the later-arc entry this
+   leg replaces: a context facet (device is a VISION §Principle-4 input), a
+   permission input (which devices may approve consequential actions —
+   ADR-0004's deferred catalogue gains a sibling), and the audit trail's
+   "approved from where".
+
+   **What is portable across a process — and would be across a device — is the
+   durable execution and audit state, not the handle.** ADR-0052 §1 enumerates
+   parked executions and re-mints a continuation from durable state, and chose
+   that over encoding durable identity into the token deliberately. The
+   continuation token stays **process-scoped**: it names an entry in one engine's
+   private table (ADR-0042's revisit-if clause, #242), and the hub will not
+   persist that table, because ADR-0052 §1 already provides the durable path
+   (ADR-0083 §14.7). So a token minted by a previous process life yields one
+   specific typed refusal — an unknown continuation, never a denial and never an
+   expiry, both of which would report something no policy and no deadline decided
+   — and the remedy is `pending_confirmations()` (ADR-0084 §7).
+10. **Proactivity.** The push seam, `NotificationCandidate`, and the interruption
+    policy — the one proposal artifact of the propose/dispose principle still
+    unbuilt. Of its two structural requirements, leg 5 met one: something is
+    awake to notice, with a scheduler to notice on (ADR-0083 §7). Leg 9 meets the
+    other, because a delivery channel is a push seam over a hop, and a hub that
+    notices and cannot reach the user has produced a candidate and delivered
+    nothing. The policy is the hard half: what earns an interruption is a
+    judgement the propose/dispose chassis has never had to make, because every
+    other proposal it gates waits patiently to be read.
+    *Exit: the assistant tells the user something they did not ask for and were
+    glad to be told, and the user can tune what reaches them.*
+11. **Sensor breadth, and the grant model.** More read-only sources — and the
+    thing that should have governed the first one. **#629** records the gap
+    exactly: a reader may be enabled with no grant at all, so VISION.md's
+    "granted, scoped, and revocable" is unmet by construction, and ADR-0093 §7
+    already rules that configuration is not a grant and no surface may present it
+    as one. `ActionPolicy` governs *actions*, not sources, so "you may read my
+    calendar" still has nowhere to be recorded. Leg 6 named this precondition and
+    could not close it against one source; breadth is what makes leaving it open
+    indefensible, which is why the two are one leg rather than two. ADR-0094 §10
+    expects this decision and #441's release ladder to be one decision rather
+    than two.
+    *Exit: the user can see every source the assistant reads, grant and revoke
+    each one, and a revoked source stops reaching the model.*
+12. **Actuators, in bulk.** MCP-shaped tool breadth, behind the decisions it
+    forces: ranking among capable tools (#241 — a second capable tool stalls the
+    step by design, ADR-0037 §1), parameter-schema enforcement (ADR-0029 §7),
+    and the deferred egress cluster — ADR-0017 §3's fourteen conditions on
+    designating the `tools/` seam, which stance 2 has been sequencing here since
+    this document's reorientation and which nothing earlier spends. This is also
+    where the permission machinery finally earns its depth: ADR-0048's first
+    local tools are read-only and reversible, so the irreversibility and
+    disclosure floors have had no live case.
+    *Exit: the assistant completes a task that changes something in the world,
+    and the user was asked exactly once, at the moment it mattered.*
+
+### Voice: parked, with a slot after leg 10
+
+Ruled 2026-08-09 (#879): voice is **parked, slotted after leg 10, and explicitly
+not scheduled** — a slot is not a plan, and the ruling is that it is not worth
+the energy now. The design is not what is missing. ADR-0094 waits ready, having
+already unified client, sensor and actuator as capability profiles of one spoke,
+with the band ceiling and the release gate an always-listening edge needs; its
+vocabulary is ratified and unspent.
+
+**What opening the slot costs is named now rather than discovered then.** An
+ambient capture producer walks into a ratified pair. ADR-0075 §2 lists "the
+buffered ambient capture #441 sketches" among the producers that inherit its
+capture exemption from nothing, and *reserves* the argument rather than granting
+it; ADR-0093 §4 then forbids a `Reader` proposing an `EpisodicMemory` at all,
+an ingested episode having neither a gate it can survive nor an exemption it can
+claim. ADR-0094 §10 states the shape of that collision and deliberately does not
+grant it either. Whoever opens the slot pays for that decision first, and saying
+so here is what keeps the parking honest rather than merely quiet.
+
+### The gate between leg 10 and leg 11
+
+Ruled 2026-08-09 (#879): **if memory precision is flat, or the correction rate is
+not falling, through legs 9 and 10, then legs 11 and 12 pause and the arc detours
+into learning quality.**
+
+This is the first commitment on this roadmap that a measurement can overrule, and
+it is what leg 8 was built to make possible. Breadth is worth buying only if the
+accumulation underneath it is improving; if it is not, more sources and more
+actions add surface to a model that is not learning, which is the failure mode
+"deepen before broaden" names in the abstract and this gate names in figures. The
+measures are read as ADR-0120 defines them — rates over one window of the trace
+stream, offline — and the window is the one #829 opens.
+
+### The dedicated box is an operating act, not a leg
+
+Ruled 2026-08-09 (#879). The hub will eventually run on an always-on machine of
+its own. A VPS is **ruled out**: a host that roots the store is the maximal
+ADR-0017 §1 decision, and it sits against the trust thesis rather than merely
+costing something.
+
+- No hardware exists, and **nothing in legs 9–12 hard-depends on it.** The
+  remote path is testable as two processes on one machine. The box buys duty
+  cycle — always-on accumulation, overnight proactivity — not capability, which
+  is why it is not sequenced as a leg.
+- The migration itself is a data-directory copy under ADR-0083's layout, run
+  whenever hardware exists.
+- **One constraint, and it is a hard one: it must not land mid-#829-window.**
+  The consolidation arming is a one-shot natural experiment, and a migration
+  inside the window confounds it. Migrate before the window opens or after it
+  closes.
+- Until then daily accumulation happens on the laptop hub — which is why leg 9
+  fronts backup and restore.
+
+It is done when the hub runs supervised on the dedicated machine with the store
+carried over, and this document records the migration as complete. #879 tracks
+it until then.
 
 ## The later arc, in order
 
 Named so near-term slices leave room for them; none is scheduled, and each
-still needs decomposing into ADR-backed slices.
+still needs decomposing into ADR-backed slices. Three entries left this list for
+the inhabitation arc — remote spokes into leg 9, proactivity into leg 10,
+actuators into leg 12 — and what each of them carried is stated there rather
+than duplicated here.
 
-- **Remote spokes.** The bridge deferred by stance 3, crossed when a second
-  physical device matters: network transport and its security posture (an
-  overlay network keeping the API off the public internet is the leading
-  candidate), device identity and enrolment/revocation — which then feeds three
-  existing subsystems: a context facet (device is a VISION §Principle-4 input),
-  a permission input (which devices may approve consequential actions —
-  ADR-0004's deferred catalogue gains a sibling), and the audit trail's
-  "approved from where" — a server-push delivery seam, and encrypted
-  backup/restore, which is also the honest test of VISION.md's portable
-  context-graph claim. **ADR-0084 bought the three expensive retrofits in advance
-  and leg 5 shipped them** — a versioned connect handshake, a defined place for a
-  credential the loopback transport carries nothing in, and a client stateless by
-  decision — so the wire is ready for this leg. **What no wire format can pre-authorise is the hop
-  itself**: a spoke off the device moves user data off the device, which
-  ADR-0017 §1 governs and which this leg owes a ratified decision for
-  (ADR-0084 §1, §11).
-
-  **What is portable across a process — and would be across a device — is the
-  durable execution and audit state, not the handle.** ADR-0052 §1 enumerates
-  parked executions and re-mints a continuation from durable state, and chose
-  that over encoding durable identity into the token deliberately. The
-  continuation token stays **process-scoped**: it names an entry in one engine's
-  private table (ADR-0042's revisit-if clause, #242), and the hub will not
-  persist that table, because ADR-0052 §1 already provides the durable path
-  (ADR-0083 §14.7). So a token minted by a previous process life yields one
-  specific typed refusal — an unknown continuation, never a denial and never an
-  expiry, both of which would report something no policy and no deadline decided
-  — and the remedy is `pending_confirmations()` (ADR-0084 §7).
-- **Actuators, in bulk.** MCP-shaped tool breadth, behind the decisions it
-  forces: ranking among capable tools (#241 — a second capable tool stalls the
-  step by design, ADR-0037 §1), parameter-schema enforcement (ADR-0029 §7),
-  and the full egress conditions (ADR-0017). This is also where the permission
-  machinery finally earns its depth: ADR-0048's first local tools are read-only
-  and reversible, so the irreversibility and disclosure floors have had no live
-  case.
-- **Proactivity.** `NotificationCandidate` and the interruption policy — the
-  one proposal artifact of the propose/dispose principle still unbuilt. Of its
-  two structural requirements, leg 5 met one: something is now awake to notice,
-  with a scheduler to notice on (ADR-0083 §7). What it still waits on is a
-  delivery channel — remote spokes' push seam — because a hub that notices and
-  cannot reach the user has produced a candidate and delivered nothing.
 - **An engagement surface.** The accumulation flywheel needs daily use, and
-  nothing on this roadmap yet makes the assistant compelling daily. This entry
-  is deliberately undesigned; it is named so its absence is a known debt of the
-  plan rather than an oversight.
+  nothing on this roadmap yet makes the assistant compelling daily. Leg 9's exit
+  test *asks* for daily use; it does not supply a reason for it, which is why
+  this entry stays here rather than moving with the others. It remains
+  deliberately undesigned, named so its absence is a known debt of the plan
+  rather than an oversight.
 - **Commitment ledger, full evaluation harness, portable context graph.**
 
 ## Parked
@@ -409,8 +584,8 @@ still needs decomposing into ADR-backed slices.
   opportunistically; none of it is scheduled here. The tracker, not this
   document, owns that list (ADR-0015/0019).
 - **Ranking, parameter schemas, networked actuators** — parked *with intent*
-  behind the MCP milestone above, not forgotten: they are contract decisions
-  that become due the moment actuators do.
+  behind leg 12 above, not forgotten: they are contract decisions that become
+  due the moment actuators do.
 
 ## Gap register
 
@@ -421,10 +596,10 @@ ledger rather than into this document.
 | VISION promise | What closes the gap |
 | --- | --- |
 | Understood — a persistent user model | Legs 1–3 (the bands, capture, the observer) |
-| In Control — inspect, correct, restrict, delete | Leg 1 (inspection surface over ADR-0007's contract); `export` still has no interface (ADR-0073 §10) |
-| More Capable Over Time | Explicit correction: ADR-0009/0022; legs 3–4 and 7 extend it to observation |
-| Context determines usefulness | Leg 6 feeds facets ADR-0008 anticipated; device context waits on remote spokes |
-| Supported — acts across tools | Later arc (actuators); deliberately last |
-| Proactivity that earns its place | Later arc; the hub it required is leg 5, so what remains is the delivery channel |
+| In Control — inspect, correct, restrict, delete | Leg 1 (inspection surface over ADR-0007's contract); *restrict* waits on leg 11's grant model (#629); `export` still has no interface (ADR-0073 §10) |
+| More Capable Over Time | Explicit correction: ADR-0009/0022; legs 3–4 and 7 extend it to observation; leg 8 is what measures whether it is working, and the arc gate before leg 11 is what acts on the answer |
+| Context determines usefulness | Leg 6 feeds facets ADR-0008 anticipated; device context waits on leg 9's hop |
+| Supported — acts across tools | Leg 12 (actuators, in bulk); deliberately last |
+| Proactivity that earns its place | Leg 10; the hub it required is leg 5 and the delivery channel is leg 9's push seam, so what remains is the interruption policy |
 | Free to choose models | ADR-0002/0011/0013/0061/0062; no leg needed |
-| Observability and evaluation | Leg 8, then the full harness |
+| Observability and evaluation | Leg 8 (ADR-0119/0120), ruled met 2026-08-09; the full harness stays in the later arc |
