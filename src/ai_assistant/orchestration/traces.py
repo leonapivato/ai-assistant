@@ -38,6 +38,7 @@ import structlog
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.correlation import correlated_operation
 from ai_assistant.core.errors import (
+    OversizedValueError,
     PermissionDeniedError,
     SourceNotGrantedError,
     UngrantableSourceError,
@@ -113,6 +114,11 @@ _REFUSALS: Final[tuple[type[Exception], ...]] = (
     PermissionDeniedError,
     # A caller naming a conversation that does not exist is told so.
     UnknownConversationError,
+    # ADR-0084 §4's payload limit refuses in both directions, and a value that
+    # does not fit the contract is an answer rather than a malfunction. Reached
+    # inside the traced region because ``Engine._tracked`` applies the check to
+    # the result there (``checked=True``), so the trace and the caller agree.
+    OversizedValueError,
 )
 
 
