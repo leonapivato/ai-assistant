@@ -378,23 +378,33 @@ def _rule_on_agreement(
         The ``REINFORCE`` ruling, or ``None`` to fall through to the arms below
         exactly as they stand.
     """
-    agreeing = [conflict for conflict in conflicts if agrees(conflict, record)]
+    # The best-ranked member of the foldable agreeing set, by a scan rather than by
+    # `conflicts[0]` — the same shape the supersession arm's scan has, and for the
+    # same reason: taking the first conflict would name a member outside the class
+    # (an agreeing `EXTERNAL` record, §3), and the writer refuses that fold, so an
+    # agreement would surface as a `MemoryStoreError` instead of a ruling.
     foldable = next(
-        (conflict for conflict in agreeing if conflict.provenance.source in _AGREEMENT_FOLDABLE),
+        (
+            conflict
+            for conflict in conflicts
+            if conflict.provenance.source in _AGREEMENT_FOLDABLE and agrees(conflict, record)
+        ),
         None,
     )
     if foldable is None:
         return None
-    agreeing_ids = {conflict.id for conflict in agreeing}
+    # §2's second condition, stated over the records rather than over a set of ids:
+    # membership in the agreeing set is a property of what a record *says*, and
+    # collecting ids first would make it a property of a store's identifiers.
     if any(
-        conflict.provenance.source is MemorySource.USER_ASSERTED and conflict.id not in agreeing_ids
+        conflict.provenance.source is MemorySource.USER_ASSERTED and not agrees(conflict, record)
         for conflict in conflicts
     ):
         return None
     return MemoryDecision(
         kind=MemoryDecisionKind.REINFORCE,
         target_id=foldable.id,
-        reason="you have told us this before; recorded as agreement rather than a change",
+        reason="you have said this before; recorded as agreement, not a change (ADR-0121 §2)",
     )
 
 
