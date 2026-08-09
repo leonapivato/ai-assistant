@@ -379,6 +379,35 @@ class TraceSinkContract(_TraceCancellation):
         assert failures[0]["seam"] == "memory_search"
         assert failures[0]["error_class"]
 
+    async def test_a_trace_mutated_past_its_model_is_dropped_and_leaks_nothing(
+        self, sink: TraceSink
+    ) -> None:
+        """The one path on which a trace's own fields are not known to be Tier 2.
+
+        ``frozen=True`` refuses ``trace.seam = …`` and **not**
+        ``trace.__dict__["seam"] = …``, so a caller that wrote past the model
+        hands the sink an object carrying an arbitrary string. Revalidation is
+        what catches it — and the trap is one level on, in the failure record:
+        logging the refused field would take the value the store just declined to
+        store *for carrying content* and write it to the log instead, where
+        ADR-0004 §5 is unconditional ("Logs are Tier 2 only") and ADR-0119 §2
+        names the same trap for a fault class ("the refused name is not diverted
+        to the log, which is the trap in the obvious fix").
+
+        So the trace is dropped, the failure is still recorded, and nothing
+        derived from the mutated value appears anywhere.
+        """
+        tier_one = "the user asked about their diagnosis on 3 March"
+        trace = evaluation_trace("memory_search")
+        trace.__dict__["seam"] = tier_one
+
+        with structlog.testing.capture_logs() as captured:
+            await sink.emit(trace)
+
+        assert await self.recorded(sink) == ()
+        assert len(_emission_failures(captured)) == 1
+        assert tier_one not in repr(captured)
+
     @pytest.mark.optional_obligation
     async def test_a_cancelled_emit_holds_its_resource_until_the_work_finishes(self) -> None:
         """``core.protocols``' cancellation clause, on ``emit`` (ADR-0060 §3).
