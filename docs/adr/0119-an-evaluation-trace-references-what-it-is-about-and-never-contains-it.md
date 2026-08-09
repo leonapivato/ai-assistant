@@ -907,7 +907,13 @@ section.
 
 #### 13a. `core/types.py`
 
-In definition order, so nothing below is named before it exists:
+In definition order, so nothing below is named before it exists. Imports are
+elided throughout, with one exception worth stating because it is the only name
+here the module does not already have: `core/types.py` imports `Iterator`,
+`Mapping` and `Sequence` from `collections.abc`, and **`Hashable` joins them** —
+without it `FrozenMapping`'s type-parameter bound is an undefined name and the
+class below does not resolve. `re` is the other addition; `isfinite`, `StrEnum`
+and the pydantic names are all present.
 
 ```python
 #: ``fullmatch``, never ``match``: ``$`` also matches *before* a trailing
