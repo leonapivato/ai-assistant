@@ -317,14 +317,17 @@ consistency while still leaving the cross-store skew §1 describes.
 
 > **Normative.** The backup excludes `hub.lock` and `hub.sock`.
 
-> **Normative.** The data-directory entries excluded above are named at the
-> composition root, beside where those entries are created, and the backup tool
-> obtains the set from there. Neither tool restates a store's filename.
+> **Normative.** The data-directory entries excluded above are declared at the
+> composition root, beside where those entries are created, as paths relative to
+> `Settings.data_dir`. The backup tool obtains the set from there and excludes a
+> file only on an exact match of its own data-directory-relative path. Neither tool
+> restates a store's location.
 
 > **Normative.** A later lane that places in the data directory a file subject to a
 > clause forbidding it to leave the device returns to this decision, adds it to the
-> exclusions above, and adds its name to the composition root's set in the same
-> change. Until it does, this ADR authorises no such file to be written there.
+> exclusions above, and registers its data-directory-relative path in the
+> composition root's set in the same change. Until it does, this ADR authorises no
+> such file to be written there.
 
 **The trace store is excluded because ADR-0119 §12 is absolute and this ADR does
 not narrow it.** "No `EvaluationTrace` leaves the device, by any route, under any
@@ -376,6 +379,16 @@ there is ADR-0104 §4's disposition for its own allow-list, which lives "at the
 composition root because that is where the embedder is *chosen*", and it needs no
 new seam: `service` "may import `app` … and `core`" (ADR-0083 §8) is the same route
 the other three offline tools already take to their mechanisms.
+
+**A bare filename would not be a well-defined exclusion, because §1 walks to any
+depth.** Matching on a name alone is ambiguous in both directions at once: an
+unrelated `archive/traces.db` some later lane writes would be dropped from every
+backup, which is a durability loss under cover of a privacy rule; and a protected
+file placed one directory down would be matched by nothing and shipped, which is
+the ADR-0119 §12 breach this clause exists to prevent. Neither is detectable by
+reading a backup. Relative paths compared exactly are the smallest form with one
+meaning, and requiring the owner of a protected entry to register the path rather
+than the name puts the precision where the knowledge is.
 
 **The forward clause is what keeps the exclusion list from being the enumeration
 §1 rejected.** It binds the lane that would create the problem rather than
@@ -818,7 +831,7 @@ directory this build has never opened.
 
 **What it does take from the composition root is a set of names, and that is not
 the wiring it avoids.** §3 has the excluded entries declared where they are
-created, so the mechanism reads a list of filenames from `app` and constructs
+created, so the mechanism reads a set of relative paths from `app` and constructs
 nothing; `service` "may import `app` … and `core`" (ADR-0083 §8), and `imports no
 subsystem directly` above is untouched because the composition root is not a
 subsystem. The distinction worth holding is between *reading a fact the composition
