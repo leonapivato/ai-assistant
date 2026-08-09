@@ -603,14 +603,30 @@ The implementation is a separate lane, briefed after this ADR merges (golden rul
 `orchestration`, `learning/processor.py` and their tests, and it owes:
 
 > **Normative.** The lane lands §1's field change, §2's adapter change, §3's
-> resolution stage and §7's refusal **together**, in one change. A tree carrying
-> the optional field without the resolution stage stores a correction with no
-> record type at all, which is worse than the defect this ADR fixes.
+> resolution stage and §7's refusal **together**, in one change.
+
+Landing the field alone is worse than landing nothing. `_to_record` matches on
+`event.memory_kind` and its final arm returns `None` for anything it does not
+recognise, so an unresolved `None` falls through it, `process` returns an empty
+sequence, and `learn` writes nothing and reports nothing wrong — the correction is
+**silently dropped**, where today it is at least stored in the wrong drawer. §7's
+refusal is what converts that drop into a fault, which is why it is not separable
+from the field.
 
 - **A test at the seam this ADR is about**, not only at the units: a correction
   whose only neighbour is a `PreferenceMemory` supersedes it, driven through the
   loop with a real processor and a real ingestor, since the defect was invisible
   to every test that stopped at one subsystem's boundary.
+- **A test on the read's *shape*, not only on what it produced** (§3). Every other
+  test here is an outcome test, and §3's clause is not observable from an outcome:
+  an implementation that issues two searches, passes `bands`, omits the `kinds`
+  argument, or reuses the turn's `retrieval_limit` still resolves a lone preference
+  neighbour correctly and passes all of them — while carrying an extra failure
+  point, the crowding §3 scopes `kinds` to avoid, and a knob that moves when
+  retrieval's is tuned. A recording store therefore asserts, for one unpinned
+  correction: **exactly one** `search` call, its query the event's `content`, its
+  `kinds` the fixed resolution set, its `bands` unset, and its `limit` the
+  resolution's own.
 - **A test that the pin suppresses the read** (§6) — an injected store that fails
   the assertion if `search` is called at all is the shape that pins this, because
   a resolution that ran and then deferred to the pin passes an outcome-only test.
