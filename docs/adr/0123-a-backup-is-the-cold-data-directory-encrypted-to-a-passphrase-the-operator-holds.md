@@ -1,13 +1,13 @@
 # 123. A backup is the cold data directory, encrypted to a passphrase the operator holds off the machine
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-09
 - **Decides no `core` surface.** No Protocol in `core/protocols.py` changes and no
   type, enum member or constant is added to `core/types.py` (§10). Golden rule 5
   and ADR-0015 §5 therefore do not bind the ordering, and the implementation lane
   this decision briefs is not gated on a contract PR — only on this one.
 - **This ADR amends nothing and supersedes nothing.** §12 applies ADR-0082 §1's
-  test to each of the seven places where a record looks owed, and records why none
+  test to each of the nine places where a record looks owed, and records why none
   is.
 
 ## Context
@@ -318,7 +318,7 @@ only process that opens the … databases, and the API is the only door" — for
 exactly that. Taking it would need an amendment to ADR-0083, to buy per-database
 consistency while still leaving the cross-store skew §1 describes.
 
-### 3. Two files are excluded, each by the clause that requires it, and the list is a refusal list
+### 3. Three entries are excluded, each by the clause that requires it, and the list is a refusal list
 
 > **Normative.** The backup excludes the trace store. No `EvaluationTrace`, and no
 > file holding one, enters a backup artifact.
