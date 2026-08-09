@@ -511,6 +511,43 @@ def _writer(
     )
 
 
+async def test_two_proposals_reinforcing_one_record_keep_their_trace(
+    sink: FakeTraceSink,
+) -> None:
+    """The repeat §3 forbids a ``RecordIdSet`` to carry, arriving honestly.
+
+    One reading may hold two proposals that both fold into the same standing
+    belief, and both results then name that one id. Filing it twice fails the
+    type's "each id at most once" validator, which §5 turns into a **lost trace**
+    for a crossing where nothing went wrong — the instrument lying because the
+    writer did its job twice.
+
+    So the set collapses and the counts do not: two rulings stay two in
+    ``decisions_reinforce``, and the answer to "which records ended up
+    reinforced" is a set, which is what §3 defines it to be.
+    """
+    store = InMemoryMemoryStore(now=_fixed_now)
+    await store.add(_preference("standing", "the office is on the third floor"))
+    writer = _writer(store, sink, policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
+    reading = SourceReading(
+        source=_SOURCE,
+        read_at=_NOW,
+        proposals=(
+            _proposal(_preference("first", "the office is on the third floor")),
+            _proposal(_preference("second", "the office is on the third floor")),
+        ),
+        coverage=None,
+    )
+
+    results = await writer.ingest_reading(reading)
+
+    assert [result.record_id for result in results] == ["standing", "standing"]
+    trace = _only(sink, TraceKind.MEMORY_WRITE)
+    assert trace.metrics["decisions_reinforce"] == 2
+    assert trace.records[TraceRecordSet.REINFORCED].ids == ("standing",)
+    assert trace.records[TraceRecordSet.REINFORCED].total == 1
+
+
 async def test_an_accepted_write_counts_every_kind_and_files_the_id_as_written(
     sink: FakeTraceSink,
 ) -> None:

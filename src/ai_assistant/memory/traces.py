@@ -233,11 +233,13 @@ class Reading:
         metrics: Numbers and booleans the crossing observed, under the literal
             keys above. A quantity the crossing did not reach is **absent**,
             never zero (§3's observation rule).
-        records: Ids the crossing produced, per disposition, **uncapped** — this
-            module applies §3's cap and derives ``total`` from the full length,
-            so no caller can report a truncation that did not happen or miss one
-            that did. An absent key means the set was not observed; a key mapped
-            to an empty sequence means it was observed and was empty (§3).
+        records: Ids the crossing produced, per disposition, **raw** — repeats and
+            all, uncapped. :func:`_capped` is the one place that de-duplicates,
+            caps and derives ``total``, so no caller can report a truncation that
+            did not happen, miss one that did, or lose a whole trace to a repeat
+            §3 forbids the type to carry. An absent key means the set was not
+            observed; a key mapped to an empty sequence means it was observed and
+            was empty (§3).
     """
 
     metrics: Mapping[str, int | float | bool] = field(default_factory=dict)
@@ -456,12 +458,31 @@ class MemoryTraces:
 
 
 def _capped(ids: Sequence[str]) -> RecordIdSet:
-    """One disposition's ids under §3's cap, with the total the crossing produced.
+    """One disposition's ids, de-duplicated and under §3's cap.
 
-    "Where that total exceeds the cap it holds the first 256, and the set is
-    **truncated** exactly when ``total`` exceeds the number of ids it carries." The
-    truncation is therefore derived rather than flagged, and it is derived here
-    rather than at each call site so no emitter can report one that did not happen.
+    **The de-duplication is the load-bearing half, and it is not defensive.** §3
+    rules that "a ``RecordIdSet`` carries each id **at most once**" and the type
+    enforces it — so a repeat is not a trace with a redundant entry, it is a trace
+    that fails construction and is lost under §5. One ``ingest_reading`` reaches
+    that honestly: two proposals of one reading may both ``REINFORCE`` the same
+    standing belief, and both results then name the same id. Losing the whole
+    crossing's trace because a writer did its job twice is exactly the instrument
+    lying that §5 exists to prevent.
+
+    **What is de-duplicated is the id set and never the counts.** The two
+    reinforcements are two rulings and stay two in ``decisions_reinforce``; what
+    collapses is only the answer to "which records ended up in this state", which
+    is a set by §3's own definition.
+
+    **Ordered**, via ``dict.fromkeys``, because §3 wants the ids "in the order the
+    observed operation produced them" and a repeat should not move the first
+    occurrence.
+
+    ``total`` is the cardinality of that set, so "where that total exceeds the cap
+    it holds the first 256, and the set is **truncated** exactly when ``total``
+    exceeds the number of ids it carries". Truncation is derived rather than
+    flagged, and derived here rather than at each call site, so no emitter can
+    report one that did not happen.
 
     Args:
         ids: Every id the crossing produced under this disposition, in order.
@@ -469,7 +490,8 @@ def _capped(ids: Sequence[str]) -> RecordIdSet:
     Returns:
         The capped set.
     """
-    return RecordIdSet(ids=tuple(ids[:TRACE_RECORD_SET_CAP]), total=len(ids))
+    distinct = tuple(dict.fromkeys(ids))
+    return RecordIdSet(ids=distinct[:TRACE_RECORD_SET_CAP], total=len(distinct))
 
 
 def _dropped(kind: TraceKind, seam: str, error: Exception) -> None:
