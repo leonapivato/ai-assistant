@@ -254,10 +254,14 @@ to honour a field that is not about them. What is excluded is the crossing that
 observed nothing, and absence already says so.
 
 > **Normative.** A `RETRIEVAL` trace carrying the eight counts §7 reads is
-> excluded from §7's population, and from no other, unless all three of
+> **counter-inconsistent** unless all five of `limit > 0`, `fetch_k > 0`,
 > `returned ≤ candidates`, `candidates ≤ fetch_k`, and — where `returned <
 > limit` — `returned` plus the four `excluded_*` values equal `candidates`
-> exactly. The report counts such a trace among the malformed.
+> exactly.
+
+> **Normative.** A counter-inconsistent trace is excluded from §7's population
+> and from no other. It is **not** malformed, and the report states its count
+> separately from the malformed count.
 
 **Counts are constrained because the metric type does not constrain them.**
 `TraceMetricValue` is `int | float | bool` refused only for non-finiteness, so a
@@ -567,17 +571,27 @@ healthy read. The second is the **window share** of each shortfall,
 differ; a shortfall read that excluded nothing is one the KNN ceiling alone
 bound, and is counted in the incidence and left out of the share.
 
-**The consistency rule is the same argument as the integrality rule, one level
-up.** Each of the eight counts can be individually valid and jointly impossible —
-`candidates = 0` with `returned = 1` satisfies every per-value rule and makes
-`candidates − returned` negative, which would be reported as a window share below
-zero. `SqliteMemoryStore` cannot produce it: `returned` counts a subset of the
-rows `candidates` counts, and the filter loop's exhaustion is what makes the
-partition hold. But the emitter's arithmetic is not the type's, and a diagnostic
-that divides by a difference must know the difference is non-negative. Excluding
-the trace from this diagnostic alone, rather than from every population, is
-deliberate: `records[RETURNED]` is observed independently of the counters, so a
-trace whose counters disagree can still tell §4 which ids came back.
+**The consistency rule is the integrality rule one level up, and it is
+deliberately a different classification.** Each of the eight counts can be
+individually valid and jointly impossible — `candidates = 0` beside
+`returned = 1` satisfies every per-value rule and makes `candidates − returned`
+negative, which would be reported as a window share below zero; and eight zeros
+satisfy them too, while `MemoryStore.search` short-circuits on a non-positive
+`limit` before it fetches anything, so no read that reached the filter pass can
+carry them. `SqliteMemoryStore` produces neither shape: `returned` counts a
+subset of the rows `candidates` counts, and the filter loop's exhaustion is what
+makes the partition hold. But the emitter's arithmetic is not the type's, and a
+diagnostic that divides by a difference must know the difference is
+non-negative.
+
+**Counter-inconsistent is not malformed, and the line between them is where the
+damage reaches.** A count that is fractional, negative or a `bool` is a value no
+emitter in this tree can write, so the record it sits on is not one to trust for
+anything — that trace is malformed and leaves every population. Counters that
+disagree with each other are a localised arithmetic fault: `records[RETURNED]` is
+observed by a different statement from the one that fills `observed`, so a trace
+whose counters disagree can still tell §4 exactly which ids came back. Excluding
+it from §4 as well would discard a surfacing for a reason §4 does not depend on.
 
 **And the half of #824's trigger this cannot see is stated.** "Approaching" the
 threshold would be read off healthy reads as headroom, and healthy reads are
@@ -598,12 +612,13 @@ summary makes no claim about a population it might have lost rows from.
 
 **The stream-health counts are what let a reader distrust the rest.** The report
 states, over `W`: traces walked by kind; the count excluded as truncated, as
-unattributed, as unclassified, and as malformed; the instant of the oldest and
-newest retained traces; and every `CONFIGURATION` trace with the gap to the trace
-preceding it. ADR-0119's own consequences record that "the stream cannot report
-its own completeness" — traces lost to an emission failure are logged and not
-counted — so these counts are not a completeness claim. They are the exclusions
-this ADR's own rules caused, which is a different and fully computable thing.
+unattributed, as unclassified, as malformed and as counter-inconsistent; the
+instant of the oldest and newest retained traces; and every `CONFIGURATION`
+trace with the gap to the trace preceding it. ADR-0119's own consequences record
+that "the stream cannot report its own completeness" — traces lost to an
+emission failure are logged and not counted — so these counts are not a
+completeness claim. They are the exclusions this ADR's own rules caused, which
+is a different and fully computable thing.
 
 ### 8. A window is partitioned at every configuration change, and settling is equalised across the parts
 
