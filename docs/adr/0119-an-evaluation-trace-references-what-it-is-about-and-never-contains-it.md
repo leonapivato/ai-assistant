@@ -549,8 +549,8 @@ that do not care.
 both and the composition root hands each collaborator the seam it is entitled to.
 That is the same arrangement `SourceGrants`/`SourceGrantStore` uses today.
 
-**Append never raises into its caller, and that is a contract obligation the
-conformance suite pins.** It is safe to state because the trace is a validated
+**No trace-store failure reaches the caller, and that is a contract obligation
+the conformance suite pins.** It is safe to state because the trace is a validated
 pydantic model before `emit` is called: a malformed trace is an emitter bug that
 fails at construction, in the emitter's own tests, and never reaches the sink. What
 `emit` can therefore encounter is environmental — a locked database, a full disk —
@@ -625,8 +625,10 @@ here needs.
 **A faulting operation still emits its trace, and its trace still tells the
 truth.** A `search` whose query embedding raises never computes a candidate set; an
 `ingest` that raises before commit never has a decision set. Under §3's
-observation rule those keys are simply **absent**, the `records` field is `None`
-rather than empty, and the trace carries what the operation did reach — its
+observation rule the metric keys are simply **absent**, and so are the
+`TraceRecordSet` keys nothing was observed under — `records` stays a mapping and
+lacks them, which is not the same as carrying an empty `RecordIdSet` under one.
+The trace carries what the operation did reach — its
 `limit`, its elapsed time, its `FAULT` outcome and its fault class. The two clauses
 above say "the following the read reached" for exactly that reason: an
 unconditional "carries" would be unsatisfiable on the fault path, and satisfying it
@@ -889,18 +891,35 @@ section.
 
 #### 13a. `core/types.py`
 
+In definition order, so nothing below is named before it exists:
+
 ```python
-#: A seam name or a metric key: lowercase, bounded, and a literal in its
-#: emitting module (§2, §3).
-type TraceLabel = Annotated[EncodableText, AfterValidator(_trace_label)]
-#: matches r"^[a-z][a-z0-9_]{0,63}$"
+_TRACE_LABEL = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_FAULT_CLASS = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
-#: An exception class's __name__ — never its message (§2).
-type FaultClassName = Annotated[EncodableText, AfterValidator(_fault_class_name)]
-#: matches r"^[A-Za-z_][A-Za-z0-9_]{0,63}$"
 
-#: The per-set ceiling on ids a trace stores (§3).
-TRACE_RECORD_SET_CAP: Final = 256
+def _trace_label(value: str) -> str:
+    """A seam name or metric key: lowercase, bounded, a literal in its module (§2)."""
+    if not _TRACE_LABEL.match(value):
+        msg = f"{value!r} is not a trace label"
+        raise ValueError(msg)
+    return value
+
+
+def _fault_class_name(value: str) -> str:
+    """An exception class's ``__name__`` — never its message (§2)."""
+    if not _FAULT_CLASS.match(value):
+        msg = f"{value!r} is not an exception class name"
+        raise ValueError(msg)
+    return value
+
+
+def _finite(value: int | float | bool) -> int | float | bool:
+    """Refuse NaN and the infinities (§3)."""
+    if isinstance(value, float) and not isfinite(value):
+        msg = f"{value!r} has no JSON representation, so it cannot be stored"
+        raise ValueError(msg)
+    return value
 
 
 class FrozenMapping[K, V](Mapping[K, V]):
@@ -911,15 +930,9 @@ class FrozenMapping[K, V](Mapping[K, V]):
     deep-copied, which would make any model holding one fail
     ``model_copy(deep=True)``". The contents are a **tuple of pairs**, never a
     ``dict``, because "a private ``dict`` would still be a mutable object
-    reachable as ``parameters._data``, which is a real bypass". Attribute
-    assignment and deletion are refused, lookup is a linear scan over a handful
-    of keys, equality is by contents against any ``Mapping``, ``__hash__`` is
-    over the pairs, and ``__reduce__`` restores it — which is what makes
-    ``deepcopy`` work.
+    reachable as ``parameters._data``, which is a real bypass".
 
-    ``FrozenDict`` is left exactly as it is. Folding it into this type is a
-    call-site sweep with no behavioural consequence, tracked as #849 and owed by
-    nothing here.
+    ``FrozenDict`` is left exactly as it is; folding the two together is #849.
     """
 
     __slots__ = ("_items",)
@@ -929,8 +942,39 @@ class FrozenMapping[K, V](Mapping[K, V]):
     def __init__(self, data: Mapping[K, V] | None = None, /) -> None:
         object.__setattr__(self, "_items", tuple((data or {}).items()))
 
-    # __setattr__, __delattr__, __getitem__, __iter__, __len__, __repr__,
-    # __eq__, __hash__ and __reduce__ as FrozenDict defines them.
+    def __setattr__(self, name: str, value: object) -> None:
+        msg = f"{type(self).__name__} is immutable"
+        raise AttributeError(msg)
+
+    def __delattr__(self, name: str) -> None:
+        msg = f"{type(self).__name__} is immutable"
+        raise AttributeError(msg)
+
+    def __getitem__(self, key: K) -> V:
+        for candidate, value in self._items:
+            if candidate == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[K]:
+        return (key for key, _ in self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({dict(self._items)!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Mapping):
+            return dict(self._items) == dict(other)
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(frozenset(self._items))
+
+    def __reduce__(self) -> tuple[type[FrozenMapping[K, V]], tuple[dict[K, V]]]:
+        return (type(self), (dict(self._items),))
 
 
 def _frozen_mapping[K, V](value: Mapping[K, V]) -> FrozenMapping[K, V]:
@@ -942,24 +986,12 @@ def _frozen_mapping[K, V](value: Mapping[K, V]) -> FrozenMapping[K, V]:
     return FrozenMapping(value)
 
 
-def _finite(value: int | float | bool) -> int | float | bool:
-    """Refuse NaN and the infinities (§3)."""
-    if isinstance(value, float) and not isfinite(value):
-        msg = f"{value!r} has no JSON representation, so it cannot be stored"
-        raise ValueError(msg)
-    return value
-
-
+type TraceLabel = Annotated[EncodableText, AfterValidator(_trace_label)]
+type FaultClassName = Annotated[EncodableText, AfterValidator(_fault_class_name)]
 type TraceMetricValue = Annotated[int | float | bool, AfterValidator(_finite)]
-type TraceRefs = Annotated[
-    Mapping[TraceRef, Identifier], AfterValidator(_frozen_mapping)
-]
-type TraceRecords = Annotated[
-    Mapping[TraceRecordSet, RecordIdSet], AfterValidator(_frozen_mapping)
-]
-type TraceMetrics = Annotated[
-    Mapping[TraceLabel, TraceMetricValue], AfterValidator(_frozen_mapping)
-]
+
+#: The per-set ceiling on ids a trace stores (§3).
+TRACE_RECORD_SET_CAP: Final = 256
 
 
 class TraceKind(StrEnum):
@@ -978,6 +1010,7 @@ class TraceOutcome(StrEnum):
 
 class TraceRef(StrEnum):
     """Singular relations: at most one id each."""
+
     CORRELATION = "correlation"
     CONVERSATION = "conversation"
     TURN = "turn"
@@ -986,6 +1019,7 @@ class TraceRef(StrEnum):
 
 class TraceRecordSet(StrEnum):
     """Plural id sets, each naming the disposition its ids had."""
+
     RETURNED = "returned"
     WRITTEN = "written"
     REINFORCED = "reinforced"
@@ -1014,6 +1048,17 @@ class RecordIdSet(BaseModel):
         return self
 
 
+type TraceRefs = Annotated[
+    Mapping[TraceRef, Identifier], AfterValidator(_frozen_mapping)
+]
+type TraceRecords = Annotated[
+    Mapping[TraceRecordSet, RecordIdSet], AfterValidator(_frozen_mapping)
+]
+type TraceMetrics = Annotated[
+    Mapping[TraceLabel, TraceMetricValue], AfterValidator(_frozen_mapping)
+]
+
+
 class EvaluationTrace(BaseModel):
     #: ``validate_default`` because pydantic skips defaults otherwise, and an
     #: unvalidated ``{}`` is a *mutable* mapping ``frozen=True`` does not protect.
@@ -1036,8 +1081,8 @@ class EvaluationTrace(BaseModel):
 
         ``REFUSED`` and ``FAULT`` are drawn *from* an exception's class (§3), so
         one without a class names no discriminator; ``OK`` and ``INCOMPLETE``
-        reached no exception, so one with a class is reporting a failure that
-        did not happen.
+        reached no exception, so one with a class reports a failure that did not
+        happen.
         """
         failed = self.outcome in (TraceOutcome.REFUSED, TraceOutcome.FAULT)
         if failed != (self.fault_class is not None):
@@ -1111,7 +1156,12 @@ and the rows it sweeps disagree about what "older" means.
 @runtime_checkable
 class TraceSink(Protocol):
     async def emit(self, trace: EvaluationTrace) -> None:
-        """Append ``trace``. **Never raises** (§5, §7)."""
+        """Append ``trace``. **No trace-store failure escapes** (§5, §7).
+
+        Not a blanket no-raise: a cancellation delivered from outside the call
+        is re-raised once the sink has made its resources safe, as this module's
+        cancellation clause requires of every method in it (ADR-0060 §1).
+        """
 
 
 @runtime_checkable
@@ -1167,8 +1217,13 @@ walk's position to the trace store and be answered rather than refused.
 
 **Failures, stated so a suite can assert them:**
 
-- `emit` never raises. A store fault is swallowed and logged (§5). A malformed
-  trace cannot reach it: `EvaluationTrace` validates at construction.
+- `emit` lets no **trace-store failure** escape: a fault there is swallowed and
+  logged (§5), and a malformed trace cannot reach it because `EvaluationTrace`
+  validates at construction. It is **not** a blanket no-raise — a cancellation
+  delivered from outside is re-raised, because ADR-0060 §1 binds every Protocol in
+  this module ("a cancellation delivered from outside the call is delivered
+  onward, never absorbed"), and an instrument that swallowed one would defeat the
+  shutdown drain rather than subordinate itself to it.
 - `walk` refuses a `limit` of zero or below with `ValueError`, and refuses a
   `TracePosition` it cannot read with `ValueError` — a caller-held position this
   store did not issue is a caller bug, not the recoverable state ADR-0111 §7
