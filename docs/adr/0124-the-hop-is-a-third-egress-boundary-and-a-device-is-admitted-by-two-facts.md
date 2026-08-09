@@ -147,9 +147,10 @@ authorised, and the first lane to notice would have discovered it with the code
 written.
 
 > **Normative.** The client half transmits only to a hub whose overlay identity it
-> has confirmed under §4, over a transport satisfying §2, and only the request it
-> was asked to make. It obtains its destination from configuration and never from
-> a discovery mechanism, a redirect, or anything a peer tells it.
+> has confirmed under §4, over a transport satisfying §2, and sends only two
+> things: the connect frame §7 requires, and the request it was asked to make. It
+> obtains its destination from configuration and never from a discovery mechanism,
+> a redirect, or anything a peer tells it.
 
 **The constraint on the client half is the mirror of the constraint on the
 listener, and it is what keeps the boundary symmetrical rather than merely
