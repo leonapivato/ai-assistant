@@ -161,9 +161,11 @@ stores carry real references across their files — a `ConversationTurn` names a
 ADR-0083 §12 records that exclusivity does not close ADR-0074 §8's cross-store
 window under a process death. A per-store scheme reading seven stores in sequence
 would introduce a *second*, larger skew of its own, between the first store read
-and the last. Copying files from a directory nobody is writing to has no such
-window: every file is at the same instant because there is no instant in between.
-§2 is what makes "nobody is writing to it" true.
+and the last — a window opened by the scheme itself, present on every run, and
+proportional to the time seven stores take to read. A file copy opens no such
+window of its own: the only writer that could produce one is a writer outside the
+tool, and §2 is what stops the hub from being it and what refuses a copy that a
+non-cooperating writer disturbed anyway.
 
 The residual is stated rather than claimed away. A backup taken after a process
 death captures whatever cross-store state that death left, faithfully; it does not
@@ -179,7 +181,7 @@ moment. ADR-0083's own count is the evidence that this is not hypothetical. §3'
 exclusions fail in the other direction — a store added later is *included* by
 default, which costs artifact size and never costs data.
 
-### 2. The backup runs offline under the hub's instance lock, and refuses a directory that is not quiescent
+### 2. The backup runs offline under the hub's instance lock, and refuses a source it cannot show stayed still
 
 > **Normative.** The backup tool takes `<data_dir>/hub.lock` before it reads any
 > file in the data directory and holds it until it exits. A contended lock is
@@ -190,6 +192,12 @@ default, which costs artifact size and never costs data.
 > sidecar — a `-journal`, `-wal` or `-shm` file — lies beside any file it would
 > copy. The diagnostic names the sidecar and states the remedy: start the hub and
 > stop it cleanly, then run the backup again.
+
+> **Normative.** For each file it copies, the backup tool records the device,
+> inode, byte length and modification time before reading it and — for a SQLite
+> database — SQLite's own file change counter. After the whole copy completes it
+> re-reads all of them, and refuses the backup if any has changed. No artifact is
+> written on that refusal.
 
 This is ADR-0104 §5's clause with the subject changed, and every term of its
 reasoning transfers: the holder of a contended lock is a hub that is meant to be
@@ -209,6 +217,28 @@ orphans those pages, whereas a cleanly closed WAL database has checkpointed
 everything into the main file and has no `-wal` beside it to find. The sidecar
 check therefore covers the copy on its own, under WAL or the rollback journal that
 ADR-0083 §12 currently keeps.
+
+**The lock does not make the directory quiescent, and the third clause is what
+narrows the gap rather than papering over it.** ADR-0083 §1 says outright that the
+lock is "**advisory**" and "stops a second *hub*, not an arbitrary process", so a
+`sqlite3` shell somebody left open on their own machine can write to a file after
+the sidecar scan has passed and while the copy is running — and the sidecar it
+creates while doing so appears after the one moment the scan looked. The
+before-and-after fingerprint is the same instrument ADR-0104 §2 uses against the
+same hazard, applied per file across the copy instead of across a resumption, and
+its stat fields are insufficient for the same reason ADR-0104 gives — a same-sized
+write inside one timestamp tick moves none of them — which is why SQLite's file
+change counter is read beside them.
+
+**It narrows the window; it does not close it, and it is not offered as closing
+it.** A writer that modifies a file and restores its length, mtime and change
+counter defeats it, and a write landing between the final re-read and the artifact
+being sealed is outside it. This is ADR-0104 §3's disposition stated in its own
+terms rather than a stronger claim made quietly: what the check actually catches is
+a non-cooperating opener on a single-user machine, which is the likely case here as
+it was there. The direction is deliberately conservative — a false refusal costs a
+rerun, and a false acceptance costs a backup that is torn in a way no restore can
+detect, because a torn file's own digest is computed from the torn bytes.
 
 **Refusing after a crash is the right answer even though it is the moment an
 operator most wants a backup.** The remedy in the diagnostic is short and it is
@@ -447,10 +477,11 @@ than a new one.
 > no hard link, and follows none while materialising.
 
 > **Normative.** After materialising and before reporting success, restore verifies
-> that the set of files present equals the manifest's set exactly, that each file's
-> length and SHA-256 digest equal the manifest's, and that every restored SQLite
-> database passes SQLite's own integrity check. Any failure is a refusal under §7's
-> third clause.
+> that the set of regular files present under the target directory, excluding the
+> `hub.lock` its own §7 lock created, equals the manifest's set exactly; that each
+> file's length and SHA-256 digest equal the manifest's; and that every restored
+> SQLite database passes SQLite's own integrity check. Any failure is a refusal
+> under §7's third clause.
 
 > **Normative.** Restore performs no check of a store's schema, of its embedding
 > model identity, or of any other compatibility between the restored content and
@@ -462,6 +493,15 @@ success would be asserting a compatibility nobody established — so a greater
 format version is refused. An older or equal one is accepted, because bringing a
 store forward is a job the system already owns and duplicating it here would mean
 two implementations of it that can disagree.
+
+**The one file the manifest cannot describe is the lock the restore itself
+creates.** `InstanceLock.acquire` opens the lock path with `O_CREAT`, and
+`InstanceLock.release` deliberately does not unlink it — "Removing it would let a
+contender that has already opened the same inode take a lock on a file no longer at
+that path" — so a target directory that satisfies §7's emptiness rule holds exactly
+one file the moment the lock is taken, and holds it still while this check runs.
+Excluding it by name is the whole of the reconciliation, and it is stated here
+rather than left to an implementer to discover as a restore that refuses itself.
 
 **Leaving compatibility to the hub is a composition, not an omission, and the
 mechanism it defers to is legible.** A restored store the running build cannot
