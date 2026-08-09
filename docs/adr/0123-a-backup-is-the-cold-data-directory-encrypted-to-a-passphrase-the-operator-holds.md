@@ -484,6 +484,11 @@ recovery are not symmetric acts and the asymmetry runs in the safe direction.
 
 > **Normative.** Restore refuses a target path that already exists.
 
+> **Normative.** Restore refuses a target path equal to the data directory
+> `Settings` resolves in the environment it is invoked in, naming both paths. A
+> restored directory enters service by the operator moving it, never by a restore
+> writing where a hub is expected to look.
+
 > **Normative.** Restore refuses a target whose parent directory is writable by
 > anyone other than that parent's owner, naming the parent and its mode.
 
@@ -513,6 +518,25 @@ live path moves it there, and the directory it displaces is still on disk to be
 examined — the same disposition ADR-0104 §3 takes with the retained pre-migration
 store, and right for the same reason: the case verification cannot cover is the one
 where the restore was the wrong act.
+
+**Refusing the live path is what keeps a supervised hub from winning the race the
+staging design otherwise leaves open.** Between the refusal check and the rename the
+target path does not exist, which is harmless for an arbitrary fresh path and is
+not harmless for *the* path a supervisor's hub is configured to serve: that hub can
+start in the gap, find an absent directory, and do the documented normal thing —
+create it and initialise an empty store. The rename then fails, because the target
+now exists and publication never replaces; and the operator, at the worst possible
+moment, has a hub serving an empty model and a recovery that will not land. So the
+one path this is reachable on is refused up front, by comparing the target against
+the data directory `Settings` resolves rather than by asking the operator to
+remember. What a tool cannot see is a supervisor configured with some *other*
+directory, which is why the refusal is a floor and not a guarantee — but the live
+path is the one an operator in a hurry actually types.
+
+**This is also the step the §9 drill takes, stated once so it is unambiguous.**
+The drill restores to a fresh path on the second machine and then moves it into
+service; it does not restore over that machine's live directory, and the clause
+above is what makes that ordering the only available one rather than a convention.
 
 **Restore takes no instance lock, and that is a decision rather than an omission.**
 The lock exists to serialise processes over a **shared** directory — ADR-0083 §10
