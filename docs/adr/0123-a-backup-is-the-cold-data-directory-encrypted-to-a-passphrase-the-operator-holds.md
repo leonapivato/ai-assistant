@@ -868,10 +868,13 @@ it does not establish that a recent artifact exists on the day it is needed.
 > that would enable egress, and authorises no component to transmit a backup
 > artifact.
 
-> **Normative.** The backup tool does not classify the destination's filesystem and
-> does not refuse a destination on the ground that the filesystem it names may be a
-> remote mount. Where the artifact comes to rest is the operator's choice and this
-> decision does not constrain it.
+> **Normative.** The destination is on storage local to the device. That is a
+> deployment obligation the operator carries, and this ADR authorises no write to a
+> destination that is not — a remote-mounted destination is outside what this
+> decision permits, not a case it allows.
+
+> **Normative.** The tool does not classify the destination's filesystem, and no
+> clause here is discharged by its failing to detect one.
 
 > **Normative.** Before it writes anything, the tool states what the artifact is —
 > a complete encrypted copy of the hub's Tier 1 data directory — and the resolved
@@ -898,37 +901,52 @@ carried somewhere ADR-0004 §4's baseline — "assumes the host uses OS full-dis
 encryption" — does not travel, and §4 and §5 are what replace the protection the
 baseline stops providing at the edge of the machine.
 
-**A destination on a network mount is the case that tests all of this, and it is
-decided rather than left silent.** Writing to an NFS, SMB or `sshfs` path does put
-bytes on a wire, and the tool cannot see the difference between that and a local
-disk — an `open` and a `write` look identical. Three things settle it. **The rule
-this would have to engage is stated over components**: ADR-0017 §1 permits egress
-"only from `models/` or from a designated integration seam inside `tools/`", and
-what makes those seams the subject is that the *system* chooses the recipient. A
-destination the operator types is not the system choosing anything; it is the
-operator's own act reaching the filesystem through this tool's `write` exactly as
-it would through `cp`, and a refusal here would not prevent the bytes crossing the
-network — it would only prevent this tool from being the program that carried them.
-**The corpus draws that line deliberately, and the contrast is the evidence**:
-ADR-0119 §12 forbids a trace leaving the device "by any route, under any setting",
-which is written over an *object* and admits no such reading — and §3 accordingly
-excludes the trace store rather than arguing with it. ADR-0017 §1 is not written
-that way, and reading a component rule as if it were would be the narrowing-by-
-assertion move ADR-0017 §5 refuses. **And the protection does not depend on the
-answer.** The artifact is ciphertext under a passphrase §5 keeps off the machine,
-which is why "encrypted" is a *ruled* property of this artifact rather than an
-option: it is ruled precisely because the artifact's whole purpose is to come to
-rest somewhere the system's residency controls do not reach, and a rule that tried
-to enumerate those places would be both unreliable — a bind mount, a FUSE volume
-that is local, an unknown kind — and beside the point.
+**A destination on a network mount is the case that tests all of this, and the
+corpus already has a shape for it that is neither a seam nor a shrug.** Writing to
+an NFS, SMB or `sshfs` path does put bytes on a wire, and no application can see
+the difference — an `open` and a `write` are identical either way. The tempting
+answer, that a path the operator typed makes the crossing their act rather than the
+tool's, does not survive contact with ADR-0017 §3: that section already weighed
+"the user chose the recipient" and made it a *condition* on a designated seam's
+send rather than a substitute for designating one. A command-line argument does not
+convert a component's write into somebody else's act.
 
-**What is owed instead is that the operator knows what they are placing.** The
+**But the analogous question is already answered elsewhere in the corpus, and not
+by designating anything.** ADR-0083 D3 requires "a `data_dir` on local storage,
+writable, not shared with another hub" — the hub writes every one of these same
+databases through the same `open` and `write`, and would cross the same boundary on
+the same mount, and the corpus's answer there is a **deployment obligation**, not an
+ADR-0017 designation and not a runtime filesystem check. The reason it can be is
+that the crossing is performed by the operator's mount table rather than by a
+protocol the component implements: a `tools/` seam speaks HTTP to a service it
+names, which is what makes recipient authorisation, payload classification and
+audit meaningful there; a filesystem write names no recipient and carries no
+protocol, so §3's conditions have nothing to attach to.
+
+**So the destination is held to D3's standard rather than §1's.** Local storage is
+required, a remote-mounted destination is not authorised by this decision, and the
+tool discloses rather than detects — the same division D3 makes, and for the same
+reason: a check that tried to enumerate remote filesystems would be wrong in both
+directions, passing a bind mount over NFS and refusing a local FUSE volume, and a
+tool that refused what it could not classify would refuse ordinary setups. This
+costs the operator nothing they wanted: they write the artifact locally and then
+move it wherever it is to live, which §11's opening clause already frames as their
+act and which ADR-0017 does not govern in either direction.
+
+**What is owed alongside is that the operator knows what they are placing.** The
 disclosure clause is the cheap half of ADR-0104 §4's shape without its refusal: that
 ADR makes the tool refuse and name the act because a *configuration* could
 otherwise authorise a bulk upload nobody decided on, whereas here the operator is
 naming the destination in the command they are typing. What they may not have in
 mind is the size of what lands there, so the tool says it — a complete encrypted
 copy of the store, and the resolved path — before the first byte.
+
+**None of this is what protects the artifact, and it is worth being clear which
+clause does.** §4 and §5 do: ciphertext under a passphrase kept off the machine.
+That is why "encrypted" is a *ruled* property of this artifact rather than an
+option — it is ruled precisely because the artifact's purpose is to come to rest
+somewhere the system's residency controls do not reach, and no rule about
+destinations could have supplied that.
 
 **Refusing a destination inside the source is a small rule about a real mistake.**
 A backup written into the directory it copies grows the next backup, and sits on
@@ -970,12 +988,15 @@ reasons are not the same reason.
 - **ADR-0004 §2's residency clause** — "All persistent data lives on the user's
   machine … No cloud storage by default" — is not engaged. §11 makes the tool write
   to a local path and transmit nothing.
-- **ADR-0017 §1** is examined in §11 and found unmet: no component here transmits,
-  and a destination the operator names — including one on a remote mount — is the
-  operator's act rather than a seam this ADR designates. ADR-0083 §15 and ADR-0084
-  §12 both record that examining a clause and finding it unmet changes nothing.
-  Nothing here widens §1, and §11 states the reasoning so a later reader can
-  disagree with the judgement rather than have to reconstruct it.
+- **ADR-0017 §1** is examined in §11 and found unmet, and is not widened by an
+  inch: the tool opens no network connection, designates no seam, and §11 requires
+  a destination on local storage rather than permitting a remote-mounted one. The
+  case §1 would otherwise reach — a component's write crossing the device on a
+  mount — is held to ADR-0083 D3's deployment standard, which is how the corpus
+  already handles the hub writing the very same databases through the very same
+  calls. ADR-0083 §15 and ADR-0084 §12 both record that examining a clause and
+  finding it unmet changes nothing. §11 states the reasoning at length so a later
+  reader can disagree with the judgement rather than reconstruct it.
 - **ADR-0119 §12** is complied with, not narrowed: §3 excludes the trace store
   precisely so that no reading of §12 has to be stretched.
 - **ADR-0083** authorises this tool's shape in §10 and this ADR adds a fourth
