@@ -533,6 +533,31 @@ amendment to a ratified clause in service of a design this ADR has no need for.
 > **Normative.** A revocation is recorded rather than erasing the enrolment it
 > revokes, so the record says what the owner actually decided and when.
 
+> **Normative.** At most one enrolment of an overlay identity is live at any
+> instant. Enrolling an identity that already has a live enrolment is a **single
+> act** that revokes the existing enrolment with §8's full finality — closing its
+> connections and leaving its credential verifying against nothing — and mints the
+> replacement; the two halves are not separable, and no intermediate state has two
+> live enrolments for one identity, or none.
+
+**Uniqueness is what makes "a device" in §8 name exactly one record, and without
+it that section's promise is not implementable.** §8 requires revoking a device to
+leave its credential verifying against nothing and to close every connection it
+holds. If an identity could carry two live enrolments, "its credential" would name
+two values and an implementation revoking the record it happened to find would
+leave the other one admitting the very device the owner just expelled — §8's
+stated outcome defeated by an ambiguity in §6. Adversarial review constructed it
+from the permitted acts alone: nothing in an earlier draft forbade enrolling a live
+identity twice.
+
+**Rotation rather than refusal, because the case is real and the residual is the
+same either way.** An owner who has lost a credential wants a new one without
+first revoking and then re-enrolling, and a two-step dance has a window in which
+the device is enrolled with nothing. Making it one act gives the owner the useful
+operation and gives §8 a single record to act on; what it must not be is two acts
+an implementation could interleave, which is why the clause forbids the
+intermediate states rather than merely describing the outcome.
+
 **Where the record lives makes it an artifact of whatever backup decision lands,
 and this ADR rules nothing about backup.** Placing it inside `data_dir` is the
 whole of what is decided; whether and how a backup carries it belongs to the
@@ -1033,13 +1058,17 @@ plan a test rather than a rehearsal.
    in step 6 revokes an idle device and can never reach this.
 8. **The record is durable.** Enrolment and revocation both survive a hub restart
    (§6).
-9. **Unenrolment purges the device.** Run at the second device, it removes the
-   credential and the enrolled hub identity, and a subsequent connect attempt has
-   nothing to present — which is what discharges ADR-0004 §6 there (§8). It works
-   with the hub stopped.
-10. **No version bump was needed.** Both halves report the same
+9. **Re-enrolling a live device rotates rather than duplicates.** Enrolling the
+   second device again while it is enrolled and connected closes that connection,
+   leaves the previous credential admitting nothing, and admits the new one — and
+   the hub never holds two live enrolments for it (§6).
+10. **Unenrolment purges the device.** Run at the second device, it removes the
+    credential and the enrolled hub identity, and a subsequent connect attempt has
+    nothing to present — which is what discharges ADR-0004 §6 there (§8). It works
+    with the hub stopped.
+11. **No version bump was needed.** Both halves report the same
     `PROTOCOL_VERSION` and the handshake passes on both listeners (§9).
-11. **The relayed path is exercised.** Where the overlay cannot establish a direct
+12. **The relayed path is exercised.** Where the overlay cannot establish a direct
     path between the two devices, the session still completes over the overlay's
     relay — which is the case §2's end-to-end encryption clause is written for.
 
