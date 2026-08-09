@@ -306,7 +306,12 @@ observe Tier 1 content in the course of recording that it exists.
 > **Normative.** A trace's own id is **minted by the type** — the hex form of a
 > random UUID, defaulted and shape-checked — so no caller can supply one from
 > data (§2). Referenced ids keep `Identifier`, and §2's third clause binds them
-> as an obligation because their shapes belong to the stores that mint them. A store that meets an id it already holds records an emission
+> as an obligation because their shapes belong to the stores that mint them.
+
+> **Normative.** The default mints an id for a **new** trace and never for a
+> stored one. A store hydrating a row that carries no readable id raises
+> `TraceStoreError` before constructing anything; it never lets the default stand
+> in for an id the row was supposed to have. A store that meets an id it already holds records an emission
 > failure under §5 and keeps the trace it has; it does not raise, and it does not
 > overwrite.
 
@@ -1351,6 +1356,18 @@ accidental route is gone: no emitter reaches for `id=` at all, and nothing that
 looks like content survives the pattern. §2's third clause governs the rest, as
 an obligation on emitters that review enforces.
 
+**The default is for minting, and hydration is where that needs saying out
+loud.** A defaulted field is silent about the difference between "no id was
+supplied because this is a new trace" and "no id was read because the row or the
+query lost the column" — and in the second case a fresh UUID would hand back a
+trace that no longer identifies the event it came from, with deduplication and
+every cross-trace join then operating on a fabricated id. The type cannot tell
+the two apart, so the store must: a row without a readable id is a
+`TraceStoreError`, and §13d makes it a conformance obligation rather than an
+instruction. The alternative — a required `id` plus a separate minting factory —
+was weighed and refused, because it puts `id=` back in every emitter's reach and
+reopens exactly the accidental route the default closes.
+
 **The referenced ids are *not* given the same treatment, deliberately.** A
 `refs` or `records` value is a conversation id, a turn id, a memory record id —
 minted elsewhere, in shapes this ADR does not own. `MemoryStore.add`'s id is the
@@ -1509,6 +1526,10 @@ together" — the Protocols, a shared conformance suite each, a canonical fake i
 - A test that no string-typed value reachable from `EvaluationTrace` is
   unconstrained — the type-graph walk §2 makes possible, in the spirit of
   ADR-0085 §5's closure walk.
+- A conformance obligation that hydrating a row with no readable `id` raises
+  `TraceStoreError` rather than minting one (§3). This is the one place the
+  type's default could quietly fabricate an identity, and only the store can see
+  the difference.
 - A round-trip obligation that an absent metric key and an absent
   `TraceRecordSet` key survive storage as absent, never as zero and never as an
   empty set (§3). A schema with `NOT NULL DEFAULT 0` columns would erase, silently
