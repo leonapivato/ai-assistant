@@ -26,6 +26,7 @@ from ai_assistant.core.errors import (
     ConversationStoreError,
     DeferralStoreError,
     MemoryStoreError,
+    OversizedValueError,
     PlanningError,
     ReaderError,
     TraceStoreError,
@@ -4064,3 +4065,53 @@ def test_an_ingestion_trace_carries_no_string_the_reader_chose() -> None:
         "rejected": 0,
     }
     assert all(isinstance(value, int | float | bool) for value in observation.metrics.values())
+
+
+async def test_a_result_too_large_to_return_records_the_refusal_not_a_success() -> None:
+    """The trace and the caller's answer must agree (ADR-0119 §3, §8).
+
+    ``_checked`` measures the *result* against ADR-0084 §4's limit, and it used to
+    run one frame outside the traced region — so an operation whose page would not
+    fit recorded ``OK`` while its caller received an ``OversizedValueError``. A
+    stream in which a refused call is indistinguishable from a served one is the
+    lie §5 spends its clauses refusing, arriving through placement instead of
+    through I/O.
+
+    The refusal is ``REFUSED`` rather than ``FAULT``: a contract limit answered is
+    the system working, and ADR-0084 §4 puts the same limit on the way in.
+
+    Driven through ``pending_confirmations``, which takes no arguments at all, so
+    a one-byte ceiling cannot be tripped by the *argument* check that runs before
+    ``_tracked`` — an operation refused there emits nothing at all, which is the
+    separate gap #855 carries and not the one this case is about.
+    """
+    harness = Harness()
+    harness.engine._max_payload_bytes = 1
+
+    with pytest.raises(OversizedValueError):
+        await harness.engine.pending_confirmations()
+
+    (trace,) = harness.trace_sink.recorded
+    assert trace.seam == "pending_confirmations"
+    assert trace.outcome is TraceOutcome.REFUSED
+    assert trace.fault_class == "OversizedValueError"
+
+
+async def test_a_maintenance_report_is_not_measured_against_the_payload_limit() -> None:
+    """``checked`` is per operation, and the four maintenance ones are exempt.
+
+    ADR-0085 §1 fixes the promoted ``AssistantEngine`` surface and none of
+    ``start``/``purge_expired``/``ingest``/``consolidate`` is on it: their reports
+    go to the hub's scheduler in-process and never cross a wire (ADR-0083 §8). They
+    were never measured before this lane and they are not measured now — the flag
+    exists so that stays a stated fact rather than an accident of which call site
+    happened to be wrapped.
+    """
+    harness = Harness()
+    harness.engine._max_payload_bytes = 1
+
+    report = await harness.engine.purge_expired()
+
+    assert report.traces == 0
+    (trace,) = harness.trace_sink.recorded
+    assert trace.outcome is TraceOutcome.OK

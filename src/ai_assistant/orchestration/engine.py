@@ -1522,11 +1522,10 @@ class Engine:
             timeout=timeout,
             conversation_id=selected,
         )
-        return self._checked(
-            await self._tracked(
-                self._converse(utterance, timeout=timeout, conversation_id=selected), "converse"
-            ),
+        return await self._tracked(
+            self._converse(utterance, timeout=timeout, conversation_id=selected),
             "converse",
+            checked=True,
         )
 
     async def resume(
@@ -1591,9 +1590,8 @@ class Engine:
             approved=approved,
             timeout=timeout,
         )
-        return self._checked(
-            await self._tracked(self._resume(token, approved=approved, timeout=timeout), "resume"),
-            "resume",
+        return await self._tracked(
+            self._resume(token, approved=approved, timeout=timeout), "resume", checked=True
         )
 
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
@@ -1627,7 +1625,7 @@ class Engine:
         """
         self._reject_if_closing()
         check_arguments("learn", max_bytes=self._max_payload_bytes, event=event)
-        return self._checked(await self._tracked(self._learn(event), "learn"), "learn")
+        return await self._tracked(self._learn(event), "learn", checked=True)
 
     async def observe(self, *, conversation_id: Identifier | None = None) -> ObservationReport:
         """Distil beliefs from a conversation's recent turns (ADR-0077 §8).
@@ -1694,9 +1692,7 @@ class Engine:
             None if conversation_id is None else identifier(conversation_id, name="conversation_id")
         )
         check_arguments("observe", max_bytes=self._max_payload_bytes, conversation_id=selected)
-        return self._checked(
-            await self._tracked(self._observation.observe(selected), "observe"), "observe"
-        )
+        return await self._tracked(self._observation.observe(selected), "observe", checked=True)
 
     async def beliefs(
         self,
@@ -1769,14 +1765,10 @@ class Engine:
             offset=offset,
         )
 
-        return self._checked(
-            await self._tracked(
-                self._beliefs(
-                    bands=snapshot_bands, kinds=snapshot_kinds, limit=limit, offset=offset
-                ),
-                "beliefs",
-            ),
+        return await self._tracked(
+            self._beliefs(bands=snapshot_bands, kinds=snapshot_kinds, limit=limit, offset=offset),
             "beliefs",
+            checked=True,
         )
 
     async def belief(self, record_id: Identifier) -> Belief | None:
@@ -1808,7 +1800,7 @@ class Engine:
         self._reject_if_closing()
         named = identifier(record_id, name="record_id")
         check_arguments("belief", max_bytes=self._max_payload_bytes, record_id=named)
-        return self._checked(await self._tracked(self._belief(named), "belief"), "belief")
+        return await self._tracked(self._belief(named), "belief", checked=True)
 
     async def forget(self, record_id: Identifier) -> bool:
         """Destroy the record ``record_id`` names (ADR-0073 §5; ADR-0007 §1).
@@ -1857,7 +1849,7 @@ class Engine:
         self._reject_if_closing()
         named = identifier(record_id, name="record_id")
         check_arguments("forget", max_bytes=self._max_payload_bytes, record_id=named)
-        return self._checked(await self._tracked(self._memory.delete(named), "forget"), "forget")
+        return await self._tracked(self._memory.delete(named), "forget", checked=True)
 
     async def questions(
         self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
@@ -1898,9 +1890,8 @@ class Engine:
         """
         self._reject_if_closing()
         self._check_page("questions", limit=limit, offset=offset)
-        return self._checked(
-            await self._tracked(self._questions.questions(limit=limit, offset=offset), "questions"),
-            "questions",
+        return await self._tracked(
+            self._questions.questions(limit=limit, offset=offset), "questions", checked=True
         )
 
     async def interrupted_questions(
@@ -1935,12 +1926,10 @@ class Engine:
         """
         self._reject_if_closing()
         self._check_page("interrupted_questions", limit=limit, offset=offset)
-        return self._checked(
-            await self._tracked(
-                self._questions.interrupted_questions(limit=limit, offset=offset),
-                "interrupted_questions",
-            ),
+        return await self._tracked(
+            self._questions.interrupted_questions(limit=limit, offset=offset),
             "interrupted_questions",
+            checked=True,
         )
 
     async def answer(self, question_id: Identifier, *, accept: bool) -> AnswerOutcome:
@@ -1985,8 +1974,8 @@ class Engine:
         check_arguments(
             "answer", max_bytes=self._max_payload_bytes, question_id=named, accept=accept
         )
-        return self._checked(
-            await self._tracked(self._questions.answer(named, accept=accept), "answer"), "answer"
+        return await self._tracked(
+            self._questions.answer(named, accept=accept), "answer", checked=True
         )
 
     async def forget_question(self, question_id: Identifier) -> bool:
@@ -2018,9 +2007,8 @@ class Engine:
         self._reject_if_closing()
         named = identifier(question_id, name="question_id")
         check_arguments("forget_question", max_bytes=self._max_payload_bytes, question_id=named)
-        return self._checked(
-            await self._tracked(self._questions.forget_question(named), "forget_question"),
-            "forget_question",
+        return await self._tracked(
+            self._questions.forget_question(named), "forget_question", checked=True
         )
 
     async def recent_conversations(
@@ -2059,11 +2047,10 @@ class Engine:
         """
         self._reject_if_closing()
         self._check_page("recent_conversations", limit=limit, offset=offset)
-        return self._checked(
-            await self._tracked(
-                self._recent_conversations(limit=limit, offset=offset), "recent_conversations"
-            ),
+        return await self._tracked(
+            self._recent_conversations(limit=limit, offset=offset),
             "recent_conversations",
+            checked=True,
         )
 
     async def _recent_conversations(
@@ -2092,9 +2079,7 @@ class Engine:
         self._reject_if_closing()
         named = identifier(conversation_id, name="conversation_id")
         check_arguments("conversation", max_bytes=self._max_payload_bytes, conversation_id=named)
-        return self._checked(
-            await self._tracked(self._conversations.digest(named), "conversation"), "conversation"
-        )
+        return await self._tracked(self._conversations.digest(named), "conversation", checked=True)
 
     async def forget_conversation(self, conversation_id: Identifier) -> bool:
         """Destroy a conversation and every episode it recorded (ADR-0074 §8).
@@ -2134,9 +2119,8 @@ class Engine:
         check_arguments(
             "forget_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
         )
-        return self._checked(
-            await self._tracked(self._conversations.delete(named), "forget_conversation"),
-            "forget_conversation",
+        return await self._tracked(
+            self._conversations.delete(named), "forget_conversation", checked=True
         )
 
     async def pending_confirmations(self) -> tuple[Confirmation, ...]:
@@ -2187,9 +2171,8 @@ class Engine:
         self._reject_if_closing()
         # Tracked like converse/resume: recovery reads the plan store and the audit
         # trail, so shutdown must drain it before closing those connections (§2).
-        return self._checked(
-            await self._tracked(self._pending_confirmations(), "pending_confirmations"),
-            "pending_confirmations",
+        return await self._tracked(
+            self._pending_confirmations(), "pending_confirmations", checked=True
         )
 
     async def _pending_confirmations(self) -> tuple[Confirmation, ...]:
@@ -2304,9 +2287,8 @@ class Engine:
             OversizedValueError: If the enumeration does not fit the contract limit.
         """
         self._reject_if_closing()
-        return self._checked(
-            await self._tracked(self._grants.grantable_sources(), "grantable_sources"),
-            "grantable_sources",
+        return await self._tracked(
+            self._grants.grantable_sources(), "grantable_sources", checked=True
         )
 
     async def grant(
@@ -2336,9 +2318,7 @@ class Engine:
         named = non_blank_text(source, name="source")
         uses = grant_scope(scope, name="scope")
         check_arguments("grant", max_bytes=self._max_payload_bytes, source=named, scope=uses)
-        return self._checked(
-            await self._tracked(self._grants.grant(named, scope=uses), "grant"), "grant"
-        )
+        return await self._tracked(self._grants.grant(named, scope=uses), "grant", checked=True)
 
     async def revoke(self, source: NonBlankEncodableText) -> SourceGrant | None:
         """Withdraw the live grant on one source, or report that there was none.
@@ -2358,7 +2338,7 @@ class Engine:
         self._reject_if_closing()
         named = non_blank_text(source, name="source")
         check_arguments("revoke", max_bytes=self._max_payload_bytes, source=named)
-        return self._checked(await self._tracked(self._grants.revoke(named), "revoke"), "revoke")
+        return await self._tracked(self._grants.revoke(named), "revoke", checked=True)
 
     async def recent_grants(self, *, limit: int = DEFAULT_PAGE_SIZE) -> tuple[SourceGrant, ...]:
         """List what the user granted and withdrew, newest first (ADR-0097 §6).
@@ -2380,9 +2360,8 @@ class Engine:
         self._reject_if_closing()
         positive_page_argument(limit, name="limit")
         check_arguments("recent_grants", max_bytes=self._max_payload_bytes, limit=limit)
-        return self._checked(
-            await self._tracked(self._grants.recent_grants(limit=limit), "recent_grants"),
-            "recent_grants",
+        return await self._tracked(
+            self._grants.recent_grants(limit=limit), "recent_grants", checked=True
         )
 
     async def aclose(self) -> None:
@@ -2545,6 +2524,8 @@ class Engine:
         coro: Awaitable[_T],
         seam: str,
         observe: Callable[[_T], Observation] | None = None,
+        *,
+        checked: bool = False,
     ) -> _T:
         """Run ``coro`` as a tracked, shielded, **traced** task, so shutdown can drain it.
 
@@ -2577,13 +2558,23 @@ class Engine:
         and a trace written out here would be a trace for an await rather than for
         an operation.
 
-        **What is not covered is what never reaches here.** A call refused at the
-        door — a closing engine, a malformed page argument, an oversized
-        utterance — raises before ``coro`` is built and emits no trace, and so does
-        a result too large to return, which :meth:`_checked` refuses after this
-        returns. Those are refusals of a *call*; a trace records an operation that
-        was served (§1), and #855 carries the question of whether the boundary
-        should widen to them.
+        **The result-size refusal is inside the traced region, deliberately.**
+        :meth:`_checked` used to run out here, after this returned, which made an
+        operation whose result would not fit record ``OK`` while its caller got an
+        :class:`~ai_assistant.core.errors.OversizedValueError` — a trace that
+        disagreed with the answer. It is now applied to the result *within* the
+        traced work, so the refusal is what the trace records (``REFUSED``, since
+        ADR-0084 §4's limit is a contract answer rather than a malfunction). What
+        does not change is where the effect stands: :meth:`_checked` still runs
+        after the work has committed, and ADR-0085 §8e's residue is untouched.
+
+        **What is still not covered is what never reaches here.** A call refused at
+        the door — a closing engine, a malformed page argument, an oversized
+        *argument* — raises before ``coro`` is built and emits no trace. Those are
+        refusals of a *call*; a trace records an operation that was served (§1), and
+        widening the boundary to them means moving the emitter off the single wiring
+        point §8 chose it for, which would also cost a trace for work whose caller
+        cancelled the shield. #855 carries the question rather than this lane.
 
         Args:
             coro: The operation's own work.
@@ -2593,16 +2584,43 @@ class Engine:
             observe: How to read the operation's result onto its trace, for the
                 operations whose detail the envelope cannot see (ADR-0119 §8).
                 ``None`` where the envelope is the whole story.
+            checked: Whether the result is measured against the contract's payload
+                limit before it is returned (:meth:`_checked`). ``True`` on every
+                operation whose result crosses the ``AssistantEngine`` boundary;
+                ``False`` on the four maintenance operations, whose reports are the
+                scheduler's and never a client's (ADR-0085 §1).
 
         Returns:
             Whatever ``coro`` returned.
         """
+        work = self._checked_result(coro, seam) if checked else coro
         task: asyncio.Task[_T] = asyncio.ensure_future(
-            self._operation_traces.observing(seam, coro, observe)
+            self._operation_traces.observing(seam, work, observe)
         )
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
         return await asyncio.shield(task)
+
+    async def _checked_result(self, coro: Awaitable[_T], method: str) -> _T:
+        """Await ``coro`` and measure what it produced, as one traced unit.
+
+        The one-line adapter that puts :meth:`_checked` inside the region
+        :meth:`_tracked` observes. It exists as a method rather than a closure so
+        the wrapped coroutine is created eagerly by the caller and awaited exactly
+        once, which is what keeps ``ensure_future``'s "never receives work it must
+        throw away un-awaited" property true of the wrapper as well.
+
+        Args:
+            coro: The operation's work.
+            method: The operation's name, for the refusal's own message.
+
+        Returns:
+            What ``coro`` produced.
+
+        Raises:
+            OversizedValueError: If the result exceeds the contract limit.
+        """
+        return self._checked(await coro, method)
 
     def _reject_if_closing(self) -> None:
         """Refuse new work once shutdown has begun (ADR-0042 §2 stops accepting).
