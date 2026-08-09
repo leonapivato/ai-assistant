@@ -220,6 +220,18 @@ trace its class and never costs the trace itself. Failing construction there
 would be the worst available outcome: the record of the fault destroyed by the
 fault's own name, before §5's subordination could catch anything.
 
+**And the refused name is not diverted to the log, which is the trap in the
+obvious fix.** Sending it there "for debuggability" would put into a Tier-2 log
+exactly the content the pattern just refused to put in a Tier-2 store — ADR-0004
+§5 is unconditional, "Logs are Tier 2 only. Tier 0/1 data must never be logged",
+and a name built from user text is the case at hand. So the name is dropped, and
+the accepted cost is stated: an operator meeting
+`UNREPRESENTABLE_FAULT_CLASS` learns that a fault occurred and that its class
+could not be represented, and nothing more. The cost is small because the
+population is small — every exception this system raises on its own paths is a
+declared class in `core/errors.py` or a library's, and a dynamically-named
+exception class reaching this seam at all would be remarkable.
+
 **The exception-class permission is narrow on purpose.** An exception's
 *class* is Tier 2 and the corpus already logs it — ADR-0111 §9 ratifies drawing
 the refusal/fault distinction "from the exception's class, never from its message
@@ -260,8 +272,12 @@ observe Tier 1 content in the course of recording that it exists.
 
 > **Normative.** Deriving `fault_class` from an exception is **total**: a class
 > whose `__name__` does not fit the permitted form yields the reserved literal
-> `UNREPRESENTABLE_FAULT_CLASS`, and the real name goes to the Tier-2 log. No
-> exception a provider can raise may prevent a trace from being constructed.
+> `UNREPRESENTABLE_FAULT_CLASS`. No exception a provider can raise may prevent a
+> trace from being constructed.
+
+> **Normative.** The rejected name is **discarded, not logged**. Nothing derived
+> from it — not the name, not a prefix, not a digest — reaches the trace store or
+> any log. The reserved literal is the whole of what is recorded.
 
 > **Normative.** A metric key and a seam label are of one constrained string type
 > whose values match a lowercase identifier pattern of bounded length.
@@ -994,8 +1010,12 @@ def fault_class_of(error: BaseException) -> str:
     is *not* under the emitter's control: a provider may raise
     ``type("X" * 65, (Exception,), {})``, and nothing stops a dynamic class name
     from carrying content. So the conversion is total — an unrepresentable name
-    becomes ``UNREPRESENTABLE_FAULT_CLASS`` and the real one goes to the Tier-2
-    log — rather than raising and destroying the very trace §8 requires (§3).
+    becomes ``UNREPRESENTABLE_FAULT_CLASS`` — rather than raising and destroying
+    the very trace §8 requires (§3).
+
+    The rejected name is **dropped here and goes nowhere**, log included: it was
+    refused precisely because it may carry Tier 1 content, and ADR-0004 §5 rules
+    that logs are Tier 2 only.
     """
     name = type(error).__name__
     return name if _FAULT_CLASS.fullmatch(name) else UNREPRESENTABLE_FAULT_CLASS
