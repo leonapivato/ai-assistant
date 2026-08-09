@@ -275,6 +275,77 @@ async def test_a_band_scoped_read_reports_a_structurally_zero_band_exclusion(
     assert trace.metrics[traces.EXCLUDED_BAND] == 0
 
 
+async def test_the_trace_reports_the_band_selection_the_search_actually_used(
+    make_store: Callable[..., SqliteMemoryStore], sink: FakeTraceSink
+) -> None:
+    """ADR-0065 §3's input clause, extended to the *record* of the read.
+
+    The shared suite already pins that ``search`` answers from the ``bands`` it was
+    handed rather than a later version (``memory_store_contract.py``'s
+    ``test_search_observes_its_bands_filter_before_its_first_await``). Nothing
+    pinned the same of the trace, and the trace is the easier one to get wrong:
+    computing its band figure is a second read of the caller's sequence, and moving
+    that read past the embedder's ``await`` would make the record describe a
+    selection the search never applied — the observation the instrument exists to
+    make, made of something that never happened.
+
+    The mutation is delivered from *inside* the read rather than from another task,
+    so the case is deterministic and needs no scheduling: the embedder is the first
+    ``await``, and it empties the caller's list on its way through. It therefore
+    pins the position of the derivation rather than any race — no ``await``
+    separates the two reads today, so on one event loop they cannot diverge, and
+    this is the guard against an edit that changes that.
+    """
+    bands = [BeliefBand.ASSERTED]
+
+    class _MutatingEmbedder:
+        """Embeds, and clears the caller's band list while it is at it."""
+
+        def __init__(self, inner: HashingEmbedder) -> None:
+            self._inner = inner
+            self.armed = False
+
+        @property
+        def model_id(self) -> str:
+            """The wrapped embedder's model."""
+            return self._inner.model_id
+
+        @property
+        def dimensions(self) -> int:
+            """The wrapped embedder's width."""
+            return self._inner.dimensions
+
+        async def embed(self, texts: Sequence[str]) -> list[Embedding]:
+            """Empty the caller's list once armed, then embed normally.
+
+            Args:
+                texts: What to embed.
+
+            Returns:
+                The wrapped embedder's vectors.
+            """
+            if self.armed:
+                bands.clear()
+            return await self._inner.embed(texts)
+
+    embedder = _MutatingEmbedder(HashingEmbedder(dimensions=64))
+    store = make_store(embedder=embedder)
+    await store.add(_semantic("inferred", "the weekly planning meeting"))
+    await store.add(
+        _semantic("asserted", "the weekly planning meeting", source=MemorySource.USER_ASSERTED)
+    )
+    # Armed after the seeding writes, so the mutation lands inside the read this
+    # case is about rather than being spent on a precondition.
+    embedder.armed = True
+
+    found = await store.search("weekly planning meeting", limit=5, bands=bands)
+
+    assert [record.id for record in found] == ["asserted"], "the pre-mutation selection"
+    assert _only(sink, TraceKind.RETRIEVAL).metrics[traces.BANDS] == 1, (
+        "the trace must report the selection the read used, not a later one"
+    )
+
+
 async def test_an_unscoped_read_reports_no_band_restriction(
     make_store: Callable[..., SqliteMemoryStore], sink: FakeTraceSink
 ) -> None:
