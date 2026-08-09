@@ -510,8 +510,6 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
         scheduler = Scheduler(jobs_for(engine, settings))
         listener = Listener(engine, settings, data_dir=data_dir)
         try:
-            if stop.is_set():
-                return EXIT_OK
             # ADR-0119 §9's configuration stamp, "after the stores are open and
             # before the API accepts a request". Both bounds are satisfied
             # anywhere between step 3 and step 6; here, at the earliest legal
@@ -521,17 +519,26 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
             # running" is exact rather than approximate, and a start that fails at
             # step 4 still leaves its configuration dated.
             #
-            # **Not a seventh startup step.** ADR-0083 §3's sequence is fixed and
-            # each of its steps is a precondition of the next; this is neither. It
+            # **Not a seventh startup step, which is why it is above the stop
+            # check and not below it.** ADR-0083 §3's sequence is fixed and each
+            # of its steps is a precondition of the next; this is neither. It
             # cannot fail (§5 subordinates it — ``record`` never raises), nothing
             # later depends on it, and a hub whose stamp was lost is a hub that
-            # started normally with a Tier 2 log record saying so.
+            # started normally with a Tier 2 log record saying so. Gating it on the
+            # between-steps stop check would make it a step in the one way that
+            # matters — §9's requirement is unconditional once the stores are
+            # open, and "a carrier that fires on every startup … cannot be
+            # forgotten" is not true of one a stop signal can race. A hub stopped
+            # here leaves a configuration trace with no operation after it, which
+            # reads correctly as a hub that came up and served nothing.
             await ConfigurationStamp(
                 sink=composed.trace_sink,
                 retrieval_search_limit=composed.retrieval_search_limit,
                 conflict_search_limit=composed.conflict_search_limit,
             ).record(settings)
 
+            if stop.is_set():
+                return EXIT_OK
             # Step 4. The deletion sweep then the retention reclaim, at the
             # position ADR-0074 §8 ratified. A resident process improves on the
             # CLI here without changing anything: because the hub restarts after a

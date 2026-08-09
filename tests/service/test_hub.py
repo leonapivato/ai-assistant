@@ -38,7 +38,7 @@ import structlog
 from ai_assistant.app import Composition
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError, IncompatibleStateError, TraceStoreError
-from ai_assistant.core.types import TraceKind
+from ai_assistant.core.types import EvaluationTrace, TraceKind
 from ai_assistant.orchestration.engine import DrainPhase, PurgeReport
 from ai_assistant.service import hub
 from ai_assistant.service.configuration import SEAM_STARTUP
@@ -167,6 +167,31 @@ def sink() -> FakeTraceSink:
     two tests want to read what it wrote.
     """
     return FakeTraceSink()
+
+
+class _SettlingSink:
+    """A conforming sink that parks long enough for a pending signal to land.
+
+    The one thing :class:`~ai_assistant.testing.FakeTraceSink` cannot do, and it
+    is :func:`_settle`'s reason applied at a second place: a signal raised from
+    inside the composition root reaches the *process* at once, but the hub's
+    handler is an I/O callback that needs a poll pass. A test asserting on what
+    happens either side of the stop check therefore needs a real suspension
+    between the two, and the stamp's own ``await`` is where one belongs.
+    """
+
+    def __init__(self) -> None:
+        """Create an empty sink."""
+        self.recorded: list[EvaluationTrace] = []
+
+    async def emit(self, trace: EvaluationTrace) -> None:
+        """Append ``trace``, then park for a poll pass.
+
+        Args:
+            trace: The event to record.
+        """
+        self.recorded.append(trace)
+        await _settle()
 
 
 def _composed(engine: FakeEngine, sink: TraceSink | None = None) -> Composition:
@@ -374,6 +399,41 @@ async def test_the_configuration_is_stamped_before_the_first_operation_runs(
     stamped = sink.recorded[0]
     assert stamped.kind is TraceKind.CONFIGURATION
     assert stamped.seam == SEAM_STARTUP
+
+
+async def test_a_stop_that_lands_before_step_four_still_leaves_the_stamp(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, engine: FakeEngine
+) -> None:
+    """§9's requirement is unconditional once the stores are open.
+
+    A stop signal delivered while the composition root is still building is an
+    ordinary event — startup is not instantaneous, and the on-device embedder
+    alone takes real time. The hub then unwinds without running step 4, which is
+    ADR-0083's between-steps honouring working correctly; what must **not** ride
+    on that timing is the configuration trace, because "a carrier that fires on
+    every startup … cannot be forgotten" is untrue of one a signal can race.
+
+    The stamp is therefore above the stop check rather than below it, and this is
+    the branch that tells the two placements apart: the stores were open, so §9's
+    condition was met, and the trace is written even though the hub goes on to
+    serve nothing.
+    """
+    sink = _SettlingSink()
+
+    def _build(settings: Settings, *, data_dir: Path) -> Composition:
+        os.kill(os.getpid(), signal.SIGTERM)
+        return _composed(engine, sink)
+
+    monkeypatch.setattr(hub, "build_composition", _build)
+    monkeypatch.setattr(hub, "ensure_model_credentials", lambda _settings: None)
+
+    with structlog.testing.capture_logs() as captured:
+        code = await hub.serve(settings)
+
+    assert code == EXIT_OK
+    assert engine.started == 0
+    assert "hub_ready" not in _events(captured)
+    assert [trace.kind for trace in sink.recorded] == [TraceKind.CONFIGURATION]
 
 
 async def test_a_hub_whose_stamp_cannot_be_written_still_starts(
