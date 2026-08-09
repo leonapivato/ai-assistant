@@ -85,12 +85,24 @@ mechanism half is rewritten by ADR-0045 §5):
   of #306 by ADR-0080 §9, which leaves this semantics exactly as ADR-0045 §6 has
   it).
 
-Both must also refuse the unsafe folds (§5b as narrowed by ADR-0045 §5): **clause
-1** — any fold onto a ``USER_ASSERTED`` target — stays record-keyed for **both**
-rulings; the **``EXTERNAL``** clause is **narrowed to ``REINFORCE``** — a
-``USER_ASSERTED`` proposal *reinforcing* an ``EXTERNAL`` target still raises, while
+Both must also refuse the unsafe folds (§5b as narrowed by ADR-0045 §5 and ADR-0121
+§5): **clause 1** — any fold onto a ``USER_ASSERTED`` target — stays record-keyed
+for **both** rulings; the **``EXTERNAL``** clause is **narrowed to ``REINFORCE``** —
+a ``USER_ASSERTED`` proposal *reinforcing* an ``EXTERNAL`` target still raises, while
 the same *supersession* is now permitted and writes a new-id correction. Every
 other pairing is permitted, which the suite exercises as well as those it refuses.
+
+**Clause 1 has a second exception since ADR-0121 §5**, and it is the only fold onto
+an assertion that needs no confirmation: a ``REINFORCE`` whose incoming record is
+``USER_ASSERTED`` and which **agrees** with the target — equal ``kind``, and equal
+``content`` after NFC, case folding, whitespace collapse and stripping (ADR-0121 §1).
+The predicate is **verified at the writer, never trusted from the ruling**, so a
+disagreeing ``REINFORCE`` is refused whatever a policy claims. The permitted fold's
+*survivor* is contract here too — the stored target with its ``content``,
+``source``, confidence, attestation, window and expiry unchanged, taking the
+incoming record's evidence and confirming instant (§4's second clause) — which is
+the one place this suite pins what a ``REINFORCE`` writes, because ADR-0121 §5's
+third clause makes it the exception's own safety argument rather than tuning.
 
 **That reinforce refusal is the one ADR-0092 §5 exists to protect.** §4 put
 ``EXTERNAL`` in the retirement class the widening above uses, and a writer that
@@ -106,8 +118,10 @@ It deliberately does **not** pin the conflict threshold, the *value* of the
 conflict limit, the constructor's tuning check, or — for ``REINFORCE`` — which
 content wins and how confidence combines: those are one implementation's tuning
 and `memory`'s semantics, and a suite that pinned them would stop being a
-contract. Only the behaviour *at* the ceiling is contract, which is why the seam
-sets a limit and asserts nothing about it (ADR-0079 §3/§4).
+contract. The single exception is the fold ADR-0121 §5 permits onto an assertion,
+whose survivor §5's third clause states in terms; everywhere else the fold's
+composition stays `memory`'s. Only the behaviour *at* the ceiling is contract,
+which is why the seam sets a limit and asserts nothing about it (ADR-0079 §3/§4).
 
 Nor does it pin clock handling: a writer with no clock at all conforms, so
 ``MemoryIngestor``'s naive-clock guard is asserted in ``test_ingest.py`` where it
@@ -546,18 +560,28 @@ _FOLD_KINDS = [MemoryDecisionKind.REINFORCE, MemoryDecisionKind.SUPERSEDE]
 
 
 def _fold_is_refused(
-    kind: MemoryDecisionKind, incoming: MemorySource, target: MemorySource
+    kind: MemoryDecisionKind, incoming: MemorySource, target: MemorySource, *, agrees: bool
 ) -> bool:
-    """ADR-0040 §5b's predicate as narrowed by ADR-0045 §5 — now ruling-aware.
+    """ADR-0040 §5b's predicate as narrowed by ADR-0045 §5 and ADR-0121 §5.
 
-    Clause 1 (any fold onto a ``USER_ASSERTED`` target) refuses under **both**
-    rulings. The ``EXTERNAL`` clause (a ``USER_ASSERTED`` proposal onto an
-    ``EXTERNAL`` target) is refused only for ``REINFORCE``: the same ``SUPERSEDE``
-    is now permitted, because it mints a fresh id rather than inheriting the
-    external one (ADR-0045 §4). Every other pairing is permitted.
+    Ruling-aware since ADR-0045 §5, and **agreement-aware** since ADR-0121 §5.
+
+    Clause 1 (any fold onto a ``USER_ASSERTED`` target) refuses under both rulings,
+    with one exception and one only: a ``REINFORCE`` whose incoming record is
+    ``USER_ASSERTED`` and which **agrees** with the target under ADR-0121 §1. The
+    ``EXTERNAL`` clause (a ``USER_ASSERTED`` proposal onto an ``EXTERNAL`` target)
+    is refused only for ``REINFORCE``, because a ``SUPERSEDE`` mints a fresh id
+    rather than inheriting the external one (ADR-0045 §4) — and **agreement does
+    nothing to it**, for ADR-0092 §5's reason: the next routine sync overwrites the
+    fold whether or not the user's words matched the import's. Every other pairing
+    is permitted, on either agreement axis.
     """
     if target is MemorySource.USER_ASSERTED:
-        return True
+        return not (
+            agrees
+            and kind is MemoryDecisionKind.REINFORCE
+            and incoming is MemorySource.USER_ASSERTED
+        )
     return (
         kind is MemoryDecisionKind.REINFORCE
         and incoming is MemorySource.USER_ASSERTED
@@ -565,14 +589,37 @@ def _fold_is_refused(
     )
 
 
-#: The complete ``ruling`` by ``incoming source`` by ``target source`` space, so the suite
-#: samples nothing: every pairing is either refused (write nothing) or applied
-#: (the fold reaches the store), per :func:`_fold_is_refused`.
+#: A content one token away from :data:`_CONTENT` — enough to be a *different*
+#: belief under ADR-0121 §1, and close enough that :class:`FakeMemoryStore` still
+#: ranks the target as a conflict: three of these four query terms appear in
+#: ``_CONTENT``, which is exactly :data:`_DEFAULT_CONFLICT_THRESHOLD`. That
+#: arithmetic is the point of the constant rather than an accident of it — the
+#: adversarial case ADR-0121 §1 argues from is a one-token edit scoring at the *top*
+#: of the ranking, and a refusal case that fell below the threshold would exercise
+#: an empty conflict set instead of the predicate.
+_DISAGREEING = "prefers concise formal emails"
+
+#: The same belief as :data:`_CONTENT`, differing only in the case and whitespace
+#: ADR-0121 §1's four transformations are chosen to absorb. Used where a case must
+#: show that the *target's own bytes* survive the permitted fold — against a proposal
+#: equal to the target byte for byte, "the target's content survived" and "the
+#: incoming content was written" are the same observation and the case pins nothing.
+_RESTATED = "  Prefers   CONCISE\temails "
+
+#: The complete ``ruling`` by ``incoming source`` by ``target source`` by
+#: ``agreement`` space, so the suite samples nothing: every combination is either
+#: refused (write nothing) or applied (the fold reaches the store), per
+#: :func:`_fold_is_refused`. The fourth axis is ADR-0121 §5's, and it is a full axis
+#: rather than one extra case because the clause it pins is a *narrowing*: the
+#: pairings agreement does **not** free — every ``SUPERSEDE`` onto an assertion, the
+#: ``EXTERNAL`` reinforce refusal, every fold from a non-asserted proposal — are
+#: what a later tidy-up would take with it.
 _FOLD_MATRIX = [
-    (kind, incoming, target)
+    (kind, incoming, target, agrees)
     for kind in _FOLD_KINDS
     for incoming in MemorySource
     for target in MemorySource
+    for agrees in (True, False)
 ]
 
 
@@ -1603,9 +1650,11 @@ class MemoryWriterContract:
         assert await store.export() == []
 
     @pytest.mark.parametrize(
-        ("kind", "incoming", "target"),
+        ("kind", "incoming", "target", "agrees"),
         _FOLD_MATRIX,
-        ids=[f"{k}-{i}-onto-{t}" for k, i, t in _FOLD_MATRIX],
+        ids=[
+            f"{k}-{i}-onto-{t}-{'agreeing' if a else 'disagreeing'}" for k, i, t, a in _FOLD_MATRIX
+        ],
     )
     async def test_every_fold_pairing_is_refused_or_applied_per_5b(
         self,
@@ -1613,18 +1662,29 @@ class MemoryWriterContract:
         kind: MemoryDecisionKind,
         incoming: MemorySource,
         target: MemorySource,
+        agrees: bool,
     ) -> None:
-        """The whole §5b predicate as narrowed by ADR-0045 §5, over the source matrix.
+        """The whole §5b predicate as narrowed by ADR-0045 §5 and ADR-0121 §5.
 
-        For *every* ``(ruling, incoming source, target source)`` triple: clause 1
-        (a fold onto a ``USER_ASSERTED`` target) and a ``USER_ASSERTED``
-        *reinforcement* of an ``EXTERNAL`` target raise and leave the store
-        byte-for-byte unchanged; every other pairing — the same *supersession* of an
-        ``EXTERNAL`` target now included — is *applied*. "Applied" means it reached
-        the store, so a writer that returned an id without writing is caught; the
-        proposal carries evidence the target lacks, which the stored record proves.
-        The two rulings apply *differently* (ADR-0045 §4): ``REINFORCE`` folds at the
-        target's id; ``SUPERSEDE`` retires the target and writes a new-id correction.
+        For *every* ``(ruling, incoming source, target source, agreement)``
+        combination: clause 1 (a fold onto a ``USER_ASSERTED`` target) and a
+        ``USER_ASSERTED`` *reinforcement* of an ``EXTERNAL`` target raise and leave
+        the store byte-for-byte unchanged; every other combination — the same
+        *supersession* of an ``EXTERNAL`` target, and since ADR-0121 §5 an
+        **agreeing** ``USER_ASSERTED`` reinforcement of a ``USER_ASSERTED`` target —
+        is *applied*. "Applied" means it reached the store, so a writer that
+        returned an id without writing is caught; the proposal carries evidence the
+        target lacks, which the stored record proves. The two rulings apply
+        *differently* (ADR-0045 §4): ``REINFORCE`` folds at the target's id;
+        ``SUPERSEDE`` retires the target and writes a new-id correction.
+
+        **The agreement axis runs over every combination, not only the one it
+        frees.** ADR-0121 §5 narrows clause 1 by exactly one case, and what a later
+        tidy-up would take with it is everything the narrowing does *not* reach: a
+        ``SUPERSEDE`` onto an assertion however verbatim the restatement, an
+        ``OBSERVED`` proposal agreeing with an assertion, the ``EXTERNAL``
+        reinforce refusal under either content. Stating the axis over the whole
+        matrix is what makes each of those a failing case rather than an absence.
         """
         # A far-forward store clock so a SUPERSEDE's window-close is observable
         # through get (the target's records carry no expiry to confound it).
@@ -1636,9 +1696,18 @@ class MemoryWriterContract:
         await store.add(_preference("existing", source=target))
         writer = make_writer(store, FakeMemoryPolicy(kind))
         before = await store.export()
-        proposal = _proposal(_preference("new", source=incoming, evidence=(_CITED,)))
+        # `_DISAGREEING` still ranks the target as a conflict (see the constant), so
+        # the disagreeing half exercises the predicate rather than an empty set.
+        proposal = _proposal(
+            _preference(
+                "new",
+                _CONTENT if agrees else _DISAGREEING,
+                source=incoming,
+                evidence=(_CITED,),
+            )
+        )
 
-        if _fold_is_refused(kind, incoming, target):
+        if _fold_is_refused(kind, incoming, target, agrees=agrees):
             with pytest.raises(MemoryStoreError):
                 await writer.ingest(proposal)
             # Write nothing: the whole store is unchanged, so a writer that
@@ -1677,6 +1746,100 @@ class MemoryWriterContract:
         live = await store.get(result.record_id)
         assert live is not None
         assert _CITED in live.provenance.evidence
+
+    # --- clause 1's ADR-0121 §5 exception, on its own ------------------------
+
+    async def test_an_agreeing_restatement_folds_the_assertions_own_record_back(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0121 §5's exception, and §4's second clause that makes it safe.
+
+        The matrix above pins that the fold is *permitted*. This pins **what it
+        writes**, which is the whole of the exception's argument: ADR-0045 §5 clause
+        1's two justifications are both about a fold that replaces or retires what
+        the user told us, and ADR-0121 §5 carves out exactly the case in which
+        neither reaches, because the write puts the target's own bytes back at the
+        target's own id — "not similar bytes, not normalised bytes: the same ones".
+
+        So the suite states it, in spite of its own refusal to pin which content
+        wins for a ``REINFORCE`` (ADR-0040 §5a leaves that unasserted). ADR-0121 §5's
+        third normative clause is what changes: "A conforming writer performing the
+        permitted fold writes it as §4's second clause specifies. A writer that would
+        fold otherwise refuses instead." A suite that admitted the fold without
+        pinning the survivor would certify a writer that overwrote an assertion
+        through the one gate opened on the promise that it does not.
+
+        **The proposal differs from the target in case and whitespace**, which
+        ADR-0121 §1's four transformations absorb. Against a byte-identical proposal
+        "the target's content survived" and "the incoming content was written" are
+        the same observation, and the case would pin nothing.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await store.add(
+            _preference("theirs", source=MemorySource.USER_ASSERTED, evidence=("earlier-episode",))
+        )
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
+
+        result = await writer.ingest(
+            _proposal(
+                _preference("new", _RESTATED, source=MemorySource.USER_ASSERTED, evidence=(_CITED,))
+            )
+        )
+
+        assert result.decision.kind is MemoryDecisionKind.REINFORCE
+        # Folded at the target's id; no second record minted for the restatement.
+        assert result.record_id == "theirs"
+        assert await store.get("new") is None
+        survivor = await store.get("theirs")
+        assert survivor is not None
+        # The user's own words, byte for byte — not the restatement's spelling.
+        assert survivor.content == _CONTENT
+        assert survivor.provenance.source is MemorySource.USER_ASSERTED
+        # Nothing retired: a REINFORCE closes no window (ADR-0045 §4), and an
+        # agreement warrants no retirement anyway (ADR-0121 §2).
+        assert survivor.validity.valid_until is None
+        # What the restatement does contribute: its evidence, unioned with the
+        # target's (ADR-0040 §5a, ADR-0121 §4).
+        assert set(survivor.provenance.evidence) == {"earlier-episode", _CITED}
+
+    async def test_a_disagreeing_restatement_may_not_fold_onto_an_assertion(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0121 §5's exception is **verified at the writer, never trusted**.
+
+        Pinned on its own as well as in the matrix, for the reason
+        :meth:`test_an_assertion_still_may_not_reinforce_an_external_record` is: this
+        is the case a later simplification breaks. A writer that admitted the fold
+        on the ruling's word — the policy said ``REINFORCE``, so the records must
+        agree — passes every other case here and folds a *correction* into the belief
+        it corrects, at that belief's id, which ADR-0121 §1 names as strictly worse
+        than either failure mode the ADR set out to fix.
+
+        The two contents are one token apart and the target still ranks as a
+        conflict (:data:`_DISAGREEING`), so this exercises the predicate rather than
+        an empty conflict set — which is the shape of the hazard: the strings
+        scoring *highest* against a belief include the one that contradicts it.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await store.add(_preference("theirs", source=MemorySource.USER_ASSERTED))
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
+        before = await store.export()
+
+        with pytest.raises(MemoryStoreError):
+            await writer.ingest(
+                _proposal(
+                    _preference(
+                        "new",
+                        _DISAGREEING,
+                        source=MemorySource.USER_ASSERTED,
+                        evidence=(_CITED,),
+                    )
+                )
+            )
+
+        assert await store.export() == before
 
     # --- the full-conflict ruling and its ceiling (ADR-0079 §4) -------------
 
