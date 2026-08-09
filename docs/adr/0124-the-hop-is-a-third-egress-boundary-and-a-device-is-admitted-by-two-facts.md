@@ -551,6 +551,12 @@ the set is where the tree currently keeps it honest.
 > The enrolment record is where admission and revocation are ordered against each
 > other.
 
+> **Normative.** Once a revocation has taken effect, the hub writes no further
+> frame to that device on any connection — including the response to a request
+> dispatched before the revocation, which is abandoned rather than delivered. A
+> response already written in full before the revocation took effect is what the
+> prospective clause above covers, and is not retracted.
+
 **The race is real on this hub's shape, so the rule is stated as an outcome rather
 than left to be inferred from the two clauses above.** The system composes on one
 event loop, and admission is not one step: the hub obtains the overlay identity
@@ -568,6 +574,18 @@ then refused every request has learned only that it connected. Fixing it at
 dispatch is the property the owner actually wants — **a revoked device gets no
 answers** — and it is satisfiable by re-reading the record on the path a request
 already takes, without a lock spanning I/O.
+
+**Dispatch alone is not the whole of it, and the second clause is where the two
+halves are reconciled.** A request dispatched a moment before a revocation may be
+awaiting a model provider for seconds; if the rule stopped at dispatch, the hub
+would finish that work and write the answer to a device the owner has expelled,
+which is the outcome the first clause exists to prevent arriving one step later.
+So the boundary is the **write**, and the clause draws it where §8's prospective
+rule already draws every other line: a response the device has, it keeps; a
+response the hub has not yet written, it does not get. That also makes the
+obligation implementable without cancellation machinery, since the connection is
+being closed anyway — the check the rule asks for is one read of the record
+immediately before the write.
 
 **What the rule deliberately does not do is name a mechanism.** A lock, a
 transaction, or a generation counter on the record are all conforming; ADR-0083 §6
@@ -747,11 +765,15 @@ plan a test rather than a rehearsal.
    live connection, its next connect is refused naming revocation, and re-enrolling
    mints a new credential against which the old one still verifies against nothing
    (§8).
-7. **Revocation wins the race.** A revocation issued while the second device is
-   mid-handshake, and again while it holds an established connection with a request
-   in flight, yields no answer on that connection in either case (§8). This is the
-   check the ordinary revocation above does not make, because it revokes a device
-   that is idle.
+7. **Revocation wins the race.** A revocation taking effect while the second
+   device is mid-handshake, and again while it holds an established connection with
+   a request in flight, yields no answer on that connection in either case: the
+   client reads a transport failure rather than a result (§8). **The check is
+   keyed to the revocation taking effect before the response is written**, which is
+   what the rule is about; a run in which the response completed first has not
+   exercised it and is repeated against a longer request. Recording that is what
+   keeps the step from passing without testing anything — the ordinary revocation
+   in step 6 revokes an idle device and can never reach this.
 8. **The record is durable.** Enrolment and revocation both survive a hub restart
    (§6).
 9. **No version bump was needed.** Both halves report the same
