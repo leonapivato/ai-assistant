@@ -97,6 +97,7 @@ from ai_assistant.testing import (
     FakePlanStore,
     FakeSourceGrantStore,
     FakeToolInvoker,
+    FakeTraceRetention,
 )
 from ai_assistant.wire.address import sun_path_limit
 
@@ -260,6 +261,11 @@ def _engine(
         trail=trail,
         memory=memory,
         deferrals=deferrals,
+        # The narrow deletion seam and its horizon (ADR-0119 §7, §10). Required on
+        # the façade, and nothing in this module sweeps: an adapter test is about
+        # what the CLI renders, not about the maintenance operation.
+        traces=FakeTraceRetention(),
+        trace_retention=timedelta(days=365),
         conversations=ConversationLifecycle(
             conversations=conversations,
             memory=memory,
@@ -1684,6 +1690,11 @@ def _conversation_engine() -> tuple[Engine, FakeConversationStore]:
         trail=trail,
         memory=memory,
         deferrals=deferrals,
+        # The narrow deletion seam and its horizon (ADR-0119 §7, §10). Required on
+        # the façade, and nothing in this module sweeps: an adapter test is about
+        # what the CLI renders, not about the maintenance operation.
+        traces=FakeTraceRetention(),
+        trace_retention=timedelta(days=365),
         conversations=ConversationLifecycle(
             conversations=conversations,
             memory=memory,

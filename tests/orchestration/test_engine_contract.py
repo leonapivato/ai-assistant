@@ -74,6 +74,7 @@ from ai_assistant.testing import (
     FakePlanStore,
     FakeSourceGrantStore,
     FakeToolInvoker,
+    FakeTraceRetention,
 )
 
 if TYPE_CHECKING:
@@ -249,6 +250,12 @@ def _wire(
         trail=trail,
         memory=memory,
         deferrals=deferrals,
+        # The narrow deletion seam (ADR-0119 §7), with the horizon the composition
+        # root would pass. The contract suite exercises the request surface rather
+        # than the maintenance one, so nothing here sweeps; the engine still cannot
+        # be built without them, which is the point of their being required.
+        traces=FakeTraceRetention(),
+        trace_retention=timedelta(days=365),
         conversations=conversations,
         observation=observation,
         questions=questions,

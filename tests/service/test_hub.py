@@ -95,7 +95,9 @@ class FakeEngine:
     async def purge_expired(self) -> PurgeReport:
         self.purged += 1
         _marker.info("fake_engine_purged")
-        return PurgeReport(records=0, questions=0)
+        # ``traces=None`` is "the horizon is keep-forever, so no trace sweep ran"
+        # (ADR-0119 §10) — the honest report for a stand-in that holds no store.
+        return PurgeReport(records=0, questions=0, traces=None)
 
     async def observe(self, *, conversation_id: str | None = None) -> None:
         self.observed += 1
