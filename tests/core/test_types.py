@@ -937,6 +937,57 @@ def test_feedback_event_constructs_with_defaults() -> None:
     assert event.evidence == ()
 
 
+def test_feedback_event_memory_kind_is_optional_and_absent_by_default() -> None:
+    """ADR-0122 §1: a field every producer had to fill, some of which cannot.
+
+    That is the whole defect. The CLI did not know, could not know, and was made to
+    answer anyway — and the answer it invented was indistinguishable at every layer
+    downstream from one a user had chosen deliberately. ``None`` means "resolve it
+    from the belief this touches"; it never means the record type is *unknowable*,
+    and it is never stored on a record.
+
+    It is ``None`` rather than a sentinel ``MemoryKind`` member because a member
+    would enter every exhaustive ``match`` over ``MemoryKind`` in the tree — and
+    every kind filter on ``search`` and ``list_beliefs`` — to express a state no
+    record ever carries. ``MemoryKind`` is a record's *type*; a request that has not
+    chosen one is not a type.
+    """
+    event = FeedbackEvent(
+        kind=FeedbackKind.CORRECTION,
+        content="the office is in Boston",
+        created_at=_WHEN,
+    )
+
+    assert event.memory_kind is None
+    assert {member.value for member in MemoryKind} == {
+        "semantic",
+        "preference",
+        "procedural",
+        "episodic",
+    }, "no sentinel member was added"
+
+
+def test_an_absent_memory_kind_is_rendered_as_null_rather_than_omitted() -> None:
+    """ADR-0122 §1: "absent" is spelled ``null``, and the codec needs no change.
+
+    ``wire``'s ``project`` renders a model through ``model_dump()``, which emits
+    every field including a defaulted one and gives ``None`` a form of its own — so
+    an unpinned correction crosses as ``"memory_kind": null`` rather than as a
+    missing member, and no projection change is owed. It is also exactly why the
+    *protocol version* is owed: a version 1 hub refuses that ``null`` for a required
+    ``MemoryKind``, inside a ``learn`` rather than at the handshake, unless the two
+    versions disagree at connect.
+    """
+    event = FeedbackEvent(
+        kind=FeedbackKind.CORRECTION,
+        content="the office is in Boston",
+        created_at=_WHEN,
+    )
+
+    assert "memory_kind" in event.model_dump()
+    assert event.model_dump()["memory_kind"] is None
+
+
 def test_feedback_event_created_at_naive_is_refused() -> None:
     with pytest.raises(ValidationError, match="created_at must be timezone-aware"):
         FeedbackEvent(

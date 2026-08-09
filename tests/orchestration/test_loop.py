@@ -11,6 +11,7 @@ first vertical.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     CurrentContext,
+    EpisodicMemory,
     FeedbackEvent,
     FeedbackKind,
     MemoryDecisionKind,
@@ -39,6 +41,10 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration import (
     LearningLoop,
     MemoryWriteStage,
+)
+from ai_assistant.orchestration.loop import (
+    _DEFAULT_RESOLUTION_LIMIT,
+    RESOLUTION_KINDS,
 )
 from ai_assistant.testing import (
     FakeContextProvider,
@@ -139,6 +145,7 @@ def _loop(  # noqa: PLR0913  # one parameter per injected collaborator, all opti
     planner: Planner | None = None,
     feedback: FeedbackProcessor | None = None,
     writer: MemoryWriter | None = None,
+    resolution_limit: int = _DEFAULT_RESOLUTION_LIMIT,
 ) -> LearningLoop:
     """Build a loop from canonical fakes, with a fixed clock and stable ids.
 
@@ -161,6 +168,7 @@ def _loop(  # noqa: PLR0913  # one parameter per injected collaborator, all opti
         ),
         planner=planner or FakePlanner(now=_clock),
         feedback=feedback or FakeFeedbackProcessor(),
+        resolution_limit=resolution_limit,
         now=_clock,
         id_factory=lambda: "goal-1",
     )
@@ -174,6 +182,33 @@ def _preference_feedback(content: str = "prefers concise replies") -> FeedbackEv
         subject="email tone",
         created_at=_NOW,
     )
+
+
+def _correction(
+    content: str = "the office is in Boston",
+    *,
+    memory_kind: MemoryKind | None = None,
+) -> FeedbackEvent:
+    """A correction, **unpinned by default** — the case ADR-0122 §3 resolves."""
+    return FeedbackEvent(
+        kind=FeedbackKind.CORRECTION,
+        memory_kind=memory_kind,
+        content=content,
+        created_at=_NOW,
+    )
+
+
+def _stated_preference(content: str = "I prefer tea") -> FeedbackEvent:
+    """A stated preference with **no** ``memory_kind`` — §3's other arm."""
+    return FeedbackEvent(kind=FeedbackKind.PREFERENCE, content=content, created_at=_NOW)
+
+
+def _asserted(at: datetime = _NOW) -> Provenance:
+    return Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=at)
+
+
+def _observed(confidence: float = 0.6) -> Provenance:
+    return Provenance(source=MemorySource.OBSERVED, confidence=confidence, last_updated=_NOW)
 
 
 # --------------------------------------------------------------------------- #
@@ -693,6 +728,455 @@ async def test_learn_leaves_earlier_proposals_applied_when_a_later_write_fails()
 
 
 # --------------------------------------------------------------------------- #
+# learn: resolving a correction's drawer (ADR-0122)                            #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class _SearchCall:
+    """One ``MemoryStore.search``, as its caller asked for it."""
+
+    query: str
+    limit: int
+    kinds: tuple[MemoryKind, ...] | None
+    bands: tuple[BeliefBand, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Processed:
+    """One ``FeedbackProcessor.process``, journalled beside the searches."""
+
+    event: FeedbackEvent
+
+
+class _JournallingStore(FakeMemoryStore):
+    """The canonical store, recording every ``search`` into a shared journal.
+
+    ``FakeMemoryStore`` records nothing of its reads, and ADR-0122 §10 asks for a
+    test on the read's *shape* rather than on what it produced — "an implementation
+    that issues two searches, passes ``bands``, omits the ``kinds`` argument, or
+    reuses the turn's ``retrieval_limit`` still resolves a lone preference neighbour
+    correctly and passes" every outcome test in this file.
+
+    The journal is shared with :class:`_JournallingProcessor` so the *order* is
+    recorded too, which is what separates the resolution's read from the write
+    path's own conflict probe further down. Overriding one method keeps the rest of
+    the contract-correct fake rather than hand-rolling a store.
+    """
+
+    def __init__(self, journal: list[object], **kwargs: object) -> None:
+        """Record into ``journal``; every other argument is the canonical fake's."""
+        super().__init__(**kwargs)  # type: ignore[arg-type]  # relayed verbatim
+        self._journal = journal
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
+    ) -> list[MemoryRecord]:
+        """Record the call as asked for, then answer it as the fake does."""
+        self._journal.append(
+            _SearchCall(
+                query=query,
+                limit=limit,
+                kinds=None if kinds is None else tuple(kinds),
+                bands=None if bands is None else tuple(bands),
+            )
+        )
+        return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+
+
+class _JournallingProcessor(FakeFeedbackProcessor):
+    """The canonical processor, marking the journal where it was called."""
+
+    def __init__(self, journal: list[object]) -> None:
+        """Record into the same journal :class:`_JournallingStore` writes to."""
+        super().__init__()
+        self._journal = journal
+
+    async def process(self, event: FeedbackEvent) -> Sequence[MemoryUpdateProposal]:
+        """Mark the call, then answer as the canonical fake does."""
+        self._journal.append(_Processed(event=event))
+        return await super().process(event)
+
+
+class _RefusingSearchStore(FakeMemoryStore):
+    """The canonical store, for which being searched at all is the failure.
+
+    The shape ADR-0122 §10 requires for §6's pin: "an injected store that fails the
+    assertion if ``search`` is called at all", because a resolution that ran and
+    *then* deferred to the pin passes an outcome-only test while issuing a read
+    whose result it discards.
+    """
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
+    ) -> list[MemoryRecord]:
+        """Refuse: this store must not be read."""
+        msg = f"the resolution must issue no search here, and it searched for {query!r}"
+        raise AssertionError(msg)
+
+
+class _PostCutKindFilterStore(FakeMemoryStore):
+    """A conforming store whose ``kind`` predicate binds **after** the ranking cut.
+
+    ``FakeMemoryStore`` filters by kind before it truncates, which is one permitted
+    placement but not the only one: ADR-0113 §2 moves the *band* ahead of the cut and
+    is explicit that ``kind`` keeps "the post-cut placement ADR-0045 §6 and ADR-0007
+    ratified for them", so "a call may return fewer than ``limit`` records while
+    eligible ones exist". Both are conforming, and the residue ADR-0122 §3 records —
+    a target crowded out by higher-ranked records the resolution cannot mint — is
+    only expressible against this one. Modelled here rather than asserted of the
+    canonical fake, which cannot exhibit it.
+    """
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
+    ) -> list[MemoryRecord]:
+        """Rank and cut band-neutrally and kind-neutrally, then drop what is out."""
+        wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
+        page = await super().search(query, limit=limit, bands=bands)
+        return [record for record in page if wanted is None or record.kind in wanted]
+
+
+async def test_the_resolution_reads_once_before_the_processor_and_in_the_shape_ruled() -> None:
+    """§3's clause is not observable from an outcome, so it is asserted directly.
+
+    ADR-0122 §10 names each way an implementation passes every other test here while
+    breaking this one: two searches carry an extra failure point on a path the user
+    invokes by hand; passing ``bands`` narrows a read the clause leaves band-neutral;
+    omitting ``kinds`` lets a crowd of episodes take the page (§3, and
+    :func:`test_a_correction_crowded_out_by_records_it_cannot_mint_lands_as_semantic`);
+    and reusing ``retrieval_limit`` moves what a correction is filed under whenever a
+    deployment tunes what an answer is personalised from.
+
+    The journal is shared with the processor so the ordering is pinned too — §3 says
+    the resolution happens *before* the ``FeedbackProcessor`` is called, and the
+    write path's own conflict probe reads the same store moments later.
+    """
+    journal: list[object] = []
+    memory = _JournallingStore(journal, now=_clock)
+    await memory.add(
+        PreferenceMemory(
+            id="pref-espresso",
+            content="prefers espresso in the morning",
+            preference="prefers espresso in the morning",
+            provenance=_asserted(),
+        )
+    )
+    loop = _loop(
+        memory=memory,
+        feedback=_JournallingProcessor(journal),
+        # Neither the turn's limit nor ``search``'s own default, so an
+        # implementation reusing either is caught by the value alone.
+        resolution_limit=3,
+    )
+
+    await loop.learn(_correction("prefers cappuccino in the morning, not espresso"))
+
+    processed = next(index for index, entry in enumerate(journal) if isinstance(entry, _Processed))
+    reads = [entry for entry in journal[:processed] if isinstance(entry, _SearchCall)]
+    assert len(reads) == 1, "exactly one search resolves the drawer"
+    [read] = reads
+    assert read.query == "prefers cappuccino in the morning, not espresso"
+    assert read.kinds == (MemoryKind.PREFERENCE, MemoryKind.SEMANTIC)
+    assert read.bands is None
+    assert read.limit == 3
+
+
+def test_the_resolution_set_is_the_two_kinds_the_rule_based_processor_mints() -> None:
+    """§3 fixes the set by that clause, and widening it is a ratified decision.
+
+    Pinned as a literal rather than derived, because the derivation is the thing §3
+    refuses: ``FeedbackProcessor`` exposes ``process`` and nothing else, so the set
+    cannot be asked for, and inventing a declaration would be a Protocol change under
+    golden rule 5. When ADR-0009 §6's ``PROCEDURAL``/``EPISODIC`` deferral is taken
+    up, the lane taking it partially supersedes §3 in the scope of this set — and
+    this assertion is what makes that a decision rather than a drift.
+    """
+    assert RESOLUTION_KINDS == (MemoryKind.PREFERENCE, MemoryKind.SEMANTIC)
+
+
+async def test_a_correction_resolves_into_the_drawer_its_target_lives_in() -> None:
+    """The defect #864 reports, at this loop's own seam.
+
+    The correction names no record type. Its only neighbour is a ``PreferenceMemory``
+    — which the pre-ADR fixed table could not reach, because it filed every
+    correction as ``SEMANTIC`` and the conflict probe then looked only there.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(
+        PreferenceMemory(
+            id="pref-espresso",
+            content="prefers espresso in the morning",
+            preference="prefers espresso in the morning",
+            provenance=_observed(),
+        )
+    )
+    processor = FakeFeedbackProcessor()
+    loop = _loop(memory=memory, feedback=processor)
+
+    await loop.learn(_correction("prefers cappuccino in the morning, not espresso"))
+
+    assert processor.last_event.memory_kind is MemoryKind.PREFERENCE
+
+
+async def test_a_stated_preference_resolves_by_intent_and_issues_no_read() -> None:
+    """§3's ``PREFERENCE`` arm, which omitting would be a defect rather than a saving.
+
+    The store is one that fails on being read at all, so an implementation resolving
+    *both* intents by search fails here even though its answer would be right on a
+    store that happened to hold nothing — the accident §10 names ("an outcome-only
+    test passes here by accident whenever the store happens to hold nothing"). A
+    stated preference establishes a ``PreferenceMemory`` by its own intent: the user
+    is not pointing at a stored belief, they are stating one.
+    """
+    processor = FakeFeedbackProcessor()
+    memory = _RefusingSearchStore(now=_clock)
+    loop = _loop(
+        memory=memory,
+        feedback=processor,
+        # The write path reads the store too, and this store refuses every read;
+        # the subject here is the resolution, so the write is taken out of the way.
+        writer=FakeMemoryWriter(
+            store=FakeMemoryStore(now=_clock), policy=FakeMemoryPolicy(), now=_clock
+        ),
+    )
+
+    await loop.learn(_stated_preference("I prefer tea in the afternoon"))
+
+    assert processor.last_event.memory_kind is MemoryKind.PREFERENCE
+
+
+async def test_a_pinned_kind_is_honoured_and_suppresses_the_resolution_read() -> None:
+    """§6: the pin says "I know which drawer, **do not look**".
+
+    A resolution that ran and then deferred to the pin would perform a search whose
+    result it discards, and would pass any outcome-only test; a store that refuses to
+    be read is what makes the difference observable. The pin is honoured for both
+    ``FeedbackKind`` members, and into the drawer the user named even where a
+    resolution would have chosen another.
+    """
+    processor = FakeFeedbackProcessor()
+    loop = _loop(
+        memory=_RefusingSearchStore(now=_clock),
+        feedback=processor,
+        writer=FakeMemoryWriter(
+            store=FakeMemoryStore(now=_clock), policy=FakeMemoryPolicy(), now=_clock
+        ),
+    )
+
+    await loop.learn(_correction("the office is in Boston", memory_kind=MemoryKind.SEMANTIC))
+    await loop.learn(
+        _stated_preference("I prefer tea").model_copy(update={"memory_kind": MemoryKind.SEMANTIC})
+    )
+
+    assert [event.memory_kind for event in processor.events] == [
+        MemoryKind.SEMANTIC,
+        MemoryKind.SEMANTIC,
+    ]
+
+
+async def test_the_resolution_never_selects_a_kind_the_processor_cannot_mint() -> None:
+    """§3's bounded set, with the best-ranked record overall an episode.
+
+    The episode outranks the preference on the fake's own scoring — it contains both
+    query terms where the preference contains one — so an unscoped read would resolve
+    to ``EPISODIC``, ``_to_record`` would propose nothing, and the user's correction
+    would vanish *entirely*: strictly worse than the mis-drawering ADR-0122 fixes.
+    Scoped, the correction resolves to the best-ranked **mintable** drawer instead.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(
+        EpisodicMemory(
+            id="ep-1",
+            content="the user ordered espresso this morning",
+            occurred_at=_NOW,
+            provenance=_observed(),
+        )
+    )
+    await memory.add(
+        PreferenceMemory(
+            id="pref-espresso",
+            content="prefers espresso",
+            preference="prefers espresso",
+            provenance=_observed(),
+        )
+    )
+    processor = FakeFeedbackProcessor()
+    loop = _loop(memory=memory, feedback=processor)
+
+    outcomes = await loop.learn(_correction("espresso this morning"))
+
+    assert processor.last_event.memory_kind is MemoryKind.PREFERENCE
+    assert len(outcomes) == 1, "the correction must not vanish"
+
+
+async def test_two_mintable_drawers_match_and_the_best_ranked_one_wins_once() -> None:
+    """§4: best-ranked, no tiebreak of our own, and exactly **one** proposal.
+
+    The semantic record carries both query terms and the preference one, so relevance
+    — the only ordering this corpus admits (ADR-0113 §4, ADR-0112 §1) — puts the
+    semantic record first. Minting into both drawers is expressible (``process``
+    returns a ``Sequence``) and refused: one utterance is one belief, and a store
+    holding neighbours in two drawers is a fact about the store rather than evidence
+    the user holds two wrong beliefs.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(
+        SemanticMemory(
+            id="fact-1",
+            content="the office is in Boston",
+            fact="the office is in Boston",
+            provenance=_observed(),
+        )
+    )
+    await memory.add(
+        PreferenceMemory(
+            id="pref-1",
+            content="prefers the office quiet",
+            preference="prefers the office quiet",
+            provenance=_observed(),
+        )
+    )
+    processor = FakeFeedbackProcessor()
+    loop = _loop(memory=memory, feedback=processor)
+
+    outcomes = await loop.learn(_correction("the office is in Cambridge"))
+
+    assert processor.last_event.memory_kind is MemoryKind.SEMANTIC
+    assert len(outcomes) == 1
+
+
+async def test_a_correction_with_no_live_target_lands_as_semantic() -> None:
+    """§5: the store looked and holds nothing, so the correction stands alone.
+
+    A correction with no live target is an assertion the user happened to phrase as
+    one, and ``SEMANTIC`` is the drawer for a free-standing assertion — the one branch
+    on which the old fixed table's answer was ever right. It is never dropped, never
+    refused, and never held for a question on this ground.
+    """
+    processor = FakeFeedbackProcessor()
+    loop = _loop(feedback=processor)
+
+    outcomes = await loop.learn(_correction("the office is in Boston"))
+
+    assert processor.last_event.memory_kind is MemoryKind.SEMANTIC
+    assert len(outcomes) == 1
+
+
+async def test_a_correction_crowded_out_by_records_it_cannot_mint_lands_as_semantic() -> None:
+    """The residue §3 records, asserted as the **known** outcome rather than hidden.
+
+    Against a store whose ``kind`` predicate binds after the ranking cut — a placement
+    ADR-0113 §2 explicitly leaves to ``kind`` — three higher-ranked episodes fill a
+    resolution page of three, and the preference sitting just below is never seen. The
+    correction resolves by §5 and lands as ``SEMANTIC``, exactly as it does today.
+
+    This is issue #457's known non-exhaustiveness of retrieval, which ADR-0122 §3
+    states rather than papers over: ``_detect_conflicts`` stands on the same limit for
+    the same reason — "what it never surfaced is invisible here". Closing it means
+    closing #457, for the conflict probe and this read together; a second retrieval
+    operation invented in this lane would be a ``MemoryStore`` contract decision taken
+    where ``MemoryStore`` is not being decided.
+    """
+    memory = _PostCutKindFilterStore(now=_clock)
+    for index in range(3):
+        await memory.add(
+            EpisodicMemory(
+                id=f"ep-{index}",
+                content="ordered espresso this morning again",
+                occurred_at=_NOW,
+                provenance=_observed(),
+            )
+        )
+    await memory.add(
+        PreferenceMemory(
+            id="pref-espresso",
+            content="prefers espresso",
+            preference="prefers espresso",
+            provenance=_observed(),
+        )
+    )
+    processor = FakeFeedbackProcessor()
+    loop = _loop(memory=memory, feedback=processor, resolution_limit=3)
+
+    await loop.learn(_correction("ordered espresso this morning"))
+
+    assert processor.last_event.memory_kind is MemoryKind.SEMANTIC
+
+
+async def test_a_failing_resolution_read_propagates_with_nothing_proposed() -> None:
+    """§3: the resolution has no degraded mode, and both halves are asserted.
+
+    A test that only checked the call raised would pass an implementation that fell
+    through to §5 on a failed read — so this asserts the processor was never called
+    and the store holds nothing. §5's fallback answers "the store looked and holds
+    nothing", a fact; it may not be made to answer "the store could not look", which
+    is not one, and a correction filed in a drawer chosen by a failure is precisely
+    the silent mis-filing ADR-0122 ends. ``learn`` deliberately does not copy
+    ``respond`` here: a turn degrades and says so, because an answer with less context
+    is still an answer.
+    """
+    memory = _FailingSearchStore(now=_clock)
+    processor = FakeFeedbackProcessor()
+    loop = _loop(memory=memory, feedback=processor)
+
+    with pytest.raises(MemoryStoreError, match="retrieval is unavailable"):
+        await loop.learn(_correction("the office is in Boston"))
+
+    assert processor.call_count == 0, "nothing was proposed"
+    assert await memory.export() == [], "and nothing was written"
+
+
+async def test_a_processor_proposing_nothing_for_a_resolved_kind_surfaces() -> None:
+    """§7's second clause: an empty answer to a *resolved* event is a mis-wiring.
+
+    The kind was chosen from :data:`RESOLUTION_KINDS` **because** the wired processor
+    is required to mint it (§3's composition-root obligation). An empty sequence
+    therefore says the root wired one that does not, and reporting it as "no update
+    proposed" would drop a correction on the strength of a wiring mistake — the same
+    silent loss ADR-0122 exists to remove, one layer down. That is what makes an
+    untypeable obligation enforceable: not checked at wiring time, and not survivable
+    at use time.
+    """
+    loop = _loop(feedback=FakeFeedbackProcessor([]))
+
+    with pytest.raises(RuntimeError, match="RESOLUTION_KINDS"):
+        await loop.learn(_correction("the office is in Boston"))
+
+
+async def test_a_pinned_deferred_kind_still_returns_an_empty_outcome() -> None:
+    """§7's second clause, other half — the two cases must not be collapsed.
+
+    A **pinned** ``PROCEDURAL`` is a user asking for something the deterministic
+    processor does not yet build (ADR-0009 §6), and reporting that nothing was
+    proposed is the honest answer that ADR ratified. It looks identical at the seam to
+    the mis-wiring above and means the opposite, so the pin is what separates them.
+    """
+    loop = _loop(feedback=FakeFeedbackProcessor([]))
+
+    outcomes = await loop.learn(
+        _correction("run the backup like this", memory_kind=MemoryKind.PROCEDURAL)
+    )
+
+    assert outcomes == ()
+
+
+# --------------------------------------------------------------------------- #
 # Tuning                                                                       #
 # --------------------------------------------------------------------------- #
 
@@ -724,8 +1208,34 @@ def test_tuning_refuses_a_limit_that_is_not_an_integer(limit: object) -> None:
         _loop_with(retrieval_limit=limit)  # type: ignore[arg-type]  # deliberately invalid
 
 
-def _loop_with(*, retrieval_limit: int) -> LearningLoop:
-    """Build a loop with the given retrieval tuning and canonical everything else."""
+@pytest.mark.parametrize("resolution_limit", [0, -1])
+def test_tuning_that_would_silently_disable_the_resolution_is_refused(
+    resolution_limit: int,
+) -> None:
+    """The sharper version of the same failure (ADR-0122 §3).
+
+    A non-positive limit makes ``search`` match nothing by contract, so **every**
+    unpinned correction would take §5's fallback and land as ``SEMANTIC`` — the
+    pre-ADR defect, restored by a number, reported as success, and indistinguishable
+    at every surface from a store that genuinely holds no target.
+    """
+    with pytest.raises(ValueError, match="resolution_limit must be at least 1"):
+        _loop_with(resolution_limit=resolution_limit)
+
+
+@pytest.mark.parametrize("limit", [1.5, float("inf"), True, "5"])
+def test_tuning_refuses_a_resolution_limit_that_is_not_an_integer(limit: object) -> None:
+    """Guarded exactly as the turn's is, and for the same reason."""
+    with pytest.raises(TypeError, match="resolution_limit must be an integer"):
+        _loop_with(resolution_limit=limit)  # type: ignore[arg-type]  # deliberately invalid
+
+
+def _loop_with(
+    *,
+    retrieval_limit: int = 5,
+    resolution_limit: int = _DEFAULT_RESOLUTION_LIMIT,
+) -> LearningLoop:
+    """Build a loop with the given tuning and canonical everything else."""
     memory = FakeMemoryStore(now=_clock)
     return LearningLoop(
         context=FakeContextProvider(),
@@ -734,6 +1244,7 @@ def _loop_with(*, retrieval_limit: int) -> LearningLoop:
         planner=FakePlanner(now=_clock),
         feedback=FakeFeedbackProcessor(),
         retrieval_limit=retrieval_limit,
+        resolution_limit=resolution_limit,
         now=_clock,
     )
 
