@@ -1,6 +1,6 @@
 # 122. A correction's record type is resolved from its target, not declared by its caller
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-09
 - **Decides `core` surface and implements none of it.** One field on
   `FeedbackEvent` in `core/types.py` becomes **optional** — `memory_kind` gains
@@ -15,14 +15,16 @@
   `scripts/ship.sh` fires its own architecture requirement on a diff touching
   `core/protocols.py` or `core/types.py`, which this diff does not. Both lenses are
   therefore run deliberately, as ADR-0117's own header records for the same reason.
-  **Both ran against this decision while it was `Proposed`** — adversarial through
-  the rounds that produced §3's intent gate, its `kinds` scoping and its fixed
-  resolution set, and architecture through the round that reclassified the ADR-0009
-  record as a partial supersession, each returning to APPROVE on the proposed text.
-  This `Accepted` line is the ratifying edit ADR-0070 §1 permits — the one that
-  "finalises the current decision rather than changing a past one" — and it records
-  that outcome rather than pre-empting it. Every merged ADR in this corpus carries
-  it, and the branch history carries the `Proposed` rounds it stands on.
+  **Both run against this decision while it is `Proposed`, including after the base
+  moved** — adversarial through the rounds that produced §3's intent gate, its
+  `kinds` scoping, its fixed resolution set, its failure path and §10's read-shape
+  test, and architecture through the round that reclassified the ADR-0009 record as
+  a partial supersession. The `Status` flip to `Accepted` is the last commit on this
+  branch and nothing follows it: it is the ratifying edit ADR-0070 §1 permits — the
+  one that "finalises the current decision rather than changing a past one" — and
+  §1 equally forbids rewriting ratified decision text, so an edit arriving after it
+  returns this line to `Proposed` first. That happened once here, when the rebase
+  across ADR-0121 cost a fresh round and the round found substantive changes.
 - **Partially supersedes [ADR-0009](0009-learning-model.md) §1**, in the scope §1
   and §3 below name and in no other: §1's first bullet requires the *caller* to
   carry the target kind, and that requirement is replaced — `memory_kind` becomes
@@ -252,8 +254,11 @@ topical similarity too weak a signal to retire a record. Three things bound it a
 none of them dissolves it. It requires a cross-kind neighbour that outranks the
 true target, where today's failure requires only that the target not be semantic —
 so the exposure is much smaller than the defect being removed, though it is not
-zero. The misresolution is *discoverable* — by belief inspection, where today's
-mis-filing is not discoverable at all (§4) — and §6's pin is the direct remedy,
+zero. The misresolution is *discoverable* by belief inspection — the same surface
+that would show today's mis-filing, so the discovery cost is not what changes
+between them (§4); what changes is that today's failure is certain for every
+cross-kind correction and this one needs a cross-kind neighbour to outrank the true
+target — and §6's pin is the direct remedy,
 which is part of why §6 keeps it authoritative rather than folding it into the
 resolution.
 This residue is the price of choosing the drawer by the only signal available, and
