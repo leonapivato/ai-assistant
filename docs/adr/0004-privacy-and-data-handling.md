@@ -1,9 +1,51 @@
 # 4. Privacy and data handling
 
-- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause)
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause) and
+  ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a
+  device the owner has enrolled)
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
+- Partially superseded: 2026-08-09 by ADR-0124 — **two clauses, each narrowly, and
+  both because a second machine now exists.** ADR-0124 ratifies the hop off the
+  device: the hub may serve a client on another device the owner enrolled, and the
+  hub may not dial that device.
+
+  **Replaced — §6's delete clause, only as it reaches an enrolled device.**
+  "Deleting the user's data purges Tier 0 (keyring entries) and Tier 1 (database
+  rows) together." That was written when one machine held everything. An enrolled
+  device holds a Tier 0 credential in its own keyring, and a delete performed at
+  the hub cannot reach it. In its place ADR-0124 §8 puts an **unenrolment act at
+  the device** that purges that device's entry and needs no hub, a **hub-side
+  delete that revokes every enrolment** so no device is left holding a credential
+  to a store that is gone, and an obligation that the delete surface **report the
+  devices it could not purge** rather than presenting itself as complete.
+  Everything else §6 grants — view, export, delete, retention rules, and the purge
+  of every Tier 0 and Tier 1 artifact on the hub's own machine — is untouched.
+
+  **Replaced — §7's gating clause, only for a client's bootstrap credential
+  read.** "Access to Tier 0/1 data and every side-effecting tool call is gated by
+  the `permissions/` layer and recorded in an **audit trail**." A client reads its
+  credential in order to reach the hub, and `permissions/` and the audit trail live
+  behind that connection, so the gate is circular for that one read and for no
+  other. ADR-0124 §6 exempts exactly it, against three replacements it requires
+  together: the read is confined to one purpose and one path; custody is the
+  operating system's own control on the keyring, the mechanism §3 below already
+  chose; and every *use* of the credential is recorded at the hub, admissions and
+  refusals alike. ADR-0124 states plainly that these are weaker than §7 — an OS
+  prompt is custody rather than a policy decision about this access, and a device
+  that reads the credential and never connects leaves no trace anywhere.
+
+  **Not replaced — everything else, which is nearly all of it.** §1's tiers; §2's
+  residency and telemetry clauses, ADR-0124 §3 finding every sentence of both still
+  true and sending the residual question about residency's *intent* to **#95**;
+  §3's keyring rule, which ADR-0124 §6 applies rather than narrows and to which it
+  adds a third `SecretStore` consumer as a stacked addition; §4's at-rest posture;
+  §5's redaction; §6's other rights; and **§7's minimisation clause and its gate
+  over every other Tier 0 and Tier 1 access**, on the hub and on the device alike.
+  ADR-0124 forbids citing its exemption to widen it to a second access. #74, which
+  asks whether §7's gate reaches the model provider credential, is untouched and
+  stays open on that subject.
 - Note (2026-07-20): **§2's egress clause is superseded by ADR-0017.** That
   clause named `models/` the only component permitted to send user data
   off-device; ADR-0017 §1 replaces it with `models/` plus a designated
