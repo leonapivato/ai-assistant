@@ -263,6 +263,13 @@ observe Tier 1 content in the course of recording that it exists.
 > it had. A flat sequence of ids is not permitted: a write producing one retired
 > and one reinforced record must say which was which.
 
+> **Normative.** A `RecordIdSet` carries each id **at most once**.
+
+> **Normative.** A trace's own id is minted at construction and is never derived
+> from data (§2). A store that meets an id it already holds records an emission
+> failure under §5 and keeps the trace it has; it does not raise, and it does not
+> overwrite.
+
 > **Normative.** An absent `TraceRecordSet` key means *that set was not observed*;
 > a key present with an empty `RecordIdSet` means *it was observed and it was
 > empty*. The two are distinct and an emitter may not substitute one for the other.
@@ -1076,14 +1083,22 @@ class RecordIdSet(BaseModel):
     total: int = Field(ge=0)
 
     @model_validator(mode="after")
-    def _ids_are_the_total_up_to_the_cap(self) -> RecordIdSet:
-        """The set carries every id it produced, and drops ids only at the cap.
+    def _ids_are_a_set_and_are_the_total_up_to_the_cap(self) -> RecordIdSet:
+        """Distinct ids, and every one produced, dropping only at the cap.
 
-        ``len(ids) == min(total, CAP)`` is the whole invariant, and it is tighter
-        than ``total >= len(ids)`` in the direction that matters: the looser form
-        admits ``ids=(), total=1``, which reports a truncation §3 reserves for cap
-        overflow and would have a measure exclude a trace that lost nothing.
+        Duplicates are refused **first**, because the length invariant cannot see
+        them: ``ids=("a", "a"), total=2`` satisfies it while double-counting one
+        record and crowding out a real one at the cap.
+
+        ``len(ids) == min(total, CAP)`` is then the whole of the rest, and it is
+        tighter than ``total >= len(ids)`` in the direction that matters: the
+        looser form admits ``ids=(), total=1``, which reports a truncation §3
+        reserves for cap overflow and would have a measure exclude a trace that
+        lost nothing.
         """
+        if len(set(self.ids)) != len(self.ids):
+            msg = "a record id set carries each id at most once"
+            raise ValueError(msg)
         expected = min(self.total, TRACE_RECORD_SET_CAP)
         if len(self.ids) != expected:
             msg = (
@@ -1180,8 +1195,14 @@ config carries `validate_default=True` and the three fields use a
 `default_factory`. It is the one pydantic default this family cannot take as it
 comes, and it is called out rather than left to be noticed.
 
-**`RecordIdSet`'s invariant is a validator, not a comment, and it is an equality
-rather than a bound.** `ge=0` alone accepts `RecordIdSet(ids=(one_id,), total=0)`,
+**It is a *set*, and the name is enforced rather than aspirational.** Duplicate
+ids satisfy every count invariant while double-counting one record in a measure's
+numerator and crowding a real one out at the cap — a miscount of exactly the kind
+§3 spends its other clauses refusing. The check runs before the length invariant,
+because the length invariant cannot see it.
+
+**`RecordIdSet`'s count invariant is a validator, not a comment, and it is an
+equality rather than a bound.** `ge=0` alone accepts `RecordIdSet(ids=(one_id,), total=0)`,
 which claims the operation produced nothing while carrying an id a measure will
 happily join on. But `total >= len(ids)` is not enough either: it admits
 `ids=(), total=1`, an emitter dropping ids it was under no pressure to drop, which
@@ -1272,6 +1293,13 @@ walk's position to the trace store and be answered rather than refused.
 
 **Failures, stated so a suite can assert them:**
 
+- `emit` is **idempotent on a trace's id**: a second trace bearing an id the
+  store already holds is refused *silently* — logged as an emission failure under
+  §5, with the stored trace kept. Unlike `AuditTrail.record`, which "re-recording
+  an id already present raises rather than overwriting", raising is not available
+  here (§5 subordinates the instrument), and overwriting would let a later write
+  rewrite the record of an earlier event. Keeping the first is the only option
+  that loses nothing already recorded.
 - `emit` lets no **trace-store failure** escape: a fault there is swallowed and
   logged (§5), and a malformed trace cannot reach it because `EvaluationTrace`
   validates at construction. It is **not** a blanket no-raise — a cancellation
