@@ -378,8 +378,10 @@ of passes.
 > **user** seam under §3; `r ≺ w`; and `w.occurred_at ≤ r.occurred_at + s`.
 
 > **Normative.** A surfacing is **overturned within `s`** exactly when some
-> candidate for it **began after the read had finished** — that is, when
-> `w.occurred_at ≥ r.occurred_at + r.elapsed`.
+> candidate for it **reports having begun at or after the read reports having
+> finished** — that is, when `w.occurred_at ≥ r.occurred_at + r.elapsed`. The
+> test is over what the two traces report and is not a claim about physical
+> order.
 
 > **Normative.** A surfacing that is not overturned within `s` and has at least
 > one candidate is **ambiguous**, and so is one whose read or whose candidate
@@ -447,12 +449,14 @@ here. It is not causality: ADR-0119 §3 has the *emitter* stamp `occurred_at` at
 the start of the work and the trace appends at its end, so a write that began
 before a retrieval and was still in flight when the retrieval finished appends
 after it. Reading that as "the user subsequently retired the record" would count
-a correction that was already underway as evidence about a surfacing it could not
-have been a response to — and the window is as wide as the write's own duration,
-not as narrow as an emission latency. Both facts a trace needs to rule that out
-are on it already: `occurred_at` says when the work began and `elapsed` says how
-long it took, so "`w` began at or after `r` had finished" is computable, and it
-is the predicate §4 uses.
+a correction that was already underway as evidence about a surfacing it could
+not have been a response to — and the window is as wide as the write's own
+duration, not as narrow as an emission latency. Both facts needed to rule that
+out are on the traces already: `occurred_at` is when the work began and
+`elapsed` is how long it took, so "`w` reports beginning at or after `r` reports
+finishing" is computable, and it is the predicate §4 uses. What that predicate
+buys is the removal of a *systematic* error — every in-flight write, on every
+deployment, misread as a response — at the price of a residual one, below.
 
 **The overlap is excluded rather than resolved, and it leaves the denominator
 too.** A candidate whose interval overlaps the read is a pair the stream genuinely
@@ -464,13 +468,19 @@ surfacing from both is the disposition ADR-0119 §3 gives an unobserved quantity
 say so — and the count of them is what tells an operator whether the exclusion is
 rare or is the measure.
 
-**Both instants come from the same wall clock and that is the residue that
-stays.** `occurred_at` is a `Clock` reading and `elapsed` is a `perf_counter`
-delta, so a wall clock stepping between two traces could order them wrongly
-however carefully the intervals are compared. `r ≺ w` is retained as a conjunct
-precisely because it is immune to that: a clock step cannot reorder appends. The
-pair is conservative in both directions, and no smaller residue is available from
-a stream that carries two instants and no third one.
+**The residual error is a wall-clock step, and it is bounded rather than
+closed.** `occurred_at` is a `Clock` reading and `elapsed` is a `perf_counter`
+delta, so the interval test compares one trace's wall-clock instant against
+another's, and a clock that steps between the two readings moves the comparison.
+A step *forward* can promote a genuine overlap to an overturn; a step *backward*
+can demote a genuine overturn to an ambiguity. Neither is closable from this
+stream: `perf_counter` origins are process-local and meaningless across the
+restarts §8 expects, and no trace carries a monotonic cross-event reading — which
+is §12 item 4, with its cost. What bounds the error is that it can only
+mis-classify a pair whose true separation is smaller than the step, and that
+`r ≺ w` is retained as a conjunct precisely because a clock step cannot reorder
+appends. The pair is conservative in both directions and is the best a stream
+carrying two instants and no third one can do.
 
 **Why the numerator is scoped to user-attributed writes and the machine rate is
 reported apart.** A consolidation job that supersedes a belief is the system
@@ -935,7 +945,7 @@ a real question a reader of the numbers will ask.
   §5's denominator rule is what keeps the measures usable despite it, and is why
   no measure here counts an absolute.
 
-### 12. No trace vocabulary is added, and the four gaps are filed with their costs
+### 12. No trace vocabulary is added, and the five gaps are filed with their costs
 
 > **Normative.** This ADR adds no member to `TraceKind`, `TraceOutcome`,
 > `TraceRef` or `TraceRecordSet`, defines no new metric key and requires no
@@ -950,7 +960,7 @@ read the six `decisions_*` keys; §3 reads `refs[CORRELATION]` and the seam of a
 `excluded_*` keys and `elapsed`; §8 reads the `CONFIGURATION` allowlist. All of
 them are emitted on `main`.
 
-**Four gaps are named rather than closed, because each costs an emitter lane and
+**Five gaps are named rather than closed, because each costs an emitter lane and
 none of them blocks a measure this ADR defines.** ADR-0119 §13e permits a
 ratified ADR to add vocabulary; this one declines, because adding a member is
 the one change that would make this a contract ADR, and no member is needed —
@@ -967,7 +977,13 @@ every gap below is a matter of *populating* what the vocabulary already declares
 3. **`_search_sync`'s counters stop at `limit`.** Closing it makes #824's
    "approaching" half readable. Cost: counting the whole candidate set on a read
    that fills its page, against a small cost on the hot retrieval path.
-4. **`Settings.consolidation_interval` does not exist**, so #829's arming is not
+4. **No trace carries a monotonic cross-event reading.** §4's interval test
+   compares one trace's wall-clock instant against another's, so a clock step
+   between the two readings can mis-order a pair whose true separation is
+   smaller than the step. Closing it would take a per-process monotonic origin
+   plus a per-trace offset, which is two metric keys and an emitter change, and
+   it buys nothing across the restarts §8 expects. Filed rather than taken.
+5. **`Settings.consolidation_interval` does not exist**, so #829's arming is not
    yet a diff between two `CONFIGURATION` traces and §8's partition will not
    find it. `core/config.py` withholds the field pending the lane that re-adds
    it. Until then the arming is datable only by ADR-0119 §9's stated fallback —
@@ -1097,7 +1113,7 @@ rather than continuous, so nobody will watch these numbers hourly — which is
 mostly a feature, since a rate over a short window of a single-user system is
 noise.
 
-**Three of the four gaps §12 files are worth closing and none is urgent.** The
+**Three of the five gaps §12 files are worth closing and none is urgent.** The
 conversation ref is the largest: it is what stands between §6 and the measure
 VISION actually names, and it costs an emitter lane rather than a contract
 change. The others buy incidence-plus-headroom on #824's trigger and explicit
