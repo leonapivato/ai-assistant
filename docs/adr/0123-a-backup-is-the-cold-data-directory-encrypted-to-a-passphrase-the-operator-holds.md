@@ -317,10 +317,14 @@ consistency while still leaving the cross-store skew §1 describes.
 
 > **Normative.** The backup excludes `hub.lock` and `hub.sock`.
 
+> **Normative.** The data-directory entries excluded above are named at the
+> composition root, beside where those entries are created, and the backup tool
+> obtains the set from there. Neither tool restates a store's filename.
+
 > **Normative.** A later lane that places in the data directory a file subject to a
-> clause forbidding it to leave the device returns to this decision and adds it to
-> the exclusions above. Until it does, this ADR authorises no such file to be
-> written there.
+> clause forbidding it to leave the device returns to this decision, adds it to the
+> exclusions above, and adds its name to the composition root's set in the same
+> change. Until it does, this ADR authorises no such file to be written there.
 
 **The trace store is excluded because ADR-0119 §12 is absolute and this ADR does
 not narrow it.** "No `EvaluationTrace` leaves the device, by any route, under any
@@ -359,11 +363,28 @@ left to §1's copy rule because §1's second clause refuses an entry that is nei
 a regular file nor a directory, and a socket left behind by a killed hub would
 otherwise refuse every backup taken before the next clean start.
 
+**The exclusion needs a name, and the name has an owner — which is not this tool.**
+§1 has the copier open no store and carry no list, and §10 keeps it out of every
+subsystem; so left unsaid, the trace store's identity would arrive as a string
+literal in `service/`, duplicating a fact that `app/composition.py` owns because it
+is where the store is *created*. That duplicate is the same failure §1 rejects an
+inclusion list for, aimed at a rule that matters more: a later lane renaming the
+trace store, or splitting it, would leave a copier still excluding a file that no
+longer exists and including one that does — silently, and against an absolute
+no-egress clause. Declaring the set where the entries are made and reading it from
+there is ADR-0104 §4's disposition for its own allow-list, which lives "at the
+composition root because that is where the embedder is *chosen*", and it needs no
+new seam: `service` "may import `app` … and `core`" (ADR-0083 §8) is the same route
+the other three offline tools already take to their mechanisms.
+
 **The forward clause is what keeps the exclusion list from being the enumeration
 §1 rejected.** It binds the lane that would create the problem rather than
-requiring this list to anticipate it, and it fails in the safe direction if that
-lane forgets: the file is backed up, which costs size and possibly an egress
-question, rather than silently dropped.
+requiring this list to anticipate it, and it now binds it in the one place that
+makes the binding effective — the declaration the tool actually reads, rather than
+a sentence in an ADR nobody re-reads while renaming a file. Where a lane forgets
+entirely, the failure is still in the safe direction for durability: the file is
+backed up, which costs size and raises an egress question, rather than being
+silently dropped from every backup.
 
 ### 4. The artifact is one encrypted file in the age v1 format
 
@@ -682,10 +703,15 @@ this tool.
 ### 9. A backup is proved by restoring it, and the drill is on a second machine
 
 > **Normative.** After writing the artifact and before §2's rename promotes it, the
-> backup tool verifies it by decrypting it and materialising it into a temporary
+> backup tool verifies it by decrypting it and materialising it into a verification
 > directory, applying every check §8 requires, and removes that directory
 > afterwards. A verification failure is reported as a failed backup, and §2's
 > refusal path removes the artifact.
+
+> **Normative.** The verification directory is created with owner-only permissions
+> under a parent writable only by its owner, and is removed on every path out of the
+> run. Where no such location is available the tool materialises the store nowhere
+> and reports the backup written-but-unverified under the clause below.
 
 > **Normative.** Where the tool cannot complete that verification for a reason that
 > is not a failure of the artifact — no room for the temporary copy, a refused
@@ -695,6 +721,20 @@ this tool.
 > **Normative.** This decision is not discharged until an artifact has been restored
 > on a machine other than the one that wrote it, by an operator supplying the
 > passphrase from their own custody, and a hub has served the restored directory.
+
+**Verification unpacks the entire Tier 1 store in plaintext, so it is held to
+§7's staging discipline and not to a system temporary directory's.** The check is
+the one moment this tool writes a complete decrypted copy of everything the user
+has accumulated, and a default temporary location is very often world-writable —
+so an implementation could satisfy every other clause here while laying the store
+out somewhere any process on the machine can read it, which is the posture
+ADR-0004 §4 and §7 both exist to hold. Owner-only, under an owner-only parent, and
+removed on every exit is the same rule §7 applies to the restored directory for the
+same reason: what is being protected is plaintext, and where it lands matters more
+than how briefly it is there. Routing an unavailable location to the
+written-but-unverified outcome rather than to a new one is what keeps that rule
+from costing the backup: the artifact is still written, and the thing the tool
+declines to do is the thing it could not do safely.
 
 **Verifying by restoring is the only verification that answers the question.** A
 checksum over a file proves the file is the file; it does not prove the artifact
@@ -771,10 +811,20 @@ consequence of §1 rather than a preference.** ADR-0104 put the re-embedder in
 one subsystem's store through that subsystem's code. A whole-directory copy opens
 no store and belongs to no subsystem: its subject is `Settings.data_dir`, which is
 the hub's (ADR-0083 §2), and its whole vocabulary is files, a lock and an archive.
-Routing it through the composition root would mean building an engine to copy files
-that no engine touches. This is the shape §1 buys — the backup needs no embedder,
-no store implementation and no wiring, which is also why it can run against a data
+Building an engine to copy files that no engine touches would be routing round a
+subsystem to reach a filesystem. This is the shape §1 buys — the backup needs no
+embedder and no store implementation, which is also why it can run against a data
 directory this build has never opened.
+
+**What it does take from the composition root is a set of names, and that is not
+the wiring it avoids.** §3 has the excluded entries declared where they are
+created, so the mechanism reads a list of filenames from `app` and constructs
+nothing; `service` "may import `app` … and `core`" (ADR-0083 §8), and `imports no
+subsystem directly` above is untouched because the composition root is not a
+subsystem. The distinction worth holding is between *reading a fact the composition
+root owns* and *asking it to build the machinery a subsystem would use* — the first
+is what every entry point in this family already does, and the second is what §1's
+shape makes unnecessary.
 
 **"Never automatic" is narrower here than in ADR-0104 §6, and the difference is
 deliberate.** ADR-0104 refuses automation because re-embedding spends hours of CPU
