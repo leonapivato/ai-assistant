@@ -222,6 +222,12 @@ chunk boundary a walk happened to draw.
 > `decisions_*` keys is **malformed** for the purposes of this ADR and enters no
 > population.
 
+> **Normative.** Every value this ADR reads as a **count** — the six
+> `decisions_*` values, and `limit`, `fetch_k`, `candidates`, `returned` and the
+> four `excluded_*` values — is a non-negative integer that is not a `bool`. A
+> trace carrying anything else under a key this ADR reads as a count is
+> **malformed** and enters no population.
+
 > **Normative.** A truncated set excludes its trace from a population **joining
 > on that set** and from no other, per ADR-0119 §3.
 
@@ -246,6 +252,18 @@ that are live. That trace's outcome is `FAULT` and its six counts are a truthful
 account of the rulings that *did* happen. Excluding it would discard real rulings
 to honour a field that is not about them. What is excluded is the crossing that
 observed nothing, and absence already says so.
+
+**Counts are constrained because the metric type does not constrain them.**
+`TraceMetricValue` is `int | float | bool` refused only for non-finiteness, so a
+`decisions_supersede` of `-1`, of `0.5` or of `True` type-checks and stores.
+Every emitter on `main` writes these from integer counters, but the rates above
+are only meaningful over non-negative integers — a negative numerator produces a
+negative rate and a fractional one produces a count of half a ruling, and both
+would be reported as figures rather than caught. `bool` is excluded by name
+because it *is* an `int` in Python, so a `True` slipping into a count would
+satisfy an integrality test while meaning something else entirely. The rule costs
+one comparison per value and turns a silent wrong answer into a counted
+exclusion.
 
 **Malformed is named rather than assumed away.** No emitter on `main` can produce
 a partial decision set — `_reconciliation_reading` builds all six from
@@ -528,20 +546,20 @@ arms its mitigation on "leg 8's telemetry showing a real store developing
 topic-concentrated window-closure approaching the measured threshold", and #799
 established the threshold as filtered-neighbour density crossing `fetch_k −
 limit`. Define a **saturated shortfall read** as a `RETRIEVAL` trace carrying
-`fetch_k`, `candidates`, `returned` and the four `excluded_*` keys, with
-`returned < limit` and `candidates ≥ fetch_k`: the KNN ceiling bound the
-candidate set, and the page did not fill. On exactly those reads the filter loop
-ran to exhaustion, so `returned + excluded_kind + excluded_retention +
-excluded_window + excluded_band` equals `candidates` and the counts are a
-partition rather than a prefix. The watch is two figures over `W`. The first is
-the **shortfall incidence**: saturated shortfall reads divided by every
-`RETRIEVAL` trace in `W` carrying those same seven keys, which is the population
-the question is about — a read that never reached the filter pass carries none of
-them and is neither a shortfall nor a healthy read. The second is the **window
-share** of each shortfall, `excluded_window ÷ (candidates − returned)`, defined
-for a read where the two differ; a shortfall read that excluded nothing is one
-the KNN ceiling alone bound, and is counted in the incidence and left out of the
-share.
+`limit`, `fetch_k`, `candidates`, `returned` and the four `excluded_*` keys —
+the eight this figure reads — with `returned < limit` and `candidates ≥
+fetch_k`: the KNN ceiling bound the candidate set, and the page did not fill. On
+exactly those reads the filter loop ran to exhaustion, so `returned +
+excluded_kind + excluded_retention + excluded_window + excluded_band` equals
+`candidates` and the counts are a partition rather than a prefix. The watch is
+two figures over `W`. The first is the **shortfall incidence**: saturated
+shortfall reads divided by every `RETRIEVAL` trace in `W` carrying those same
+eight keys, which is the population the question is about — a read that never
+reached the filter pass carries none of them and is neither a shortfall nor a
+healthy read. The second is the **window share** of each shortfall,
+`excluded_window ÷ (candidates − returned)`, defined for a read where the two
+differ; a shortfall read that excluded nothing is one the KNN ceiling alone
+bound, and is counted in the incidence and left out of the share.
 
 **And the half of #824's trigger this cannot see is stated.** "Approaching" the
 threshold would be read off healthy reads as headroom, and healthy reads are
@@ -639,8 +657,12 @@ above, and a later reader can see when each reading was taken.
 > diagnostic naming the data directory and the lock path; the tool does not
 > retry.
 
-> **Normative.** No `AssistantEngine` method, no wire operation and no CLI
-> command is created for reading traces or measures.
+> **Normative.** No `AssistantEngine` method, no wire operation and no
+> `assistant` CLI command is created for reading traces or measures.
+
+> **Normative.** The tool's entry point is its **own** console script, beside
+> `ai-assistant-hub` and `ai-assistant-reembed`, and never an `assistant`
+> subcommand.
 
 > **Normative.** No Protocol in `core/protocols.py` changes, and no type, enum
 > member or constant is added to `core/types.py`.
@@ -678,6 +700,18 @@ one — takes the same instance lock, which serialises it against the hub by
 construction and needs no new mechanism." And ADR-0119 §15 leaves open "whether
 the measures lane reads them through the API or offline in the shape ADR-0104's
 re-embedder uses". This takes the second option by the route both texts name.
+
+**The console script is not the CLI command the clause above forbids, and the
+two are kept apart because the corpus already keeps them apart.** What is refused
+is a measure reachable from the assistant client — an `assistant` subcommand, or
+anything routed over the wire — because that is the read path ADR-0119 §7 exists
+to prevent and because `interfaces/` may hold no business logic (golden rule 3).
+What is required is a separate console script, and ADR-0084 §6's reasoning makes
+that the only available shape rather than a preference: a subcommand "would live
+in `interfaces`, which would then have to import `service` — and ADR-0083 §8
+forbids anything importing `service` at all", which is why `ai-assistant-hub` and
+`ai-assistant-reembed` are their own scripts and not `assistant hub` and
+`assistant reembed`. The reporting tool is the third of that family.
 
 **The placement inside that shape is forced rather than chosen.** ADR-0104 §5
 settles it for the re-embedder and every term transfers: the entry point must
