@@ -132,6 +132,7 @@ if TYPE_CHECKING:
         Embedding,
         EncodableText,
         EpisodicMemory,
+        EvaluationTrace,
         ExecutionState,
         FeedbackEvent,
         Goal,
@@ -162,7 +163,10 @@ if TYPE_CHECKING:
         ToolCall,
         ToolDefinition,
         ToolResult,
+        TraceChunk,
+        TracePosition,
         TurnOutcome,
+        UtcInstant,
         WalkPosition,
     )
 
@@ -3970,6 +3974,249 @@ class DeferralStore(Protocol):
 
         Raises:
             DeferralStoreError: If the store cannot be written.
+        """
+        ...
+
+
+@runtime_checkable
+class TraceSink(Protocol):
+    """Where an emitter puts a trace, and the only trace seam a subsystem holds.
+
+    The narrow half of ADR-0119 §7's three-way split, and the *write* seam is the
+    narrow one here where ADR-0097 §5 made the *query* seam narrow — the same
+    mechanism turned the other way round. **Every emitting site takes one of these
+    as a required constructor argument with no default**, so a composition that
+    omits it does not type-check. An optional sink defaults to unwired, an unwired
+    emitter produces no traces, and no traces is indistinguishable from no events
+    — the lie ADR-0119 §5 refuses, arriving through composition instead of I/O.
+
+    **What a holder of this seam cannot do is read a trace back** (§7). Nothing
+    this system does is conditioned on what a trace says, no trace is ever
+    assembled into a prompt, and a trace the pipeline cannot read is a trace
+    `models/` cannot send — so ADR-0004 §2's egress rule needs no new exception.
+
+    **The instrument is subordinate to the work it observes** (§5). No retrieval,
+    write, turn, scheduled run or startup fails, retries, or changes its result
+    because a trace could not be written; see :meth:`emit`.
+
+    Cancelling :meth:`emit` is governed by this module's cancellation clause
+    (ADR-0060). Its input-observation clause (ADR-0065) is **vacuous**: the one
+    argument is an :class:`~ai_assistant.core.types.EvaluationTrace`, which is
+    immutable all the way down — every mapping it holds is detached and frozen at
+    validation (ADR-0119 §13a).
+    """
+
+    async def emit(self, trace: EvaluationTrace) -> None:
+        """Append ``trace``. **No trace-store failure escapes** (ADR-0119 §5, §7).
+
+        **Idempotent on the trace's id.** A second trace bearing an id the store
+        already holds is refused *silently* — logged as an emission failure under
+        §5, with the stored trace kept. Unlike :meth:`AuditTrail.record`, where
+        "re-recording an id already present raises rather than overwriting",
+        raising is not available here because §5 subordinates the instrument; and
+        overwriting would let a later write rewrite the record of an earlier
+        event. Keeping the first is the only option that loses nothing already
+        recorded.
+
+        **A trace that could not be recorded is logged**, as a Tier 2 log record
+        naming the kind, the seam and the failure's class (§5). Emission failure
+        is never silent: a missing trace is otherwise indistinguishable from a
+        non-event, which is the specific way an instrument lies.
+
+        **No trace is emitted for the writing of a trace** (§5), which is both the
+        #710 lesson applied before the fact and what closes the obvious regress.
+
+        It is safe to promise that no store failure escapes because the trace is a
+        validated pydantic model before this is called: a malformed trace is an
+        emitter bug that fails at construction, in the emitter's own tests, and
+        never reaches here. What ``emit`` can therefore encounter is
+        environmental — a locked database, a full disk — which is precisely the
+        class §5 subordinates. That in turn is safe to say only because ADR-0119
+        §3 makes the one externally-sourced string,
+        :attr:`~ai_assistant.core.types.EvaluationTrace.fault_class`, a **total**
+        conversion (:func:`~ai_assistant.core.types.fault_class_of`) rather than a
+        validation an exception could fail.
+
+        Args:
+            trace: The event to record, already stamped by the emitter's clock.
+
+        Raises:
+            CancelledError: **Not a blanket no-raise.** A cancellation delivered
+                from outside the call is re-raised once the sink has made its
+                resources safe, as this module's cancellation clause requires of
+                every method in it (ADR-0060 §1). An instrument that swallowed one
+                would defeat the shutdown drain rather than subordinate itself
+                to it.
+        """
+        ...
+
+
+@runtime_checkable
+class TraceRetention(Protocol):
+    """The trace store's deletion seam: a horizon, swept by the job that already sweeps.
+
+    The second narrow seam (ADR-0119 §7). Purging is `orchestration`'s capability
+    rather than an emitter's, because ADR-0083 §8 puts the retention purge behind
+    an ``Engine`` maintenance operation and ADR-0119 §10 wires the trace purge
+    there rather than inventing a second sweeping mechanism — ADR-0078 §10 item
+    8's instruction taken literally, as ADR-0083 §7 already took it for the
+    deferral purge.
+
+    **There is no count cap and no size cap** (§10). A trace is deleted only for
+    being older than the horizon. A cap evicts the *oldest* rows, which in #829's
+    design are the unarmed baseline — the half of the natural experiment that
+    cannot be re-created.
+
+    **Enforcement is by deletion only.** A trace still on disk is returned by
+    :meth:`TraceStore.walk` whatever its age; there is no read-time retention
+    filter. That is a difference from ADR-0007 §2 rather than a departure from it:
+    that rule enforces at read time because it is a *privacy* guarantee over Tier
+    1, and a Tier 2 horizon is a disk-space policy over data that identifies
+    nobody.
+
+    Cancelling :meth:`purge_before` is governed by this module's cancellation
+    clause (ADR-0060); its input-observation clause (ADR-0065) is vacuous, the one
+    argument being an instant.
+    """
+
+    async def purge_before(self, instant: UtcInstant) -> int:
+        """Delete every trace older than ``instant``; return how many (ADR-0119 §10).
+
+        ``UtcInstant`` rather than a merely-aware ``datetime``: a horizon compared
+        against stored instants must be canonicalised the same way, or the sweep
+        and the rows it sweeps disagree about what "older" means (ADR-0023,
+        ADR-0030).
+
+        **This one raises**, unlike :meth:`TraceSink.emit`. A sweep is not the work
+        being observed, so ADR-0119 §5's subordination has nothing to say about it,
+        and a purge that silently did nothing would let a store grow without bound
+        behind a horizon an operator believes is enforced.
+
+        The purge's own ``OPERATION`` trace lands in the store it just swept, one
+        instant after the sweep, and is therefore never a candidate for it. Noted
+        because it looks like a paradox and is not.
+
+        Args:
+            instant: The horizon. A trace whose ``occurred_at`` is strictly before
+                it is deleted; one at the instant is kept.
+
+        Returns:
+            How many traces were removed.
+
+        Raises:
+            TraceStoreError: If the store cannot be written.
+        """
+        ...
+
+
+@runtime_checkable
+class TraceStore(TraceSink, TraceRetention, Protocol):
+    """The whole trace store: append, purge, and the walk nothing in the pipeline holds.
+
+    The seventh SQLite database under ``Settings.data_dir`` (ADR-0119 §6), and a
+    **Tier 2** store — the only one in this file that is. A separate database
+    rather than a table beside an existing one, for two reasons and the second
+    decides: a trace about a failed write inside the failed write's own database
+    is lost exactly when it is most wanted, and this is the only store here with a
+    decided deletion horizon, so putting a swept table beside ``memory.db``'s
+    retention axes would be three lifetimes in one file.
+
+    **It structurally satisfies both narrow Protocols**, so one concrete
+    implements all three and the composition root hands each collaborator exactly
+    the seam it is entitled to (§7): a :class:`TraceSink` to every emitter, a
+    :class:`TraceRetention` to the ``Engine``'s maintenance operation, and this
+    type to nothing in the pipeline. That is the arrangement
+    :class:`SourceGrants`/:class:`SourceGrantStore` uses today, with one more
+    specialisation because there is one more capability.
+
+    **No component of the request pipeline holds a seam carrying the walk** —
+    `orchestration`, `memory`, `context`, `planning`, `readers`, `learning`,
+    `tools`, `permissions` — and none reads a trace back (§7). An instrument whose
+    readings change behaviour is measuring a system that includes the instrument,
+    and leg 8's exit test would be circular in a way that is nearly impossible to
+    see afterwards in the numbers.
+
+    **A reference is permitted to dangle** (§10). A trace referencing a deleted
+    record keeps an opaque id that now resolves to nothing, which is the honest
+    record: the deletion does not un-happen the retrieval, and an id whose row is
+    gone identifies nobody. Nothing here ever resolves a reference to check it.
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060).
+    """
+
+    async def walk(self, *, after: TracePosition | None = None, limit: int) -> TraceChunk:
+        """One chunk in insertion order, resuming after ``after`` (ADR-0119 §7a).
+
+        **The order is the store's total insertion order** — the order in which
+        appends landed, never ``occurred_at`` order — under ADR-0114 §2's rule that
+        a position "is opaque to its caller, and is never a value a caller
+        composes". ADR-0119 §3 has the *emitter* stamp the instant, so two traces
+        can carry the same one and a slow sink can land an earlier instant after a
+        later one; an order over ``occurred_at`` is therefore neither total nor
+        stable, and a page boundary drawn on it can skip a row that arrives behind
+        the cursor. A measure that wants a time window filters within the walk; it
+        does not order by time.
+
+        **One call returns an ordered prefix**: at most ``limit`` traces, in
+        insertion order, of those appended after ``after`` and still present. It
+        returns no trace at or before that position. The *completeness* guarantee
+        is a property of the **sequence** of calls, each resumed from the position
+        the last one handed back — calls resumed that way collectively return every
+        retained trace after the first position, in order and exactly once. An
+        append that lands during a call takes a position after every position
+        already issued, so no page boundary skips or duplicates a trace.
+
+        **Every chunk carries a position, always** — after the last trace returned,
+        or, when the chunk is empty, the position the walk was resumed from, and
+        for a walk starting at ``None`` the store's floor. There is no exhausted
+        state in which a caller is handed no position. An earlier draft had the
+        walk report exhaustion with ``position: None``, which is the natural shape
+        and wrong: a reader handed that has stopped *and thrown away the only thing
+        that would let it resume*, so a trace appended between the query and the
+        return is unreachable.
+
+        **A chunk shorter than ``limit`` means nothing further is present yet**,
+        never "this walk is over". A caller may resume from the position it was
+        handed at any later time and receive whatever has been appended since. The
+        walk is a high-water mark rather than an iterator.
+
+        **The position is the caller's to hold.** This store persists no cursor,
+        names no walk, and two concurrent readers never contend — unlike
+        :meth:`MemoryStore.advance_walk`, whose walk is resumed by a scheduled
+        *job* across process restarts (ADR-0111 §1, ADR-0114 §5). A measure is a
+        reader, not a job.
+
+        A resumed walk may see rows appended since the position was issued —
+        correct, since they are genuinely later — and may find rows gone that were
+        present when it started, which is ADR-0119 §10's purge doing its job.
+        Neither is an anomaly.
+
+        **The one operation no pipeline component may reach** (§7).
+
+        Args:
+            after: Where to resume, or ``None`` to start at the store's floor.
+                Opaque: the only admissible source is a :class:`TraceChunk` this
+                store returned.
+            limit: The most traces to return. Keyword-only and **required**: a
+                default would make the unbounded read the easy one.
+
+        Returns:
+            The chunk, and the position it reached.
+
+        Raises:
+            ValueError: If ``limit`` is zero or below, as ADR-0114 §6 refuses one
+                for the chunked walk and for the same reason; or if ``after`` is a
+                position this store cannot read — a caller-held position this store
+                did not issue is a caller bug, not the recoverable state ADR-0111
+                §7 discards for a *durable* cursor. Every refusal in this contract
+                is a ``ValueError``, mirroring ADR-0114 §6a.
+            TraceStoreError: If the store cannot be read, or holds a row that
+                cannot be hydrated — a row carrying no readable ``id`` included
+                (ADR-0119 §3). Every trace returned is a **detached snapshot**, as
+                :class:`AuditTrail` and :class:`MemoryStore` already give, for the
+                reason ``AuditTrail`` states: ``frozen=True`` refuses
+                ``x.outcome = …`` and not ``x.__dict__["outcome"] = …``.
         """
         ...
 
