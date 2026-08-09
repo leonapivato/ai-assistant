@@ -625,8 +625,10 @@ and it is one subsystem's change.
 - **Whether a multi-member agreeing set should fold more than once.** The arm
   names one target and leaves any second agreeing member live — the duplication
   residue ADR-0092 §7 already names, reached here by a rarer path. Filed.
-- **Anything about ADR-0122's subject.** The cross-kind reach of a correction
-  (#864) is a separate lane and this ADR neither depends on it nor constrains it.
+- **The cross-kind reach of a correction (#864).** A separate lane, with its own
+  ADR in flight in the same batch (#865). This ADR neither depends on it nor
+  constrains it: the agreement test reads `kind` and requires equality, and the
+  conflict probe that supplies the candidates is kind-scoped either way.
 
 ## Consequences
 

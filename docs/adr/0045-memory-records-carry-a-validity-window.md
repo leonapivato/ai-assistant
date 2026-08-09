@@ -2,6 +2,38 @@
 
 - Status: Partially superseded by ADR-0080 (§4's window-close instruction for a target carrying a producer-set bounded window)
 - Date: 2026-07-22
+- Amended: 2026-08-09 by ADR-0121 — **§5's clause 1 gains its second exception:
+  an *agreeing* `REINFORCE` from a user-asserted proposal onto a user-asserted
+  target. §5's two stated justifications are untouched, because neither of them
+  describes that fold.** Clause 1 refuses "no fold of any kind onto a
+  `USER_ASSERTED` target" and gives two reasons — *destructiveness* ("the write
+  replaces what the user told us") and *signal strength* (topical similarity is
+  "too weak to authorise retiring a record the user gave us"). Both are about a
+  fold that replaces or retires the user's record.
+  [ADR-0121](0121-an-agreeing-restatement-is-ruled-agreement-not-conflict.md) §4
+  makes the permitted fold write the *target's own content* back at the target's
+  own id, keeping its source, confidence, window and attestation and closing no
+  window, so nothing is replaced and nothing is retired; and §1's predicate reads
+  no retrieval score at all, so the signal it runs on is not the 0.75 one clause 1
+  names. §5's "Clause 1 (below) stays record-keyed" also stands: the exception is
+  keyed on the two records' `kind`, `content` and `source`, never on the relation
+  between them, and it is **verified at the writer** rather than trusted from the
+  ruling (ADR-0121 §5, ADR-0038 §2a). This is the same mechanism ADR-0078 §5b used
+  against this clause, drawn one case wider and for the reason §5b itself gave for
+  excluding a `REINFORCE` — "it would rewrite the user's own words at the target's
+  id" — which ADR-0121 §4 makes false of this fold and of no other.
+
+  **What stands.** Every other fold onto a `USER_ASSERTED` target is refused
+  exactly as before, including every non-asserted proposal's and every `SUPERSEDE`
+  outside ADR-0078 §5b's confirmation exception. §5b's `EXTERNAL` narrowing, §4's
+  fresh-id rule, §7's limits and §§1–3, 6, 8–10 are untouched. §7's #245 bullet —
+  "a decidable policy-lane question, and this ADR consciously does not answer it",
+  needing "a real contradiction signal (or explicit user confirmation)" — is
+  **discharged** by ADR-0121 §1 supplying a third thing §7 did not enumerate: a
+  determination that there is no contradiction to resolve. ADR-0121 §9 applies
+  ADR-0070 §1's test and records this ruling; the `Status` line is unchanged
+  because ADR-0082 §2 puts the record in this note alone on a line led by
+  `Partially superseded by`. Refs #862, #863.
 - Note (2026-08-02): **§5/§7/§10's deferred policy choice is taken, §10's identity
   residual is decided, and §7 understated one of the two limits it recorded.**
   Nothing this ADR *decided* moves; the note is owed because two of its sentences
@@ -453,6 +485,15 @@ because `REINFORCE` still inherits the *target's* id, is exactly why the
 Steps 1 and 2 are two writes and **must be atomic** (§8).
 
 ### 5. The two `MemoryWriter` conformance rewrites, stated precisely; clause 1 stays
+
+> **Amended by ADR-0121 (2026-08-09).** Clause 1 below now carries a second
+> exception: a `REINFORCE` from a `USER_ASSERTED` proposal that **agrees** with a
+> `USER_ASSERTED` target under ADR-0121 §1 is permitted, verified at the writer.
+> Clause 1's two justifications are untouched — ADR-0121 §4 makes that fold write
+> the target's own content back, retiring nothing, and its predicate reads no
+> retrieval score — and clause 1 stays record-keyed. Everything else in this
+> section, including §5b's `EXTERNAL` narrowing and clause 1 for every other
+> pairing, is in force as written.
 
 ADR-0040 §6 named exactly two clauses a validity window rewrites, both in the
 `MemoryWriter` conformance suite. This ADR makes them.

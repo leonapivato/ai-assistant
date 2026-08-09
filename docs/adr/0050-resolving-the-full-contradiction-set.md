@@ -1,7 +1,35 @@
 # 50. Contradiction resolution retires the full conflict set, and defers assertion-vs-assertion
 
-- Status: Partially superseded by ADR-0079 (§1's over-limit surplus clause) and ADR-0092 (§1's `EXTERNAL` hold-out from the retirement widening)
+- Status: Partially superseded by ADR-0079 (§1's over-limit surplus clause), ADR-0092 (§1's `EXTERNAL` hold-out from the retirement widening) and ADR-0121 (§2's scope over a conflict set whose asserted members all *agree* with the proposal)
 - Date: 2026-07-23
+- Partially superseded: 2026-08-09 by ADR-0121 — **§2's rule is narrowed to
+  conflict sets holding an asserted member that *disagrees* with the proposal;
+  everything §2 says about a genuine self-contradiction stands.** §2 states its
+  rule unconditionally over the set — "if a user-asserted proposal conflicts with
+  any existing `USER_ASSERTED` record, rule `ASK_USER`" — and defends the
+  interrogation cost on the ground that the prompt "is also **targeted** … so it
+  is rare and high-value, not the blanket interrogation §5 feared". Leg 8's QA run
+  (#862) falsifies that premise rather than the ruling: the targeting is on
+  *topical conflict*, which is what a restatement of one's own words is, so a
+  verbatim self-restatement drew a contradiction question three times out of
+  three — the interaction ADR-0038 §5 predicted ("`ASK_USER` would interrogate the
+  user about a 'conflict' that is most often a restatement").
+  [ADR-0121](0121-an-agreeing-restatement-is-ruled-agreement-not-conflict.md) §1
+  supplies the discriminator §2 never had — a syntactic agreement predicate that
+  reads no retrieval score — and its §2 rules `REINFORCE` ahead of this arm when
+  every asserted member of the conflict set agrees with the proposal.
+
+  **What stands.** §2's ruling for every conflict set holding a *disagreeing*
+  asserted member is untouched, and that is the #245 case §2 was written for:
+  ADR-0121 §2's second condition exists to keep it reachable, so two contradictory
+  assertions still cannot both go live. §2's "both live" sentence — "a correctness
+  defect, not a benign restatement to be tolerated" — stays true, and is about two
+  *contradictory* assertions standing live rather than about an agreeing one
+  folding. §2's recency-precedence rule once a contradiction is confirmed, its
+  `ASK_USER`-writes-nothing clause, its refinement of ADR-0038 §3's mixed case and
+  its supersession of ADR-0038 §5's `ASK_USER` rejection all stand, as does §1
+  entire. ADR-0121 §9 applies ADR-0070 §1's test and records this ruling. Refs
+  #862, #863.
 - Partially superseded: 2026-08-02 by ADR-0092 — **§1's second hold-out goes; its
   first stands, and so does everything §1 says about what "full" means.** §1
   defines the retirement set extensionally — the named `target` plus "every other
@@ -271,6 +299,15 @@ follow-up filed as an issue, not decided here; that would be a contract-surface 
 in its own lane.
 
 ### 2. A user assertion contradicting a prior assertion defers to the user (#245)
+
+> **Partially superseded by ADR-0121 (2026-08-09).** The rule below is stated
+> unconditionally over the conflict set, and the conflict set is a topical
+> similarity signal, so it fires on a user restating their own words as reliably
+> as on a genuine self-contradiction (#862, #863). ADR-0121 §2 rules `REINFORCE`
+> ahead of this arm when *every* `USER_ASSERTED` member of the conflict set
+> agrees with the proposal under ADR-0121 §1's syntactic predicate. This section
+> is otherwise in force, and governs every conflict set holding an asserted
+> member that disagrees — which is the #245 case it was written for.
 
 `DefaultMemoryPolicy` gains a rule, ahead of its supersession rule: **if a
 user-asserted proposal conflicts with any existing `USER_ASSERTED` record, rule
