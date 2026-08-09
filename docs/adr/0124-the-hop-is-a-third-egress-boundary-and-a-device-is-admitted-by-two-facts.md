@@ -97,11 +97,11 @@ the guarantee matters, still resting on nothing.
   at 64. A credential occupies what is left, and raising that bound would amend a
   ratified clause.
 - **`SecretStore` does not exist.** ADR-0004 §3 provisions it and ADR-0084 §11
-  calls it "the obvious home" for a credential; `core/protocols.py` declares
-  sixteen Protocols and that is not one of them. Today's Tier 0 credential — the
-  provider key — is read from the process environment by the provider SDK
-  (`models/provider.py`). A decision that assumed the keyring path exists would be
-  designing against a premise the tree does not hold.
+  calls it "the obvious home" for a credential; `core/protocols.py` does not
+  declare it. Today's Tier 0 credential — the provider key — is read from the
+  process environment by the provider SDK (`models/provider.py`). A decision that
+  assumed the keyring path exists would be designing against a premise the tree
+  does not hold.
 - **`credential` is already redacted in logs.** `core/logging.py`'s
   `_SENSITIVE_KEY_PARTS` matches it as a substring, case-insensitively.
 - **A handshake refusal an old client cannot name still renders.**
@@ -506,6 +506,14 @@ honouring the figure independently would mean the hub honours neither.
 > `AssistantError` by the code alone (ADR-0085 §9, §10a). It appears on the
 > handshake path and never on the call path.
 
+**That last clause has an existing enforcement point the implementing lane has to
+find, and it is easy to miss.** `_raise_reply_error` (`wire/client.py`) carries a
+closed set of handshake-vocabulary codes so that one arriving on the *call* path
+is raised as a protocol fault rather than handed to `raise_from_payload`, which
+expects a class name. A new refusal code that is not added to that set would reach
+an older client's reconstruction path as an unknown class. The rule is the clause;
+the set is where the tree currently keeps it honest.
+
 ### 8. Revocation is prospective, and two levers exist that do not substitute for each other
 
 > **Normative.** Revoking a device is an explicit act of the owner at the hub.
@@ -544,11 +552,11 @@ restore by accident.
 
 ### 9. This change does not bump `PROTOCOL_VERSION`, and here is the rule that decides when one does
 
-> **Normative.** This decision does not change `PROTOCOL_VERSION`. It adds no
-> member to the connect exchange, changes no frame's encoding, and changes no
-> method's arguments or results. What differs between the two listeners is which
-> connect frames are admitted, which is policy reported in the ratified error frame
-> rather than a change to what a frame is.
+> **Normative.** No lane implementing this decision changes `PROTOCOL_VERSION` for
+> it. The remote listener adds no member to the connect exchange, changes no
+> frame's encoding, and changes no method's arguments or results; what differs
+> between the two listeners is which connect frames are admitted, which is policy
+> reported in the ratified error frame rather than a change to what a frame is.
 
 **The freeze ADR-0084 §3 bought is what makes that true rather than merely
 convenient.** Its permanent clause fixes "the length prefix, the UTF-8 JSON codec,
@@ -569,19 +577,18 @@ spoke resting on nothing.
 > conforming peer at the new version may send would be refused by a conforming
 > peer at the old version, or would be accepted by it with a different meaning.
 > The obligation is on whoever makes the change, in the same change.
-
-> **Normative.** That clause reaches, without limiting itself to: a change to the
-> encoding of a wire-carried value (ADR-0087 §8's rule, which is unchanged and is
-> not restated by this one); a change to a wire-carried `core` type that makes a
-> value one peer emits invalid for the other, whether the change widens or narrows
-> the type; and any change to the promoted surface's method set or to a method's
-> arguments or results (ADR-0085 §3).
-
-> **Normative.** That clause does not reach: adding a listener, changing which
-> connect frames a listener admits, or adding a refusal code on the handshake
-> path. The connect exchange's decodability is frozen across versions (ADR-0084
-> §3), and a handshake refusal an older peer cannot name is still rendered from its
-> message rather than refused.
+>
+> It reaches, without limiting itself to: a change to the encoding of a
+> wire-carried value (ADR-0087 §8's rule, which is unchanged and is not restated
+> by this one); a change to a wire-carried `core` type that makes a value one peer
+> emits invalid for the other, whether the change widens or narrows the type; and
+> any change to the promoted surface's method set or to a method's arguments or
+> results (ADR-0085 §3).
+>
+> It does not reach: adding a listener, changing which connect frames a listener
+> admits, or adding a refusal code on the handshake path. The connect exchange's
+> decodability is frozen across versions (ADR-0084 §3), and a handshake refusal an
+> older peer cannot name is still rendered from its message rather than refused.
 
 **The widening limb is the one the corpus has already been caught by.** ADR-0122
 made `FeedbackEvent.memory_kind` optional — a widening — and a new client sending
@@ -632,10 +639,9 @@ inferred from an ADR whose subject was a microphone.
 > surface. An implementing lane that finds it needs either stops and owes its own
 > contract ADR, merged first (golden rule 5, ADR-0015 §5).
 
-> **Normative.** This ADR decides nothing about a delivery seam for proactivity.
-> A push over this hop must ride a connection the spoke established (ADR-0094 §2),
-> which ADR-0084 §3's serial connection cannot express; that remains the additive
-> wire decision ADR-0094 §10, ADR-0084 §11 and ADR-0042 §5 already defer.
+> **Normative.** No lane may read this ADR as deciding any part of a delivery seam
+> for proactivity. That seam is the additive wire decision ADR-0094 §10,
+> ADR-0084 §11 and ADR-0042 §5 already defer, and it is unmoved by this one.
 
 **So the answer to whether this transport choice forecloses or enables push is
 neither, and the distinction is worth being exact about.** The overlay makes the
