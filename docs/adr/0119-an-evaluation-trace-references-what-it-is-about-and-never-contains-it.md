@@ -299,8 +299,10 @@ observe Tier 1 content in the course of recording that it exists.
 
 > **Normative.** A `RecordIdSet` carries each id **at most once**.
 
-> **Normative.** A trace's own id is minted at construction and is never derived
-> from data (§2). A store that meets an id it already holds records an emission
+> **Normative.** A trace's own id is **minted by the type** — the hex form of a
+> random UUID, defaulted and shape-checked — so no caller can supply one from
+> data (§2). Referenced ids keep `Identifier`, and §2's third clause binds them
+> as an obligation because their shapes belong to the stores that mint them. A store that meets an id it already holds records an emission
 > failure under §5 and keeps the trace it has; it does not raise, and it does not
 > overwrite.
 
@@ -984,8 +986,8 @@ elided throughout, with one exception worth stating because it is the only name
 here the module does not already have: `core/types.py` imports `Iterator`,
 `Mapping` and `Sequence` from `collections.abc`, and **`Hashable` joins them** —
 without it `FrozenMapping`'s type-parameter bound is an undefined name and the
-class below does not resolve. `re` is the other addition; `isfinite`, `StrEnum`
-and the pydantic names are all present.
+class below does not resolve. `re` and `uuid4` are the other additions;
+`isfinite`, `StrEnum` and the pydantic names are all present.
 
 ```python
 #: ``fullmatch``, never ``match``: ``$`` also matches *before* a trailing
@@ -1043,6 +1045,17 @@ def fault_class_of(error: BaseException) -> str:
     except Exception:  # noqa: BLE001 — see below; CancelledError is not caught
         return UNREPRESENTABLE_FAULT_CLASS
     return name if representable else UNREPRESENTABLE_FAULT_CLASS
+
+
+_TRACE_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def _trace_id(value: str) -> str:
+    """A trace's own id: the hex form of a random UUID, and nothing else (§3)."""
+    if not _TRACE_ID.fullmatch(value):
+        msg = f"{value!r} is not a minted trace id"
+        raise ValueError(msg)
+    return value
 
 
 def _finite(value: int | float | bool) -> int | float | bool:
@@ -1128,6 +1141,7 @@ def _frozen_mapping[K, V](value: Mapping[K, V]) -> FrozenMapping[K, V]:
     return FrozenMapping(value)
 
 
+type TraceId = Annotated[EncodableText, AfterValidator(_trace_id)]
 type TraceLabel = Annotated[EncodableText, AfterValidator(_trace_label)]
 type FaultClassName = Annotated[EncodableText, AfterValidator(_fault_class_name)]
 type TraceMetricValue = Annotated[int | float | bool, AfterValidator(_finite)]
@@ -1223,7 +1237,7 @@ class EvaluationTrace(BaseModel):
     #: unvalidated ``{}`` is a *mutable* mapping ``frozen=True`` does not protect.
     model_config = ConfigDict(frozen=True, validate_default=True)
 
-    id: Identifier
+    id: TraceId = Field(default_factory=lambda: uuid4().hex)
     kind: TraceKind
     seam: TraceLabel
     occurred_at: UtcInstant   # emitter-stamped, from its Clock (§3)
@@ -1299,6 +1313,25 @@ ids satisfy every count invariant while double-counting one record in a measure'
 numerator and crowding a real one out at the cap — a miscount of exactly the kind
 §3 spends its other clauses refusing. The check runs before the length invariant,
 because the length invariant cannot see it.
+
+**A trace's own id is minted by the type, and that is a stricter thing than the
+ids it references.** §3 says the id is minted at construction and never derived
+from data, and an `Identifier` — nonblank encodable text — would have let any
+emitter satisfy the type with a user's sentence, putting Tier 1 content in a
+Tier 2 store through the one field nobody inspects. So `id` carries its own
+`default_factory` and its own shape: the 32-character hex of a random UUID, which
+a caller cannot supply from content and which a row read back out of the store
+matches by construction. That is the reconstruction path, and it needs no
+privileged constructor.
+
+**The referenced ids are *not* given the same treatment, deliberately.** A
+`refs` or `records` value is a conversation id, a turn id, a memory record id —
+minted elsewhere, in shapes this ADR does not own. `MemoryStore.add`'s id is the
+caller's idempotency key, not a UUID, so constraining referenced ids to a minted
+shape would refuse the very records a trace exists to point at. There, §2's third
+clause is an **obligation** on emitters rather than a property of the type, and
+the difference is stated rather than blurred: the type closes the field this ADR
+mints, and review closes the fields it borrows.
 
 **`RecordIdSet`'s count invariant is a validator, not a comment, and it is an
 equality rather than a bound.** `ge=0` alone accepts `RecordIdSet(ids=(one_id,), total=0)`,
