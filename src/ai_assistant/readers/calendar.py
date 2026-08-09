@@ -20,6 +20,69 @@ descriptor check. Widening the seam to read a directory is **#649**: it reopens
 the byte cap's scope, §7b's single acquisition instant, and mid-read mutation,
 so it is its own decision and not a looser version of this one.
 
+**The ``singlefile`` arrangement is verified, not assumed.** #649 recorded the
+storage's existence as "unverified in-session", and the deferral of §7's widening
+rests on it — so it was checked against ``vdirsyncer`` 0.20.0 rather than left
+asserted. ``SingleFileStorage`` exists, writes an entire collection into one
+``VCALENDAR``, and ``checkfile`` refuses a path that exists and is not a file, so
+the output is a regular file by construction. ``tests/readers/`` pins bytes it
+actually produced.
+
+**Its writes are atomic, and that is what makes the pairing safe rather than
+merely workable.** ``singlefile`` writes through ``atomic_write(..., overwrite=
+True)``, which is ``mkstemp`` in the target's own directory followed by
+``os.rename`` — so the configured path always resolves to a *complete* collection,
+never a partial or missing one, and a sync landing mid-read swaps the inode under
+a descriptor this reader already holds rather than corrupting what it is reading.
+§7b's acquisition instant therefore always describes bytes that were whole, and
+the mid-read mutation hazard #649 raises against a *directory* source has no
+counterpart here. Nothing in this module depends on that — the descriptor check
+and the capped read stand on their own — but a deployment note that recommended a
+fetcher writing in place would be recommending something weaker.
+
+**Deploying it** (the fetcher is a co-located mature tool and deliberately not a
+dependency of this project, ADR-0095 §Context). Install ``vdirsyncer`` on the hub
+box as a *tool* — ``uv tool install vdirsyncer`` — and give it a ``singlefile``
+side::
+
+    [general]
+    status_path = "~/.vdirsyncer/status"
+
+    [pair calendar]
+    a = "remote"
+    b = "local"
+    collections = null
+
+    [storage remote]
+    type = "caldav"          # or "http" for a read-only .ics subscription URL
+    url = "..."
+
+    [storage local]
+    type = "singlefile"      # NOT "filesystem" — that writes a directory (#649)
+    path = "~/.calendars/calendar.ics"
+
+Run ``vdirsyncer discover calendar`` once, then ``vdirsyncer sync calendar`` on a
+timer the fetcher owns (cron or a systemd timer) — the network is the fetcher's
+and never this seam's, which is the whole point of the pattern. Point the hub at
+its output and arm the job::
+
+    ASSISTANT_CALENDAR_READER_PATH=/home/you/.calendars/calendar.ics
+    ASSISTANT_CALENDAR_READER_INTERVAL=PT15M
+
+The two settings are a matrix ``Settings`` refuses to leave incoherent: an
+interval with no path fails at load (§7a). **Configuration is not consent** — the
+hub reads nothing until the user grants the source through a client, and until
+then the scheduler's job fails every tick with ``SourceNotGrantedError`` rather
+than reading (ADR-0097 §5)::
+
+    assistant sources                                    # shows the location
+    assistant grant calendar --scope facet --scope ingest
+    assistant revoke calendar                            # prospective (ADR-0097 §6)
+
+The reader's identity is ``calendar`` and a grant keys on **that**, never on the
+path (ADR-0097 §1) — so repointing the path leaves the grant standing over the new
+location, which ADR-0097 §9a states and does not close.
+
 **Configuration is not consent**, and no surface may present it as one (§7). A
 ``Settings`` field cannot be revoked by the user through the assistant, cannot be
 scoped, and leaves no audit record. The grant model is deferred (§11, #629), and
