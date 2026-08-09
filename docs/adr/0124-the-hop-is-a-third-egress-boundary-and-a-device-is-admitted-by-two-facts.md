@@ -1,6 +1,6 @@
 # 124. The hop is a third egress boundary, and a device is admitted by two independent facts
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-09
 - **This ADR partially supersedes ADR-0017 §1, and the record lands in this
   change.** §12 applies ADR-0070 §1's test and finds ADR-0017 §1's two-boundary
@@ -25,7 +25,14 @@
   fixes an egress boundary, an admission rule on a ratified handshake, and a
   version-bump rule the wire has been operating without (#872) — the edge cases
   are answerable from prose, before an implementation commits to an answer
-  (`CONTRIBUTING.md` → "Contract ADRs land before their implementation").
+  (`CONTRIBUTING.md` → "Contract ADRs land before their implementation"). **Both
+  ran against this decision while it was `Proposed`, and both changed it.**
+  Adversarial produced §7's credential wire type, §8's revocation ordering and
+  its indivisibility clause, and §4's enrolled hub identity; architecture produced
+  §1's two-directional boundary — the client's own send was prohibited by the rule
+  it replaced — §6's persistence and its `SecretStore` prerequisite, and §3's
+  proper treatment of ADR-0004 §2's residency clause. Each is recorded at the
+  clause it changed rather than only here.
 
 ## Context
 
