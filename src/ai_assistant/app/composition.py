@@ -349,6 +349,12 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         # ``TraceSink`` — this object, narrowed by the annotation on its
         # constructor — and the ``Engine``'s maintenance operation takes it as a
         # ``TraceRetention``. Nothing in the pipeline ever takes it whole (§7).
+        #
+        # **So ``settings.trace_retention`` is configured and not yet enforced**,
+        # and #852 is where the third call behind ADR-0083 §7's existing
+        # retention-purge operation lands (ADR-0119 §10). Stated here rather than
+        # left to be discovered, because a horizon an operator can set and nothing
+        # applies is exactly the shape that reads as working.
         traces = SqliteTraceStore(path=directory / "traces.db")
         opened.append(traces.close)
 

@@ -70,6 +70,11 @@ _log = structlog.get_logger(__name__)
 #: implementation.
 TRACE_NOT_RECORDED = "trace_not_recorded"
 
+#: What an emission-failure record carries in place of a trace's own kind and
+#: seam when the trace could not be revalidated — so the one path on which those
+#: fields are *not* known to be Tier 2 writes nothing derived from them (§2, §5).
+UNREADABLE_TRACE_FIELD = "unreadable"
+
 _OWNER_ONLY = 0o600
 
 #: The sidecars SQLite may keep beside a database file. Restricted for the reason
@@ -225,8 +230,8 @@ def _sort_key(instant: datetime) -> int:
     return (elapsed.days * 86_400 + elapsed.seconds) * 1_000_000 + elapsed.microseconds
 
 
-def _detached(trace: EvaluationTrace) -> str:
-    """Rebuild ``trace`` as a validated :class:`EvaluationTrace` and serialise it.
+def _detached(trace: EvaluationTrace) -> EvaluationTrace:
+    """Rebuild ``trace`` as a validated :class:`EvaluationTrace`.
 
     Read out of the instance's ``__dict__`` rather than through ``model_dump``,
     for ``SqliteSourceGrantStore._revalidated``'s reason: ``model_dump`` is an
@@ -237,8 +242,17 @@ def _detached(trace: EvaluationTrace) -> str:
     Args:
         trace: What the emitter passed.
 
+    **Everything the store goes on to use comes from the returned snapshot**, not
+    from the argument: the id it keys the row on, the instant it sorts by, the
+    JSON it stores, and the kind and seam a failure record names. A caller that
+    wrote past ``frozen=True`` therefore cannot make the stored row and the
+    validated object disagree, and cannot put an unvalidated string anywhere.
+
+    Args:
+        trace: What the emitter passed.
+
     Returns:
-        The JSON form of a rebuilt, validated copy.
+        A rebuilt, validated copy.
 
     Raises:
         ValidationError: If the object does not satisfy its own model — a caller
@@ -248,7 +262,7 @@ def _detached(trace: EvaluationTrace) -> str:
             work being traced.
     """
     fields = dict(object.__getattribute__(trace, "__dict__"))
-    return EvaluationTrace.model_validate(fields).model_dump_json()
+    return EvaluationTrace.model_validate(fields)
 
 
 def _hydrate(row: str) -> EvaluationTrace:
@@ -538,17 +552,22 @@ class SqliteTraceStore:
                 shutdown drain rather than subordinate itself to it.
         """
         try:
-            row = _detached(trace)
+            snapshot = _detached(trace)
         except ValidationError as exc:
-            _dropped(trace, exc)
+            # No snapshot, so nothing about this object is known to be Tier 2 —
+            # see :func:`_dropped`.
+            _dropped(None, exc)
             return
         try:
             async with self._lock:
                 await _run_to_completion(
-                    self._append_sync, trace.id, _sort_key(trace.occurred_at), row
+                    self._append_sync,
+                    snapshot.id,
+                    _sort_key(snapshot.occurred_at),
+                    snapshot.model_dump_json(),
                 )
         except Exception as exc:  # every store fault, and nothing that is not one
-            _dropped(trace, exc)
+            _dropped(snapshot, exc)
 
     def _append_sync(self, trace_id: str, occurred_at_us: int, row: str) -> None:
         """Insert the row unless its id is already present, as one transaction.
@@ -661,24 +680,38 @@ class SqliteTraceStore:
             self._conn.close()
 
 
-def _dropped(trace: EvaluationTrace, error: Exception) -> None:
+def _dropped(snapshot: EvaluationTrace | None, error: Exception) -> None:
     """Log a trace that could not be recorded (ADR-0119 §5).
 
     The three keys are Tier 2 by construction: the kind is an enum member, the
-    seam is a literal the emitting module wrote, and the error's *class* is what
-    ADR-0111 §9 already puts in an operational record — never its message, which
-    may quote a row.
+    seam is a bounded lowercase label, and the error's *class* is what ADR-0111
+    §9 already puts in an operational record — never its message, which may quote
+    a row.
+
+    **Read off the revalidated snapshot and never off the caller's object**, and
+    ``None`` when there is no snapshot because revalidation is what failed. This
+    is the trap ADR-0119 §2 names one level down for a fault class: "the refused
+    name is not diverted to the log, which is the trap in the obvious fix", and
+    ADR-0004 §5 is unconditional — "Logs are Tier 2 only". ``frozen=True`` refuses
+    ``trace.seam = …`` and not ``trace.__dict__["seam"] = …``, so a caller that
+    wrote past the model puts an arbitrary string on the object; reading it here
+    would take the value the store just refused for carrying content and write it
+    to the log instead. So the record says a trace was lost and which class lost
+    it, and the reserved literal is the whole of what stands in for the rest —
+    exactly the shape :data:`~ai_assistant.core.types.UNREPRESENTABLE_FAULT_CLASS`
+    takes for the same problem.
 
     Args:
-        trace: The event that was not recorded.
-        error: Why it was not.
+        snapshot: The validated copy of the event, or ``None`` if the trace could
+            not be revalidated at all.
+        error: Why it was not recorded.
     """
     _log.warning(
         TRACE_NOT_RECORDED,
-        kind=str(trace.kind),
-        seam=str(trace.seam),
+        kind=str(snapshot.kind) if snapshot is not None else UNREADABLE_TRACE_FIELD,
+        seam=str(snapshot.seam) if snapshot is not None else UNREADABLE_TRACE_FIELD,
         error_class=type(error).__name__,
     )
 
 
-__all__ = ["TRACE_NOT_RECORDED", "SqliteTraceStore"]
+__all__ = ["TRACE_NOT_RECORDED", "UNREADABLE_TRACE_FIELD", "SqliteTraceStore"]

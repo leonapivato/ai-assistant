@@ -59,6 +59,13 @@ _log = structlog.get_logger(__name__)
 #: reason every bound in these fakes is duplicated from its production twin.
 TRACE_NOT_RECORDED = "trace_not_recorded"
 
+#: What an emission-failure record carries in place of a trace's own kind and
+#: seam when the trace could not be revalidated. Duplicated from the durable
+#: store for the reason :data:`TRACE_NOT_RECORDED` is: ``ai_assistant.testing``
+#: may not import a subsystem, and the shared suite asserts both implementations
+#: write the same record.
+UNREADABLE_TRACE_FIELD: Final = "unreadable"
+
 #: The order key a walk resumes above when it has seen nothing — the store's
 #: floor (ADR-0119 §7a). Zero because these fakes key rows from one, exactly as a
 #: ``rowid`` does, so no issued position can collide with it.
@@ -112,8 +119,8 @@ def evaluation_trace(
     )
 
 
-def _detached(trace: EvaluationTrace) -> str:
-    """Rebuild ``trace`` as a validated :class:`EvaluationTrace` and serialise it.
+def _detached(trace: EvaluationTrace) -> EvaluationTrace:
+    """Rebuild ``trace`` as a validated :class:`EvaluationTrace`.
 
     Read out of the instance's ``__dict__`` rather than through ``model_dump``,
     for ``SqliteSourceGrantStore._revalidated``'s reason: ``model_dump`` is an
@@ -124,8 +131,16 @@ def _detached(trace: EvaluationTrace) -> str:
     Args:
         trace: What the emitter passed.
 
+    **Everything the fake goes on to use comes from the returned snapshot**, not
+    from the argument — the id, the row, and the kind and seam a failure record
+    names — so a caller that wrote past ``frozen=True`` cannot put an unvalidated
+    string anywhere, the log included.
+
+    Args:
+        trace: What the emitter passed.
+
     Returns:
-        The JSON form of a rebuilt, validated copy.
+        A rebuilt, validated copy.
 
     Raises:
         ValidationError: If the object does not satisfy its own model — a caller
@@ -134,7 +149,7 @@ def _detached(trace: EvaluationTrace) -> str:
             ADR-0119 §5 forbids a trace-store fault propagating into the work.
     """
     fields = dict(object.__getattribute__(trace, "__dict__"))
-    return EvaluationTrace.model_validate(fields).model_dump_json()
+    return EvaluationTrace.model_validate(fields)
 
 
 def _hydrate(row: str) -> EvaluationTrace:
@@ -363,7 +378,8 @@ class FakeTraceRetention:
     def hold(self, *traces: EvaluationTrace) -> None:
         """Arrange a history directly, bypassing the seam that has no append."""
         for trace in traces:
-            self._rows.append(trace.id, _detached(trace))
+            snapshot = _detached(trace)
+            self._rows.append(snapshot.id, snapshot.model_dump_json())
 
     def fail_purge(self, error: Exception | None = None) -> None:
         """Script a backing-store fault on every later purge.
@@ -429,7 +445,8 @@ class FakeTraceStore:
     def hold(self, *traces: EvaluationTrace) -> None:
         """Arrange a history directly, without going through :meth:`emit`."""
         for trace in traces:
-            self._rows.append(trace.id, _detached(trace))
+            snapshot = _detached(trace)
+            self._rows.append(snapshot.id, snapshot.model_dump_json())
 
     def plant_raw_row(self, row: str) -> None:
         """Plant a row nothing validated — ADR-0119 §13d's hydration lever.
@@ -544,36 +561,54 @@ def _append(rows: _Rows, trace: EvaluationTrace, *, failure: Exception | None) -
         trace: The event to record.
         failure: A scripted backing-store fault, or ``None``.
     """
-    if failure is not None:
-        _dropped(trace, failure)
-        return
     try:
-        row = _detached(trace)
+        snapshot = _detached(trace)
     except ValidationError as exc:
-        _dropped(trace, exc)
+        # No snapshot, so nothing about this object is known to be Tier 2 —
+        # see :func:`_dropped`. Checked *first*, before the scripted failure, so
+        # the unvalidatable case is never reported through a path that would read
+        # the caller's fields.
+        _dropped(None, exc)
         return
-    if trace.id in rows.ids:
-        _dropped(trace, TraceStoreError(f"trace {trace.id!r} is already recorded"))
+    if failure is not None:
+        _dropped(snapshot, failure)
         return
-    rows.append(trace.id, row)
+    if snapshot.id in rows.ids:
+        _dropped(snapshot, TraceStoreError(f"trace {snapshot.id!r} is already recorded"))
+        return
+    rows.append(snapshot.id, snapshot.model_dump_json())
 
 
-def _dropped(trace: EvaluationTrace, error: Exception) -> None:
+def _dropped(snapshot: EvaluationTrace | None, error: Exception) -> None:
     """Log a trace that could not be recorded (ADR-0119 §5).
 
-    The three keys are Tier 2 by construction: the kind and the outcome are enum
-    members, the seam is a literal the emitting module wrote, and the error's
-    *class* is what ADR-0111 §9 already puts in an operational record — never its
-    message, which may quote a row.
+    The three keys are Tier 2 by construction: the kind is an enum member, the
+    seam is a bounded lowercase label, and the error's *class* is what ADR-0111
+    §9 already puts in an operational record — never its message, which may quote
+    a row.
+
+    **Read off the revalidated snapshot and never off the caller's object**, and
+    ``None`` when there is no snapshot because revalidation is what failed. This
+    is the trap ADR-0119 §2 names one level down for a fault class: "the refused
+    name is not diverted to the log, which is the trap in the obvious fix", and
+    ADR-0004 §5 is unconditional — "Logs are Tier 2 only". ``frozen=True`` refuses
+    ``trace.seam = …`` and not ``trace.__dict__["seam"] = …``, so a caller that
+    wrote past the model puts an arbitrary string on the object; reading it here
+    would take the value the store just refused for carrying content and write it
+    to the log instead. So the record says a trace was lost and which class lost
+    it, and the reserved literal is the whole of what stands in for the rest —
+    exactly the shape :data:`~ai_assistant.core.types.UNREPRESENTABLE_FAULT_CLASS`
+    takes for the same problem.
 
     Args:
-        trace: The event that was not recorded.
-        error: Why it was not.
+        snapshot: The validated copy of the event, or ``None`` if the trace could
+            not be revalidated at all.
+        error: Why it was not recorded.
     """
     _log.warning(
         TRACE_NOT_RECORDED,
-        kind=str(trace.kind),
-        seam=str(trace.seam),
+        kind=str(snapshot.kind) if snapshot is not None else UNREADABLE_TRACE_FIELD,
+        seam=str(snapshot.seam) if snapshot is not None else UNREADABLE_TRACE_FIELD,
         error_class=type(error).__name__,
     )
 
@@ -581,6 +616,7 @@ def _dropped(trace: EvaluationTrace, error: Exception) -> None:
 __all__ = [
     "DEFAULT_OCCURRED_AT",
     "TRACE_NOT_RECORDED",
+    "UNREADABLE_TRACE_FIELD",
     "FakeTraceRetention",
     "FakeTraceSink",
     "FakeTraceStore",
