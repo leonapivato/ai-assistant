@@ -266,14 +266,20 @@ class Restart:
 
     Attributes:
         at: When the hub started.
-        gap: The interval from the preceding trace of any kind, or ``None``.
-            An **upper bound** on how long the hub was not running, never the
-            downtime: the stream cannot say when the previous process stopped.
+        preceded: Whether any trace precedes this one in the retained stream.
+            §8's clause applies only where one does.
+        gap: The interval from that predecessor, or ``None`` where no bound can
+            be stated. An **upper bound** on how long the hub was not running,
+            never the downtime: the stream cannot say when the previous process
+            stopped. ``None`` beside a ``True`` ``preceded`` means the two
+            instants are out of order, which ADR-0119 §7a permits — and a
+            negative duration bounds no downtime.
         changed: Whether the effective figures moved. Only a changed stamp
             partitions the window (§8).
     """
 
     at: datetime
+    preceded: bool
     gap: timedelta | None
     changed: bool
 
@@ -472,7 +478,17 @@ def _health_lines(health: StreamHealth) -> list[str]:
 
 
 def _restart_line(restart: Restart) -> str:
-    """One ``CONFIGURATION`` trace: when, the bounding gap, and whether it moved."""
-    gap = "no preceding trace" if restart.gap is None else f"gap at most {restart.gap}"
+    """One ``CONFIGURATION`` trace: when, the bounding gap, and whether it moved.
+
+    Three things the gap can be, and the third is not a rounding of the first
+    two: no predecessor at all; a predecessor whose reported instant is *later*
+    than this one's, which bounds nothing; and an interval.
+    """
+    if not restart.preceded:
+        gap = "no preceding trace"
+    elif restart.gap is None:
+        gap = "no downtime bound — the preceding trace reports a later instant"
+    else:
+        gap = f"gap at most {restart.gap}"
     moved = "configuration CHANGED" if restart.changed else "configuration unchanged"
     return f"    {restart.at:%Y-%m-%dT%H:%M:%S%z}  {gap}  {moved}"

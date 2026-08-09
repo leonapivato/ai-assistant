@@ -112,14 +112,24 @@ class Configuration:
             stream has no predecessor to differ from and is ``False``: it
             partitions nothing, because there is no earlier configuration for the
             window to have been under.
-        gap: The interval from the preceding trace **of any kind** in the
-            retained stream, or ``None`` where there is none. §8 states it as an
-            *upper bound* on how long the hub was not running, never as the
-            downtime itself.
+        preceded: Whether a trace of any kind precedes this one in the retained
+            stream. §8's clause is stated only "for every ``CONFIGURATION`` trace
+            that has a predecessor", so the first trace in the stream carries no
+            bound and is not claiming one of zero.
+        gap: The interval from that predecessor. §8 states it as an **upper
+            bound** on how long the hub was not running, never as the downtime
+            itself. ``None`` where no bound can be stated: either there is no
+            predecessor, or the predecessor reports a *later* instant than this
+            trace does — which ADR-0119 §7a makes possible, since "a slow sink can
+            land an earlier instant after a later one" and a clock that stepped
+            backwards across the restart does the same. The interval is then
+            negative, and a negative duration does not bound a downtime; saying so
+            is the honest answer and printing it would be a false claim.
     """
 
     occurred_at: datetime
     changed: bool
+    preceded: bool
     gap: timedelta | None
 
 
@@ -230,9 +240,16 @@ class _IndexBuilder:
         """Record the startup stamp, and whether it moved the effective figures."""
         metrics = dict(trace.metrics)
         changed = self._previous_metrics is not None and metrics != self._previous_metrics
-        gap = None if self._previous is None else trace.occurred_at - self._previous
+        gap = None
+        if self._previous is not None and self._previous <= trace.occurred_at:
+            gap = trace.occurred_at - self._previous
         self._configurations.append(
-            Configuration(occurred_at=trace.occurred_at, changed=changed, gap=gap)
+            Configuration(
+                occurred_at=trace.occurred_at,
+                changed=changed,
+                preceded=self._previous is not None,
+                gap=gap,
+            )
         )
         self._previous_metrics = metrics
 

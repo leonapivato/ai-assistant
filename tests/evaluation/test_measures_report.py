@@ -212,3 +212,51 @@ class TestUnboundedCounts:
         assert result.whole.beliefs_per_correction.numerator == 10**400
         assert "too large to state as a decimal" in result.render()
         assert result.whole.correction.value == 1.0
+
+
+class TestOutOfOrderInstants:
+    """Insertion order and instant order can disagree, and §8's bound cannot.
+
+    ADR-0119 §7a: the emitter stamps the instant, so "a slow sink can land an
+    earlier instant after a later one" — and a wall clock that stepped backwards
+    across a restart puts the same shape in the stream. The interval from the
+    preceding trace is then negative, and §8 requires the figure to be stated as
+    an **upper bound** on how long the hub was not running. A negative duration
+    bounds no downtime, so the report declines to claim one.
+    """
+
+    async def test_a_configuration_stamped_before_its_predecessor_claims_no_bound(self) -> None:
+        result = await report(
+            operation("converse", when=at(days=5)),
+            configuration(when=at(days=2)),
+        )
+
+        assert result.health is not None
+        stamp = result.health.restarts[0]
+        assert stamp.preceded is True
+        assert stamp.gap is None
+        assert "no downtime bound" in result.render()
+        assert "gap at most -" not in result.render()
+
+    async def test_the_first_trace_in_the_stream_is_not_a_zero_bound(self) -> None:
+        """No predecessor is a third state, not a gap of nothing."""
+        result = await compute(
+            FakeTraceStore([configuration(when=START)]),
+            start=START,
+            end=END,
+            settling=SETTLING,
+        )
+
+        assert result.health is not None
+        stamp = result.health.restarts[0]
+        assert stamp.preceded is False
+        assert stamp.gap is None
+        assert "no preceding trace" in result.render()
+
+    async def test_an_equal_instant_is_a_zero_bound_and_not_an_inversion(self) -> None:
+        """The boundary between the two: equal instants order fine."""
+        result = await report(configuration(when=START))
+
+        assert result.health is not None
+        assert result.health.restarts[0].gap == timedelta(0)
+        assert "gap at most 0:00:00" in result.render()
