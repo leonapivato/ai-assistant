@@ -252,6 +252,10 @@ forbidden_modules = [
     # reason again: `core` holds the `Reader` Protocol, so the edge that would
     # invert the dependency is one an implementation could plausibly reach for.
     "ai_assistant.readers",
+    # Leg 8's leaf package holding the trace store (ADR-0119 §6, §7). Same reason
+    # a third time: `core` holds the three trace Protocols, so the inverting edge
+    # is one an implementation could reach for.
+    "ai_assistant.evaluation",
 ]
 
 [[tool.importlinter.contracts]]
@@ -320,6 +324,11 @@ source_modules = [
     # the sibling contract below keeps `readers` free of every `ai_assistant`
     # package while saying nothing about an external one.
     "ai_assistant.readers",
+    # The trace store writes rows to SQLite and asks a model nothing (ADR-0119
+    # §7). Listed for the same reason again, and for one of its own: ADR-0119 §12
+    # rules that no trace leaves the device by any route, and a provider SDK is
+    # the route.
+    "ai_assistant.evaluation",
 ]
 # `huggingface_hub` is here for ADR-0024 §4: the model-artifact acquisition seam
 # stays owned by `models/`, and this makes that mechanically enforced rather than
@@ -365,6 +374,9 @@ source_modules = [
     # And so is a concrete reader: it ships in the same wheel and runs inside the
     # hub (ADR-0093 §1), so the canonical `FakeReader` must not reach it.
     "ai_assistant.readers",
+    # And so is the trace store (ADR-0119 §6): the three canonical trace fakes
+    # stand in *for* it and must not reach it.
+    "ai_assistant.evaluation",
 ]
 forbidden_modules = ["ai_assistant.testing"]
 
@@ -434,6 +446,10 @@ source_modules = [
     # scheduler ADR-0083 §7 puts *in* the service drives a reader through an
     # `Engine` call (ADR-0093 §6), so nothing in `readers` reaches back up.
     "ai_assistant.readers",
+    # `evaluation` is leg 8's, and the direction matters again: ADR-0119 §9 has
+    # *`service`* hold a `TraceSink` to stamp the configuration trace, which is a
+    # `core` Protocol — the store never reaches back up at it.
+    "ai_assistant.evaluation",
 ]
 forbidden_modules = ["ai_assistant.service"]
 
@@ -471,6 +487,7 @@ forbidden_modules = [
     "ai_assistant.app",
     "ai_assistant.service",
     "ai_assistant.readers",
+    "ai_assistant.evaluation",
 ]
 
 [[tool.importlinter.contracts]]
@@ -503,6 +520,7 @@ forbidden_modules = [
     "ai_assistant.app",
     "ai_assistant.service",
     "ai_assistant.wire",
+    "ai_assistant.evaluation",
 ]
 
 [[tool.importlinter.contracts]]
@@ -567,6 +585,9 @@ source_modules = [
     # "holds no store, no sensor and no subsystem import" (ADR-0093 §6, ADR-0083
     # §8). A job that imported a reader would be the shape §8 forbids.
     "ai_assistant.service",
+    # And `evaluation`, for the reason its own contract below states: it is a
+    # leaf that may import `core` and nothing else.
+    "ai_assistant.evaluation",
 ]
 forbidden_modules = ["ai_assistant.readers"]
 
@@ -598,3 +619,88 @@ type = "forbidden"
 allow_indirect_imports = "true"
 source_modules = ["ai_assistant.interfaces"]
 forbidden_modules = ["ai_assistant.app"]
+
+[[tool.importlinter.contracts]]
+# ADR-0119 §6 and §7: the trace store is a concrete implementation of three
+# `core` Protocols, living in a top-level `ai_assistant/evaluation/` package that
+# may import `core` and nothing else in `ai_assistant`, and that no subsystem may
+# import. This is the first half.
+#
+# **The package and its two contracts land together**, in the shape the `readers`
+# lane established and for the reason it recorded: every package is enumerated by
+# name in the contracts above, so a package that exists without its own is the
+# silent escape those comments warn about — it inherits nothing and is checked by
+# nothing.
+name = "evaluation depends on core and nothing else"
+type = "forbidden"
+source_modules = ["ai_assistant.evaluation"]
+forbidden_modules = [
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    "ai_assistant.orchestration",
+    "ai_assistant.interfaces",
+    "ai_assistant.app",
+    "ai_assistant.service",
+    "ai_assistant.wire",
+    "ai_assistant.readers",
+]
+
+[[tool.importlinter.contracts]]
+# ADR-0119 §7's second half, and it carries more weight here than the `readers`
+# analogue it copies. §7 rules that **no component of the request pipeline may
+# hold a seam carrying the walk** — "nothing this system does is conditioned on
+# what a trace says" — because an instrument whose readings change behaviour is
+# measuring a system that includes the instrument, and leg 8's exit test would be
+# circular in a way that is nearly impossible to see afterwards in the numbers.
+#
+# The seam split in `core` (`TraceSink` / `TraceRetention` / `TraceStore`) is what
+# makes that a `mypy --strict` property for a collaborator that is *handed* a
+# store. This contract is what makes it hold for one that would go and get its
+# own: a package no subsystem may import cannot be constructed inside one.
+#
+# It also closes an egress question by construction (ADR-0119 §12): a trace the
+# pipeline cannot read is a trace `models/` cannot send, so ADR-0004 §2's egress
+# rule needs no new exception and no designated seam is created.
+#
+# **`ai_assistant.app` is deliberately absent, and its absence is the clause's
+# meaning rather than a gap** — the same carve-out the `readers` contract states
+# at length. The composition root is not a subsystem; it is the one place golden
+# rule 1 puts the injection that lets a collaborator receive an implementation it
+# may not name. Listing `app` here would make the store unreachable in production
+# for good.
+#
+# **Direct imports only**, which is what makes that carve-out work: `service.hub`
+# imports `app` to call `build_engine`, so the chain `service -> app -> evaluation`
+# exists the moment the composition root opens the store, and banning it would
+# reach the outcome the paragraph above says listing `app` would cause. The ban
+# this contract means is the *direct* one.
+allow_indirect_imports = "true"
+name = "nothing imports the evaluation package"
+type = "forbidden"
+source_modules = [
+    "ai_assistant.core",
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    "ai_assistant.orchestration",
+    "ai_assistant.interfaces",
+    # The three canonical trace fakes stand in *for* the durable store and must
+    # never reach one.
+    "ai_assistant.testing",
+    "ai_assistant.wire",
+    # `service` holds a `TraceSink` for ADR-0119 §9's configuration trace, and
+    # `TraceSink` is `core` — which ADR-0083 §8 permits in as many words. What it
+    # may not do is name the concrete.
+    "ai_assistant.service",
+    "ai_assistant.readers",
+]
+forbidden_modules = ["ai_assistant.evaluation"]

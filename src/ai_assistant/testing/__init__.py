@@ -45,6 +45,12 @@ from ai_assistant.testing.readers import (
     attested_proposal,
 )
 from ai_assistant.testing.tools import FakeToolRegistry
+from ai_assistant.testing.traces import (
+    TRACE_NOT_RECORDED,
+    FakeTraceRetention,
+    FakeTraceSink,
+    FakeTraceStore,
+)
 from ai_assistant.testing.writer import FakeMemoryWriter
 
 __all__ = [
@@ -53,6 +59,7 @@ __all__ = [
     "DEFAULT_MAX_BATCH_SIZE",
     "DEFAULT_MAX_PROPOSALS",
     "DEFAULT_READER_NAME",
+    "TRACE_NOT_RECORDED",
     "FakeActionPolicy",
     "FakeAssistantEngine",
     "FakeAuditTrail",
@@ -74,6 +81,9 @@ __all__ = [
     "FakeToolImplementation",
     "FakeToolInvoker",
     "FakeToolRegistry",
+    "FakeTraceRetention",
+    "FakeTraceSink",
+    "FakeTraceStore",
     "ModelCall",
     "ObservationGate",
     "ObservedBelief",
