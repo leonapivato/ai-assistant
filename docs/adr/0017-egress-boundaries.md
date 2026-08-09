@@ -12,11 +12,13 @@
 
   **Replaced — §1's rule as an enumeration.** "User data may leave the device only
   from `models/` or from a designated integration seam inside `tools/`; every
-  other egress is a bug." A reader acting on that sentence reads the hub's remote
-  listener as a bug and refuses to build it, which is what ADR-0084 §1 records that
-  reader doing. The live rule is ADR-0124 §1: `models/`, the designated `tools/`
-  seam, **or** the hub's remote listener to an enrolled device; every other egress
-  is still a bug.
+  other egress is a bug." A reader acting on that sentence reads the hop as a bug
+  and refuses to build it, which is what ADR-0084 §1 records that reader doing.
+  The live rule is ADR-0124 §1: `models/`, the designated `tools/` seam, **or** the
+  hub's remote transport between the hub and an enrolled device — **both halves,
+  the listener and the client** — every other egress still being a bug. Both halves
+  are named because a hop moves data off two devices: the response leaves the hub's
+  machine and the utterance leaves the device the owner is sitting at.
 
   **Replaced — §2's framing of the boundaries as two.** Nothing in §2 becomes false
   about either boundary it describes; what fails is that its heading and
@@ -38,8 +40,10 @@
   being a count as well; §5's instrument argument; §6's treatment of the prior
   amendment's declining clause; §7's record of what acceptance did to ADR-0004; §8's
   deferred injected egress capability; and §9's open list. ADR-0004 §2's residency
-  and telemetry clauses stay untouched and unread, ADR-0124 §3 examining each and
-  finding it unengaged rather than narrowing either.
+  and telemetry clauses stay untouched: ADR-0124 §3 finds every sentence of both
+  still true — that system transmits nothing to an overlay's control plane — and
+  sends the residual question about the residency clause's *intent* to **#95**,
+  where §1 above sent the analogous one, rather than narrowing or widening it.
 - Supersedes: ADR-0004 §2's egress clause ("The **only** component permitted to
   send user data off-device is the `models/` layer… Every other egress is a
   bug"), as amended 2026-07-19. That clause is no longer the live rule; §1 below
