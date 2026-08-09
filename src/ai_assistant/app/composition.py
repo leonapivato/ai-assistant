@@ -29,7 +29,7 @@ from ai_assistant.context import (
 )
 from ai_assistant.core.config import EmbedderKind
 from ai_assistant.core.errors import ConfigurationError, ModelError
-from ai_assistant.evaluation import SqliteTraceStore
+from ai_assistant.evaluation import MeasureReader, SqliteTraceStore
 from ai_assistant.learning import ModelBackedObserver, RuleBasedFeedbackProcessor
 from ai_assistant.memory import (
     DefaultMemoryPolicy,
@@ -1376,3 +1376,37 @@ def build_reembedder(
     embedder = _build_embedder(settings)
     directory = data_dir if data_dir is not None else settings.data_dir
     return Reembedder(store=directory / "memory.db", embedder=embedder)
+
+
+def build_measure_reader(settings: Settings, *, data_dir: Path | None = None) -> MeasureReader:
+    """Point leg 8's offline measure report at this deployment's trace store.
+
+    The composition root's third function, and the thinnest of them, because
+    ADR-0120 §9 gives the reporting tool nothing to be wired *to*: it opens the
+    trace store and no other store (§10), it reads through ``TraceStore.walk``
+    alone (§9), and it consults no model, no clock and no policy. What this
+    function supplies is the one fact the mechanism may not go and get for
+    itself — where the data directory is.
+
+    **It is here rather than in the entry point** for the reason
+    :func:`build_reembedder` is: ``lint-imports``' "nothing imports the evaluation
+    package" contract forbids ``service`` the direct edge, and the entry point has
+    to be in ``service`` because that is where the instance lock lives (ADR-0104
+    §5, transferred by ADR-0120 §9). So the tool arrives at its mechanism the same
+    indirect way the re-embedder does, through this layer.
+
+    **Nothing is opened here.** A reader that opened the database on construction
+    would create an empty one as a side effect of a deployment that has never run
+    the hub asking whether it has any traces, and the honest answer to that is
+    ADR-0120 §8's empty-stream statement rather than a new file.
+
+    Args:
+        settings: Loaded application settings — ``data_dir`` locates the store.
+        data_dir: Overrides ``settings.data_dir`` when given, exactly as
+            :func:`build_engine`'s keyword does (ADR-0083 §2).
+
+    Returns:
+        A reader ready to report over ``<data_dir>/traces.db``.
+    """
+    directory = data_dir if data_dir is not None else settings.data_dir
+    return MeasureReader(store=directory / "traces.db")

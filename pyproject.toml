@@ -79,6 +79,13 @@ ai-assistant-hub = "ai_assistant.service:main"
 # `service`, and nothing may import `service` — so the tool has to *be* there and
 # therefore has to be its own console script.
 ai-assistant-reembed = "ai_assistant.service.reembed:main"
+# Leg 8's offline measure report (ADR-0120 §9), the third of the family and here
+# by the same rule again — with §9 making the separate script normative rather
+# than incidental: "The tool's entry point is its **own** console script, beside
+# `ai-assistant-hub` and `ai-assistant-reembed`, and never an `assistant`
+# subcommand." An `assistant` subcommand would be a measure reachable from the
+# client, which is the read path ADR-0119 §7 exists to keep out of the pipeline.
+ai-assistant-measures = "ai_assistant.service.measures:main"
 
 [dependency-groups]
 dev = [

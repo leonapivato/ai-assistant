@@ -27,7 +27,10 @@ the one caller that needs a startup answer ``build_engine`` deliberately does no
 give (issue #530, ADR-0083 §3), and :func:`build_reembedder` wires the offline
 re-embedding migration for the same reason ``build_engine`` exists — it is the
 only layer that may name both the ``Embedder`` in ``models/`` and the migration
-in ``memory/`` (ADR-0104 §5).
+in ``memory/`` (ADR-0104 §5). :func:`build_measure_reader` is the second offline
+tool arriving by that same route (ADR-0120 §9): ``service`` may not import
+``evaluation`` directly, so leg 8's measure report reaches its mechanism through
+here.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from ai_assistant.app.composition import (
     Composition,
     build_composition,
     build_engine,
+    build_measure_reader,
     build_reembedder,
     ensure_model_credentials,
 )
@@ -44,6 +48,7 @@ __all__ = [
     "Composition",
     "build_composition",
     "build_engine",
+    "build_measure_reader",
     "build_reembedder",
     "ensure_model_credentials",
 ]

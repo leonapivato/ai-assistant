@@ -1,4 +1,4 @@
-"""The evaluation slice: where a trace is stored, and nothing that reads one back.
+"""The evaluation slice: where a trace is stored, and where the measures are read.
 
 Leg 8's instrument. An :class:`~ai_assistant.core.types.EvaluationTrace` records
 that a named event occurred at a named seam — its instant, its duration, its
@@ -41,10 +41,21 @@ It satisfies all three trace Protocols structurally, so the composition root
 hands each collaborator exactly the seam it is entitled to — a ``TraceSink`` to
 every emitter, a ``TraceRetention`` to the ``Engine``'s maintenance operation,
 and the store itself to nothing in the pipeline.
+
+**And the walk's one legitimate holder lives here too** (ADR-0120 §9).
+:class:`~ai_assistant.evaluation.measures.MeasureReader` computes leg 8's three
+measures over the retained stream, and its placement is forced by the same
+sentence as the store's: "a measure computed there is unreachable from the
+pipeline by the architecture checker, not by a promise". It runs in its own
+process, while the hub is stopped, behind the hub's own instance lock, driven by
+the console script in :mod:`ai_assistant.service.measures`. Nothing about the
+prohibition above is narrowed by its existence — the pipeline still holds no seam
+carrying the walk, and no measure is an input to anything the system does.
 """
 
 from __future__ import annotations
 
+from ai_assistant.evaluation.measures import MeasureReader, MeasureReport
 from ai_assistant.evaluation.sqlite_store import SqliteTraceStore
 
-__all__ = ["SqliteTraceStore"]
+__all__ = ["MeasureReader", "MeasureReport", "SqliteTraceStore"]
