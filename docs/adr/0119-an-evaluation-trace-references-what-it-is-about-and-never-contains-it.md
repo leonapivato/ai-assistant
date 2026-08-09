@@ -592,6 +592,15 @@ which is precisely the class §5 subordinates.
 > trace at or before it. An append that lands during a walk takes a position after
 > every position already issued, so no page boundary skips or duplicates a trace.
 
+> **Normative.** Every chunk carries a position, always. It is the position after
+> the last trace returned, or — when the chunk is empty — the position the walk
+> was resumed from, and for a walk starting at `None` the store's floor. There is
+> no exhausted state in which a caller is handed no position.
+
+> **Normative.** A chunk shorter than the bound means *nothing further is present
+> yet*, never *this walk is over*. A caller may resume from the position it was
+> handed at any later time and receive whatever has been appended since.
+
 > **Normative.** The position is the caller's to hold. `TraceStore` persists no
 > cursor, names no walk, and two concurrent readers never contend.
 
@@ -609,8 +618,18 @@ total insertion order, and nothing else", and whatever order a walk uses "must b
 total and must not reorder under later writes". A measure that wants a time window
 filters within the walk; it does not order by time.
 
-**An append-only store needs no snapshot, which is why this is three clauses and
-not a transaction model.** A trace is never updated and never re-ordered; the only
+**Exhaustion is a reading of a chunk, not a state the store reports, and that is
+what closes the last skip.** An earlier draft had a chunk carry `position: None`
+when the walk ran out — the natural shape, and wrong: a reader that queries the
+final row and is handed `None` has stopped *and thrown away the only thing that
+would let it resume*, so a trace appended between the query and the return is
+unreachable. The walk is a high-water mark rather than an iterator; a position
+always comes back, and "no more yet" is what a short chunk means. That also makes
+the walk usable the way a measure actually wants it — resume tomorrow from where
+you stopped today — which an iterator that ends could not do at all.
+
+**An append-only store needs no snapshot, which is why this is a handful of
+clauses and not a transaction model.** A trace is never updated and never re-ordered; the only
 thing that removes one is §10's purge, which deletes from the *old* end. So a
 resumed walk can see rows appended since the position was issued — correct, since
 they are genuinely later — and can find rows gone that were present when it
@@ -1248,6 +1267,9 @@ class TraceStore(TraceSink, TraceRetention, Protocol):
     ) -> TraceChunk:
         """One chunk in insertion order, resuming after ``after`` (§7a).
 
+        Always returns a position, including for an empty chunk; a chunk shorter
+        than ``limit`` means nothing further is present *yet*.
+
         The one operation no pipeline component may reach (§7).
         """
 ```
@@ -1267,7 +1289,9 @@ class TracePosition(BaseModel):
     ``rowid`` in a SQLite store, an insertion index elsewhere.
 
     A **bound, not a reference**: §10's purge deleting traces below a held
-    position does not disturb it, because the store never reissues a key.
+    position does not disturb it, because the store never reissues a key. The
+    store issues a floor position for a walk that has seen nothing, so there is
+    no state in which a caller holds none (§7a).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -1281,7 +1305,10 @@ class TraceChunk(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     traces: tuple[EvaluationTrace, ...]
-    position: TracePosition | None   # None exactly when the walk is exhausted
+    #: Always present (§7a): after the last trace returned, or the resumed-from
+    #: position when ``traces`` is empty. A short chunk means "nothing further
+    #: yet", never "this walk is over".
+    position: TracePosition
 ```
 
 `TracePosition` carries a token for the reason `WalkPosition` does: a position
