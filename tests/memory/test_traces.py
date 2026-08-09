@@ -745,6 +745,57 @@ async def test_a_covered_reading_files_what_its_absence_retired(sink: FakeTraceS
     assert trace.records[TraceRecordSet.RETIRED].ids == ("gone",)
 
 
+async def test_a_reading_that_refuses_half_way_still_files_what_it_applied(
+    sink: FakeTraceSink,
+) -> None:
+    """A partial commit is observed work, and §3 forbids the trace to deny it.
+
+    ADR-0115 §3 leaves "the proposals ingested before the raise stay applied", so a
+    ``REFUSED`` trace carrying no ``WRITTEN`` id would say a record that is live was
+    never written. An absent key means *not observed* — and this one was observed,
+    committed, and is readable from the store while the trace denies it. That is
+    the same fabrication §8's fault-path paragraph refuses in the other direction,
+    arriving through a partial commit instead of through a zero.
+
+    ``RETIRED`` stays absent because the reconciliation genuinely never ran, and
+    the decision counts sum to one against ``proposals = 2``, which is what a
+    half-finished crossing looks like when it is described honestly.
+    """
+    store = InMemoryMemoryStore(now=_fixed_now)
+    writer = _writer(store, sink)
+    unwarranted = SemanticMemory(
+        id="derived",
+        content="a conclusion drawn from nothing",
+        fact="a conclusion drawn from nothing",
+        provenance=Provenance(
+            source=MemorySource.INFERRED,
+            confidence=0.6,
+            last_updated=_WHEN,
+            evidence=("missing",),
+        ),
+    )
+    reading = SourceReading(
+        source=_SOURCE,
+        read_at=_NOW,
+        proposals=(
+            _proposal(_asserted("landed", "the office is on the third floor")),
+            _proposal(unwarranted),
+        ),
+        coverage=None,
+    )
+
+    with pytest.raises(UnresolvedEvidenceError):
+        await writer.ingest_reading(reading)
+
+    assert await store.get("landed") is not None, "the first proposal stayed applied"
+    trace = _only(sink, TraceKind.MEMORY_WRITE)
+    assert trace.outcome is TraceOutcome.REFUSED
+    assert trace.metrics[traces.PROPOSALS] == 2
+    assert trace.metrics["decisions_accept"] == 1
+    assert trace.records[TraceRecordSet.WRITTEN].ids == ("landed",)
+    assert TraceRecordSet.RETIRED not in trace.records, "the reconciliation never ran"
+
+
 async def test_an_inadmissible_proposal_traces_as_a_refusal_and_not_a_fault(
     sink: FakeTraceSink,
 ) -> None:
