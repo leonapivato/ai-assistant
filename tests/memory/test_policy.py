@@ -1068,6 +1068,32 @@ async def test_agreement_normalises_composed_and_decomposed_forms_alike() -> Non
     assert decision.target_id == "said-before"
 
 
+async def test_agreement_folds_case_beyond_ascii_lowering() -> None:
+    """The case-*folding* limb of ADR-0121 §1, which no ASCII pair can reach.
+
+    ``"ß".casefold()`` is ``"ss"``, while ``"Straße".lower()`` is ``"straße"`` —
+    so a policy built on ``str.lower`` refuses this agreement and puts a question
+    to a user who restated their own belief in another legitimate spelling. Every
+    ASCII case in the table above passes under either implementation; this pair
+    is the one that tells them apart, and the writer suite's twin case cannot
+    stand in for it because ADR-0121 §6 makes the two recomputations independent
+    obligations.
+    """
+    sharp = "the user prefers window seats on the Stra\u00dfe"
+    folded = "the user prefers window seats on the STRASSE"
+    proposal = _proposal(
+        _semantic("again", content=folded, source=MemorySource.USER_ASSERTED, confidence=1.0)
+    )
+    earlier = _semantic(
+        "said-before", content=sharp, source=MemorySource.USER_ASSERTED, confidence=1.0
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "said-before"
+
+
 async def test_the_agreement_arm_stays_behind_the_admissibility_floor() -> None:
     """ADR-0121 §2 places the arm ahead of the *conflict* arms, not ahead of rule 1.
 
