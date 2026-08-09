@@ -1173,15 +1173,23 @@ class SqliteMemoryStore:
             materialised inside :meth:`_search_sync`, past the embedder's ``await``
             and the lock's, so a caller mutating the list it passed while the
             embedding was in flight was answered from the later version (#436).
-            ``bands`` is folded to its source set on that same first line, which
-            both discharges the clause and is the form the SQL wants.
+            ``bands`` is snapshotted on that same first line, and **both** the
+            source set the SQL wants and the count the trace records come off that
+            one copy — two reads of the caller's sequence would let the search and
+            its own trace disagree about what was asked for.
         """
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
-        wanted_sources = None if bands is None else _sources_in(bands)
-        # Read off the same first-executed-lines snapshot the predicates take, so
-        # the trace and the read agree about what was asked for even if the caller
-        # mutates the sequence while the embedding is in flight (#436).
-        selected_bands = None if bands is None else len(frozenset(bands))
+        # **One read of the caller's sequence, and both derivations off the copy.**
+        # ``_sources_in(bands)`` followed by ``frozenset(bands)`` would be two reads
+        # of a caller-owned mutable container. No ``await`` separates them, so on one
+        # event loop they cannot disagree and ADR-0065 §3 is discharged either way;
+        # what the snapshot buys is that the restriction the SQL applies and the
+        # figure the trace reports are the *same value* rather than two reads that
+        # happen to be adjacent — so no later edit between them can make the record
+        # describe a selection the read never applied.
+        selected = None if bands is None else tuple(bands)
+        wanted_sources = None if selected is None else _sources_in(selected)
+        selected_bands = None if selected is None else len(frozenset(selected))
         # Observed before any work, so §8's "the trace still carries its ``limit``"
         # holds on the fault path too. ``_searched`` is *constructed* here and not
         # started; the materialisation above is still on this coroutine's first
