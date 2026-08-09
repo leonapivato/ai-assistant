@@ -441,6 +441,8 @@ def _preference(  # noqa: PLR0913 — one keyword per provenance axis a case may
     source: MemorySource = MemorySource.OBSERVED,
     evidence: tuple[str, ...] = (),
     evidence_elided: int = 0,
+    last_updated: datetime = _WHEN,
+    last_confirmed_at: datetime | None = None,
 ) -> MemoryRecord:
     # USER_ASSERTED is pinned to full confidence by `Provenance`, so honour that
     # here rather than build a record the domain forbids.
@@ -453,7 +455,8 @@ def _preference(  # noqa: PLR0913 — one keyword per provenance axis a case may
         provenance=Provenance(
             source=source,
             confidence=confidence,
-            last_updated=_WHEN,
+            last_updated=last_updated,
+            last_confirmed_at=last_confirmed_at,
             evidence=evidence,
             evidence_elided=evidence_elided,
             # Same principle as the line above, for ADR-0092 §1's obligation: the
@@ -605,6 +608,40 @@ _DISAGREEING = "prefers concise formal emails"
 #: equal to the target byte for byte, "the target's content survived" and "the
 #: incoming content was written" are the same observation and the case pins nothing.
 _RESTATED = "  Prefers   CONCISE\temails "
+
+#: When the restatement was made and last confirmed: strictly later than
+#: :data:`_WHEN` and still in the past of every plausible writer clock. The gap is
+#: what makes §4's *positive* half observable — a writer that kept all the target's
+#: fields would be indistinguishable from a conforming one if both records carried
+#: the same instants (ADR-0109 §5's usability test is satisfied by both).
+_RESTATED_AT = datetime(2026, 2, 1, tzinfo=UTC)
+
+#: Restatements a writer implementing ADR-0121 §1 with ASCII ``str.lower`` and
+#: ASCII whitespace handling would wrongly refuse. Each shares five of its six terms
+#: with its target, so :class:`FakeMemoryStore` still ranks the target as a conflict
+#: and the case exercises the *predicate* rather than conflict detection. The
+#: `.lower()` writer is not a straw man: it is the obvious implementation, it passes
+#: every other case in this suite, and ADR-0121 §6 makes the writer's recomputation
+#: an *independent* obligation — a policy-side Unicode test cannot discharge it.
+_UNICODE_RESTATEMENTS = [
+    # NFC: precomposed U+00E9 against `e` + U+0301. The same text; a reader sees no
+    # difference at all, and no case or whitespace rule reaches it.
+    (
+        "prefers concise emails from the caf\u00e9",
+        "prefers concise emails from the cafe\u0301",
+        "nfc",
+    ),
+    # Case *folding*, not lowering: "ß".casefold() is "ss", so these agree — while
+    # "Straße".lower() is "straße" and never equals "strasse".
+    (
+        "prefers concise emails on the Stra\u00dfe",
+        "prefers concise emails on the STRASSE",
+        "case-fold",
+    ),
+    # Unicode whitespace: a no-break space is whitespace, and `str.split()` collapses
+    # it. A run keyed on " " or on `str.strip()`'s ASCII default does not.
+    ("prefers concise emails at the office", "prefers concise emails at\u00a0the office", "nbsp"),
+]
 
 #: The complete ``ruling`` by ``incoming source`` by ``target source`` by
 #: ``agreement`` space, so the suite samples nothing: every combination is either
@@ -1773,17 +1810,47 @@ class MemoryWriterContract:
         ADR-0121 §1's four transformations absorb. Against a byte-identical proposal
         "the target's content survived" and "the incoming content was written" are
         the same observation, and the case would pin nothing.
+
+        **Both halves of §4's second clause are stated, and the timestamps are made
+        distinguishable so the positive half can be seen at all.** The clause is a
+        pair — what the incoming record does *not* contribute (content, source,
+        confidence, attestation, window, expiry) and what it *does* (evidence,
+        ``last_updated``, the confirming instant). A fixture giving both records the
+        same instants tests only the first half, and a writer that special-cased the
+        new arm by keeping *all* the target's fields would pass while storing stale
+        currency — the very outcome ADR-0121's Consequences ("a restatement now
+        refreshes currency") says this arm exists to produce.
+
+        **The confirming instant is asserted as a contribution, not as a composition
+        rule.** ADR-0109 §9 declines to promote its currency composition to this
+        suite — a writer composing differently still conforms — so the case plants
+        the incoming instant strictly *later* than the target's and both in the past,
+        where every admissible rule agrees on the answer. What fails is only a writer
+        that discards the contribution, which is what §4 forbids.
         """
         store = FakeMemoryStore(now=_after_close)
         await _cite(store)
         await store.add(
-            _preference("theirs", source=MemorySource.USER_ASSERTED, evidence=("earlier-episode",))
+            _preference(
+                "theirs",
+                source=MemorySource.USER_ASSERTED,
+                evidence=("earlier-episode",),
+                last_updated=_WHEN,
+                last_confirmed_at=_WHEN,
+            )
         )
         writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
 
         result = await writer.ingest(
             _proposal(
-                _preference("new", _RESTATED, source=MemorySource.USER_ASSERTED, evidence=(_CITED,))
+                _preference(
+                    "new",
+                    _RESTATED,
+                    source=MemorySource.USER_ASSERTED,
+                    evidence=(_CITED,),
+                    last_updated=_RESTATED_AT,
+                    last_confirmed_at=_RESTATED_AT,
+                )
             )
         )
 
@@ -1796,12 +1863,71 @@ class MemoryWriterContract:
         # The user's own words, byte for byte — not the restatement's spelling.
         assert survivor.content == _CONTENT
         assert survivor.provenance.source is MemorySource.USER_ASSERTED
+        assert survivor.provenance.confidence == 1.0
+        assert survivor.provenance.attestation is None
         # Nothing retired: a REINFORCE closes no window (ADR-0045 §4), and an
         # agreement warrants no retirement anyway (ADR-0121 §2).
         assert survivor.validity.valid_until is None
+        assert survivor.expires_at is None
         # What the restatement does contribute: its evidence, unioned with the
         # target's (ADR-0040 §5a, ADR-0121 §4).
         assert set(survivor.provenance.evidence) == {"earlier-episode", _CITED}
+        # ...the transaction stamp, because the store *did* change its mind about
+        # what this record cites (ADR-0045 §3), and...
+        assert survivor.provenance.last_updated == _RESTATED_AT
+        # ...the fact that the belief still holds, which is the whole product point
+        # of the arm: a belief the user repeats ages more slowly than one they do not.
+        assert survivor.provenance.last_confirmed_at == _RESTATED_AT
+
+    @pytest.mark.parametrize(
+        ("target_content", "restatement"),
+        [(target, restatement) for target, restatement, _ in _UNICODE_RESTATEMENTS],
+        ids=[label for _, _, label in _UNICODE_RESTATEMENTS],
+    )
+    async def test_the_writer_recomputes_the_predicate_over_unicode(
+        self, make_writer: WriterFactory, target_content: str, restatement: str
+    ) -> None:
+        """ADR-0121 §1's Unicode limbs, at the boundary obliged to recompute them.
+
+        §1 fixes four transformations and **three of them are Unicode operations**:
+        NFC normalisation, Unicode *case folding* (not lowering), and collapse of
+        Unicode whitespace runs. §6 has the writer compute the predicate
+        independently of the policy and §5 has it verify rather than trust the
+        ruling, so the obligation is the writer's own and no policy-side test can
+        discharge it, however thorough.
+
+        Each case is one an ASCII implementation gets wrong **in the refusing
+        direction**: a writer using ``str.lower`` and ASCII whitespace passes every
+        other case in this suite and then refuses a fold ADR-0121 §5 requires,
+        leaving the user interrogated about agreeing with themselves — the exact harm
+        the ADR exists to remove, reintroduced underneath a green suite.
+
+        That direction is also why these belong here and not only in the matrix: the
+        matrix's ``disagreeing`` axis catches a predicate that is too **wide**, and
+        nothing else in this suite catches one that is too **narrow**.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await store.add(_preference("theirs", target_content, source=MemorySource.USER_ASSERTED))
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
+
+        result = await writer.ingest(
+            _proposal(
+                _preference(
+                    "new", restatement, source=MemorySource.USER_ASSERTED, evidence=(_CITED,)
+                )
+            )
+        )
+
+        # Admitted by the writer's own recomputation, and folded at the target's id.
+        assert result.decision.kind is MemoryDecisionKind.REINFORCE
+        assert result.record_id == "theirs"
+        assert await store.get("new") is None
+        survivor = await store.get("theirs")
+        assert survivor is not None
+        # Still the user's own spelling, which is what makes the fold permissible.
+        assert survivor.content == target_content
+        assert _CITED in survivor.provenance.evidence
 
     async def test_a_disagreeing_restatement_may_not_fold_onto_an_assertion(
         self, make_writer: WriterFactory
