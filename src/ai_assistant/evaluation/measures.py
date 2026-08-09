@@ -170,6 +170,14 @@ async def compute(
                 f"empty or inverted; a measure is a rate over a half-open interval"
             )
         )
+    if not _representable(end, settling):
+        return MeasureReport(
+            refusal=(
+                f"a settling period of {settling} reaches past the last instant this report "
+                f"can represent, so no surfacing in the window could ever be given it. Ask "
+                f"for a settling period the window's end can be moved forward by"
+            )
+        )
     stream = await index(store)
     if stream.extent is None:
         # §8's empty-stream clause: no measure, no diagnostic, no window validation.
@@ -181,6 +189,29 @@ async def compute(
     async for ordinal, trace in walk(store):
         collector.add(ordinal, trace)
     return collector.report()
+
+
+def _representable(end: datetime, settling: timedelta) -> bool:
+    """Whether the window's end can be moved forward by the settling period.
+
+    Checked once, here, and never again: every instant this walk adds ``settling``
+    to is a read's ``occurred_at``, which lies in ``[start, end)`` and so is
+    strictly before ``end``. One guard therefore covers §4's candidate horizon and
+    §8's settling test alike, and turns what would otherwise be an ``OverflowError``
+    out of the middle of the walk into a refusal that says what to ask for instead.
+
+    Args:
+        end: The window's exclusive end.
+        settling: The settling period.
+
+    Returns:
+        Whether ``end + settling`` is a representable instant.
+    """
+    try:
+        end + settling
+    except OverflowError:
+        return False
+    return True
 
 
 def _swept(start: datetime, extent: Extent) -> str:

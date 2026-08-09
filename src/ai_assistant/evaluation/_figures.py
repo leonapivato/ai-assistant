@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import TraceKind
 
 _UNDEFINED = "undefined (denominator is zero)"
+_UNRENDERABLE = "too large to state as a decimal"
+_WITHHELD = "withheld — the stream does not yet extend the settling period past the window"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,11 +59,35 @@ class Rate:
 
     @property
     def value(self) -> float | None:
-        """The ratio, or ``None`` when the denominator is zero."""
-        return self.numerator / self.denominator if self.defined else None
+        """The ratio, or ``None`` when it is not a decimal this report can state.
+
+        Two ways to get ``None``, and :meth:`rendered` keeps them apart because
+        they mean different things.
+
+        **A zero denominator**, which §1 rules is *undefined*.
+
+        **A quotient too large for a float.** ADR-0120 §2 constrains a count to "a
+        non-negative integer that is not a ``bool``" and puts no ceiling on it,
+        and ``RecordIdSet.total`` is bounded only by ``ge=0`` — so a trace this
+        tree's emitters cannot write is still one the type admits and the store
+        will hydrate. Every ratio this ADR defines is a share of a population
+        containing its own numerator, and so is at most one, *except*
+        beliefs-per-correction: it divides beliefs by corrective acts and is
+        unbounded above by construction (ADR-0079's "a correction resolves every
+        conflict it is shown"). ``int.__truediv__`` raises ``OverflowError``
+        rather than returning infinity, so the one unbounded figure is the one
+        that would abort the whole report — for a value that is data, not a bug
+        in this walk.
+        """
+        if not self.defined:
+            return None
+        try:
+            return self.numerator / self.denominator
+        except OverflowError:
+            return None
 
     def rendered(self) -> str:
-        """The ratio and its two counts, or the undefined statement.
+        """The ratio and its two counts, or the statement that stands in for it.
 
         The numerator is printed even when the ratio is undefined, rather than
         assumed to be zero with it. Most of this ADR's ratios cannot have one
@@ -69,10 +95,18 @@ class Rate:
         but beliefs-per-correction sums two quantities a single trace could
         report inconsistently, and a suppressed numerator there would hide the
         inconsistency behind the word *undefined*.
+
+        An unrepresentable quotient states both counts too, which is everything
+        the stream holds about it: §1's objection to a zero is that it "asserts a
+        rate that was measured to be zero", and the same objection forbids
+        substituting any other figure here.
         """
-        if self.value is None:
+        if not self.defined:
             return f"{_UNDEFINED}  ({self.numerator} of 0)"
-        return f"{self.value:.4f}  ({self.numerator} of {self.denominator})"
+        value = self.value
+        if value is None:
+            return f"{_UNRENDERABLE}  ({self.numerator} of {self.denominator})"
+        return f"{value:.4f}  ({self.numerator} of {self.denominator})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,9 +202,14 @@ class Overturns:
         return Rate(numerator=self.overturned, denominator=self.non_ambiguous)
 
     def rendered_precision(self) -> str:
-        """``1 -`` the overturn rate, withheld where the settling is unequal."""
+        """``1 -`` the overturn rate, withheld where the settling is unequal.
+
+        No unrepresentable case, unlike :meth:`Rate.rendered`: both counts here
+        are surfacings this walk counted one at a time, so the quotient is at
+        most one and the numerator is bounded by the store's own size.
+        """
         if not self.settled:
-            return "withheld — the stream does not yet extend the settling period past the window"
+            return _WITHHELD
         value = self.rate.value
         if value is None:
             return f"{_UNDEFINED}  (no non-ambiguous surfacing)"
@@ -179,7 +218,7 @@ class Overturns:
     def rendered_overturn(self) -> str:
         """The overturn rate itself, withheld under the same condition."""
         if not self.settled:
-            return "withheld — the stream does not yet extend the settling period past the window"
+            return _WITHHELD
         value = self.rate.value
         if value is None:
             return f"{_UNDEFINED}  (no non-ambiguous surfacing)"
