@@ -47,6 +47,7 @@ from ai_assistant.core.types import (
     band_of,
 )
 from ai_assistant.memory import traces
+from ai_assistant.memory._agreement import agrees
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -117,13 +118,30 @@ _RETIREMENT_CLASS = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED, Mem
 
 #: The **reinforce-safe class** — targets a user assertion may safely fold onto *at
 #: the target's id*, used by :func:`_refuse_unsafe_fold`'s ``REINFORCE`` arm
-#: (ADR-0038 §2a, narrowed to ``REINFORCE`` by ADR-0045 §5b). Membership means
-#: "does not carry a foreign idempotency key", and **``EXTERNAL`` still does not
-#: satisfy it**: a `REINFORCE` inherits the target's id, so a correction folded onto
-#: an imported record is overwritten by the next routine sync. ADR-0092 §4 widened
-#: what an assertion may *retire* and has no ground to touch what it may fold onto —
-#: a `SUPERSEDE` is safe there only because ADR-0045 §4 makes it mint a fresh id.
-_REINFORCE_SAFE = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
+#: (ADR-0038 §2a, narrowed to ``REINFORCE`` by ADR-0045 §5b, widened with
+#: ``USER_ASSERTED`` by ADR-0121 §5). Membership means "does not carry a foreign
+#: idempotency key", and **``EXTERNAL`` still does not satisfy it**: a `REINFORCE`
+#: inherits the target's id, so a correction folded onto an imported record is
+#: overwritten by the next routine sync. ADR-0092 §4 widened what an assertion may
+#: *retire* and has no ground to touch what it may fold onto — a `SUPERSEDE` is safe
+#: there only because ADR-0045 §4 makes it mint a fresh id.
+#:
+#: **``USER_ASSERTED`` joins to match the membership rule, not past it** (ADR-0121
+#: §5). A record the user gave us carries no foreign key either; it was outside the
+#: set only because clause 1 already refused *every* fold onto it, so the question
+#: this set answers never arose for it. With clause 1 carrying ADR-0121's agreeing
+#: exception the question is live, and leaving the source out would refuse the
+#: permitted fold a second time, for a reason that is false of it. That is the drift
+#: ADR-0092 §5 warns about read from the other side: a set whose membership stops
+#: matching the question it answers.
+#:
+#: **It is still not the retirement class, and the two must not be tidied into one.**
+#: The sets now differ in *both* directions — ``EXTERNAL`` is retirable and not
+#: foldable-onto, ``USER_ASSERTED`` is foldable-onto and not retirable — so a merge
+#: is no longer even coincidentally harmless.
+_REINFORCE_SAFE = frozenset(
+    {MemorySource.OBSERVED, MemorySource.INFERRED, MemorySource.USER_ASSERTED}
+)
 
 #: The rulings that dispatch a write. Check 0 (:func:`_refuse_secret_write`) gates
 #: exactly these and nothing else, because ADR-0004 §3 forbids a secret **in the
@@ -202,12 +220,36 @@ def _refuse_unsafe_fold(
       *destroys* the assertion, but the conflict signal is topical similarity, not
       contradiction (ADR-0038 §5), and is too weak to retire a record the user
       gave us — a justification the window does not touch. So nothing, of any
-      source, under either ruling, may fold onto an assertion — **except** under a
-      confirmation that covers this very target (:func:`_confirmation_covers`,
-      ADR-0078 §5b). There the signal is not topical similarity: it is the user's
-      answer, which ADR-0045 §7 named as one of the two acceptable gates. The
-      clause is therefore **narrowed by exception, not lifted**, and it stands
-      verbatim in every other case.
+      source, under either ruling, may fold onto an assertion — **except** under
+      two exceptions, and no others.
+
+      The first is a confirmation that covers this very target
+      (:func:`_confirmation_covers`, ADR-0078 §5b). There the signal is not topical
+      similarity: it is the user's answer, which ADR-0045 §7 named as one of the two
+      acceptable gates.
+
+      The second is an **agreeing restatement** (:func:`_agreeing_restatement`,
+      ADR-0121 §5): a ``REINFORCE`` whose incoming record is ``USER_ASSERTED`` and
+      which agrees with the target under ADR-0121 §1. Clause 1's two justifications
+      are both about a fold that *replaces or retires* what the user told us, and
+      this fold does neither — :func:`_merge`'s corroboration arm writes the
+      target's own content back at the target's own id, keeps its source,
+      confidence, window and attestation, retires nothing and closes no window. Nor
+      does it run on the 0.75 score: the conflict set supplies a *candidate* and
+      ADR-0121 §1's predicate, which reads no score, decides. ADR-0078 §5b's reason
+      for drawing its own exception at ``SUPERSEDE`` — "a ``REINFORCE`` onto an
+      assertion would rewrite the user's own words at the target's id, which no
+      answer authorises" — is exactly right and is exactly what this fold makes
+      false, which is what the exception is keyed on and all it is keyed on.
+
+      The clause is therefore **narrowed by exception, not lifted**, and it stands
+      verbatim in every other case: every ``SUPERSEDE`` outside ADR-0078 §5b's
+      exception, and every fold from a non-asserted proposal, is refused as before.
+      **Both exceptions stay record-keyed**, which is the property ADR-0045 §5 was
+      protecting: this one's predicate reads the target's source, the incoming
+      record's source and both records' ``kind`` and ``content``, all facts about
+      the records and none of them the relation between them. The ruling appears in
+      it only to name which fold is permitted, exactly as ADR-0078 §5b's does.
     - **Clause 2 — a ``USER_ASSERTED`` proposal onto an ``EXTERNAL`` target,
       ``REINFORCE`` only.** The external id is that system's idempotency key. A
       ``REINFORCE`` still inherits it, so the correction is overwritten by the next
@@ -225,14 +267,17 @@ def _refuse_unsafe_fold(
       questions are different: this one asks "may an assertion fold at *this
       record's* id", which turns on whether the id is a foreign system's key.
 
-    ``DefaultMemoryPolicy`` proposes none of these — its rule 4 defers, and rule 6
+    ``DefaultMemoryPolicy`` proposes none of these — its rule 5 defers, and rule 8
     names a retirable conflict for ``SUPERSEDE`` rather than ``REINFORCE`` — but a
     policy reaches the ingestor through an injected seam and any conforming
     implementation may rule differently. The refusal therefore lives here, at the
     boundary that performs the write, rather than in the policy that recommends it.
-    That is also why the exception is **verified rather than trusted**: a gate that
-    opened on an unexamined field would hand that guarantee back to the caller's
-    good intentions (ADR-0078 §5b).
+    That is also why **both** exceptions are **verified rather than trusted**: a
+    gate that opened on an unexamined field, or on the ruling's say-so that the
+    records agree, would hand that guarantee back to the caller's good intentions
+    (ADR-0078 §5b, ADR-0121 §5). ADR-0121's arm is the first case where the default
+    policy really does rule a fold onto an assertion, so the duplication is no
+    longer merely defensive — it is recomputed here on every such write.
 
     Fail-closed rather than silently downgrading, for the reason that already
     makes an absent fold target raise instead of falling back to storing the
@@ -252,13 +297,15 @@ def _refuse_unsafe_fold(
             confirmation permits it.
     """
     incoming = proposal.proposed
-    if target.provenance.source is MemorySource.USER_ASSERTED and not _confirmation_covers(
-        target, proposal, kind, resolved=resolved
+    if (
+        target.provenance.source is MemorySource.USER_ASSERTED
+        and not _confirmation_covers(target, proposal, kind, resolved=resolved)
+        and not _agreeing_restatement(target, incoming, kind)
     ):
         msg = (
             f"refusing to fold onto {target.id!r}: a {incoming.provenance.source} record may not "
             f"be folded onto a user-asserted one, whose belief it would overwrite "
-            f"(ADR-0038 §3, ADR-0045 §5, narrowed by ADR-0078 §5b)"
+            f"(ADR-0038 §3, ADR-0045 §5, narrowed by ADR-0078 §5b and ADR-0121 §5)"
         )
         raise MemoryStoreError(msg)
     if (
@@ -273,6 +320,47 @@ def _refuse_unsafe_fold(
             f"(ADR-0038 §2a, narrowed to REINFORCE by ADR-0045 §5b)"
         )
         raise MemoryStoreError(msg)
+
+
+def _agreeing_restatement(
+    target: MemoryRecord, incoming: MemoryRecord, kind: MemoryDecisionKind
+) -> bool:
+    """Whether clause 1's ADR-0121 §5 exception admits this fold.
+
+    Three conditions, and each is exactly as wide as the clause makes it:
+
+    1. **The ruling is ``REINFORCE``.** A ``SUPERSEDE`` onto an assertion is
+       untouched by this exception whatever the records say — it retires what the
+       user told us, which only their own answer authorises (ADR-0078 §5b).
+    2. **The incoming record is ``USER_ASSERTED``.** The permitted fold's whole
+       argument is that the same authority is saying the same thing again. A
+       non-asserted proposal agreeing with an assertion is a *different* case,
+       ADR-0121 §11 leaves it ruling ``ASK_USER``, and admitting it here would let
+       :func:`_merge`'s ordinary arm demote the assertion to an observation.
+    3. **The records agree** under ADR-0121 §1 (:func:`~ai_assistant.memory.
+       _agreement.agrees`) — ``kind`` and normalised ``content``, no score, no
+       provenance field, no embedding.
+
+    **Recomputed here rather than read off the ruling** (ADR-0121 §5, ADR-0038 §2a).
+    A policy reaches this writer through an injected seam, so a gate that trusted
+    the ruling's word for the predicate would be no gate at all; and because the
+    ruling is *not* consulted beyond its kind, a policy that rules ``REINFORCE`` on
+    records that do not agree is refused exactly as it was before ADR-0121.
+
+    Args:
+        target: The stored record the ruling folds into.
+        incoming: The proposed record being folded in.
+        kind: The ruling being applied.
+
+    Returns:
+        Whether the fold is the one ADR-0121 §5 permits, in which case
+        :func:`_merge` writes it as ADR-0121 §4's second clause specifies.
+    """
+    return (
+        kind is MemoryDecisionKind.REINFORCE
+        and incoming.provenance.source is MemorySource.USER_ASSERTED
+        and agrees(target, incoming)
+    )
 
 
 def _confirmation_covers(
@@ -293,8 +381,12 @@ def _confirmation_covers(
     :func:`_refuse_secret_write`.)
 
     1. **The ruling is ``SUPERSEDE``.** A ``REINFORCE`` onto an assertion stays
-       refused whatever the confirmation says: folding at the target's id would
-       rewrite the user's own words, which no answer authorises.
+       refused *by this exception* whatever the confirmation says: folding at the
+       target's id would rewrite the user's own words, which no answer authorises.
+       That reason is why ADR-0121 §5's exception is a separate gate rather than a
+       widening of this one — it admits the single ``REINFORCE`` that writes the
+       user's own words back rather than rewriting them
+       (:func:`_agreeing_restatement`), and it needs no confirmation at all.
     2. **The target id is in ``confirmation.retires``.**
     3. **The target id is also among the conflicts this very ingest resolved.** A
        confirmation cannot authorise retiring a record the current ruling was not
@@ -826,9 +918,33 @@ def _installed(record: MemoryRecord) -> MemoryRecord:
 
 
 def _corroborates(target: MemoryRecord, incoming: MemoryRecord) -> bool:
-    """Is this the fold ADR-0103 §6 rules — an ``ATTESTED`` target, a ``DERIVED`` proposal?
+    """Does this fold contribute evidence and currency and nothing else?
 
-    **Keyed on both bands, and on neither record's confidence.** The clause reads
+    **Two pairings, one rule.** ADR-0103 §6 ruled it for a ``DERIVED`` proposal onto
+    an ``ATTESTED`` target; ADR-0121 §4 applies the same rule to a second pairing, a
+    ``USER_ASSERTED`` proposal onto a ``USER_ASSERTED`` target. ADR-0103 §6's
+    reasoning is what both stand on, and it is true of the second word for word:
+    agreement "is information about whether the belief still holds, not about how
+    much warrant it has: the observation supplies no warrant the target did not
+    already have." When the user confirms a belief they had *already asserted*, the
+    same authority is saying the same thing again, so the only new facts are that
+    the belief still holds and what episode showed it. ADR-0121 §9 records this as a
+    stacked addition: ADR-0103 §6's own clause is unchanged in scope, wording and
+    effect.
+
+    **The second pairing is not "an agreeing fold", and the difference matters.**
+    This function selects the arm by the **pairing**, not by re-testing ADR-0121
+    §1's predicate, because :func:`_refuse_unsafe_fold` has already refused every
+    ``USER_ASSERTED`` → ``USER_ASSERTED`` fold that does not agree
+    (:func:`_agreeing_restatement`) — so the pairing is reachable only when the
+    records agree. Testing the predicate again *here* would be worse than
+    redundant: were the refusal ever weakened, an *ordinary*-arm fold would
+    overwrite the user's assertion with the incoming record's content, which is the
+    outcome both clauses exist to prevent. Selecting on the pairing alone makes the
+    safe arm the one that catches a slip.
+
+    **Keyed on ADR-0103 §6's bands, and on neither record's confidence.** The clause
+    reads
     "where a ``REINFORCE``'s target is in the ``ATTESTED`` band and its incoming
     record is in the ``DERIVED`` band", so it is the pairing that selects the arm,
     not the arithmetic — the same fold at ``0.7`` and at ``1.0`` folds the same
@@ -840,27 +956,40 @@ def _corroborates(target: MemoryRecord, incoming: MemoryRecord) -> bool:
     A crash-keyed guard would have fixed the exception and left the rule the
     exception was a symptom of.
 
-    **Naming ``ATTESTED`` on the target side keeps the rule inside the reachable
+    **Naming ``ATTESTED`` on the target side keeps that clause inside the reachable
     set** (ADR-0103 §6). The wider "a ``DERIVED`` proposal onto any target" would
-    sweep in the ``ASSERTED`` target, and nothing folds onto an assertion at all
-    (:func:`_refuse_unsafe_fold` clause 1, ADR-0045 §5) — whatever a confirmation
-    says, since :func:`_confirmation_covers` check 1 admits only a ``SUPERSEDE``,
-    which retires rather than folds — so it would prescribe how to fold a fold
-    that may not happen. The other pairings are left exactly as
-    they stand: a ``USER_ASSERTED`` proposal is not in the ``DERIVED`` band, so the
-    assertion still wins at 1.0; a ``DERIVED`` target reinforced by an ``EXTERNAL``
-    record still folds to ``EXTERNAL`` at the maximum, which the ``ATTESTED`` band
-    admits (ADR-0038 §2a) and §6's first clause therefore permits — the
-    misattribution that leaves behind is filed as #733 and is deliberately not
-    fixed here; and same-band folds are untouched.
+    sweep in the ``ASSERTED`` target, and the only fold that reaches an assertion is
+    ADR-0121 §5's, whose incoming record is ``USER_ASSERTED`` and so not
+    ``DERIVED`` — a confirmation still admits none, since
+    :func:`_confirmation_covers` check 1 takes only a ``SUPERSEDE``, which retires
+    rather than folds. So the wider phrasing would prescribe how to fold a fold that
+    may not happen. The remaining pairings are left exactly as they stand: a
+    ``DERIVED`` target reinforced by an ``EXTERNAL`` record still folds to
+    ``EXTERNAL`` at the maximum, which the ``ATTESTED`` band admits (ADR-0038 §2a)
+    and §6's first clause therefore permits — the misattribution that leaves behind
+    is filed as #733 and is deliberately not fixed here; and same-band folds other
+    than ADR-0121's are untouched.
+
+    **The second pairing is keyed on the *sources*, not on the ``ASSERTED`` band.**
+    Both clauses are stated over ``USER_ASSERTED`` in terms, and a band-keyed test
+    would enrol a ``MemorySource`` added into that band later into a fold rule
+    nobody weighed for it — the omission hazard ADR-0038 §2a's allow-list shape
+    exists to refuse. The asymmetry with the line above is deliberate and follows
+    each clause's own words.
 
     Args:
         target: The stored record the ruling folds into.
         incoming: The proposed record being folded in.
 
     Returns:
-        Whether ADR-0103 §6's second clause governs this fold.
+        Whether the survivor is the target contributed to, rather than the incoming
+        record wearing the target's id.
     """
+    if (
+        target.provenance.source is MemorySource.USER_ASSERTED
+        and incoming.provenance.source is MemorySource.USER_ASSERTED
+    ):
+        return True
     return (
         band_of(target.provenance.source) is BeliefBand.ATTESTED
         and band_of(incoming.provenance.source) is BeliefBand.DERIVED
@@ -923,8 +1052,8 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
 
     Newer content wins; evidence is unioned and confidence taken as the maximum,
     so a merge strengthens rather than weakens what is known — **except** for the
-    one pairing ADR-0103 §6 rules, where the incoming record corroborates rather
-    than accumulates (:func:`_corroborates`, below).
+    two pairings on which the incoming record corroborates rather than accumulates
+    (:func:`_corroborates`, below): ADR-0103 §6's, and ADR-0121 §4's second clause.
 
     **Reinforcement only.** Both halves of that — the union and the maximum —
     assume the two records *agree*. Only a ``REINFORCE`` ruling reaches this
@@ -947,6 +1076,18 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     agreement is recorded where ADR-0103 §6 puts it — in the unioned evidence,
     which retains the episode the observation stands on — and not in a number that
     would claim the attested source said something it did not.
+
+    **An agreeing restatement of the user's own assertion folds the same way**
+    (ADR-0121 §4's second clause), on the same reasoning applied to a second
+    pairing: no warrant arrives that the record did not already have, so the
+    survivor is the stored target with its ``content``, ``provenance.source``,
+    ``provenance.confidence``, ``attestation``, ``validity`` and ``expires_at``
+    unchanged, and the incoming record contributes its evidence and its confirming
+    instant. It is what makes ADR-0121 §5's exception to the clause-1 fold refusal
+    *provable* rather than argued: the write puts the target's own bytes back at the
+    target's own id — not similar bytes, not normalised bytes, the same ones — so
+    ADR-0045 §5 clause 1's two justifications, both about a fold that replaces or
+    retires what the user told us, do not reach it.
 
     **The whole target record survives, not only its provenance.** ADR-0103 §6
     gives the incoming record exactly two contributions, so its content, its
@@ -1042,9 +1183,12 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     that property by keeping the target's attestation**, which is the same rule
     read against ADR-0103 §6's content ruling rather than a departure from it: the
     attestation still describes the content that survived and still agrees with the
-    ``source`` beside it. Taking the incoming attestation there is not merely
-    wrong but impossible — a ``DERIVED`` record carries none, and an ``EXTERNAL``
-    survivor without one is refused by the same iff validator.
+    ``source`` beside it. Taking the incoming attestation on ADR-0103 §6's pairing
+    is not merely wrong but impossible — a ``DERIVED`` record carries none, and an
+    ``EXTERNAL`` survivor without one is refused by the same iff validator. On
+    ADR-0121 §4's pairing both sides carry ``None`` (the ``ASSERTED`` band admits
+    no attestation), so the arms cannot be told apart by their output there and the
+    rule is stated for the property rather than for the case that observes it.
 
     Args:
         target: The stored record the ruling folds into.
@@ -1056,7 +1200,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
             translates a bad reading into `memory`'s own error (ADR-0026 §4).
 
     Returns:
-        The survivor: the target's record on ADR-0103 §6's arm, the incoming
+        The survivor: the target's record on the corroboration arm, the incoming
         record wearing the target's id on the ordinary one.
     """
     union = tuple(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence]))
