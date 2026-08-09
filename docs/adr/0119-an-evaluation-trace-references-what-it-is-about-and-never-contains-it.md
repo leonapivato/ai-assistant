@@ -941,7 +941,7 @@ def _finite(value: int | float | bool) -> int | float | bool:
     return value
 
 
-class FrozenMapping[K, V](Mapping[K, V]):
+class FrozenMapping[K: Hashable, V: Hashable](Mapping[K, V]):
     """An immutable, hashable, copyable mapping — ``FrozenDict``, generic.
 
     Every design point is ``FrozenDict``'s and is taken for its stated reasons.
@@ -950,6 +950,17 @@ class FrozenMapping[K, V](Mapping[K, V]):
     ``model_copy(deep=True)``". The contents are a **tuple of pairs**, never a
     ``dict``, because "a private ``dict`` would still be a mutable object
     reachable as ``parameters._data``, which is a real bypass".
+
+    **Both parameters are bound to ``Hashable``**, because ``__hash__`` is part
+    of what this type promises and ``FrozenDict`` can only promise it for the
+    reason its own docstring gives — hashing by contents is "possible only
+    because every value is itself frozen". Unbounded, ``FrozenMapping[str,
+    list[int]]`` would construct happily and raise at ``hash(...)``, making the
+    guarantee false everywhere but the fields that happen to be safe. The bound
+    is satisfied by all three trace mappings: ``TraceRef`` and
+    ``TraceRecordSet`` are ``StrEnum``, ``Identifier`` and ``TraceLabel`` are
+    ``str``, ``TraceMetricValue`` is ``int | float | bool``, and ``RecordIdSet``
+    is a frozen model.
 
     ``FrozenDict`` is left exactly as it is; folding the two together is #849.
     """
