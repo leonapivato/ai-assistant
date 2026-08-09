@@ -183,11 +183,23 @@ Four things, each with a reasonable-looking wrong answer.
 > `occurred_at` and, where the measure looks forward from an event, an explicit
 > settling period. A figure reported without both is not one of these measures.
 
+> **Normative.** Every ratio this ADR defines, measure or diagnostic alike, is
+> **undefined** when its denominator is zero, and the report states that it is
+> undefined rather than stating a figure or a zero.
+
 > **Normative.** No measure defined here carries a threshold, a target, a
 > pass/fail verdict or a trend claim.
 
 A measure is a number; whether it is good is the operator's ruling, which is what
 leg 8's exit test asks for.
+
+**A zero denominator is stated as undefined rather than rendered.** Every
+population here can legitimately be empty — a window with no corrections, a
+window with no `observe` write, a window whose retrievals all short-circuited —
+and the two shortcuts both lie. A zero asserts a rate that was measured to be
+zero; an omitted line asserts nothing at all, which a reader takes for zero
+anyway. This is ADR-0119 §3's observation rule applied one level up, at the
+report instead of at the trace: an absent quantity says so.
 
 **Notation, fixed here so the definitions below are unambiguous.** `W = [a, b)`
 is a half-open interval over the `occurred_at` field; `s` is a non-negative
@@ -371,7 +383,8 @@ of passes.
 > surfacing and the last retained trace's `occurred_at` is at or after `b + s`.
 
 > **Normative.** The **machine overturn rate** over `(W, s)` is the same ratio
-> computed with the **machine** seam set in place of the user set.
+> computed with the **machine** seam set in place of the user set, under the same
+> condition on the stream's extent.
 
 > **Normative.** The machine overturn rate is a diagnostic reported beside memory
 > precision, and is never folded into it.
@@ -467,6 +480,11 @@ the user overturning a belief. `ASK_USER` defers rather than decides. `ACCEPT`
 and `STORE_TEMPORARY` add. `REINFORCE` agrees. One ruling kind means "what was
 held is now wrong", and it is the one counted.
 
+> **Normative.** The **beliefs-per-correction** diagnostic over `W` is computed
+> over the traces of the ruling population that carry
+> `records[TraceRecordSet.SUPERSEDED]`: the sum of that set's `total`, divided by
+> the sum of `decisions_supersede`, over that same sub-population.
+
 **Corrective acts, not beliefs overturned, and both are available.** A single
 correction may retire several beliefs — ADR-0079's title is "a correction
 resolves every conflict it is shown" — so `decisions_supersede` counts acts while
@@ -498,8 +516,14 @@ a vocabulary addition, because `TraceRecordSet.RETIRED` already exists.
 > **Normative.** `decisions_reinforce` under the `observe` seam is **not** part of
 > this measure, and is not admissible as a substitute for it.
 
-> **Normative.** The report states the `observe` reinforcement share separately,
-> labelled as the observation stage's re-mining overlap.
+> **Normative.** The **`observe` reinforcement share** over `W` is the sum of
+> `decisions_reinforce`, divided by the sum of the six `decisions_*` values, over
+> every `MEMORY_WRITE` trace eligible under §2 whose `occurred_at` lies in `W`
+> and which is attributed to the `observe` seam.
+
+> **Normative.** The report states the `observe` reinforcement share separately
+> from the repeated-explanation rate, labelled as the observation stage's
+> re-mining overlap.
 
 **What a `REINFORCE` means is fixed by the enum and it is the right event.**
 `MemoryDecisionKind`'s docstring: "`REINFORCE` — the incoming record agrees with
