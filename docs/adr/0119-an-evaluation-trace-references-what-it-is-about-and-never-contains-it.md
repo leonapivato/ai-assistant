@@ -272,6 +272,10 @@ observe Tier 1 content in the course of recording that it exists.
 > ADR-0111 §9 binds the scheduler's log record to, so the two records about one
 > event cannot disagree.
 
+> **Normative.** A cancellation is never classified. An emitter re-raises an
+> externally delivered `CancelledError` before any outcome or fault class is
+> decided, so no trace records one (ADR-0060 §1).
+
 > **Normative.** Deriving `fault_class` from an exception is **total**: a class
 > whose `__name__` does not fit the permitted form yields the reserved literal
 > `UNREPRESENTABLE_FAULT_CLASS`. No exception a provider can raise may prevent a
@@ -1018,7 +1022,7 @@ def _fault_class_name(value: str) -> str:
     return value
 
 
-def fault_class_of(error: BaseException) -> str:
+def fault_class_of(error: Exception) -> str:
     """``type(error).__name__``, or the reserved literal when it will not fit.
 
     The one string on a trace that is neither a literal nor an enum member and
@@ -1035,9 +1039,14 @@ def fault_class_of(error: BaseException) -> str:
     **Reading the name is itself guarded**, because "total" has to mean it: a
     metaclass may override ``__getattribute__`` for ``"__name__"`` and raise, or
     return something that is not a ``str``, and either would take the trace down
-    with the fault it was recording. ``Exception`` and not ``BaseException``, so
-    an externally delivered ``CancelledError`` is delivered onward as ADR-0060 §1
-    requires rather than silently becoming a fault class.
+    with the fault it was recording. The guard catches ``Exception`` and not
+    ``BaseException``, so a ``CancelledError`` raised *by the name read* is
+    delivered onward as ADR-0060 §1 requires.
+
+    **The parameter is ``Exception``, not ``BaseException``**, for the same rule
+    one level out: a cancellation is not a fault and must never be classified as
+    one. An emitter re-raises it before it reaches here, so no ``FAULT`` trace
+    can ever name it.
     """
     try:
         name = type(error).__name__
@@ -1323,6 +1332,24 @@ Tier 2 store through the one field nobody inspects. So `id` carries its own
 a caller cannot supply from content and which a row read back out of the store
 matches by construction. That is the reconstruction path, and it needs no
 privileged constructor.
+
+**What the shape does not buy is provenance, and that residue is accepted rather
+than papered over.** A caller can still pass 32 hex characters it computed from
+content — a digest, a hex-encoded string — and the type will take it. No
+constructor discipline closes that: the model must be reconstructible from a
+stored row, every hydration path is callable, and the caller in question is
+first-party code inside this repository. **The corpus has already ruled this
+class of residue accepted.** ADR-0021 §1 leaves open "a caller hand-constructing
+a `PermissionDecision` field by field", calling it "a caller falsifying its own
+audit trail, not a policy subverting a gate", and says plainly that "no producer
+can prevent it"; ADR-0058 ratifies that reading a second time, against a
+*chokepoint* where a check would have bound, on the ground that it is
+"defence-in-depth against the principal itself". An emitter hex-encoding user
+content into a trace id is the same act by the same party, and it is a deliberate
+one rather than a slip. What the shape and the factory *do* buy is that every
+accidental route is gone: no emitter reaches for `id=` at all, and nothing that
+looks like content survives the pattern. §2's third clause governs the rest, as
+an obligation on emitters that review enforces.
 
 **The referenced ids are *not* given the same treatment, deliberately.** A
 `refs` or `records` value is a conversation id, a turn id, a memory record id —
