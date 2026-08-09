@@ -494,12 +494,15 @@ the artifact when the passphrase cannot be shown is the fail-closed form.
 
 ### 6. The artifact carries a manifest, and it carries no Tier 0
 
-> **Normative.** The artifact contains a manifest as a reserved archive member,
-> named so that it cannot collide with any data-directory-relative path and never
-> counted among the copied files, recording: the artifact format version; the
-> instant the backup was taken; the project version that wrote it; and for each
-> copied file its data-directory-relative path, its byte length and a SHA-256 digest
-> of its contents.
+> **Normative.** The artifact's archive carries every copied file under one fixed
+> top-level prefix, whose member path is that prefix followed by the file's
+> data-directory-relative path, and carries the manifest at a fixed member path
+> outside that prefix.
+
+> **Normative.** The manifest records the artifact format version; the instant the
+> backup was taken; the project version that wrote it; and for each copied file its
+> data-directory-relative path, its byte length and a SHA-256 digest of its
+> contents. It is never counted among the copied files.
 
 > **Normative.** The manifest carries no record content, no record identifier, no
 > subject and no correlation identifier.
@@ -670,6 +673,10 @@ taking no lock at all discharges that completely rather than by a qualification.
 > resolves outside the staging directory. It creates no symbolic link, no device and
 > no hard link, and follows none while materialising.
 
+> **Normative.** Restore refuses an archive carrying any member that is neither the
+> manifest at its fixed path nor a file under §6's payload prefix, and materialises
+> each payload member at its path with that prefix removed.
+
 > **Normative.** Restore reads the manifest from its reserved member and never
 > materialises that member. The manifest is not a restored file and is not a member
 > of any set compared below.
@@ -697,11 +704,21 @@ stops the equality check eating itself.** The manifest travels inside the same
 would demand it either list itself — a digest over bytes that are not final until
 the digest is in them — or be absent from its own set while still landing in the
 staging directory, which makes the two sets differ on every artifact. Both readings
-refuse every backup ever taken. Reserving the member, parsing it rather than
-materialising it, and defining the compared set as the copied files only is the
-whole of the reconciliation; the reserved name is constrained so that no
-data-directory-relative path can collide with it, because a collision would put a
-real file and the metadata in the same slot.
+refuse every backup ever taken. Parsing the manifest rather than materialising it,
+and defining the compared set as the copied files only, is the reconciliation.
+
+**Keeping it out of the payload's namespace is what makes "reserved" true rather
+than asserted.** §1 copies *every* regular file at any relative path, so no member
+name is unavailable to an arbitrary source tree — a data directory can perfectly
+well contain a file named whatever the manifest is named, and then a single flat
+namespace forces the tool to drop a real file, overwrite the metadata, or parse a
+user's file as a manifest. Declaring the collision impossible does not make it so.
+Putting every copied file under one prefix and the manifest outside it removes the
+question instead of answering it: a source file with the manifest's name lands at
+the prefix followed by that name and collides with nothing, and restore can tell
+metadata from payload by position rather than by trusting a name. Refusing an
+archive with anything outside those two regions is the other half — an artifact
+this tool did not write does not get to introduce a third category.
 
 **The set check can be an exact equality because §7 leaves nothing else in the
 staging directory to except.** Every file there was put there by this run out of the
