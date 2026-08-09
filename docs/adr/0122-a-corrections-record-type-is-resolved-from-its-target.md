@@ -252,9 +252,10 @@ topical similarity too weak a signal to retire a record. Three things bound it a
 none of them dissolves it. It requires a cross-kind neighbour that outranks the
 true target, where today's failure requires only that the target not be semantic —
 so the exposure is much smaller than the defect being removed, though it is not
-zero. The misresolution is *visible* in the outcome and in `assistant beliefs`
-(§4), where today's silence is not. And §6's pin is the direct remedy, which is
-part of why §6 keeps it authoritative rather than folding it into the resolution.
+zero. The misresolution is *discoverable* — by belief inspection, where today's
+mis-filing is not discoverable at all (§4) — and §6's pin is the direct remedy,
+which is part of why §6 keeps it authoritative rather than folding it into the
+resolution.
 This residue is the price of choosing the drawer by the only signal available, and
 it is filed with the others in §11 rather than hidden behind a claim of strict
 improvement.
@@ -393,12 +394,17 @@ semantic fact, and the store would hold two records of one utterance — one of 
 in a drawer the user never referred to. #864's second complaint is precisely a
 stray record polluting retrieval; a design that guarantees one is not a fix.
 
-**A wrong resolution is visible and recoverable**, which is what makes best-ranked
-acceptable rather than merely convenient. The outcome the user already receives
-distinguishes the cases — "Replaced a prior memory" against "Stored a new memory" —
-`assistant beliefs` shows the record and its kind (ADR-0073 §7), and §6's pin puts the
-drawer back in the user's hands on a re-teach. This is the same recovery the QA run
-found by hand.
+**A wrong resolution is discoverable and recoverable**, which is what makes
+best-ranked acceptable rather than merely convenient. Discoverable is the accurate
+word and "visible in the outcome" is not: `IngestSummary` carries a decision and a
+record id and no `MemoryKind`, so a correct resolution and a wrong one can both
+report "Replaced a prior memory" — against different records. What separates them
+is `assistant beliefs`, the belief-inspection surface (ADR-0073 §7), which shows
+each record and its kind; the outcome narrows the question rather than answering
+it. Recovery is then §6's pin on a re-teach, which is the same recovery the QA run
+found by hand. That inspection is a step the user must take is the honest cost of
+not adding the resolved kind to the outcome, and the Alternatives record why that
+`core` field is filed rather than taken here.
 
 ### 5. An unresolvable correction is a free-standing assertion, and lands as `SEMANTIC`
 
