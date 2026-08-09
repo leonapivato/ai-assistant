@@ -1,6 +1,6 @@
 # 119. An evaluation trace records an event at a seam, references what it is about, and never contains it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-08
 - **Decides `core` surface and implements none of it.** Three new Protocols —
   `TraceSink`, `TraceRetention` and `TraceStore` — in `core/protocols.py`, and the
