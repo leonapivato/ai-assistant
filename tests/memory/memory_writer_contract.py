@@ -1929,8 +1929,29 @@ class MemoryWriterContract:
         assert survivor.content == target_content
         assert _CITED in survivor.provenance.evidence
 
+    @pytest.mark.parametrize(
+        ("target_content", "restatement"),
+        [
+            # One token *inserted*: the adversarial case ADR-0121 §1 argues from,
+            # scoring 3 of 4 query terms — exactly the conflict threshold.
+            (_CONTENT, _DISAGREEING),
+            # Terminal punctuation only. "daily." is not a substring of the
+            # unpunctuated target, so the case still scores 3 of 4 — at the
+            # threshold, exercising the predicate and not an empty conflict set.
+            # A writer predicate that strips trailing stops accepts this fold and
+            # refreshes an assertion's evidence and currency from a sentence the
+            # user never quite said.
+            ("prefers concise emails daily", "prefers concise emails daily."),
+            # A dropped leading article. Every remaining term is a substring of
+            # the target (score 1.0), so the target *tops* the ranking while the
+            # texts remain different beliefs under §1 — the widening a
+            # stop-word-stripping predicate admits.
+            ("the user prefers concise emails", "user prefers concise emails"),
+        ],
+        ids=["one-token-insertion", "trailing-stop", "dropped-article"],
+    )
     async def test_a_disagreeing_restatement_may_not_fold_onto_an_assertion(
-        self, make_writer: WriterFactory
+        self, make_writer: WriterFactory, target_content: str, restatement: str
     ) -> None:
         """ADR-0121 §5's exception is **verified at the writer, never trusted**.
 
@@ -1946,10 +1967,17 @@ class MemoryWriterContract:
         conflict (:data:`_DISAGREEING`), so this exercises the predicate rather than
         an empty conflict set — which is the shape of the hazard: the strings
         scoring *highest* against a belief include the one that contradicts it.
+
+        The punctuation and dropped-article cases pin the predicate from the other
+        side: §1 admits exactly four transformations, and a writer that "helpfully"
+        strips a terminal stop or a stop-word widens agreement past what was
+        ratified — accepting a forced fold this suite otherwise never shows it.
+        Each case's arithmetic keeps the target at or above the conflict
+        threshold, so all three refusals are decided by the predicate alone.
         """
         store = FakeMemoryStore(now=_after_close)
         await _cite(store)
-        await store.add(_preference("theirs", source=MemorySource.USER_ASSERTED))
+        await store.add(_preference("theirs", target_content, source=MemorySource.USER_ASSERTED))
         writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
         before = await store.export()
 
@@ -1958,7 +1986,7 @@ class MemoryWriterContract:
                 _proposal(
                     _preference(
                         "new",
-                        _DISAGREEING,
+                        restatement,
                         source=MemorySource.USER_ASSERTED,
                         evidence=(_CITED,),
                     )
