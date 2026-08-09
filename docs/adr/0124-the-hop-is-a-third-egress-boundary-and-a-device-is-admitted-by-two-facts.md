@@ -1066,9 +1066,16 @@ plan a test rather than a rehearsal.
     credential and the enrolled hub identity, and a subsequent connect attempt has
     nothing to present — which is what discharges ADR-0004 §6 there (§8). It works
     with the hub stopped.
-11. **No version bump was needed.** Both halves report the same
+11. **The ceilings are the hub's, not each listener's.** With
+    `hub_max_connections` and `hub_max_pending_handshakes` set low for the run,
+    saturating each ceiling through one listener causes the *other* listener to
+    refuse — checked in both orders, loopback-then-remote and remote-then-loopback,
+    and for both figures. This is the check §7's shared-budget clause exists for
+    and the one an implementation fails by giving each listener its own counter,
+    which every other step here would still pass.
+12. **No version bump was needed.** Both halves report the same
     `PROTOCOL_VERSION` and the handshake passes on both listeners (§9).
-12. **The relayed path is exercised.** Where the overlay cannot establish a direct
+13. **The relayed path is exercised.** Where the overlay cannot establish a direct
     path between the two devices, the session still completes over the overlay's
     relay — which is the case §2's end-to-end encryption clause is written for.
 
