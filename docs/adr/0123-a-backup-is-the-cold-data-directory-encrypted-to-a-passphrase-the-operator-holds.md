@@ -196,9 +196,10 @@ default, which costs artifact size and never costs data.
 > path; the tool does not retry.
 
 > **Normative.** The backup tool refuses, before copying anything, if any SQLite
-> sidecar — a `-journal`, `-wal` or `-shm` file — lies beside any file it would
-> copy. The diagnostic names the sidecar and states the remedy: start the hub and
-> stop it cleanly, then run the backup again.
+> sidecar — a `-journal`, `-wal` or `-shm` file — is present anywhere in the data
+> directory, including beside a file §3 excludes. The diagnostic names the sidecar
+> and states the remedy: start the hub and stop it cleanly, then run the backup
+> again.
 
 > **Normative.** For each file it copies, the backup tool records the device,
 > inode, byte length and modification time before reading it and — for a SQLite
@@ -333,6 +334,11 @@ consistency while still leaving the cross-store skew §1 describes.
 > `Settings.data_dir`, and excludes a file only on an exact match of its own
 > data-directory-relative path.
 
+> **Normative.** Excluding a path also excludes that path's SQLite sidecars — its
+> `-journal`, `-wal` and `-shm` — each matched exactly as that path's name followed
+> by the suffix. A protected store's sidecars are part of the store and never enter
+> an artifact.
+
 > **Normative.** A later lane that places in the data directory a file subject to a
 > clause forbidding it to leave the device returns to this decision, adds it to the
 > exclusions above, and makes its path reachable from the module that owns it in the
@@ -401,6 +407,24 @@ respects every boundary at once: the tool lives in `service/`, so it reaches
 `service/lock.py` directly, `wire/address.py` as the hub already does, and the
 composition root by the route ADR-0083 §8 gives it — "may import `app` … and
 `core`", the same route the other three offline tools take to their mechanisms.
+
+**Exact matching is right and it opens a hole that has to be closed beside it: a
+database is not one file.** `traces.db-wal` is a different path from `traces.db`,
+so a set holding only the latter excludes only the latter — and a `-wal` left by a
+crashed hub holds committed pages of exactly the records ADR-0119 §12 says may not
+leave the device, in a file §1 would otherwise copy without a second thought. The
+exclusion's unit is therefore the store rather than its main file, and the sidecar
+suffixes are matched exactly the same way, so nothing about the precision the
+paragraph above argues for is given back.
+
+**§2's scan is widened to the whole directory for the same reason, and the two
+guards are deliberately redundant.** A sidecar beside an *excluded* file was
+outside a refusal phrased over files the tool would copy, which left the crashed
+trace store as the one state that could reach an artifact. Refusing on any sidecar
+anywhere also makes the before-scan symmetric with the after-scan, which was
+already directory-wide. Either guard alone closes this; both are kept because the
+clause they protect is absolute and the cost of a second check is a directory
+listing.
 
 **A bare filename would not be a well-defined exclusion, because §1 walks to any
 depth.** Matching on a name alone is ambiguous in both directions at once: an
