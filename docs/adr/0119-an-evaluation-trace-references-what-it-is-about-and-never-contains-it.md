@@ -507,7 +507,7 @@ deletion horizon (§10); putting a swept table beside `memory.db`'s retention ax
 (ADR-0007's `expires_at`, ADR-0045's validity window) is three lifetimes in one
 file, each meaning something different.
 
-### 7. Two Protocols: an append-only sink the pipeline holds, and a store the pipeline does not
+### 7. Three seams by capability: every subsystem emits, the engine purges, and nothing in the pipeline reads
 
 > **Normative.** `core/protocols.py` gains three Protocols, narrow to wide.
 > `TraceSink` carries an append. `TraceRetention` carries a purge below an
