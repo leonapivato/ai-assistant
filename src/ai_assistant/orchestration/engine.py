@@ -111,6 +111,7 @@ from ai_assistant.core.types import (
     QueueOutcome,
     StepOutcome,
     StepStatus,
+    TraceOutcome,
     TurnOutcome,
     band_of,
 )
@@ -125,6 +126,7 @@ from ai_assistant.orchestration.payloads import (
     positive_page_argument,
 )
 from ai_assistant.orchestration.questions import question_state
+from ai_assistant.orchestration.traces import Observation, OperationTraces
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -137,6 +139,7 @@ if TYPE_CHECKING:
         MemoryStore,
         PlanStore,
         TraceRetention,
+        TraceSink,
     )
     from ai_assistant.core.types import (
         AnswerOutcome,
@@ -326,6 +329,99 @@ def _utcnow() -> datetime:
     reading would sweep against an instant nobody chose.
     """
     return datetime.now(UTC)
+
+
+def _purged(report: PurgeReport) -> Observation:
+    """Read one maintenance sweep onto its own ``OPERATION`` trace (ADR-0119 §8).
+
+    **``traces`` is absent when the horizon is "keep forever"**, and that is §3's
+    observation rule rather than a convenience: "a metric key appears in a trace
+    only when the quantity it names was **observed**. An absent key means *not
+    observed* and never zero". :attr:`PurgeReport.traces` is ``None`` for exactly
+    that reason — the sweep did not run — and writing a zero would report a store
+    swept clean by a sweep that never happened.
+
+    Args:
+        report: What the three stores reclaimed.
+
+    Returns:
+        The counts, keyed by literals written here (§2's second clause).
+    """
+    metrics: dict[str, int | float | bool] = {
+        "records": report.records,
+        "questions": report.questions,
+    }
+    if report.traces is not None:
+        metrics["traces"] = report.traces
+    return Observation(metrics=metrics)
+
+
+def _ingested(report: IngestionReport) -> Observation:
+    """Read one scheduled ingestion onto its own ``OPERATION`` trace (ADR-0119 §8).
+
+    **The report's two string-shaped fields are deliberately left off.** §2 admits
+    no string into a trace that is not an identifier, an enum member, a literal
+    written here or an exception's class name, and
+    :attr:`~ai_assistant.orchestration.ingestion.IngestionReport.source` is none of
+    those — it is a reader's declared identity, read at runtime. ``read_at`` is a
+    ``datetime``, which the metric map's value type does not admit at all. Neither
+    is a loss the envelope feels: the seam says which operation this was, and
+    ``occurred_at`` says when.
+
+    Args:
+        report: What the reading proposed and what memory did with it.
+
+    Returns:
+        The four counts that partition the proposals.
+    """
+    return Observation(
+        metrics={
+            "proposed": report.proposed,
+            "stored": report.stored,
+            "deferred": report.deferred,
+            "rejected": report.rejected,
+        }
+    )
+
+
+def _consolidated(report: ConsolidationReport) -> Observation:
+    """Read one consolidation run onto its own ``OPERATION`` trace (ADR-0119 §8).
+
+    **A halted run is ``INCOMPLETE``, which is the only place the fourth outcome
+    is produced.** ADR-0111 §9's third clause rules that "a run that halts under §5
+    without processing its remaining work is recorded as a completed run that did
+    not exhaust its work, not as a failure", and ADR-0119 §3 calls ``INCOMPLETE``
+    that clause "given a value": recording a halt as ``OK`` makes a job that has
+    stopped making progress invisible, and recording it as ``FAULT`` makes a queue
+    at its cap indistinguishable from a broken store.
+
+    ``halted`` is therefore **not** also a metric. The outcome carries it, and a
+    second copy is a second thing to disagree with the first —
+    :attr:`~ai_assistant.orchestration.consolidation.ConsolidationReport.exhausted`
+    is a different fact and is carried, because a run that spent its budget and one
+    that halted are distinguishable only through the pair.
+
+    Args:
+        report: What the run examined, proposed and recorded.
+
+    Returns:
+        The run's counters, and ``INCOMPLETE`` if it halted.
+    """
+    return Observation(
+        outcome=TraceOutcome.INCOMPLETE if report.halted else TraceOutcome.OK,
+        metrics={
+            "chunks": report.chunks,
+            "examined": report.examined,
+            "proposed": report.proposed,
+            "committed": report.committed,
+            "deferred": report.deferred,
+            "rejected": report.rejected,
+            "discarded_unusable": report.discarded_unusable,
+            "discarded_over_limit": report.discarded_over_limit,
+            "refused_self_citing": report.refused_self_citing,
+            "exhausted": report.exhausted,
+        },
+    )
 
 
 def queued_question(admission: DeferralAdmission) -> QueuedQuestion:
@@ -687,6 +783,7 @@ class Engine:
         memory: MemoryStore,
         deferrals: DeferralStore,
         traces: TraceRetention,
+        trace_sink: TraceSink,
         trace_retention: timedelta | None,
         conversations: ConversationLifecycle,
         observation: ObservationStage,
@@ -772,6 +869,23 @@ class Engine:
                 optional collaborator defaults to unwired, and an unwired sweep is
                 a horizon an operator can set and nothing applies — indistinguishable
                 from a store with nothing to reclaim.
+            trace_sink: The trace store's **append** seam, and a *second, separate*
+                narrowing of the very object ``traces`` narrows (ADR-0119 §7): a
+                :class:`~ai_assistant.core.protocols.TraceSink` the engine emits
+                its own ``OPERATION`` trace through (§8), never a ``TraceStore``,
+                so the engine can write telemetry and still cannot walk it. Two
+                parameters rather than one because the capabilities are two —
+                "``TraceStore`` structurally satisfies both narrow Protocols… and
+                the composition root hands each collaborator exactly the seam it is
+                entitled to" — and a single parameter typed to the union of them
+                would be the wide seam §7 withholds, reintroduced by the back door.
+
+                **Required with no default**, which §7 makes a clause: "every
+                emitting site takes a ``TraceSink`` as a required constructor
+                argument with no default. A composition that omits it does not
+                type-check." An optional sink defaults to unwired, and an unwired
+                emitter is indistinguishable from a system in which nothing
+                happened.
             trace_retention: The trace horizon, the value
                 :data:`~ai_assistant.core.config.Settings.trace_retention` carries
                 (ADR-0119 §10). ``None`` means "keep forever": the sweep is
@@ -970,6 +1084,11 @@ class Engine:
         self._traces = traces
         self._trace_retention = trace_retention
         self._clock = checked_clock(now, owner="Engine")
+        # The one emitter, built here rather than injected: ADR-0119 §8 puts the
+        # envelope at `_tracked`, so its lifetime is this engine's and nothing
+        # else may hold it. It is given the *guarded* clock above, so the trace's
+        # instant and the purge's horizon are read through one seam (ADR-0026 §7).
+        self._operation_traces = OperationTraces(sink=trace_sink, now=self._clock)
         self._conversations = conversations
         self._observation = observation
         self._questions = questions
@@ -1032,7 +1151,7 @@ class Engine:
             MemoryStoreError: If an episode a deletion must destroy could not be.
         """
         self._reject_if_closing()
-        return await self._tracked(self._start())
+        return await self._tracked(self._start(), "start")
 
     async def _start(self) -> None:
         """Finish pending deletions, then reclaim what retention has emptied."""
@@ -1113,7 +1232,7 @@ class Engine:
                 enforced".
         """
         self._reject_if_closing()
-        return await self._tracked(self._purge_expired())
+        return await self._tracked(self._purge_expired(), "purge_expired", _purged)
 
     async def _purge_expired(self) -> PurgeReport:
         """Sweep all three stores — **the only place any purge is called**.
@@ -1272,7 +1391,7 @@ class Engine:
                 "whether it may be read, and neither stands in for the other"
             )
             raise ConfigurationError(msg)
-        return await self._tracked(self._ingestion.ingest())
+        return await self._tracked(self._ingestion.ingest(), "ingest", _ingested)
 
     async def consolidate(self) -> ConsolidationReport:
         """Distil stored records into durable beliefs, one bounded run (ADR-0106).
@@ -1333,7 +1452,7 @@ class Engine:
                 "persists to (ADR-0106 §6, ADR-0111 §4)"
             )
             raise ConfigurationError(msg)
-        return await self._tracked(self._consolidation.run())
+        return await self._tracked(self._consolidation.run(), "consolidate", _consolidated)
 
     async def converse(
         self,
@@ -1405,7 +1524,7 @@ class Engine:
         )
         return self._checked(
             await self._tracked(
-                self._converse(utterance, timeout=timeout, conversation_id=selected)
+                self._converse(utterance, timeout=timeout, conversation_id=selected), "converse"
             ),
             "converse",
         )
@@ -1473,7 +1592,8 @@ class Engine:
             timeout=timeout,
         )
         return self._checked(
-            await self._tracked(self._resume(token, approved=approved, timeout=timeout)), "resume"
+            await self._tracked(self._resume(token, approved=approved, timeout=timeout), "resume"),
+            "resume",
         )
 
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
@@ -1507,7 +1627,7 @@ class Engine:
         """
         self._reject_if_closing()
         check_arguments("learn", max_bytes=self._max_payload_bytes, event=event)
-        return self._checked(await self._tracked(self._learn(event)), "learn")
+        return self._checked(await self._tracked(self._learn(event), "learn"), "learn")
 
     async def observe(self, *, conversation_id: Identifier | None = None) -> ObservationReport:
         """Distil beliefs from a conversation's recent turns (ADR-0077 §8).
@@ -1574,7 +1694,9 @@ class Engine:
             None if conversation_id is None else identifier(conversation_id, name="conversation_id")
         )
         check_arguments("observe", max_bytes=self._max_payload_bytes, conversation_id=selected)
-        return self._checked(await self._tracked(self._observation.observe(selected)), "observe")
+        return self._checked(
+            await self._tracked(self._observation.observe(selected), "observe"), "observe"
+        )
 
     async def beliefs(
         self,
@@ -1651,7 +1773,8 @@ class Engine:
             await self._tracked(
                 self._beliefs(
                     bands=snapshot_bands, kinds=snapshot_kinds, limit=limit, offset=offset
-                )
+                ),
+                "beliefs",
             ),
             "beliefs",
         )
@@ -1685,7 +1808,7 @@ class Engine:
         self._reject_if_closing()
         named = identifier(record_id, name="record_id")
         check_arguments("belief", max_bytes=self._max_payload_bytes, record_id=named)
-        return self._checked(await self._tracked(self._belief(named)), "belief")
+        return self._checked(await self._tracked(self._belief(named), "belief"), "belief")
 
     async def forget(self, record_id: Identifier) -> bool:
         """Destroy the record ``record_id`` names (ADR-0073 §5; ADR-0007 §1).
@@ -1734,7 +1857,7 @@ class Engine:
         self._reject_if_closing()
         named = identifier(record_id, name="record_id")
         check_arguments("forget", max_bytes=self._max_payload_bytes, record_id=named)
-        return self._checked(await self._tracked(self._memory.delete(named)), "forget")
+        return self._checked(await self._tracked(self._memory.delete(named), "forget"), "forget")
 
     async def questions(
         self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
@@ -1776,7 +1899,8 @@ class Engine:
         self._reject_if_closing()
         self._check_page("questions", limit=limit, offset=offset)
         return self._checked(
-            await self._tracked(self._questions.questions(limit=limit, offset=offset)), "questions"
+            await self._tracked(self._questions.questions(limit=limit, offset=offset), "questions"),
+            "questions",
         )
 
     async def interrupted_questions(
@@ -1812,7 +1936,10 @@ class Engine:
         self._reject_if_closing()
         self._check_page("interrupted_questions", limit=limit, offset=offset)
         return self._checked(
-            await self._tracked(self._questions.interrupted_questions(limit=limit, offset=offset)),
+            await self._tracked(
+                self._questions.interrupted_questions(limit=limit, offset=offset),
+                "interrupted_questions",
+            ),
             "interrupted_questions",
         )
 
@@ -1859,7 +1986,7 @@ class Engine:
             "answer", max_bytes=self._max_payload_bytes, question_id=named, accept=accept
         )
         return self._checked(
-            await self._tracked(self._questions.answer(named, accept=accept)), "answer"
+            await self._tracked(self._questions.answer(named, accept=accept), "answer"), "answer"
         )
 
     async def forget_question(self, question_id: Identifier) -> bool:
@@ -1892,7 +2019,8 @@ class Engine:
         named = identifier(question_id, name="question_id")
         check_arguments("forget_question", max_bytes=self._max_payload_bytes, question_id=named)
         return self._checked(
-            await self._tracked(self._questions.forget_question(named)), "forget_question"
+            await self._tracked(self._questions.forget_question(named), "forget_question"),
+            "forget_question",
         )
 
     async def recent_conversations(
@@ -1932,7 +2060,9 @@ class Engine:
         self._reject_if_closing()
         self._check_page("recent_conversations", limit=limit, offset=offset)
         return self._checked(
-            await self._tracked(self._recent_conversations(limit=limit, offset=offset)),
+            await self._tracked(
+                self._recent_conversations(limit=limit, offset=offset), "recent_conversations"
+            ),
             "recent_conversations",
         )
 
@@ -1962,7 +2092,9 @@ class Engine:
         self._reject_if_closing()
         named = identifier(conversation_id, name="conversation_id")
         check_arguments("conversation", max_bytes=self._max_payload_bytes, conversation_id=named)
-        return self._checked(await self._tracked(self._conversations.digest(named)), "conversation")
+        return self._checked(
+            await self._tracked(self._conversations.digest(named), "conversation"), "conversation"
+        )
 
     async def forget_conversation(self, conversation_id: Identifier) -> bool:
         """Destroy a conversation and every episode it recorded (ADR-0074 §8).
@@ -2003,7 +2135,8 @@ class Engine:
             "forget_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
         )
         return self._checked(
-            await self._tracked(self._conversations.delete(named)), "forget_conversation"
+            await self._tracked(self._conversations.delete(named), "forget_conversation"),
+            "forget_conversation",
         )
 
     async def pending_confirmations(self) -> tuple[Confirmation, ...]:
@@ -2055,7 +2188,8 @@ class Engine:
         # Tracked like converse/resume: recovery reads the plan store and the audit
         # trail, so shutdown must drain it before closing those connections (§2).
         return self._checked(
-            await self._tracked(self._pending_confirmations()), "pending_confirmations"
+            await self._tracked(self._pending_confirmations(), "pending_confirmations"),
+            "pending_confirmations",
         )
 
     async def _pending_confirmations(self) -> tuple[Confirmation, ...]:
@@ -2171,7 +2305,8 @@ class Engine:
         """
         self._reject_if_closing()
         return self._checked(
-            await self._tracked(self._grants.grantable_sources()), "grantable_sources"
+            await self._tracked(self._grants.grantable_sources(), "grantable_sources"),
+            "grantable_sources",
         )
 
     async def grant(
@@ -2201,7 +2336,9 @@ class Engine:
         named = non_blank_text(source, name="source")
         uses = grant_scope(scope, name="scope")
         check_arguments("grant", max_bytes=self._max_payload_bytes, source=named, scope=uses)
-        return self._checked(await self._tracked(self._grants.grant(named, scope=uses)), "grant")
+        return self._checked(
+            await self._tracked(self._grants.grant(named, scope=uses), "grant"), "grant"
+        )
 
     async def revoke(self, source: NonBlankEncodableText) -> SourceGrant | None:
         """Withdraw the live grant on one source, or report that there was none.
@@ -2221,7 +2358,7 @@ class Engine:
         self._reject_if_closing()
         named = non_blank_text(source, name="source")
         check_arguments("revoke", max_bytes=self._max_payload_bytes, source=named)
-        return self._checked(await self._tracked(self._grants.revoke(named)), "revoke")
+        return self._checked(await self._tracked(self._grants.revoke(named), "revoke"), "revoke")
 
     async def recent_grants(self, *, limit: int = DEFAULT_PAGE_SIZE) -> tuple[SourceGrant, ...]:
         """List what the user granted and withdrew, newest first (ADR-0097 §6).
@@ -2244,7 +2381,8 @@ class Engine:
         positive_page_argument(limit, name="limit")
         check_arguments("recent_grants", max_bytes=self._max_payload_bytes, limit=limit)
         return self._checked(
-            await self._tracked(self._grants.recent_grants(limit=limit)), "recent_grants"
+            await self._tracked(self._grants.recent_grants(limit=limit), "recent_grants"),
+            "recent_grants",
         )
 
     async def aclose(self) -> None:
@@ -2402,8 +2540,13 @@ class Engine:
         # gather and skips its siblings. Every one must complete before a closer runs.
         await asyncio.gather(*pending, return_exceptions=True)
 
-    async def _tracked(self, coro: Awaitable[_T]) -> _T:
-        """Run ``coro`` as a tracked, shielded task, so shutdown can drain it.
+    async def _tracked(
+        self,
+        coro: Awaitable[_T],
+        seam: str,
+        observe: Callable[[_T], Observation] | None = None,
+    ) -> _T:
+        """Run ``coro`` as a tracked, shielded, **traced** task, so shutdown can drain it.
 
         The task is what :meth:`aclose` awaits, and the shield is what keeps the
         underlying work alive when the *caller* cancels: a cancelled
@@ -2416,8 +2559,47 @@ class Engine:
         public methods reject a closing engine *before* building ``coro``
         (:meth:`_reject_if_closing`), so this never receives work it must throw away
         un-awaited.
+
+        **It is also ADR-0119 §8's one wiring point**, for the reason that section
+        gives: this already wraps every public method, so "the operation's name,
+        its outcome, its elapsed time and its fault class are all in hand at one
+        place, for a turn, a scheduled job and a client command alike". Everything
+        the emitter does is subordinate to the work (§5) — no trace failure
+        reaches ``coro``'s caller, and no operation is retried, delayed or altered
+        because a trace could not be written.
+
+        **The tracing wraps the coroutine *inside* the task rather than around the
+        shield**, and the placement is load-bearing twice. §4's correlation scope
+        opens in the task's own copy of the context, so two concurrent operations
+        cannot see each other's identifier and every trace emitted below joins to
+        the right one. And the trace covers the work the task actually did: a
+        caller that cancels this await abandons the shield while the task runs on,
+        and a trace written out here would be a trace for an await rather than for
+        an operation.
+
+        **What is not covered is what never reaches here.** A call refused at the
+        door — a closing engine, a malformed page argument, an oversized
+        utterance — raises before ``coro`` is built and emits no trace, and so does
+        a result too large to return, which :meth:`_checked` refuses after this
+        returns. Those are refusals of a *call*; a trace records an operation that
+        was served (§1), and #856 carries the question of whether the boundary
+        should widen to them.
+
+        Args:
+            coro: The operation's own work.
+            seam: Its name — a literal constant at the call site, matching the
+                public method's, so a measure filtering the stream by seam is
+                filtering by the surface a caller actually invoked.
+            observe: How to read the operation's result onto its trace, for the
+                operations whose detail the envelope cannot see (ADR-0119 §8).
+                ``None`` where the envelope is the whole story.
+
+        Returns:
+            Whatever ``coro`` returned.
         """
-        task: asyncio.Task[_T] = asyncio.ensure_future(coro)
+        task: asyncio.Task[_T] = asyncio.ensure_future(
+            self._operation_traces.observing(seam, coro, observe)
+        )
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
         return await asyncio.shield(task)

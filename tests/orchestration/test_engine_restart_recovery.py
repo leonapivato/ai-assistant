@@ -61,6 +61,7 @@ from ai_assistant.testing import (
     FakeSourceGrantStore,
     FakeToolInvoker,
     FakeTraceRetention,
+    FakeTraceSink,
 )
 
 if TYPE_CHECKING:
@@ -193,6 +194,7 @@ def _make_engine(
         # sweeps; a fresh fake per engine is therefore right — the trace store is
         # not part of the durable state the second process re-reads.
         traces=FakeTraceRetention(),
+        trace_sink=FakeTraceSink(),
         trace_retention=timedelta(days=365),
         conversations=ConversationLifecycle(
             conversations=conversations,
