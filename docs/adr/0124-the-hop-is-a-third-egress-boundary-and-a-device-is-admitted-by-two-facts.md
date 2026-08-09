@@ -556,6 +556,10 @@ the set is where the tree currently keeps it honest.
 > dispatched before the revocation, which is abandoned rather than delivered. A
 > response already written in full before the revocation took effect is what the
 > prospective clause above covers, and is not retracted.
+>
+> The check that the enrolment is live and the write it authorises are one step
+> with respect to a revocation: an implementation in which a revocation may take
+> effect between the two does not satisfy this clause.
 
 **The race is real on this hub's shape, so the rule is stated as an outcome rather
 than left to be inferred from the two clauses above.** The system composes on one
@@ -584,13 +588,32 @@ So the boundary is the **write**, and the clause draws it where §8's prospectiv
 rule already draws every other line: a response the device has, it keeps; a
 response the hub has not yet written, it does not get. That also makes the
 obligation implementable without cancellation machinery, since the connection is
-being closed anyway — the check the rule asks for is one read of the record
-immediately before the write.
+being closed anyway.
+
+**A read of the record placed near the write is not on its own enough, and the
+clause's second paragraph says so because the near-miss is the tempting
+implementation.** Read-then-write is a linearization only if nothing may interleave
+between the two, and whether anything may is a property of where the awaits fall —
+not of how few lines apart the read and the write are written. An implementation
+that reads the record, awaits, and then writes has satisfied the letter of "check
+immediately before" and none of the rule. What the clause requires is that the two
+be indivisible against a revocation; a lock spanning both, a transaction, or a
+compare-and-claim on a generation the revocation bumps all achieve that, and
+choosing among them stays the implementing lane's with the store in hand
+(ADR-0083 §6).
 
 **What the rule deliberately does not do is name a mechanism.** A lock, a
 transaction, or a generation counter on the record are all conforming; ADR-0083 §6
 governs the store the record lives in, and choosing among them is the implementing
 lane's with the store in hand.
+
+**Forcing the interleaving is a unit-level obligation on that lane and is
+deliberately not a step of §11.** The indivisibility above is exercised by making a
+revocation land between the check and the write, which is a thing a test does to
+its own process and not a thing two laptops can be made to do on cue. §11 is an
+end-to-end plan on commodity hardware; the race belongs in the implementing lane's
+tests, where the schedule can be controlled, and it is named here so that lane
+knows it is owed rather than discovering it.
 
 > **Normative.** Revocation is prospective. It does not retract what the hub
 > already sent to that device, and no surface may present it as though it did.
