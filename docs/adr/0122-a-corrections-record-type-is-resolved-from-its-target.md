@@ -149,16 +149,27 @@ including `_to_record`'s and every kind filter on `search` and `list_beliefs`, t
 express a state that is never stored on a record. `MemoryKind` is the record's
 *type*; a request that has not yet chosen one is not a type.
 
-**The wire needs no accommodation, and "absent" is spelled `null` on it.** The
-codec's `project` renders a model through `model_dump()`, which emits every field
-including a defaulted one, and it gives `None` a form of its own — so an unpinned
-correction crosses the wire as `"memory_kind": null` rather than as a missing
-member, and no projection change is owed. "Absent" throughout this ADR means the
-field holds `None`, whatever layer is looking at it; there is no second, weaker
-sense in which a producer omits it. ADR-0084 §3's connect handshake is an
-exact-match version check, so a hub and a client never differ in what
-`FeedbackEvent` may carry, and a field that gains a default is source-compatible
-with every existing construction site in the tree.
+**"Absent" is spelled `null` on the wire, the codec needs no change, and the
+protocol version does.** The codec's `project` renders a model through
+`model_dump()`, which emits every field including a defaulted one, and it gives
+`None` a form of its own — so an unpinned correction crosses the wire as
+`"memory_kind": null` rather than as a missing member, and no projection change is
+owed. "Absent" throughout this ADR means the field holds `None`, whatever layer is
+looking at it; there is no second, weaker sense in which a producer omits it. A
+field that gains a default is likewise source-compatible with every existing
+construction site in the tree.
+
+What is *not* free is the half-upgraded deployment. `PROTOCOL_VERSION` is a single
+integer matched exactly at connect, and ADR-0084 §3 defends the exact match on the
+ground that "there is no supported deployment in which they differ except a
+half-finished upgrade, and a half-finished upgrade is precisely the state ruling 4
+wants legible rather than papered over". Left unbumped, this change makes that
+state *illegible*: both peers still say `1`, the handshake passes, and a new
+client's `"memory_kind": null` fails validation inside an old hub — a decode error
+where §3 promises a message naming both versions and the operator action. So §10
+requires the bump, on ADR-0087 §8's precedent for the same reason ("the bump makes
+a half-upgraded deployment legible"). Bumping is applying §3's mechanism, not
+changing it, so ADR-0084 is neither amended nor superseded here.
 
 ### 2. The adapter stops inventing one
 
@@ -690,6 +701,9 @@ from the field.
   for its other clause: a stub processor returning `()` for a **resolved** event
   surfaces, while the same `()` for a **pinned** `PROCEDURAL` still returns an
   empty `LearnOutcome`. Both, or the two cases have been collapsed.
+- **The `PROTOCOL_VERSION` bump** (§1), in the same change as the field, with the
+  connect-refusal path exercised so the half-upgraded deployment produces
+  ADR-0084 §3's version message rather than a payload validation error.
 - **No change to `memory/`.** If the lane concludes it needs one, that is §8 being
   reopened, and it stops and brings back an ADR rather than widening the probe.
 
@@ -717,6 +731,10 @@ from the field.
 - **ADR-0009 §6's deferrals.** `PROCEDURAL` and `EPISODIC` correction targets stay
   deferred, and §3's candidate set is written to widen with them rather than to
   outlive them.
+- **Whether *every* incompatible payload change owes a `PROTOCOL_VERSION` bump.**
+  This ADR requires the bump for its own change (§1, §10) and states the reason;
+  it does not rule for the general case, which is a `wire` decision on ADR-0084 §3
+  and is filed rather than taken in a `learning` lane.
 - **Anything about the conflict threshold, the ceiling, the retirement set or the
   fold refusals.** They stay `memory`'s, unamended, which is the point of §3's
   "names a drawer, never a conflict".
