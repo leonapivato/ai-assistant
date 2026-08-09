@@ -1,7 +1,34 @@
 # 92. An attested belief names its source and its report time; a user assertion retires it
 
-- Status: Accepted
+- Status: Accepted, §5's reinforce-safe membership amended by ADR-0121
 - Date: 2026-08-02
+- Amended: 2026-08-09 by ADR-0121 — **§5's reinforce-safe class becomes
+  `{OBSERVED, INFERRED, USER_ASSERTED}`; the *meaning* §5 gave the class is what
+  admits the third member, and `EXTERNAL` stays out for §5's reason unchanged.**
+  §5 names the class "`{OBSERVED, INFERRED}`, unchanged", with membership meaning
+  "does not carry a foreign idempotency key", and that sentence stops being true
+  of the tree.
+  [ADR-0121](0121-an-agreeing-restatement-is-ruled-agreement-not-conflict.md) §5
+  adds `USER_ASSERTED`, which carries no such key and was outside the class only
+  because ADR-0045 §5 clause 1 already refused every fold onto it — so the
+  question never arose. With ADR-0121's exception to clause 1, leaving it out
+  would refuse the permitted fold a second time for a reason that is false of it,
+  which is §5's own hazard read from the other side: a set whose membership stops
+  matching the question it answers.
+
+  **What stands, and it is the whole of §5's argument.** `EXTERNAL` remains
+  excluded, because its exclusion *is* the meaning — a `REINFORCE` folds at the
+  target's id, an import's id is the integrating system's idempotency key, and
+  identity of content does nothing to the next routine sync. So the
+  `USER_ASSERTED` → `EXTERNAL` `REINFORCE` refusal stands verbatim, and ADR-0121
+  §3 keeps an `EXTERNAL` conflict out of the agreement arm for exactly this
+  reason. **The two sets stay two**: the retirement class is untouched at
+  `{OBSERVED, INFERRED, EXTERNAL}`, ADR-0121 widens neither into the other, and
+  §5's warning that "a set that answers two questions answers neither once the
+  questions come apart" — with the conformance case pinning the `EXTERNAL`
+  refusal as what stops the tidy-up — is the standing rule. §4's widening, §6's id
+  discipline and §§1–3, 7–10 are untouched. ADR-0121 §9 applies ADR-0070 §1's
+  test and records this ruling. Refs #862, #863.
 - **This is a contract change.** §1 adds an `Attestation` value object and an
   `attestation` field to `Provenance` in `core/types.py`, with a band-keyed
   validator — a `core` addition every subsystem reading a belief will meet. §4
@@ -306,6 +333,14 @@ the widening stands (ADR-0050 §1). And the `EXTERNAL` `REINFORCE` refusal stand
 which is not automatic, and is why §5 exists.
 
 ### 5. The one constant that must become two, or the adoption reopens the loss it waited on
+
+> **Amended by ADR-0121 (2026-08-09).** The reinforce-safe class below is now
+> `{OBSERVED, INFERRED, USER_ASSERTED}`. The third member is admitted by this
+> section's own definition of membership — "does not carry a foreign idempotency
+> key" — and became reachable only once ADR-0121 §5 carved an agreeing
+> `REINFORCE` out of ADR-0045 §5 clause 1. `EXTERNAL` is still excluded, for the
+> reason below, and the two sets are still two: the retirement class is
+> unchanged.
 
 This is the section an implementing lane most needs, because the obvious way to
 perform §4 is wrong in a way that passes as a one-line change.

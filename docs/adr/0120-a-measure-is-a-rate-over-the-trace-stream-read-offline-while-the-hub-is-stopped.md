@@ -2,6 +2,38 @@
 
 - Status: Accepted
 - Date: 2026-08-09
+- Note (2026-08-09): **§6's numerator had no producer when this ADR was written,
+  and §5's and §6's measured series have a discontinuity at ADR-0121. No clause
+  of this ADR is amended or superseded, and no `Status` qualifier is owed.**
+  Leg 8's QA run (#862) found that `DefaultMemoryPolicy` routes every
+  user-asserted proposal through an arm set with no `REINFORCE` in it, and both
+  direct seams produce user-asserted proposals — so `decisions_reinforce` under
+  §6's direct ruling population was **structurally zero**, not merely small. §6's
+  "The cost is a small population, and it is accepted rather than hidden" was
+  therefore not true of the tree when written, and §6's reading of the event —
+  "A direct user act that produces a reinforcement is the user supplying a belief
+  the system already held" — described a class that could not be entered.
+  [ADR-0121](0121-an-agreeing-restatement-is-ruled-agreement-not-conflict.md)
+  gives it a producer, and its §7 states the two consequences: §6's rate becomes a
+  **lower bound** (agreement is judged by exact restatement, so a paraphrase is
+  not counted, and the report says so), and §5's correction rate stops counting an
+  agreeing restatement of an `OBSERVED` or `INFERRED` belief as a correction and
+  will read lower — the beliefs-per-correction diagnostic moving with it.
+
+  **Why no record is owed under ADR-0082 §1.** Every normative clause of §2, §5
+  and §6 stays literally true and computable: the measures are defined over metric
+  keys, and ADR-0121 adds none, removes none and redefines none (its §8 argues why
+  it adds no `MemoryDecisionKind` member either, so §2's all-six eligibility is
+  untouched and ADR-0119 §13e's gate is not reached). What changes is the
+  frequency of the events the keys count — a false sentence becoming true, which
+  is the opposite of the direction ADR-0082 §1's test names. This note is written
+  under ADR-0070 §1's unconditional permission to append a dated note, because a
+  reader of §6 needs both facts and can get them nowhere else. **A window spanning
+  the change is not internally comparable**, and §8 does not partition it: §8
+  partitions at a `CONFIGURATION` trace diff and a policy change emits none.
+  #829's baseline window has not opened and #865 sequences it after ADR-0121's
+  implementation, so on the intended timeline no ratified baseline spans it.
+  Refs #862, #863, #865.
 - **This decision adds no contract surface, and §9 argues it rather than
   asserting it.** No Protocol in `core/protocols.py` gains a member or changes a
   signature; no type, enum member, constrained string or constant is added to

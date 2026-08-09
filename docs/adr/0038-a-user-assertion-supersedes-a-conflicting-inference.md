@@ -2,6 +2,36 @@
 
 - Status: Partially superseded by ADR-0092 (§2a's policy-side exclusion of `EXTERNAL` from the supersedable set)
 - Date: 2026-07-22
+- Amended: 2026-08-09 by ADR-0121 — **§2a's first fold refusal — "**any** fold
+  onto a `USER_ASSERTED` target, whatever the proposal's source" — gains one
+  exception, and §2a's reason for the refusal is what grants it.** §2a refuses
+  that fold because "the write replaces what the user told us, and from a
+  non-asserted proposal it also downgrades the record's provenance out of the
+  profile".
+  [ADR-0121](0121-an-agreeing-restatement-is-ruled-agreement-not-conflict.md) §4
+  rules that an *agreeing* `REINFORCE` from a `USER_ASSERTED` proposal contributes
+  the incoming record's evidence and confirming instant and nothing else — the
+  survivor keeps the target's content, source, confidence, window and attestation
+  — so neither half of §2a's reason reaches it. Nothing is replaced and no
+  provenance is downgraded. Every other fold onto a `USER_ASSERTED` target is
+  refused exactly as before.
+
+  **What stands, and it is nearly all of §2a.** The refusal stays "keyed on the
+  **records** rather than on the relation between them" — ADR-0121 §5's exception
+  reads the two records' `kind`, `content` and `source` and never the relation —
+  so §2a's "*every* fold overwrites the target, so the target is what has to be
+  checked" survives as the reason the exception has to *prove* that this one does
+  not. §2a's second refusal (a `USER_ASSERTED` proposal onto an `EXTERNAL` target,
+  narrowed to `REINFORCE` by ADR-0045 §5b) is untouched, and ADR-0121 §3 keeps
+  `EXTERNAL` out of the reinforce-safe class for §2a's own idempotency-key reason.
+  §2a's allow-list *shape* is untouched: ADR-0121 §5 widens the reinforce-safe
+  class to `{OBSERVED, INFERRED, USER_ASSERTED}` by enumerated membership, to match
+  the meaning ADR-0092 §5 gave it, and never to `is not EXTERNAL`. And §2a's
+  "**enforced at the ingestor, not only chosen by the policy**" is why ADR-0121 §5
+  requires the exception to be recomputed at the writer rather than trusted from
+  the ruling. ADR-0121 §9 applies ADR-0070 §1's test and records this ruling; the
+  `Status` line is unchanged because ADR-0082 §2 puts the record in this note alone
+  on a line led by `Partially superseded by`. Refs #862, #863.
 - Partially superseded: 2026-08-02 by ADR-0092 — **§2a's exclusion of `EXTERNAL`
   from the supersedable set is reversed; everything §2a gave as its *reason* was
   already spent.** §2a excluded `EXTERNAL` "for a mechanical reason rather than a
@@ -289,6 +319,15 @@ blast radius on that side is bounded and recoverable. It is not good enough
 against assertions, and rule 3 below is what keeps it away from them.
 
 ### 2a. Supersedable is an allow-list of `OBSERVED` and `INFERRED`
+
+> **Amended by ADR-0121 (2026-08-09).** The first of the two fold refusals below
+> — any fold onto a `USER_ASSERTED` target — now admits one exception: an
+> *agreeing* `REINFORCE` from a `USER_ASSERTED` proposal, which ADR-0121 §4 makes
+> write the target's own content back at the target's own id. The refusal's stated
+> reason ("the write replaces what the user told us") is what grants the
+> exception rather than what resists it. It stays keyed on the records, and it is
+> verified at the ingestor as this section requires. Everything else here is in
+> force, including the `EXTERNAL` refusal and the allow-list shape.
 
 The rule tests membership of those two sources, **not** `is not USER_ASSERTED`.
 Both readings agree on every source ADR-0005 §2 defines except `EXTERNAL`, which

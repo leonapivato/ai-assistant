@@ -2,6 +2,39 @@
 
 - Status: Partially superseded by ADR-0086 (§1's and §5a's rule that a `REINFORCE` retains both records' `evidence`)
 - Date: 2026-07-22
+- Amended: 2026-08-09 by ADR-0121 — **§5b's conformance predicate is narrowed by
+  one exception in its first disjunct; §7's filed question is answered.** §5b
+  states the obligation "so it cannot be paraphrased into something broader": a
+  fold "must raise `MemoryStoreError` and write nothing when
+  `target.provenance.source is USER_ASSERTED`, **or** when
+  `incoming.provenance.source is USER_ASSERTED` **and**
+  `target.provenance.source is EXTERNAL`".
+  [ADR-0121](0121-an-agreeing-restatement-is-ruled-agreement-not-conflict.md) §5
+  permits one fold the first disjunct refuses — a `REINFORCE` from a
+  `USER_ASSERTED` proposal that *agrees* with a `USER_ASSERTED` target under
+  ADR-0121 §1, verified at the writer rather than trusted from the ruling — so a
+  suite pinning the disjunct as written would now refuse a permitted fold, which
+  is the contract-widening mistake §5b itself names. **The second disjunct is
+  untouched**, and ADR-0121 §3 keeps `EXTERNAL` out of the reinforce-safe class
+  for ADR-0092 §5's reason unchanged.
+
+  **What stands.** §5b's argument that the refusals are contract rather than
+  tuning, and that "a safety property enforced at one seam and not at the next one
+  out is not enforced", is what makes ADR-0121 §5 state the exception as a
+  `MemoryWriter` obligation and §6 require the canonical fake to carry it. §3's
+  "`_refuse_unsafe_fold` stays exactly where it is and stays keyed on the records"
+  stands: the exception reads both records' `kind`, `content` and `source`, never
+  the relation. §1's definition of `REINFORCE` — "the incoming record agrees with
+  the target and strengthens it" — is untouched and is ADR-0121 §8's whole reason
+  for adding no seventh `MemoryDecisionKind`. §5a's latitude ("which content wins,
+  how confidence combines, `last_updated` — is unasserted") is what leaves
+  ADR-0121 §4's fold rule inside `memory`. And **§7's filed question is
+  discharged** — "Whether `DefaultMemoryPolicy` rule 5 should supersede in some
+  cases … a policy-lane question that this vocabulary makes askable" — answered in
+  its mirror image by ADR-0121: rule 3 sometimes reinforces. ADR-0121 §9 applies
+  ADR-0070 §1's test and records this ruling; the `Status` line is unchanged
+  because ADR-0082 §2 puts the record in this note alone on a line led by
+  `Partially superseded by`. Refs #862, #863.
 - Partially superseded: 2026-08-01 by ADR-0086 — **two clauses: §1's and §5a's
   statement that a `REINFORCE` retains *both* records' `evidence` no longer holds
   at the boundary.**
@@ -400,6 +433,14 @@ survived #112 untouched.
 suite, which is the divergence §Consequences already requires it to close.
 
 ### 5b. The two refusals become `MemoryWriter` obligations as well
+
+> **Amended by ADR-0121 (2026-08-09).** The predicate's **first** disjunct now
+> carries one exception: a `REINFORCE` from a `USER_ASSERTED` proposal that
+> *agrees* with a `USER_ASSERTED` target under ADR-0121 §1 is permitted, and a
+> conforming writer recomputes that predicate rather than trusting the ruling.
+> The second disjunct — a `USER_ASSERTED` proposal onto an `EXTERNAL` target, as
+> narrowed to `REINFORCE` by ADR-0045 §5b — is untouched, as is everything this
+> section says about why the refusals are contract rather than tuning.
 
 `_refuse_unsafe_fold`'s two refusals — no fold of any kind onto a
 `USER_ASSERTED` target, no `USER_ASSERTED` proposal onto an `EXTERNAL` one — join
