@@ -218,7 +218,9 @@ pattern refuses those — a name is not a licence to carry a payload — and §3
 the *conversion* total rather than the pattern lax, so the refused name costs the
 trace its class and never costs the trace itself. Failing construction there
 would be the worst available outcome: the record of the fault destroyed by the
-fault's own name, before §5's subordination could catch anything.
+fault's own name, before §5's subordination could catch anything. Reading the
+name is guarded for the same reason — a metaclass can make `__name__` raise, and
+a guarantee with an exotic hole in it is not the guarantee §3 states.
 
 **And the refused name is not diverted to the log, which is the trap in the
 obvious fix.** Sending it there "for debuggability" would put into a Tier-2 log
@@ -1027,9 +1029,20 @@ def fault_class_of(error: BaseException) -> str:
     The rejected name is **dropped here and goes nowhere**, log included: it was
     refused precisely because it may carry Tier 1 content, and ADR-0004 §5 rules
     that logs are Tier 2 only.
+
+    **Reading the name is itself guarded**, because "total" has to mean it: a
+    metaclass may override ``__getattribute__`` for ``"__name__"`` and raise, or
+    return something that is not a ``str``, and either would take the trace down
+    with the fault it was recording. ``Exception`` and not ``BaseException``, so
+    an externally delivered ``CancelledError`` is delivered onward as ADR-0060 §1
+    requires rather than silently becoming a fault class.
     """
-    name = type(error).__name__
-    return name if _FAULT_CLASS.fullmatch(name) else UNREPRESENTABLE_FAULT_CLASS
+    try:
+        name = type(error).__name__
+        representable = isinstance(name, str) and bool(_FAULT_CLASS.fullmatch(name))
+    except Exception:  # noqa: BLE001 — see below; CancelledError is not caught
+        return UNREPRESENTABLE_FAULT_CLASS
+    return name if representable else UNREPRESENTABLE_FAULT_CLASS
 
 
 def _finite(value: int | float | bool) -> int | float | bool:
