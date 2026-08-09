@@ -216,6 +216,7 @@ async def test_a_completed_read_carries_every_count_section_8_names(
     assert trace.metrics[traces.EXCLUDED_RETENTION] == 1
     assert trace.metrics[traces.EXCLUDED_WINDOW] == 1
     assert trace.metrics[traces.EXCLUDED_KIND] == 0
+    assert trace.metrics[traces.EXCLUDED_BAND] == 0
     assert trace.records[TraceRecordSet.RETURNED].ids == ("live",)
     assert trace.records[TraceRecordSet.RETURNED].total == 1
 
@@ -241,21 +242,23 @@ async def test_the_kind_predicate_is_counted_apart_from_the_other_two(
     assert trace.metrics[traces.EXCLUDED_KIND] == 1
     assert trace.metrics[traces.EXCLUDED_RETENTION] == 0
     assert trace.metrics[traces.EXCLUDED_WINDOW] == 0
+    assert trace.metrics[traces.EXCLUDED_BAND] == 0
 
 
-async def test_a_band_scoped_read_says_so_and_claims_no_band_exclusion_count(
+async def test_a_band_scoped_read_reports_a_structurally_zero_band_exclusion(
     make_store: Callable[..., SqliteMemoryStore], sink: FakeTraceSink
 ) -> None:
-    """The one of §8's four predicates this store cannot count, and why it is absent.
+    """§8's fourth predicate, and the reason its count is zero rather than large.
 
-    ADR-0113 §2 binds the band *before* the ranking cut, so an out-of-band record
-    is never a candidate and the post-KNN pass never evaluates a band predicate at
-    all. §3 rules that an unobserved quantity is **absent, never zero**, and §8
-    asks for what "the read reached" — so no ``excluded_band`` of any spelling is
-    reported, and the count of bands the caller asked for stands in its place.
+    ADR-0113 §2 binds the band *before* the ranking cut, so the out-of-band record
+    below never becomes a candidate — which the candidate count says outright — and
+    the post-KNN pass has none to drop. The zero is therefore a true statement
+    about the set the same trace reports, and not a count of what the band kept out
+    of the store's answer; that population is filtered inside the KNN and could
+    only be counted by a second vector search.
 
-    Asserted over the whole metric mapping rather than one guessed key, because
-    the claim is that no band exclusion is reported at all.
+    ``bands`` beside it is what carries the information the zero cannot: whether a
+    band predicate was bound at all.
     """
     store = make_store()
     await store.add(_semantic("inferred", "the weekly planning meeting"))
@@ -269,19 +272,25 @@ async def test_a_band_scoped_read_says_so_and_claims_no_band_exclusion_count(
     trace = _only(sink, TraceKind.RETRIEVAL)
     assert trace.metrics[traces.BANDS] == 1
     assert trace.metrics[traces.CANDIDATES] == 1, "an out-of-band row was never a candidate"
-    assert [key for key in trace.metrics if "band" in key] == [traces.BANDS]
+    assert trace.metrics[traces.EXCLUDED_BAND] == 0
 
 
-async def test_an_unscoped_read_reports_no_band_count_either(
+async def test_an_unscoped_read_reports_no_band_restriction(
     make_store: Callable[..., SqliteMemoryStore], sink: FakeTraceSink
 ) -> None:
-    """``bands=None`` restricted nothing, so there is no restriction to report."""
+    """``bands=None`` restricted nothing, so there is no restriction to report.
+
+    The exclusion count still appears, because the pass still ran — the same
+    reading that gives ``excluded_kind`` a zero on a read that named no kinds.
+    """
     store = make_store()
     await store.add(_semantic("live", "the weekly planning meeting"))
 
     await store.search("weekly planning meeting", limit=5)
 
-    assert traces.BANDS not in _only(sink, TraceKind.RETRIEVAL).metrics
+    trace = _only(sink, TraceKind.RETRIEVAL)
+    assert traces.BANDS not in trace.metrics
+    assert trace.metrics[traces.EXCLUDED_BAND] == 0
 
 
 async def test_a_short_circuited_read_still_traces_and_counts_no_candidates(
@@ -304,7 +313,16 @@ async def test_a_short_circuited_read_still_traces_and_counts_no_candidates(
     assert trace.metrics[traces.LIMIT] == 5
     assert trace.metrics[traces.RETURNED] == 0
     assert traces.CANDIDATES not in trace.metrics
-    assert traces.EXCLUDED_WINDOW not in trace.metrics
+    # All four exclusion counts stand or fall together with the pass that
+    # produces them, which is what keeps the band's structural zero from meaning
+    # "no candidate set existed" (ADR-0119 §3).
+    for key in (
+        traces.EXCLUDED_KIND,
+        traces.EXCLUDED_RETENTION,
+        traces.EXCLUDED_WINDOW,
+        traces.EXCLUDED_BAND,
+    ):
+        assert key not in trace.metrics
     assert trace.records[TraceRecordSet.RETURNED].ids == ()
     assert trace.records[TraceRecordSet.RETURNED].total == 0
 
@@ -722,6 +740,7 @@ def test_every_decision_kind_has_a_declared_disposition() -> None:
         traces.EXCLUDED_KIND,
         traces.EXCLUDED_RETENTION,
         traces.EXCLUDED_WINDOW,
+        traces.EXCLUDED_BAND,
         traces.BANDS,
         traces.PROPOSALS,
         traces.COVERAGE_DECLARED,
