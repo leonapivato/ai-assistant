@@ -212,7 +212,15 @@ async def test_a_vdirsyncer_singlefile_collection_is_read(tmp_path: Path) -> Non
         "Morning standup",
         "Design review",
     ]
-    assert not any("555-0100" in content or "passcode" in content for content in contents)
+    # Every distinctive token of the `DESCRIPTION`, the bare access code included.
+    # Asserting only on the formatted number and the word "passcode" would pass
+    # against a renderer that reformatted one and dropped the other while still
+    # emitting `9999` — which is the half of that line that actually opens a door.
+    assert not any(
+        token in content
+        for content in contents
+        for token in ("555-0100", "5550100", "passcode", "9999", "Dial-in")
+    )
     assert not any(
         "09a238f056952a77" in proposal.proposed.id or "198f21b93d797cf1" in proposal.proposed.id
         for proposal in reading.proposals
