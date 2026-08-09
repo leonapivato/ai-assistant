@@ -180,10 +180,11 @@ clause's `PREFERENCE` arm exists to keep consistent with.
 > before it calls the `FeedbackProcessor`, and the intent decides how. On
 > `FeedbackKind.PREFERENCE` the resolution is `MemoryKind.PREFERENCE` and **no
 > store read is issued**. On `FeedbackKind.CORRECTION` it is **one** ranked
-> `MemoryStore.search` over the feedback's own `content`, unscoped by kind and
-> unscoped by band: the resolved kind is the kind of the best-ranked returned
-> record whose kind the processor can mint, and where the search returns no such
-> record, §5 governs. The search resolution applies **no similarity threshold and
+> `MemoryStore.search` over the feedback's own `content`, **scoped to the kinds the
+> processor can mint** and unscoped by band: the resolved kind is the best-ranked
+> returned record's, and where the search returns nothing, §5 governs. Its `limit`
+> is the loop's own checked tuning knob, distinct from the turn's
+> `retrieval_limit`. The search resolution applies **no similarity threshold and
 > makes no ruling**: it selects a kind and nothing else, and whether a
 > contradiction exists remains `MemoryIngestor`'s and the `MemoryPolicy`'s question
 > alone.
@@ -256,16 +257,39 @@ whose target has just gone, finds no conflict, and is stored as new — again th
 pre-existing outcome, in a better drawer. Nothing is written on the basis of the
 resolution, so there is nothing for a race to corrupt.
 
-**The candidate set is bounded by what the processor can mint, and this is not an
-optimisation.** ADR-0009 §6 defers `PROCEDURAL` and `EPISODIC` correction targets,
-and `_to_record` returns no proposal for them. A resolution free to select
-`EPISODIC` — the store is full of episodes, and an episode recording the user
-ordering espresso is a plausible best match for a correction about espresso —
-would produce an event the processor answers with an empty sequence, and the
-user's correction would vanish *entirely*, which is strictly worse than the defect
-this ADR fixes. Restricting the candidates to the mintable kinds is what forecloses
-that, and it self-heals: when ADR-0009 §6's deferral is taken up, the set widens
-with it and this clause needs no amendment.
+**The candidate set is bounded by what the processor can mint, and the bound is
+the `kinds` argument rather than a filter over the answer.** ADR-0009 §6 defers
+`PROCEDURAL` and `EPISODIC` correction targets, and `_to_record` returns no
+proposal for them. A resolution free to select `EPISODIC` — the store is full of
+episodes, and an episode recording the user ordering espresso is a plausible best
+match for a correction about espresso — would produce an event the processor
+answers with an empty sequence, and the user's correction would vanish *entirely*,
+which is strictly worse than the defect this ADR fixes. The restriction self-heals:
+when ADR-0009 §6's deferral is taken up, the set widens with it and this clause
+needs no amendment.
+
+**Passing the restriction to `search` rather than applying it afterwards is
+load-bearing**, and the reason is where the predicate binds. ADR-0113 §2 binds the
+*band* before the ranking cut and is explicit that `kind` keeps "the post-cut
+placement ADR-0045 §6 and ADR-0007 ratified for them" — so a page fetched unscoped
+is a page of whatever ranked highest, and a store holding many topically similar
+episodes returns them and nothing mintable, whereupon §5 files a correction whose
+target was sitting just below the cut. Passing `kinds` does not move the predicate
+before the cut, but it puts the resolution on exactly the footing
+`MemoryIngestor._detect_conflicts` already stands on: the store's own over-fetch
+pads for the post-cut kind filter, which is how the conflict probe finds its target
+today.
+
+**What that leaves open is retrieval's known non-exhaustiveness, and this ADR does
+not claim to close it.** `_detect_conflicts` states the same limit for the same
+reason — it "makes no claim that retrieval is exhaustive", and "what it never
+surfaced is invisible here", a `MemoryStore` obligation filed as issue #457. A
+correction whose target ranks below the resolution's reach resolves by §5 and lands
+as it does today, so the residue is bounded by the behaviour this ADR replaces
+rather than added to it — but it is a residue, not a guarantee, and a §10 test
+pins it as one. Closing it means closing #457, for the conflict probe and this read
+together; a second retrieval operation invented here would be a `MemoryStore`
+contract decision taken inside a lane that is not deciding `MemoryStore`.
 
 **The read is traced for free and discloses nothing.** ADR-0119 §8's `RETRIEVAL`
 emitter is inside the store, so the resolution's search appears in the trace stream
@@ -313,8 +337,8 @@ found by hand.
 
 ### 5. An unresolvable correction is a free-standing assertion, and lands as `SEMANTIC`
 
-> **Normative.** Where §3's correction arm searches and returns no candidate of a
-> mintable kind, the resolved kind is `MemoryKind.SEMANTIC`. This governs that arm
+> **Normative.** Where §3's correction arm searches and its read returns nothing,
+> the resolved kind is `MemoryKind.SEMANTIC`. This governs that arm
 > alone and is never reached from §3's `PREFERENCE` arm, which issues no search.
 > The feedback is never dropped,
 > never refused, and never held for a question on this ground.
@@ -495,8 +519,13 @@ The implementation is a separate lane, briefed after this ADR merges (golden rul
   `PREFERENCE` and issue no search. An outcome-only test passes here by accident
   whenever the store happens to hold nothing.
 - **A test for §3's mintable-kind restriction** where the best-ranked candidate
-  overall is an `EpisodicMemory`: the correction must still land, in the
-  best-ranked *mintable* drawer or §5's fallback, and must not vanish.
+  overall is an `EpisodicMemory`: the correction must resolve to the best-ranked
+  *mintable* drawer, and must not vanish.
+- **A test pinning the residue, not hiding it** (§3): a store crowded with
+  higher-ranked non-mintable records beyond the resolution's reach resolves by §5
+  and lands as `SEMANTIC`. It is asserted as the *known* outcome, cited to #457,
+  so a later reader finds the boundary recorded rather than discovering it in
+  another QA run.
 - **A test for §5's fallback** on an empty store, and **for §4** where candidates
   span both mintable kinds.
 - **A test that a failing resolution read propagates** (§3): a store whose
@@ -521,6 +550,9 @@ The implementation is a separate lane, briefed after this ADR merges (golden rul
 - **The cross-drawer residue** §8 records: one correction still resolves to one
   drawer. Reopening it means reopening §8's refusal, with the four costs it
   states.
+- **Retrieval's reach.** A target ranked below what one read surfaces is not found
+  here any more than it is found by the conflict probe; that is issue #457's, it
+  is stated in §3 rather than papered over, and it is neither closed nor widened.
 - **ADR-0009 §6's deferrals.** `PROCEDURAL` and `EPISODIC` correction targets stay
   deferred, and §3's candidate set is written to widen with them rather than to
   outlive them.
