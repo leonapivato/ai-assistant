@@ -494,10 +494,12 @@ the artifact when the passphrase cannot be shown is the fail-closed form.
 
 ### 6. The artifact carries a manifest, and it carries no Tier 0
 
-> **Normative.** The artifact contains a manifest recording: the artifact format
-> version; the instant the backup was taken; the project version that wrote it; and
-> for each copied file its name, its byte length and a SHA-256 digest of its
-> contents.
+> **Normative.** The artifact contains a manifest as a reserved archive member,
+> named so that it cannot collide with any data-directory-relative path and never
+> counted among the copied files, recording: the artifact format version; the
+> instant the backup was taken; the project version that wrote it; and for each
+> copied file its data-directory-relative path, its byte length and a SHA-256 digest
+> of its contents.
 
 > **Normative.** The manifest carries no record content, no record identifier, no
 > subject and no correlation identifier.
@@ -668,8 +670,12 @@ taking no lock at all discharges that completely rather than by a qualification.
 > resolves outside the staging directory. It creates no symbolic link, no device and
 > no hard link, and follows none while materialising.
 
+> **Normative.** Restore reads the manifest from its reserved member and never
+> materialises that member. The manifest is not a restored file and is not a member
+> of any set compared below.
+
 > **Normative.** After materialising and before §7's publication, restore verifies
-> that the set of regular files present under the staging directory equals the
+> that the set of regular files materialised under the staging directory equals the
 > manifest's set exactly; that each file's length and SHA-256 digest equal the
 > manifest's; and that every restored SQLite database passes SQLite's own integrity
 > check. Any failure is a refusal under §7's cleanup clause.
@@ -684,6 +690,18 @@ success would be asserting a compatibility nobody established — so a greater
 format version is refused. An older or equal one is accepted, because bringing a
 store forward is a job the system already owns and duplicating it here would mean
 two implementations of it that can disagree.
+
+**The manifest is archive metadata, not a restored file, and saying so is what
+stops the equality check eating itself.** The manifest travels inside the same
+`tar` stream as everything else, so a rule that treated it as an ordinary member
+would demand it either list itself — a digest over bytes that are not final until
+the digest is in them — or be absent from its own set while still landing in the
+staging directory, which makes the two sets differ on every artifact. Both readings
+refuse every backup ever taken. Reserving the member, parsing it rather than
+materialising it, and defining the compared set as the copied files only is the
+whole of the reconciliation; the reserved name is constrained so that no
+data-directory-relative path can collide with it, because a collision would put a
+real file and the metadata in the same slot.
 
 **The set check can be an exact equality because §7 leaves nothing else in the
 staging directory to except.** Every file there was put there by this run out of the
