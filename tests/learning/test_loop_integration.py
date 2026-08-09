@@ -19,13 +19,16 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.learning import RuleBasedFeedbackProcessor
 from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
+from ai_assistant.testing import FakeTraceSink
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 async def test_feedback_becomes_a_reusable_memory() -> None:
     store = InMemoryMemoryStore()
-    ingestor = MemoryIngestor(store=store, policy=DefaultMemoryPolicy())
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=DefaultMemoryPolicy()
+    )
     processor = RuleBasedFeedbackProcessor(id_factory=lambda: "pref-1")
 
     # 1. The user gives explicit feedback.

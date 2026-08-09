@@ -30,6 +30,7 @@ from ai_assistant.models import HashingEmbedder
 from ai_assistant.service import datadir, reembed
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
+from ai_assistant.testing import FakeTraceSink
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -62,7 +63,9 @@ def settings(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
 async def _seed(data_dir: Path, count: int = 2) -> None:
     """Write a store tagged with an embedder the configured one does not match."""
     store = SqliteMemoryStore(
-        path=data_dir / "memory.db", embedder=HashingEmbedder(dimensions=_SEEDED)
+        traces_sink=FakeTraceSink(),
+        path=data_dir / "memory.db",
+        embedder=HashingEmbedder(dimensions=_SEEDED),
     )
     try:
         for index in range(count):
@@ -122,7 +125,9 @@ def test_a_dry_run_changes_nothing(
 def test_a_store_already_on_the_configured_embedder_is_reported_as_done(
     settings: Settings, data_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    store = SqliteMemoryStore(path=data_dir / "memory.db", embedder=HashingEmbedder())
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=data_dir / "memory.db", embedder=HashingEmbedder()
+    )
     store.close()
 
     code = reembed.main([])

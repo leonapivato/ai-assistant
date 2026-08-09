@@ -38,7 +38,7 @@ from ai_assistant.core.types import (
     Provenance,
 )
 from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
-from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryWriter
+from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryWriter, FakeTraceSink
 
 if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
@@ -90,7 +90,7 @@ def _fixed_now() -> datetime:
 
 
 def _build_ingestor(store: MemoryStore, policy: MemoryPolicy, now: Clock) -> MemoryWriter:
-    return MemoryIngestor(store=store, policy=policy, now=now)
+    return MemoryIngestor(traces_sink=FakeTraceSink(), store=store, policy=policy, now=now)
 
 
 def _build_fake(store: MemoryStore, policy: MemoryPolicy, now: Clock) -> MemoryWriter:

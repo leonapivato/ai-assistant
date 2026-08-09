@@ -16,6 +16,7 @@ import pytest
 from memory_writer_contract import MemoryWriterContract, WriterFactory
 
 from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
+from ai_assistant.testing import FakeTraceSink
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -46,12 +47,26 @@ class TestMemoryIngestorContract(MemoryWriterContract):
                 seams["id_factory"] = id_factory
             if conflict_limit is not None:
                 seams["conflict_limit"] = conflict_limit
-            return MemoryIngestor(store=store, policy=policy, now=_fixed_now, **seams)
+            # A sink per writer, and one the suite never sees: ADR-0119 §7 makes it
+            # a required constructor argument, and the shared suite is deliberately
+            # not asked to assert that anything is emitted — emission is a property
+            # of the wired deployment, not of the ``MemoryWriter`` contract this
+            # suite is about.
+            return MemoryIngestor(
+                store=store,
+                policy=policy,
+                traces_sink=FakeTraceSink(),
+                now=_fixed_now,
+                **seams,
+            )
 
         return build
 
     @pytest.fixture
     def writer(self) -> MemoryWriter:
         return MemoryIngestor(
-            store=InMemoryMemoryStore(now=_fixed_now), policy=DefaultMemoryPolicy(), now=_fixed_now
+            traces_sink=FakeTraceSink(),
+            store=InMemoryMemoryStore(now=_fixed_now),
+            policy=DefaultMemoryPolicy(),
+            now=_fixed_now,
         )

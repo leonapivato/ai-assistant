@@ -45,6 +45,7 @@ from ai_assistant.memory.reembed import (
     ReembedPlan,
 )
 from ai_assistant.models import HashingEmbedder
+from ai_assistant.testing import FakeTraceSink
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -88,7 +89,9 @@ def _record(
 
 async def _seed(path: Path, records: Sequence[MemoryRecord], *, dimensions: int = _OLD) -> None:
     """Write ``records`` into a store tagged with the ``dimensions``-wide embedder."""
-    store = SqliteMemoryStore(path=path, embedder=HashingEmbedder(dimensions=dimensions))
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=dimensions)
+    )
     try:
         for record in records:
             await store.add(record)
@@ -163,7 +166,7 @@ async def test_a_store_built_by_another_embedder_is_re_embedded_and_opens(tmp_pa
     assert _meta(store) == {"embedding_model": target.model_id, "dimensions": str(_NEW)}
     # The store the refusal blocked now opens against the new embedder, which is
     # the whole point of the migration (#425).
-    opened = SqliteMemoryStore(path=store, embedder=target)
+    opened = SqliteMemoryStore(traces_sink=FakeTraceSink(), path=store, embedder=target)
     try:
         assert {record.id for record in await opened.export()} == {"a", "b"}
         assert [record.id for record in await opened.search("espresso", limit=1)] == ["a"]
@@ -195,7 +198,9 @@ async def test_the_pre_migration_store_is_retained_and_still_readable(tmp_path: 
     assert backup.is_file()
     # Retained means *usable*: it still opens against the embedder that wrote it,
     # which is what makes it a way back rather than a souvenir (ADR-0104 §3).
-    old = SqliteMemoryStore(path=backup, embedder=HashingEmbedder(dimensions=_OLD))
+    old = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=backup, embedder=HashingEmbedder(dimensions=_OLD)
+    )
     try:
         assert [record.id for record in await old.export()] == ["a"]
     finally:
@@ -285,7 +290,7 @@ async def test_a_legacy_store_without_the_later_columns_migrates(tmp_path: Path)
     assert rows[0][0] is not None
     assert rows[0][1] is None
     assert rows[0][2] is None
-    opened = SqliteMemoryStore(path=store, embedder=target)
+    opened = SqliteMemoryStore(traces_sink=FakeTraceSink(), path=store, embedder=target)
     try:
         assert [record.id for record in await opened.export()] == ["a"]
     finally:

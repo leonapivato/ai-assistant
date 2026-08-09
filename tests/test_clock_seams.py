@@ -165,7 +165,9 @@ async def _in_memory_store(now: Clock) -> None:
 
 
 async def _sqlite_store(now: Clock) -> None:
-    store = SqliteMemoryStore(path=":memory:", embedder=FakeEmbedder(), now=now)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=":memory:", embedder=FakeEmbedder(), now=now
+    )
     await store.get("m1")
 
 
@@ -173,6 +175,7 @@ async def _ingestor(now: Clock) -> None:
     # STORE_TEMPORARY is the ruling whose expiry stamp reads the clock, and it
     # reaches the store through `model_copy(update=...)`, past every validator.
     await MemoryIngestor(
+        traces_sink=FakeTraceSink(),
         store=InMemoryMemoryStore(now=lambda: _AWARE),
         policy=FakeMemoryPolicy(MemoryDecisionKind.STORE_TEMPORARY),
         now=now,

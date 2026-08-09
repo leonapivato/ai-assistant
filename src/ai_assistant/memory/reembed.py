@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
     from ai_assistant.core.protocols import Embedder
-    from ai_assistant.core.types import Embedding, MemoryRecord
+    from ai_assistant.core.types import Embedding, EvaluationTrace, MemoryRecord
 
 #: Appended to the live store's name for the store being built beside it. A
 #: sibling rather than a temporary directory because ``os.replace`` is atomic only
@@ -415,6 +415,26 @@ def _require_rollback_journal(conn: sqlite3.Connection, store: Path) -> None:
         )
 
 
+class _DiscardedTraces:
+    """The sink for a store that is opened to run DDL and closed again.
+
+    Structurally satisfies :class:`~ai_assistant.core.protocols.TraceSink`.
+    ADR-0119 §7 makes a sink a required constructor argument so that "a
+    composition that omits it does not type-check", against the failure where "an
+    unwired emitter produces no traces, and no traces is indistinguishable from no
+    events". That failure needs an emitter with events to lose;
+    :meth:`Reembedder._prepare_work`'s store never serves a read, so it has none.
+    Deliberately module-private, so nothing outside this file can wire it.
+    """
+
+    async def emit(self, trace: EvaluationTrace) -> None:
+        """Discard ``trace``.
+
+        Args:
+            trace: The trace no read produced, since no read runs on this store.
+        """
+
+
 class Reembedder:
     """Rebuilds one memory store's vectors against a new embedder (ADR-0104).
 
@@ -583,6 +603,14 @@ class Reembedder:
         it and closing it again, rather than by repeating its DDL here. That is
         the point: the destination is then whatever the current schema is, meta
         included, and it stays that way when the schema next changes.
+
+        **The sink it is handed is a discard**, and that is honest rather than a
+        loophole in ADR-0119 §7's required-constructor rule. This store is opened
+        to run DDL and closed on the next expression; it never serves a ``search``,
+        so it can emit nothing and there is nothing for a sink to receive. Wiring
+        a real one would mean threading a ``TraceSink`` through
+        :func:`~ai_assistant.app.build_reembedder` and the offline migration entry
+        point to reach a code path that cannot use it.
         """
         if resumed:
             conn = _connect(self._work)
@@ -594,7 +622,9 @@ class Reembedder:
             finally:
                 conn.close()
         _discard(self._work)
-        SqliteMemoryStore(path=self._work, embedder=self._embedder).close()
+        SqliteMemoryStore(
+            path=self._work, embedder=self._embedder, traces_sink=_DiscardedTraces()
+        ).close()
         conn = _connect(self._work)
         try:
             with transaction(conn, "start a re-embedding", error=MemoryStoreError):

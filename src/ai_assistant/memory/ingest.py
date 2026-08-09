@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import isfinite
-from typing import TYPE_CHECKING, assert_never
+from typing import TYPE_CHECKING, Final, assert_never
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
@@ -40,15 +41,18 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     Provenance,
+    TraceKind,
+    TraceRecordSet,
     Validity,
     band_of,
 )
+from ai_assistant.memory import traces
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
+    from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, TraceSink
     from ai_assistant.core.types import (
         MemoryDecision,
         MemoryRecord,
@@ -1091,6 +1095,120 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> Me
     return incoming.model_copy(update={"id": target.id, "provenance": provenance})
 
 
+@dataclass(frozen=True, slots=True)
+class _Applied:
+    """What applying one ruling actually wrote.
+
+    ``MemoryIngestResult`` carries the id left *live* and nothing about what a
+    ``SUPERSEDE`` retired to leave it there, because ADR-0078 §4 gave it the
+    conflicts the policy ruled against rather than the subset the applier closed.
+    ADR-0119 §8 wants that subset "so a correction measure can tell a retired id
+    from a reinforced one without re-deriving it", so it travels here — inside the
+    subsystem, on no contract.
+
+    Attributes:
+        record_id: The id the ruling left live, or ``None`` if nothing was stored.
+        superseded: Every id a ``SUPERSEDE`` closed the window of — the whole
+            retirement set (ADR-0050 §1), not just the ruling's ``target_id``.
+    """
+
+    record_id: str | None
+    superseded: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _Ingested:
+    """One proposal's public result beside what the trace needs and it lacks."""
+
+    result: MemoryIngestResult
+    superseded: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _Reconciled:
+    """One crossing of the write seam, whatever member it came in through.
+
+    Attributes:
+        ingested: One entry per proposal, in the order they were ingested.
+        retired: The ids ADR-0110's reconciliation closed, or ``None`` where no
+            reconciliation ran at all — an uncovered reading, or a bare
+            :meth:`MemoryIngestor.ingest`. ADR-0119 §3 makes that distinction
+            load-bearing: an absent ``TraceRecordSet`` key means the set was not
+            observed, an empty one means it was observed and was empty, and "an
+            emitter may not substitute one for the other".
+    """
+
+    ingested: tuple[_Ingested, ...]
+    retired: tuple[str, ...] | None = None
+
+
+#: Which ``TraceRecordSet`` a ruling's live id belongs under (ADR-0119 §8), or
+#: ``None`` for a ruling that stores nothing. A ``SUPERSEDE``'s live id is a
+#: **written** record — the correction is installed fresh at a minted id
+#: (ADR-0045 §4) — and what it displaced travels separately as
+#: :attr:`_Applied.superseded`. Totality over ``MemoryDecisionKind`` is asserted by
+#: test, so a ruling added later fails loudly rather than losing its ids.
+_WRITE_DISPOSITIONS: Final[Mapping[MemoryDecisionKind, TraceRecordSet | None]] = {
+    MemoryDecisionKind.ACCEPT: TraceRecordSet.WRITTEN,
+    MemoryDecisionKind.STORE_TEMPORARY: TraceRecordSet.WRITTEN,
+    MemoryDecisionKind.SUPERSEDE: TraceRecordSet.WRITTEN,
+    MemoryDecisionKind.REINFORCE: TraceRecordSet.REINFORCED,
+    MemoryDecisionKind.REJECT: None,
+    MemoryDecisionKind.ASK_USER: None,
+}
+
+
+def _reconciliation_reading(reconciled: _Reconciled) -> traces.Reading:
+    """Read one completed crossing of the write seam into its trace (ADR-0119 §8).
+
+    **Every decision kind gets a key, including the ones that did not occur.**
+    §3's observation rule says an absent key means *not observed*, and a completed
+    ingest observed every kind: five zeros and a one is what "this proposal was
+    accepted" looks like when the alternative reading of a missing key is
+    "unobserved". The fault path omits them all, which is the same rule from the
+    other side.
+
+    Args:
+        reconciled: What the crossing produced.
+
+    Returns:
+        The reading the emitter turns into a trace.
+    """
+    metrics: dict[str, int | float | bool] = dict.fromkeys(traces.DECISION_METRICS.values(), 0)
+    records: dict[TraceRecordSet, list[str]] = {
+        TraceRecordSet.WRITTEN: [],
+        TraceRecordSet.REINFORCED: [],
+        TraceRecordSet.SUPERSEDED: [],
+    }
+    for one in reconciled.ingested:
+        kind = one.result.decision.kind
+        metrics[traces.DECISION_METRICS[kind]] += 1
+        disposition = _WRITE_DISPOSITIONS[kind]
+        if disposition is not None and one.result.record_id is not None:
+            records[disposition].append(one.result.record_id)
+        records[TraceRecordSet.SUPERSEDED].extend(one.superseded)
+    if reconciled.retired is not None:
+        metrics[traces.CLOSED] = len(reconciled.retired)
+        records[TraceRecordSet.RETIRED] = list(reconciled.retired)
+    return traces.Reading(metrics=metrics, records=records)
+
+
+def _proposal_reading(ingested: _Ingested) -> traces.Reading:
+    """One bare :meth:`MemoryIngestor.ingest` read as a one-proposal crossing.
+
+    ``retired`` stays ``None``: this member runs no reconciliation, so the retired
+    set is *unobserved* rather than empty, and ADR-0119 §3 forbids substituting
+    one for the other.
+
+    Args:
+        ingested: What the one proposal produced.
+
+    Returns:
+        The reading the emitter turns into a trace.
+    """
+    return _reconciliation_reading(_Reconciled(ingested=(ingested,)))
+
+
 class MemoryIngestor:
     """Runs a proposed memory through conflict detection, policy, and storage.
 
@@ -1104,6 +1222,8 @@ class MemoryIngestor:
         *,
         store: MemoryStore,
         policy: MemoryPolicy,
+        traces_sink: TraceSink,
+        traces_now: Clock = _utcnow,
         conflict_threshold: float = _DEFAULT_CONFLICT_THRESHOLD,
         conflict_limit: int = _DEFAULT_CONFLICT_LIMIT,
         now: Clock = _utcnow,
@@ -1114,6 +1234,24 @@ class MemoryIngestor:
         Args:
             store: Where accepted memories are persisted and conflicts sought.
             policy: The deterministic policy that rules on each proposal.
+            traces_sink: Where this writer's ``MEMORY_WRITE`` traces are appended
+                (ADR-0119 §8). **Required with no default**, which §7 states as a
+                clause of its own: "a composition that omits it does not
+                type-check", because an optional sink defaults to unwired and "no
+                traces is indistinguishable from no events". A
+                :class:`~ai_assistant.core.protocols.TraceSink` and never a
+                ``TraceStore``: §7 gives an emitter the append and withholds the
+                walk.
+            traces_now: Clock the ``MEMORY_WRITE`` trace's ``occurred_at`` is
+                stamped from. **A seam of its own rather than a second reader of
+                ``now``**, because sharing one made the instrument change the work:
+                ADR-0080 §1 requires one ingest to close every window it retires on
+                a **single** clock reading, and an emitter reading first turned the
+                applier's reading into the second, moving the close instant. That
+                is precisely what ADR-0119 §5 forbids an instrument doing, and two
+                clocks is how it holds rather than how it is promised. Defaults to
+                the wall clock, so a test freezing ``now`` for the write's own
+                semantics does not thereby freeze the instant a trace records.
             conflict_threshold: Minimum retrieval score for an existing record to
                 count as conflicting with the proposal.
             conflict_limit: The **ceiling** on the conflicts one ingest resolves
@@ -1147,6 +1285,15 @@ class MemoryIngestor:
         self._conflict_threshold = conflict_threshold
         self._conflict_limit = conflict_limit
         self._clock = checked_clock(now, owner="MemoryIngestor")
+        # §3 stamps the instant on the emitter rather than on the trace store, so
+        # the trace means the write and not the append. Its own clock, for the
+        # reason ``traces_now`` documents.
+        self._traces = traces.MemoryTraces(
+            kind=TraceKind.MEMORY_WRITE,
+            sink=traces_sink,
+            now=traces_now,
+            owner="MemoryIngestor write traces",
+        )
         self._id_factory = id_factory
         # Guards the read-modify-write in `ingest` (issue #248). Constructed
         # here rather than lazily because since Python 3.10 an `asyncio.Lock`
@@ -1258,7 +1405,17 @@ class MemoryIngestor:
         # semantic desync one level up: beliefs retired over a statement that was
         # never stored.
         observed = proposal.model_copy(deep=True)
-        return await self._locked_ingest(observed)
+        # One crossing, one ``MEMORY_WRITE`` trace (ADR-0119 §5, §8), and the
+        # write's mode carried by the seam label. ``_locked_ingest`` is
+        # *constructed* here and not started, so the observation above is still on
+        # this coroutine's first executed line (ADR-0065).
+        ingested = await self._traces.observing(
+            traces.SEAM_INGEST,
+            self._locked_ingest(observed),
+            _proposal_reading,
+            entry={traces.PROPOSALS: 1},
+        )
+        return ingested.result
 
     async def ingest_reading(self, reading: SourceReading) -> Sequence[MemoryIngestResult]:
         """Ingest one reading's proposals, then close what its coverage warrants.
@@ -1340,27 +1497,69 @@ class MemoryIngestor:
         # One observation of the whole reading, on this coroutine's first executed
         # line — before the lock, which is the first await (ADR-0065, issue #366).
         observed = reading.model_copy(deep=True)
+        # "**A ``MemoryWriter.ingest_reading`` call is one crossing and one
+        # trace**, not one per resulting ``MemoryIngestResult``, following §5's
+        # one-crossing rule; the per-reading counts ride as metrics" (ADR-0119 §8).
+        # That is why the ingests below go through ``_locked_ingest``/``_ingest``
+        # and never through ``ingest``, which would emit a second trace apiece.
+        reconciled = await self._traces.observing(
+            traces.SEAM_INGEST_READING,
+            self._reconciled(observed),
+            _reconciliation_reading,
+            entry={
+                traces.PROPOSALS: len(observed.proposals),
+                traces.COVERAGE_DECLARED: observed.coverage is not None,
+            },
+        )
+        return [one.result for one in reconciled.ingested]
+
+    async def _reconciled(self, observed: SourceReading) -> _Reconciled:
+        """Ingest one already-observed reading's proposals and close what it warrants.
+
+        The body :meth:`ingest_reading` had before ADR-0119 put a trace around it,
+        split out so the emitter wraps the whole crossing — both arms, the
+        reconciliation included — and so the caller's ADR-0065 observation still
+        happens on its own first executed line.
+
+        Args:
+            observed: This object's own snapshot of the reading.
+
+        Returns:
+            Each proposal's outcome, and the ids the reconciliation closed — or
+            ``None`` for those where §3's second clause applies, no reconciliation
+            having run.
+        """
         if observed.coverage is None:
             # ADR-0115 §3's second clause: no reconciliation, so no read-modify-write
             # to isolate, and this member owes nothing beyond what `ingest` already
             # carries for each proposal in turn.
-            return [await self._locked_ingest(proposal) for proposal in observed.proposals]
+            return _Reconciled(
+                ingested=tuple(
+                    [await self._locked_ingest(proposal) for proposal in observed.proposals]
+                )
+            )
         async with self._lock:
-            results = [await self._ingest(proposal) for proposal in observed.proposals]
+            ingested = tuple([await self._ingest(proposal) for proposal in observed.proposals])
             # Reached only by completing the loop. A raise skips it, which is the
             # conservative direction and is why there is no `finally` here.
-            await self._close_absent(
-                source=observed.source, coverage=observed.coverage, results=results
+            retired = await self._close_absent(
+                source=observed.source,
+                coverage=observed.coverage,
+                results=[one.result for one in ingested],
             )
-            return results
+            return _Reconciled(ingested=ingested, retired=retired)
 
-    async def _locked_ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
+    async def _locked_ingest(self, proposal: MemoryUpdateProposal) -> _Ingested:
         """One proposal under the ordinary per-proposal hold.
 
         The uncovered arm of :meth:`ingest_reading` and :meth:`ingest` do the same
         thing; this is the shared tail so that neither grows a second copy of the
         lock discipline. The proposal is already this object's own snapshot at both
         call sites, so it is not copied again.
+
+        Returns:
+            The proposal's result together with the ids a ``SUPERSEDE`` retired,
+            which ADR-0119 §8 wants and ``MemoryIngestResult`` does not carry.
         """
         async with self._lock:
             return await self._ingest(proposal)
@@ -1371,7 +1570,7 @@ class MemoryIngestor:
         source: str,
         coverage: ReadCoverage,
         results: Sequence[MemoryIngestResult],
-    ) -> int:
+    ) -> tuple[str, ...]:
         """Close the windows one reading's coverage warrants (ADR-0110 §3).
 
         A reading that declared what it exhausted did not merely fail to mention a
@@ -1420,9 +1619,12 @@ class MemoryIngestor:
                 stored nothing.
 
         Returns:
-            How many windows were closed. Zero is an ordinary outcome and never a
-            failure: a reading that accounted for everything it covered closes
-            nothing, and so does one §4 suspends.
+            The ids whose windows were closed, in the order the enumeration found
+            them. Empty is an ordinary outcome and never a failure: a reading that
+            accounted for everything it covered closes nothing, and so does one §4
+            suspends. The ids are carried rather than merely counted because
+            ADR-0119 §8 puts them under ``TraceRecordSet.RETIRED``, where a
+            correction measure can tell them from a reinforcement.
 
         Raises:
             MemoryStoreError: If a close would write an unrepresentable window — an
@@ -1449,7 +1651,7 @@ class MemoryIngestor:
         # reading — because the alternative is a per-proposal correspondence rule,
         # which is a second matcher wearing a different hat.
         if any(result.record_id is None for result in results):
-            return 0
+            return ()
         present = {result.record_id for result in results}
         # One instant for the whole reconciliation, determined before any write and
         # shared by every close it performs — ADR-0080 §1's rule for one ingest,
@@ -1462,13 +1664,16 @@ class MemoryIngestor:
             )
         ]
         if not closes:
-            return 0
+            return ()
         # One write set, never a loop of `add`s (§5). A partially applied
         # reconciliation is refused for ADR-0045 §8's reason, one act over: a set of
         # retirements that half-lands is a set of beliefs retired for a reading that
         # was never fully accounted for.
         await self._store.write_atomic(closes)
-        return len(closes)
+        # Read off the batch rather than off `write_atomic`'s return, so the ids
+        # reported are the ones this reconciliation decided to close and the trace
+        # cannot drift from the write if the store's echo ever changes shape.
+        return tuple(close.record.id for close in closes)
 
     async def _absence_candidates(
         self,
@@ -1524,7 +1729,7 @@ class MemoryIngestor:
                 return candidates
             offset += _ABSENCE_PAGE
 
-    async def _ingest(self, observed: MemoryUpdateProposal) -> MemoryIngestResult:
+    async def _ingest(self, observed: MemoryUpdateProposal) -> _Ingested:
         await self._require_resolvable_evidence(observed.proposed)
         conflicts = await self._detect_conflicts(observed.proposed)
         resolved = tuple(record.id for record in conflicts)
@@ -1548,7 +1753,7 @@ class MemoryIngestor:
         # write set and before the dispatch that performs it. `SUPERSEDE`'s minted
         # destination does not exist yet and is tested in `_apply_supersede` (§2).
         _refuse_self_consuming_write(decision, observed, resolved=resolved)
-        record_id = await self._apply(decision, observed, conflicts, resolved=resolved)
+        applied = await self._apply(decision, observed, conflicts, resolved=resolved)
         # The resolved ids come back on **every** ruling (ADR-0078 §4). ADR-0028 §3
         # declined this and named the exact condition for revisiting — a consumer
         # that needs to *show* the user what a proposal contradicted — and a
@@ -1561,7 +1766,12 @@ class MemoryIngestor:
         # duplication ADR-0028 §4 deleted) or re-detecting at answer time, by which
         # point the set has moved and the user would have authorised something other
         # than what they were shown.
-        return MemoryIngestResult(decision=decision, record_id=record_id, conflicts=resolved)
+        return _Ingested(
+            result=MemoryIngestResult(
+                decision=decision, record_id=applied.record_id, conflicts=resolved
+            ),
+            superseded=applied.superseded,
+        )
 
     async def _require_resolvable_evidence(self, record: MemoryRecord) -> None:
         """Refuse a ``DERIVED`` proposal citing a record this store does not hold.
@@ -1663,7 +1873,7 @@ class MemoryIngestor:
         conflicts: list[MemoryRecord],
         *,
         resolved: tuple[str, ...],
-    ) -> str | None:
+    ) -> _Applied:
         proposed = proposal.proposed
         # Every arm below that *installs* passes its record through `_installed`
         # (ADR-0086 §2), which is what makes the bound a property of the seam
@@ -1672,11 +1882,13 @@ class MemoryIngestor:
         # result, which has already applied the same rule to the union it formed.
         match decision.kind:
             case MemoryDecisionKind.ACCEPT:
-                return await self._install(_installed(proposed))
+                return _Applied(await self._install(_installed(proposed)))
             case MemoryDecisionKind.STORE_TEMPORARY:
                 expires_at = self._expiry(decision.ttl)
-                return await self._install(
-                    _installed(proposed.model_copy(update={"expires_at": expires_at}))
+                return _Applied(
+                    await self._install(
+                        _installed(proposed.model_copy(update={"expires_at": expires_at}))
+                    )
                 )
             case MemoryDecisionKind.REINFORCE | MemoryDecisionKind.SUPERSEDE:
                 target = next((c for c in conflicts if c.id == decision.target_id), None)
@@ -1693,9 +1905,16 @@ class MemoryIngestor:
                 # correction as a new record, REINFORCE folds the two at the target's
                 # id.
                 if decision.kind is MemoryDecisionKind.SUPERSEDE:
-                    return await self._apply_supersede(
-                        _retirement_set(target, conflicts, proposal=proposal, resolved=resolved),
-                        proposed,
+                    # The whole retirement set, not the ruling's `target_id`:
+                    # ADR-0050 §1 / #244 retire every supersedable conflict the
+                    # correction contradicts, and ADR-0119 §8 wants the ids that
+                    # were actually closed rather than the one that was named.
+                    retiring = _retirement_set(
+                        target, conflicts, proposal=proposal, resolved=resolved
+                    )
+                    return _Applied(
+                        await self._apply_supersede(retiring, proposed),
+                        tuple(record.id for record in retiring),
                     )
                 # The clock reading is the fold's, taken here rather than inside
                 # `_merge`: `_now_utc` translates a bad reading into this
@@ -1703,9 +1922,11 @@ class MemoryIngestor:
                 # helper has no error class to raise. It also keeps `_merge` a pure
                 # function of its arguments, which is what makes ADR-0109 §5's
                 # selection deterministic under test.
-                return await self._fold(_installed(_merge(target, proposed, now=self._now_utc())))
+                return _Applied(
+                    await self._fold(_installed(_merge(target, proposed, now=self._now_utc())))
+                )
             case _:  # REJECT, ASK_USER — nothing is written.
-                return None
+                return _Applied(None)
 
     async def _install(self, record: MemoryRecord) -> str:
         """Write ``record`` as a **new** record, refusing a colliding id.

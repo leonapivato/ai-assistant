@@ -80,6 +80,7 @@ from aged_store import (
 from ai_assistant.core.types import MemoryKind
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.memory.sqlite_store import _RESULT_OVERFETCH, _VEC_KNN_MAX_K
+from ai_assistant.testing import FakeTraceSink
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -163,6 +164,7 @@ def make_store(tmp_path: Path) -> Iterator[Callable[[str], SqliteMemoryStore]]:
 
     def _make(name: str) -> SqliteMemoryStore:
         store = SqliteMemoryStore(
+            traces_sink=FakeTraceSink(),
             path=tmp_path / f"{name}.db",
             embedder=ClusteredEmbedder(),
             now=lambda: _INSTANTS.now,
