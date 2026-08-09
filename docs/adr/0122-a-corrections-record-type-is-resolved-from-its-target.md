@@ -15,6 +15,14 @@
   `scripts/ship.sh` fires its own architecture requirement on a diff touching
   `core/protocols.py` or `core/types.py`, which this diff does not. Both lenses are
   therefore run deliberately, as ADR-0117's own header records for the same reason.
+  **Both ran against this decision while it was `Proposed`** — adversarial through
+  the rounds that produced §3's intent gate, its `kinds` scoping and its fixed
+  resolution set, and architecture through the round that reclassified the ADR-0009
+  record as a partial supersession, each returning to APPROVE on the proposed text.
+  This `Accepted` line is the ratifying edit ADR-0070 §1 permits — the one that
+  "finalises the current decision rather than changing a past one" — and it records
+  that outcome rather than pre-empting it. Every merged ADR in this corpus carries
+  it, and the branch history carries the `Proposed` rounds it stands on.
 - **Partially supersedes [ADR-0009](0009-learning-model.md) §1**, in the scope §1
   and §3 below name and in no other: §1's first bullet requires the *caller* to
   carry the target kind, and that requirement is replaced — `memory_kind` becomes
