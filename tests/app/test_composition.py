@@ -16,11 +16,18 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import ModuleType
+from typing import TYPE_CHECKING
 
 import pytest
 
 import ai_assistant
-from ai_assistant.app import build_engine, build_reembedder, ensure_model_credentials
+from ai_assistant.app import (
+    Composition,
+    build_composition,
+    build_engine,
+    build_reembedder,
+    ensure_model_credentials,
+)
 from ai_assistant.app import composition as composition_module
 from ai_assistant.context import AssemblingContextProvider, CalendarContextSource
 from ai_assistant.core.config import EmbedderKind, Settings, load_settings
@@ -33,18 +40,40 @@ from ai_assistant.core.errors import (
     SourceNotGrantedError,
     TraceStoreError,
 )
-from ai_assistant.core.types import GrantScope, Reversibility, RiskLevel, TraceKind
+from ai_assistant.core.types import (
+    BeliefBand,
+    GrantScope,
+    MemoryKind,
+    MemoryRecord,
+    MemorySource,
+    MemoryUpdateProposal,
+    Provenance,
+    Reversibility,
+    RiskLevel,
+    SemanticMemory,
+    TraceKind,
+)
 from ai_assistant.evaluation import SqliteTraceStore
 from ai_assistant.learning import ModelBackedObserver
-from ai_assistant.memory import MemoryIngestor, SqliteDeferralStore, SqliteMemoryStore
+from ai_assistant.memory import (
+    DefaultMemoryPolicy,
+    MemoryIngestor,
+    SqliteDeferralStore,
+    SqliteMemoryStore,
+)
 from ai_assistant.memory import deferral_store as deferral_store_module
 from ai_assistant.models import BoundedEmbedder, HashingEmbedder
 from ai_assistant.orchestration import Engine
+from ai_assistant.orchestration.conversations import BELIEF_KINDS
+from ai_assistant.orchestration.retrieval import assemble_by_band
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.readers import CALENDAR_READER_NAME
-from ai_assistant.testing import FakeTraceSink, evaluation_trace
+from ai_assistant.testing import FakeMemoryStore, FakeTraceSink, evaluation_trace
 from ai_assistant.tools import InMemoryToolRegistry
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class _CloudKind(StrEnum):
@@ -2005,3 +2034,150 @@ class TestBuildReembedder:
         assert plan.target_model == HashingEmbedder().model_id
         assert plan.source_model == "hashing-8"
         assert plan.required
+
+
+# --- ADR-0119 §9's two effective search limits -------------------------------
+# §9 records, for every cardinality control that can drive a traced read past
+# §3's 256-id cap, "the **effective** ``search`` limit that control produces at
+# the seam, which need not equal the control's own value". Neither control is a
+# ``Settings`` field, so the figure has to come from here: "the figure to record
+# is the one the composition root actually produced".
+#
+# The three tests below are one property in three places, and they need to be
+# three: what this layer *reports*, what it *tuned the collaborators to*, and
+# what those collaborators then *ask the store for*. A record that is right in
+# the first two and wrong in the third is exactly §9's failure — "a diagnostic
+# that is wrong two short of its own boundary is worse than none, because it is
+# the record an operator reaches for when truncated traces appear and cannot see
+# why".
+
+
+class _LimitSpy(FakeMemoryStore):
+    """A canonical store that also remembers what ``limit`` it was asked for.
+
+    Subclassed rather than hand-rolled: the point is to observe the real call a
+    real collaborator makes, so everything about the store's behaviour has to stay
+    the canonical one and only the observation is added.
+    """
+
+    def __init__(self) -> None:
+        """Create an empty store with an empty log of asked-for limits."""
+        super().__init__()
+        self.limits: list[int] = []
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
+    ) -> list[MemoryRecord]:
+        """Record ``limit``, then answer exactly as the canonical store would.
+
+        Args:
+            query: The query text.
+            limit: How many records the caller asked for; the observation.
+            kinds: The kind filter, passed through.
+            bands: The band filter, passed through.
+
+        Returns:
+            Whatever :class:`~ai_assistant.testing.FakeMemoryStore` returns.
+        """
+        self.limits.append(limit)
+        return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+
+
+async def test_build_composition_reports_the_two_effective_search_limits(
+    tmp_path: Path,
+) -> None:
+    """What ADR-0119 §9's startup stamp is handed, and where it comes from.
+
+    The retrieval figure is the control's own value; the conflict figure is the
+    control **plus two**, because ADR-0079 §1's probe over-asks its ceiling. §9
+    requires the second and not the first: "a ``conflict_limit`` of 255 sits under
+    the cap while the probe it drives asks for 257".
+    """
+    composed = build_composition(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        assert isinstance(composed, Composition)
+        assert composed.retrieval_search_limit == composition_module.RETRIEVAL_LIMIT
+        assert composed.conflict_search_limit == composition_module.CONFLICT_LIMIT + 2
+        assert isinstance(composed.engine, Engine)
+    finally:
+        await composed.engine.aclose()
+
+
+async def test_build_composition_tunes_the_collaborators_to_the_figures_it_reports(
+    tmp_path: Path,
+) -> None:
+    """The report is not a second opinion about what was built.
+
+    §9's whole reason for saying *effective* is that the number must be the one
+    the machine is running on. If the root reported these figures while leaving
+    either collaborator on a default it does not control, a later change to that
+    default would silently make the operator's record wrong — which is the failure
+    this lane exists to avoid rather than one it may reintroduce.
+    """
+    composed = build_composition(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        writer = composed.engine._loop._writes._writer
+        assert isinstance(writer, MemoryIngestor)  # narrows the Protocol-typed seam
+        assert composed.engine._loop._retrieval_limit == composed.retrieval_search_limit
+        assert writer._conflict_limit + 2 == composed.conflict_search_limit
+    finally:
+        await composed.engine.aclose()
+
+
+async def test_the_conflict_probe_asks_the_store_for_the_reported_figure() -> None:
+    """The ``+ 2`` is pinned against the ingestor's behaviour, not against a comment.
+
+    The arithmetic is duplicated in the composition root because `memory` exposes
+    no effective-limit seam and golden rule 1 forbids importing its internals. A
+    duplicate is only safe if something fails when it drifts, and this is that
+    something: the ingestor tuned to the root's ceiling is asked what limit it
+    actually reaches ``search`` with.
+    """
+    store = _LimitSpy()
+    writer = MemoryIngestor(
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        traces_sink=FakeTraceSink(),
+        conflict_limit=composition_module.CONFLICT_LIMIT,
+    )
+
+    await writer.ingest(
+        MemoryUpdateProposal(
+            proposed=SemanticMemory(
+                id="record-1",
+                content="the user drinks oat milk",
+                fact="the user drinks oat milk",
+                provenance=Provenance(
+                    source=MemorySource.USER_ASSERTED,
+                    confidence=1.0,
+                    last_updated=datetime(2026, 8, 9, tzinfo=UTC),
+                ),
+            ),
+            rationale="because",
+        )
+    )
+
+    assert store.limits == [composition_module.CONFLICT_LIMIT + 2]
+
+
+async def test_the_band_budget_never_asks_for_more_than_the_reported_figure() -> None:
+    """The retrieval figure's "effective equals its own value", pinned the same way.
+
+    ``orchestration/retrieval.py`` fills one budget of ``retrieval_limit`` band by
+    band, so the first band asks for all of it and every later band asks for what
+    is left. The largest ``limit`` reaching the store is therefore the control
+    itself — which is what §9 asserts and what this checks rather than assumes.
+    """
+    store = _LimitSpy()
+
+    await assemble_by_band(
+        store, "oat milk", limit=composition_module.RETRIEVAL_LIMIT, kinds=BELIEF_KINDS
+    )
+
+    assert store.limits
+    assert max(store.limits) == composition_module.RETRIEVAL_LIMIT

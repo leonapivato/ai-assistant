@@ -30,21 +30,28 @@ import asyncio
 import errno
 import os
 import signal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import structlog
 
+from ai_assistant.app import Composition
 from ai_assistant.core.config import Settings
-from ai_assistant.core.errors import ConfigurationError, IncompatibleStateError
+from ai_assistant.core.errors import ConfigurationError, IncompatibleStateError, TraceStoreError
+from ai_assistant.core.types import TraceKind
 from ai_assistant.orchestration.engine import DrainPhase, PurgeReport
 from ai_assistant.service import hub
+from ai_assistant.service.configuration import SEAM_STARTUP
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
+from ai_assistant.testing import FakeTraceSink
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
+
+    from ai_assistant.core.protocols import TraceSink
+    from ai_assistant.orchestration.engine import Engine
 
 _marker = structlog.get_logger("tests.service.fake")
 
@@ -153,7 +160,44 @@ def engine() -> FakeEngine:
 
 
 @pytest.fixture
-def wired(monkeypatch: pytest.MonkeyPatch, engine: FakeEngine) -> dict[str, list[Any]]:
+def sink() -> FakeTraceSink:
+    """The trace sink the composition root would have opened (ADR-0119 §9).
+
+    A fixture rather than a local, because the startup stamp writes through it and
+    two tests want to read what it wrote.
+    """
+    return FakeTraceSink()
+
+
+def _composed(engine: FakeEngine, sink: TraceSink | None = None) -> Composition:
+    """What the composition root returns, around a faked engine (ADR-0119 §9).
+
+    The cast is the price of a real :class:`Composition` here rather than a
+    look-alike: ``Engine`` is a concrete class and ``FakeEngine`` deliberately is
+    not one, but the field the hub reads through is ``engine`` and the fields this
+    lane added are the other three — a stand-in namespace would let the dataclass's
+    shape drift from what the hub destructures without anything failing.
+
+    Args:
+        engine: The stand-in the hub will drive.
+        sink: The trace sink the startup stamp writes through; a fresh one when
+            the test does not care what it holds.
+
+    Returns:
+        A composition the hub cannot tell from the real one.
+    """
+    return Composition(
+        engine=cast("Engine", engine),
+        trace_sink=sink if sink is not None else FakeTraceSink(),
+        retrieval_search_limit=5,
+        conflict_search_limit=102,
+    )
+
+
+@pytest.fixture
+def wired(
+    monkeypatch: pytest.MonkeyPatch, engine: FakeEngine, sink: FakeTraceSink
+) -> dict[str, list[Any]]:
     """Replace the composition root's two entry points and record their calls.
 
     Both are patched **where the hub looks them up**, so the substitution is of the
@@ -161,14 +205,14 @@ def wired(monkeypatch: pytest.MonkeyPatch, engine: FakeEngine) -> dict[str, list
     """
     calls: dict[str, list[Any]] = {"build": [], "credentials": []}
 
-    def _build(settings: Settings, *, data_dir: Path) -> FakeEngine:
+    def _build(settings: Settings, *, data_dir: Path) -> Composition:
         calls["build"].append(data_dir)
-        return engine
+        return _composed(engine, sink)
 
     def _credentials(settings: Settings) -> None:
         calls["credentials"].append(settings)
 
-    monkeypatch.setattr(hub, "build_engine", _build)
+    monkeypatch.setattr(hub, "build_composition", _build)
     monkeypatch.setattr(hub, "ensure_model_credentials", _credentials)
     return calls
 
@@ -239,12 +283,12 @@ async def test_the_lock_is_held_before_any_store_is_opened(
     """
     observed: list[bool] = []
 
-    def _build(settings: Settings, *, data_dir: Path) -> FakeEngine:
+    def _build(settings: Settings, *, data_dir: Path) -> Composition:
         contender = InstanceLock(data_dir / LOCK_FILENAME)
         observed.append(contender.acquire())
-        return engine
+        return _composed(engine)
 
-    monkeypatch.setattr(hub, "build_engine", _build)
+    monkeypatch.setattr(hub, "build_composition", _build)
     monkeypatch.setattr(hub, "ensure_model_credentials", lambda _settings: None)
     engine.on_start = _stop_after_start()
 
@@ -295,6 +339,73 @@ async def test_the_readiness_event_names_the_pid_the_directory_and_the_job_set(
     assert ready["pid"] == os.getpid()
     assert ready["data_dir"] == str(settings.data_dir)
     assert ready["jobs"] == ["retention_purge", "conversation_sweep"]
+
+
+async def test_the_configuration_is_stamped_before_the_first_operation_runs(
+    settings: Settings, wired: dict[str, list[Any]], engine: FakeEngine, sink: FakeTraceSink
+) -> None:
+    """ADR-0119 §9's two bounds, asserted at the tighter end of the window.
+
+    §9 requires the stamp "after the stores are open and before the API accepts a
+    request", which step 6 alone would satisfy. It lands earlier than that on
+    purpose, and the earlier position is what is worth pinning: read from inside
+    ``Engine.start()`` — step 4, the hub's *first* operation — the trace is already
+    written. So the ``CONFIGURATION`` trace is the first trace of every run, which
+    is what makes §9's "a gap between a shutdown and the next configuration trace
+    is a hub that was not running" exact rather than approximate.
+
+    Asserted from inside the operation rather than by comparing two logs, because
+    a successful stamp logs nothing — and a test that inferred order from the
+    absence of a record would pass for a hub that never stamped at all.
+    """
+    at_step_four: list[int] = []
+    stop = _stop_after_start()
+
+    def _observe() -> None:
+        # ``start`` is also the conversation sweep's job body, so the hook fires
+        # again once the scheduler ticks; only the first call is step 4.
+        at_step_four.append(len(sink.recorded))
+        stop()
+
+    engine.on_start = _observe
+
+    assert await hub.serve(settings) == EXIT_OK
+    assert at_step_four[0] == 1
+    stamped = sink.recorded[0]
+    assert stamped.kind is TraceKind.CONFIGURATION
+    assert stamped.seam == SEAM_STARTUP
+
+
+async def test_a_hub_whose_stamp_cannot_be_written_still_starts(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: FakeEngine,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ADR-0119 §5's subordination, reaching the sequence it is about.
+
+    The unit-level guard is pinned in ``test_configuration.py``; what this adds is
+    that nothing between the stamp and :func:`hub.serve` re-raises on its behalf.
+    A hub that would not come up because its instrument could not write is the
+    exact inversion §5 forbids — and it would be a *deployment* fault by §5's own
+    classification, so the failure would look permanent to a supervisor.
+    """
+
+    class _RaisingSink:
+        async def emit(self, trace: object) -> None:
+            msg = "the trace database is locked"
+            raise TraceStoreError(msg)
+
+    def _build(settings: Settings, *, data_dir: Path) -> Composition:
+        return _composed(engine, cast("TraceSink", _RaisingSink()))
+
+    monkeypatch.setattr(hub, "build_composition", _build)
+    monkeypatch.setattr(hub, "ensure_model_credentials", lambda _settings: None)
+    engine.on_start = _stop_after_start()
+
+    assert await hub.serve(settings) == EXIT_OK
+    assert engine.started >= 1
+    assert capsys.readouterr().err == ""
 
 
 # --- Shutdown (§4) -----------------------------------------------------------
@@ -965,7 +1076,7 @@ async def test_a_state_fault_stays_down_and_prints_its_own_remedy(
     the reason buried in a repeating trace.
     """
 
-    def _build(settings: Settings, *, data_dir: Path) -> FakeEngine:
+    def _build(settings: Settings, *, data_dir: Path) -> Composition:
         raise IncompatibleStateError(
             "store was built with embedding_model='v1', but this embedder has 'v2'",
             expected="embedding_model='v2'",
@@ -973,7 +1084,7 @@ async def test_a_state_fault_stays_down_and_prints_its_own_remedy(
             operator_action="re-embed the store, or configure the embedder it was built with",
         )
 
-    monkeypatch.setattr(hub, "build_engine", _build)
+    monkeypatch.setattr(hub, "build_composition", _build)
     monkeypatch.setattr(hub, "ensure_model_credentials", lambda _settings: None)
 
     code = await hub.serve(settings)
@@ -999,15 +1110,15 @@ async def test_a_missing_credential_stays_down_before_any_store_is_opened(
     """
     built: list[Path] = []
 
-    def _build(settings: Settings, *, data_dir: Path) -> FakeEngine:
+    def _build(settings: Settings, *, data_dir: Path) -> Composition:
         built.append(data_dir)
-        return FakeEngine()
+        return _composed(FakeEngine())
 
     def _credentials(settings: Settings) -> None:
         msg = "model spec 'anthropic:x' names provider 'anthropic', for which this deployment holds no credential"  # noqa: E501
         raise ConfigurationError(msg)
 
-    monkeypatch.setattr(hub, "build_engine", _build)
+    monkeypatch.setattr(hub, "build_composition", _build)
     monkeypatch.setattr(hub, "ensure_model_credentials", _credentials)
 
     code = await hub.serve(settings)
@@ -1028,11 +1139,11 @@ async def test_an_unexpected_fault_comes_back_and_asks_nothing_of_anyone(
     itself.
     """
 
-    def _build(settings: Settings, *, data_dir: Path) -> FakeEngine:
+    def _build(settings: Settings, *, data_dir: Path) -> Composition:
         msg = "a corrupt page"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(hub, "build_engine", _build)
+    monkeypatch.setattr(hub, "build_composition", _build)
     monkeypatch.setattr(hub, "ensure_model_credentials", lambda _settings: None)
 
     code = await hub.serve(settings)
@@ -1053,11 +1164,11 @@ async def test_the_lock_is_released_when_startup_fails(
     would restart into a directory its own predecessor was still holding.
     """
 
-    def _build(settings: Settings, *, data_dir: Path) -> FakeEngine:
+    def _build(settings: Settings, *, data_dir: Path) -> Composition:
         msg = "no"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(hub, "build_engine", _build)
+    monkeypatch.setattr(hub, "build_composition", _build)
     monkeypatch.setattr(hub, "ensure_model_credentials", lambda _settings: None)
 
     await hub.serve(settings)
@@ -1123,10 +1234,10 @@ async def test_a_transient_filesystem_fault_still_comes_back(
 ) -> None:
     """The other side of the same boundary: a full disk is not a deployment mistake."""
 
-    def _build(settings: Settings, *, data_dir: Path) -> FakeEngine:
+    def _build(settings: Settings, *, data_dir: Path) -> Composition:
         raise OSError(errno.ENOSPC, "no space left on device")
 
-    monkeypatch.setattr(hub, "build_engine", _build)
+    monkeypatch.setattr(hub, "build_composition", _build)
     monkeypatch.setattr(hub, "ensure_model_credentials", lambda _settings: None)
 
     assert await hub.serve(settings) == EXIT_RESTART
