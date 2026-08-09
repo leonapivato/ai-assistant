@@ -253,6 +253,12 @@ account of the rulings that *did* happen. Excluding it would discard real ruling
 to honour a field that is not about them. What is excluded is the crossing that
 observed nothing, and absence already says so.
 
+> **Normative.** A `RETRIEVAL` trace carrying the eight counts §7 reads is
+> excluded from §7's population, and from no other, unless all three of
+> `returned ≤ candidates`, `candidates ≤ fetch_k`, and — where `returned <
+> limit` — `returned` plus the four `excluded_*` values equal `candidates`
+> exactly. The report counts such a trace among the malformed.
+
 **Counts are constrained because the metric type does not constrain them.**
 `TraceMetricValue` is `int | float | bool` refused only for non-finiteness, so a
 `decisions_supersede` of `-1`, of `0.5` or of `True` type-checks and stores.
@@ -561,6 +567,18 @@ healthy read. The second is the **window share** of each shortfall,
 differ; a shortfall read that excluded nothing is one the KNN ceiling alone
 bound, and is counted in the incidence and left out of the share.
 
+**The consistency rule is the same argument as the integrality rule, one level
+up.** Each of the eight counts can be individually valid and jointly impossible —
+`candidates = 0` with `returned = 1` satisfies every per-value rule and makes
+`candidates − returned` negative, which would be reported as a window share below
+zero. `SqliteMemoryStore` cannot produce it: `returned` counts a subset of the
+rows `candidates` counts, and the filter loop's exhaustion is what makes the
+partition hold. But the emitter's arithmetic is not the type's, and a diagnostic
+that divides by a difference must know the difference is non-negative. Excluding
+the trace from this diagnostic alone, rather than from every population, is
+deliberate: `records[RETURNED]` is observed independently of the counters, so a
+trace whose counters disagree can still tell §4 which ids came back.
+
 **And the half of #824's trigger this cannot see is stated.** "Approaching" the
 threshold would be read off healthy reads as headroom, and healthy reads are
 exactly the ones whose counters are a prefix, because `_search_sync` breaks at
@@ -604,10 +622,23 @@ this ADR's own rules caused, which is a different and fully computable thing.
 > `occurred_at` less `s` carries no memory-precision figure, and the report says
 > so rather than reporting a figure over an unequal settling.
 
+> **Normative.** Over an **empty** retained stream the report states that the
+> stream is empty, states no measure and no diagnostic, and applies no window
+> validation. Every clause of this ADR naming the oldest, the newest or the last
+> retained trace presupposes a non-empty one.
+
 > **Normative.** The report refuses a window whose start precedes the oldest
 > retained trace's `occurred_at`, naming both instants. A retention horizon that
 > has swept the window's early traces makes the figure a statement about a
 > different period than the one asked for.
+
+**The empty stream is stated because it is reachable and every other clause
+assumes it away.** A hub that has just opened its seventh database has written
+nothing, and a horizon that has swept everything leaves the same state; ADR-0119
+§10 makes the second a normal outcome rather than a fault. Without this clause an
+implementation must crash, invent an instant, or disobey a reporting clause, and
+the three would disagree. Saying "empty" is the honest answer and it needs no
+figure to carry it.
 
 **The partition is what turns ADR-0119 §9's stamp into an answer rather than a
 record.** ADR-0119 §9 made every startup stamp the effective configuration so a
