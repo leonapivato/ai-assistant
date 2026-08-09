@@ -486,6 +486,10 @@ recovery are not symmetric acts and the asymmetry runs in the safe direction.
 > that already exists. It never materialises into, merges with, writes over or
 > deletes a directory it did not itself create in that run.
 
+> **Normative.** Restore refuses a target whose parent directory is writable by
+> anyone other than that parent's owner, naming the parent and its mode. It creates
+> the target it will materialise into with owner-only permissions.
+
 > **Normative.** Restore takes `<data_dir>/hub.lock` in the target directory it
 > created, before it materialises anything, and holds it until it exits, on the
 > same terms as §2.
@@ -545,18 +549,33 @@ take — refusing to remove a directory that is not empty means a target that ha
 been swapped for somebody else's directory fails the cleanup instead of emptying
 it.
 
-**What that does not do is make the write path race-free, and this ADR does not
-claim it does.** An extraction whose target path was swapped writes elsewhere, and
-closing that needs creation, locking, extraction and cleanup to be performed
-relative to a held directory descriptor — which would mean giving `InstanceLock` a
-descriptor-relative form, and hardening one tool while the hub, the re-embedder and
-the measures report resolve the same directory by path beside it. That is a change
-to a shared mechanism rather than to this decision, and it is filed as #889. The
-limit is disclosed here in the shape ADR-0104 §3 uses for its own residual window —
-"it does not close it, and it is not offered as closing it" — because the adversary
-it needs is one running as the user, who can already read the store, the trail and
-any artifact this tool writes, and because that is the same posture ADR-0083 §1
-takes when it makes the instance lock advisory and says so.
+**The parent's permissions are what bound who can play that game, and without the
+clause the bound would have been wrong.** A target under a group-writable or
+world-writable parent can be renamed away by any principal with write on that
+parent — a different user, not merely a stray process of the operator's own — so a
+rationale resting on "only the owner could do this" would have been false for
+exactly the parents most likely to be chosen in a hurry, a shared mount or a
+scratch directory on a multi-user box. Refusing such a parent outright is cheaper
+than reasoning about it, and it is the right refusal on its own terms: the target
+is where the **plaintext** store lands, and a directory whose parent strangers may
+write is not a place to unpack every belief the user has accumulated. The
+destination in §11 is deliberately not held to this — an artifact is ciphertext and
+an operator may legitimately want it on a shared drive — and that asymmetry is the
+whole reason the two paths have different rules.
+
+**What none of it does is make the write path race-free, and this ADR does not
+claim it does.** With the parent owner-only, the principal who could still swap the
+target between its creation and the extraction is one already running as its
+owner — who can read the store, the audit trail and any artifact this tool writes
+without racing anything. Closing even that needs creation, locking, extraction and
+cleanup performed relative to a held directory descriptor, which would mean giving
+`InstanceLock` a descriptor-relative form and hardening one tool while the hub, the
+re-embedder and the measures report resolve the same directory by path beside it.
+That is a change to a shared mechanism rather than to this decision, and it is
+filed as #889. The limit is disclosed here in the shape ADR-0104 §3 uses for its
+own residual window — "it does not close it, and it is not offered as closing
+it" — and it is the same posture ADR-0083 §1 takes when it makes the instance lock
+advisory and says so.
 
 **The general exposure in `InstanceLock` is untouched by this and is not this ADR's
 to close.** The hub, the re-embedder and the measures report all take the lock the
