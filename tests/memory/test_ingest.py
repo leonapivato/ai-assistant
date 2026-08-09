@@ -1708,3 +1708,79 @@ async def test_concurrent_merges_into_one_target_do_not_lose_a_write() -> None:
     assert merged is not None
     assert set(merged.provenance.evidence) == {"ev1", "evA", "evB"}
     assert merged.provenance.confidence == 0.8
+
+
+# --- ADR-0121: an agreeing restatement, end to end --------------------------
+
+
+async def test_a_verbatim_restatement_folds_into_the_users_own_record() -> None:
+    """#862's whole shape, through the real path: policy, floor and fold together.
+
+    The QA run's scratch store ended holding three near-identical window-seat
+    records while the observation job reinforced one of them twice from the same
+    conversation — a duplicate *or* a question *or* a retirement, and never the
+    agreement ADR-0120 §6's numerator was defined over. Driven through
+    ``MemoryIngestor`` rather than against the policy alone, because the ruling and
+    the writer floor are separate gates and the run failed at whichever fired first.
+
+    The proposal differs from the target in case and whitespace, which ADR-0121 §1's
+    transformations absorb: against byte-identical text "the user's own words
+    survived" and "the restatement was written" are the same observation.
+    """
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, "before", "now")
+    await store.add(_asserted("their-words", "the user prefers window seats", evidence=("before",)))
+
+    result = await _ingestor(store).ingest(
+        _proposal(_asserted("again", "The User Prefers  WINDOW Seats", evidence=("now",)))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.REINFORCE
+    # Folded at the target's id — no second near-identical record, which is the
+    # duplication #862 observed and ADR-0092 §7 names as a residue to shrink.
+    assert result.record_id == "their-words"
+    assert await store.get("again") is None
+    assert {record.id for record in await store.export()} == {"before", "now", "their-words"}
+
+    survivor = await store.get("their-words")
+    assert survivor is not None
+    # ADR-0121 §4's second clause: the user's own bytes, at the user's own id.
+    assert survivor.content == "the user prefers window seats"
+    assert survivor.provenance.source is MemorySource.USER_ASSERTED
+    assert survivor.provenance.confidence == 1.0
+    # Nothing retired and no window closed: a REINFORCE has no retirement set
+    # (ADR-0045 §4), and an agreement warrants none anyway (ADR-0121 §2).
+    assert survivor.validity.valid_until is None
+    # What the restatement does contribute — its evidence, and the fact that the
+    # belief still holds (ADR-0103 §3, ADR-0103 §6's rule applied to this pairing).
+    assert set(survivor.provenance.evidence) == {"before", "now"}
+
+
+async def test_a_one_token_correction_still_defers_end_to_end() -> None:
+    """The adversarial fixture ADR-0121 §1 argues from, driven through the writer.
+
+    "Window" against "aisle" is a one-token edit that a hashing embedder scores near
+    the top of its ranking, which is why agreement may not be read off the conflict
+    set's scores: a false agreement folds a correction into the belief it corrects,
+    at that belief's id, taking the maximum confidence. Here the conflict set is the
+    same shape as the case above and the outcome is the opposite one — a
+    contradiction of a prior assertion still goes to the user under ADR-0050 §2,
+    which ADR-0121 §9 supersedes only over sets whose asserted members all *agree*.
+    Nothing is written, so the fold a false agreement would perform is observable
+    by its absence.
+    """
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, "before", "now")
+    await store.add(_asserted("their-words", "the user prefers window seats", evidence=("before",)))
+
+    result = await _ingestor(store).ingest(
+        _proposal(_asserted("correction", "the user prefers aisle seats", evidence=("now",)))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.ASK_USER
+    assert result.record_id is None
+    # Nothing written, nothing folded: the earlier assertion is untouched.
+    survivor = await store.get("their-words")
+    assert survivor is not None
+    assert survivor.content == "the user prefers window seats"
+    assert set(survivor.provenance.evidence) == {"before"}
