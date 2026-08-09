@@ -54,12 +54,27 @@ side::
     collections = null
 
     [storage remote]
-    type = "caldav"          # or "http" for a read-only .ics subscription URL
+    type = "caldav"          # or "http" for an .ics subscription URL
     url = "..."
+    read_only = true         # REQUIRED for caldav — see below
 
     [storage local]
     type = "singlefile"      # NOT "filesystem" — that writes a directory (#649)
     path = "~/.calendars/calendar.ics"
+
+**``read_only = true`` on the remote is not optional, and leaving it out points a
+write path at the user's real calendar.** ``vdirsyncer``'s sync is bidirectional
+by default — ``Storage.read_only`` is ``False`` on the base class, and ``caldav``
+inherits it — so anything that edits the local ``.ics`` is treated as a local
+change and **uploaded to the calendar server** on the next sync. Nothing in this
+project writes to that file, but the file is an ordinary path on the user's
+machine and the seam it feeds is read-only by construction (ADR-0093 §1: a reader
+"holds no store, writes nothing"); a deployment that can push edits outward has a
+capability the design never granted it. With the flag set, ``vdirsyncer`` reverts
+local divergence instead of uploading it, which is what makes the local file a
+*mirror* rather than a replica. ``type = "http"`` needs no flag — ``HttpStorage``
+sets ``read_only = True`` itself, since a subscription URL has nothing to write
+to.
 
 Run ``vdirsyncer discover calendar`` once, then ``vdirsyncer sync calendar`` on a
 timer the fetcher owns (cron or a systemd timer) — the network is the fetcher's
