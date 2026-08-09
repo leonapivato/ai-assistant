@@ -23,11 +23,11 @@ from __future__ import annotations
 import asyncio
 import os
 import types
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from ics_fixtures import NOW, calendar, reader, source, utc, vevent
+from ics_fixtures import NOW, calendar, frozen, reader, source, utc, vevent
 
 from ai_assistant.core.errors import ReaderError
 from ai_assistant.readers import _occurrences, _source
@@ -47,6 +47,36 @@ if TYPE_CHECKING:
     from ai_assistant.readers import CalendarReader
 
 _ONE_ENTRY = calendar(vevent(f"DTSTART:{utc(NOW)}", "DURATION:PT1H", "SUMMARY:Standup"))
+
+#: One collection as ``vdirsyncer`` 0.20.0's ``singlefile`` storage actually wrote
+#: it, captured verbatim from a sync of an ``http`` remote rather than assembled
+#: here. Every other fixture in this package is hand-written RFC 5545 on purpose;
+#: this one is the exception, because what it pins is not the reader's handling of
+#: a construct but the *shape a real co-located fetcher emits* — the arrangement
+#: ADR-0095 rates strongest and `readers/calendar.py` names as the supported
+#: deployment. Note what vdirsyncer's own framing does: the whole collection lands
+#: in one ``VCALENDAR``, ``UID`` is moved after the payload properties, and the
+#: ``http`` storage has replaced each source ``UID`` with a content hash
+#: (``_ignore_uids``). None of that is ours to control, which is the point of
+#: capturing it rather than writing it.
+_VDIRSYNCER_SINGLEFILE = (
+    b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//live-calendar-lane//EN\r\n"
+    b"CALSCALE:GREGORIAN\r\n"
+    b"BEGIN:VEVENT\r\nDTSTAMP:20260808T090000Z\r\nDTSTART:20260809T090000Z\r\n"
+    b"DTEND:20260809T093000Z\r\nSUMMARY:Morning standup\r\nLOCATION:Room 2\r\n"
+    b"UID:09a238f056952a7756f41fc56f1bd2bb78cc42e317e3238b4a9fd1621f8977a8\r\n"
+    b"END:VEVENT\r\n"
+    b"BEGIN:VEVENT\r\nDTSTAMP:20260808T091500Z\r\nDTSTART:20260809T140000Z\r\n"
+    b"DTEND:20260809T150000Z\r\nSUMMARY:Design review\r\nLOCATION:Video call\r\n"
+    b"DESCRIPTION:Dial-in 555-0100 passcode 9999\r\n"
+    b"UID:198f21b93d797cf1ab2b076b09c008b58e297837f010cdeb3f3a024bf1df9a5f\r\n"
+    b"END:VEVENT\r\nEND:VCALENDAR\r\n"
+)
+
+#: Noon between the two entries above, so both sit inside a four-hour window and
+#: neither is at an edge — the reading below is about the *arrangement*, and an
+#: entry that fell out of the window would make it about the window instead.
+_VDIRSYNCER_NOW = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
 
 #: Short enough that a case does not wait on it, long enough that a loaded
 #: machine does not fire it during an ordinary successful read.
@@ -136,6 +166,57 @@ async def test_a_directory_source_is_refused_on_the_descriptor(tmp_path: Path) -
         await reader(directory).read()
 
     assert isinstance(raised.value.__cause__, SourceNotRegularFileError)
+
+
+async def test_a_vdirsyncer_singlefile_collection_is_read(tmp_path: Path) -> None:
+    """The positive half of the case above, against bytes a real fetcher wrote.
+
+    ADR-0095 §Context rates the co-located fetcher the stronger of the two source
+    patterns, and `readers/calendar.py` names ``vdirsyncer``'s ``singlefile``
+    storage as the arrangement that fits §7's regular-file check. Until this case
+    existed that was an **assertion in prose on both sides** — #649 recorded it as
+    "unverified in-session", and the only executable statement about vdirsyncer in
+    this package was the directory *refusal* above. So the shape the deployment
+    depends on was pinned nowhere, and a change that broke it would have been
+    caught by no test while two docstrings went on recommending it.
+
+    What the assertions are chosen to hold, beyond "it parses":
+
+    * **The whole collection is one regular file**, so §7's descriptor check
+      admits it — the property that distinguishes ``singlefile`` from the default
+      ``filesystem`` storage and the entire reason #649 stays deferred.
+    * **Every entry is proposed**, so the single wrapper is read as a collection
+      rather than as one entry with trailing text.
+    * **``DESCRIPTION`` reaches no belief.** It is where a calendar's most
+      sensitive content lives — here a dial-in and its passcode — and
+      :func:`~ai_assistant.readers.calendar._render` deliberately omits it. A
+      belief is durable, retrievable and exportable, so this is a privacy property
+      of the stored record and not a rendering preference.
+    * **vdirsyncer's ``UID`` reaches no id.** ADR-0092 §6 forbids an ``EXTERNAL``
+      producer adopting the source's key "whether directly or namespaced", and
+      this fetcher's key is doubly unfit: the ``http`` storage rewrites it to a
+      *content hash*, so adopting it would give a re-worded entry a new id and an
+      unchanged one a stable address into a retired record.
+    """
+    subject = reader(
+        source(tmp_path, _VDIRSYNCER_SINGLEFILE),
+        now=frozen(_VDIRSYNCER_NOW),
+        window_past=timedelta(hours=4),
+        window_future=timedelta(hours=4),
+    )
+
+    reading = await subject.read()
+
+    contents = [proposal.proposed.content for proposal in reading.proposals]
+    assert [content.split('"')[1] for content in contents] == [
+        "Morning standup",
+        "Design review",
+    ]
+    assert not any("555-0100" in content or "passcode" in content for content in contents)
+    assert not any(
+        "09a238f056952a77" in proposal.proposed.id or "198f21b93d797cf1" in proposal.proposed.id
+        for proposal in reading.proposals
+    )
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFOs only")
