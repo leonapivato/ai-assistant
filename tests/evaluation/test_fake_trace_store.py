@@ -75,6 +75,11 @@ class TestFakeTraceSinkContract(TraceSinkContract):
         sink.fail_append()
         return sink
 
+    def sink_failing_with(self, error: Exception) -> TraceSink:
+        sink = FakeTraceSink()
+        sink.fail_append(error)
+        return sink
+
     @contextlib.asynccontextmanager
     async def subject_suspended_mid_operation(self) -> AsyncIterator[SuspendedMidWrite[Any]]:
         """The fake models the resource it does not really own (ADR-0060 §3).
@@ -155,6 +160,11 @@ class TestFakeTraceStoreContract(TraceSinkContract, TraceRetentionContract, Trac
     def failing_sink(self) -> TraceSink:
         store = FakeTraceStore()
         store.fail_append()
+        return store
+
+    def sink_failing_with(self, error: Exception) -> TraceSink:
+        store = FakeTraceStore()
+        store.fail_append(error)
         return store
 
     def failing_retention(self) -> TraceRetention:

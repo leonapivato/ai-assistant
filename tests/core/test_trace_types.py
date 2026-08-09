@@ -225,6 +225,36 @@ def test_a_trace_mints_its_own_id() -> None:
     assert int(first.id, 16) >= 0  # hex, and nothing else
 
 
+def test_a_well_formed_id_supplied_by_a_caller_is_accepted() -> None:
+    """The residue ADR-0119 §13a **accepts by name**, pinned so it reads as decided.
+
+    "A caller can still pass 32 hex characters it computed from content — a
+    digest, a hex-encoded string — and the type will take it. No constructor
+    discipline closes that: the model must be reconstructible from a stored row,
+    every hydration path is callable, and the caller in question is first-party
+    code inside this repository." The corpus has ruled this class of residue
+    accepted twice over — ADR-0021 §1 ("a caller falsifying its own audit trail,
+    not a policy subverting a gate… no producer can prevent it") and ADR-0058.
+
+    §13a also names, and refuses, the fix that looks obvious: "a required ``id``
+    plus a separate minting factory… was weighed and refused, because it puts
+    ``id=`` back in every emitter's reach and reopens exactly the accidental route
+    the default closes."
+
+    What the shape *does* buy is asserted beside it: nothing that looks like
+    content survives the pattern, so every **accidental** route is gone and the
+    remaining one is a deliberate act by first-party code that review governs
+    (§2's third clause).
+    """
+    supplied = "0" * 32
+
+    assert _trace(id=supplied).id == supplied
+
+    for content in ("the user's address", "0" * 31, "not hex at all", "A" * 32):
+        with pytest.raises(ValidationError):
+            _trace(id=content)
+
+
 # --- the model's invariants (§13a) -------------------------------------------
 
 

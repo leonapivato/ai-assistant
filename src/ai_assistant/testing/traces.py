@@ -43,6 +43,7 @@ from ai_assistant.core.types import (
     TraceKind,
     TraceOutcome,
     TracePosition,
+    fault_class_of,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
 
@@ -600,6 +601,15 @@ def _dropped(snapshot: EvaluationTrace | None, error: Exception) -> None:
     exactly the shape :data:`~ai_assistant.core.types.UNREPRESENTABLE_FAULT_CLASS`
     takes for the same problem.
 
+    **The error's class goes through the same total conversion a trace's
+    ``fault_class`` does** (:func:`~ai_assistant.core.types.fault_class_of`), and
+    reading ``type(error).__name__`` here directly would be the leak this function
+    exists to prevent, one field over: a provider may raise
+    ``type("X" * 65, (Exception,), {})``, and ADR-0119 §2 admits an exception's
+    class name only because *the pattern bounds it* — "a name is not a licence to
+    carry a payload". A log record is Tier 2 unconditionally (ADR-0004 §5), so the
+    bound has to hold on this side of the seam too.
+
     Args:
         snapshot: The validated copy of the event, or ``None`` if the trace could
             not be revalidated at all.
@@ -609,7 +619,7 @@ def _dropped(snapshot: EvaluationTrace | None, error: Exception) -> None:
         TRACE_NOT_RECORDED,
         kind=str(snapshot.kind) if snapshot is not None else UNREADABLE_TRACE_FIELD,
         seam=str(snapshot.seam) if snapshot is not None else UNREADABLE_TRACE_FIELD,
-        error_class=type(error).__name__,
+        error_class=fault_class_of(error),
     )
 
 
