@@ -708,13 +708,16 @@ async def test_a_superseded_targets_hiding_is_read_time_relative(
             now=lambda: read_at[0],
         )
     try:
-        # Open-window target, so it is a live conflict at any read clock. Identical
-        # content to the correction so both the lexical and vector detectors find it.
+        # Open-window target, so it is a live conflict at any read clock. Content a
+        # single token away from the correction, so both the lexical and the vector
+        # detector find it and the ruling is still a `SUPERSEDE`: since ADR-0121 §2
+        # a *verbatim* restatement is an agreement and rules `REINFORCE`, which
+        # closes no window and would leave this case measuring nothing.
         await store.add(_preference("stale", "user prefers morning meetings", confidence=0.6))
 
         # The ingestor's clock (`_fixed_now`, 2026-06-01) is the close instant.
         result = await _ingestor(store).ingest(
-            _proposal(_asserted("correction", "user prefers morning meetings"))
+            _proposal(_asserted("correction", "user prefers afternoon meetings"))
         )
         assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
         new_id = result.record_id
@@ -762,7 +765,7 @@ async def test_superseding_a_target_never_extends_its_existing_window() -> None:
     )
 
     result = await _ingestor(store).ingest(
-        _proposal(_asserted("correction", "user prefers morning meetings"))
+        _proposal(_asserted("correction", "user prefers afternoon meetings"))
     )
 
     assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
@@ -807,7 +810,7 @@ async def test_superseding_a_future_dated_target_refuses_without_corrupting(
 
         with pytest.raises(MemoryStoreError, match="valid_from"):
             await _ingestor(store).ingest(
-                _proposal(_asserted("correction", "user prefers morning meetings"))
+                _proposal(_asserted("correction", "user prefers afternoon meetings"))
             )
 
         # No corrupt state: the store still reads cleanly (a corrupt SQLite row would
@@ -869,7 +872,7 @@ async def test_superseding_a_target_whose_window_opens_at_the_close_refuses(
 
         with pytest.raises(MemoryStoreError, match="valid_from"):
             await _ingestor(store).ingest(
-                _proposal(_asserted("correction", "user prefers morning meetings"))
+                _proposal(_asserted("correction", "user prefers afternoon meetings"))
             )
 
         assert {record.id: record for record in await store.export()} == before

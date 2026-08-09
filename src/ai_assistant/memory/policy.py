@@ -21,6 +21,7 @@ from ai_assistant.core.types import (
     MemorySource,
     band_of,
 )
+from ai_assistant.memory._agreement import agrees
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -47,10 +48,30 @@ _DEFAULT_TEMPORARY_TTL = timedelta(days=7)
 # error calculus, and the case for retiring it is the case §2 already made for
 # inferences.
 #
-# **This is not the applier's reinforce-safe class**, which stays `{OBSERVED,
-# INFERRED}` (`memory/ingest.py`). ADR-0092 §5 splits the two because they answer
-# different questions; the constant here only ever answered this one.
+# **This is not the applier's reinforce-safe class**, which is `{OBSERVED,
+# INFERRED, USER_ASSERTED}` since ADR-0121 §5 (`memory/ingest.py`). ADR-0092 §5
+# splits the two because they answer different questions; the constant here only
+# ever answered this one, and ADR-0121 widened the *other* one while leaving this
+# untouched — `EXTERNAL` is retirable and not foldable-onto, `USER_ASSERTED` is
+# foldable-onto (by an agreeing restatement) and not retirable.
 _RETIREMENT_CLASS = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED, MemorySource.EXTERNAL})
+
+# The target source classes an **agreeing restatement** may fold onto (ADR-0121 §3).
+# The same three sources as the writer's reinforce-safe class, arrived at from the
+# same clause and held separately for the reason ADR-0038 §2a gives: the policy
+# *chooses* a ruling and the ingestor *performs* the write, so the safety property
+# has to hold at the boundary that writes rather than at the one that recommends.
+# This copy is the choice; `memory/ingest.py`'s is the floor.
+#
+# **`EXTERNAL` is excluded, and the exclusion is not an oversight to tidy up later**
+# (ADR-0121 §3, ADR-0092 §5). A `REINFORCE` folds at the *target's* id, an imported
+# record's id is the integrating system's idempotency key, and the next routine sync
+# overwrites the fold. Identity of content does nothing to that argument — the sync
+# overwrites the record whether or not the user's words matched the import's. So an
+# `EXTERNAL` conflict is never named by the agreement arm, whether or not it agrees.
+_AGREEMENT_FOLDABLE = frozenset(
+    {MemorySource.OBSERVED, MemorySource.INFERRED, MemorySource.USER_ASSERTED}
+)
 
 
 def _rule_on_admissibility(proposal: MemoryUpdateProposal) -> MemoryDecision | None:
@@ -304,14 +325,94 @@ def _rule_on_confirmation(
     )
 
 
-def _rule_on_assertion(conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
-    """Rule on a user-asserted proposal: defer, supersede stale inferences, or accept.
+def _rule_on_agreement(
+    record: MemoryRecord, conflicts: Sequence[MemoryRecord]
+) -> MemoryDecision | None:
+    """Rule ``REINFORCE`` on an agreeing restatement, or ``None`` (ADR-0121 §2).
 
-    Three arms, in order:
+    The **agreeing set** is the members of the conflict set that agree with the
+    proposal under ADR-0121 §1 (:func:`~ai_assistant.memory._agreement.agrees`); the
+    **foldable agreeing set** is those of them whose source is in
+    :data:`_AGREEMENT_FOLDABLE`. This rules ``REINFORCE`` at the best-ranked member
+    of the foldable agreeing set exactly when **both** hold: that set is non-empty,
+    and every ``USER_ASSERTED`` member of the conflict set is in the agreeing set.
+
+    **The second condition is what keeps issue #245 closed, and it is not
+    optional.** Without it a user who said "window seats", then "aisle seats", then
+    "window seats" again would reinforce the first record and leave the second live
+    — two live contradictory assertions, which is the honesty defect ADR-0050 §2
+    exists to prevent, reached by a new path. It is stated over the *asserted*
+    members only because they are the ones ADR-0050 §2 protects: a disagreeing
+    ``OBSERVED`` or ``INFERRED`` member is not evidence of a contradiction (it is a
+    similarity hit), and the supersession arm below is what deals with it.
+
+    **An agreement retires nothing.** ``REINFORCE`` has no retirement set (ADR-0045
+    §4), so conflict-set members outside the agreeing set are left live. That is the
+    honest outcome: the proposal added no information, so it warrants no retirement,
+    and retiring a record on the strength of a *restatement* would be retiring it on
+    similarity alone. The first time the user asserted this belief the supersession
+    arm ran and retired what it was warranted to retire; a second telling does not
+    buy a second retirement.
+
+    **Its position is the decision, not a tie-break** (ADR-0121 §2). It must precede
+    the prior-assertion deferral, which is unconditional over asserted conflicts and
+    would otherwise consume every self-restatement; and it must precede the
+    supersession arm, which would otherwise retire an agreeing ``OBSERVED`` belief.
+    Placed anywhere else it is unreachable, in exactly the way ADR-0120 §6's
+    ``decisions_reinforce`` numerator was unreachable before this rule existed.
+
+    **It reads no score.** The conflict set supplies the *candidates* — a topical
+    similarity ranking at ``conflict_threshold``, which is not a contradiction
+    signal and is not an agreement signal either (ADR-0045 §5) — and ADR-0121 §1's
+    predicate decides. Reading agreement off the score instead inverts on the case
+    that matters: the strings scoring highest against "I prefer window seats"
+    include "I prefer aisle seats", so a threshold-keyed agreement folds a
+    correction into the belief it corrects, at that belief's id.
+
+    Args:
+        record: The proposed record, whose source the caller has already
+            established is ``USER_ASSERTED``.
+        conflicts: The conflict set, best-ranked first.
+
+    Returns:
+        The ``REINFORCE`` ruling, or ``None`` to fall through to the arms below
+        exactly as they stand.
+    """
+    agreeing = [conflict for conflict in conflicts if agrees(conflict, record)]
+    foldable = next(
+        (conflict for conflict in agreeing if conflict.provenance.source in _AGREEMENT_FOLDABLE),
+        None,
+    )
+    if foldable is None:
+        return None
+    agreeing_ids = {conflict.id for conflict in agreeing}
+    if any(
+        conflict.provenance.source is MemorySource.USER_ASSERTED and conflict.id not in agreeing_ids
+        for conflict in conflicts
+    ):
+        return None
+    return MemoryDecision(
+        kind=MemoryDecisionKind.REINFORCE,
+        target_id=foldable.id,
+        reason="you have told us this before; recorded as agreement rather than a change",
+    )
+
+
+def _rule_on_assertion(record: MemoryRecord, conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
+    """Rule on a user-asserted proposal: agree, defer, supersede stale beliefs, or accept.
+
+    Four arms, in order:
+
+    0. **An agreeing restatement → ``REINFORCE`` (ADR-0121 §2).** Ahead of both
+       conflict arms, because both would otherwise consume it:
+       :func:`_rule_on_agreement`.
 
     1. **A contradictory prior assertion → ``ASK_USER`` (ADR-0050 §2, #245).** If
        *any* conflict is itself ``USER_ASSERTED``, the user is contradicting
-       something they earlier told us. Committing the new assertion — even by
+       something they earlier told us — which is now what the word *contradictory*
+       says, because arm 0 has already taken the sets whose asserted members all
+       agree (ADR-0121 §9 records that as a partial supersession of ADR-0050 §2,
+       narrow and in that scope alone). Committing the new assertion — even by
        superseding an inference alongside it — would leave two live, contradictory
        profile records, the honesty gap issue #245 reports. We may not silently
        destroy either (topical similarity is not a contradiction signal, ADR-0045 §5
@@ -342,8 +443,22 @@ def _rule_on_assertion(conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
        **empty**: with ``EXTERNAL`` in the class, every non-asserted conflict is
        now retirable, and an asserted one was already ruled on by arm 1. The
        ADR-0045 §7 shape where an assertion landed live beside a contradicting
-       import is what ADR-0092 §4 exists to end.
+       import is what ADR-0092 §4 exists to end. Arm 0 does not widen this: it
+       fires only on a non-empty conflict set, so it takes cases from arms 1 and 2
+       and never from here.
+
+    Args:
+        record: The proposed record — read by arm 0 alone, which is the only arm
+            that compares the proposal against what it conflicts with rather than
+            reading the conflict set's sources.
+        conflicts: The conflict set, best-ranked first.
+
+    Returns:
+        The ruling.
     """
+    agreed = _rule_on_agreement(record, conflicts)
+    if agreed is not None:
+        return agreed
     if any(c.provenance.source is MemorySource.USER_ASSERTED for c in conflicts):
         return MemoryDecision(
             kind=MemoryDecisionKind.ASK_USER,
@@ -391,11 +506,19 @@ class DefaultMemoryPolicy:
        rules 1 to 3 and ahead of every rule after it; the placement is argued in
        that function.
     5. An inference never silently overrides a user-asserted memory — defer.
-    6. A user-asserted proposal that contradicts a *prior assertion* defers to
+    6. A user-asserted proposal that **agrees** with what it conflicts with rules
+       ``REINFORCE``, ahead of both conflict arms (ADR-0121 §2). Agreement is
+       ADR-0121 §1's syntactic predicate over ``kind`` and ``content`` — never a
+       retrieval score — and the arm fires only when some agreeing conflict is
+       ``OBSERVED``/``INFERRED``/``USER_ASSERTED`` *and* every asserted conflict
+       agrees, so a user repeating themselves is recorded as agreement while a
+       user contradicting themselves still reaches rule 7. It retires nothing
+       (:func:`_rule_on_agreement`).
+    7. A user-asserted proposal that contradicts a *prior assertion* defers to
        the user (``ASK_USER``): two things the user said cannot both stay live,
        yet neither may be destroyed on a topical-similarity signal, so the user
-       resolves it (ADR-0050 §2, #245).
-    7. A user-asserted proposal *supersedes* the conflicting beliefs: it rules
+       resolves it (ADR-0050 §2, #245, narrowed by rule 6).
+    8. A user-asserted proposal *supersedes* the conflicting beliefs: it rules
        ``SUPERSEDE`` naming the best-ranked ``OBSERVED``/``INFERRED``/``EXTERNAL``
        conflict, and the applier retires the *whole* retirement set it leads —
        which is now the whole set retrieval surfaced, since the writer refuses
@@ -404,19 +527,22 @@ class DefaultMemoryPolicy:
        ADR-0040, ADR-0050 §1, ADR-0092 §4, #244). ``EXTERNAL`` is in that class
        since ADR-0092 §4: a connected source is an *input*, so the user's
        correction retires the import rather than sitting live beside it.
-    8. A user-asserted proposal with nothing to supersede is trusted and
-       accepted — which, since rule 7 took ``EXTERNAL``, means nothing conflicted
+    9. A user-asserted proposal with nothing to supersede is trusted and
+       accepted — which, since rule 8 took ``EXTERNAL``, means nothing conflicted
        with it at all.
-    9. A proposal that conflicts with an existing (non-asserted) record rules
-       ``REINFORCE`` over it, folding into it (ADR-0040 §4).
-    10. Weak evidence (below ``min_confidence``) is stored temporarily, with an
+    10. A proposal that conflicts with an existing (non-asserted) record rules
+        ``REINFORCE`` over it, folding into it (ADR-0040 §4).
+    11. Weak evidence (below ``min_confidence``) is stored temporarily, with an
         expiry, rather than committed.
-    11. Otherwise the proposal is accepted.
+    12. Otherwise the proposal is accepted.
 
-    Rules 5 and 7 are the same asymmetry read in both directions: an assertion
+    Rules 5 and 8 are the same asymmetry read in both directions: an assertion
     outranks an inference, and never the reverse. Rule 4 is the one ratified way
     through it — the user's own answer (ADR-0045 §7, ADR-0078 §5) — and it is the
-    way through rule 3 as well.
+    way through rule 3 as well. Rule 6 is not a third way through: it does not
+    resolve a conflict in the user's favour, it determines that there was no
+    conflict to resolve, which is the third thing ADR-0045 §7 did not enumerate
+    (ADR-0121 §1).
     """
 
     def __init__(
@@ -475,7 +601,7 @@ class DefaultMemoryPolicy:
     def _rule_on_conflicts(
         self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
     ) -> MemoryDecision:
-        """Rules 5 to 11: the ordinary conflict and confidence rules.
+        """Rules 5 to 12: the ordinary conflict and confidence rules.
 
         The ruling a proposal gets when the admissibility floor let it through and
         no confirmation settled it — which is *every* proposal today except a
@@ -496,7 +622,7 @@ class DefaultMemoryPolicy:
             )
 
         if is_asserted:
-            return _rule_on_assertion(conflicts)
+            return _rule_on_assertion(record, conflicts)
 
         if conflicts:
             return MemoryDecision(
