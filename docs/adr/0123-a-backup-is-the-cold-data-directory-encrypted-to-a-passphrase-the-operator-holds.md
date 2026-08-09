@@ -482,29 +482,26 @@ recovery are not symmetric acts and the asymmetry runs in the safe direction.
 
 ### 7. Restore builds a fresh data directory and replaces nothing
 
-> **Normative.** Restore materialises into a target directory that is absent,
-> empty, or holds nothing but a `hub.lock` that is a regular file, and refuses any
-> other target. It never merges into, writes over, or deletes an existing data
-> directory.
+> **Normative.** Restore creates its target directory, and refuses a target path
+> that already exists. It never materialises into, merges with, writes over or
+> deletes a directory it did not itself create in that run.
 
-> **Normative.** Restore establishes the nature of a pre-existing `hub.lock`
-> without following it, before it takes any lock, and refuses a target whose
-> `hub.lock` is a symbolic link.
-
-> **Normative.** Restore takes `<data_dir>/hub.lock` in the target directory before
-> it materialises anything and holds it until it exits, on the same terms as §2.
+> **Normative.** Restore takes `<data_dir>/hub.lock` in the target directory it
+> created, before it materialises anything, and holds it until it exits, on the
+> same terms as §2.
 
 > **Normative.** Restore leaves no partial directory behind. Where it refuses or
-> fails, it removes every file it materialised; the `hub.lock` its own lock created
-> may remain.
+> fails, it removes the target directory it created and everything in it, and it
+> removes no other directory on any path.
 
-**Refusing a non-empty target is ADR-0104 §1's build-and-swap with the swap left to
-the operator.** Nothing that exists is modified, so there is no path — including a
-crash — on which a half-restored directory replaces a real one; the operator who
-wants the restored directory in the live path moves it there, and the directory it
-displaces is still on disk to be examined. That is the same disposition ADR-0104 §3
-takes with the retained pre-migration store, and it is right for the same reason:
-the case verification cannot cover is the one where the restore was the wrong act.
+**Restoring only into a directory the tool made is ADR-0104 §1's build-and-swap
+with the swap left to the operator.** Nothing that exists is modified, so there is
+no path — including a crash — on which a half-restored directory replaces a real
+one; the operator who wants the restored directory in the live path moves it there,
+and the directory it displaces is still on disk to be examined. That is the same
+disposition ADR-0104 §3 takes with the retained pre-migration store, and it is
+right for the same reason: the case verification cannot cover is the one where the
+restore was the wrong act.
 
 **Taking the lock on the target is not ceremony.** A supervisor configured to
 restart the hub is watching a path, and a directory that appears under it is a
@@ -512,31 +509,37 @@ directory a hub will start against — mid-materialisation if nothing stops it.
 The lock is what stops it, using the mechanism ADR-0083 §1 already provides rather
 than a new one.
 
-**Tolerating a lone `hub.lock` is what keeps the first clause from making a
-failed restore unrepeatable.** Taking the lock creates the file — `InstanceLock`
-opens it with `O_CREAT` and its release "deliberately" does not unlink it — so a
-run that refuses *before* materialising anything, which is exactly what a mistyped
-passphrase or a too-new artifact produces, leaves behind precisely one file and
-would strand the target under an emptiness rule written without it. The operator's
-second attempt has to work, and it has to work without their first knowing that a
-file they never created is why it did not. Tolerating it costs nothing, because the
-file grants nothing: exclusivity is the kernel's lock and not the path's existence,
-which is the reasoning `InstanceLock.release` records for leaving it. A directory
-holding only that file holds no data by construction, so nothing can be silently
-written over.
+**Creating the directory, rather than accepting an empty or almost-empty one, is
+what makes a whole class of question unreachable, and it is worth saying which
+class.** Taking the lock creates `hub.lock` — `InstanceLock` opens it with
+`O_CREAT`, and its release "deliberately" does not unlink it — so a rule admitting
+a *pre-existing* target has to say what happens to that file, and then has to say
+what happens when the path it names is not what it appears to be. `acquire` opens
+without `O_NOFOLLOW` and then `fchmod`s, truncates and writes the pid, so a
+`hub.lock` that is a symbolic link is followed and its *target* is truncated; a
+`hub.lock` that is a regular file may still be a hard link, and is truncated
+through the shared inode with no symlink and no race involved. Each is closable —
+`lstat` first, then check the link count, then close the window between the check
+and the open — and closing them one at a time is how a rule accumulates conditions
+faster than a reader can hold them.
 
-**The tolerance has to be qualified, because taking a lock writes through whatever
-the path names.** `InstanceLock.acquire` opens the lock path with `O_CREAT` and no
-`O_NOFOLLOW`, then `fchmod`s, truncates and writes the pid — so a `hub.lock` that
-is a symbolic link is followed, and its *target* is what gets truncated. Accepting
-a pre-existing lock file without qualification would therefore let a restore
-destroy a file outside its target directory before it had validated a single
-archive member. Restricting the tolerated file to a regular one, established
-without following it, is the whole of the fix, and it is ADR-0104 §3's rule in its
-own words — "A symbolic link is refused, never followed" — reached there by the
-same reasoning about `lstat`. The general exposure in `InstanceLock`, which the hub
-shares and which predates this decision, is not this ADR's to close and is filed as
-#888.
+**The three clauses above pay none of that, because the state those questions are
+about never exists.** A target path that already exists is refused outright, so
+there is no pre-existing file of any kind to classify; the lock is created inside a
+directory that came into being seconds earlier and that nothing else has ever seen;
+and a failed run removes that directory whole, so the retry after a mistyped
+passphrase finds nothing and simply works. The tool deletes only a directory it
+created in the same run, which is an invariant it establishes rather than trusts.
+The cost is stated rather than hidden: an operator who wants the target
+pre-created — on a particular mount, with particular permissions — creates its
+parent instead and lets the tool make the leaf.
+
+**The general exposure in `InstanceLock` is untouched by this and is not this ADR's
+to close.** The hub, the re-embedder and the measures report all take the lock the
+same way and are all exposed to a symlinked lock path in their own data
+directories; that predates this decision and is filed as #888. What §7 owes is that
+this decision does not *add* a way to reach it, and refusing a pre-existing target
+is what discharges that.
 
 ### 8. Restore verifies what it can settle, and leaves to the hub what the hub already refuses
 
@@ -570,10 +573,10 @@ two implementations of it that can disagree.
 creates.** `InstanceLock.acquire` opens the lock path with `O_CREAT`, and
 `InstanceLock.release` deliberately does not unlink it — "Removing it would let a
 contender that has already opened the same inode take a lock on a file no longer at
-that path" — so a target directory that satisfies §7's emptiness rule holds exactly
-one file the moment the lock is taken, and holds it still while this check runs.
-Excluding it by name is the whole of the reconciliation, and it is stated here
-rather than left to an implementer to discover as a restore that refuses itself.
+that path" — so the directory §7 creates holds exactly one file the moment the lock
+is taken, and holds it still while this check runs. Excluding it by name is the
+whole of the reconciliation, and it is stated here rather than left to an
+implementer to discover as a restore that refuses itself.
 
 **Leaving compatibility to the hub is a composition, not an omission, and the
 mechanism it defers to is legible.** A restored store the running build cannot
