@@ -32,6 +32,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.models import HashingEmbedder
+from ai_assistant.testing import FakeTraceSink
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 _PAST = datetime(2000, 1, 1, tzinfo=UTC)
@@ -50,7 +51,9 @@ def _semantic(record_id: str, content: str, validity: Validity | None = None) ->
 
 async def _main() -> None:
     path = sys.argv[1]
-    store = SqliteMemoryStore(path=path, embedder=HashingEmbedder(dimensions=8))
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=8)
+    )
     await store.add(_semantic("T", "coffee target"))  # committed, window open
 
     # After T is committed, make the *second* element's vector write kill the

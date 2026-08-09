@@ -48,6 +48,7 @@ from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.memory._walk import mint_position
 from ai_assistant.memory.sqlite_store import _run_to_completion
 from ai_assistant.models import HashingEmbedder
+from ai_assistant.testing import FakeTraceSink
 from ai_assistant.testing.cancellation import (
     ResourceLog,
     SuspendedMidWrite,
@@ -170,6 +171,7 @@ def make_store(tmp_path: Path) -> Iterator[Callable[..., SqliteMemoryStore]]:
         now: Callable[[], datetime] = _fixed_now,
     ) -> SqliteMemoryStore:
         store = SqliteMemoryStore(
+            traces_sink=FakeTraceSink(),
             path=tmp_path / "memory.db",
             embedder=embedder if embedder is not None else HashingEmbedder(dimensions=dimensions),
             now=now,
@@ -465,7 +467,11 @@ async def test_a_frozen_record_cannot_be_mutated_in_the_construct_then_await_win
     # write is suspended — are likewise unrepresentable now, and the generic
     # defence is verified for this backend by
     # ``TestSqliteMemoryStoreContract.test_add_cannot_tear_on_a_mid_flight_mutation_of_its_record``.
-    store = SqliteMemoryStore(path=tmp_path / "boundary.db", embedder=HashingEmbedder(dimensions=8))
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(),
+        path=tmp_path / "boundary.db",
+        embedder=HashingEmbedder(dimensions=8),
+    )
     try:
         rec = _semantic("orig", "alpha")
         pending = store.add(rec)  # coroutine built; body (and the snapshot) not run yet
@@ -539,7 +545,9 @@ async def test_write_atomic_recovers_to_neither_write_after_a_crash(tmp_path: Pa
     # completion (no crash), 0/other a clean exit — either would void the test.
     assert result.returncode == 42, f"child did not crash mid-batch: {result.stderr}"
 
-    reopened = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8))
+    reopened = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8)
+    )
     try:
         target = await reopened.get("T")
         assert target is not None  # T not left window-closed: the UPSERT rolled back
@@ -603,7 +611,9 @@ async def test_a_persist_holds_off_a_deletion_in_another_process(tmp_path: Path)
     """
     db = tmp_path / "memory.db"
     child = Path(__file__).parent / "_begin_immediate_child.py"
-    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8))
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8)
+    )
     try:
         await store.add(_semantic("T", "coffee target"))
 
@@ -636,7 +646,9 @@ async def test_a_persist_holds_off_a_deletion_in_another_process(tmp_path: Path)
         "record, so the read-then-write is not atomic across processes"
     )
 
-    reopened = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8))
+    reopened = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8)
+    )
     try:
         # Whichever order the two landed in, the file is internally consistent:
         # the deletion is last, so nothing is left behind either.
@@ -686,7 +698,9 @@ async def test_get_many_is_one_snapshot_across_its_chunks(tmp_path: Path) -> Non
     """
     db = tmp_path / "memory.db"
     child_path = Path(__file__).parent / "_get_many_snapshot_child.py"
-    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8))
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8)
+    )
     # A blocking ``Popen`` rather than an asyncio subprocess: the go-signal is sent
     # from the worker thread ``_run_to_completion`` dispatched to, and an
     # ``asyncio.StreamWriter`` is not safe to touch from off the loop. A real OS
@@ -844,7 +858,9 @@ async def test_connect_failure_is_wrapped(tmp_path: Path) -> None:
     # before any connection exists to close.
     missing = tmp_path / "no_such_dir" / "memory.db"
     with pytest.raises(MemoryStoreError, match="failed to open memory store"):
-        SqliteMemoryStore(path=missing, embedder=HashingEmbedder(dimensions=8))
+        SqliteMemoryStore(
+            traces_sink=FakeTraceSink(), path=missing, embedder=HashingEmbedder(dimensions=8)
+        )
 
 
 async def test_setup_failure_is_wrapped_and_closes_connection(
@@ -880,7 +896,11 @@ async def test_setup_failure_is_wrapped_and_closes_connection(
     monkeypatch.setattr("ai_assistant.memory.sqlite_store.sqlite_vec.load", _boom)
 
     with pytest.raises(MemoryStoreError, match="failed to open memory store"):
-        SqliteMemoryStore(path=tmp_path / "memory.db", embedder=HashingEmbedder(dimensions=8))
+        SqliteMemoryStore(
+            traces_sink=FakeTraceSink(),
+            path=tmp_path / "memory.db",
+            embedder=HashingEmbedder(dimensions=8),
+        )
 
     assert len(captured) == 1  # a connection was opened
     with pytest.raises(sqlite3.ProgrammingError):
@@ -968,7 +988,9 @@ def test_a_second_open_of_a_fresh_file_waits_for_the_first_to_initialise(
             errors.append(AssertionError("the first opener never reached the meta insert"))
             return
         try:
-            store = SqliteMemoryStore(path=path, embedder=HashingEmbedder(dimensions=8))
+            store = SqliteMemoryStore(
+                traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=8)
+            )
         except BaseException as exc:
             with guard:
                 errors.append(exc)
@@ -1057,7 +1079,11 @@ def test_setup_takes_the_write_lock_before_it_inspects_the_schema(
         return conn
 
     monkeypatch.setattr("ai_assistant.memory.sqlite_store.sqlite3.connect", _connect)
-    store = SqliteMemoryStore(path=tmp_path / "memory.db", embedder=HashingEmbedder(dimensions=8))
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(),
+        path=tmp_path / "memory.db",
+        embedder=HashingEmbedder(dimensions=8),
+    )
     store.close()
 
     _assert_opens_with_the_write_lock(statements, what="setup")
@@ -1270,7 +1296,9 @@ async def test_walk_key_migration_reaches_a_record_added_over_a_gap_at_the_top(
     db = tmp_path / "pre-walk.db"
     _write_pre_walk_db(db, [_semantic(str(index), f"legacy {index}") for index in range(1, 4)])
 
-    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
     try:
         first = await store.walk_records("upgrade", limit=10)
         assert [record.id for record in first.records] == ["1", "2"]
@@ -1309,7 +1337,9 @@ async def test_a_walk_yields_a_legacy_record_whose_rowid_is_below_zero(
     legacy.commit()
     legacy.close()
 
-    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
     try:
         chunk = await store.walk_records("negative", limit=10)
         assert [record.id for record in chunk.records] == ["below", "just-below", "above"]
@@ -1335,7 +1365,9 @@ async def test_walk_key_migration_leaves_every_existing_rowid_where_it_was(
     original = dict(before.execute("SELECT id, rowid FROM records").fetchall())
     before.close()
 
-    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
     try:
         after = dict(store._conn.execute("SELECT id, rowid FROM records").fetchall())
         assert after == original
@@ -1361,7 +1393,9 @@ async def test_migration_adds_expires_at_column_and_accepts_writes(tmp_path: Pat
     db = tmp_path / "legacy.db"
     _write_legacy_db(db, [])
 
-    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
     try:
         columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
         assert "expires_at" in columns
@@ -1385,7 +1419,9 @@ async def test_migration_backfills_expiry_so_legacy_expired_stays_forgotten(
         ],
     )
 
-    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
     try:
         assert await store.get("expired") is None  # backfilled deadline honoured
         assert await store.get("live") is not None
@@ -1428,7 +1464,9 @@ async def test_migration_backfills_valid_until_column_from_json(tmp_path: Path) 
         ],
     )
 
-    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
     try:
         columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
         assert "valid_until" in columns
@@ -1463,7 +1501,9 @@ async def test_migration_adds_valid_until_to_a_post_expires_at_table(
         with_expires_at=True,
     )
 
-    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
     try:
         types = {row[1]: row[2] for row in store._conn.execute("PRAGMA table_info(records)")}
         assert {"expires_at", "valid_until"} <= types.keys()
@@ -1504,7 +1544,9 @@ async def test_list_beliefs_orders_and_pages_migration_era_rows(tmp_path: Path) 
         ],
     )
 
-    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
     try:
         # The two unreadable rows carry the *newest* stamps, so they sort ahead of
         # the cut: a page of 2 is short unless both axes are applied before it.
@@ -1616,7 +1658,9 @@ async def test_migration_rebuilds_a_full_real_schema_preserving_vectors(tmp_path
     db = tmp_path / "real.db"
     await _write_real_schema_db(db, records, embedder)
 
-    store = SqliteMemoryStore(path=db, embedder=embedder, now=lambda: just_before)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=embedder, now=lambda: just_before
+    )
     try:
         types = {row[1]: row[2] for row in store._conn.execute("PRAGMA table_info(records)")}
         assert types["expires_at"] == "INTEGER"  # affinity flipped, not left REAL
@@ -1646,7 +1690,7 @@ async def test_migration_rolls_back_a_rebuild_that_hits_a_corrupt_row(tmp_path: 
     legacy.close()
 
     with pytest.raises(MemoryStoreError):
-        SqliteMemoryStore(path=db, embedder=embedder, now=_fixed_now)
+        SqliteMemoryStore(traces_sink=FakeTraceSink(), path=db, embedder=embedder, now=_fixed_now)
 
     # The rebuild rolled back: the original REAL schema is intact, so a fixed
     # process could migrate cleanly later rather than being stuck half-swapped.
@@ -1798,7 +1842,9 @@ async def test_migration_adds_the_subject_column_to_a_pre_subject_table(
     db = tmp_path / "pre-subject.db"
     _write_pre_subject_db(db, [_semantic("legacy", "written before the field existed")])
 
-    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
     try:
         columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
         assert "about_person" in columns
@@ -1826,7 +1872,9 @@ async def test_the_rebuild_path_also_produces_the_subject_column(tmp_path: Path)
     db = tmp_path / "ancient.db"
     _write_legacy_db(db, [_semantic("legacy", "written long before the field")])
 
-    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
     try:
         columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
         assert {"expires_at", "valid_until", "about_person"} <= columns
@@ -2034,7 +2082,9 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
         suspended worker is parked for the length of the case, and sharing would
         make an unrelated failure hang instead of fail.
         """
-        store = SqliteMemoryStore(path=":memory:", embedder=HashingEmbedder(dimensions=8))
+        store = SqliteMemoryStore(
+            traces_sink=FakeTraceSink(), path=":memory:", embedder=HashingEmbedder(dimensions=8)
+        )
         log = ResourceLog()
         suspension = ThreadSuspension()
 
@@ -2097,7 +2147,9 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
         leaves nothing parked on the ``store`` fixture's.
         """
         embedder = _GatedEmbedder(HashingEmbedder(dimensions=8))
-        store = SqliteMemoryStore(path=":memory:", embedder=embedder, now=_fixed_now)
+        store = SqliteMemoryStore(
+            traces_sink=FakeTraceSink(), path=":memory:", embedder=embedder, now=_fixed_now
+        )
         lock = _GatedLock(store._lock)
 
         def arm(operation: str) -> SuspendedCall:
@@ -2228,7 +2280,11 @@ async def test_cancelling_a_write_does_not_release_the_connection(tmp_path: Path
     task, and asserts the lock stays held until the worker finishes, then that a
     second write lands on an intact connection.
     """
-    store = SqliteMemoryStore(path=tmp_path / "cancel.db", embedder=HashingEmbedder(dimensions=8))
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(),
+        path=tmp_path / "cancel.db",
+        embedder=HashingEmbedder(dimensions=8),
+    )
     entered = threading.Event()
     release = threading.Event()
     original_add = store._add_sync
@@ -2286,7 +2342,11 @@ async def test_cancellation_takes_precedence_over_a_worker_error(tmp_path: Path)
     the worker happened to raise as it finished. And the connection must survive
     both, so the next call lands cleanly.
     """
-    store = SqliteMemoryStore(path=tmp_path / "cancel.db", embedder=HashingEmbedder(dimensions=8))
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(),
+        path=tmp_path / "cancel.db",
+        embedder=HashingEmbedder(dimensions=8),
+    )
     entered = threading.Event()
     release = threading.Event()
 

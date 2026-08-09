@@ -44,6 +44,7 @@ from ics_fixtures import NOW, calendar, reader, source, utc, vevent
 from ai_assistant.core.errors import ReaderError
 from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
 from ai_assistant.readers import CALENDAR_READER_NAME
+from ai_assistant.testing import FakeTraceSink
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -77,7 +78,12 @@ _WIDE = {"window_future": timedelta(days=1)}
 def _hub() -> tuple[InMemoryMemoryStore, MemoryIngestor]:
     """The composition root's pairing, with the clock the fixtures freeze."""
     store = InMemoryMemoryStore(now=lambda: NOW)
-    return store, MemoryIngestor(store=store, policy=DefaultMemoryPolicy(), now=lambda: NOW)
+    return store, MemoryIngestor(
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        traces_sink=FakeTraceSink(),
+        now=lambda: NOW,
+    )
 
 
 async def _cycle(writer: MemoryIngestor, subject: Reader) -> None:

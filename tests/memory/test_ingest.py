@@ -32,6 +32,7 @@ from ai_assistant.memory import (
     SqliteMemoryStore,
 )
 from ai_assistant.models import HashingEmbedder
+from ai_assistant.testing import FakeTraceSink
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -168,7 +169,9 @@ def _proposal(
 
 
 def _ingestor(store: MemoryStore) -> MemoryIngestor:
-    return MemoryIngestor(store=store, policy=DefaultMemoryPolicy(), now=_fixed_now)
+    return MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=DefaultMemoryPolicy(), now=_fixed_now
+    )
 
 
 async def test_accepts_and_stores_a_novel_memory() -> None:
@@ -515,6 +518,7 @@ async def test_a_correction_retires_every_conflicting_inference_not_only_the_bes
     # A low threshold so all four near-duplicates are detected (they score at the
     # default 0.75 boundary; the headroom keeps the test off the knife-edge).
     ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
         store=store,
         policy=DefaultMemoryPolicy(),
         now=_fixed_now,
@@ -563,7 +567,9 @@ async def test_a_multi_target_supersede_that_cannot_mint_leaves_every_target_liv
         store = InMemoryMemoryStore()
     else:
         store = SqliteMemoryStore(
-            path=tmp_path / "memory.db", embedder=HashingEmbedder(dimensions=32)
+            traces_sink=FakeTraceSink(),
+            path=tmp_path / "memory.db",
+            embedder=HashingEmbedder(dimensions=32),
         )
     try:
         for stale_id in ("morning", "early", "dawn"):
@@ -579,6 +585,7 @@ async def test_a_multi_target_supersede_that_cannot_mint_leaves_every_target_liv
         # INSERT_IF_ABSENT collides and the correction can never land.
         await store.add(_semantic("wall", "an unrelated fact", confidence=0.9))
         ingestor = MemoryIngestor(
+            traces_sink=FakeTraceSink(),
             store=store,
             policy=DefaultMemoryPolicy(),
             now=_fixed_now,
@@ -624,6 +631,7 @@ async def test_a_correction_above_the_conflict_ceiling_refuses_and_writes_nothin
             )
         )
     ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
         store=store,
         policy=DefaultMemoryPolicy(),
         now=_fixed_now,
@@ -694,6 +702,7 @@ async def test_a_superseded_targets_hiding_is_read_time_relative(
         store = InMemoryMemoryStore(now=lambda: read_at[0])
     else:
         store = SqliteMemoryStore(
+            traces_sink=FakeTraceSink(),
             path=tmp_path / "memory.db",
             embedder=HashingEmbedder(dimensions=32),
             now=lambda: read_at[0],
@@ -780,6 +789,7 @@ async def test_superseding_a_future_dated_target_refuses_without_corrupting(
         store = InMemoryMemoryStore(now=lambda: datetime(2026, 10, 1, tzinfo=UTC))
     else:
         store = SqliteMemoryStore(
+            traces_sink=FakeTraceSink(),
             path=tmp_path / "memory.db",
             embedder=HashingEmbedder(dimensions=32),
             now=lambda: datetime(2026, 10, 1, tzinfo=UTC),
@@ -832,6 +842,7 @@ async def test_superseding_a_target_whose_window_opens_at_the_close_refuses(
         store = InMemoryMemoryStore(now=lambda: datetime(2026, 7, 1, tzinfo=UTC))
     else:
         store = SqliteMemoryStore(
+            traces_sink=FakeTraceSink(),
             path=tmp_path / "memory.db",
             embedder=HashingEmbedder(dimensions=32),
             now=lambda: datetime(2026, 7, 1, tzinfo=UTC),
@@ -904,6 +915,7 @@ async def test_a_multi_target_supersede_reads_its_close_instant_exactly_once() -
         )
     clock = _AdvancingClock()
     ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
         store=store,
         policy=DefaultMemoryPolicy(),
         now=clock,
@@ -940,7 +952,11 @@ async def test_a_correction_retires_the_import_and_survives_the_next_re_sync() -
     #            honest thing §6 buys, and the only thing asserted below.
     store = InMemoryMemoryStore()
     ingestor = MemoryIngestor(
-        store=store, policy=DefaultMemoryPolicy(), now=_fixed_now, id_factory=lambda: "m2"
+        traces_sink=FakeTraceSink(),
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        now=_fixed_now,
+        id_factory=lambda: "m2",
     )
     await store.add(
         _preference(
@@ -1058,7 +1074,9 @@ async def test_the_ingestor_refuses_to_fold_an_assertion_onto_an_external_record
             source=MemorySource.EXTERNAL,
         )
     )
-    ingestor = MemoryIngestor(store=store, policy=_MergeEverythingPolicy(), now=_fixed_now)
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=_MergeEverythingPolicy(), now=_fixed_now
+    )
 
     with pytest.raises(MemoryStoreError, match="refusing to reinforce"):
         await ingestor.ingest(_proposal(_asserted("new", "user works from the berlin office")))
@@ -1080,7 +1098,9 @@ async def test_the_ingestor_refuses_to_fold_an_assertion_onto_another_assertion(
     # user said.
     store = InMemoryMemoryStore()
     await store.add(_asserted("said-before", "user prefers morning meetings"))
-    ingestor = MemoryIngestor(store=store, policy=_MergeEverythingPolicy(), now=_fixed_now)
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=_MergeEverythingPolicy(), now=_fixed_now
+    )
 
     with pytest.raises(MemoryStoreError, match="refusing to fold onto"):
         await ingestor.ingest(_proposal(_asserted("says-now", "user prefers afternoon meetings")))
@@ -1104,7 +1124,9 @@ async def test_the_ingestor_refuses_to_fold_a_non_assertion_onto_an_assertion(
     # downgrade its provenance out of the profile.
     store = InMemoryMemoryStore()
     await store.add(_asserted("their-words", "user prefers morning meetings"))
-    ingestor = MemoryIngestor(store=store, policy=_MergeEverythingPolicy(), now=_fixed_now)
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=_MergeEverythingPolicy(), now=_fixed_now
+    )
 
     with pytest.raises(MemoryStoreError, match="refusing to fold onto"):
         await ingestor.ingest(
@@ -1136,7 +1158,9 @@ async def test_a_reinforce_of_an_assertion_onto_a_derived_record_keeps_its_evide
     )
     # `_MergeEverythingPolicy` rules REINFORCE for the assertion; INFERRED is
     # supersedable, so `_refuse_unsafe_fold` permits the fold.
-    ingestor = MemoryIngestor(store=store, policy=_MergeEverythingPolicy(), now=_fixed_now)
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=_MergeEverythingPolicy(), now=_fixed_now
+    )
 
     result = await ingestor.ingest(
         _proposal(_asserted("correction", "user prefers afternoon meetings", evidence=("ev2",)))
@@ -1181,7 +1205,9 @@ async def test_proposal_itself_does_not_consume_a_conflict_slot() -> None:
     await store.add(_preference("self", "prefers concise emails"))
     await store.add(_preference("rival", "prefers concise emails"))
     policy = _RecordingPolicy()
-    ingestor = MemoryIngestor(store=store, policy=policy, conflict_limit=1, now=_fixed_now)
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=policy, conflict_limit=1, now=_fixed_now
+    )
 
     await ingestor.ingest(_proposal(_preference("self", "prefers concise emails")))
 
@@ -1199,7 +1225,9 @@ async def test_the_whole_detected_conflict_set_reaches_the_policy_at_the_ceiling
     for index in range(3):
         await store.add(_preference(f"existing-{index}", "prefers concise emails"))
     policy = _RecordingPolicy()
-    ingestor = MemoryIngestor(store=store, policy=policy, conflict_limit=3, now=_fixed_now)
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=policy, conflict_limit=3, now=_fixed_now
+    )
 
     await ingestor.ingest(_proposal(_preference("new", "prefers concise emails")))
 
@@ -1220,7 +1248,9 @@ async def test_a_conflict_set_above_the_ceiling_is_refused_before_the_policy_is_
         await store.add(_preference(f"existing-{index}", "prefers concise emails"))
     before = await store.export()
     policy = _RecordingPolicy()
-    ingestor = MemoryIngestor(store=store, policy=policy, conflict_limit=3, now=_fixed_now)
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=policy, conflict_limit=3, now=_fixed_now
+    )
 
     with pytest.raises(MemoryStoreError, match="surfaced more than"):
         await ingestor.ingest(_proposal(_preference("new", "prefers concise emails")))
@@ -1245,7 +1275,12 @@ class _MergeToAbsentTargetPolicy:
 
 async def test_merge_into_absent_target_raises_and_stores_nothing() -> None:
     store = InMemoryMemoryStore()
-    ingestor = MemoryIngestor(store=store, policy=_MergeToAbsentTargetPolicy(), now=_fixed_now)
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
+        store=store,
+        policy=_MergeToAbsentTargetPolicy(),
+        now=_fixed_now,
+    )
 
     with pytest.raises(MemoryStoreError, match="not among the conflicts"):
         await ingestor.ingest(_proposal(_semantic("1", "some fact", confidence=0.9)))
@@ -1269,7 +1304,9 @@ class _MaxTtlPolicy:
 
 async def test_overflowing_temporary_ttl_raises_and_stores_nothing() -> None:
     store = InMemoryMemoryStore()
-    ingestor = MemoryIngestor(store=store, policy=_MaxTtlPolicy(), now=_fixed_now)
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=_MaxTtlPolicy(), now=_fixed_now
+    )
 
     with pytest.raises(MemoryStoreError, match="overflows"):
         await ingestor.ingest(_proposal(_semantic("1", "some fact", confidence=0.9)))
@@ -1317,6 +1354,7 @@ def test_tuning_that_would_silently_disable_a_stage_is_refused(
     """
     with pytest.raises(ValueError, match=match):
         MemoryIngestor(
+            traces_sink=FakeTraceSink(),
             store=InMemoryMemoryStore(),
             policy=DefaultMemoryPolicy(),
             now=_fixed_now,
@@ -1332,6 +1370,7 @@ async def test_tuning_accepts_the_boundary_values(threshold: float, limit: int) 
     # conflicts, so it cannot consume the ceiling of 1 this case is pinning.
     await _plant_episodes(store, _EPISODE)
     ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
         store=store,
         policy=DefaultMemoryPolicy(),
         conflict_threshold=threshold,
@@ -1351,6 +1390,7 @@ def test_tuning_refuses_a_conflict_limit_that_is_not_an_integer(limit: object) -
     """A non-integral limit reaches ``MemoryStore.search``, where slicing raises."""
     with pytest.raises(TypeError, match="must be an integer"):
         MemoryIngestor(
+            traces_sink=FakeTraceSink(),
             store=InMemoryMemoryStore(),
             policy=DefaultMemoryPolicy(),
             conflict_limit=limit,  # type: ignore[arg-type]  # deliberately invalid tuning
@@ -1369,6 +1409,7 @@ def test_tuning_refuses_a_boolean_threshold(threshold: bool) -> None:
     """
     with pytest.raises(TypeError, match="must be a real number"):
         MemoryIngestor(
+            traces_sink=FakeTraceSink(),
             store=InMemoryMemoryStore(),
             policy=DefaultMemoryPolicy(),
             # No `type: ignore` needed, and that is the point: `bool` is a
@@ -1391,6 +1432,7 @@ async def test_a_naive_clock_cannot_leak_a_naive_expiry() -> None:
     store = InMemoryMemoryStore(now=_fixed_now)
     await _plant_episodes(store, _EPISODE)
     naive_clock = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
         store=store,
         policy=DefaultMemoryPolicy(),
         now=lambda: datetime(2026, 6, 1),  # noqa: DTZ001 — the naive clock is the subject
@@ -1415,6 +1457,7 @@ async def test_a_non_utc_clock_is_converted_not_merely_accepted() -> None:
     store = InMemoryMemoryStore(now=_fixed_now)
     await _plant_episodes(store, _EPISODE)
     berlin_clock = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
         store=store,
         policy=DefaultMemoryPolicy(),
         now=lambda: datetime(2026, 6, 1, 2, tzinfo=timezone(timedelta(hours=2))),
@@ -1495,6 +1538,7 @@ async def test_an_unusable_clock_reading_is_the_subsystems_error(zone: tzinfo) -
     store = InMemoryMemoryStore(now=_fixed_now)
     await _plant_episodes(store, _EPISODE)
     broken = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
         store=store,
         policy=DefaultMemoryPolicy(),
         now=lambda: datetime(2026, 6, 1, tzinfo=zone),
@@ -1526,6 +1570,7 @@ async def test_a_clock_whose_conversion_lies_cannot_install_a_naive_expiry() -> 
     store = InMemoryMemoryStore(now=_fixed_now)
     await _plant_episodes(store, _EPISODE)
     lying = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
         store=store,
         policy=DefaultMemoryPolicy(),
         now=lambda: _LyingConversion(2026, 6, 1, tzinfo=UTC),
@@ -1564,6 +1609,7 @@ async def test_a_clock_that_flips_its_offset_during_conversion_is_refused() -> N
     await _plant_episodes(store, _EPISODE)
     _FlipOnConvert.lie = timedelta(0)
     flipping = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
         store=store,
         policy=DefaultMemoryPolicy(),
         now=lambda: _FlipOnConvert(2026, 6, 1, tzinfo=UTC),

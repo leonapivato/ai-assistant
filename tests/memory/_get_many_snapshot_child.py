@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from ai_assistant.core.types import MemorySource, Provenance, SemanticMemory, Validity
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.models import HashingEmbedder
+from ai_assistant.testing import FakeTraceSink
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 #: stdout marker meaning "the store is open and I am waiting for the go-signal".
@@ -52,7 +53,9 @@ def _semantic(record_id: str, content: str) -> SemanticMemory:
 
 async def _main() -> None:
     path = sys.argv[1]
-    store = SqliteMemoryStore(path=path, embedder=HashingEmbedder(dimensions=8))
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=8)
+    )
     try:
         print(_READY, flush=True)  # flushed: the parent is blocked on this line
         sys.stdin.readline()  # the go-signal, sent from between the parent's chunks

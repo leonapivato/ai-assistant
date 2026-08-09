@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from ai_assistant.core.types import MemorySource, Provenance, SemanticMemory, Validity
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.models import HashingEmbedder
+from ai_assistant.testing import FakeTraceSink
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 #: How long the child holds the window open once it has announced itself. A
@@ -61,7 +62,9 @@ def _semantic(record_id: str, content: str) -> SemanticMemory:
 
 async def _main() -> None:
     path = sys.argv[1]
-    store = SqliteMemoryStore(path=path, embedder=HashingEmbedder(dimensions=8))
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=8)
+    )
     reached = False
 
     def hold(statement: str) -> None:

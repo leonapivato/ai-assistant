@@ -61,6 +61,7 @@ from ai_assistant.core.types import (
     Validity,
 )
 from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
+from ai_assistant.testing import FakeTraceSink
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -197,7 +198,9 @@ def _store() -> InMemoryMemoryStore:
 
 
 def _ingestor(store: MemoryStore) -> MemoryIngestor:
-    return MemoryIngestor(store=store, policy=DefaultMemoryPolicy(), now=_fixed_now)
+    return MemoryIngestor(
+        traces_sink=FakeTraceSink(), store=store, policy=DefaultMemoryPolicy(), now=_fixed_now
+    )
 
 
 async def _window_of(store: MemoryStore, record_id: str) -> Validity:
@@ -236,9 +239,15 @@ async def _reconcile(
     lock, so they take the lock and call it. That the real path holds it across the
     ingest as well is a different property, and the two cases at the end of this
     module are what pin it.
+
+    Counts what came back rather than returning it. ADR-0119 §8 made
+    ``_close_absent`` hand out the closed **ids**, so a trace can carry them under
+    ``TraceRecordSet.RETIRED``; every case below is about *how many* windows the
+    rules close, and the ids themselves are pinned where the trace is.
     """
     async with ingestor._lock:
-        return await ingestor._close_absent(source=source, coverage=coverage, results=results)
+        closed = await ingestor._close_absent(source=source, coverage=coverage, results=results)
+    return len(closed)
 
 
 # --- §3: the four conditions, one case each ---------------------------------

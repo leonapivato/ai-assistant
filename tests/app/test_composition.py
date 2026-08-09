@@ -43,7 +43,7 @@ from ai_assistant.orchestration import Engine
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.readers import CALENDAR_READER_NAME
-from ai_assistant.testing import evaluation_trace
+from ai_assistant.testing import FakeTraceSink, evaluation_trace
 from ai_assistant.tools import InMemoryToolRegistry
 
 
@@ -1261,14 +1261,16 @@ async def test_only_the_maintenance_operation_is_handed_the_trace_store(
     contract cannot see, because the store arrives by injection precisely so that
     a subsystem never names it.
 
-    **Two attributes of the engine are the permitted holders, and between them
+    **Four attributes of the engine are the permitted holders, and between them
     they are §7's two narrow seams**: "a ``TraceSink`` to every emitter, a
     ``TraceRetention`` to the ``Engine``'s maintenance operation, and the
     ``TraceStore`` itself to nothing in the pipeline". ``_traces`` is the purge
-    (§10) and ``_operation_traces._sink`` is §8's engine-boundary emitter. The
-    narrowing is the annotation on each constructor rather than anything done here,
-    which is why the object identity is the same and the *reach* is not — the same
-    arrangement ``SourceGrants``/``SourceGrantStore`` uses.
+    (§10); the other three are §8's emitters — the engine boundary, ``memory``'s
+    relevance read and ``memory``'s write path — each reaching the object through
+    its own ``MemoryTraces``/``OperationTraces`` and each holding it under a
+    ``TraceSink`` annotation. The narrowing is that annotation rather than anything
+    done here, which is why the object identity is the same and the *reach* is not
+    — the same arrangement ``SourceGrants``/``SourceGrantStore`` uses.
 
     **Neither can walk, which is the property the list is guarding.** §7 cuts the
     seam at the walk rather than at the store — "the pipeline may not read a trace
@@ -1285,9 +1287,12 @@ async def test_only_the_maintenance_operation_is_handed_the_trace_store(
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         holders = _holders_of(engine, built[0])
-        assert sorted(holders) == ["engine._operation_traces._sink", "engine._traces"], (
-            f"the trace store is reachable from {holders}"
-        )
+        assert sorted(holders) == [
+            "engine._loop._memory._traces._sink",
+            "engine._loop._writes._writer._traces._sink",
+            "engine._operation_traces._sink",
+            "engine._traces",
+        ], f"the trace store is reachable from {holders}"
     finally:
         await engine.aclose()
 
@@ -1369,12 +1374,16 @@ async def test_a_keep_forever_horizon_sweeps_no_trace(
         await engine.aclose()
 
 
-def _holders_of(root: object, target: object, *, depth: int = 4) -> list[str]:
+def _holders_of(root: object, target: object, *, depth: int = 6) -> list[str]:
     """Every attribute path from ``root`` that reaches ``target``.
 
     Bounded in depth and cycle-guarded, because an engine's object graph is deep
-    and partly cyclic; four levels reaches every stage and every store the
-    composition root wires.
+    and partly cyclic. **Six levels rather than four** since ADR-0119 §8's memory
+    emitters landed: the writer's sink sits at
+    ``engine._loop._writes._writer._traces._sink``, one hop past where four
+    stopped, so the walk would have reported one memory emitter and silently
+    missed its twin. Eight finds nothing six does not, so six is a bound rather
+    than a lucky number.
     """
     found: list[str] = []
     seen: set[int] = set()
@@ -1985,7 +1994,9 @@ class TestBuildReembedder:
         that the disclosed recipient is the configured one.
         """
         SqliteMemoryStore(
-            path=tmp_path / "memory.db", embedder=HashingEmbedder(dimensions=8)
+            traces_sink=FakeTraceSink(),
+            path=tmp_path / "memory.db",
+            embedder=HashingEmbedder(dimensions=8),
         ).close()
         settings = Settings(embedder=EmbedderKind.HASHING, data_dir=tmp_path)
 

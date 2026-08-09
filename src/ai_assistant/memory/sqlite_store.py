@@ -29,6 +29,7 @@ import contextlib
 import json
 import sqlite3
 import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -49,8 +50,11 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryWriteMode,
     RecordChunk,
+    TraceKind,
+    TraceRecordSet,
     band_of,
 )
+from ai_assistant.memory import traces
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory._walk import (
     check_walk_limit,
@@ -65,7 +69,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.protocols import Embedder
+    from ai_assistant.core.protocols import Embedder, TraceSink
     from ai_assistant.core.types import (
         BeliefBand,
         Embedding,
@@ -256,6 +260,45 @@ def _to_micros(instant: datetime) -> int:
     return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
 
 
+@dataclass(frozen=True, slots=True)
+class _Retrieved:
+    """One relevance read's records together with what only the read can count.
+
+    The public :meth:`SqliteMemoryStore.search` unwraps this and returns the
+    records; it exists so the counts ADR-0119 §8 requires travel out of the read
+    without widening the ``MemoryStore`` contract, which §4 forbids in terms.
+
+    Attributes:
+        records: What the read returned, in relevance order.
+        observed: The counts, already keyed by ``memory.traces``' literal metric
+            keys. Empty where the read short-circuited before fetching anything —
+            an absent key is §3's "not observed", which is what that is.
+    """
+
+    records: list[MemoryRecord]
+    observed: Mapping[str, int]
+
+
+def _retrieval_reading(retrieved: _Retrieved) -> traces.Reading:
+    """Read one completed relevance read into its trace (ADR-0119 §8).
+
+    ``returned`` and the returned ids are observed on **every** completed read,
+    including one that short-circuited: "zero records came back" is a real
+    observation, and §3 distinguishes it from the unobserved counts around it by
+    the key being present with the value it has.
+
+    Args:
+        retrieved: What the read produced.
+
+    Returns:
+        The reading the emitter turns into a trace.
+    """
+    return traces.Reading(
+        metrics={**retrieved.observed, traces.RETURNED: len(retrieved.records)},
+        records={TraceRecordSet.RETURNED: [record.id for record in retrieved.records]},
+    )
+
+
 class SqliteMemoryStore:
     """A persistent, semantically-searchable ``MemoryStore``."""
 
@@ -264,6 +307,8 @@ class SqliteMemoryStore:
         *,
         path: Path | str,
         embedder: Embedder,
+        traces_sink: TraceSink,
+        traces_now: Clock = _utcnow,
         now: Clock = _utcnow,
     ) -> None:
         """Open (or create) the store at ``path``.
@@ -272,6 +317,31 @@ class SqliteMemoryStore:
             path: Database file path, or ``":memory:"`` for an ephemeral store.
             embedder: The embedder used for all records; a store is bound to one
                 embedding model for its lifetime.
+            traces_sink: Where this store's ``RETRIEVAL`` traces are appended
+                (ADR-0119 §8). **Required with no default**, which §7 states as a
+                clause of its own: "every emitting site takes a ``TraceSink`` as a
+                required constructor argument with no default. A composition that
+                omits it does not type-check." An optional sink defaults to
+                unwired, an unwired emitter produces no traces, "and no traces is
+                indistinguishable from no events".
+
+                A :class:`~ai_assistant.core.protocols.TraceSink` and never a
+                ``TraceStore``: §7 gives an emitter the append and withholds the
+                walk, and this annotation is the whole of the narrowing.
+            traces_now: Clock the ``RETRIEVAL`` trace's ``occurred_at`` is stamped
+                from. **A seam of its own rather than a second reader of ``now``**,
+                because sharing one made the instrument change the work: this
+                store's contract is that a search judges every candidate against
+                **one** clock reading, and an emitter reading first turned the
+                read's own reading into the *second* — so an advancing clock
+                retired records that a search without a trace would have returned
+                (``memory_store_contract.py``'s
+                ``test_search_judges_every_record_against_one_clock_reading``
+                caught exactly that). ADR-0119 §5 rules that no retrieval "changes
+                its result because a trace"; two clocks is how that holds rather
+                than how it is promised. Defaults to the wall clock, so a test that
+                freezes ``now`` for the expiry axis does not thereby freeze the
+                instant a trace records.
             now: Clock used to decide whether a record has expired; injectable
                 for deterministic tests. Defaults to UTC wall-clock. Guarded by
                 :func:`~ai_assistant.core.clock.checked_clock`: this seam never
@@ -290,6 +360,15 @@ class SqliteMemoryStore:
         """
         self._embedder = embedder
         self._clock = checked_clock(now, owner="SqliteMemoryStore")
+        # §3 puts the stamp on the emitter rather than on the trace store, so the
+        # instant means the read and not the append. Its own clock, for the reason
+        # ``traces_now`` documents.
+        self._traces = traces.MemoryTraces(
+            kind=TraceKind.RETRIEVAL,
+            sink=traces_sink,
+            now=traces_now,
+            owner="SqliteMemoryStore retrieval traces",
+        )
         self._path = path if path == ":memory:" else str(Path(path))
         self._lock = asyncio.Lock()
         self._conn = self._setup()
@@ -1063,6 +1142,15 @@ class SqliteMemoryStore:
                 every band and ``()`` none, conjunctive with ``kinds``. Applied
                 *before* the vector search, unlike ``kinds``.
 
+        **One ``RETRIEVAL`` trace per call, emitted here because nowhere else can
+        see the numbers** (ADR-0119 §8). The per-predicate exclusion counts exist
+        only inside :meth:`_search_sync`, so a trace emitted one layer up "would
+        satisfy the letter of 'we have retrieval telemetry' and be blind to the
+        exact thing #824 watches for". The trace is subordinate to the read (§5):
+        no failure to record one reaches this method's caller, and a fault path
+        still emits, carrying the ``limit`` it was asked for and omitting the
+        counts it never reached (§3's observation rule).
+
         Returns:
             Matching records, most relevant first, each carrying a ``score``
             that is the cosine similarity to the query, in ``[0, 1]``. Expired
@@ -1090,19 +1178,69 @@ class SqliteMemoryStore:
         """
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
         wanted_sources = None if bands is None else _sources_in(bands)
+        # Read off the same first-executed-lines snapshot the predicates take, so
+        # the trace and the read agree about what was asked for even if the caller
+        # mutates the sequence while the embedding is in flight (#436).
+        selected_bands = None if bands is None else len(frozenset(bands))
+        # Observed before any work, so §8's "the trace still carries its ``limit``"
+        # holds on the fault path too. ``_searched`` is *constructed* here and not
+        # started; the materialisation above is still on this coroutine's first
+        # executed lines, which is what ADR-0065 §3 asks for.
+        entry: dict[str, int | float | bool] = {traces.LIMIT: limit}
+        if selected_bands is not None:
+            entry[traces.BANDS] = selected_bands
+        retrieved = await self._traces.observing(
+            traces.SEAM_SEARCH,
+            self._searched(query, limit, wanted, wanted_sources),
+            _retrieval_reading,
+            entry=entry,
+        )
+        return retrieved.records
+
+    async def _searched(
+        self,
+        query: str,
+        limit: int,
+        wanted: frozenset[str] | None,
+        wanted_sources: frozenset[str] | None,
+    ) -> _Retrieved:
+        """The read itself, returning its records **and** what only it can count.
+
+        Split out of :meth:`search` so the whole read — the short circuits, the
+        embedding, the filtered pass and the decode — sits inside the traced
+        region. Decoding in particular: a corrupt row raises ``MemoryStoreError``
+        there, and a decode left outside would have that read recorded as ``OK``.
+
+        Args:
+            query: The search text.
+            limit: The caller's ceiling.
+            wanted: The kind restriction, already materialised.
+            wanted_sources: The band restriction as source names, already
+                materialised; ``None`` for every band.
+
+        Returns:
+            The records, and the counts ADR-0119 §8 requires of the trace. A
+            short circuit observes none of the counts, which is the honest answer:
+            the read never fetched a candidate, and §3 forbids a zero standing in.
+        """
         if limit <= 0 or not query.strip():
-            return []
+            return _Retrieved(records=[], observed={})
         # An empty ``bands`` selects nothing (ADR-0113 §3), and so does a selection
         # no source maps into — the same answer by the same reasoning, and taken
         # before the embedder is paid for a query whose result is already known.
         if wanted_sources is not None and not wanted_sources:
-            return []
+            return _Retrieved(records=[], observed={})
         vector = await self._embed_one(query)
         async with self._lock:
-            rows = await _run_to_completion(
+            rows, observed = await _run_to_completion(
                 self._search_sync, vector, limit, wanted, wanted_sources, self._now_micros()
             )
-        return [self._decode(data).model_copy(update={"score": score}) for data, score in rows]
+        return _Retrieved(
+            records=[
+                self._decode(data).model_copy(update={"score": score}) for data, score in rows
+            ],
+            observed=observed,
+        )
 
     def _search_sync(
         self,
@@ -1111,7 +1249,7 @@ class SqliteMemoryStore:
         wanted: frozenset[str] | None,
         wanted_sources: frozenset[str] | None,
         now: int,
-    ) -> list[tuple[str, float]]:
+    ) -> tuple[list[tuple[str, float]], dict[str, int]]:
         """Run the KNN with the band bound into it, then the post-cut predicates.
 
         **Why the band is in the SQL and the other three are not.** ADR-0113 §2
@@ -1147,6 +1285,32 @@ class SqliteMemoryStore:
         silently drop a live belief out of a band-scoped answer, which is worse than
         failing loudly. An indexed column would also remove the amplification, and
         is the other reason to reach for one.
+
+        **The three exclusion counts ADR-0119 §8 requires are taken here**, one per
+        predicate rather than one total, because #824's trigger "is about *window*
+        closure specifically, and a single filtered count cannot distinguish it
+        from an expiry sweep or a band filter". Both window ends count into one
+        figure: they are one predicate — ADR-0045 §6's ``live_at``, read from two
+        places for storage reasons alone.
+
+        **There is no fourth count for the band, and its absence is the honest
+        answer rather than an omission.** The band binds *before* the cut (above),
+        so no out-of-band row is ever a candidate here and this pass never
+        evaluates a band predicate at all. ADR-0119 §3 rules that "an absent key
+        means *not observed* and never zero", and §8 asks only for what "the read
+        reached"; a zero would say the band filter removed nothing from a
+        population it was never given the chance to filter. The caller records how
+        many bands were *asked for* instead, which is a quantity that does exist.
+
+        **The counts do not sum to the candidates.** The pass stops at ``limit``,
+        so candidates it never examined are neither returned nor excluded, and a
+        measure that assumed an accounting identity would read the shortfall as an
+        exclusion. That is deliberate: ``candidates`` is what was fetched, and each
+        exclusion count is what this pass actually rejected.
+
+        Returns:
+            The surviving ``(data, score)`` rows, and the counts keyed by
+            ``memory.traces``' literal metric keys.
         """
         # Over-fetch to leave room for kind-, expiry-, and window-filtered rows,
         # clamped to sqlite-vec's KNN ``k`` ceiling so an over-large ``limit``
@@ -1190,24 +1354,37 @@ class SqliteMemoryStore:
             msg = f"failed to search: {exc}"
             raise MemoryStoreError(msg) from exc
         results: list[tuple[str, float]] = []
+        excluded_kind = 0
+        excluded_retention = 0
+        excluded_window = 0
         for data, kind, expires_at, valid_until, distance in rows:
             if wanted is not None and kind not in wanted:
+                excluded_kind += 1
                 continue
             if expires_at is not None and expires_at <= now:
+                excluded_retention += 1
                 continue
             # Window, both ends: the hot ``valid_until`` from its column, and the
             # rare ``valid_from`` from the JSON blob (ADR-0045 §9). Applied in this
             # same post-KNN pass so a filtered row still counts against over-fetch.
             if valid_until is not None and valid_until <= now:
+                excluded_window += 1
                 continue
             valid_from = self._micros_from_json(data, "valid_from", nested="validity")
             if valid_from is not None and valid_from > now:
+                excluded_window += 1
                 continue
             # vec0 uses cosine distance; similarity is 1 - distance, floored at 0.
             results.append((data, max(0.0, 1.0 - distance)))
             if len(results) >= limit:
                 break
-        return results
+        return results, {
+            traces.FETCH_K: fetch_k,
+            traces.CANDIDATES: len(rows),
+            traces.EXCLUDED_KIND: excluded_kind,
+            traces.EXCLUDED_RETENTION: excluded_retention,
+            traces.EXCLUDED_WINDOW: excluded_window,
+        }
 
     async def list_beliefs(
         self,

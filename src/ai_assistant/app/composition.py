@@ -267,7 +267,49 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
     opened: list[Callable[[], None]] = []
     try:
         # The connection-owning stores first, tracked for build-failure cleanup.
-        memory = SqliteMemoryStore(path=directory / "memory.db", embedder=embedder)
+        #
+        # **The trace store opens ahead of the rest**, because the stores below
+        # take it as a ``TraceSink`` and a required constructor argument cannot be
+        # filled by something that does not exist yet (ADR-0119 §7). It is still
+        # the **seventh** connection-owning store (ADR-0119 §6) — the ordinal
+        # counts them, it does not order them — and the first that is **Tier 2**
+        # rather than Tier 1: it holds numbers, opaque ids and durations about
+        # events, and never the content those events were about (§2). ADR-0083
+        # ruling 4's exclusivity needs nothing new for it, on ADR-0102 §12's
+        # reasoning: it lives inside the directory the instance lock already
+        # covers, is opened by the same process, is closed in the same ordered
+        # shutdown, and is reached only through the API.
+        #
+        # **A database of its own rather than a table beside an existing one**
+        # (§6). Two reasons, and the second decides: a trace about a failed write
+        # inside the failed write's own database is lost exactly when it is most
+        # wanted, and this is the only store here with a decided deletion horizon,
+        # so putting a swept table beside ``memory.db``'s retention axes would be
+        # three lifetimes in one file.
+        #
+        # **One object, handed out narrowed, and never whole** (§7). The
+        # ``Engine`` below is given it as a ``TraceRetention`` — the deletion
+        # seam — so the maintenance operation can sweep it and the pipeline
+        # cannot walk it. The memory store and the writer are given the same
+        # object as a ``TraceSink``, narrowed the same way, by the annotation on
+        # each one's own constructor. Nothing takes it whole.
+        #
+        # **``settings.trace_retention`` is enforced from here** (#852): the
+        # engine measures the horizon back from its own clock and calls
+        # ``purge_before`` as the third call behind ADR-0083 §7's existing
+        # retention-purge operation (ADR-0119 §10). No new job, no new interval,
+        # and no store surface on the scheduler, which holds an ``Engine`` and
+        # nothing else.
+        traces = SqliteTraceStore(path=directory / "traces.db")
+        opened.append(traces.close)
+        # ADR-0119 §8's ``RETRIEVAL`` emitter is *inside* this store, because the
+        # per-predicate exclusion counts #824's trigger needs exist nowhere else:
+        # "a retrieval trace emitted one layer up would satisfy the letter of 'we
+        # have retrieval telemetry' and be blind to the exact thing #824 watches
+        # for". This is the wiring point that arms it.
+        memory = SqliteMemoryStore(
+            path=directory / "memory.db", embedder=embedder, traces_sink=traces
+        )
         opened.append(memory.close)
         trail = SqliteAuditTrail(path=directory / "audit.db")
         opened.append(trail.close)
@@ -326,37 +368,6 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         # anything done here — "what the driver cannot do is *name* ``record``".
         grants = SqliteSourceGrantStore(path=directory / "grants.db")
         opened.append(grants.close)
-        # The **seventh** connection-owning store (ADR-0119 §6), and the first
-        # that is **Tier 2** rather than Tier 1: it holds numbers, opaque ids and
-        # durations about events, and never the content those events were about
-        # (§2). ADR-0083 ruling 4's exclusivity needs nothing new for it, on
-        # ADR-0102 §12's reasoning: it lives inside the directory the instance
-        # lock already covers, is opened by the same process, is closed in the
-        # same ordered shutdown, and is reached only through the API.
-        #
-        # **A database of its own rather than a table beside an existing one**
-        # (§6). Two reasons, and the second decides: a trace about a failed write
-        # inside the failed write's own database is lost exactly when it is most
-        # wanted, and this is the only store here with a decided deletion horizon,
-        # so putting a swept table beside ``memory.db``'s retention axes would be
-        # three lifetimes in one file.
-        #
-        # **One object, handed out narrowed, and never whole** (§7). The
-        # ``Engine`` below is given it as a ``TraceRetention`` — the deletion
-        # seam — so the maintenance operation can sweep it and the pipeline
-        # cannot walk it. When the emitters arrive (ADR-0119 §13d defers §8's
-        # emitters and §4's correlation carrier to later lanes) each takes the
-        # same object as a ``TraceSink``, narrowed the same way, by the
-        # annotation on its own constructor. Nothing takes it whole.
-        #
-        # **``settings.trace_retention`` is enforced from here** (#852): the
-        # engine measures the horizon back from its own clock and calls
-        # ``purge_before`` as the third call behind ADR-0083 §7's existing
-        # retention-purge operation (ADR-0119 §10). No new job, no new interval,
-        # and no store surface on the scheduler, which holds an ``Engine`` and
-        # nothing else.
-        traces = SqliteTraceStore(path=directory / "traces.db")
-        opened.append(traces.close)
 
         # The context provider, assembled now that the grant seam exists. Its
         # calendar facet is registered only when a source is configured — a source
@@ -381,8 +392,11 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         # from, so a recall sees what the user's memory holds.
         tools = build_default_registry(memory=memory)
 
-        # The writer persists to the *same* store the loop retrieves from (ADR-0028 §4).
-        writer = MemoryIngestor(store=memory, policy=DefaultMemoryPolicy())
+        # The writer persists to the *same* store the loop retrieves from (ADR-0028 §4),
+        # and appends its ``MEMORY_WRITE`` traces to the *same* trace store the read
+        # path and the engine boundary use, so §4's correlation join has one stream
+        # to join within (ADR-0119 §8).
+        writer = MemoryIngestor(store=memory, policy=DefaultMemoryPolicy(), traces_sink=traces)
         # **One** write stage, over that writer and that deferral queue, shared by
         # every producer's stage (ADR-0078 §3). Two of the three composition-root
         # obligations are discharged by this single object existing: the queue the
@@ -612,11 +626,13 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
                 # The grant store joins the same ordered shutdown as the other five
                 # Tier 1 stores (ADR-0083 ruling 4, ADR-0102 §7).
                 _as_async(grants.close),
-                # And the trace store as the seventh (ADR-0119 §6). Closed last
-                # because it is opened last, and the list is in open order — the
-                # façade drains in-flight work before any of them, so a trace
-                # written by an operation still finishing is written before this
-                # connection goes.
+                # And the trace store as the seventh (ADR-0119 §6). Closed **last
+                # although it is now opened first**, which is the one place this
+                # list deliberately departs from open order: the memory store and
+                # the writer above emit into it (§8), so a trace written on the way
+                # down has to find the connection still open. The façade drains
+                # in-flight work before any of these run, so what this protects is
+                # the tail of that drain rather than a race with it.
                 _as_async(traces.close),
             ],
             # The shutdown budget every production engine gets, hub and CLI alike
