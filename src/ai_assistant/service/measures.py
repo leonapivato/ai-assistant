@@ -42,6 +42,7 @@ import argparse
 import asyncio
 import sys
 from datetime import UTC, datetime, timedelta
+from math import isfinite
 from typing import TYPE_CHECKING
 
 from ai_assistant.app import build_measure_reader
@@ -101,6 +102,42 @@ def _instant(text: str) -> datetime:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
+def _settling(text: str) -> timedelta:
+    """Parse the settling period, in hours, refusing what a duration cannot be.
+
+    ``float`` alone is not enough and the gap is not theoretical: it accepts
+    ``nan`` and ``inf``, and ``timedelta`` then raises — ``ValueError`` for the
+    first and ``OverflowError`` for the second — from a line no ``except``
+    clause in this module covers, so the tool would exit with a traceback
+    instead of one of the codes it documents. A negative value is refused here
+    too, ahead of the mechanism's own refusal, so that an operator who typed a
+    minus sign is told at the argument rather than after the lock is taken.
+
+    Args:
+        text: The operator's argument.
+
+    Returns:
+        The settling period.
+
+    Raises:
+        argparse.ArgumentTypeError: If it is not a finite, non-negative number of
+            hours a duration can hold.
+    """
+    try:
+        hours = float(text)
+    except ValueError as exc:
+        msg = f"{text!r} is not a number of hours"
+        raise argparse.ArgumentTypeError(msg) from exc
+    if not isfinite(hours) or hours < 0:
+        msg = f"a settling period must be a finite, non-negative number of hours; got {text!r}"
+        raise argparse.ArgumentTypeError(msg)
+    try:
+        return timedelta(hours=hours)
+    except OverflowError as exc:
+        msg = f"a settling period of {text} hours is longer than any duration this tool can hold"
+        raise argparse.ArgumentTypeError(msg) from exc
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     """Read the three decisions ADR-0120 §1 leaves to the operator.
 
@@ -131,8 +168,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--settling-hours",
-        dest="settling_hours",
-        type=float,
+        dest="settling",
+        type=_settling,
         required=True,
         help=(
             "how long a surfaced record is given to be overturned before the window's "
@@ -206,9 +243,7 @@ async def _run_locked(settings: Settings, args: argparse.Namespace) -> int:
         return EXIT_OK
 
     try:
-        report = await reader.report(
-            start=args.start, end=args.end, settling=timedelta(hours=args.settling_hours)
-        )
+        report = await reader.report(start=args.start, end=args.end, settling=args.settling)
     except AssistantError as exc:
         return _report(exc)
 

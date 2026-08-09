@@ -216,3 +216,29 @@ class TestArguments:
         measures.main(_ARGS)
 
         assert "2026-07-01T00:00:00+0000" in capsys.readouterr().out
+
+
+class TestSettlingArgument:
+    """``--settling-hours`` is a duration, and ``float`` alone does not say so.
+
+    ``float("nan")`` and ``float("inf")`` both parse, and ``timedelta`` then
+    raises from a line no ``except`` clause in the tool covers — so the process
+    would exit with a traceback rather than with one of the codes it documents.
+    """
+
+    @pytest.mark.parametrize("hours", ["nan", "inf", "-inf", "-1", "not-a-number"], ids=str)
+    def test_a_value_a_duration_cannot_hold_is_refused_by_the_parser(self, hours: str) -> None:
+        with pytest.raises(SystemExit):
+            measures.main(
+                ["--from", "2026-07-01", "--until", "2026-08-01", "--settling-hours", hours]
+            )
+
+    def test_a_settling_longer_than_any_duration_is_refused_by_the_parser(self) -> None:
+        with pytest.raises(SystemExit):
+            measures.main(
+                ["--from", "2026-07-01", "--until", "2026-08-01", "--settling-hours", "1e30"]
+            )
+
+    def test_hours_become_the_settling_period(self) -> None:
+        assert measures._settling("48") == timedelta(days=2)
+        assert measures._settling("0") == timedelta(0)

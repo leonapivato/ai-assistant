@@ -26,6 +26,7 @@ from measure_fixtures import (
 )
 
 from ai_assistant.core.types import TraceKind
+from ai_assistant.evaluation._figures import Rate
 from ai_assistant.evaluation.measures import compute
 from ai_assistant.testing import FakeTraceStore
 
@@ -173,3 +174,41 @@ class TestRendering:
         rendered = result.render()
         assert rendered == result.refusal
         assert "memory precision" not in rendered
+
+
+class TestUnboundedCounts:
+    """A count the *type* admits and no emitter writes still must not abort a run.
+
+    ADR-0120 §2 constrains a count to "a non-negative integer that is not a
+    ``bool``" and puts no ceiling on it, and ``RecordIdSet.total`` carries only
+    ``ge=0``. Every ratio this ADR defines is a share of a population containing
+    its own numerator — at most one, and so representable — except
+    beliefs-per-correction, which divides beliefs by corrective acts and is
+    unbounded above by construction. That is the one that would otherwise raise
+    ``OverflowError`` out of the middle of the render and take the whole report
+    with it.
+    """
+
+    def test_an_unrepresentable_ratio_states_both_counts_instead(self) -> None:
+        figure = Rate(numerator=10**400, denominator=1)
+
+        assert figure.defined is True
+        assert figure.value is None
+        assert "too large to state as a decimal" in figure.rendered()
+        assert str(10**400) in figure.rendered()
+
+    async def test_a_vast_superseded_total_does_not_abort_the_report(self) -> None:
+        """End to end: the trace validates, hydrates, and reaches the diagnostic."""
+        vast = write(
+            when=at(days=1),
+            correlation="c1",
+            metrics=decisions(supersede=1),
+            superseded=tuple(f"r{ordinal}" for ordinal in range(256)),
+            superseded_total=10**400,
+        )
+        result = await report(vast, operation("learn", when=at(days=1), correlation="c1"))
+
+        assert result.whole is not None
+        assert result.whole.beliefs_per_correction.numerator == 10**400
+        assert "too large to state as a decimal" in result.render()
+        assert result.whole.correction.value == 1.0

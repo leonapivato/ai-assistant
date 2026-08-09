@@ -570,3 +570,38 @@ class TestWindowAndParts:
         )
         assert result.refusal is not None
         assert "negative" in result.refusal
+
+
+class TestSettlingBounds:
+    """A settling period the window's end cannot be moved forward by."""
+
+    async def test_a_settling_reaching_past_the_last_instant_is_refused(self) -> None:
+        """One guard covers §4's candidate horizon and §8's settling test alike.
+
+        Every instant the walk adds the settling to is a read's ``occurred_at``,
+        which lies in ``[start, end)``. So if ``end + s`` is representable, every
+        addition inside the walk is — and if it is not, an ``OverflowError`` would
+        otherwise come out of the middle of the walk rather than as a refusal.
+        """
+        result = await compute(
+            FakeTraceStore([operation("start", when=START)]),
+            start=START,
+            end=END,
+            settling=timedelta(days=999999999),
+        )
+
+        assert result.refusal is not None
+        assert "reaches past the last instant" in result.refusal
+        assert result.whole is None
+
+    async def test_the_largest_workable_settling_still_reports(self) -> None:
+        """The guard refuses only what cannot be represented, not what is merely large."""
+        result = await compute(
+            FakeTraceStore([operation("start", when=START)]),
+            start=START,
+            end=END,
+            settling=timedelta(days=365 * 100),
+        )
+
+        assert result.refusal is None
+        assert result.whole is not None
