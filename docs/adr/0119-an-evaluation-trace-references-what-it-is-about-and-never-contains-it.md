@@ -2,8 +2,8 @@
 
 - Status: Proposed
 - Date: 2026-08-08
-- **Decides `core` surface and implements none of it.** Two new Protocols —
-  `TraceSink` and `TraceStore` — in `core/protocols.py`, and the
+- **Decides `core` surface and implements none of it.** Three new Protocols —
+  `TraceSink`, `TraceRetention` and `TraceStore` — in `core/protocols.py`, and the
   `EvaluationTrace` family — four enumerations, two constrained string types and
   one nested model — in `core/types.py` (§13).
   No existing Protocol gains a member and no existing signature changes:
@@ -509,9 +509,10 @@ file, each meaning something different.
 
 ### 7. Two Protocols: an append-only sink the pipeline holds, and a store the pipeline does not
 
-> **Normative.** `core/protocols.py` gains two Protocols. `TraceSink` carries one
-> operation, an append. `TraceStore` carries the append, a resumable walk (§7a),
-> and a purge below an instant.
+> **Normative.** `core/protocols.py` gains three Protocols, narrow to wide.
+> `TraceSink` carries an append. `TraceRetention` carries a purge below an
+> instant. `TraceStore` carries both and, alone among the three, the resumable
+> walk of §7a.
 
 > **Normative.** Every emitting site takes a **`TraceSink`** as a required
 > constructor argument with no default. A composition that omits it does not
@@ -519,8 +520,20 @@ file, each meaning something different.
 
 > **Normative.** No component of the request pipeline — `orchestration`, `memory`,
 > `context`, `planning`, `readers`, `learning`, `tools`, `permissions` — holds a
-> `TraceStore` or reads a trace back. Nothing this system does is conditioned on
-> what a trace says, and no trace is ever assembled into a prompt.
+> seam carrying the **walk**, and none reads a trace back. Nothing this system
+> does is conditioned on what a trace says, and no trace is ever assembled into a
+> prompt.
+
+**Three seams rather than two, because the pipeline has two legitimate
+capabilities and one forbidden one.** Emitting is every subsystem's; purging is
+`orchestration`'s, since ADR-0083 §8 puts the retention purge behind an `Engine`
+maintenance operation and §10 wires the trace purge there rather than inventing a
+second sweeping mechanism; **reading** is neither's. An earlier draft named only
+`TraceSink` and `TraceStore` and forbade the pipeline the latter outright — which
+made §10's purge unimplementable, since `purge_before` lived only on the seam
+`orchestration` was forbidden. The property being protected was never "the
+pipeline may not touch the store"; it is "the pipeline may not read a trace back",
+so the seam is cut at the walk and the clause says so.
 
 **The split is ADR-0097 §5's mechanism, mirrored.** There the query seam is the
 narrow one — "Every site that drives a reader takes a **`SourceGrants`** — the
@@ -545,9 +558,12 @@ lie §5 refuses, arriving through composition instead of through I/O. A canonica
 fake in `ai_assistant.testing` (the triad, §13) keeps the friction off the tests
 that do not care.
 
-**`TraceStore` structurally satisfies `TraceSink`**, so one concrete implements
-both and the composition root hands each collaborator the seam it is entitled to.
-That is the same arrangement `SourceGrants`/`SourceGrantStore` uses today.
+**`TraceStore` structurally satisfies both narrow Protocols**, so one concrete
+implements all three and the composition root hands each collaborator exactly the
+seam it is entitled to: a `TraceSink` to every emitter, a `TraceRetention` to the
+`Engine`'s maintenance operation, and the `TraceStore` itself to nothing in the
+pipeline. That is the same arrangement `SourceGrants`/`SourceGrantStore` uses
+today, with one more specialisation because there is one more capability.
 
 **No trace-store failure reaches the caller, and that is a contract obligation
 the conformance suite pins.** It is safe to state because the trace is a validated
@@ -894,13 +910,16 @@ section.
 In definition order, so nothing below is named before it exists:
 
 ```python
-_TRACE_LABEL = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-_FAULT_CLASS = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+#: ``fullmatch``, never ``match``: ``$`` also matches *before* a trailing
+#: newline, so ``match(r"^[a-z]+$", "seam\n")`` succeeds and the bound these
+#: patterns exist to impose would not hold.
+_TRACE_LABEL = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_FAULT_CLASS = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 
 
 def _trace_label(value: str) -> str:
     """A seam name or metric key: lowercase, bounded, a literal in its module (§2)."""
-    if not _TRACE_LABEL.match(value):
+    if not _TRACE_LABEL.fullmatch(value):
         msg = f"{value!r} is not a trace label"
         raise ValueError(msg)
     return value
@@ -908,7 +927,7 @@ def _trace_label(value: str) -> str:
 
 def _fault_class_name(value: str) -> str:
     """An exception class's ``__name__`` — never its message (§2)."""
-    if not _FAULT_CLASS.match(value):
+    if not _FAULT_CLASS.fullmatch(value):
         msg = f"{value!r} is not an exception class name"
         raise ValueError(msg)
     return value
@@ -1165,21 +1184,26 @@ class TraceSink(Protocol):
 
 
 @runtime_checkable
-class TraceStore(Protocol):
-    async def emit(self, trace: EvaluationTrace) -> None: ...
+class TraceRetention(Protocol):
+    async def purge_before(self, instant: UtcInstant) -> int:
+        """Delete every trace older than ``instant``; return how many (§10)."""
 
+
+@runtime_checkable
+class TraceStore(TraceSink, TraceRetention, Protocol):
     async def walk(
         self, *, after: TracePosition | None = None, limit: int
     ) -> TraceChunk:
-        """One chunk in insertion order, resuming after ``after`` (§7a)."""
+        """One chunk in insertion order, resuming after ``after`` (§7a).
 
-    async def purge_before(self, instant: UtcInstant) -> int:
-        """Delete every trace older than ``instant``; return how many (§10)."""
+        The one operation no pipeline component may reach (§7).
+        """
 ```
 
-`TraceStore` structurally satisfies `TraceSink`, which is the point: one concrete
-implements both and the composition root hands each collaborator the seam it is
-entitled to (§7).
+`TraceStore` extends both narrow Protocols, so one concrete satisfies all three
+and the composition root hands each collaborator exactly the seam it is entitled
+to (§7): a `TraceSink` to every emitter, a `TraceRetention` to the `Engine`'s
+maintenance operation, and the full store to nothing in the pipeline.
 
 ```python
 class TracePosition(BaseModel):
