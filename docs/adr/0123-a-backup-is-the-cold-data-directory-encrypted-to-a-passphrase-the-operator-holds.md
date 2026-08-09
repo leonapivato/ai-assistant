@@ -201,10 +201,16 @@ default, which costs artifact size and never costs data.
 > **Normative.** The backup tool refuses a destination path that already exists.
 
 > **Normative.** The backup tool writes the encrypted stream to a temporary path
-> in the destination's own directory, and moves it to the destination by a single
-> rename only after the re-read above has passed and §9 has either verified the
-> artifact or reported it written-but-unverified. On any refusal or failure it
-> removes that temporary file, and nothing is left at the destination path.
+> in the destination's own directory, and publishes it to the destination only
+> after the re-read above has passed and §9 has either verified the artifact or
+> reported it written-but-unverified. On any refusal or failure it removes that
+> temporary file, and nothing is left at the destination path.
+
+> **Normative.** Publication is an operation that fails when the destination
+> already exists rather than replacing it, and the tool never publishes by an
+> operation that would replace a destination. A destination that came into
+> existence after the refusal above fails the publication; the temporary file is
+> removed and the backup is reported as not published.
 
 This is ADR-0104 §5's clause with the subject changed, and every term of its
 reasoning transfers: the holder of a contended lock is a hub that is meant to be
@@ -243,15 +249,26 @@ land somewhere before the re-read can say whether it was worth writing, and the 
 alternatives are both foreclosed: buffering a whole data directory in memory is not
 a design, and staging the plaintext breaks §4's clause and would put an unencrypted
 copy of the entire Tier 1 store on disk in the name of protecting it. So the tool
-builds the encrypted artifact under a temporary name and promotes it by rename —
-ADR-0104 §1's build-and-swap with the artifact as the subject, including its reason
-for the same-directory placement: `os.replace` "is atomic only within one
+builds the encrypted artifact under a temporary name and promotes it — ADR-0104
+§1's build-and-swap with the artifact as the subject, including its reason for the
+same-directory placement: an atomic publication is atomic "only within one
 filesystem and same-directory is the only placement that guarantees it without
-probing". Until the rename there is no artifact, only a partial file under a name
+probing". Until publication there is no artifact, only a partial file under a name
 nothing will mistake for one; after it there is an artifact that has passed every
-check this ADR requires. **Refusing a destination that already exists** is what
-keeps the rename from being able to destroy a good backup with a bad one, and it
-makes each artifact an explicit act rather than an overwrite.
+check this ADR requires.
+
+**The two destination clauses do different jobs and neither replaces the other.**
+Refusing a destination that already exists is a *fast* refusal: it costs nothing,
+it happens before the store is read, and it is what an operator who mistyped a
+filename should get instead of a completed backup and a lost predecessor. It is
+also, on its own, a check-then-act — the destination can come into being while the
+artifact is being written, and a publication that replaces is one that would then
+destroy a backup created in between. So the publication itself refuses an existing
+destination rather than trusting the earlier check, which makes the guarantee
+structural instead of a race the tool usually wins. This is ADR-0104 §3's posture
+at its own seam: that clause hard-links to a retained name and "refuses and does
+nothing" where the path already exists, for the same reason and with the same
+primitive available.
 
 **It narrows the window; it does not close it, and it is not offered as closing
 it.** A writer that modifies a file and restores its length, mtime and change
@@ -466,8 +483,13 @@ recovery are not symmetric acts and the asymmetry runs in the safe direction.
 ### 7. Restore builds a fresh data directory and replaces nothing
 
 > **Normative.** Restore materialises into a target directory that is absent,
-> empty, or holds nothing but a `hub.lock`, and refuses any other target. It never
-> merges into, writes over, or deletes an existing data directory.
+> empty, or holds nothing but a `hub.lock` that is a regular file, and refuses any
+> other target. It never merges into, writes over, or deletes an existing data
+> directory.
+
+> **Normative.** Restore establishes the nature of a pre-existing `hub.lock`
+> without following it, before it takes any lock, and refuses a target whose
+> `hub.lock` is a symbolic link.
 
 > **Normative.** Restore takes `<data_dir>/hub.lock` in the target directory before
 > it materialises anything and holds it until it exits, on the same terms as §2.
@@ -502,6 +524,19 @@ file grants nothing: exclusivity is the kernel's lock and not the path's existen
 which is the reasoning `InstanceLock.release` records for leaving it. A directory
 holding only that file holds no data by construction, so nothing can be silently
 written over.
+
+**The tolerance has to be qualified, because taking a lock writes through whatever
+the path names.** `InstanceLock.acquire` opens the lock path with `O_CREAT` and no
+`O_NOFOLLOW`, then `fchmod`s, truncates and writes the pid — so a `hub.lock` that
+is a symbolic link is followed, and its *target* is what gets truncated. Accepting
+a pre-existing lock file without qualification would therefore let a restore
+destroy a file outside its target directory before it had validated a single
+archive member. Restricting the tolerated file to a regular one, established
+without following it, is the whole of the fix, and it is ADR-0104 §3's rule in its
+own words — "A symbolic link is refused, never followed" — reached there by the
+same reasoning about `lstat`. The general exposure in `InstanceLock`, which the hub
+shares and which predates this decision, is not this ADR's to close and is filed as
+#888.
 
 ### 8. Restore verifies what it can settle, and leaves to the hub what the hub already refuses
 
