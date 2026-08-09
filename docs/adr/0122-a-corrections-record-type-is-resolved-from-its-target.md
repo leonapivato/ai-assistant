@@ -276,10 +276,20 @@ rather than by the belief, which is precisely the silent mis-filing this ADR
 exists to end. §5's fallback answers "the store looked and holds nothing", a fact;
 it may not be made to answer "the store could not look", which is not one.
 
-Propagation also costs nothing that was going to succeed: the ingest's own
-conflict probe reads the same store through the same seam moments later, so a
-store that cannot answer the resolution was not going to complete the write
-either. And it is the discipline `LearningLoop.learn` already documents for this
+**What propagation costs, and it is not nothing.** For a *persistent* failure it
+costs nothing that was going to succeed — the ingest's own conflict probe reads
+the same store through the same seam moments later, so a store that cannot answer
+the resolution was not going to complete the write either. A **transient** failure
+is different, and an earlier draft's blanket claim overlooked it: a read that
+times out and would have succeeded on the retry now aborts a `learn` whose single
+pre-existing read might have gone through. That is a real availability cost of
+adding a read, accepted here rather than argued away, because the alternative is
+not "the correction lands" but "the correction lands somewhere the failure chose",
+and because a failed `learn` is a legible fault the user retries while a
+mis-drawered belief is a silent one they do not know to. Retry policy is the
+store seam's question and no part of this decision.
+
+Propagation is also the discipline `LearningLoop.learn` already documents for this
 path — "a store failure propagates with the earlier proposals **already
 applied**", where "[r]eporting success for a partially applied set would be a
 claim about memory integrity this loop cannot make".
@@ -711,10 +721,12 @@ from the field.
   belief is readable from kind-scoped surfaces, and a correction given with
   `--about` keeps its scope on the preference branch instead of losing it to
   `_to_record`'s semantic arm.
-- **One extra store read per unpinned correction.** A ranked `search` on a path a
-  user invokes by hand, on the same store the ingest is about to read anyway. It is
-  traced by ADR-0119 §8's emitter, so it is visible in the measure stream rather
-  than hidden.
+- **One extra store read per unpinned correction**, and with it one extra place a
+  correction can fail. A ranked `search` on a path a user invokes by hand, on the
+  same store the ingest is about to read anyway; it is traced by ADR-0119 §8's
+  emitter, so it is visible in the measure stream rather than hidden. A transient
+  failure there now fails the `learn` that might otherwise have completed (§3) —
+  the accepted cost of refusing to let a failure choose the drawer.
 - **`orchestration` grows one pipeline stage**, and `learning` and `memory` grow
   nothing. `learning` stays `core`-only (ADR-0009 §3), `interfaces` stays thin
   (golden rule 3), and `memory`'s writer keeps every safety property it states.
