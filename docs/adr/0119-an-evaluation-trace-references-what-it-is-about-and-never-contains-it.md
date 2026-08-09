@@ -619,10 +619,14 @@ which is precisely the class §5 subordinates.
 > §2's rule that a position "is opaque to its caller, and is never a value a
 > caller composes".
 
-> **Normative.** A walk resumed from a position returns, exactly once and in
-> order, every trace appended after that position and still present; it returns no
-> trace at or before it. An append that lands during a walk takes a position after
-> every position already issued, so no page boundary skips or duplicates a trace.
+> **Normative.** One call returns an ordered **prefix** — at most `limit` traces,
+> in insertion order, of those appended after the given position and still
+> present. It returns no trace at or before that position.
+
+> **Normative.** Calls resumed from each returned position collectively return
+> every retained trace after the first position, in order and **exactly once**.
+> An append that lands during a call takes a position after every position already
+> issued, so no page boundary skips or duplicates a trace.
 
 > **Normative.** Every chunk carries a position, always. It is the position after
 > the last trace returned, or — when the chunk is empty — the position the walk
@@ -649,6 +653,13 @@ ADR-0114 §2's ruling reached by the same route — "a cursor is a position in a
 total insertion order, and nothing else", and whatever order a walk uses "must be
 total and must not reorder under later writes". A measure that wants a time window
 filters within the walk; it does not order by time.
+
+**The bound and the completeness guarantee are stated separately, because one
+call cannot carry both.** A single chunk is a prefix of at most `limit`; the
+walk's completeness is a property of the *sequence* of calls, each resumed from
+the position the last one handed back. Reading it as one call's obligation makes
+it unsatisfiable the moment more than `limit` traces are outstanding, which is
+the normal case for a measure over a week.
 
 **Exhaustion is a reading of a chunk, not a state the store reports, and that is
 what closes the last skip.** An earlier draft had a chunk carry `position: None`
