@@ -75,6 +75,7 @@ from ai_assistant.testing import (
     FakeSourceGrantStore,
     FakeToolInvoker,
     FakeTraceRetention,
+    FakeTraceSink,
 )
 
 if TYPE_CHECKING:
@@ -255,6 +256,7 @@ def _wire(
         # than the maintenance one, so nothing here sweeps; the engine still cannot
         # be built without them, which is the point of their being required.
         traces=FakeTraceRetention(),
+        trace_sink=FakeTraceSink(),
         trace_retention=timedelta(days=365),
         conversations=conversations,
         observation=observation,

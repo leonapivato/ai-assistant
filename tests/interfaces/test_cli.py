@@ -98,6 +98,7 @@ from ai_assistant.testing import (
     FakeSourceGrantStore,
     FakeToolInvoker,
     FakeTraceRetention,
+    FakeTraceSink,
 )
 from ai_assistant.wire.address import sun_path_limit
 
@@ -265,6 +266,7 @@ def _engine(
         # the façade, and nothing in this module sweeps: an adapter test is about
         # what the CLI renders, not about the maintenance operation.
         traces=FakeTraceRetention(),
+        trace_sink=FakeTraceSink(),
         trace_retention=timedelta(days=365),
         conversations=ConversationLifecycle(
             conversations=conversations,
@@ -1694,6 +1696,7 @@ def _conversation_engine() -> tuple[Engine, FakeConversationStore]:
         # the façade, and nothing in this module sweeps: an adapter test is about
         # what the CLI renders, not about the maintenance operation.
         traces=FakeTraceRetention(),
+        trace_sink=FakeTraceSink(),
         trace_retention=timedelta(days=365),
         conversations=ConversationLifecycle(
             conversations=conversations,

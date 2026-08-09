@@ -443,6 +443,14 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             # walk it, because a pipeline that could read its own telemetry would be
             # measuring a system that includes the instrument (§7).
             traces=traces,
+            # The **same object again**, narrowed the other way (ADR-0119 §7): a
+            # ``TraceSink`` for the engine-boundary emitter §8 puts at
+            # ``Engine._tracked``, so one ``OPERATION`` trace lands per public
+            # call — a turn, a scheduled job and a client command alike. Two
+            # parameters and not one because the capabilities are two: nothing in
+            # the pipeline may name the walk, and a single wider parameter would
+            # hand it over.
+            trace_sink=traces,
             # The horizon that sweep measures back from, straight off ``Settings``
             # (ADR-0119 §10). ``None`` — the disable sentinel — means keep forever
             # and the sweep does not run; the default is 365 days, longer than any

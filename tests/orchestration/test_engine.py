@@ -107,6 +107,7 @@ from ai_assistant.testing import (
     FakeSourceGrantStore,
     FakeToolInvoker,
     FakeTraceRetention,
+    FakeTraceSink,
     ObservationGate,
     evaluation_trace,
     source_grant,
@@ -291,6 +292,7 @@ class Harness:
         queue_limit: int = 50,
         drain_timeout: timedelta | None = None,
         traces: FakeTraceRetention | None = None,
+        trace_sink: FakeTraceSink | None = None,
         trace_retention: timedelta | None = TRACE_RETENTION,
     ) -> None:
         self.plans = FakePlanStore(now=lambda: AT)
@@ -389,6 +391,13 @@ class Harness:
         # ``FakeTraceRetention`` rather than the whole store — a fake that could
         # walk would let a test assert a reach the production wiring does not have.
         self.traces = traces if traces is not None else FakeTraceRetention()
+        # The trace store's *append* seam, and only that (ADR-0119 §7): the engine
+        # emits its own ``OPERATION`` trace through a ``FakeTraceSink``, which can
+        # be appended to and cannot be walked. Separate from ``traces`` above
+        # because the capabilities are separate — the production wiring narrows one
+        # object twice, and a harness handing over one fake for both would let a
+        # case assert a reach the engine does not have.
+        self.trace_sink = trace_sink if trace_sink is not None else FakeTraceSink()
         self.trace_retention = trace_retention
         self.engine = Engine(
             grant_operations=_grant_operations(),
@@ -399,6 +408,7 @@ class Harness:
             memory=self.memory,
             deferrals=self.deferrals,
             traces=self.traces,
+            trace_sink=self.trace_sink,
             trace_retention=trace_retention,
             conversations=self.conversations,
             observation=self.observation,
@@ -599,6 +609,7 @@ def _fresh_facade(harness: Harness) -> Engine:
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
+        trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
         observation=harness.observation,
@@ -713,6 +724,7 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
+        trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
         observation=harness.observation,
@@ -772,6 +784,7 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
+        trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
         observation=harness.observation,
@@ -823,6 +836,7 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
+        trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
         observation=harness.observation,
@@ -961,6 +975,7 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
+        trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
         observation=harness.observation,
@@ -1705,6 +1720,7 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
+        trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
         observation=harness.observation,
@@ -2053,6 +2069,7 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
+        trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
         observation=harness.observation,
@@ -2120,6 +2137,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
+        trace_sink=harness.trace_sink,
         trace_retention=harness.trace_retention,
         conversations=harness.conversations,
         observation=harness.observation,
@@ -2153,6 +2171,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
             memory=harness.memory,
             deferrals=harness.deferrals,
             traces=harness.traces,
+            trace_sink=harness.trace_sink,
             trace_retention=harness.trace_retention,
             conversations=harness.conversations,
             observation=harness.observation,
@@ -2175,6 +2194,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
             memory=harness.memory,
             deferrals=harness.deferrals,
             traces=harness.traces,
+            trace_sink=harness.trace_sink,
             trace_retention=harness.trace_retention,
             conversations=harness.conversations,
             observation=harness.observation,

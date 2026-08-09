@@ -73,6 +73,7 @@ from ai_assistant.testing import (
     FakeSourceGrantStore,
     FakeToolInvoker,
     FakeTraceRetention,
+    FakeTraceSink,
 )
 
 if TYPE_CHECKING:
@@ -267,6 +268,7 @@ async def _engine(now: Clock) -> None:
         memory=memory,
         deferrals=deferrals,
         traces=FakeTraceRetention(),
+        trace_sink=FakeTraceSink(),
         trace_retention=timedelta(days=365),
         conversations=ConversationLifecycle(
             conversations=conversations,
