@@ -1,7 +1,17 @@
 # 9. Learning: feedback capture that proposes memory updates
 
-- Status: Accepted
+- Status: Accepted, §1 amended by ADR-0122
 - Date: 2026-07-17
+- Amended: 2026-08-09 by ADR-0122 — §1's `memory_kind` is no longer required of
+  the caller: it becomes `MemoryKind | None`, and an absent value is resolved by
+  `orchestration` from the belief the feedback touches, before the processor is
+  called. §1's reason is unchanged and is what the amendment implements — a
+  correction's record type varies with what it corrects, so the layer that cannot
+  see the target no longer supplies it. §§2–6 stand: §2's Protocol is untouched,
+  §3's "`learning` never imports `memory`" is what places the resolution in the
+  pipeline, §4's mapping runs on a resolved kind, §5's recorded interaction is
+  unchanged, and §6's `PROCEDURAL`/`EPISODIC` deferral bounds what the resolution
+  may select.
 
 ## Context
 
@@ -65,6 +75,18 @@ Two deliberate scoping choices:
   proper payloads — likely turning `FeedbackEvent` into a discriminated union, an
   ADR-backed breaking change. Modelling them now with an unfit field would be a
   false promise (a `RATING` with nowhere to put the rating).
+
+> **Amended by ADR-0122 §1 (2026-08-09).** `memory_kind` becomes
+> `MemoryKind | None`, defaulting to `None`, and absent means "resolve it from
+> what this feedback touches" rather than "the caller could not decide". The first
+> bullet's reason stands and is the amendment's own ground: because a correction's
+> record type varies with what it corrects, a caller that cannot see the target —
+> `interfaces/cli.py`, which had been filling the field from a fixed
+> `CORRECTION → SEMANTIC` table — must be allowed to decline it. `orchestration`
+> resolves an absent value with one unscoped ranked read before calling the
+> processor, so §4's mapping below still receives a `MemoryKind` and is unchanged.
+> A value the caller *does* supply is authoritative and suppresses the read. The
+> second bullet is untouched.
 
 ### 2. `FeedbackProcessor` — feedback in, proposals out
 
