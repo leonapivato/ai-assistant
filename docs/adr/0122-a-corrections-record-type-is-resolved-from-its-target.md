@@ -27,9 +27,10 @@
   on, and is honoured here for the first time. §1's second bullet and §§2–6 stand
   unchanged, including §4's mapping, §3's "learning never imports `memory`", and
   §6's `PROCEDURAL`/`EPISODIC` deferral, which §3 below binds itself to. The record
-  is on ADR-0009's `Status` line in ADR-0070 §4's leading-token form and in an
-  appended dated note, plus an inline note at §1, all landing in this change — the
-  atomic pair ADR-0082 §1 requires.
+  is on ADR-0009's `Status` line in ADR-0070 §4's leading-token, **one-physical-
+  line** form and in an appended dated note, plus an inline note at §1, all landing
+  in this change — the atomic pair ADR-0082 §7 names, whose condition is that the
+  superseding ADR *exists* and not that it is ratified (§9).
 - **Refuses to widen `memory`'s conflict probe** (§8), and corrects one reason
   that has been offered for that refusal: the shipped ingest lock does **not**
   depend on conflict detection staying kind-scoped. The dependency belongs to the
@@ -538,9 +539,24 @@ accepted and legible.
 
 - **ADR-0009's `Status` line takes ADR-0070 §4's leading-token form** —
   `Partially superseded by ADR-0122 (<scope>)`, with `Accepted` dropped so a prefix
-  match cannot read the replaced clause as live — and a dated bullet is appended to
-  its header after `Date`. Per ADR-0082 §2 the leading token carries no amendment
-  qualifier beside it; the record's substance is in the note.
+  match cannot read the replaced clause as live, on **one physical line**, which §4
+  makes "a going-forward requirement" so the value is read whole rather than
+  reconstructed from wrapped continuations — and a dated bullet is appended to its
+  header after `Date`. Per ADR-0082 §2 the leading token carries no amendment
+  qualifier beside it; the record's substance is in the note. The scope names a
+  clause and carries no `ADR-NNNN` token, which is §4's one authoring constraint.
+- **The record lands here, while this ADR is still `Proposed`, and that is the
+  rule rather than an exception to it.** ADR-0070 §1's condition on a status edit
+  is that the superseding ADR **exists**, not that it is ratified, and ADR-0082 §7
+  states this in terms — naming the contrary reading as "#458 — the recurring
+  misreading of ADR-0070 §1's 'a supersession that has landed' clause", "not a
+  governance gap but a reviewer failure mode", because "the hazard §1 names is a
+  `Status` line pointing at nothing, and an atomic pair makes that unreachable".
+  Deferring the edit to a later change is the failure ADR-0082 exists to close
+  (#477): `main` would carry ADR-0009 §1 live beside a merged ADR-0122 replacing
+  it, which is two ratified ADRs giving opposite instructions about one field.
+  ADR-0117 and ADR-0115 both edited ADR-0110's `Status` in their opening commits,
+  while `Proposed`.
 - **An inline note is appended at ADR-0009 §1**, after its two scoping bullets, in
   the block-quote form ADR-0014 and ADR-0038 use, so a reader arriving at the
   bullet sees the supersession beside it. ADR-0009's Context, Decision and
