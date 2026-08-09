@@ -81,6 +81,13 @@ _ASK = MemoryDecision(kind=MemoryDecisionKind.ASK_USER, reason="fake: the user d
 
 _LISBON = "the user works from Lisbon"
 _MADRID = "the user works from Madrid"
+#: The corrections proposed against them. Distinct beliefs, not restatements:
+#: since ADR-0121 §2 a proposal *agreeing* with the assertion it conflicts with
+#: rules `REINFORCE`, so proposing the live content back is no longer a way to
+#: provoke a question. Four terms of five overlap, so each still ranks as a
+#: conflict of both live records.
+_PORTO = "the user works from Porto"
+_SEVILLE = "the user works from Seville"
 
 
 def _clock() -> datetime:
@@ -201,7 +208,7 @@ async def test_a_correction_contradicting_an_assertion_becomes_a_question_and_la
     harness = Harness()
     await harness.memory.add(_record("live-1", _LISBON))
 
-    outcome = await harness.writes.write(_proposal("new-1", _LISBON))
+    outcome = await harness.writes.write(_proposal("new-1", _PORTO))
 
     assert outcome.result.decision.kind is MemoryDecisionKind.ASK_USER
     assert outcome.result.record_id is None
@@ -212,7 +219,7 @@ async def test_a_correction_contradicting_an_assertion_becomes_a_question_and_la
     [question] = await harness.questions.questions()
     assert question.id == parked.id
     assert question.state is QuestionState.OPEN
-    assert question.content == _LISBON
+    assert question.content == _PORTO
     # The conflicting assertion is *shown*, resolved to its content. This is the
     # exact scope the answer will authorise.
     assert [(r.record_id, r.content) for r in question.retires] == [("live-1", _LISBON)]
@@ -226,7 +233,7 @@ async def test_a_correction_contradicting_an_assertion_becomes_a_question_and_la
     assert await harness.memory.get("live-1") is None
     correction = await harness.memory.get(answered.record_id)
     assert correction is not None
-    assert correction.content == _LISBON
+    assert correction.content == _PORTO
     stored = await harness.deferrals.get(question.id)
     assert stored is not None
     assert stored.state is DeferralState.ACCEPTED
@@ -245,7 +252,7 @@ async def test_the_question_shows_a_conflict_that_has_since_been_retired_as_no_l
     """
     harness = Harness()
     await harness.memory.add(_record("live-1", _LISBON))
-    outcome = await harness.writes.write(_proposal("new-1", _LISBON))
+    outcome = await harness.writes.write(_proposal("new-1", _PORTO))
     assert outcome.admission is not None
     await harness.memory.delete("live-1")
 
@@ -269,7 +276,7 @@ async def test_the_enqueued_question_carries_the_conflicts_the_policy_ruled_agai
     """
     harness = Harness()
     await harness.memory.add(_record("live-1", _LISBON))
-    submitted = _proposal("new-1", _LISBON)
+    submitted = _proposal("new-1", _PORTO)
 
     outcome = await harness.writes.write(submitted)
 
@@ -311,11 +318,11 @@ async def test_a_full_queue_refuses_the_new_question_and_says_so() -> None:
     harness = Harness(queue_limit=1)
     await harness.memory.add(_record("live-1", _LISBON))
     await harness.memory.add(_record("live-2", _MADRID))
-    first = await harness.writes.write(_proposal("new-1", _LISBON))
+    first = await harness.writes.write(_proposal("new-1", _PORTO))
     assert first.admission is not None
     assert first.admission.outcome.value == "admitted"
 
-    second = await harness.writes.write(_proposal("new-2", _MADRID))
+    second = await harness.writes.write(_proposal("new-2", _SEVILLE))
 
     assert second.admission is not None
     assert second.admission.outcome.value == "refused"
@@ -333,12 +340,12 @@ async def test_an_ordinary_admission_re_mints_a_colliding_id_and_parks_the_quest
     harness = Harness(ids=_scripted("q-1", "q-1", "q-2"))
     await harness.memory.add(_record("live-1", _LISBON))
     await harness.memory.add(_record("live-2", _MADRID))
-    first = await harness.writes.write(_proposal("new-1", _LISBON))
+    first = await harness.writes.write(_proposal("new-1", _PORTO))
     assert first.admission is not None
     assert first.admission.deferral is not None
     assert first.admission.deferral.id == "q-1"
 
-    second = await harness.writes.write(_proposal("new-2", _MADRID))
+    second = await harness.writes.write(_proposal("new-2", _SEVILLE))
 
     assert second.admission is not None
     assert second.admission.deferral is not None
@@ -355,10 +362,10 @@ async def test_an_always_colliding_id_factory_raises_with_zero_deferrals_persist
     harness = Harness(ids=lambda: "q-1")
     await harness.memory.add(_record("live-1", _LISBON))
     await harness.memory.add(_record("live-2", _MADRID))
-    await harness.writes.write(_proposal("new-1", _LISBON))
+    await harness.writes.write(_proposal("new-1", _PORTO))
 
     with pytest.raises(DeferralStoreError, match="could not mint a free deferral id"):
-        await harness.writes.write(_proposal("new-2", _MADRID))
+        await harness.writes.write(_proposal("new-2", _SEVILLE))
 
     assert len(await harness.deferrals.export()) == 1, "nothing half-written"
 
@@ -561,7 +568,7 @@ async def test_two_concurrent_accepts_leave_one_correction_and_report_the_loser(
     """
     harness = Harness()
     await harness.memory.add(_record("live-1", _LISBON))
-    outcome = await harness.writes.write(_proposal("new-1", _LISBON))
+    outcome = await harness.writes.write(_proposal("new-1", _PORTO))
     assert outcome.admission is not None
     assert outcome.admission.deferral is not None
     question_id = outcome.admission.deferral.id
@@ -594,7 +601,7 @@ async def test_an_accept_suspended_inside_ingest_survives_a_purge_and_resolves()
         writer=gated, deferrals=harness.deferrals, memory=harness.memory, now=_clock
     )
     await harness.memory.add(_record("live-1", _LISBON))
-    outcome = await harness.writes.write(_proposal("new-1", _LISBON))
+    outcome = await harness.writes.write(_proposal("new-1", _PORTO))
     assert outcome.admission is not None
     assert outcome.admission.deferral is not None
     question_id = outcome.admission.deferral.id
@@ -625,7 +632,7 @@ async def test_an_accept_whose_question_is_destroyed_mid_apply_commits_and_repor
         writer=gated, deferrals=harness.deferrals, memory=harness.memory, now=_clock
     )
     await harness.memory.add(_record("live-1", _LISBON))
-    outcome = await harness.writes.write(_proposal("new-1", _LISBON))
+    outcome = await harness.writes.write(_proposal("new-1", _PORTO))
     assert outcome.admission is not None
     assert outcome.admission.deferral is not None
     question_id = outcome.admission.deferral.id
@@ -675,7 +682,7 @@ async def test_an_accept_whose_ingest_fails_strands_the_claim_and_writes_no_book
         writer=failing, deferrals=harness.deferrals, memory=harness.memory, now=_clock
     )
     await harness.memory.add(_record("live-1", _LISBON))
-    outcome = await harness.writes.write(_proposal("new-1", _LISBON))
+    outcome = await harness.writes.write(_proposal("new-1", _PORTO))
     assert outcome.admission is not None
     assert outcome.admission.deferral is not None
     question_id = outcome.admission.deferral.id
@@ -702,7 +709,7 @@ async def test_an_accept_whose_ingest_fails_strands_the_claim_and_writes_no_book
 async def _question_over_one_assertion(harness: Harness) -> str:
     """Park a question about a correction contradicting exactly one assertion."""
     await harness.memory.add(_record("live-1", _LISBON))
-    outcome = await harness.writes.write(_proposal("new-1", _LISBON))
+    outcome = await harness.writes.write(_proposal("new-1", _PORTO))
     assert outcome.admission is not None
     assert outcome.admission.deferral is not None
     return outcome.admission.deferral.id
@@ -877,7 +884,7 @@ async def test_a_re_deferral_past_a_disposal_and_a_full_queue_queues_no_successo
     answering = asyncio.ensure_future(stage.answer(question_id, accept=True))
     await gated.entered.wait()
     assert await harness.questions.forget_question(question_id)
-    filler = await harness.writes.write(_proposal("new-2", _MADRID))
+    filler = await harness.writes.write(_proposal("new-2", _SEVILLE))
     assert filler.admission is not None
     assert filler.admission.outcome.value == "admitted"
     gated.proceed.set()
@@ -911,7 +918,7 @@ async def test_a_suppressed_successor_is_reported_by_the_state_that_suppressed_i
     # Seed the successor's own key: the same proposal against the same *new* set.
     seeded = await harness.deferrals.defer(
         deferral_id="seeded",
-        proposal=_proposal("new-1", _LISBON).model_copy(update={"conflicts": ("live-1", "live-2")}),
+        proposal=_proposal("new-1", _PORTO).model_copy(update={"conflicts": ("live-1", "live-2")}),
         decision=_ASK,
     )
     assert seeded.deferral is not None
@@ -1187,7 +1194,7 @@ async def test_an_answer_to_a_proposal_whose_window_has_closed_is_stale() -> Non
     harness = Harness()
     await harness.memory.add(_record("live-1", _LISBON))
     outcome = await harness.writes.write(
-        _proposal("new-1", _LISBON, validity=Validity(valid_until=AT - timedelta(days=1)))
+        _proposal("new-1", _PORTO, validity=Validity(valid_until=AT - timedelta(days=1)))
     )
     assert outcome.admission is not None
     assert outcome.admission.deferral is not None
@@ -1255,7 +1262,7 @@ async def test_disposing_of_a_stranded_question_unblocks_a_re_learn() -> None:
         await stranding.answer(question_id, accept=True)
 
     # Step 0: a re-`learn` while the row lives is handed the stranded question back.
-    blocked = await harness.writes.write(_proposal("new-1", _LISBON))
+    blocked = await harness.writes.write(_proposal("new-1", _PORTO))
     assert blocked.admission is not None
     assert blocked.admission.outcome.value == "suppressed"
     assert blocked.admission.deferral is not None
@@ -1266,7 +1273,7 @@ async def test_disposing_of_a_stranded_question_unblocks_a_re_learn() -> None:
     assert await harness.questions.forget_question(question_id)
 
     # Step 2: re-`learn` now admits a *fresh* question.
-    fresh = await harness.writes.write(_proposal("new-1", _LISBON))
+    fresh = await harness.writes.write(_proposal("new-1", _PORTO))
     assert fresh.admission is not None
     assert fresh.admission.outcome.value == "admitted"
     assert fresh.admission.deferral is not None
@@ -1290,7 +1297,7 @@ async def test_a_declined_question_must_be_forgotten_before_it_is_asked_again() 
 
     # `learn` alone is suppressed, and the user is told which question stands in the
     # way and in what state.
-    suppressed = await harness.writes.write(_proposal("new-1", _LISBON))
+    suppressed = await harness.writes.write(_proposal("new-1", _PORTO))
     assert suppressed.admission is not None
     assert suppressed.admission.outcome.value == "suppressed"
     assert suppressed.admission.deferral is not None
@@ -1299,7 +1306,7 @@ async def test_a_declined_question_must_be_forgotten_before_it_is_asked_again() 
     assert await harness.questions.questions() == ()
 
     assert await harness.questions.forget_question(question_id)
-    reversed_ = await harness.writes.write(_proposal("new-1", _LISBON))
+    reversed_ = await harness.writes.write(_proposal("new-1", _PORTO))
 
     assert reversed_.admission is not None
     assert reversed_.admission.outcome.value == "admitted"
@@ -1347,7 +1354,7 @@ async def test_a_content_mutation_mid_ingest_cannot_change_the_queued_question()
     gated = _GatedWriter(harness.writer)
     stage = MemoryWriteStage(writer=gated, deferrals=harness.deferrals)
     await harness.memory.add(_record("live-1", _LISBON))
-    submitted = _proposal("new-1", _LISBON)
+    submitted = _proposal("new-1", _PORTO)
 
     writing = asyncio.ensure_future(stage.write(submitted))
     await gated.entered.wait()
