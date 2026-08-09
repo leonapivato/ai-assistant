@@ -94,15 +94,22 @@ assumes the host uses OS full-disk encryption."
 `EvaluationTrace` leaves the device, by any route, under any setting. There is no
 opt-in that enables trace egress, and this ADR creates no designated seam under
 ADR-0017." That is written over an *object* rather than over a component, and
-"by any route" is wider than anything ADR-0017 §1 says.
+"by any route" is wider than anything the egress rule says.
 
-**Egress is a device-crossing test stated over components.** ADR-0017 §1: "User
-data may leave the device only from `models/` or from a designated integration
-seam inside `tools/`; every other egress is a bug." ADR-0084 §1 reads it as a
-device test — a loopback listener "engages neither clause" while "a hub on a
-dedicated machine serving a spoke on a laptop *is* user data leaving the device".
-Neither text says anything about an operator carrying their own file to their own
-other machine; the question is unaddressed rather than decided.
+**Egress is a device-crossing test stated over components, and ADR-0124 has just
+widened it without changing that.** The live rule is ADR-0124 §1: user data may
+leave the device "only from `models/`, from a designated integration seam inside
+`tools/`, or across the hub's **remote transport** between the hub and a device the
+owner has enrolled under §6 … every other egress is a bug." It replaces ADR-0017
+§1's two-boundary enumeration, which ADR-0124 §12 found "contradicted rather than
+joined" — and it leaves ADR-0017 §3's fourteen conditions on designating the
+`tools/` seam untouched, every one of them still undischarged. What matters here is
+that the widened rule names a *third component* rather than abandoning the form:
+egress is still something a named part of the system does. ADR-0084 §1 reads the
+test as a device one — a loopback listener "engages neither clause" while "a hub on
+a dedicated machine serving a spoke on a laptop *is* user data leaving the device".
+None of the three texts says anything about an operator carrying their own file to
+their own other machine; the question is unaddressed rather than decided.
 
 ### The question nobody has answered is custody, and it is the one that decides everything
 
@@ -546,9 +553,11 @@ that is the correct trade.** The hub comes up with the accumulated model intact 
 its provider credentials absent; the operator re-provisions those from wherever
 they keep them. What is bought is that a stolen or lost artifact yields no API key,
 no OAuth token and no refresh token — the tier whose compromise reaches services
-the assistant has nothing to do with. ADR-0004 §6 makes deletion span Tier 0 and
-Tier 1 "together"; this artifact deliberately spans one, because deletion and
-recovery are not symmetric acts and the asymmetry runs in the safe direction.
+the assistant has nothing to do with. ADR-0004 §6 makes deletion on this machine
+span Tier 0 and Tier 1 "together" — the part of that clause ADR-0124 §12 left
+untouched when it replaced the reach of a hub-side delete onto an enrolled device —
+and this artifact deliberately spans one, because deletion and recovery are not
+symmetric acts and the asymmetry runs in the safe direction.
 
 ### 7. Restore builds a fresh data directory and replaces nothing
 
@@ -955,9 +964,10 @@ it does not establish that a recent artifact exists on the day it is needed.
 > resolved through symbolic links, is at or beneath the resolved `Settings.data_dir`
 > it is copying. It applies that test before it creates §2's temporary file.
 
-> **Normative.** This ADR designates no seam under ADR-0017 §1, creates no opt-in
-> that would enable egress, and authorises no component to transmit a backup
-> artifact.
+> **Normative.** This ADR designates no seam under ADR-0017 §3, adds no boundary
+> to ADR-0124 §1's enumeration, creates no opt-in that would enable egress, and
+> authorises no component to transmit a backup artifact — including across the
+> remote transport ADR-0124 §1 admits.
 
 > **Normative.** The destination is on storage local to the device. That is a
 > deployment obligation the operator carries, and this ADR authorises no write to a
@@ -979,15 +989,20 @@ path and stopping there means the act of moving the artifact off the machine is 
 operator's, performed with their own tools, with their own knowledge of where it
 lands.
 
-**Which is where ADR-0017 §1 sits with respect to this decision, stated plainly
-rather than left to inference.** §1 governs components: "User data may leave the
-device only from `models/` or from a designated integration seam inside `tools/`."
-No component here transmits anything, so the clause is examined and found unmet —
-the pattern ADR-0084 §12 records for a loopback listener. What ADR-0017 does not
-address, in either direction, is an operator carrying their own file to their own
-other machine, and this ADR does not decide it either: it makes the tool incapable
-of the act ADR-0017 governs, and leaves the operator's act where the corpus leaves
-it. Encryption is what makes that silence tolerable. The artifact is built to be
+**Which is where the egress rule sits with respect to this decision, stated plainly
+rather than left to inference.** It governs components, and since ADR-0124 there
+are three of them: "`models/`, … a designated integration seam inside `tools/`, or
+across the hub's **remote transport** between the hub and a device the owner has
+enrolled". No component here transmits anything, and a backup artifact is not
+something the remote transport carries, so the clause is examined and found unmet —
+the pattern ADR-0084 §12 records for a loopback listener. That the enumeration grew
+by one while this ADR was in review changes the answer not at all, which is the
+useful thing about a rule written over components: a third boundary is a third
+named thing that may transmit, and this tool is still none of them. What the rule
+does not address, in any of its versions, is an operator carrying their own file to
+their own other machine, and this ADR does not decide it either: it makes the tool
+incapable of the act the rule governs, and leaves the operator's act where the
+corpus leaves it. Encryption is what makes that silence tolerable. The artifact is built to be
 carried somewhere ADR-0004 §4's baseline — "assumes the host uses OS full-disk
 encryption" — does not travel, and §4 and §5 are what replace the protection the
 baseline stops providing at the edge of the machine.
@@ -1062,8 +1077,11 @@ from arriving after the write it was meant to prevent.
 
 ADR-0082 §1's test is whether a reader holding only the earlier ADR would now act
 differently, or read one of its clauses more widely than it now holds. Applied to
-each place a record looks owed, it comes out "no record" seven times, and the
-reasons are not the same reason.
+each place a record looks owed, it comes out "no record" nine times, and the
+reasons are not the same reason. Two of the nine are here because ADR-0124 merged
+while this decision was in review and partially superseded clauses it cites; they
+were re-read at their amended status rather than at the status they had when this
+text was drafted.
 
 - **ADR-0007 §5** defers "**Import / restore** of an exported snapshot", and that
   deferral is untouched. This ADR restores a *file copy*, never an export; ADR-0007
@@ -1079,15 +1097,28 @@ reasons are not the same reason.
 - **ADR-0004 §2's residency clause** — "All persistent data lives on the user's
   machine … No cloud storage by default" — is not engaged. §11 makes the tool write
   to a local path and transmit nothing.
-- **ADR-0017 §1** is examined in §11 and found unmet, and is not widened by an
-  inch: the tool opens no network connection, designates no seam, and §11 requires
-  a destination on local storage rather than permitting a remote-mounted one. The
-  case §1 would otherwise reach — a component's write crossing the device on a
+- **The egress rule — ADR-0124 §1, replacing ADR-0017 §1's enumeration** — is
+  examined in §11 and found unmet, and is not widened by an inch: the tool opens no
+  network connection, designates no seam under ADR-0017 §3, and §11 requires a
+  destination on local storage rather than permitting a remote-mounted one. The case
+  the rule would otherwise reach — a component's write crossing the device on a
   mount — is held to ADR-0083 D3's deployment standard, which is how the corpus
   already handles the hub writing the very same databases through the very same
   calls. ADR-0083 §15 and ADR-0084 §12 both record that examining a clause and
   finding it unmet changes nothing. §11 states the reasoning at length so a later
   reader can disagree with the judgement rather than reconstruct it.
+- **ADR-0124** is a live neighbour rather than a clause this touches. Its §1
+  admits a third egress boundary and this decision uses none of it; its §10 names
+  "backup and restore, which is its own lane (#883)" among the things it does not
+  authorise, which is the reciprocal of §13's deferral below. Its §12's partial
+  supersessions of ADR-0004 and ADR-0017 are read and followed above rather than
+  argued with. No record is owed on it in either direction.
+- **ADR-0004 §6's delete clause** is cited in §6 and is one ADR-0124 §12 partially
+  replaced — but only "as it reaches a device the owner has enrolled". What §6 above
+  leans on is the part ADR-0004's own status note records as untouched: "the purge
+  of every Tier 0 and Tier 1 artifact on the hub's own machine". The contrast drawn
+  there is between a hub-local purge and a hub-local backup, so the replaced scope
+  is not engaged.
 - **ADR-0119 §12** is complied with, not narrowed: §3 excludes the trace store
   precisely so that no reading of §12 has to be stretched.
 - **ADR-0083** authorises this tool's shape in §10 and this ADR adds a fourth
@@ -1109,9 +1140,16 @@ reasons are not the same reason.
   writes and refuses; everything past that is the operator's.
 - **Whether the hub's databases should be encrypted at rest.** ADR-0004 §4 decides
   it and this ADR does not revisit it.
-- **The hop, and anything a remote spoke changes about any of this.** Leg 9's
-  ADR-0017 §1 decision is its own lane's. If a hop lands, whether a backup may
-  travel over it is that decision's question and not one this ADR pre-answers.
+- **Whether a backup may travel over the hop.** ADR-0124 has since ratified the
+  hop, and neither ADR answers this: its §10 names "backup and restore, which is
+  its own lane (#883)" among what it does not authorise, and §11's clause above
+  authorises no component to transmit an artifact across that transport. So the
+  question is open in both directions rather than answered by silence in one, and
+  the lane that takes it holds a rule from each — ADR-0124 §1's enumeration, and
+  §5's custody, which does not become easier because a second device exists. What
+  the two texts already settle together is the negative case: §10's clauses create
+  no wire operation and no engine method for backup, so an enrolled device cannot
+  cause one.
 - **The dedicated-box migration.** #879 makes it an operating act — "a
   data-directory copy under ADR-0083's layout, run whenever hardware exists" —
   gated on #829's window. A migration is not a backup: it moves a directory rather
