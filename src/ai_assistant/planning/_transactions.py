@@ -16,16 +16,16 @@ parameter. ``SqlitePlanStore`` keeps a thin ``_transaction`` method that binds
 it, and keeps on that method the docstring saying what the exclusion buys *this*
 store — the argument is store-specific even where the mechanism is not.
 
-**Why a module for one store, and why duplicated in ``memory`` and
-``permissions`` rather than shared with them.** Both of those own SQLite stores
-with the same need, and golden rule 1 forbids one subsystem importing another's
+**Why a module for one store, and why duplicated in ``memory``,
+``permissions`` and ``evaluation`` rather than shared with them.** All of those
+own SQLite stores with the same need, and golden rule 1 forbids one subsystem importing another's
 module — ``lint-imports`` fails the gate on it, so this is not a convention that
 could be bent. A single home would have to be ``core``, which is the contract
 surface rather than a place for concrete helpers; putting it there is an
 architecture decision owed its own ADR (#563, and #506 for the same question
-about ``_restrict_permissions``). Three copies of one function is what that
-boundary costs. Given three, they sit at the same name in all three packages, so
-what a reader compares is three files rather than a file, a file and a method
+about ``_restrict_permissions``). Four copies of one function is what that
+boundary costs. Given four, they sit at the same name in all four packages, so
+what a reader compares is four files rather than a file, a file and a method
 buried in a thousand-line store. It is the floor, not an oversight, and it is
 two fewer than the five hand-rolled spellings it replaces.
 """

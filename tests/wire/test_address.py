@@ -1,7 +1,7 @@
 """The socket's path, and the budget no socket can be bound outside of (#554).
 
 ADR-0084 §1's fourth step-2 condition, which had no socket to check until this
-change. The three that landed with the hub protect the six databases; this one
+change. The three that landed with the hub protect the seven databases; this one
 "bears on nothing until something binds", and something binds now.
 """
 
@@ -85,7 +85,7 @@ def test_a_path_too_long_for_the_socket_is_a_stay_down_fault(tmp_path: Path) -> 
     A ``ConfigurationError`` because ADR-0083 §5's test applies without strain:
     "restarting unchanged never succeeds, and a human must move the data directory".
     Left unchecked the failure lands at step 6 instead — "after the lock is held,
-    the six stores are open and the start-up sweeps have run: the latest and least
+    the seven stores are open and the start-up sweeps have run: the latest and least
     legible moment available".
     """
     deep = tmp_path

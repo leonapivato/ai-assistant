@@ -16,13 +16,14 @@ the only parameter. Each store keeps a thin ``_transaction`` method that binds
 it, and keeps on that method the docstring saying what the exclusion buys *that*
 store — the argument is store-specific even where the mechanism is not.
 
-**Why this is duplicated in ``memory`` and ``planning`` rather than shared with
-them.** Both own SQLite stores with the same need, and golden rule 1
+**Why this is duplicated in ``memory``, ``planning`` and ``evaluation`` rather
+than shared with them.** All three own SQLite stores with the same need, and
+golden rule 1
 forbids one subsystem importing another's module — ``lint-imports`` fails the
 gate on it, so this is not a convention that could be bent. A single home would
 have to be ``core``, which is the contract surface rather than a place for
 concrete helpers; putting it there is an architecture decision owed its own ADR
-(#563, and #506 for the same question about ``_restrict_permissions``). Three
+(#563, and #506 for the same question about ``_restrict_permissions``). Four
 copies of one function is what that boundary costs. It is the floor, not an
 oversight, and it is two fewer than the five hand-rolled spellings it replaces.
 """

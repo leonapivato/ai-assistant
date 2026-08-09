@@ -171,7 +171,7 @@ class _Hub:
         a timeout, so returning proves nothing; and ``close()`` on a loop still
         inside ``run_forever`` raises ``RuntimeError: Event loop is running``, which
         then *replaces* whatever went wrong with a report about the cleanup. That is
-        the worst of both: the diagnosis is lost, and the daemon thread with the six
+        the worst of both: the diagnosis is lost, and the daemon thread with the seven
         SQLite connections it holds survives the test that was supposed to end it.
 
         Raising here rather than falling through is the same argument the shutdown
@@ -409,7 +409,7 @@ def test_a_closed_door_is_reported_rather_than_worked_around(
 
     Deliberately without the ``hub`` fixture — the point is the socket that is not
     there. This is the one client-side obligation with a *destructive* failure mode
-    behind it: a CLI that fell back to building its own engine would open the six
+    behind it: a CLI that fell back to building its own engine would open the seven
     databases the resident hub owns exclusively (ADR-0083 ruling 4), so "it printed
     an error" and "it did not open memory.db" are separate claims and both are made.
     """
@@ -437,7 +437,7 @@ def test_a_loop_that_will_not_stop_is_named_rather_than_closed_out_from_under(
     SQLite connections survives anyway.
 
     Driven without the ``hub`` fixture and without an engine: the subject is the
-    loop and its thread, and standing up six databases to wedge a callback would
+    loop and its thread, and standing up seven databases to wedge a callback would
     only make the test slower and the wedge harder to place. The patience is
     shortened for the same reason — waiting the full :data:`_PATIENT` to watch a
     teardown give up would put ten seconds into every run of the suite.
