@@ -1,6 +1,6 @@
 # 120. A measure is a rate over one window of the trace stream, read offline while the hub is stopped
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-09
 - **This decision adds no contract surface, and §9 argues it rather than
   asserting it.** No Protocol in `core/protocols.py` gains a member or changes a
@@ -964,7 +964,9 @@ them are emitted on `main`.
 none of them blocks a measure this ADR defines.** ADR-0119 §13e permits a
 ratified ADR to add vocabulary; this one declines, because adding a member is
 the one change that would make this a contract ADR, and no member is needed —
-every gap below is a matter of *populating* what the vocabulary already declares.
+every gap below except item 4 is a matter of *populating* what the vocabulary
+already declares — item 4's own text prices in two new metric keys, which §3
+makes the cheap axis ("a new number costs a line") and §13e does not gate.
 
 1. **No emitter populates `TraceRef.CONVERSATION` or `TraceRef.TURN`.** Closing
    it makes §6 definable as VISION phrases it and enables the retrieval-miss join.
@@ -1055,7 +1057,7 @@ nothing. §10's third clause makes it a ruling.
 **ADR-0111 §9 and §11 — not owed.** ADR-0111 §9's one-record rule is about
 emission and nothing here emits. ADR-0111 §11's ruling that arming a
 shipped-disabled job is "an implementation lane's act against this text once
-ratified" is untouched: §12 item 4 records that the arming is not this ADR's,
+ratified" is untouched: §12 item 5 records that the arming is not this ADR's,
 and §8 only reads the stamp.
 
 **ADR-0113 §2 and ADR-0079 §3 — not owed.** Each is cited for a fact it already
