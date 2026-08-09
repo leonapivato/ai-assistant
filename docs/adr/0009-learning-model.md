@@ -5,9 +5,11 @@
 - Amended: 2026-08-09 by ADR-0122 — §1's `memory_kind` is no longer required of
   the caller: it becomes `MemoryKind | None`, and an absent value is resolved by
   `orchestration` before the processor is called — from the belief a *correction*
-  touches, by one ranked read, and from the intent alone for a stated
-  *preference*, which establishes a `PreferenceMemory` and is resolved with no
-  read at all. §1's reason is unchanged and is what the amendment implements — a
+  touches, by one ranked read scoped to ADR-0122 §3's fixed resolution set, and
+  from the intent alone for a stated *preference*, which establishes a
+  `PreferenceMemory` and is resolved with no read at all. ADR-0122 §3 is the
+  operative text; this note records the amendment and does not restate its terms.
+  §1's reason is unchanged and is what the amendment implements — a
   correction's record type varies with what it corrects, so the layer that cannot
   see the target no longer supplies it. §§2–6 stand: §2's Protocol is untouched,
   §3's "`learning` never imports `memory`" is what places the resolution in the
@@ -86,13 +88,17 @@ Two deliberate scoping choices:
 > `interfaces/cli.py`, which had been filling the field from a fixed
 > `CORRECTION → SEMANTIC` table — must be allowed to decline it. **The resolution
 > is gated on `kind`, and only a correction is looked up**: `orchestration`
-> resolves an absent value on a `CORRECTION` with one unscoped ranked read, and on
-> a `PREFERENCE` with no read at all, to `PREFERENCE` — a stated preference
-> establishes one by its own intent, and searching for it would file the user's
-> preference wherever the store's nearest neighbour happens to live. Either way
-> §4's mapping below receives a `MemoryKind` and is unchanged. A value the caller
-> *does* supply is authoritative and suppresses the read. The second bullet is
-> untouched.
+> resolves an absent value on a `CORRECTION` with one ranked read **scoped to
+> ADR-0122 §3's fixed resolution set** — `PREFERENCE` and `SEMANTIC`, the kinds
+> §4's processor below mints — and on a `PREFERENCE` with no read at all, to
+> `PREFERENCE`, since a stated preference establishes one by its own intent and
+> searching for it would file the user's preference wherever the store's nearest
+> neighbour happens to live. Either way §4's mapping below receives a `MemoryKind`
+> and is unchanged. A value the caller *does* supply is authoritative and
+> suppresses the read. The second bullet is untouched. **ADR-0122 §3 is the
+> operative text**; this note records the amendment and is not a second statement
+> of its terms — where the two differ, ADR-0122 governs, and §6's deferral being
+> taken up amends its resolution set there.
 
 ### 2. `FeedbackProcessor` — feedback in, proposals out
 
