@@ -377,9 +377,15 @@ platforms.
 
 > **Normative.** Before sending anything on the remote transport, the client
 > obtains the hub's overlay identity from the overlay agent on its own machine and
-> refuses unless it equals the identity recorded when this device was enrolled.
-> ADR-0084 §1's peer-credential check governs the loopback transport and is
-> unavailable here; this clause stands in its place, in the same direction.
+> refuses unless it equals the **enrolled hub identity** §6 gave it. ADR-0084 §1's
+> peer-credential check governs the loopback transport and is unavailable here;
+> this clause stands in its place, in the same direction.
+
+> **Normative.** The enrolled hub identity is held beside the credential, in the
+> same Tier 0 place and by the same mechanism (§6), and it is not an ordinary
+> configuration value. Changing the client's destination address does not change
+> the identity the clause above requires it to match, and no configuration setting
+> may override that identity.
 
 **The second clause is the one that is easy to omit, and omitting it is the whole
 of the attack.** Without it, any node on the overlay that can occupy the hub's
@@ -388,6 +394,17 @@ the utterance and everything the session carries, exactly as ADR-0084 §1's
 replaced-socket case does on one machine. Mutual authentication is what makes the
 credential in §7 a proof of *this pair* rather than a bearer token the client will
 hand to whoever answers.
+
+**The third clause is what stops the second from being circular, and an earlier
+draft was.** It required the client to match "the identity recorded when this
+device was enrolled" and §6 recorded no such thing — the enrolment record is
+hub-side and holds the *device's* identity, so the client had nothing to compare
+against and could only take whatever its local agent reported about whatever
+address it had been pointed at. Adversarial review found it. Separating the two
+values is what closes it: **the address is ordinary configuration and the identity
+is not**, so an edit that redirects the client to an attacker's node changes the
+destination and leaves the check that destination has to pass exactly where it
+was.
 
 **Querying the local overlay agent is not egress.** It is a call to a daemon on
 the same machine over a local interface, in the class ADR-0084 §1 already reasoned
@@ -462,6 +479,12 @@ grant, which is a different act with a different subject.
 > which the credential cannot be recovered, so the hub holds no device's Tier 0
 > secret at rest.
 
+> **Normative.** Enrolment also discloses the **hub's own overlay identity**, and
+> the two values travel together: the client holds both, and holding the credential
+> without the hub identity is an incomplete enrolment the client refuses to connect
+> on. The hub identity is not a secret; it is carried with the credential because
+> §4 makes it the thing a destination has to match.
+
 > **Normative.** The credential is compared in constant time, and the verifier is
 > a cryptographic hash rather than a memory-hard password derivation. The clause
 > above makes the credential machine-generated and high-entropy, so there is no
@@ -507,7 +530,7 @@ anticipates nor constrains it.
 > **Normative.** On the device, the credential is Tier 0 under ADR-0004 §1. It is
 > **persisted**, so that the owner presents it once at enrolment rather than at
 > every connect, and it is held **only** in the Tier 0 place ADR-0004 §3 names —
-> the OS keyring. It is never written to any database this system opens, never
+> the OS keyring, which is where the enrolled hub identity sits beside it (§4). It is never written to any database this system opens, never
 > committed, and never reaches a log, an audit record or an error message.
 > `core/logging.py` already redacts a key containing `credential`, and no
 > implementation may give it a name that redaction misses.
@@ -886,8 +909,10 @@ plan a test rather than a rehearsal.
 4. **The door is not on the internet.** From a network path outside the overlay,
    the listener does not answer; and the hub refuses at load a configuration that
    would bind it anywhere §2 forbids.
-5. **Mutual authentication holds.** The client refuses a hub whose overlay
-   identity is not the one recorded at enrolment (§4).
+5. **Mutual authentication holds.** Pointed by configuration at a different
+   overlay member's address, the client refuses before sending anything, because
+   the identity its own agent reports for that address is not the enrolled hub
+   identity — and editing the destination does not move that identity (§4).
 6. **Revocation works and is prospective.** Revoking the second device closes its
    live connection, its next connect is refused naming revocation, and re-enrolling
    mints a new credential against which the old one still verifies against nothing
