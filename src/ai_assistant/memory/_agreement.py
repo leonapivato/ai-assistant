@@ -25,10 +25,16 @@ record's own id.
 **Held in `memory` and duplicated into `ai_assistant.testing`, not shared with
 it** (§6, golden rule 1). The canonical ``MemoryWriter`` fake may not import this
 subsystem, which is why ADR-0121 states the predicate normatively rather than
-leaving one implementation to define it. Within `memory` it is one module because
-the policy and the ingestor are one subsystem: the duplication ADR-0038 §2a
-requires is between the *recommending* boundary and the *writing* one across
-process seams, and both of those read this file.
+leaving one implementation to define it.
+
+**Within `memory` it is one module, and that is not a weakening of ADR-0038 §2a.**
+What §2a requires is that the safety property be *recomputed at the boundary that
+performs the write*, because "a policy reaches ``MemoryIngestor`` through an
+injected seam" and an arbitrary conforming policy may not have computed it at all.
+``MemoryIngestor`` does recompute it, over the target it holds and the proposal it
+was given, and refuses when it does not hold whatever the ruling says (ADR-0121
+§5). Two *copies* of the predicate would add nothing to that and would add a way
+for the two to disagree — which for this predicate is the one failure §1 forbids.
 """
 
 from __future__ import annotations
