@@ -1049,8 +1049,8 @@ class TraceRecordSet(StrEnum):
 class RecordIdSet(BaseModel):
     """Ids the operation produced under one disposition, and how many there were.
 
-    Truncated exactly when ``total`` exceeds ``len(ids)``; there is no separate
-    flag, so the two cannot disagree.
+    Truncated exactly when ``total`` exceeds ``len(ids)`` — equivalently, when it
+    exceeds the cap — so there is no separate flag to disagree with.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -1059,10 +1059,19 @@ class RecordIdSet(BaseModel):
     total: int = Field(ge=0)
 
     @model_validator(mode="after")
-    def _total_covers_its_ids(self) -> RecordIdSet:
-        """Refuse a total below the ids carried — the one way this pair can lie."""
-        if self.total < len(self.ids):
-            msg = f"total {self.total} is below the {len(self.ids)} ids carried"
+    def _ids_are_the_total_up_to_the_cap(self) -> RecordIdSet:
+        """The set carries every id it produced, and drops ids only at the cap.
+
+        ``len(ids) == min(total, CAP)`` is the whole invariant, and it is tighter
+        than ``total >= len(ids)`` in the direction that matters: the looser form
+        admits ``ids=(), total=1``, which reports a truncation §3 reserves for cap
+        overflow and would have a measure exclude a trace that lost nothing.
+        """
+        expected = min(self.total, TRACE_RECORD_SET_CAP)
+        if len(self.ids) != expected:
+            msg = (
+                f"a total of {self.total} carries {expected} ids, not {len(self.ids)}"
+            )
             raise ValueError(msg)
         return self
 
@@ -1154,11 +1163,16 @@ config carries `validate_default=True` and the three fields use a
 `default_factory`. It is the one pydantic default this family cannot take as it
 comes, and it is called out rather than left to be noticed.
 
-**`RecordIdSet`'s invariant is a validator, not a comment.** `ge=0` alone accepts
-`RecordIdSet(ids=(one_id,), total=0)`, which claims the operation produced nothing
-while carrying an id a measure will happily join on — and it makes the derived
-truncation state false in the safe-looking direction. The refusal is part of the
-type, so no emitter and no store schema can construct the contradiction.
+**`RecordIdSet`'s invariant is a validator, not a comment, and it is an equality
+rather than a bound.** `ge=0` alone accepts `RecordIdSet(ids=(one_id,), total=0)`,
+which claims the operation produced nothing while carrying an id a measure will
+happily join on. But `total >= len(ids)` is not enough either: it admits
+`ids=(), total=1`, an emitter dropping ids it was under no pressure to drop, which
+reports a truncation §3 reserves for cap overflow and costs a trace its place in
+a measure's population for nothing. `len(ids) == min(total, CAP)` says both things
+at once — carry everything, drop only at the cap — so truncation stays exactly
+equivalent to `total > CAP` and no emitter or schema can construct a set that
+lies about which it is.
 
 **`UtcInstant`, not a merely-aware `datetime`.** ADR-0023 puts every stored
 instant in `core/types.py` behind the shared validated type — naive is rejected
