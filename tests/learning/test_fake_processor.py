@@ -37,7 +37,7 @@ _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 def _event(  # noqa: PLR0913 — one keyword per event field a case may need to vary
     *,
     kind: FeedbackKind = FeedbackKind.PREFERENCE,
-    memory_kind: MemoryKind = MemoryKind.PREFERENCE,
+    memory_kind: MemoryKind | None = MemoryKind.PREFERENCE,
     content: str = "prefers concise replies",
     subject: str | None = None,
     about_person: str | None = None,
@@ -263,6 +263,34 @@ async def test_an_empty_script_proposes_nothing() -> None:
     # Distinct from the `None` default: a consumer needs to exercise its "the
     # learning step produced no proposal" path.
     assert await FakeFeedbackProcessor([]).process(_event()) == []
+
+
+async def test_an_unresolved_kind_is_refused_rather_than_synthesised() -> None:
+    """The fake keeps ADR-0122 §7's discipline on the branch that would invent one.
+
+    ``None`` is not a kind: it is a request that has not chosen one yet, which the
+    calling stage resolves before any processor is called. Synthesising a record for
+    it would let a consumer's test pass while its subject skipped the resolution
+    stage — certifying the exact silent drop §7 makes loud, from the double every
+    consumer of the learning step reaches for.
+    """
+    with pytest.raises(ValueError, match="must carry a resolved memory_kind"):
+        await FakeFeedbackProcessor().process(_event(memory_kind=None))
+
+
+async def test_a_scripted_fake_answers_an_unresolved_event_with_its_script() -> None:
+    """The refusal belongs to synthesis, not to the fake.
+
+    A script is the consumer's own stated outcome — it is how a test says "this
+    processor proposes exactly this" — and it names a record rather than deriving
+    one from the event, so there is no drawer for the fake to invent. The
+    ``FeedbackProcessor`` Protocol is unchanged by ADR-0122 (§7), so nothing here is
+    a contract clause: the shared conformance suite states no such rule, and an
+    implementation that answered an unresolved event some other way still conforms.
+    """
+    scripted = _proposal()
+
+    assert await FakeFeedbackProcessor([scripted]).process(_event(memory_kind=None)) == [scripted]
 
 
 async def test_a_scripted_proposal_cannot_be_mutated_after_construction() -> None:

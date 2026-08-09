@@ -182,6 +182,60 @@ async def test_the_hub_refuses_a_credentialled_connect_and_says_why(tmp_path: Pa
     assert "credential" in reply.payload["message"]
 
 
+async def test_a_client_from_before_the_optional_memory_kind_is_refused_at_connect(
+    tmp_path: Path,
+) -> None:
+    """ADR-0122 §1 and §10: the bump, and the refusal it exists to reach.
+
+    ``FeedbackEvent.memory_kind`` became optional, so an unpinned correction now
+    crosses as ``"memory_kind": null`` — which a hub from before the change refuses
+    for a required ``MemoryKind``. Left unbumped, both peers would still say ``1``,
+    the handshake would pass, and the operator would meet that as a decode error
+    somewhere inside a ``learn``: the half-finished upgrade made *illegible*, which
+    is the state ADR-0084 §3 defends the exact match in order to expose.
+
+    Driven from the server's side with a hand-written connect at the previous
+    version, because a conforming client of this build cannot produce one, and
+    asserted on the refusal rather than only on the constant — a bump nothing ever
+    reaches through the handshake buys nothing.
+    """
+    engine = FakeAssistantEngine()
+    limits = ConnectionLimits(max_frame_bytes=_FRAME, read_timeout=_PATIENT, build="test")
+
+    async def _hub(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await serve_connection(engine, reader, writer, limits=limits)
+
+    path = tmp_path / "hub.sock"
+    server = await asyncio.start_unix_server(_hub, path=str(path))
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(path))
+        await _send(
+            writer,
+            env.Envelope(
+                kind=env.FrameKind.CONNECT,
+                id="c-1",
+                payload={
+                    env.CONNECT_VERSION: env.PROTOCOL_VERSION - 1,
+                    env.CONNECT_CLIENT: "assistant-cli",
+                },
+            ),
+        )
+        reply = await _read_one(reader)
+        writer.close()
+    finally:
+        server.close()
+        with contextlib.suppress(Exception):
+            await server.wait_closed()
+
+    assert env.PROTOCOL_VERSION > 1, "ADR-0122 §1 owes the bump"
+    assert reply.kind is env.FrameKind.ERROR
+    assert reply.payload["code"] == env.VERSION_MISMATCH
+    assert str(env.PROTOCOL_VERSION) in reply.payload["message"]
+    assert str(env.PROTOCOL_VERSION - 1) in reply.payload["message"]
+    assert "finish the upgrade" in reply.payload["message"], "and the operator action"
+    assert engine.calls == [], "refused before any request of this build's shape is decoded"
+
+
 # --- authenticating the hub from the kernel (ADR-0084 §1) ------------------
 
 

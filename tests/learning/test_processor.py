@@ -32,7 +32,7 @@ _WRITTEN_AT = datetime(2026, 3, 2, 17, 45, tzinfo=UTC)
 def _event(  # noqa: PLR0913 — one keyword per event field a case may need to vary
     *,
     kind: FeedbackKind = FeedbackKind.PREFERENCE,
-    memory_kind: MemoryKind = MemoryKind.PREFERENCE,
+    memory_kind: MemoryKind | None = MemoryKind.PREFERENCE,
     content: str = "prefers concise replies",
     subject: str | None = None,
     about_person: str | None = None,
@@ -102,6 +102,51 @@ async def test_procedural_and_episodic_targets_are_deferred() -> None:
 
     assert await processor.process(_event(memory_kind=MemoryKind.PROCEDURAL)) == []
     assert await processor.process(_event(memory_kind=MemoryKind.EPISODIC)) == []
+
+
+async def test_an_unresolved_target_is_refused_rather_than_deferred() -> None:
+    """ADR-0122 §7, and the reason it is a *raise* and not the arm above.
+
+    The two answers look identical from ``process``'s return and mean opposite
+    things. ``None`` on the field is not a deferred target — it is a producer that
+    skipped the pipeline stage owing the resolution — and answering it with the
+    deferred arm's empty sequence would report "nothing to propose" for feedback that
+    had everything to propose: ``learn`` writes nothing, reports nothing wrong, and
+    the correction is silently dropped where today it is at least stored in the wrong
+    drawer. That is why ADR-0122 §10 refuses to let the field change land without
+    this refusal beside it.
+    """
+    processor = _processor()
+
+    with pytest.raises(ValueError, match="must carry a resolved memory_kind"):
+        await processor.process(_event(memory_kind=None))
+
+
+async def test_an_unresolved_target_is_refused_before_any_seam_is_touched() -> None:
+    """The refusal consumes neither an id nor a clock reading.
+
+    The same discipline the deferred arm already keeps: nothing is minted for a call
+    that proposes nothing, so a misconfigured clock cannot turn this refusal into a
+    different failure, and an allocating id factory is not spent on it.
+    """
+    issued: list[str] = []
+    readings: list[datetime] = []
+
+    def id_factory() -> str:
+        issued.append("rec-1")
+        return "rec-1"
+
+    def clock() -> datetime:
+        readings.append(_WRITTEN_AT)
+        return _WRITTEN_AT
+
+    processor = RuleBasedFeedbackProcessor(id_factory=id_factory, now=clock)
+
+    with pytest.raises(ValueError, match="must carry a resolved memory_kind"):
+        await processor.process(_event(memory_kind=None))
+
+    assert issued == []
+    assert readings == []
 
 
 # --- the subject axis: the user's route into it (ADR-0100 §7) ----------------

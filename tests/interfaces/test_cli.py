@@ -584,10 +584,21 @@ def _wire(monkeypatch: pytest.MonkeyPatch, engine: object) -> None:
     monkeypatch.setattr(cli, "_utcnow", lambda: AT)
 
 
-def test_learn_builds_a_correction_event_and_defaults_the_memory_kind(
+def test_learn_leaves_a_corrections_memory_kind_for_the_engine_to_resolve(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """--kind correction becomes a CORRECTION event defaulting to a semantic fact."""
+    """ADR-0122 §2: this adapter no longer predicts a correction's record type.
+
+    It used to answer from a fixed table, and the answer was indistinguishable
+    downstream from one the user had chosen deliberately — which is #864: every
+    correction filed as a semantic fact, and the kind-scoped conflict probe then
+    looking only in the drawer the table named. A correction points at a belief that
+    already exists, whose record type is a property of *that* belief; naming it here
+    is a prediction made at the one layer with no access to the target. Leaving it
+    absent is the adapter reporting what it knows, and it is what keeps golden rule 3
+    intact — the resolution is business logic and none of it happens in
+    ``interfaces/``.
+    """
     engine = _RecordingEngine(_stored_outcome())
     _wire(monkeypatch, engine)
 
@@ -598,11 +609,22 @@ def test_learn_builds_a_correction_event_and_defaults_the_memory_kind(
     assert len(engine.events) == 1
     event = engine.events[0]
     assert event.kind is FeedbackKind.CORRECTION
-    assert event.memory_kind is MemoryKind.SEMANTIC  # defaulted from --kind
+    assert event.memory_kind is None  # not predicted here (ADR-0122 §2)
     assert event.content == "the office is in Boston"
     assert event.subject is None
     assert event.created_at == AT  # stamped from the injected clock, not hand-rolled
     assert "Learned" in output.getvalue()
+
+
+def test_the_default_table_no_longer_answers_for_a_correction() -> None:
+    """§2 removes the ``CORRECTION`` entry; the table is deliberately not exhaustive.
+
+    Asserted on the table itself as well as through the command, because the comment
+    that used to call it "exhaustive over ``FeedbackKind``" is exactly the invitation
+    to restore the entry — and restoring it would reinstate #864 while every outcome
+    test above still passed on a store that happened to hold a semantic neighbour.
+    """
+    assert cli._DEFAULT_MEMORY_KIND == {FeedbackKind.PREFERENCE: MemoryKind.PREFERENCE}
 
 
 def test_learn_builds_a_preference_event_with_a_subject(
@@ -751,6 +773,30 @@ def test_learn_memory_kind_flag_overrides_the_default(
     event = engine.events[0]
     assert event.kind is FeedbackKind.PREFERENCE
     assert event.memory_kind is MemoryKind.SEMANTIC  # overridden, not the preference default
+
+
+def test_learn_memory_kind_flag_pins_a_correction_that_would_otherwise_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§6: the flag keeps its role and acquires a sharper one.
+
+    It was a way to pre-empt a fixed table; it becomes the way to say "I know which
+    drawer, do not look" — a stronger guarantee, since it now suppresses a store read
+    as well as a default, and the escape hatch §4's best-ranked rule leaves the user.
+    The adapter's whole part in that is putting the value on the event; the
+    suppression itself is the engine's (``tests/orchestration/test_loop.py``).
+    """
+    engine = _RecordingEngine(_stored_outcome())
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["learn", "--kind", "correction", "the office is in Boston", "--memory-kind", "semantic"],
+    )
+    assert result.exit_code == 0
+    event = engine.events[0]
+    assert event.kind is FeedbackKind.CORRECTION
+    assert event.memory_kind is MemoryKind.SEMANTIC
 
 
 def test_learn_rejects_an_unknown_kind() -> None:
