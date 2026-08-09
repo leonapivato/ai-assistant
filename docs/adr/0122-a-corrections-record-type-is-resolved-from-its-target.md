@@ -180,8 +180,9 @@ clause's `PREFERENCE` arm exists to keep consistent with.
 > before it calls the `FeedbackProcessor`, and the intent decides how. On
 > `FeedbackKind.PREFERENCE` the resolution is `MemoryKind.PREFERENCE` and **no
 > store read is issued**. On `FeedbackKind.CORRECTION` it is **one** ranked
-> `MemoryStore.search` over the feedback's own `content`, **scoped to the kinds the
-> processor can mint** and unscoped by band: the resolved kind is the best-ranked
+> `MemoryStore.search` over the feedback's own `content`, **scoped to the
+> resolution set — `{MemoryKind.PREFERENCE, MemoryKind.SEMANTIC}`, fixed by this
+> clause** — and unscoped by band: the resolved kind is the best-ranked
 > returned record's, and where the search returns nothing, §5 governs. Its `limit`
 > is the loop's own checked tuning knob, distinct from the turn's
 > `retrieval_limit`. The search resolution applies **no similarity threshold and
@@ -257,16 +258,36 @@ whose target has just gone, finds no conflict, and is stored as new — again th
 pre-existing outcome, in a better drawer. Nothing is written on the basis of the
 resolution, so there is nothing for a race to corrupt.
 
-**The candidate set is bounded by what the processor can mint, and the bound is
-the `kinds` argument rather than a filter over the answer.** ADR-0009 §6 defers
-`PROCEDURAL` and `EPISODIC` correction targets, and `_to_record` returns no
-proposal for them. A resolution free to select `EPISODIC` — the store is full of
-episodes, and an episode recording the user ordering espresso is a plausible best
-match for a correction about espresso — would produce an event the processor
-answers with an empty sequence, and the user's correction would vanish *entirely*,
-which is strictly worse than the defect this ADR fixes. The restriction self-heals:
-when ADR-0009 §6's deferral is taken up, the set widens with it and this clause
-needs no amendment.
+**Why the set is bounded at all.** ADR-0009 §6 defers `PROCEDURAL` and `EPISODIC`
+correction targets, and `_to_record` returns no proposal for them. A resolution
+free to select `EPISODIC` — the store is full of episodes, and an episode
+recording the user ordering espresso is a plausible best match for a correction
+about espresso — would produce an event the processor answers with an empty
+sequence, and the user's correction would vanish *entirely*, which is strictly
+worse than the defect this ADR fixes.
+
+**Why the set is a literal here and not a question asked of the processor.** The
+tempting phrasing is "the kinds the processor can mint", and it is not
+implementable: `FeedbackProcessor` exposes `process(event)` and nothing else, so
+`orchestration` has no way to ask, and inventing one would be a Protocol change
+under golden rule 5 — a capability declaration with one implementation and one
+caller, ratified to spare an ADR from naming two enum members. So the set is
+named here, matching what ADR-0009 §4 fixes `RuleBasedFeedbackProcessor` to mint,
+and **it widens by amendment rather than by inference**: when ADR-0009 §6's
+deferral is taken up, the lane taking it amends this clause, in the same change
+that makes the kinds mintable.
+
+> **Normative.** The `FeedbackProcessor` wired behind the loop mints every kind in
+> §3's resolution set. This is a composition-root obligation, in ADR-0028 §4's
+> sense — nothing in the type system can state it — and a root that wires a
+> processor minting fewer has mis-wired the loop.
+
+That obligation is the honest form of the constraint, and it has precedent
+directly beside it: `LearningLoop`'s own constructor already carries "**The writer
+behind ``writes`` must persist to ``memory``.** Nothing in the type system can say
+so — a ``MemoryWriter`` exposes no store, deliberately — so it is a
+composition-root obligation". §7's second clause is what stops a violation of it
+from being silent.
 
 **Passing the restriction to `search` rather than applying it afterwards is
 load-bearing**, and the reason is where the predicate binds. ADR-0113 §2 binds the
@@ -402,6 +423,26 @@ same shape — `_apply` raises rather than storing a proposal as new when a fold
 names an absent target, "fail-closed rather than silently downgrading", because "a
 write that loses data while reporting success is worse than one that stops".
 
+**And an empty answer to a *resolved* event is a mis-wiring, not a deferral.**
+
+> **Normative.** Where §3 resolved the kind, a `FeedbackProcessor` returning no
+> proposal is §3's composition-root obligation broken, and `learn` surfaces it
+> rather than returning an empty `LearnOutcome`. Where the caller **pinned** the
+> kind (§6), an empty sequence keeps exactly the meaning ADR-0009 §4 and §6 give
+> it — a target this processor defers — and nothing here disturbs it.
+
+The two cases look identical at the seam and mean opposite things. A pinned
+`PROCEDURAL` is a user asking for something the deterministic processor does not
+yet build, and reporting that nothing was proposed is the honest answer §6
+ratified. A resolved kind, by contrast, was chosen from §3's set *because* the
+processor mints it; an empty sequence there says the root wired a processor that
+does not, and reporting it as "no update proposed" would drop a correction on the
+strength of a wiring mistake — the same silent loss one layer down, again.
+
+This is what makes §3's obligation enforceable in the only way an untypeable
+obligation can be: it is not checked at wiring time, it is *not survivable* at use
+time.
+
 The Protocol is untouched because nothing about it changes: `process` takes a
 `FeedbackEvent` and returns proposals, exactly as ADR-0009 §2 states. What changed
 is one field's domain on the type it takes.
@@ -532,7 +573,10 @@ The implementation is a separate lane, briefed after this ADR merges (golden rul
   `search` raises `MemoryStoreError` must surface it from `learn` with nothing
   proposed and nothing written — asserted on both halves, since a fallback to §5
   passes any test that only checks the call raised nothing.
-- **A test that §7 raises** rather than returning an empty sequence.
+- **A test that §7 raises** rather than returning an empty sequence, and a second
+  for its other clause: a stub processor returning `()` for a **resolved** event
+  surfaces, while the same `()` for a **pinned** `PROCEDURAL` still returns an
+  empty `LearnOutcome`. Both, or the two cases have been collapsed.
 - **No change to `memory/`.** If the lane concludes it needs one, that is §8 being
   reopened, and it stops and brings back an ADR rather than widening the probe.
 
@@ -613,6 +657,11 @@ The implementation is a separate lane, briefed after this ADR merges (golden rul
 - **Resolve inside the CLI, before the event is built.** Rejected in §2: the
   adapter is thin by golden rule 3, and it is on the far side of the wire from the
   store in any case (ADR-0083) — it has nothing to read.
+- **Give `FeedbackProcessor` a mintable-kinds declaration**, so §3's set could be
+  asked for rather than named. Rejected in §3: it is a Protocol change under golden
+  rule 5, with its own triad, to spare this ADR from writing two enum members and a
+  clause saying who amends them. The composition-root obligation states the same
+  constraint at the same strength, and §7's second clause makes breaking it loud.
 - **Add a resolution seam as a new Protocol**, so the step is injectable. Rejected
   as surface with one implementation and one caller: `MemoryStore.search` already
   expresses the read, golden rule 5 would put the Protocol's triad ahead of a step
