@@ -53,6 +53,7 @@ import structlog
 
 from ai_assistant.core.errors import TraceStoreError
 from ai_assistant.core.types import (
+    UNREPRESENTABLE_FAULT_CLASS,
     EvaluationTrace,
     RecordIdSet,
     TraceKind,
@@ -233,6 +234,24 @@ class TraceSinkContract(_TraceCancellation):
     def failing_sink(self) -> TraceSink:
         """A sink whose backing store fails every append (ADR-0119 §5).
 
+        The implementation's own natural fault — a closed connection, a scripted
+        one — rather than an injected exception, so the case is evidence about
+        what really happens rather than about a stand-in.
+
+        Returns:
+            The sink.
+        """
+        raise NotImplementedError
+
+    def sink_failing_with(self, error: Exception) -> TraceSink:
+        """A sink whose backing store raises exactly ``error`` on every append.
+
+        The injectable form, for the one case that is about *which* exception
+        arrived rather than about the fact that one did.
+
+        Args:
+            error: The fault the backing store should raise.
+
         Returns:
             The sink.
         """
@@ -407,6 +426,27 @@ class TraceSinkContract(_TraceCancellation):
         assert await self.recorded(sink) == ()
         assert len(_emission_failures(captured)) == 1
         assert tier_one not in repr(captured)
+
+    async def test_a_dropped_traces_log_record_bounds_the_error_class(self) -> None:
+        """The bound ADR-0119 §2 puts on a class name holds on the log side too.
+
+        §2 admits an exception's ``__name__`` as one of four permitted strings
+        *because the pattern bounds it* — "a name is not a licence to carry a
+        payload" — and a provider may raise ``type("X" * 65, (Exception,), {})``
+        with a name of any length and any content. A failure record that read
+        ``type(error).__name__`` directly would put that name in a Tier 2 log,
+        which ADR-0004 §5 forbids unconditionally, through the one path that only
+        runs when something has already gone wrong.
+        """
+        hostile = type("Xylophone" * 40, (Exception,), {})
+        sink = self.sink_failing_with(hostile())
+
+        with structlog.testing.capture_logs() as captured:
+            await sink.emit(evaluation_trace("memory_search"))
+
+        failures = _emission_failures(captured)
+        assert len(failures) == 1
+        assert failures[0]["error_class"] == UNREPRESENTABLE_FAULT_CLASS
 
     @pytest.mark.optional_obligation
     async def test_a_cancelled_emit_holds_its_resource_until_the_work_finishes(self) -> None:

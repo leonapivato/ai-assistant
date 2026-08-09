@@ -171,6 +171,22 @@ class TestSqliteTraceStoreContract(TraceSinkContract, TraceRetentionContract, Tr
     def failing_sink(self) -> TraceSink:
         return _broken()
 
+    def sink_failing_with(self, error: Exception) -> TraceSink:
+        """A store whose append raises exactly ``error``.
+
+        Patched at the private sync method rather than arranged through the
+        driver, because the case is about *which* exception the swallow meets —
+        a hostile class name a provider could raise — and no real ``sqlite3``
+        fault can be made to carry one.
+        """
+        store = SqliteTraceStore(path=":memory:")
+
+        def raising(*_args: object) -> None:
+            raise error
+
+        store._append_sync = raising  # type: ignore[assignment,method-assign]
+        return store
+
     def failing_retention(self) -> TraceRetention:
         return _broken()
 
