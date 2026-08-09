@@ -524,6 +524,17 @@ class DefaultMemoryPolicy:
        agrees, so a user repeating themselves is recorded as agreement while a
        user contradicting themselves still reaches rule 7. It retires nothing
        (:func:`_rule_on_agreement`).
+
+       **It stays behind rule 4**, which ADR-0121 §2 does not disturb: §2 places
+       the arm ahead of "the prior-assertion deferral and the supersession arm",
+       which are rules 7 and 8, and says nothing about a confirmed proposal. The
+       one case where the order shows is a confirmation whose ``retires`` names a
+       conflict the re-ingested proposal now *agrees* with — reachable only from a
+       question queued before this rule existed, because a question about a
+       restatement is exactly what rule 6 stops being asked. There the user's own
+       answer authorised the retirement, and ADR-0045 §7 names that answer as an
+       acceptable gate where similarity is not one, so honouring it is the
+       conservative reading rather than an oversight.
     7. A user-asserted proposal that contradicts a *prior assertion* defers to
        the user (``ASK_USER``): two things the user said cannot both stay live,
        yet neither may be destroyed on a topical-similarity signal, so the user
