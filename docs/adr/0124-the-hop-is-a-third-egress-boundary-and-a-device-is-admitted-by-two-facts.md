@@ -573,7 +573,7 @@ untestable without a real keyring, and different on every platform — is exactl
 what §3 exists to prevent, arriving through a layer it did not happen to name.
 
 **The cost is real and named rather than discovered: one more contract PR ahead of
-the client half.** ADR-0084 §11 called `SecretStore` "the obvious home" for a
+the client half (#892).** ADR-0084 §11 called `SecretStore` "the obvious home" for a
 credential and the tree does not have one; today's Tier 0 credential, the provider
 key, is read from the process environment by the provider SDK. The cheap
 alternative — read the device credential from an environment variable too — was
@@ -845,7 +845,7 @@ error inside a call.
 failure one layer up". What it needs is a schema fingerprint over the wire-carried
 types, computed and compared in the gate — a real design, with real decisions
 about what is in the fingerprint and what a false positive costs, and none of them
-answerable from an ADR about a hop. An issue carries it (Consequences).
+answerable from an ADR about a hop. **#891** carries it.
 
 ### 10. What this does not authorise
 
@@ -1101,10 +1101,11 @@ Every ADR naming ADR-0017 was read for *what it relied on it for*:
 **Follow-on, filed as issues with this change:**
 
 - **The mechanical version check** §9 rules is owed — a schema fingerprint over the
-  wire-carried types, compared in the gate — with #872 as its ground.
-- **The device credential joins the provider credential** in whatever change builds
-  the `SecretStore` Protocol ADR-0004 §3 provisions and `core/protocols.py` does
-  not declare (§6).
+  wire-carried types, compared in the gate — with #872 as its ground. **#891.**
+- **The `SecretStore` Protocol** ADR-0004 §3 provisions and `core/protocols.py`
+  does not declare is a prerequisite of the client half, so its contract ADR and
+  triad land first (§6). **#892**, which also holds whether the provider credential
+  migrates onto it in the same change.
 - **What the hop feeds** — a device as a context facet, a device-scoped permission
   input, and the audit trail's "approved from where" — is filed when the listener
   lands, as `docs/roadmap.md`'s leg 9 directs (§10).
