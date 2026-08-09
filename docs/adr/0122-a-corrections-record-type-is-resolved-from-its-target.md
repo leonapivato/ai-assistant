@@ -105,8 +105,9 @@ proposal is minted, leaving `memory`'s kind-scoped probe exactly as it is.
 
 > **Normative.** `FeedbackEvent.memory_kind` is `MemoryKind | None`, defaulting to
 > `None`. `None` means the feedback does not name a record type and one is to be
-> resolved from what the feedback touches (§3); it never means a record type is
-> unknowable, and it is never stored. A value present is the caller's **pin** and
+> resolved by §3 — from the belief the feedback touches where the intent leaves
+> that open, and from the intent itself where it does not. It never means a record
+> type is unknowable, and it is never stored. A value present is the caller's **pin** and
 > is honoured unchanged (§6).
 
 The field was required, so every producer had to answer a question some producers
@@ -130,7 +131,13 @@ including `_to_record`'s and every kind filter on `search` and `list_beliefs`, t
 express a state that is never stored on a record. `MemoryKind` is the record's
 *type*; a request that has not yet chosen one is not a type.
 
-**The wire needs no accommodation.** ADR-0084 §3's connect handshake is an
+**The wire needs no accommodation, and "absent" is spelled `null` on it.** The
+codec's `project` renders a model through `model_dump()`, which emits every field
+including a defaulted one, and it gives `None` a form of its own — so an unpinned
+correction crosses the wire as `"memory_kind": null` rather than as a missing
+member, and no projection change is owed. "Absent" throughout this ADR means the
+field holds `None`, whatever layer is looking at it; there is no second, weaker
+sense in which a producer omits it. ADR-0084 §3's connect handshake is an
 exact-match version check, so a hub and a client never differ in what
 `FeedbackEvent` may carry, and a field that gains a default is source-compatible
 with every existing construction site in the tree.
@@ -140,7 +147,7 @@ with every existing construction site in the tree.
 > **Normative.** `interfaces/cli.py` supplies `memory_kind` only where the value
 > follows from what the user said: from `--memory-kind` when it is given, and from
 > `--kind preference` when it is not. For `--kind correction` with no
-> `--memory-kind`, it sends the field absent. `_DEFAULT_MEMORY_KIND`'s
+> `--memory-kind`, it leaves the field `None`. `_DEFAULT_MEMORY_KIND`'s
 > `CORRECTION` entry is removed; no adapter substitutes a record type for a
 > correction.
 
@@ -155,20 +162,43 @@ default stays and is not a guess.
 A **correction** points at a belief that already exists. Its record type is a
 property of *that* belief, so naming it without looking is not a default, it is a
 prediction — and ADR-0009 §1's own sentence says the prediction has no fixed
-answer. Sending the field absent is the adapter reporting what it knows, which is
+answer. Leaving the field `None` is the adapter reporting what it knows, which is
 what keeps golden rule 3 intact: the resolution is business logic, and this rules
 that no part of it happens in `interfaces/`.
+
+**This clause binds the adapter and settles nothing for any other producer.**
+`FeedbackEvent` is a `core` type, so a programmatic caller — a future interface, a
+test, a later processor's own re-proposal — can construct one with an absent
+`memory_kind` and any `kind`, and it is not reached by a rule stated over
+`interfaces/cli.py`. §3's first clause therefore states the same asymmetry at the
+pipeline, where every producer's event passes, and this section is what that
+clause's `PREFERENCE` arm exists to keep consistent with.
 
 ### 3. The resolution is `orchestration`'s, and it names a drawer, never a conflict
 
 > **Normative.** `orchestration`'s learning loop resolves an absent `memory_kind`
-> before it calls the `FeedbackProcessor`, with **one** ranked `MemoryStore.search`
-> over the feedback's own `content`, unscoped by kind and unscoped by band. The
-> resolved kind is the kind of the best-ranked returned record whose kind the
-> processor can mint; where the search returns no such record, §5 governs. The
-> resolution applies **no similarity threshold and makes no ruling**: it selects a
-> kind and nothing else, and whether a contradiction exists remains
-> `MemoryIngestor`'s and the `MemoryPolicy`'s question alone.
+> before it calls the `FeedbackProcessor`, and the intent decides how. On
+> `FeedbackKind.PREFERENCE` the resolution is `MemoryKind.PREFERENCE` and **no
+> store read is issued**. On `FeedbackKind.CORRECTION` it is **one** ranked
+> `MemoryStore.search` over the feedback's own `content`, unscoped by kind and
+> unscoped by band: the resolved kind is the kind of the best-ranked returned
+> record whose kind the processor can mint, and where the search returns no such
+> record, §5 governs. The search resolution applies **no similarity threshold and
+> makes no ruling**: it selects a kind and nothing else, and whether a
+> contradiction exists remains `MemoryIngestor`'s and the `MemoryPolicy`'s question
+> alone.
+
+**The `PREFERENCE` arm is not a shortcut, and omitting it would be a defect.** §2
+gives the reason a stated preference needs no lookup — its record type follows
+from the intent, not from what the store happens to hold — but §2 binds one
+adapter, and this clause is where every producer's event actually arrives. Without
+the arm, a programmatic `FeedbackEvent(kind=PREFERENCE, content="I prefer tea")`
+with no `memory_kind` would be resolved by search: a best-ranked semantic
+neighbour would file the user's stated preference as a fact, and on an empty store
+§5's fallback would do the same. That is the wrong-drawer defect this ADR exists
+to end, reproduced on the arm it was never about. The arm also keeps the two
+statements from drifting: §2 is now a consequence of this clause as it applies to
+the CLI, rather than a second, independent rule.
 
 **Why `orchestration` and not `learning`.** ADR-0009 §3 is explicit that `learning`
 produces proposals and the pipeline closes the loop — "`learning` never imports
@@ -258,8 +288,10 @@ found by hand.
 
 ### 5. An unresolvable correction is a free-standing assertion, and lands as `SEMANTIC`
 
-> **Normative.** Where the resolution's search returns no candidate of a mintable
-> kind, the resolved kind is `MemoryKind.SEMANTIC`. The feedback is never dropped,
+> **Normative.** Where §3's correction arm searches and returns no candidate of a
+> mintable kind, the resolved kind is `MemoryKind.SEMANTIC`. This governs that arm
+> alone and is never reached from §3's `PREFERENCE` arm, which issues no search.
+> The feedback is never dropped,
 > never refused, and never held for a question on this ground.
 
 A correction with no live target is not a correction; it is an assertion the user
@@ -433,6 +465,10 @@ The implementation is a separate lane, briefed after this ADR merges (golden rul
 - **A test that the pin suppresses the read** (§6) — an injected store that fails
   the assertion if `search` is called at all is the shape that pins this, because
   a resolution that ran and then deferred to the pin passes an outcome-only test.
+- **The same shape for §3's `PREFERENCE` arm**: an unpinned `PREFERENCE` event
+  against a store holding a better-ranked semantic neighbour must resolve to
+  `PREFERENCE` and issue no search. An outcome-only test passes here by accident
+  whenever the store happens to hold nothing.
 - **A test for §3's mintable-kind restriction** where the best-ranked candidate
   overall is an `EpisodicMemory`: the correction must still land, in the
   best-ranked *mintable* drawer or §5's fallback, and must not vanish.
