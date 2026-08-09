@@ -356,9 +356,10 @@ behind the hub's API.
    Tier 2 under ADR-0004 (ADR-0119); a measure is a **rate over one window of
    that stream**, computed offline by `ai-assistant-measures` while the hub is
    stopped, so the instrument never competes with the process it measures
-   (ADR-0120). The three measures are VISION.md's first few — memory precision,
-   correction rate, repeated-explanation rate. The trace store is the hub's
-   seventh database, and this is also the hub's operational telemetry; a process
+   (ADR-0120). The measures are a first few of VISION.md's success measures:
+   memory precision, correction rate, repeated-explanation rate. The trace store
+   is the hub's seventh database, and this is also the hub's operational
+   telemetry; a process
    that runs for weeks cannot be debugged by rerunning it. Memory precision is
    also what answers the half of leg 7's exit test leg 7 hands over — whether
    months of use made retrieval noisier — so that claim entered here rather than
@@ -393,7 +394,7 @@ behind the hub's API.
    sequences the window's opening immediately behind the fix batch. The boundary
    issues those lanes filed rather than absorbed (#868–#873, #876, #877) stay in
    the tracker; #876 and #868 are together why the repeated-explanation rate is
-   read as a lower bound rather than a rate.
+   read as a lower bound rather than as an exact rate.
 
 **The arc closed here.** Every leg met its exit test, the last of them on
 2026-08-09. Their residuals are named in the entries above and live in the
@@ -416,9 +417,11 @@ duty cycle, or a reason to open the assistant tomorrow, and the arc is ordered s
 the cheapest of those comes first.
 
 9. **Reach and daily use.** The leg that makes the hub something the owner lives
-   in rather than something they drive. Four things, in this order:
+   in rather than something they drive. Four things, and the ruling fixes which
+   of them goes first:
 
-   - **Backup and restore, as the first slice and not a mid-leg one.** Daily
+   - **Backup and restore — encrypted, as the entry this leg replaces named it —
+     as the first slice and not a mid-leg one.** Daily
      accumulation is about to happen on one laptop holding the only copy of the
      store; that is the plan's single fragile spot, and it is fragile from the
      day accumulation starts rather than from the day the leg ends. It is also
