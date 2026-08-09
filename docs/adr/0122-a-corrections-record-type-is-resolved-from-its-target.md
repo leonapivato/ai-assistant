@@ -224,6 +224,31 @@ outcome for that case, in the drawer the belief lives in rather than a different
 one. The resolution can therefore never make an outcome worse than the one it
 replaced; it can only make a supersession reachable that was not.
 
+**A resolution that cannot be performed propagates, and never degrades into a
+drawer.**
+
+> **Normative.** Where §3's search raises, the error propagates from
+> `learn` unchanged. The resolution has no degraded mode: a failed lookup never
+> falls through to §5, never falls back to the pin's absent value, and nothing is
+> proposed, processed or written on the strength of it.
+
+This is the one place where `learn` must not copy `respond`. A turn whose
+retrieval fails is answered with fewer memories and says so through
+`memory_degraded`, because an answer with less context is still an answer. A
+correction whose *type* could not be resolved is not a correction with less
+context — it is a correction about to be filed in a drawer chosen by the failure
+rather than by the belief, which is precisely the silent mis-filing this ADR
+exists to end. §5's fallback answers "the store looked and holds nothing", a fact;
+it may not be made to answer "the store could not look", which is not one.
+
+Propagation also costs nothing that was going to succeed: the ingest's own
+conflict probe reads the same store through the same seam moments later, so a
+store that cannot answer the resolution was not going to complete the write
+either. And it is the discipline `LearningLoop.learn` already documents for this
+path — "a store failure propagates with the earlier proposals **already
+applied**", where "[r]eporting success for a partially applied set would be a
+claim about memory integrity this loop cannot make".
+
 **A stale resolution is benign, and is not raced against.** The resolution read
 happens outside `MemoryIngestor`'s lock, so a record can retire between the
 resolution and the probe. The consequence is that the correction lands in a drawer
@@ -474,6 +499,10 @@ The implementation is a separate lane, briefed after this ADR merges (golden rul
   best-ranked *mintable* drawer or §5's fallback, and must not vanish.
 - **A test for §5's fallback** on an empty store, and **for §4** where candidates
   span both mintable kinds.
+- **A test that a failing resolution read propagates** (§3): a store whose
+  `search` raises `MemoryStoreError` must surface it from `learn` with nothing
+  proposed and nothing written — asserted on both halves, since a fallback to §5
+  passes any test that only checks the call raised nothing.
 - **A test that §7 raises** rather than returning an empty sequence.
 - **No change to `memory/`.** If the lane concludes it needs one, that is §8 being
   reopened, and it stops and brings back an ADR rather than widening the probe.
