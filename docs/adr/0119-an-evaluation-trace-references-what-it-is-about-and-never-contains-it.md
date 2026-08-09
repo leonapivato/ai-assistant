@@ -209,6 +209,17 @@ this rule is about — ADR-0100's own title says the label "resolves to nothing"
 it is not an id in any sense but the type's. A conformance suite can check the
 shape; only this clause can state the origin.
 
+**The exception-class permission is the one string a trace takes from outside,
+so it is bounded *and* total.** Every other string in the family is an enum
+member or a literal the emitting module wrote, which is why §2's origin rule can
+be strict about them. A class name is neither: a provider may raise an exception
+whose class was built at runtime, with a name of any length and any content. The
+pattern refuses those — a name is not a licence to carry a payload — and §3 makes
+the *conversion* total rather than the pattern lax, so the refused name costs the
+trace its class and never costs the trace itself. Failing construction there
+would be the worst available outcome: the record of the fault destroyed by the
+fault's own name, before §5's subordination could catch anything.
+
 **The exception-class permission is narrow on purpose.** An exception's
 *class* is Tier 2 and the corpus already logs it — ADR-0111 §9 ratifies drawing
 the refusal/fault distinction "from the exception's class, never from its message
@@ -246,6 +257,11 @@ observe Tier 1 content in the course of recording that it exists.
 > exception's class and never by its message text — the same discriminator
 > ADR-0111 §9 binds the scheduler's log record to, so the two records about one
 > event cannot disagree.
+
+> **Normative.** Deriving `fault_class` from an exception is **total**: a class
+> whose `__name__` does not fit the permitted form yields the reserved literal
+> `UNREPRESENTABLE_FAULT_CLASS`, and the real name goes to the Tier-2 log. No
+> exception a provider can raise may prevent a trace from being constructed.
 
 > **Normative.** A metric key and a seam label are of one constrained string type
 > whose values match a lowercase identifier pattern of bounded length.
@@ -666,7 +682,8 @@ here needs.
 
 **A faulting operation still emits its trace, and its trace still tells the
 truth.** A `search` whose query embedding raises never computes a candidate set; an
-`ingest` that raises before commit never has a decision set. Under §3's
+`ingest` that raises before commit never has a decision set; and whatever it
+raised, §3's total `fault_class` conversion has a value for it. Under §3's
 observation rule the metric keys are simply **absent**, and so are the
 `TraceRecordSet` keys nothing was observed under — `records` stays a mapping and
 lacks them, which is not the same as carrying an empty `RecordIdSet` under one.
@@ -957,12 +974,31 @@ def _trace_label(value: str) -> str:
     return value
 
 
+#: What ``fault_class`` carries when an exception's own ``__name__`` will not fit
+#: the pattern — a dynamically built class, an over-long or non-ASCII name (§3).
+UNREPRESENTABLE_FAULT_CLASS: Final = "UnrepresentableFaultClass"
+
+
 def _fault_class_name(value: str) -> str:
     """An exception class's ``__name__`` — never its message (§2)."""
     if not _FAULT_CLASS.fullmatch(value):
         msg = f"{value!r} is not an exception class name"
         raise ValueError(msg)
     return value
+
+
+def fault_class_of(error: BaseException) -> str:
+    """``type(error).__name__``, or the reserved literal when it will not fit.
+
+    The one string on a trace that is neither a literal nor an enum member and
+    is *not* under the emitter's control: a provider may raise
+    ``type("X" * 65, (Exception,), {})``, and nothing stops a dynamic class name
+    from carrying content. So the conversion is total — an unrepresentable name
+    becomes ``UNREPRESENTABLE_FAULT_CLASS`` and the real one goes to the Tier-2
+    log — rather than raising and destroying the very trace §8 requires (§3).
+    """
+    name = type(error).__name__
+    return name if _FAULT_CLASS.fullmatch(name) else UNREPRESENTABLE_FAULT_CLASS
 
 
 def _finite(value: int | float | bool) -> int | float | bool:
@@ -1329,7 +1365,9 @@ walk's position to the trace store and be answered rather than refused.
   that loses nothing already recorded.
 - `emit` lets no **trace-store failure** escape: a fault there is swallowed and
   logged (§5), and a malformed trace cannot reach it because `EvaluationTrace`
-  validates at construction. It is **not** a blanket no-raise — a cancellation
+  validates at construction — which is safe to say only because §3 makes the one
+  externally-sourced string, `fault_class`, a total conversion rather than a
+  validation an exception could fail. It is **not** a blanket no-raise — a cancellation
   delivered from outside is re-raised, because ADR-0060 §1 binds every Protocol in
   this module ("a cancellation delivered from outside the call is delivered
   onward, never absorbed"), and an instrument that swallowed one would defeat the
