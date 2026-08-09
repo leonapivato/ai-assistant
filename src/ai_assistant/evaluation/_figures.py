@@ -61,9 +61,17 @@ class Rate:
         return self.numerator / self.denominator if self.defined else None
 
     def rendered(self) -> str:
-        """The ratio and its two counts, or the undefined statement."""
+        """The ratio and its two counts, or the undefined statement.
+
+        The numerator is printed even when the ratio is undefined, rather than
+        assumed to be zero with it. Most of this ADR's ratios cannot have one
+        without the other — a correction is one of the rulings it is a share of —
+        but beliefs-per-correction sums two quantities a single trace could
+        report inconsistently, and a suppressed numerator there would hide the
+        inconsistency behind the word *undefined*.
+        """
         if self.value is None:
-            return f"{_UNDEFINED}  (0 of 0)"
+            return f"{_UNDEFINED}  ({self.numerator} of 0)"
         return f"{self.value:.4f}  ({self.numerator} of {self.denominator})"
 
 
