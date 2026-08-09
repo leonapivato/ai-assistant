@@ -459,6 +459,27 @@ carries it (Consequences).
 > connection closes after the refusal — the decoded-frame treatment ADR-0084 §3
 > gives the handshake's own refusals.
 
+> **Normative.** The credential member is a JSON string, or it is absent. A connect
+> frame whose credential member is present and is not a string, or is a string that
+> is not a well-formed value of the scheme §6 mints, is refused as a credential
+> that did not verify, and the value never reaches the verifier or the comparison.
+
+**That clause exists because the connect payload is untrusted decoded JSON, and
+the loopback transport never had to say what a credential *is*.** `read_connect`
+(`wire/envelope.py`) refuses anything not in `(None, "")`, so on loopback an
+object, a boolean or a number is already refused and the question never arises.
+On the remote listener the same value would otherwise reach a verifier written for
+text, and three implementations could diverge three ways: an uncaught type error
+that closes the connection with no refusal, a hash over some serialisation of the
+object, or a generic refusal. Fixing the type is what makes the two-fact rule
+decidable from the frame.
+
+**The width is already bounded and nothing new is needed for it.** ADR-0085 §8d's
+256-byte connect payload bound is enforced before any member is read —
+`_refuse_an_oversized_handshake` runs first in `read_connect` — so an oversized
+credential is refused as an oversized handshake and never reaches this section at
+all.
+
 > **Normative.** ADR-0084 §2's rule is unchanged on the loopback transport: there a
 > non-empty credential is still refused with `credential_not_supported`. The two
 > listeners hold opposite rules, and a hub running both applies each rule to its
@@ -522,6 +543,36 @@ the set is where the tree currently keeps it honest.
 
 > **Normative.** Revoking a device closes any connection that device currently
 > holds.
+
+> **Normative.** A revocation that has taken effect on the enrolment record is
+> final against every connection of that device, whether the connection was
+> admitted before the revocation, concurrently with it, or after: no request is
+> dispatched on such a connection, and the connection is closed rather than served.
+> The enrolment record is where admission and revocation are ordered against each
+> other.
+
+**The race is real on this hub's shape, so the rule is stated as an outcome rather
+than left to be inferred from the two clauses above.** The system composes on one
+event loop, and admission is not one step: the hub obtains the overlay identity
+(§4), reads the enrolment record, verifies the credential, and writes a connect
+reply. Every one of those may yield. A revocation landing in a gap would find the
+record live when admission read it and find no connection to close when it swept,
+and a device the owner has just expelled would then be served — the exact outcome
+§8's first clause promises is impossible.
+
+**The linearization point is stated at request dispatch, not at the handshake, and
+that is the choice worth defending.** Fixing it at admission would demand that the
+whole handshake be atomic against a revocation, which is a much larger obligation
+on an implementation and buys nothing: a device that completes a handshake and is
+then refused every request has learned only that it connected. Fixing it at
+dispatch is the property the owner actually wants — **a revoked device gets no
+answers** — and it is satisfiable by re-reading the record on the path a request
+already takes, without a lock spanning I/O.
+
+**What the rule deliberately does not do is name a mechanism.** A lock, a
+transaction, or a generation counter on the record are all conforming; ADR-0083 §6
+governs the store the record lives in, and choosing among them is the implementing
+lane's with the store in hand.
 
 > **Normative.** Revocation is prospective. It does not retract what the hub
 > already sent to that device, and no surface may present it as though it did.
@@ -682,9 +733,11 @@ plan a test rather than a rehearsal.
 2. **The loopback transport is unchanged.** On the hub's machine the CLI still
    serves over `hub.sock`, and a connect carrying a non-empty credential is still
    refused with `credential_not_supported` (ADR-0084 §2).
-3. **The remote listener fails closed in all three ways.** A connect with no
-   credential, a connect with a wrong credential, and a connect from an overlay
-   member never enrolled are each refused, each naming its own reason (§7).
+3. **The remote listener fails closed in every way §7 names.** A connect with no
+   credential, a connect with an empty credential, a connect with a wrong
+   credential, a connect whose credential member is not a string, and a connect
+   from an overlay member never enrolled are each refused, each naming its own
+   reason, and none of the malformed ones reaches the verifier (§7).
 4. **The door is not on the internet.** From a network path outside the overlay,
    the listener does not answer; and the hub refuses at load a configuration that
    would bind it anywhere §2 forbids.
@@ -694,13 +747,18 @@ plan a test rather than a rehearsal.
    live connection, its next connect is refused naming revocation, and re-enrolling
    mints a new credential against which the old one still verifies against nothing
    (§8).
-7. **The record is durable.** Enrolment and revocation both survive a hub restart
+7. **Revocation wins the race.** A revocation issued while the second device is
+   mid-handshake, and again while it holds an established connection with a request
+   in flight, yields no answer on that connection in either case (§8). This is the
+   check the ordinary revocation above does not make, because it revokes a device
+   that is idle.
+8. **The record is durable.** Enrolment and revocation both survive a hub restart
    (§6).
-8. **No version bump was needed.** Both halves report the same
+9. **No version bump was needed.** Both halves report the same
    `PROTOCOL_VERSION` and the handshake passes on both listeners (§9).
-9. **The relayed path is exercised.** Where the overlay cannot establish a direct
-   path between the two devices, the session still completes over the overlay's
-   relay — which is the case §2's end-to-end encryption clause is written for.
+10. **The relayed path is exercised.** Where the overlay cannot establish a direct
+    path between the two devices, the session still completes over the overlay's
+    relay — which is the case §2's end-to-end encryption clause is written for.
 
 **What this plan does not prove, stated so nobody reads it as more than it is.**
 Two devices on one overlay account do not exercise a hostile network, a device the
