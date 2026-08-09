@@ -1,6 +1,6 @@
 # 122. A correction's record type is resolved from its target, not declared by its caller
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-09
 - **Decides `core` surface and implements none of it.** One field on
   `FeedbackEvent` in `core/types.py` becomes **optional** — `memory_kind` gains
