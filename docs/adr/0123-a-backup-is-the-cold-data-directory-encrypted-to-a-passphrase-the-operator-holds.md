@@ -731,8 +731,11 @@ this tool.
 > that guarantee and is not claimed by it.
 
 > **Normative.** The verification directory is created at a path a later run
-> recognises as one, and a run removes any it finds from an earlier run before it
-> materialises its own.
+> recognises as one, namespaced by the resolved `Settings.data_dir` whose backup it
+> verifies.
+
+> **Normative.** A run sweeps abandoned verification directories only within its
+> own source's namespace, and only while it holds that source's instance lock.
 
 > **Normative.** Where the tool cannot complete that verification for a reason that
 > is not a failure of the artifact — no room for the temporary copy, a refused
@@ -770,6 +773,19 @@ work store, which the next run discards rather than trusts, and it means the win
 is bounded by the next backup rather than by nothing. It is not bounded by anything
 if no later backup is ever taken, which is the same residue §10 already names about
 a schedule that lapses.
+
+**The sweep is namespaced because "an earlier run" is not otherwise a thing a run
+can identify.** §2's lock serialises backups of *one* data directory, and nothing
+serialises backups of two — an operator with a second data directory, or a test
+installation beside a real one, can have both running at once under the same user
+and the same verification parent. An unnamespaced sweep would let the second run
+recognise the first run's *live* verification tree as abandoned and delete it
+underneath it. Keying the path to the resolved source directory and sweeping only
+that key is what makes the instance lock sufficient: within one namespace the lock
+guarantees there is no other live run, so anything found there was left by a run
+that is gone. Resolved rather than as typed, for the reason §11's containment check
+is resolved — two spellings of one directory would otherwise be two namespaces, and
+the sweep would never reach half of what it is for.
 
 **Verifying by restoring is the only verification that answers the question.** A
 checksum over a file proves the file is the file; it does not prove the artifact
