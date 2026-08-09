@@ -198,6 +198,10 @@ default, which costs artifact size and never costs data.
 > database — SQLite's own file change counter. After the whole copy completes it
 > re-reads all of them, and refuses the backup if any has changed.
 
+> **Normative.** After the whole copy completes, the backup tool re-scans the data
+> directory for SQLite sidecars and refuses the backup if any is present — whether
+> or not one was present at the scan preceding the copy.
+
 > **Normative.** The backup tool refuses a destination path that already exists.
 
 > **Normative.** The backup tool writes the encrypted stream to a temporary path
@@ -269,6 +273,18 @@ structural instead of a race the tool usually wins. This is ADR-0104 §3's postu
 at its own seam: that clause hard-links to a retained name and "refuses and does
 nothing" where the path already exists, for the same reason and with the same
 primitive available.
+
+**The sidecar scan is repeated after the copy because the fingerprint alone cannot
+see a commit that never touched the file it fingerprinted.** A non-cooperating
+writer that switches a database to WAL and then commits puts that commit in a
+newly created `-wal`, leaving the main file's length, timestamps and change counter
+where they were — so a check that re-reads only the files it copied reads a file
+that is unchanged and *incomplete*, and accepts it. Re-running the directory scan
+is what notices, because the evidence of that write is a sidecar that was not there
+before rather than a difference in anything copied. Running it before and after
+also makes the two scans symmetric, which is the shape the first one should have
+had: the hazard is a sidecar existing at any point across the copy, not at one
+instant before it.
 
 **It narrows the window; it does not close it, and it is not offered as closing
 it.** A writer that modifies a file and restores its length, mtime and change
