@@ -161,34 +161,63 @@ async def compute(
     Raises:
         TraceStoreError: If the store cannot be read.
     """
-    if settling < timedelta(0):
-        return MeasureReport(refusal=f"a settling period cannot be negative; got {settling}")
-    if start >= end:
-        return MeasureReport(
-            refusal=(
-                f"the window [{start:%Y-%m-%dT%H:%M:%S%z}, {end:%Y-%m-%dT%H:%M:%S%z}) is "
-                f"empty or inverted; a measure is a rate over a half-open interval"
-            )
-        )
-    if not _representable(end, settling):
-        return MeasureReport(
-            refusal=(
-                f"a settling period of {settling} reaches past the last instant this report "
-                f"can represent, so no surfacing in the window could ever be given it. Ask "
-                f"for a settling period the window's end can be moved forward by"
-            )
-        )
     stream = await index(store)
     if stream.extent is None:
-        # §8's empty-stream clause: no measure, no diagnostic, no window validation.
+        # §8: "Over an **empty** retained stream the report states that the stream
+        # is empty, states no measure and no diagnostic, and applies no window
+        # validation." The emptiness test comes first for that last clause, which
+        # is unqualified — including over the two refusals below that this ADR
+        # does not itself require. A stream with nothing in it has nothing to
+        # measure whatever window was asked for, and saying so is the answer §8
+        # picked over the three an implementation would otherwise have to choose
+        # between.
         return MeasureReport()
-    if start < stream.extent.oldest:
-        return MeasureReport(refusal=_swept(start, stream.extent))
+    refusal = _refused(start=start, end=end, settling=settling, extent=stream.extent)
+    if refusal is not None:
+        return MeasureReport(refusal=refusal)
 
     collector = _Collector(stream, stream.extent, start=start, end=end, settling=settling)
     async for ordinal, trace in walk(store):
         collector.add(ordinal, trace)
     return collector.report()
+
+
+def _refused(*, start: datetime, end: datetime, settling: timedelta, extent: Extent) -> str | None:
+    """Why no figure can be stated over this window, or ``None``.
+
+    One of the four is ADR-0120's: §8's refusal of a window whose start precedes
+    the oldest retained trace. The other three are this implementation's, covering
+    arguments the ADR's notation excludes rather than rules on — a negative
+    settling period, a window that is not half-open, and a settling period the
+    window's end cannot be moved forward by. They are reported through the same
+    path rather than raised, so that every way this exits without a figure exits
+    the same way: a refused window and a swept one are one thing to an operator.
+
+    Args:
+        start: The window's inclusive start.
+        end: The window's exclusive end.
+        settling: The settling period.
+        extent: The retained stream's span.
+
+    Returns:
+        The refusal, or ``None`` when the window is one this report can state.
+    """
+    if settling < timedelta(0):
+        return f"a settling period cannot be negative; got {settling}"
+    if start >= end:
+        return (
+            f"the window [{start:%Y-%m-%dT%H:%M:%S%z}, {end:%Y-%m-%dT%H:%M:%S%z}) is "
+            f"empty or inverted; a measure is a rate over a half-open interval"
+        )
+    if not _representable(end, settling):
+        return (
+            f"a settling period of {settling} reaches past the last instant this report "
+            f"can represent, so no surfacing in the window could ever be given it. Ask "
+            f"for a settling period the window's end can be moved forward by"
+        )
+    if start < extent.oldest:
+        return _swept(start, extent)
+    return None
 
 
 def _representable(end: datetime, settling: timedelta) -> bool:

@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
+import pytest
 from measure_fixtures import (
     END,
     QUICK,
@@ -33,6 +34,8 @@ from ai_assistant.core.types import EvaluationTrace, TraceOutcome  # isort: skip
 
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from ai_assistant.core.types import EvaluationTrace
     from ai_assistant.evaluation._figures import MeasureReport
 
@@ -605,3 +608,45 @@ class TestSettlingBounds:
 
         assert result.refusal is None
         assert result.whole is not None
+
+
+class TestTheEmptyStreamComesFirst:
+    """§8: an empty stream "applies no window validation", and that is unqualified.
+
+    The clause is stated ahead of every refusal, including the two this
+    implementation adds that the ADR does not require. A stream with nothing in
+    it has nothing to measure whatever window was asked for, so the emptiness is
+    the answer — and the window's own fault surfaces on the next run, against a
+    stream that has something to say.
+    """
+
+    @pytest.mark.parametrize(
+        ("start", "end", "settling"),
+        [
+            (END, START, SETTLING),
+            (START, END, timedelta(hours=-1)),
+            (START, END, timedelta(days=999999999)),
+            (START - timedelta(days=365), END, SETTLING),
+        ],
+        ids=["inverted", "negative-settling", "unrepresentable-settling", "before-any-trace"],
+    )
+    async def test_no_window_is_validated_over_an_empty_stream(
+        self, start: datetime, end: datetime, settling: timedelta
+    ) -> None:
+        result = await compute(FakeTraceStore([]), start=start, end=end, settling=settling)
+
+        assert result.refusal is None
+        assert result.whole is None
+        assert "empty" in result.render()
+
+    async def test_the_same_window_is_refused_once_the_stream_has_something_in_it(self) -> None:
+        """The refusals are not removed by the clause above, only ordered behind it."""
+        result = await compute(
+            FakeTraceStore([operation("start", when=START)]),
+            start=END,
+            end=START,
+            settling=SETTLING,
+        )
+
+        assert result.refusal is not None
+        assert "inverted" in result.refusal
