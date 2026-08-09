@@ -166,7 +166,7 @@ async def compute(
         # §8: "Over an **empty** retained stream the report states that the stream
         # is empty, states no measure and no diagnostic, and applies no window
         # validation." The emptiness test comes first for that last clause, which
-        # is unqualified — including over the two refusals below that this ADR
+        # is unqualified — including over the three refusals below that this ADR
         # does not itself require. A stream with nothing in it has nothing to
         # measure whatever window was asked for, and saying so is the answer §8
         # picked over the three an implementation would otherwise have to choose
@@ -668,7 +668,12 @@ class _Collector:
             unclassified_seams=tuple(sorted(self._health.unclassified_seams)),
             ambiguous_surfacings=ambiguous,
             restarts=tuple(
-                Restart(at=stamp.occurred_at, gap=stamp.gap, changed=stamp.changed)
+                Restart(
+                    at=stamp.occurred_at,
+                    preceded=stamp.preceded,
+                    gap=stamp.gap,
+                    changed=stamp.changed,
+                )
                 for stamp in self._stream.configurations
             ),
         )
