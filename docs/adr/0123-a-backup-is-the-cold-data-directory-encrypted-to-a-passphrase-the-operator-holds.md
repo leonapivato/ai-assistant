@@ -317,17 +317,19 @@ consistency while still leaving the cross-store skew §1 describes.
 
 > **Normative.** The backup excludes `hub.lock` and `hub.sock`.
 
-> **Normative.** The data-directory entries excluded above are declared at the
-> composition root, beside where those entries are created, as paths relative to
-> `Settings.data_dir`. The backup tool obtains the set from there and excludes a
-> file only on an exact match of its own data-directory-relative path. Neither tool
-> restates a store's location.
+> **Normative.** Each excluded entry's path is obtained from the module that already
+> owns that name — the trace store's from the composition root, where the store is
+> created; the instance lock's from `service/lock.py`; the socket's from
+> `wire/address.py`. No tool and no registry restates any of them.
+
+> **Normative.** The backup tool assembles those paths into one set, relative to
+> `Settings.data_dir`, and excludes a file only on an exact match of its own
+> data-directory-relative path.
 
 > **Normative.** A later lane that places in the data directory a file subject to a
 > clause forbidding it to leave the device returns to this decision, adds it to the
-> exclusions above, and registers its data-directory-relative path in the
-> composition root's set in the same change. Until it does, this ADR authorises no
-> such file to be written there.
+> exclusions above, and makes its path reachable from the module that owns it in the
+> same change. Until it does, this ADR authorises no such file to be written there.
 
 **The trace store is excluded because ADR-0119 §12 is absolute and this ADR does
 not narrow it.** "No `EvaluationTrace` leaves the device, by any route, under any
@@ -374,11 +376,24 @@ is where the store is *created*. That duplicate is the same failure §1 rejects 
 inclusion list for, aimed at a rule that matters more: a later lane renaming the
 trace store, or splitting it, would leave a copier still excluding a file that no
 longer exists and including one that does — silently, and against an absolute
-no-egress clause. Declaring the set where the entries are made and reading it from
-there is ADR-0104 §4's disposition for its own allow-list, which lives "at the
-composition root because that is where the embedder is *chosen*", and it needs no
-new seam: `service` "may import `app` … and `core`" (ADR-0083 §8) is the same route
-the other three offline tools already take to their mechanisms.
+no-egress clause. Reading each name from where it is already defined is ADR-0104
+§4's disposition for its own allow-list, which lives "at the composition root
+because that is where the embedder is *chosen*" — the principle being that the
+authority on a name is whoever establishes it.
+
+**Which is why the set is assembled rather than declared in one place, and the
+three entries have three different owners.** The trace store's path is the
+composition root's, because that is where the store is constructed. But `hub.lock`
+is not: `service/lock.py` defines it, under ADR-0083 §1. Nor is `hub.sock`:
+`wire/address.py` defines it, under ADR-0084 §1. Restating either at the
+composition root would rebuild, for the two process-state entries, exactly the
+stale-name seam this section rejects for the trace store — and it could not even be
+done consistently, since `lint-imports`' "nothing imports the service" contract
+forbids `app` from reaching the lock's own module. Assembling in the tool is what
+respects every boundary at once: the tool lives in `service/`, so it reaches
+`service/lock.py` directly, `wire/address.py` as the hub already does, and the
+composition root by the route ADR-0083 §8 gives it — "may import `app` … and
+`core`", the same route the other three offline tools take to their mechanisms.
 
 **A bare filename would not be a well-defined exclusion, because §1 walks to any
 depth.** Matching on a name alone is ambiguous in both directions at once: an
@@ -902,15 +917,18 @@ subsystem to reach a filesystem. This is the shape §1 buys — the backup needs
 embedder and no store implementation, which is also why it can run against a data
 directory this build has never opened.
 
-**What it does take from the composition root is a set of names, and that is not
-the wiring it avoids.** §3 has the excluded entries declared where they are
-created, so the mechanism reads a set of relative paths from `app` and constructs
-nothing; `service` "may import `app` … and `core`" (ADR-0083 §8), and `imports no
-subsystem directly` above is untouched because the composition root is not a
-subsystem. The distinction worth holding is between *reading a fact the composition
-root owns* and *asking it to build the machinery a subsystem would use* — the first
-is what every entry point in this family already does, and the second is what §1's
-shape makes unnecessary.
+**What it does read is a handful of names, and that is not the wiring it avoids.**
+§3 has each excluded entry's path come from whichever module owns that name, so the
+mechanism reads constants and constructs nothing. Two of the three are inside
+`service/` and `wire/`, which the entry point already reaches; the third comes from
+`app`, and `service` "may import `app` … and `core`" (ADR-0083 §8). The clause
+above — the mechanism `imports no subsystem directly` — is untouched: the
+composition root is not a subsystem, and `wire` is the transport package this
+family's entry points already depend on rather than one of the pipeline's. The
+distinction worth holding is between *reading a name someone else establishes* and
+*asking a layer to build the machinery a subsystem would use* — the first is what
+every entry point in this family already does, and the second is what §1's shape
+makes unnecessary.
 
 **"Never automatic" is narrower here than in ADR-0104 §6, and the difference is
 deliberate.** ADR-0104 refuses automation because re-embedding spends hours of CPU
