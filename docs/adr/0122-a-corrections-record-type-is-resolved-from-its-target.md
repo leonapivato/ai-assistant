@@ -239,8 +239,25 @@ drawer the best-ranked neighbour lives in, and hands the proposal to the ordinar
 path. If that neighbour turns out to score below the ingestor's threshold, the
 ingest finds no conflict and stores the proposal as new — which is exactly today's
 outcome for that case, in the drawer the belief lives in rather than a different
-one. The resolution can therefore never make an outcome worse than the one it
-replaced; it can only make a supersession reachable that was not.
+one.
+
+**The one case where this can be worse than today, stated rather than claimed
+away.** An earlier draft asserted the resolution could never make an outcome
+worse. That is false, and the counter-example is not exotic: a correction of a
+semantic belief whose true target ranks *below* an unrelated preference resolves
+to `PREFERENCE`, and the semantic target — which today's fixed `SEMANTIC` default
+would have probed and superseded — is never looked at. Ranking is relevance, and
+relevance is not aboutness; the corpus says so itself when ADR-0045 §5 rules
+topical similarity too weak a signal to retire a record. Three things bound it and
+none of them dissolves it. It requires a cross-kind neighbour that outranks the
+true target, where today's failure requires only that the target not be semantic —
+so the exposure is much smaller than the defect being removed, though it is not
+zero. The misresolution is *visible* in the outcome and in `assistant beliefs`
+(§4), where today's silence is not. And §6's pin is the direct remedy, which is
+part of why §6 keeps it authoritative rather than folding it into the resolution.
+This residue is the price of choosing the drawer by the only signal available, and
+it is filed with the others in §11 rather than hidden behind a claim of strict
+improvement.
 
 **A resolution that cannot be performed propagates, and never degrades into a
 drawer.**
@@ -669,6 +686,10 @@ from the field.
 - **The cross-drawer residue** §8 records: one correction still resolves to one
   drawer. Reopening it means reopening §8's refusal, with the four costs it
   states.
+- **The cross-kind misresolution** §3 records: a semantic target outranked by an
+  unrelated preference resolves to the wrong drawer, where today's fixed default
+  would have reached it. Bounded, visible, and answered by §6's pin — but real, and
+  the reason §4's best-ranked rule keeps an escape hatch rather than standing alone.
 - **Retrieval's reach.** A target ranked below what one read surfaces is not found
   here any more than it is found by the conflict probe; that is issue #457's, it
   is stated in §3 rather than papered over, and it is neither closed nor widened.
