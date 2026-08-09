@@ -241,8 +241,11 @@ class OperationTraces:
             Whatever ``work`` returned, untouched.
         """
         with correlated_operation() as correlation:
-            started = perf_counter()
+            # The clock first and the monotonic reading second, so ``elapsed``
+            # measures the work rather than the work plus a clock read — §3 cares
+            # which instant a record means, and it cares for latency's sake.
             occurred_at = self._stamped(seam)
+            started = perf_counter()
             try:
                 result = await work
             except Exception as error:

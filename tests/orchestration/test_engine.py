@@ -23,6 +23,7 @@ import pytest
 
 from ai_assistant.core.errors import (
     ConfigurationError,
+    ConversationStoreError,
     DeferralStoreError,
     MemoryStoreError,
     PlanningError,
@@ -66,6 +67,9 @@ from ai_assistant.core.types import (
     StepStatus,
     ToolCost,
     ToolDefinition,
+    TraceKind,
+    TraceOutcome,
+    TraceRef,
     TurnOutcome,
     Validity,
     band_of,
@@ -88,7 +92,9 @@ from ai_assistant.orchestration import (
     presented_confidence,
 )
 from ai_assistant.orchestration import engine as engine_module
+from ai_assistant.orchestration.consolidation import ConsolidationReport
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, DrainPhase
+from ai_assistant.orchestration.ingestion import IngestionReport
 from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.testing import (
     FakeActionPolicy,
@@ -117,6 +123,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from ai_assistant.core.types import (
+        Conversation,
         CurrentContext,
         EvaluationTrace,
         Goal,
@@ -3839,3 +3846,221 @@ def _secret_proposal() -> MemoryUpdateProposal:
         rationale="the user pasted a credential",
         sensitivity=DataTier.SECRET,
     )
+
+
+# --- ADR-0119 §8: one OPERATION trace per call, at one wiring point -----
+
+
+#: Public ``Engine`` methods that are not an operation and emit nothing.
+#:
+#: ``aclose`` alone, and it is not an oversight. Shutdown is not work the engine
+#: was asked to do — it is the engine ceasing to accept work — and it is the one
+#: public method that deliberately does *not* run through ``_tracked``: tracing it
+#: would put a trace's append inside the drain that exists to wait for appends,
+#: and the ``TraceSink`` may already be closed by the time it returned.
+_UNTRACED = frozenset({"aclose"})
+
+
+class _TrackedScan(ast.NodeVisitor):
+    """Collect every ``self._tracked(...)`` call and the method it sits in."""
+
+    def __init__(self) -> None:
+        self._scope: list[str] = []
+        #: ``(enclosing method, the seam literal or None)`` per call found.
+        self.found: list[tuple[str, str | None]] = []
+        #: Every ``async def`` inside ``class Engine``, by name.
+        self.methods: list[str] = []
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._scope.append(node.name)
+        self.generic_visit(node)
+        self._scope.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        if self._scope == ["Engine"]:
+            self.methods.append(node.name)
+        self._scope.append(node.name)
+        self.generic_visit(node)
+        self._scope.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._scope.append(node.name)
+        self.generic_visit(node)
+        self._scope.pop()
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "_tracked":
+            seam = node.args[1] if len(node.args) > 1 else None
+            literal = seam.value if isinstance(seam, ast.Constant) else None
+            self.found.append((self._scope[-1], literal if isinstance(literal, str) else None))
+        self.generic_visit(node)
+
+
+def _tracked_scan() -> _TrackedScan:
+    """Parse ``orchestration/engine.py`` and scan it for the wiring point."""
+    source = Path(engine_module.__file__).read_text(encoding="utf-8")
+    scan = _TrackedScan()
+    scan.visit(ast.parse(source, filename=engine_module.__file__))
+    return scan
+
+
+def test_every_public_operation_reaches_the_one_wiring_point_exactly_once() -> None:
+    """ADR-0119 §8 and §5's one-crossing rule, held structurally rather than by drill.
+
+    §8 places the envelope at ``_tracked`` precisely because it "already wraps every
+    public method" — so the claim that makes the placement sound is that the set of
+    public methods and the set of traced ones are the same set. Driving all
+    twenty-three through a harness would need twenty-three fixtures and would still
+    say nothing about the twenty-fourth somebody adds next month.
+
+    Exactly once, not at least once: "one crossing of a seam produces at most one
+    trace" (§5), and a method that reached the wiring point twice would record one
+    operation as two — inflating every denominator drawn from the stream.
+    """
+    scan = _tracked_scan()
+    expected = {name for name in scan.methods if not name.startswith("_")} - _UNTRACED
+    traced = [method for method, _ in scan.found]
+
+    assert sorted(traced) == sorted(expected), (
+        "every public operation is traced once and only public operations are"
+    )
+
+
+def test_each_seam_label_is_the_literal_name_of_its_own_method() -> None:
+    """The label a measure filters on is the surface a caller invoked (§2, §3).
+
+    Two properties at once. The label is a **literal constant in the emitting
+    module**, which is §2's second clause — anything computed at runtime is a string
+    the tier discipline cannot vouch for. And it is the method's own name, so a
+    measure grouping by seam is grouping by operation rather than by whatever the
+    author of the twenty-fourth method happened to type; a seam that drifted from
+    its method would silently merge two operations into one population.
+    """
+    mislabelled = {method: seam for method, seam in _tracked_scan().found if seam != method}
+
+    assert mislabelled == {}, "each _tracked call passes its own method's name"
+
+
+async def test_a_completed_turn_emits_one_trace_through_the_sink() -> None:
+    """The whole of §8's envelope, over a real turn rather than a stub.
+
+    Through the ``TraceSink`` and not the ``TraceRetention``: they are two
+    narrowings of one object in production (ADR-0119 §7), and the harness keeps them
+    as two fakes so a case can tell which capability was used.
+    """
+    harness = Harness()
+
+    await harness.engine.converse("hello", timeout=PATIENT)
+
+    (trace,) = harness.trace_sink.recorded
+    assert trace.kind is TraceKind.OPERATION
+    assert trace.seam == "converse"
+    assert trace.outcome is TraceOutcome.OK
+    assert trace.refs[TraceRef.CORRELATION]
+    assert harness.traces.recorded == ()
+
+
+async def test_a_turn_that_raises_is_recorded_rather_than_lost() -> None:
+    """ADR-0074's deferral discharged at the engine (ADR-0119 §8, §14).
+
+    "A turn that raises before producing an outcome is not captured, and the gap is
+    deliberate… what failed is *operational* information — Tier 2, and the subject
+    of leg 8's ``EvaluationTrace``, not of Tier 1 memory." This is that record: no
+    episode, one trace, and the fault's class rather than its message.
+    """
+    harness = Harness()
+
+    async def refuses(conversation_id: str | None) -> Conversation:
+        msg = "the index cannot be read"
+        raise ConversationStoreError(msg)
+
+    harness.conversations.begin = refuses  # type: ignore[method-assign]
+
+    with pytest.raises(ConversationStoreError):
+        await harness.engine.converse("hello", timeout=PATIENT)
+
+    (trace,) = harness.trace_sink.recorded
+    assert trace.seam == "converse"
+    assert trace.outcome is TraceOutcome.FAULT
+    assert trace.fault_class == "ConversationStoreError"
+
+
+async def test_the_maintenance_operation_carries_its_three_counts() -> None:
+    """§5's one-crossing rule: the sweep's detail rides on the sweep's own trace.
+
+    "A job with detail the envelope cannot see returns it in the operation's own
+    result type, where it becomes metrics on that operation's one trace, rather than
+    emitting a second record for the same run."
+    """
+    traces = FakeTraceRetention()
+    traces.hold(_aged(400), _aged(1))
+    harness = Harness(traces=traces)
+
+    await harness.engine.purge_expired()
+
+    (trace,) = harness.trace_sink.recorded
+    assert trace.seam == "purge_expired"
+    assert dict(trace.metrics) == {"records": 0, "questions": 0, "traces": 1}
+
+
+async def test_a_sweep_that_did_not_run_omits_its_key_rather_than_reporting_zero() -> None:
+    """§3's observation rule, on the one metric in this lane that can be unobserved.
+
+    "A metric key appears in a trace only when the quantity it names was
+    **observed**. An absent key means *not observed* and never zero." A keep-forever
+    horizon does not call the trace sweep at all, so a ``0`` here would report a
+    store swept clean by a sweep nobody ran — and would do it on the deployment
+    whose whole point is that nothing is deleted.
+    """
+    harness = Harness(trace_retention=None)
+
+    await harness.engine.purge_expired()
+
+    (trace,) = harness.trace_sink.recorded
+    assert "traces" not in trace.metrics
+    assert dict(trace.metrics) == {"records": 0, "questions": 0}
+
+
+def test_a_halted_consolidation_reads_as_incomplete() -> None:
+    """ADR-0111 §9's third clause, given ADR-0119 §3's value.
+
+    "A run that halts under §5 without processing its remaining work is recorded as
+    a completed run that did not exhaust its work, not as a failure." Recording it
+    as ``OK`` makes a job that has stopped making progress invisible; recording it
+    as ``FAULT`` makes a queue at its cap indistinguishable from a broken store.
+
+    ``halted`` is carried by the outcome and **not** duplicated as a metric, so the
+    two cannot disagree; ``exhausted`` is a different fact and is carried, because a
+    run that spent its budget and one that halted are told apart only by the pair.
+    """
+    halted = engine_module._consolidated(ConsolidationReport(chunks=2, halted=True))
+    spent = engine_module._consolidated(ConsolidationReport(chunks=2, exhausted=False))
+
+    assert halted.outcome is TraceOutcome.INCOMPLETE
+    assert spent.outcome is TraceOutcome.OK
+    assert "halted" not in halted.metrics
+    assert halted.metrics["exhausted"] is False
+    assert halted.metrics["chunks"] == 2
+
+
+def test_an_ingestion_trace_carries_no_string_the_reader_chose() -> None:
+    """§2's containment rule, at the one report that holds a runtime-derived string.
+
+    ``IngestionReport.source`` is a reader's declared identity — read at runtime,
+    and therefore in none of §2's four admitted categories ("an identifier… a member
+    of an enumeration… a literal constant written in the emitting module; or the
+    ``__name__`` of an exception class"). ``read_at`` is a ``datetime``, which the
+    metric map's value type does not admit at all. Neither is a loss: the seam says
+    which operation this was and ``occurred_at`` says when.
+    """
+    observation = engine_module._ingested(
+        IngestionReport(source="calendar", read_at=AT, proposed=3, stored=2, deferred=1)
+    )
+
+    assert dict(observation.metrics) == {
+        "proposed": 3,
+        "stored": 2,
+        "deferred": 1,
+        "rejected": 0,
+    }
+    assert all(isinstance(value, int | float | bool) for value in observation.metrics.values())

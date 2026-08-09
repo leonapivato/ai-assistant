@@ -33,7 +33,7 @@ from ai_assistant.core.errors import (
     SourceNotGrantedError,
     TraceStoreError,
 )
-from ai_assistant.core.types import GrantScope, Reversibility, RiskLevel
+from ai_assistant.core.types import GrantScope, Reversibility, RiskLevel, TraceKind
 from ai_assistant.evaluation import SqliteTraceStore
 from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.memory import MemoryIngestor, SqliteDeferralStore, SqliteMemoryStore
@@ -1261,23 +1261,33 @@ async def test_only_the_maintenance_operation_is_handed_the_trace_store(
     contract cannot see, because the store arrives by injection precisely so that
     a subsystem never names it.
 
-    **The engine's own attribute is the one permitted holder**, and it is the whole
-    of §7's middle seam: "a ``TraceRetention`` to the ``Engine``'s maintenance
-    operation, and the ``TraceStore`` itself to nothing in the pipeline". The
-    narrowing is the annotation on the constructor rather than anything done here,
+    **Two attributes of the engine are the permitted holders, and between them
+    they are §7's two narrow seams**: "a ``TraceSink`` to every emitter, a
+    ``TraceRetention`` to the ``Engine``'s maintenance operation, and the
+    ``TraceStore`` itself to nothing in the pipeline". ``_traces`` is the purge
+    (§10) and ``_operation_traces._sink`` is §8's engine-boundary emitter. The
+    narrowing is the annotation on each constructor rather than anything done here,
     which is why the object identity is the same and the *reach* is not — the same
     arrangement ``SourceGrants``/``SourceGrantStore`` uses.
 
+    **Neither can walk, which is the property the list is guarding.** §7 cuts the
+    seam at the walk rather than at the store — "the pipeline may not read a trace
+    back" — so a second holder is admissible exactly when it is a narrowed one, and
+    this list grows by a reviewed line when an emitter lands rather than by a
+    directory exclusion.
+
     Asserted by identity over the engine's reachable collaborators rather than by
     naming the ones that exist today, so a stage added later is covered without
-    this test being edited. A stage handed the store would show up here as a second
+    this test being edited. A stage handed the store would show up here as a third
     path even though it is the same object.
     """
     built = _spy_on_traces(monkeypatch)
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         holders = _holders_of(engine, built[0])
-        assert holders == ["engine._traces"], f"the trace store is reachable from {holders}"
+        assert sorted(holders) == ["engine._operation_traces._sink", "engine._traces"], (
+            f"the trace store is reachable from {holders}"
+        )
     finally:
         await engine.aclose()
 
@@ -1311,7 +1321,15 @@ async def test_the_engine_sweeps_the_configured_trace_horizon(
         report = await engine.purge_expired()
 
         assert report.traces == 1
-        assert [trace.id for trace in (await store.walk(limit=10)).traces] == [kept.id]
+        # The purge's *own* ``OPERATION`` trace lands in the store it just swept,
+        # which ADR-0119 §10 states outright — "one instant after the sweep, and…
+        # therefore never a candidate for it. Noted because it looks like a paradox
+        # and is not." So the walk returns the kept trace and the record of the
+        # sweep that kept it, and the seam names which is which.
+        walked = (await store.walk(limit=10)).traces
+        assert [trace.id for trace in walked] == [kept.id, walked[-1].id]
+        assert (walked[-1].kind, walked[-1].seam) == (TraceKind.OPERATION, "purge_expired")
+        assert walked[-1].metrics["traces"] == 1
     finally:
         await engine.aclose()
 
@@ -1338,7 +1356,15 @@ async def test_a_keep_forever_horizon_sweeps_no_trace(
         report = await engine.purge_expired()
 
         assert report.traces is None
-        assert [trace.id for trace in (await store.walk(limit=10)).traces] == [ancient.id]
+        # The sweep did not run, so the operation's own trace **omits** the
+        # ``traces`` key rather than reporting zero: ADR-0119 §3's observation rule,
+        # where "an absent key means *not observed* and never zero". A zero here
+        # would say a store was swept clean by a sweep nobody ran.
+        walked = (await store.walk(limit=10)).traces
+        assert [trace.id for trace in walked] == [ancient.id, walked[-1].id]
+        assert walked[-1].seam == "purge_expired"
+        assert "traces" not in walked[-1].metrics
+        assert walked[-1].metrics["records"] == 0
     finally:
         await engine.aclose()
 
