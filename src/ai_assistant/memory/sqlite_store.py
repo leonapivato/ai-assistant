@@ -1293,14 +1293,21 @@ class SqliteMemoryStore:
         figure: they are one predicate — ADR-0045 §6's ``live_at``, read from two
         places for storage reasons alone.
 
-        **There is no fourth count for the band, and its absence is the honest
-        answer rather than an omission.** The band binds *before* the cut (above),
-        so no out-of-band row is ever a candidate here and this pass never
-        evaluates a band predicate at all. ADR-0119 §3 rules that "an absent key
-        means *not observed* and never zero", and §8 asks only for what "the read
-        reached"; a zero would say the band filter removed nothing from a
-        population it was never given the chance to filter. The caller records how
-        many bands were *asked for* instead, which is a quantity that does exist.
+        **The fourth count, the band's, is structurally zero here and is emitted
+        anyway.** The band binds *before* the cut (above), so no out-of-band row is
+        ever a candidate and this pass has none to drop — exactly as it drops none
+        for ``kind`` on an unfiltered read, which also reports zero. All four
+        decompose *the candidate set this same trace reports*, so they stand or
+        fall together: emitting only the non-zero ones would make "the band dropped
+        nothing" and "no candidate set existed" the same record, and ADR-0119 §3's
+        prohibition on a zero placeholder is about the latter — which is why all
+        four are absent on the fault and short-circuit paths, where no pass ran.
+
+        What the zero is **not** is a count of what the band kept out of the
+        store's answer. That population is filtered inside the KNN and could only
+        be counted by running a second vector search on the interactive read path.
+        The caller records how many bands were *asked for* beside it, which is the
+        figure that says a restriction was in force at all.
 
         **The counts do not sum to the candidates.** The pass stops at ``limit``,
         so candidates it never examined are neither returned nor excluded, and a
@@ -1331,6 +1338,11 @@ class SqliteMemoryStore:
             # assembled text carries no caller data — the same construction
             # ``_list_beliefs_sync`` uses, and the reason the S608 heuristic is
             # suppressed here rather than satisfied.
+            # This is where the band predicate lives, and why ADR-0119 §8's
+            # ``excluded_band`` is structurally zero below: a row this subquery
+            # excludes never reaches the KNN's ``k``, so it is never a candidate the
+            # post-cut pass could drop. Counting what it removed would take a
+            # second, unrestricted vector search. See the docstring.
             placeholders = ", ".join("?" * len(wanted_sources))
             sql += (
                 " AND v.rowid IN (SELECT rowid FROM records "  # noqa: S608 — bound below
@@ -1384,6 +1396,12 @@ class SqliteMemoryStore:
             traces.EXCLUDED_KIND: excluded_kind,
             traces.EXCLUDED_RETENTION: excluded_retention,
             traces.EXCLUDED_WINDOW: excluded_window,
+            # Zero by construction, not by counting: the band bound above the cut,
+            # so this pass saw no out-of-band candidate to reject. Written as a
+            # literal rather than as a counter that can only stay at zero, so
+            # nobody later "fixes" a dead increment into a post-cut band filter and
+            # reintroduces ADR-0113 §2's flood failure.
+            traces.EXCLUDED_BAND: 0,
         }
 
     async def list_beliefs(

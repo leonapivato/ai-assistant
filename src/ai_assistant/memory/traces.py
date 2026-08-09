@@ -127,15 +127,29 @@ EXCLUDED_RETENTION: Final = "excluded_retention"
 #: #824's trigger watches, which is why it is counted apart from the other two.
 EXCLUDED_WINDOW: Final = "excluded_window"
 
+#: Candidates dropped by the belief-band predicate (§8), and **the one of the four
+#: that is structurally zero in ``SqliteMemoryStore``**. ADR-0113 §2 binds the band
+#: *before* the ranking cut, so an out-of-band record never becomes a candidate and
+#: the post-KNN pass has none to drop. The key is still emitted whenever that pass
+#: runs, for the reason :data:`EXCLUDED_KIND` is emitted as zero on an unfiltered
+#: read: the four counts decompose **the candidate set the same trace reports**, and
+#: a key that appeared only when it was non-zero would make "nothing was dropped"
+#: and "nothing was looked at" the same record. §3's prohibition on a zero
+#: placeholder is about a quantity the event **did not reach**, which is why all
+#: four are absent together on the fault and short-circuit paths, where no pass ran
+#: and no candidate set exists.
+#:
+#: **What it does not mean.** It is not a count of records the band kept out of the
+#: *store's* answer — that population is filtered inside the KNN, is unbounded, and
+#: could only be counted by a second vector search on the interactive read path.
+#: :data:`BANDS` is what says a restriction was in force at all.
+EXCLUDED_BAND: Final = "excluded_band"
+
 #: How many bands the caller restricted the read to, absent when it restricted
-#: none. **There is deliberately no band exclusion count beside the other three.**
-#: ADR-0113 §2 binds the band predicate *before* the ranking cut, so in
-#: ``SqliteMemoryStore`` an out-of-band record is never a candidate and the store
-#: never observes a count of what the band removed; §3's observation rule then
-#: says the key is **absent**, never zero, and §8's "carries every one of the
-#: following **the read reached**" is the clause that governs. This key is what
-#: keeps that absence legible rather than mysterious: a measure reading a trace
-#: with no ``excluded_band`` can tell a band-scoped read from an unscoped one.
+#: none. Beside :data:`EXCLUDED_BAND`'s structural zero this is the figure that
+#: carries the information: a measure reading ``excluded_band = 0`` learns that no
+#: *candidate* was dropped for its band, and reads here whether a band predicate was
+#: bound before the cut at all.
 BANDS: Final = "bands"
 
 # --- the write metric keys ----------------------------------------------------
@@ -488,6 +502,7 @@ __all__ = [
     "CLOSED",
     "COVERAGE_DECLARED",
     "DECISION_METRICS",
+    "EXCLUDED_BAND",
     "EXCLUDED_KIND",
     "EXCLUDED_RETENTION",
     "EXCLUDED_WINDOW",
