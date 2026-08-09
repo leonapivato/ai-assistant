@@ -1,6 +1,6 @@
 # 122. A correction's record type is resolved from its target, not declared by its caller
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-09
 - **Decides `core` surface and implements none of it.** One field on
   `FeedbackEvent` in `core/types.py` becomes **optional** — `memory_kind` gains
@@ -15,16 +15,21 @@
   `scripts/ship.sh` fires its own architecture requirement on a diff touching
   `core/protocols.py` or `core/types.py`, which this diff does not. Both lenses are
   therefore run deliberately, as ADR-0117's own header records for the same reason.
-- **Amends [ADR-0009](0009-learning-model.md) §1 in one clause and supersedes
-  nothing** (§9). §1's `memory_kind` bullet stops requiring the *caller* to carry
-  the target kind; its stated reason — "a correction is not always a preference…
-  carrying the target kind lets the processor build the correct record type" — is
-  preserved verbatim and is honoured here for the first time. §§2–6 stand
+- **Partially supersedes [ADR-0009](0009-learning-model.md) §1**, in the scope §1
+  and §3 below name and in no other: §1's first bullet requires the *caller* to
+  carry the target kind, and that requirement is replaced — `memory_kind` becomes
+  optional, and an absent value is resolved by `orchestration` before the
+  processor is called. A reader holding only ADR-0009 would act differently, which
+  is ADR-0070 §1's test and is what makes this a supersession rather than an
+  amendment however small the edit (§9). The bullet's *reason* — "a correction is
+  not always a preference… carrying the target kind lets the processor build the
+  correct record type" — is not replaced; it is the ground the replacement stands
+  on, and is honoured here for the first time. §1's second bullet and §§2–6 stand
   unchanged, including §4's mapping, §3's "learning never imports `memory`", and
-  §6's `PROCEDURAL`/`EPISODIC` deferral, which §3 below binds itself to. The
-  record is on ADR-0009's `Status` line and in an appended dated note, plus an
-  inline note at §1, all landing in this change — the two places ADR-0082 §1 and
-  §2 put a record on a line with no leading token.
+  §6's `PROCEDURAL`/`EPISODIC` deferral, which §3 below binds itself to. The record
+  is on ADR-0009's `Status` line in ADR-0070 §4's leading-token form and in an
+  appended dated note, plus an inline note at §1, all landing in this change — the
+  atomic pair ADR-0082 §1 requires.
 - **Refuses to widen `memory`'s conflict probe** (§8), and corrects one reason
   that has been offered for that refusal: the shipped ingest lock does **not**
   depend on conflict detection staying kind-scoped. The dependency belongs to the
@@ -273,9 +278,10 @@ implementable: `FeedbackProcessor` exposes `process(event)` and nothing else, so
 under golden rule 5 — a capability declaration with one implementation and one
 caller, ratified to spare an ADR from naming two enum members. So the set is
 named here, matching what ADR-0009 §4 fixes `RuleBasedFeedbackProcessor` to mint,
-and **it widens by amendment rather than by inference**: when ADR-0009 §6's
-deferral is taken up, the lane taking it amends this clause, in the same change
-that makes the kinds mintable.
+and **it widens by a ratified decision rather than by inference**: when ADR-0009
+§6's deferral is taken up, the lane taking it partially supersedes this clause in
+the scope of the set — a change to what was decided, on ADR-0070 §1's test — in
+the same change that makes the kinds mintable.
 
 > **Normative.** The `FeedbackProcessor` wired behind the loop mints every kind in
 > §3's resolution set. This is a composition-root obligation, in ADR-0028 §4's
@@ -369,10 +375,10 @@ happened to phrase as one. Something must still be stored, because the alternati
 is discarding what the user said, and losing a user's words is the failure this ADR
 exists to end — not a fallback it may take.
 
-`SEMANTIC` is the right free-standing drawer, and choosing it **preserves
-ADR-0009 §1 rather than amending it**: with nothing to correct, "a fact becomes a
-`SemanticMemory`, not a preference" applies on its own terms, to a statement
-standing alone. This is also the only branch on which the old table's answer was
+`SEMANTIC` is the right free-standing drawer, and choosing it **applies ADR-0009
+§1's own illustration where that illustration in fact holds**: with nothing to
+correct, "a fact becomes a `SemanticMemory`, not a preference" reads on a statement
+standing alone. Nothing of §1 beyond the clause §9 names is disturbed by this arm. This is also the only branch on which the old table's answer was
 ever right, so the fallback keeps the pre-existing behaviour for exactly the case
 that behaviour fitted.
 
@@ -510,23 +516,36 @@ them and the other must be corrected on its own. That residue is real, it is
 narrower than the defect being fixed, and it is left open rather than closed by a
 cross-kind probe, for (a)–(d).
 
-### 9. What ratification amends, and under which rule
+### 9. What ratification supersedes, and under which rule
 
-ADR-0070 §1's test asks whether a reader holding only the earlier ADR would now
-act differently, or read one of its clauses more widely than it now holds.
-ADR-0009 §1's *reason* survives entirely — it is quoted in this ADR's header and
-relied on in §5 — and what changes is who supplies the field, so this is an
-amendment rather than a supersession, in ADR-0001's append-only form, with no
-ratified text rewritten. ADR-0009's `Status` carries no leading token, so
-ADR-0082 §1 and §2 put the record in both places.
+**This is a partial supersession, not an amendment, and the test is not close.**
+ADR-0070 §1 permits an in-place amendment "only when the amendment changes no
+decision" — where "a reader acting on the ADR would act **identically** before and
+after" — and rules that "[a]ny change to what was decided requires a new ADR that
+supersedes the old one — wholly, or partially (§3)". ADR-0009 §1's first bullet
+decided that the *caller* carries the target kind; a reader holding it builds a
+`FeedbackEvent` with a `memory_kind` they chose, and after this ADR they may build
+one without. That is acting differently, so §1 is partially superseded, whatever
+the edit's size — §1 is explicit that "[t]he line is the **decision**, not the size
+of the edit".
 
-- **ADR-0009's `Status` line becomes** `Accepted, §1 amended by ADR-0122`, and a
-  dated bullet is appended to its header after `Date`, naming the one clause that
-  moves: `memory_kind` is no longer required of the caller, and an absent value is
-  resolved by the pipeline (§3) rather than defaulted by an adapter.
+That ADR-0009 §1's *reason* survives is not a counter-argument, and treating it as
+one was this ADR's own first error. §1's test is about what a reader would do, not
+about whether the later ADR agrees with the earlier one's motivation. Partial
+supersession is "a first-class form, not a discouraged one" (ADR-0070 §3), and it
+is the sanctioned tool exactly here: one clause is replaced, the remainder stays
+accepted and legible.
+
+- **ADR-0009's `Status` line takes ADR-0070 §4's leading-token form** —
+  `Partially superseded by ADR-0122 (<scope>)`, with `Accepted` dropped so a prefix
+  match cannot read the replaced clause as live — and a dated bullet is appended to
+  its header after `Date`. Per ADR-0082 §2 the leading token carries no amendment
+  qualifier beside it; the record's substance is in the note.
 - **An inline note is appended at ADR-0009 §1**, after its two scoping bullets, in
   the block-quote form ADR-0014 and ADR-0038 use, so a reader arriving at the
-  bullet sees the amendment beside it.
+  bullet sees the supersession beside it. ADR-0009's Context, Decision and
+  Consequences are not rewritten: the replaced clause stays readable as history
+  beside the pointer to this ADR, which is the property ADR-0070 §2 keeps.
 - **Nothing else in ADR-0009 is touched.** §2's Protocol, §3's placement rule, §4's
   mapping and provenance, §5's recorded policy interaction and §6's deferrals all
   stand. §5 is worth naming because it recorded this defect's same-kind ancestor —
@@ -535,7 +554,13 @@ ADR-0082 §1 and §2 put the record in both places.
   and ADR-0050 closed. This ADR closes the cross-kind residue of the same shape.
 - **ADR-0050, ADR-0079, ADR-0092 and ADR-0108 are untouched**, which is the
   intended property of §8's refusal: every clause those ADRs state over a
-  kind-scoped probe continues to hold, unamended, because the probe does not move.
+  kind-scoped probe continues to hold, neither amended nor superseded, because the
+  probe does not move.
+- **This ADR is ratified after its required reviews, not before.** It is a
+  substantive contract ADR, so it is reviewed while `Proposed` and the `Status`
+  flip to `Accepted` is the ratifying edit that records the outcome — ADR-0070 §1's
+  permitted in-place header edit, and the sequence ADR-0015 §5 and `CONTRIBUTING.md`
+  → "Contract ADRs land before their implementation" require.
 
 ### 10. What the implementing lane owes
 
