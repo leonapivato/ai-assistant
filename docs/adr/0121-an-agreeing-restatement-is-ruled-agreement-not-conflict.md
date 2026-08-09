@@ -1,6 +1,6 @@
 # 121. An agreeing restatement is ruled agreement, not conflict
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-09
 - **Not a contract change under golden rule 5.** No Protocol in
   `core/protocols.py` gains a member or changes a signature, no type or enum
