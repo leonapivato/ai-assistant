@@ -88,7 +88,9 @@ over-reading is where the defect is: it converts "the type depends on the target
 into a constant, at the one layer that has no access to the target.
 
 **The machinery downstream of the kind is sound.** The same content re-taught as
-`--kind preference` found the target immediately, deferred under ADR-0050 §2, and
+`--kind preference` found the target immediately, deferred under ADR-0050 §2 — the
+arm ADR-0121 has since narrowed, and which still governs here because espresso and
+cappuccino *disagree* — and
 superseded on `assistant answer --accept`. Nothing in the policy, the fold, the
 deferral queue or the writer needs to change. What is missing is a step that names
 the drawer before the record is minted.
@@ -580,6 +582,14 @@ accepted and legible.
   intended property of §8's refusal: every clause those ADRs state over a
   kind-scoped probe continues to hold, neither amended nor superseded, because the
   probe does not move.
+- **ADR-0121 is untouched and does not touch this**, though the two land together
+  and both come out of #862. It rules *how a conflict set is judged* once one has
+  been detected — an agreeing restatement reinforces rather than deferring — and
+  this ADR decides *which drawer is probed for one at all*. The two compose without
+  interacting: §3's resolution "names a drawer, never a conflict", so it reaches no
+  question ADR-0121 answers, and ADR-0121's predicate reads a conflict set this ADR
+  neither widens nor narrows. Where ADR-0121 narrowed ADR-0050 §2, this ADR's one
+  citation of that arm is to a *disagreeing* case, which the arm still governs.
 - **This ADR is ratified after its required reviews, not before.** It is a
   substantive contract ADR, so it is reviewed while `Proposed` and the `Status`
   flip to `Accepted` is the ratifying edit that records the outcome — ADR-0070 §1's
