@@ -58,18 +58,23 @@ def _attestation_for(source: MemorySource) -> Attestation | None:
     return _ATTESTED_BY if band_of(source) is BeliefBand.ATTESTED else None
 
 
-def _semantic(
+def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may vary
     record_id: str,
     *,
+    content: str | None = None,
     source: MemorySource = MemorySource.OBSERVED,
     confidence: float = 0.6,
     evidence: tuple[str, ...] = (_EPISODE,),
     derived_from_external: bool = False,
 ) -> MemoryRecord:
+    # Content defaults to the id, so a case not about ADR-0121's agreement predicate
+    # gets records that cannot accidentally agree: two records agree only when their
+    # `content` matches, and no two ids here do.
+    content = record_id if content is None else content
     return SemanticMemory(
         id=record_id,
-        content=record_id,
-        fact=record_id,
+        content=content,
+        fact=content,
         provenance=Provenance(
             source=source,
             confidence=confidence,
@@ -81,14 +86,23 @@ def _semantic(
     )
 
 
-def _episodic(record_id: str, *, evidence: tuple[str, ...] = ()) -> MemoryRecord:
+def _episodic(
+    record_id: str,
+    *,
+    content: str | None = None,
+    source: MemorySource = MemorySource.OBSERVED,
+    evidence: tuple[str, ...] = (),
+) -> MemoryRecord:
     """An episode: a record that something happened, whose warrant is that it did."""
     return EpisodicMemory(
         id=record_id,
-        content=record_id,
+        content=record_id if content is None else content,
         occurred_at=_WHEN,
         provenance=Provenance(
-            source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN, evidence=evidence
+            source=source,
+            confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.6,
+            last_updated=_WHEN,
+            evidence=evidence,
         ),
     )
 
@@ -757,3 +771,320 @@ async def test_a_confirmed_derived_proposal_citing_nothing_is_still_rejected() -
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
 
     assert decision.kind is MemoryDecisionKind.REJECT
+
+
+# --- ADR-0121: an agreeing restatement is agreement, not conflict ------------
+#
+# The three shapes below are #862's live failure modes, pinned by the shapes the
+# QA run actually observed rather than by the mechanism that produced them. Each
+# ran three times out of three against a live hub, and each was structural: with
+# `_rule_on_assertion`'s three arms and rule 9's reinforce sitting behind
+# `not is_asserted`, `decisions_reinforce` at a direct seam was reachable at no
+# input whatever (ADR-0120 §6's numerator, ADR-0121's Context).
+
+#: The belief every case below restates. A preference the user states in so many
+#: words, which is the population ADR-0121 §1's predicate is narrow enough to see.
+_SEAT = "the user prefers window seats"
+
+#: The same belief, one token different — ADR-0121 §1's own adversarial fixture.
+#: Under a hashing embedder (what #862 ran) this scores at the *top* of the ranking
+#: against `_SEAT`, which is why agreement may not be read off a retrieval score: a
+#: threshold-keyed test folds this correction into the belief it corrects.
+_AISLE = "the user prefers aisle seats"
+
+
+async def test_a_verbatim_self_restatement_reinforces_rather_than_asking() -> None:
+    """#862's first failure mode: the system asked whether the user contradicted itself.
+
+    ``_rule_on_assertion`` arm 1 fires when *any* member of the conflict set is
+    ``USER_ASSERTED``, and the conflict set is a topical-similarity ranking — which
+    a verbatim restatement tops. So the arm fired and the user was interrogated
+    about agreeing with themselves, three times out of three, which is exactly the
+    interaction ADR-0038 §5 predicted when it rejected ``ASK_USER`` for this case.
+    """
+    proposal = _proposal(
+        _semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0)
+    )
+    earlier = _semantic(
+        "said-before", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "said-before"
+
+
+async def test_a_restatement_agreeing_with_an_observed_belief_reinforces_it() -> None:
+    """#862's second failure mode: the confirmation retired what it confirmed.
+
+    Above the conflict threshold arm 2 fired and ruled ``SUPERSEDE`` — closing the
+    window on the very record the user had just confirmed, and counting in ADR-0120
+    §5's correction rate as a belief the user overturned. An agreement inflating the
+    correction rate is a measure-fidelity defect §5's own justification forbids:
+    "One ruling kind means 'what was held is now wrong', and it is the one counted."
+    """
+    proposal = _proposal(
+        _semantic("told-you", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0)
+    )
+    observed = _semantic("we-noticed", content=_SEAT, source=MemorySource.OBSERVED)
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[observed])
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "we-noticed"
+
+
+async def test_a_one_token_contradiction_still_defers_to_the_user() -> None:
+    """The case ADR-0050 §2 was written for is untouched (ADR-0121 §9).
+
+    §2's rule stands whole for every conflict set holding an asserted member that
+    *disagrees* with the proposal — which is #245's honesty gap and is the reason
+    ADR-0121 §1 refuses to read agreement off a similarity score at all: this pair
+    is one token apart and would score at the top of any threshold drawn high
+    enough to call a restatement an agreement.
+    """
+    proposal = _proposal(
+        _semantic("correction", content=_AISLE, source=MemorySource.USER_ASSERTED, confidence=1.0)
+    )
+    earlier = _semantic(
+        "said-before", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
+
+
+async def test_a_restatement_beside_a_disagreeing_assertion_still_defers() -> None:
+    """ADR-0121 §2's second firing condition, which is what keeps #245 closed.
+
+    The arm requires **every** ``USER_ASSERTED`` member of the conflict set to be in
+    the agreeing set, not merely one. Without that, a user who said "window seats",
+    then "aisle seats", then "window seats" again would reinforce the first record
+    and leave the second live — two live contradictory assertions, the honesty
+    defect ADR-0050 §2 exists to prevent, reached by a new path. So the ruling here
+    is the deferral even though a perfectly good foldable agreeing member is present.
+    """
+    proposal = _proposal(
+        _semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0)
+    )
+    conflicts = [
+        _semantic("agrees", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0),
+        _semantic("disagrees", content=_AISLE, source=MemorySource.USER_ASSERTED, confidence=1.0),
+    ]
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
+
+
+async def test_a_disagreeing_derived_conflict_does_not_block_the_agreement() -> None:
+    """The condition is stated over the *asserted* members alone (ADR-0121 §2).
+
+    A disagreeing ``OBSERVED`` or ``INFERRED`` member is not evidence of a
+    contradiction — it is a similarity hit — so it neither blocks the arm nor is
+    retired by it. ``REINFORCE`` has no retirement set (ADR-0045 §4), and retiring a
+    record on the strength of a *restatement* would be retiring it on similarity
+    alone, which ADR-0045 §5 refuses. It stays live, and the ruling names the
+    agreeing member.
+    """
+    proposal = _proposal(
+        _semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0)
+    )
+    conflicts = [
+        _semantic("our-guess", content=_AISLE, source=MemorySource.INFERRED),
+        _semantic("we-noticed", content=_SEAT, source=MemorySource.OBSERVED),
+    ]
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "we-noticed"
+    # A REINFORCE carries no retirement set at all, so nothing is retired here and
+    # the ruling names one record rather than leading a set.
+    assert decision.ttl is None
+
+
+async def test_an_agreeing_external_record_is_never_named_by_the_arm() -> None:
+    """ADR-0121 §3's exclusion, and the residue it states rather than hides.
+
+    ``EXTERNAL`` is out of the foldable class for ADR-0092 §5's reason unchanged: a
+    ``REINFORCE`` folds at the *target's* id, an import's id is the integrating
+    system's idempotency key, and the next routine sync overwrites the fold —
+    whether or not the user's words matched the import's. So the arm does not fire,
+    the proposal falls through to the supersession arm, and ADR-0120 §5's correction
+    rate counts a correction that did not happen. That is filed (ADR-0121 §7), and
+    the store outcome is defensible: the user's own words land at a fresh id and the
+    import is retired, which is what ADR-0092 §4 decided a user assertion does.
+    """
+    proposal = _proposal(
+        _semantic("told-you", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0)
+    )
+    imported = _semantic("calendar", content=_SEAT, source=MemorySource.EXTERNAL, confidence=1.0)
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[imported])
+
+    assert decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert decision.target_id == "calendar"
+
+
+async def test_the_arm_names_the_best_ranked_foldable_agreeing_member() -> None:
+    """ADR-0121 §2 names the best-ranked member of the *foldable* agreeing set.
+
+    Ranked first here is an agreeing ``EXTERNAL`` record, which §3 puts outside the
+    foldable set — so the scan reaches past it to the agreeing ``OBSERVED`` one
+    rather than abandoning the arm, exactly as the supersession arm's scan reaches
+    past a member it may not name. Taking ``conflicts[0]`` would name a record the
+    writer refuses to fold onto, turning an agreement into a ``MemoryStoreError``.
+    """
+    proposal = _proposal(
+        _semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0)
+    )
+    conflicts = [
+        _semantic("calendar", content=_SEAT, source=MemorySource.EXTERNAL, confidence=1.0),
+        _semantic("we-noticed", content=_SEAT, source=MemorySource.OBSERVED),
+    ]
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "we-noticed"
+
+
+async def test_records_of_different_kinds_never_agree() -> None:
+    """ADR-0121 §1 requires ``kind`` equality, and states it rather than assuming it.
+
+    Kind-scoped conflict detection means the ingestor never hands this policy a
+    cross-kind conflict set, so the clause guards a path nothing takes today. It is
+    written anyway, for the reason ADR-0074 §4's episodic exemption is: a floor that
+    holds only while a coincidence holds is not a floor, and ADR-0121 §11 leaves
+    #864's cross-kind reach explicitly undecided rather than foreclosed.
+    """
+    proposal = _proposal(
+        _semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0)
+    )
+    other_kind = _episodic("that-time", content=_SEAT, source=MemorySource.USER_ASSERTED)
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[other_kind])
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
+
+
+async def test_an_observation_agreeing_with_an_assertion_still_defers() -> None:
+    """ADR-0121 §11's out-of-scope case, pinned so it is a decision and not a gap.
+
+    An observation restating what the user told us still rules ``ASK_USER`` under
+    rule 5. The arm is stated over a ``USER_ASSERTED`` *proposal* because the fold's
+    ordinary arm would take the incoming record's source and **demote** the
+    assertion to an observation; fixing that means extending ADR-0103 §6's
+    corroboration rule again, on a path ADR-0120 §6 excludes from its measure anyway.
+    Filed, not fixed here.
+    """
+    proposal = _proposal(_semantic("we-noticed", content=_SEAT, source=MemorySource.OBSERVED))
+    theirs = _semantic(
+        "their-words", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[theirs])
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
+
+
+#: ADR-0121 §1's four transformations and the ones it excludes, stated as pairs
+#: against :data:`_SEAT`. The admitted ones "change no word"; each excluded one
+#: decides that two *different* strings mean the same thing, which is a judgement,
+#: and a judgement is what this predicate must not contain if it is to license a
+#: fold onto a record the user gave us.
+_AGREEMENT_FORMS = [
+    (_SEAT, True, "byte-identical"),
+    ("The User Prefers WINDOW Seats", True, "case-folded"),
+    ("the  user   prefers window   seats", True, "collapsed-runs"),
+    ("\n  the user prefers window seats \t", True, "stripped-ends"),
+    # Escaped rather than written literally: a no-break space is invisible in
+    # source and this case is *about* it. §1 says "Unicode whitespace", so a
+    # collapse keyed on ASCII would call these two sentences different beliefs.
+    ("the user prefers window\u00a0seats", True, "unicode-whitespace"),
+    ("the user prefers window seats.", False, "trailing-stop"),
+    ("user prefers window seats", False, "dropped-article"),
+    ("the user prefers windowseats", False, "joined-tokens"),
+    (_AISLE, False, "one-token-edit"),
+]
+
+
+@pytest.mark.parametrize(
+    ("restatement", "expected_agreement"),
+    [(form, agrees) for form, agrees, _ in _AGREEMENT_FORMS],
+    ids=[label for _, _, label in _AGREEMENT_FORMS],
+)
+async def test_agreement_absorbs_exactly_the_four_transformations(
+    restatement: str, expected_agreement: bool
+) -> None:
+    """ADR-0121 §1's predicate, exercised through the ruling it licenses.
+
+    NFC normalisation, case folding, whitespace-run collapse and end-stripping are
+    admitted; everything else is refused, including a trailing full stop, a dropped
+    stop-word and a one-token substitution. Stemming, synonym expansion and every
+    embedding comparison are out for the same reason, and their exclusion is the
+    point rather than a simplification: the failure mode of a false *agreement* is
+    folding a contradiction into the record it contradicts, at that record's id.
+
+    Driven through ``decide`` rather than against the predicate directly, so what is
+    pinned is the behaviour the ADR rules and not one implementation's helper.
+    """
+    proposal = _proposal(
+        _semantic("again", content=restatement, source=MemorySource.USER_ASSERTED, confidence=1.0)
+    )
+    earlier = _semantic(
+        "said-before", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
+
+    expected = MemoryDecisionKind.REINFORCE if expected_agreement else MemoryDecisionKind.ASK_USER
+    assert decision.kind is expected
+
+
+async def test_agreement_normalises_composed_and_decomposed_forms_alike() -> None:
+    """The NFC limb of ADR-0121 §1, which no ASCII case can reach.
+
+    Two spellings of the same accented word — precomposed U+00E9 against ``e`` plus
+    U+0301 — are the same text and a reader sees no difference at all. Without the
+    normalisation limb the predicate would call them different beliefs and put the
+    question back in front of the user, which is the harm this ADR removes.
+    """
+    composed = "the user prefers a window seat in the caf\u00e9 car"
+    decomposed = "the user prefers a window seat in the cafe\u0301 car"
+    proposal = _proposal(
+        _semantic("again", content=decomposed, source=MemorySource.USER_ASSERTED, confidence=1.0)
+    )
+    earlier = _semantic(
+        "said-before", content=composed, source=MemorySource.USER_ASSERTED, confidence=1.0
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "said-before"
+
+
+async def test_the_agreement_arm_stays_behind_the_admissibility_floor() -> None:
+    """ADR-0121 §2 places the arm ahead of the *conflict* arms, not ahead of rule 1.
+
+    A secret-tier restatement is Tier 0 whether or not it agrees with anything, and
+    ADR-0004 §3 keeps it out of the memory database by every route. The floor's
+    rulings are properties of the proposal alone and none commits anything, so
+    nothing about the records' relation can make one safe to skip — the same
+    argument that puts the *confirmed* rule behind the floor (ADR-0078 §5a).
+    """
+    proposal = _proposal(
+        _semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0),
+        sensitivity=DataTier.SECRET,
+    )
+    earlier = _semantic(
+        "said-before", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
