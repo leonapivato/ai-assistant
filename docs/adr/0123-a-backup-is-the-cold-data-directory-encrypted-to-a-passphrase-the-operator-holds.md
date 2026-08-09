@@ -482,107 +482,107 @@ recovery are not symmetric acts and the asymmetry runs in the safe direction.
 
 ### 7. Restore builds a fresh data directory and replaces nothing
 
-> **Normative.** Restore creates its target directory, and refuses a target path
-> that already exists. It never materialises into, merges with, writes over or
-> deletes a directory it did not itself create in that run.
+> **Normative.** Restore refuses a target path that already exists.
 
 > **Normative.** Restore refuses a target whose parent directory is writable by
-> anyone other than that parent's owner, naming the parent and its mode. It creates
-> the target it will materialise into with owner-only permissions.
+> anyone other than that parent's owner, naming the parent and its mode.
 
-> **Normative.** Restore takes `<data_dir>/hub.lock` in the target directory it
-> created, before it materialises anything, and holds it until it exits, on the
-> same terms as §2.
+> **Normative.** Restore materialises into a staging directory it creates in the
+> target's own parent, with owner-only permissions, and never writes into the
+> target path itself.
 
-> **Normative.** Restore leaves no partial directory behind. Where it refuses or
-> fails, it removes the files it materialised and the lock file it created, and
-> then removes the target directory itself only if that leaves it empty. It removes
-> no directory that is not empty, and it removes nothing recursively.
+> **Normative.** Restore publishes the restored directory by renaming the staging
+> directory to the target path, as its last act and only after every check §8
+> requires has passed. Publication fails rather than replacing anything if the
+> target exists at that moment.
 
-**Restoring only into a directory the tool made is ADR-0104 §1's build-and-swap
-with the swap left to the operator.** Nothing that exists is modified, so there is
-no path — including a crash — on which a half-restored directory replaces a real
-one; the operator who wants the restored directory in the live path moves it there,
-and the directory it displaces is still on disk to be examined. That is the same
-disposition ADR-0104 §3 takes with the retained pre-migration store, and it is
-right for the same reason: the case verification cannot cover is the one where the
-restore was the wrong act.
+> **Normative.** Where restore refuses or fails, it removes the staging directory
+> and everything it placed in it, touches the target path not at all, and removes
+> nothing outside the staging directory.
 
-**Taking the lock on the target is not ceremony.** A supervisor configured to
-restart the hub is watching a path, and a directory that appears under it is a
-directory a hub will start against — mid-materialisation if nothing stops it.
-The lock is what stops it, using the mechanism ADR-0083 §1 already provides rather
-than a new one.
+> **Normative.** Restore takes no instance lock, and creates no lock file.
 
-**Creating the directory, rather than accepting an empty or almost-empty one, is
-what makes a whole class of question unreachable, and it is worth saying which
-class.** Taking the lock creates `hub.lock` — `InstanceLock` opens it with
-`O_CREAT`, and its release "deliberately" does not unlink it — so a rule admitting
-a *pre-existing* target has to say what happens to that file, and then has to say
-what happens when the path it names is not what it appears to be. `acquire` opens
-without `O_NOFOLLOW` and then `fchmod`s, truncates and writes the pid, so a
-`hub.lock` that is a symbolic link is followed and its *target* is truncated; a
-`hub.lock` that is a regular file may still be a hard link, and is truncated
-through the shared inode with no symlink and no race involved. Each is closable —
-`lstat` first, then check the link count, then close the window between the check
-and the open — and closing them one at a time is how a rule accumulates conditions
-faster than a reader can hold them.
+**Building beside the target and publishing by one rename is ADR-0104 §1's
+build-and-swap, with the swap into the live path left to the operator.** Nothing
+that exists is modified, so there is no path — including a crash — on which a
+half-restored directory becomes something a hub serves: before the rename the
+target path does not exist, and a hub pointed at an absent directory initialises an
+empty store exactly as it would on a first run; after the rename the directory is
+complete and has passed every check §8 requires. The operator who wants it in the
+live path moves it there, and the directory it displaces is still on disk to be
+examined — the same disposition ADR-0104 §3 takes with the retained pre-migration
+store, and right for the same reason: the case verification cannot cover is the one
+where the restore was the wrong act.
 
-**The three clauses above pay none of that, because the state those questions are
-about never exists.** A target path that already exists is refused outright, so
-there is no pre-existing file of any kind to classify; the lock is created inside a
-directory that came into being seconds earlier and that nothing else has ever seen;
-and a failed run undoes itself file by file, so the retry after a mistyped
-passphrase finds nothing and simply works. The cost is stated rather than hidden:
-an operator who wants the target pre-created — on a particular mount, with
-particular permissions — creates its parent instead and lets the tool make the
-leaf.
+**Restore takes no instance lock, and that is a decision rather than an omission.**
+The lock exists to serialise processes over a **shared** directory — ADR-0083 §10
+offers it to offline tools because they and the hub contend for the same live data
+directory, which is exactly the backup tool's situation in §2 and exactly not
+this one. Restore's staging directory is created by this run, in a parent only its
+owner may write, and nothing is configured to look at it; the target is touched
+once, by an atomic rename. There is no interval during which a second process could
+observe a partial store at a path it cares about, so there is nothing for a lock to
+serialise.
 
-**The cleanup removes named files and then an empty directory, never a tree, and
-that shape is chosen rather than incidental.** Everything above is reasoning about
-*pathnames*, and a pathname is not a handle: between the `mkdir` that creates the
-target and any later operation on it, a process running as the same user can rename
-the directory away and leave a symlink in its place, after which path-based
-operations act somewhere else. A recursive removal under those conditions is the
-one step whose mistake is unrecoverable, so it is the step this decision does not
-take — refusing to remove a directory that is not empty means a target that has
-been swapped for somebody else's directory fails the cleanup instead of emptying
-it.
+**Taking one anyway would cost more than it bought, and the cost is specific.** A
+lock has to live somewhere, and the only place a hub would look for it is inside the
+target — which means creating the target to hold it, which is the state the first
+clause refuses. It also cannot be cleaned up: a failed run has to remove what it
+made, `InstanceLock.release` "deliberately" does not unlink the lock file for a
+documented reason — "Removing it would let a contender that has already opened the
+same inode take a lock on a file no longer at that path" — and a run that unlinked
+its own live lock would recreate precisely the split-lock hazard that sentence
+exists to prevent. Every ordering of hold, release, unlink and remove is wrong in
+one of those two ways. Staging dissolves the question instead of answering it.
+
+**It also makes the retry after a failure ordinary rather than a special case.** A
+mistyped passphrase or a too-new artifact leaves nothing at the target, because
+nothing was ever written there; the staging directory is removed whole, and the
+operator simply runs the command again. That is the property round-tripping through
+a pre-existing lock file kept costing, and it now falls out of the shape rather than
+being maintained by a clause.
+
+**Cleanup is bounded to a directory this run created, and touches the target path
+not at all.** Everything here is reasoning about *pathnames*, and a pathname is not
+a handle: a process that can write the parent could rename the staging directory
+away between its creation and a later operation on it, after which path-based
+operations act somewhere else. Confining removal to the staging directory — and
+never to the target, which the failure path has no business touching — is what
+keeps the one irreversible step aimed at something this run made.
 
 **The parent's permissions are what bound who can play that game, and without the
-clause the bound would have been wrong.** A target under a group-writable or
-world-writable parent can be renamed away by any principal with write on that
-parent — a different user, not merely a stray process of the operator's own — so a
-rationale resting on "only the owner could do this" would have been false for
-exactly the parents most likely to be chosen in a hurry, a shared mount or a
-scratch directory on a multi-user box. Refusing such a parent outright is cheaper
-than reasoning about it, and it is the right refusal on its own terms: the target
-is where the **plaintext** store lands, and a directory whose parent strangers may
-write is not a place to unpack every belief the user has accumulated. The
-destination in §11 is deliberately not held to this — an artifact is ciphertext and
-an operator may legitimately want it on a shared drive — and that asymmetry is the
-whole reason the two paths have different rules.
+clause the bound would be wrong.** A staging or target directory under a
+group-writable or world-writable parent can be renamed away by any principal with
+write on that parent — a different user, not merely a stray process of the
+operator's own — so a rationale resting on "only the owner could do this" would be
+false for exactly the parents most likely to be chosen in a hurry, a shared mount or
+a scratch directory on a multi-user box. Refusing such a parent outright is cheaper
+than reasoning about it, and it is the right refusal on its own terms: this is where
+the **plaintext** store lands, and a directory whose parent strangers may write is
+not a place to unpack every belief the user has accumulated. The destination in §11
+is deliberately not held to this — an artifact is ciphertext and an operator may
+legitimately want it on a shared drive — and that asymmetry is the whole reason the
+two paths have different rules.
 
 **What none of it does is make the write path race-free, and this ADR does not
 claim it does.** With the parent owner-only, the principal who could still swap the
-target between its creation and the extraction is one already running as its
-owner — who can read the store, the audit trail and any artifact this tool writes
-without racing anything. Closing even that needs creation, locking, extraction and
-cleanup performed relative to a held directory descriptor, which would mean giving
-`InstanceLock` a descriptor-relative form and hardening one tool while the hub, the
-re-embedder and the measures report resolve the same directory by path beside it.
-That is a change to a shared mechanism rather than to this decision, and it is
-filed as #889. The limit is disclosed here in the shape ADR-0104 §3 uses for its
-own residual window — "it does not close it, and it is not offered as closing
-it" — and it is the same posture ADR-0083 §1 takes when it makes the instance lock
-advisory and says so.
+staging directory between its creation and the extraction is one already running as
+its owner — who can read the store, the audit trail and any artifact this tool
+writes without racing anything. Closing even that needs creation, extraction and
+cleanup performed relative to a held directory descriptor, which is a shared
+mechanism's change rather than this decision's: the hub, the re-embedder and the
+measures report all resolve their data directory by path beside it, and hardening
+one tool alone buys nothing real. Filed as #889. The limit is disclosed here in the
+shape ADR-0104 §3 uses for its own residual window — "it does not close it, and it
+is not offered as closing it" — and it is the same posture ADR-0083 §1 takes when
+it makes the instance lock advisory and says so.
 
-**The general exposure in `InstanceLock` is untouched by this and is not this ADR's
-to close.** The hub, the re-embedder and the measures report all take the lock the
-same way and are all exposed to a symlinked lock path in their own data
-directories; that predates this decision and is filed as #888. What §7 owes is that
-this decision does not *add* a way to reach it, and refusing a pre-existing target
-is what discharges that.
+**The `InstanceLock` exposure in #888 is untouched by this and is now unreachable
+from restore.** The hub, the re-embedder and the measures report all open their lock
+path without `O_NOFOLLOW` and then truncate it, so a symlinked `hub.lock` in their
+own data directories destroys the link's target; that predates this decision and
+stays #888's. What §7 owes is that this decision adds no new way to reach it, and
+taking no lock at all discharges that completely rather than by a qualification.
 
 ### 8. Restore verifies what it can settle, and leaves to the hub what the hub already refuses
 
@@ -591,15 +591,14 @@ is what discharges that.
 
 > **Normative.** Restore refuses any archive member that is not a regular file, and
 > any member whose name is absolute, contains a parent-directory component, or
-> resolves outside the target directory. It creates no symbolic link, no device and
+> resolves outside the staging directory. It creates no symbolic link, no device and
 > no hard link, and follows none while materialising.
 
-> **Normative.** After materialising and before reporting success, restore verifies
-> that the set of regular files present under the target directory, excluding the
-> `hub.lock` its own §7 lock created, equals the manifest's set exactly; that each
-> file's length and SHA-256 digest equal the manifest's; and that every restored
-> SQLite database passes SQLite's own integrity check. Any failure is a refusal
-> under §7's third clause.
+> **Normative.** After materialising and before §7's publication, restore verifies
+> that the set of regular files present under the staging directory equals the
+> manifest's set exactly; that each file's length and SHA-256 digest equal the
+> manifest's; and that every restored SQLite database passes SQLite's own integrity
+> check. Any failure is a refusal under §7's cleanup clause.
 
 > **Normative.** Restore performs no check of a store's schema, of its embedding
 > model identity, or of any other compatibility between the restored content and
@@ -612,14 +611,12 @@ format version is refused. An older or equal one is accepted, because bringing a
 store forward is a job the system already owns and duplicating it here would mean
 two implementations of it that can disagree.
 
-**The one file the manifest cannot describe is the lock the restore itself
-creates.** `InstanceLock.acquire` opens the lock path with `O_CREAT`, and
-`InstanceLock.release` deliberately does not unlink it — "Removing it would let a
-contender that has already opened the same inode take a lock on a file no longer at
-that path" — so the directory §7 creates holds exactly one file the moment the lock
-is taken, and holds it still while this check runs. Excluding it by name is the
-whole of the reconciliation, and it is stated here rather than left to an
-implementer to discover as a restore that refuses itself.
+**The set check can be an exact equality because §7 leaves nothing else in the
+staging directory to except.** Every file there was put there by this run out of the
+artifact, so "equals the manifest exactly" is a statement a correct restore can
+always satisfy — which is a property of §7 taking no lock rather than an accident.
+A design that locked the directory it materialised into would hold one file the
+manifest never carried, and the equality would have to be qualified around it.
 
 **Leaving compatibility to the hub is a composition, not an omission, and the
 mechanism it defers to is legible.** A restored store the running build cannot
@@ -633,7 +630,7 @@ refusing earlier and approximately.
 
 **The archive-member rule exists because unpacking an archive is the operation with
 the history.** A member named with a parent-directory component, an absolute path
-or a symbolic link writes outside the target directory, and this artifact is
+or a symbolic link writes outside the staging directory, and this artifact is
 unpacked on a machine in a recovery state where a surprise write is least likely to
 be noticed. §1's rules put only regular files under relative paths into an artifact,
 so the restriction costs nothing an honest artifact needs. What earns it its place
@@ -715,12 +712,18 @@ is the box migration, and this ADR neither performs one nor schedules one.
 > invokes.
 
 **The placement is forced rather than chosen, and ADR-0120 §9's argument transfers
-term for term.** The entry point must take the instance lock; the lock is
-`service/lock.py`; `lint-imports`' "nothing imports the service" contract means the
-entry point has to *be* in `service/`; and `service` may import `app` and `core`
-(ADR-0083 §8), which is how the other three reach their mechanisms. ADR-0084 §6's
-reasoning forecloses the `assistant` subcommand independently: a subcommand lives in
-`interfaces`, which would then have to import `service`.
+term for term for the backup.** Its entry point must take the instance lock; the
+lock is `service/lock.py`; `lint-imports`' "nothing imports the service" contract
+means the entry point has to *be* in `service/`; and `service` may import `app` and
+`core` (ADR-0083 §8), which is how the other three reach their mechanisms.
+
+**Restore lands in the same place by a different route, since §7 gives it no lock
+to take.** What decides it is ADR-0084 §6's reasoning, which forecloses the
+`assistant` subcommand independently of any lock: a subcommand lives in
+`interfaces`, which would then have to import `service`, and `interfaces` may hold
+no business logic in any case (golden rule 3). A separate console script is
+therefore the only shape available, and putting the pair anywhere but beside each
+other would split one decision's two halves across two packages for no reason.
 
 **The mechanism is in `service/` rather than in a subsystem, and that is a
 consequence of §1 rather than a preference.** ADR-0104 put the re-embedder in
