@@ -554,6 +554,28 @@ class DeferralIdConflictError(DeferralStoreError):
     """
 
 
+class TraceStoreError(AssistantError):
+    """Reading from or writing to the evaluation-trace store failed (ADR-0119 §13b).
+
+    Its own class in the :class:`AssistantError` hierarchy, mirroring
+    :class:`MemoryStoreError`, because the trace store is a store of its own —
+    the seventh SQLite database under ``Settings.data_dir`` (ADR-0119 §6), Tier 2
+    where every other one named here is Tier 1.
+
+    **It never reaches an emitter**, and that asymmetry is the whole of ADR-0119
+    §5. ``TraceSink.emit`` swallows a store fault and logs it, because a failure
+    to record a trace may not propagate into the operation being traced; only
+    ``TraceStore.walk`` and ``TraceRetention.purge_before`` — a measure's read and
+    the hub's sweep, neither of which is the work being observed — raise this.
+
+    A malformed *argument* is not this error: a non-positive walk bound and a
+    position the store cannot read are both ``ValueError``, mirroring ADR-0114
+    §6a. A row the store cannot hydrate **is** this error, the row carrying no
+    readable ``id`` included: minting a fresh one there would hand back a trace
+    that no longer identifies the event it came from (ADR-0119 §3).
+    """
+
+
 class ContextError(AssistantError):
     """Situational context could not be assembled (e.g. a source-wiring bug)."""
 

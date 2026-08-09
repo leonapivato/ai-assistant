@@ -14,14 +14,16 @@ state-transition graph does not, which is why that one lives in ``planning``.
 from __future__ import annotations
 
 import json
+import re
 import unicodedata
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Hashable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
 from math import isfinite
 from typing import Annotated, Any, Final, Literal, assert_never
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 from pydantic.functional_serializers import PlainSerializer
@@ -6832,3 +6834,519 @@ class GrantableSource(BaseModel):
             "from ``recent_grants`` (ADR-0102 §3)."
         ),
     )
+
+
+# --- evaluation: the Tier 2 trace family (ADR-0119) --------------------------
+# One envelope, four closed enumerations, and numbers keyed by constants. The
+# whole shape falls out of ADR-0004 §1: everything a trace is *about* is Tier 1,
+# so a trace **references** it — ids, counts, scores, durations — and never
+# contains it. §2 makes that a property of the type rather than a review
+# checklist: every string reachable from an `EvaluationTrace` is an identifier,
+# an enum member, a literal the emitting module wrote, or an exception's
+# `__name__`, and nothing else can be spelled. `tests/core/test_trace_string_
+# closure.py` walks the graph and proves the closure holds.
+
+
+#: ``fullmatch``, never ``match``: ``$`` also matches *before* a trailing
+#: newline, so ``match(r"^[a-z]+$", "seam\n")`` succeeds and the bound these
+#: patterns exist to impose would not hold.
+_TRACE_LABEL = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_FAULT_CLASS = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+
+
+def _trace_label(value: str) -> str:
+    """A seam name or metric key: lowercase, bounded, a literal in its module (§2).
+
+    Args:
+        value: The candidate label.
+
+    Returns:
+        ``value`` unchanged.
+
+    Raises:
+        ValueError: If it does not match the label pattern.
+    """
+    if not _TRACE_LABEL.fullmatch(value):
+        msg = f"{value!r} is not a trace label"
+        raise ValueError(msg)
+    return value
+
+
+#: What ``fault_class`` carries when an exception's own ``__name__`` will not fit
+#: the pattern — a dynamically built class, an over-long or non-ASCII name
+#: (ADR-0119 §3).
+UNREPRESENTABLE_FAULT_CLASS: Final = "UnrepresentableFaultClass"
+
+
+def _fault_class_name(value: str) -> str:
+    """An exception class's ``__name__`` — never its message (ADR-0119 §2).
+
+    Args:
+        value: The candidate class name.
+
+    Returns:
+        ``value`` unchanged.
+
+    Raises:
+        ValueError: If it does not match the class-name pattern.
+    """
+    if not _FAULT_CLASS.fullmatch(value):
+        msg = f"{value!r} is not an exception class name"
+        raise ValueError(msg)
+    return value
+
+
+def fault_class_of(error: Exception) -> str:
+    """``type(error).__name__``, or the reserved literal when it will not fit.
+
+    The one string on a trace that is neither a literal nor an enum member and
+    is *not* under the emitter's control: a provider may raise
+    ``type("X" * 65, (Exception,), {})``, and nothing stops a dynamic class name
+    from carrying content. So the conversion is total — an unrepresentable name
+    becomes :data:`UNREPRESENTABLE_FAULT_CLASS` — rather than raising and
+    destroying the very trace ADR-0119 §8 requires (§3).
+
+    The rejected name is **dropped here and goes nowhere**, log included: it was
+    refused precisely because it may carry Tier 1 content, and ADR-0004 §5 rules
+    that logs are Tier 2 only.
+
+    **Reading the name is itself guarded**, because "total" has to mean it: a
+    metaclass may override ``__getattribute__`` for ``"__name__"`` and raise, or
+    return something that is not a ``str``, and either would take the trace down
+    with the fault it was recording. The guard catches ``Exception`` and not
+    ``BaseException``, so a ``CancelledError`` raised *by the name read* is
+    delivered onward as ADR-0060 §1 requires.
+
+    **The parameter is ``Exception``, not ``BaseException``**, for the same rule
+    one level out: a cancellation is not a fault and must never be classified as
+    one. An emitter re-raises it before it reaches here, so no ``FAULT`` trace
+    can ever name it.
+
+    Args:
+        error: The exception whose class decided the outcome.
+
+    Returns:
+        The class name, or :data:`UNREPRESENTABLE_FAULT_CLASS`.
+    """
+    try:
+        name = type(error).__name__
+        representable = isinstance(name, str) and bool(_FAULT_CLASS.fullmatch(name))
+    # A blind `except Exception` on purpose — see the docstring. `BaseException`
+    # is deliberately *not* caught, so a `CancelledError` raised by the name read
+    # is delivered onward (ADR-0060 §1). ADR-0119 §13a spells this line with a
+    # `noqa: BLE001`; this tree does not enable `BLE`, and `RUF100` fails the
+    # gate on the unused directive, so the reason stays as a comment.
+    except Exception:
+        return UNREPRESENTABLE_FAULT_CLASS
+    return name if representable else UNREPRESENTABLE_FAULT_CLASS
+
+
+_TRACE_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def _trace_id(value: str) -> str:
+    """A trace's own id: the hex form of a random UUID, and nothing else (§3).
+
+    Args:
+        value: The candidate id.
+
+    Returns:
+        ``value`` unchanged.
+
+    Raises:
+        ValueError: If it is not 32 lowercase hex characters.
+    """
+    if not _TRACE_ID.fullmatch(value):
+        msg = f"{value!r} is not a minted trace id"
+        raise ValueError(msg)
+    return value
+
+
+def _finite(value: int | float | bool) -> int | float | bool:
+    """Refuse ``NaN`` and the infinities (ADR-0119 §3).
+
+    Args:
+        value: The observed quantity.
+
+    Returns:
+        ``value`` unchanged.
+
+    Raises:
+        ValueError: If it is a non-finite float.
+    """
+    if isinstance(value, float) and not isfinite(value):
+        msg = f"{value!r} has no JSON representation, so it cannot be stored"
+        raise ValueError(msg)
+    return value
+
+
+class FrozenMapping[K: Hashable, V: Hashable](Mapping[K, V]):
+    """An immutable, hashable, copyable mapping — :class:`FrozenDict`, generic.
+
+    Every design point is ``FrozenDict``'s and is taken for its stated reasons.
+    ``MappingProxyType`` is refused because it "can be neither pickled nor
+    deep-copied, which would make any model holding one fail
+    ``model_copy(deep=True)``". The contents are a **tuple of pairs**, never a
+    ``dict``, because "a private ``dict`` would still be a mutable object
+    reachable as ``parameters._data``, which is a real bypass".
+
+    **Both parameters are bound to ``Hashable``**, because ``__hash__`` is part
+    of what this type promises and ``FrozenDict`` can only promise it for the
+    reason its own docstring gives — hashing by contents is "possible only
+    because every value is itself frozen". Unbounded,
+    ``FrozenMapping[str, list[int]]`` would construct happily and raise at
+    ``hash(...)``, making the guarantee false everywhere but the fields that
+    happen to be safe. The bound is satisfied by all three trace mappings:
+    :class:`TraceRef` and :class:`TraceRecordSet` are ``StrEnum``,
+    :data:`Identifier` and :data:`TraceLabel` are ``str``,
+    :data:`TraceMetricValue` is ``int | float | bool``, and :class:`RecordIdSet`
+    is a frozen model.
+
+    ``FrozenDict`` is left exactly as it is; folding the two together is #849.
+    """
+
+    __slots__ = ("_items",)
+
+    _items: tuple[tuple[K, V], ...]
+
+    def __init__(self, data: Mapping[K, V] | None = None, /) -> None:
+        """Store ``data``'s pairs, detached from whatever the caller keeps."""
+        object.__setattr__(self, "_items", tuple((data or {}).items()))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Refuse attribute assignment, including rebinding the backing tuple."""
+        msg = f"{type(self).__name__} is immutable"
+        raise AttributeError(msg)
+
+    def __delattr__(self, name: str) -> None:
+        """Refuse attribute deletion, for the same reason as assignment."""
+        msg = f"{type(self).__name__} is immutable"
+        raise AttributeError(msg)
+
+    def __getitem__(self, key: K) -> V:
+        """Return the value for ``key``, raising ``KeyError`` if absent."""
+        for candidate, value in self._items:
+            if candidate == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[K]:
+        """Iterate over the keys, in insertion order."""
+        return (key for key, _ in self._items)
+
+    def __len__(self) -> int:
+        """Return the number of keys."""
+        return len(self._items)
+
+    def __repr__(self) -> str:
+        """Return a dict-like representation of the contents."""
+        return f"{type(self).__name__}({dict(self._items)!r})"
+
+    def __eq__(self, other: object) -> bool:
+        """Compare equal to any mapping with the same contents."""
+        if isinstance(other, Mapping):
+            return dict(self._items) == dict(other)
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        """Hash by contents; possible only because every value is itself frozen."""
+        return hash(frozenset(self._items))
+
+    def __reduce__(self) -> tuple[type[FrozenMapping[K, V]], tuple[dict[K, V]]]:
+        """Support pickling (and, via it, ``copy.deepcopy``)."""
+        return (type(self), (dict(self._items),))
+
+
+def _frozen_mapping[K: Hashable, V: Hashable](value: Mapping[K, V]) -> FrozenMapping[K, V]:
+    """Detach and freeze — the model owns a copy no caller can reach.
+
+    ``frozen=True`` refuses ``trace.metrics = ...`` and not
+    ``trace.metrics["k"] = ...``; ADR-0018 §3's rule is about the second.
+
+    Args:
+        value: The validated mapping pydantic produced.
+
+    Returns:
+        An immutable, hashable copy of it.
+    """
+    return FrozenMapping(value)
+
+
+def _thaw_mapping(value: Mapping[Any, Any]) -> dict[Any, Any]:
+    """Convert a frozen trace mapping back to a plain ``dict`` for serialisation.
+
+    The mirror of :func:`_thaw_json`, and needed for the same mechanical reason:
+    pydantic-core serialises a ``dict`` and does not know how to write a
+    :class:`FrozenMapping`, so a trace holding one could not reach the store at
+    all. The frozen form is how the value is *held*; a plain mapping is how it is
+    *written*.
+
+    ADR-0119 §13a elides this along with the imports, but the store §13d ratifies
+    cannot round-trip a trace without it — and this is the shape
+    :data:`FrozenJsonMapping` already uses for exactly this problem.
+
+    Args:
+        value: The frozen mapping a trace field holds.
+
+    Returns:
+        A plain ``dict`` with the same pairs; pydantic then serialises each value
+        in the ordinary way.
+    """
+    return dict(value)
+
+
+type TraceId = Annotated[EncodableText, AfterValidator(_trace_id)]
+type TraceLabel = Annotated[EncodableText, AfterValidator(_trace_label)]
+type FaultClassName = Annotated[EncodableText, AfterValidator(_fault_class_name)]
+type TraceMetricValue = Annotated[int | float | bool, AfterValidator(_finite)]
+
+#: The per-set ceiling on ids a trace stores (ADR-0119 §3).
+TRACE_RECORD_SET_CAP: Final = 256
+
+
+class TraceKind(StrEnum):
+    """What kind of event a trace records (ADR-0119 §3).
+
+    Exactly four members, and §13e makes a fifth an ADR's to add: these are the
+    axis along which the tier discipline is stated, so membership is contract.
+    """
+
+    OPERATION = "operation"
+    RETRIEVAL = "retrieval"
+    MEMORY_WRITE = "memory_write"
+    CONFIGURATION = "configuration"
+
+
+class TraceOutcome(StrEnum):
+    """How the traced crossing of a seam ended (ADR-0119 §3).
+
+    ``REFUSED`` and ``FAULT`` are drawn from the exception's **class** and never
+    from its message text — the same discriminator ADR-0111 §9 binds the
+    scheduler's log record to, so the two records about one event cannot
+    disagree. ``INCOMPLETE`` is ADR-0111 §9's third clause given a value: a run
+    that halted without exhausting its work is neither a success nor a failure.
+    """
+
+    OK = "ok"
+    REFUSED = "refused"
+    FAULT = "fault"
+    INCOMPLETE = "incomplete"
+
+
+class TraceRef(StrEnum):
+    """Singular relations: at most one id each."""
+
+    CORRELATION = "correlation"
+    CONVERSATION = "conversation"
+    TURN = "turn"
+    EXECUTION = "execution"
+
+
+class TraceRecordSet(StrEnum):
+    """Plural id sets, each naming the disposition its ids had."""
+
+    RETURNED = "returned"
+    WRITTEN = "written"
+    REINFORCED = "reinforced"
+    SUPERSEDED = "superseded"
+    RETIRED = "retired"
+
+
+class RecordIdSet(BaseModel):
+    """Ids the operation produced under one disposition, and how many there were.
+
+    Truncated exactly when ``total`` exceeds ``len(ids)`` — equivalently, when it
+    exceeds :data:`TRACE_RECORD_SET_CAP` — so there is no separate flag to
+    disagree with.
+
+    Attributes:
+        ids: The ids, in the order the observed operation produced them, each at
+            most once, capped at :data:`TRACE_RECORD_SET_CAP`.
+        total: How many the operation actually produced, cap or no cap.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    ids: tuple[Identifier, ...] = Field(max_length=TRACE_RECORD_SET_CAP)
+    total: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _ids_are_a_set_and_are_the_total_up_to_the_cap(self) -> RecordIdSet:
+        """Distinct ids, and every one produced, dropping only at the cap.
+
+        Duplicates are refused **first**, because the length invariant cannot see
+        them: ``ids=("a", "a"), total=2`` satisfies it while double-counting one
+        record and crowding out a real one at the cap.
+
+        ``len(ids) == min(total, CAP)`` is then the whole of the rest, and it is
+        tighter than ``total >= len(ids)`` in the direction that matters: the
+        looser form admits ``ids=(), total=1``, which reports a truncation
+        ADR-0119 §3 reserves for cap overflow and would have a measure exclude a
+        trace that lost nothing.
+
+        Returns:
+            ``self``, unchanged.
+
+        Raises:
+            ValueError: If an id repeats, or if the count does not match.
+        """
+        if len(set(self.ids)) != len(self.ids):
+            msg = "a record id set carries each id at most once"
+            raise ValueError(msg)
+        expected = min(self.total, TRACE_RECORD_SET_CAP)
+        if len(self.ids) != expected:
+            msg = f"a total of {self.total} carries {expected} ids, not {len(self.ids)}"
+            raise ValueError(msg)
+        return self
+
+
+type TraceRefs = Annotated[
+    Mapping[TraceRef, Identifier], AfterValidator(_frozen_mapping), PlainSerializer(_thaw_mapping)
+]
+type TraceRecords = Annotated[
+    Mapping[TraceRecordSet, RecordIdSet],
+    AfterValidator(_frozen_mapping),
+    PlainSerializer(_thaw_mapping),
+]
+type TraceMetrics = Annotated[
+    Mapping[TraceLabel, TraceMetricValue],
+    AfterValidator(_frozen_mapping),
+    PlainSerializer(_thaw_mapping),
+]
+
+
+class EvaluationTrace(BaseModel):
+    """One event at one seam: what happened, when, how it ended, what it was about.
+
+    **Tier 2 under ADR-0004 §1, at every depth** (ADR-0119 §2). It references
+    Tier 0/1 content and never contains it: every string reachable from here is
+    an identifier minted by this system, a member of an enumeration in this
+    module, a literal constant written in the emitting module, or an exception
+    class's ``__name__``. Every other observation is a number or a boolean —
+    there is no free-text field, no serialised payload and no open-value-type
+    mapping anywhere in the family.
+
+    **It is not a measurement** (§1). No trace carries a rate, ratio, average or
+    threshold verdict over more than the one event it records; a measure is a
+    query over the stream, computed where its denominator can be stated.
+
+    **Frozen at both levels.** ``ConfigDict(frozen=True)`` refuses
+    ``trace.metrics = …`` and not ``trace.metrics["k"] = …``, and the second is
+    the one that matters: a caller mutating a validated trace's ``metrics`` in
+    place could put a free-form string past §2's containment rule *after*
+    validation ran. So each mapping field detaches into a copy the model owns and
+    exposes as an immutable view (ADR-0018 §3).
+
+    Attributes:
+        id: The trace's own id, **minted by the type** — 32 lowercase hex
+            characters of a random UUID, so no caller can supply one from data
+            (§3). A store hydrating a row that carries no readable id raises
+            :class:`~ai_assistant.core.errors.TraceStoreError` rather than
+            letting this default stand in for the id the row was supposed to
+            have.
+        kind: Which of the four kinds of event this is.
+        seam: Where it happened, as a literal label the emitting module wrote.
+        occurred_at: When it happened, stamped by the **emitter** from the
+            ``Clock`` it already holds — never by the store on append, which
+            would measure the write rather than the event.
+        elapsed: How long it took, or ``None`` where no duration was observed.
+        outcome: How it ended.
+        fault_class: The exception class that decided a ``REFUSED`` or ``FAULT``
+            outcome, present exactly when one did, and never its message.
+        refs: Singular relations this trace is about, by :class:`TraceRef`.
+        records: Plural id sets, each under the disposition its ids had. An
+            **absent** key means that set was not observed; a key present with an
+            empty :class:`RecordIdSet` means it was observed and was empty.
+        metrics: Numbers and booleans this event observed, keyed by literal
+            constants. A key appears only when the quantity it names was
+            observed: an absent key means *not observed*, never zero.
+    """
+
+    #: ``validate_default`` because pydantic skips defaults otherwise, and an
+    #: unvalidated ``{}`` is a *mutable* mapping ``frozen=True`` does not protect.
+    model_config = ConfigDict(frozen=True, validate_default=True)
+
+    id: TraceId = Field(default_factory=lambda: uuid4().hex)
+    kind: TraceKind
+    seam: TraceLabel
+    occurred_at: UtcInstant  # emitter-stamped, from its Clock (§3)
+    elapsed: timedelta | None = Field(default=None, ge=timedelta(0))
+    outcome: TraceOutcome
+    fault_class: FaultClassName | None = None
+    refs: TraceRefs = Field(default_factory=dict)
+    records: TraceRecords = Field(default_factory=dict)
+    metrics: TraceMetrics = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _a_fault_class_accompanies_a_failure(self) -> EvaluationTrace:
+        """``fault_class`` is present exactly when an exception decided the outcome.
+
+        ``REFUSED`` and ``FAULT`` are drawn *from* an exception's class (§3), so
+        one without a class names no discriminator; ``OK`` and ``INCOMPLETE``
+        reached no exception, so one with a class reports a failure that did not
+        happen.
+
+        Returns:
+            ``self``, unchanged.
+
+        Raises:
+            ValueError: If the outcome and the fault class disagree.
+        """
+        failed = self.outcome in (TraceOutcome.REFUSED, TraceOutcome.FAULT)
+        if failed != (self.fault_class is not None):
+            msg = f"outcome {self.outcome} and fault_class {self.fault_class!r} disagree"
+            raise ValueError(msg)
+        return self
+
+
+# --- evaluation: the trace walk's position and its chunk (ADR-0119 §7a) ------
+# Beside :class:`WalkPosition` and :class:`RecordChunk` above, and a *separate*
+# type from them rather than a reuse: a key issued by one store is meaningless
+# in another, and a shared type is an invitation to hand a memory walk's
+# position to the trace store and be answered rather than refused. They live
+# here rather than in `core/protocols.py`, where ADR-0119 §13b's second code
+# block prints them, because that module declares Protocols and no pydantic
+# models — every model those Protocols exchange is defined in this one, the two
+# ADR-0114 analogues above included.
+
+
+class TracePosition(BaseModel):
+    """How far a walk over the trace store has reached (ADR-0119 §7a).
+
+    Opaque to its caller: no caller parses, orders, compares, derives or
+    synthesises one, and the only admissible source is the :class:`TraceChunk`
+    that carried it (ADR-0114 §2). The token is the store's own order key — a
+    ``rowid`` in a SQLite store, an insertion index elsewhere.
+
+    A **bound, not a reference**: ADR-0119 §10's purge deleting traces below a
+    held position does not disturb it, because the store never reissues a key.
+    The store issues a floor position for a walk that has seen nothing, so there
+    is no state in which a caller holds none (§7a).
+
+    Attributes:
+        token: The store's opaque encoding of this position.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    token: NonBlankEncodableText = Field(
+        description="The store's opaque encoding of this position. Never parsed by a caller.",
+    )
+
+
+class TraceChunk(BaseModel):
+    """One chunk of a walk over the trace store, and where it reached (§7a).
+
+    Attributes:
+        traces: The traces this chunk returned, in the store's total insertion
+            order.
+        position: Always present — after the last trace returned, or the
+            resumed-from position when ``traces`` is empty. A chunk shorter than
+            the requested bound means "nothing further yet", never "this walk is
+            over".
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    traces: tuple[EvaluationTrace, ...]
+    position: TracePosition

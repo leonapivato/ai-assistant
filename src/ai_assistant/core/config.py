@@ -34,7 +34,8 @@ from ai_assistant.core.types import Reversibility, RiskLevel, describe_untrusted
 #: The string an operator sets a setting to in the environment to select its
 #: ``None`` value — "disable this entirely". Environment variables arrive as
 #: strings, so any nullable setting whose *default* is not ``None``
-#: (``confirm_at_risk``, ``confirm_at_reversibility``, ``episode_retention``)
+#: (``confirm_at_risk``, ``confirm_at_reversibility``, ``episode_retention``,
+#: ``deferral_ttl``, ``trace_retention``)
 #: would otherwise be un-disable-able from the environment: omitting the variable
 #: restores the default, and neither a scale member nor a duration literal spells
 #: ``None``. Case-insensitive, and distinct from every ``RiskLevel`` and
@@ -441,8 +442,9 @@ def _only_a_duration(value: object) -> object:
       sentinel through to :func:`_disabled_if_sentinel` on the fields that opt in.
     - ``None``, passed through for the field's **own** annotation to judge, which
       is the only thing that knows whether this duration has a ``None`` spelling:
-      it does for ``confirmation_ttl`` (no lifetime), ``episode_retention`` and
-      ``deferral_ttl`` (ADR-0074 §7, ADR-0078 §6), and deliberately does not for
+      it does for ``confirmation_ttl`` (no lifetime), ``episode_retention``,
+      ``deferral_ttl`` and ``trace_retention`` (ADR-0074 §7, ADR-0078 §6,
+      ADR-0119 §10), and deliberately does not for
       ``conversation_tombstone_grace``, where ADR-0074 §8 declines to offer one.
       Deciding that here would duplicate — and could contradict — the annotation.
 
@@ -1230,6 +1232,43 @@ class Settings(BaseSettings):
             "The most answerable deferred questions the queue holds; beyond it a new "
             "question is refused rather than an old one evicted (ADR-0078 §7). Positive, "
             "with no unlimited spelling."
+        ),
+    )
+
+    # --- Evaluation traces (ADR-0119 §10) ---------------------------------
+    # The one setting the trace store takes, parsed from an ISO-8601 duration or
+    # `HH:MM:SS` string (`ASSISTANT_TRACE_RETENTION=P365D`). A trace is deleted
+    # only for being older than this; **there is no count cap and no size cap**,
+    # and that absence is the decision. A cap evicts the *oldest* rows, and in
+    # #829's design the oldest rows are the unarmed baseline — the half of the
+    # natural experiment that cannot be re-created, because consolidation writes
+    # durably and "unarming later does not restore one". A horizon deletes rows
+    # nobody is measuring; a cap deletes the rows the measurement is *about*,
+    # silently, at exactly the moment the store has accumulated enough to be
+    # interesting. The unbounded-growth worry a cap answers is answered by the
+    # arithmetic instead: a trace is a row of numbers and ids, a busy single-user
+    # day is on the order of a few hundred events, and a year of them is tens of
+    # megabytes on a store whose neighbours hold embeddings.
+    #
+    # **365 days rather than a figure sized to leg 8** (§10). The horizon must
+    # exceed any window a measure will span, and a default sized to the window
+    # this lane can foresee is a default that expires the first time somebody
+    # wants a year-over-year comparison.
+    #
+    # `gt=timedelta(0)` refuses a zero or negative horizon at load, as
+    # `episode_retention` and `confirmation_ttl` above refuse theirs: a
+    # non-positive horizon would sweep every trace at the first purge, which is
+    # an instrument switched off by misconfiguration. `None` — reachable only
+    # through the disable sentinel — means keep forever, matching
+    # `episode_retention`'s convention, and a finite default is chosen for that
+    # field's reason: unbounded is the wrong thing to inherit by omission.
+    trace_retention: _OptionalDuration = Field(
+        default=timedelta(days=365),
+        gt=timedelta(0),
+        description=(
+            "How long an evaluation trace is kept before the retention sweep deletes it "
+            "(ADR-0119 §10). Finite by default and longer than any measurement window; "
+            "set it to 'none' to keep traces forever. There is no count or size cap."
         ),
     )
 
