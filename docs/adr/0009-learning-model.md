@@ -1,9 +1,6 @@
 # 9. Learning: feedback capture that proposes memory updates
 
-- Status: Partially superseded by ADR-0122 (§1's first bullet, in the one clause
-  requiring the caller to carry the target kind: `memory_kind` becomes optional and
-  an absent value is resolved by `orchestration` before the processor is called;
-  the bullet's reason, its second bullet and §§2–6 stand)
+- Status: Partially superseded by ADR-0122 (§1's first bullet, in its one clause requiring the caller to carry the target kind — `memory_kind` becomes optional and an absent value is resolved before the processor is called; that bullet's reason, its second bullet and §§2–6 stand)
 - Date: 2026-07-17
 - **Partially superseded: 2026-08-09 by
   [ADR-0122](0122-a-corrections-record-type-is-resolved-from-its-target.md), in the
