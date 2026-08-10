@@ -866,7 +866,9 @@ property being tested.
 > unset name returns `None`; two names differing only in `scope` are distinct
 > entries, and two differing only in `key` are distinct; two subjects bound to
 > different installations share no entry, so an entry arranged in one is `None` in
-> the other; a name outside the subject's bound scope raises `ValueError` and the
+> the other; two subjects **over one backing** differing only in installation, and
+> two differing only in scope, each keep their entries isolated under the same
+> `key`; a name outside the subject's bound scope raises `ValueError` and the
 > subject's own scope still answers afterwards; the subject satisfies `Secrets` by
 > `isinstance`; and no secret value appears in the `repr` of the subject, of a
 > `SecretValue`, or of any error the subject raises.
@@ -915,14 +917,18 @@ for the same reason and `core/types.py`'s `encodable_text` is the predicate; ADR
 is deliberate: the callable is where a hand-built value is caught and `set` is
 where a bare `SecretStr` is (§4).
 
-**The installation obligation is in the suite rather than left to the adapter,
-and that placement is the point of it.** Every other test on this list passes
-against a subject that ignores its installation namespace entirely, because one
-subject cannot observe another's entries by accident. Two subjects can, and the
-failure it catches is the one §2 exists to prevent: a concrete adapter that
-composes backend coordinates from the scope and key alone, whose second
-installation then overwrites the first's credential and whose unenrolment deletes
-it. Requiring two subjects makes that a red test rather than a support ticket.
+**The isolation obligations are in the suite rather than left to the adapter, and
+the shared backing is what gives them teeth.** Every other test on this list passes
+against a subject that ignores both its installation and its scope, because one
+subject cannot observe another's entries by accident — and two subjects holding
+*separate* maps cannot either, which is why "two subjects" alone is not enough.
+Over one backing they can, and that is the real deployment: one OS keyring holding
+every scope of every installation on the machine. The failures it catches are the
+two §2 exists to prevent — an adapter composing backend coordinates from the key
+alone, so `api-key` under `PROVIDER` and under `INTEGRATION` are one entry; and one
+composing them without the installation, so a second data directory overwrites the
+first's credential and its unenrolment deletes it. Both become red tests rather
+than support tickets.
 
 > **Normative.** The suite proves the unavailable state too — that every method
 > raises `SecretStoreUnavailableError` and that `get` does not return `None` — as a
