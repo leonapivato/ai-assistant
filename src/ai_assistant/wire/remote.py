@@ -127,7 +127,8 @@ class RemoteHubEngineClient(HubClient):
                 not say whose device holds the destination.
             HubIdentityMismatchError: If it says something other than the hub this
                 device was enrolled at.
-            HubUnavailableError: If nothing is listening at the destination.
+            HubUnavailableError: If nothing is listening at the destination, or it
+                does not answer within this client's read deadline.
             SecretStoreUnavailableError: If this device's keyring cannot be reached —
                 which ADR-0125 §7 keeps distinct from holding no enrolment, because
                 otherwise "a client would report the owner as unenrolled while they
@@ -146,14 +147,30 @@ class RemoteHubEngineClient(HubClient):
             )
             raise HubIdentityMismatchError(msg)
         try:
-            reader, writer = await asyncio.open_connection(host=host, port=port)
-        except OSError as exc:
+            # **Bounded, because on this transport nothing else bounds it.** A Unix
+            # socket with no listener refuses at once; an overlay address whose peer
+            # is asleep or unrouted drops the SYN, and the operating system retries
+            # for minutes before it gives up. That is not an edge case here — #879
+            # prices the hub's duty cycle as a laptop that sleeps, so it is the
+            # ordinary way this call fails, and ADR-0084 §9's "a closed door is an
+            # instruction" is not served by a command that hangs instead of saying
+            # so. The figure is this client's existing patience for this hub rather
+            # than a new setting: a connect that stalls is a connection that stalls.
+            async with asyncio.timeout(self._read_timeout.total_seconds()):
+                reader, writer = await asyncio.open_connection(host=host, port=port)
+        except (OSError, TimeoutError) as exc:
+            stalled = isinstance(exc, TimeoutError)
+            detail = (
+                f"it did not answer within {self._read_timeout.total_seconds():g}s"
+                if stalled
+                else str(exc)
+            )
             msg = (
-                f"cannot reach the assistant hub at {self.where}: {exc}. Check that the "
+                f"cannot reach the assistant hub at {self.where}: {detail}. Check that the "
                 f"hub is running with ASSISTANT_HUB_REMOTE_ADDRESS set, that both devices "
-                f"are on the overlay, and that ASSISTANT_REMOTE_HUB_PORT matches the hub's "
-                f"hub_remote_port. (This client never starts one for you, and never falls "
-                f"back to running the assistant in-process.)"
+                f"are on the overlay and awake, and that ASSISTANT_REMOTE_HUB_PORT matches "
+                f"the hub's hub_remote_port. (This client never starts one for you, and "
+                f"never falls back to running the assistant in-process.)"
             )
             raise HubUnavailableError(msg) from exc
         try:

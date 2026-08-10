@@ -459,3 +459,41 @@ async def _free_port() -> int:
 async def _never(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     """A handler that is never invoked; the socket is closed before anything connects."""
     raise AssertionError
+
+
+async def test_a_destination_that_never_answers_is_reported_rather_than_waited_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped SYN is the ordinary failure on this transport, not an edge case.
+
+    A Unix socket with no listener refuses at once, so the loopback client never
+    needed a connect deadline. An overlay address whose peer is asleep or unrouted
+    drops the packet instead, and the operating system retries for minutes — and
+    #879 prices the hub's duty cycle as a laptop that sleeps, so this *is* how the
+    hop ordinarily fails. ADR-0084 §9's "a closed door is an instruction, never a
+    fallback" is not served by a command that hangs rather than saying so.
+
+    Driven by replacing the dial with one that never completes, so the case is
+    deterministic and costs milliseconds rather than depending on a blackholed
+    address the test environment may or may not provide.
+    """
+
+    async def never(**_kwargs: object) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    monkeypatch.setattr(asyncio, "open_connection", never)
+    store, _ = await enrolled()
+    client = RemoteHubEngineClient(
+        RemoteDestination(host="100.64.1.7", port=50084),
+        read_timeout=timedelta(milliseconds=20),
+        agent=FakeOverlayAgent(),
+        secrets=store,
+    )
+
+    with pytest.raises(HubUnavailableError) as raised:
+        await client.probe()
+
+    assert "100.64.1.7:50084" in str(raised.value)
+    assert "did not answer" in str(raised.value)
+    assert "never falls back" in str(raised.value)
