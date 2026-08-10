@@ -38,6 +38,7 @@ from ai_assistant.memory import (
     SqliteMemoryStore,
 )
 from ai_assistant.memory.conversation_store import SqliteConversationStore
+from ai_assistant.memory.health import DEFAULT_K, DEFAULT_SAMPLE, MAX_K, StoreHealthReader
 from ai_assistant.memory.reembed import Reembedder
 from ai_assistant.models import (
     BoundedEmbedder,
@@ -1319,6 +1320,16 @@ def _as_async(close: Callable[[], None]) -> Callable[[], Awaitable[None]]:
 #: dependency-free ``HashingEmbedder``.
 _ON_DEVICE_EMBEDDERS: Final = frozenset({EmbedderKind.ON_DEVICE, EmbedderKind.HASHING})
 
+#: The census's own defaults and its ``k`` ceiling, re-exported so its entry
+#: point can put them in ``--help`` and refuse a bad argument *at the argument*,
+#: without importing ``memory`` (ADR-0129 §5, ADR-0083 §8). Restating the numbers
+#: there would be a second definition that could drift from the one the mechanism
+#: applies; passing them through the layer already allowed to name both sides
+#: costs an import edge that exists anyway.
+STORE_HEALTH_DEFAULT_SAMPLE: Final = DEFAULT_SAMPLE
+STORE_HEALTH_DEFAULT_K: Final = DEFAULT_K
+STORE_HEALTH_MAX_K: Final = MAX_K
+
 
 def build_reembedder(
     settings: Settings,
@@ -1410,3 +1421,45 @@ def build_measure_reader(settings: Settings, *, data_dir: Path | None = None) ->
     """
     directory = data_dir if data_dir is not None else settings.data_dir
     return MeasureReader(store=directory / "traces.db")
+
+
+def build_store_health_reader(
+    settings: Settings, *, data_dir: Path | None = None
+) -> StoreHealthReader:
+    """Point ADR-0129's store-health census at this deployment's memory store.
+
+    The composition root's fourth function, and thin for the same reason the
+    third is: ADR-0129 §5 gives the census nothing to be wired *to*. It opens the
+    memory store and no other store (§4), embeds nothing and constructs no
+    ``Embedder`` (§2), and consults no model and no policy — so the one fact it
+    may not go and get for itself is where the data directory is.
+
+    **It is here rather than in the entry point** for the reason
+    :func:`build_reembedder` is, and §5 states it: the mechanism lives in
+    ``memory/``, ``lint-imports``' "nothing imports the service" contract means
+    the entry point has to *be* in ``service`` because that is where the instance
+    lock lives, and ADR-0083 §8 keeps that entry point free of subsystem imports.
+    So the census arrives at its mechanism the same indirect way the re-embedder
+    and the measure report do.
+
+    **The clock is not a parameter here**, and that is ADR-0129 §1 rather than an
+    omission: ``T`` is the instant the tool reads its own clock, "not an operator
+    parameter: no option, argument or setting moves it". A test fixes it by
+    injecting one into :class:`~ai_assistant.memory.health.StoreHealthReader`
+    directly, which is the corpus's standing pattern; there is nothing for this
+    layer to choose.
+
+    **Nothing is opened here**, exactly as in :func:`build_measure_reader`: a
+    reader that opened the database on construction would create an empty one as
+    a side effect of a deployment that has never run the hub asking what is in it.
+
+    Args:
+        settings: Loaded application settings — ``data_dir`` locates the store.
+        data_dir: Overrides ``settings.data_dir`` when given, exactly as
+            :func:`build_engine`'s keyword does (ADR-0083 §2).
+
+    Returns:
+        A reader ready to take a census of ``<data_dir>/memory.db``.
+    """
+    directory = data_dir if data_dir is not None else settings.data_dir
+    return StoreHealthReader(store=directory / "memory.db")

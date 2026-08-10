@@ -158,6 +158,15 @@ ai-assistant-restore = "ai_assistant.service.restore:main"
 # there is would do. §2 states the separate script normatively: "It is not an
 # `assistant` subcommand."
 ai-assistant-purge = "ai_assistant.service.purge:main"
+# ADR-0129's store-health census, the ninth console script and the offline
+# family's sixth member — the count §5 itself keeps, following ADR-0126's. Here by
+# the family's rule and by §5's own clause, which makes the separate script
+# normative: the entry point "is its **own** console script, beside
+# `ai-assistant-hub`, `ai-assistant-reembed` and `ai-assistant-measures`, and never
+# an `assistant` subcommand". Like the re-embed and measure tools it wants the hub
+# **stopped**, because §1 defines every figure at one instant and a census taken
+# while supersessions are landing is a census of no instant.
+ai-assistant-store-health = "ai_assistant.service.store_health:main"
 
 [dependency-groups]
 dev = [
@@ -993,3 +1002,82 @@ source_modules = [
     "ai_assistant.testing",
 ]
 forbidden_modules = ["keyring"]
+
+[[tool.importlinter.contracts]]
+# ADR-0129 §5's fifth clause, in the form it asks for: "The implementing lane
+# makes the previous clause mechanical: a `lint-imports` contract names the
+# store-health module as forbidden to every subsystem package and to
+# `orchestration` and `interfaces`."
+#
+# **This is what the placement costs, and it is the reason the placement is
+# affordable.** ADR-0120 §9 put its own offline reader in `evaluation/` partly
+# because "no subsystem may import it — which is the same contract that makes
+# ADR-0119 §7's prohibition mechanical", and §5 reaches the opposite placement on
+# a difference of instrument: the census reads the store's *storage*, so it has to
+# live in the package that owns the schema. `memory/` is a package the pipeline
+# may import, so the property §9 actually valued — "unreachable from the pipeline
+# by the architecture checker, not by a promise" — would degrade to a convention
+# here. This contract is what buys it back, one module at a time instead of one
+# package at a time.
+#
+# What it enforces is §5's fourth clause: no pipeline component and no interface
+# adapter "computes, holds, caches or consults a figure defined here, and no
+# figure defined here is an input to anything the system does". A figure that
+# armed something would rebuild the instrument the #824 re-ruling took apart, and
+# §6 forbids that in a clause; this makes the *reachability* half of it a check.
+#
+# **Every package is enumerated rather than relying on `ai_assistant` wholesale**,
+# in the discipline the `service`, `wire`, `readers`, `evaluation` and
+# `secret_store` contracts above established: a new top-level package is a
+# deliberate addition here rather than something that silently escapes. That takes
+# the source list past the nine §5 names, which is stricter than the clause and
+# forbidden by nothing.
+#
+# **`ai_assistant.app` is the one deliberate absence**, and the absence is the
+# clause's meaning rather than a gap — the same carve-out the `readers` and
+# `evaluation` contracts state at length. The composition root is not a subsystem;
+# it is the one place golden rule 1 puts the injection, and §5 wires the census
+# there by name. Listing it would make the module unreachable in production for
+# good.
+#
+# **`ai_assistant.memory` is the other**, and for a reason no earlier contract has
+# met: the module *is* in that package. A source list naming its own parent asks
+# import-linter to check a package against a descendant of itself, which is not
+# what the clause is about — what the clause is about is the pipeline reaching in
+# from outside. The intra-package separation (nothing in `memory/` that serves a
+# read imports this module) is left to review, which is where §5's fourth clause
+# says the rest of it lives anyway.
+#
+# **Direct imports only**, for the reason the three sibling contracts state: the
+# chain `service -> app -> memory.health` is the sanctioned one and exists the
+# moment the entry point runs, so banning it indirectly would reach the outcome
+# listing `app` would cause.
+name = "nothing but the composition root imports the store-health census"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "ai_assistant.core",
+    "ai_assistant.models",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    "ai_assistant.orchestration",
+    "ai_assistant.interfaces",
+    # The entry point drives whatever the composition root returns and names no
+    # `memory` type (ADR-0129 §5, ADR-0083 §8). Beyond the nine §5 enumerates, and
+    # listed because this is the one package that has a reason to reach for the
+    # module and must not.
+    "ai_assistant.service",
+    "ai_assistant.wire",
+    "ai_assistant.readers",
+    # ADR-0129 §1: neither figure family may be substituted for the other, and
+    # §5's last clause keeps the two reports from importing each other's package.
+    "ai_assistant.evaluation",
+    "ai_assistant.secret_store",
+    # The canonical fakes stand in for the stores this census reads; none of them
+    # has a geometry, and none may reach one.
+    "ai_assistant.testing",
+]
+forbidden_modules = ["ai_assistant.memory.health"]
