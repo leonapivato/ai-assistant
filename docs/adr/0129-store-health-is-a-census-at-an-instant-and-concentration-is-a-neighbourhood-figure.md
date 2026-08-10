@@ -221,12 +221,12 @@ single fact from which §5's placement follows, and it is inherited rather than 
 > **undefined** when the population it is taken over is empty, and the report states
 > that it is undefined rather than stating a figure or a zero.
 
-> **Normative.** `T` is an input to the run, not a fact the mechanism discovers
-> about itself: it is either given by the operator or defaulted to the tool's own
-> start instant, and it is fixed for the whole run so every figure in one report is
-> taken at the same instant. The report states `T`, and states every parameter §3
-> makes a parameter, on its own output. A figure reported without them is not one
-> of these figures.
+> **Normative.** `T` is the instant the tool reads its own clock, read **once** per
+> run and used for every figure in that run. It is **not** an operator parameter: no
+> option, argument or setting moves it, and a report is always a statement about the
+> store as it stands when the tool runs. The report states `T`, and states every
+> parameter §3 makes a parameter, on its own output. A figure reported without them
+> is not one of these figures.
 
 **The category matters because the two reports will be read side by side.** ADR-0120
 §1's measures answer "did the user model get more accurate over this window" from a
@@ -239,15 +239,33 @@ present state of a store is the accumulated residue of every event since it was
 created, including events before any retained trace — and that is why a census can
 answer a question about accumulation that no window over the stream can.
 
-**`T` being an input is not the as-of retrieval axis ADR-0045 §1 deferred and
+**`T` is the read instant because the store keeps no history, and an operator-chosen
+`T` would promise one.** The census population is whatever the store physically holds
+when the tool reads it (§3). Classify that population against a `T` in the past and
+the report counts a record inserted since — which did not exist at `T` — while missing
+one deleted or purged since, which did; a `T` in the future has the same defect
+mirrored. Neither is a census of the store at `T`, and the store retains no versioned
+snapshot and no deleted row from which one could be built. Fixing `T` to the read
+instant makes the population and the classification the same moment, which is the only
+configuration under which the sentence this section's heading uses is true.
+
+**That does not cost reproducibility, because reproducibility was never `T`'s job.**
+What must not vary between two runs is *which records were looked at*, and §3's
+determinism clause binds that directly and independently of `T`. What is allowed to
+vary — and must — is what the figures come to, because a window that lapses between
+two runs really has lapsed. An implementation that needs a fixed `T` for a test injects
+the clock, which is the corpus's standing pattern (`core/clock.py`), rather than
+exposing an option that would let an operator ask a question the store cannot answer.
+
+**And the read instant is not the as-of retrieval axis ADR-0045 §1 deferred and
 ADR-0128 §1's second clause refuses.** Those are about `MemoryStore.search` gaining a
-parameter that moves the instant its read-time predicates are evaluated against, and
-this ADR adds no parameter to any contract (§5) and does not go through `search` at
-all (§2). The census evaluates `Validity.live_at` itself, over the records it read, at
-an instant it states — which is what any reader of the whole store has to do to say
-anything about liveness, since ADR-0045 §6's read semantics are that `get` and
-`search` hide a record on either end of the window while `export` keeps it. A
-diagnostic choosing which instant to describe is not a read path acquiring an axis.
+parameter that moves the instant its read-time predicates are evaluated against; this
+ADR adds no parameter to any contract (§5), does not go through `search` at all (§2),
+and — by the clause above — adds no as-of parameter to its own tool either. The census
+evaluates `Validity.live_at` itself, over the records it read, at the instant it read
+them, which is what any reader of the whole store has to do to say anything about
+liveness, since ADR-0045 §6's read semantics are that `get` and `search` hide a record
+on either end of the window while `export` keeps it.
 
 **The undefined clause is ADR-0120 §1's second clause restated for this family, and
 it is restated rather than cited because ADR-0120 §1 binds "every measure defined by
@@ -328,9 +346,10 @@ stand alone; either is sufficient.
 
 > **Normative.** The sample and `k` are parameters of the run, stated on the report.
 > `k` is a **positive integer** and is the same for every sampled record in a run.
-> The sample is a deterministic function of the store's contents and the stated
-> parameters, and does not depend on `T`. Two runs over an unchanged store, with
-> the same parameters and the same `T`, produce identical figures.
+> The sample is a deterministic function of the census population and the stated
+> parameters, and does not depend on `T`: two runs over an unchanged store with the
+> same parameters select the same sample. Where `T` is also held fixed, the two runs
+> produce identical figures.
 
 > **Normative.** The density figure is **undefined** where the store holds fewer
 > than `k + 1` records with a vector, and the report states that it is undefined
@@ -407,8 +426,8 @@ density per record is one KNN over the whole vector table, and `vec0` scans it; 
 about `m × n × 1.2 µs`, which is seconds for a thousand samples over a hundred
 thousand records and hours for the exhaustive figure. Sampling is the honest way to
 buy the figure, and the determinism clause is what keeps it a figure rather than a
-draw: two operators running the same tool on the same store at the same `T` must not
-get two answers. The mechanism — a stable order over ids, a stride, a hash cut — is
+draw: two operators running the same tool on the same store must not look at two
+different sets of records. The mechanism — a stable order over ids, a stride, a hash cut — is
 the implementing lane's, and any of them satisfies the clause.
 
 **The clause binds the sample and not the figure's value, and the distinction is the
@@ -420,9 +439,10 @@ lapsed, and the records the sampler happened to pick. What a figure is *worth* i
 allowed to move with `T`, and must: a record whose `valid_until` falls between two
 runs is live in the first census and retired in the second, and a rule promising
 identical figures across that would be promising a census that is not of an instant.
-`T` is an input (§1) precisely so the two effects are separable — an operator who
-wants the same answer twice passes the same `T`, and one who wants to see what a day
-did passes two.
+Separating the two is what makes a difference between two reports readable: with the
+sample fixed, everything that moved between them moved because the store or the clock
+did, and §1 keeps `T` the read instant so the clock's contribution is exactly the time
+that elapsed.
 
 **Closure age is what the store can honestly say about churn, and the limit is
 stated.** There is no supersession lineage in the store (Context), so "how many times
@@ -667,14 +687,16 @@ that reads as numbers. Naming it separately costs a sentence and closes a door t
 
 > **Normative.** The tests assert §3's determinism clause directly — two runs of the
 > concentration figure over an unchanged store, with the same parameters and the
-> same `T`, produce identical figures — and assert the density figure over a store
-> built with a known concentration, in the shape `tests/memory/aged_store.py`
-> already builds.
+> clock held at one reading, produce identical figures — and assert the density
+> figure over a store built with a known concentration, in the shape
+> `tests/memory/aged_store.py` already builds.
 
-> **Normative.** The tests assert that `T` moves the figures and the sample: over
-> an unchanged store, two runs whose `T` falls either side of a record's
-> `valid_until` reclassify that record between live and retired in the census, the
-> band fill and the density population, while selecting the same sample.
+> **Normative.** The tests assert that `T` moves the figures and not the sample:
+> over an unchanged store, two runs against **injected** clock readings falling
+> either side of a record's `valid_until` reclassify that record between live and
+> retired in the census, the band fill and the density population, while selecting
+> the same sample. The clock is injected because §1 gives the tool no `T` option to
+> pass.
 
 **The determinism test is named because it is the clause an implementation can pass in
 name and fail in substance.** A sampler seeded from the system RNG, or one that walks a
