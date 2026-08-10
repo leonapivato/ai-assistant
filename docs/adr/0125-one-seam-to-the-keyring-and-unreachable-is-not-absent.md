@@ -977,14 +977,18 @@ standing example. It is used here rather than dropping the obligation because th
 unavailable path is the one §7 argues hardest about, and a suite that could not
 test it at all would leave the argument unenforced.
 
-> **Normative.** Three obligations are the landing lane's rather than the triad's,
-> because a shared suite running against a fake cannot reach them, and the lane
-> that lands the keyring-backed implementation owes all three: that a backend
-> selection which finds nothing usable **raises rather than falling back** (§7);
-> that no backend storing a value without the operating system's own access control
-> is ever selected; and that §6's redaction holds over that adapter's **own** error
-> wrapping, proved against a controllable backend it can drive to fail on each
-> method with the value in the failure's text.
+> **Normative.** The lane that lands the keyring-backed implementation runs **both
+> shared suites against that adapter**, over a backend it controls, so every
+> obligation the suites carry — the scope and installation refusals, the unavailable
+> state, the locked backend, and §6's redaction over every derivation on every
+> method — is proved against the real wrapper and not only against the fake. The
+> controllable backend is what makes this possible and the lane owes it.
+
+> **Normative.** Two further obligations are that lane's alone, because no suite
+> running against any subject can express them: that a backend selection which
+> finds nothing usable **raises rather than falling back** (§7), and that no backend
+> storing a value without the operating system's own access control is ever
+> selected.
 
 **Naming them here is what stops them from evaporating between two lanes.** Every
 obligation the shared suite carries can be satisfied by the canonical fake, which
@@ -994,14 +998,27 @@ that property lives and the adapter's own tests are where it has to be pinned;
 recorded as a debt on a lane that does not exist yet, it would be discovered by
 whoever first ran the system on a headless box.
 
-**The redaction obligation is on both lists deliberately, and only one of the two
-copies can be skipped.** The suite's version is marked optional because a subject
-that cannot be driven to fail cannot run it — but §6 is an invariant of every
-implementation, not of the ones convenient to test, so an adapter allowed to skip
-it on that ground is exactly the implementation whose error wrapping nobody has
-looked at. The fake proves the contract is expressible; the adapter proves the one
-that touches a real credential honours it, against a backend it controls. A single
-optional case would have left the production path as the only untested one.
+**The adapter's obligations are bound to the suites rather than listed again, and
+an earlier draft listed them.** That draft named three properties by hand, and
+review then found, one round at a time, that the hand-written list was narrower
+than the suite it was meant to mirror — the derivations were missing, then the
+locked branch was. The same drift as §11's own enumeration, from the same cause:
+two lists describing one obligation diverge, and the shorter one is the floor.
+Running the suites against the adapter is also the corpus's default rather than a
+special demand — a shared conformance suite exists so that *every* implementation
+runs it, and an adapter that ran none of it would be the anomaly.
+
+**What that leaves genuinely lane-only is small and stated separately**: no
+fallback, and no unprotected backend. Neither is expressible as a suite obligation
+at all, because both are about which backend gets *selected*, and a subject handed
+to a suite has already been constructed. Those two would have been discovered by
+whoever first ran the system on a headless box.
+
+**The optional marking inside the suites stays, and now costs nothing.** A subject
+that cannot be driven into a failing or locked state skips those cases; the
+adapter can be driven into both, because the clause above requires it to bring a
+backend it controls. So the production path is covered by construction rather than
+by an implementer choosing to cover it.
 
 > **Normative.** The canonical fake in `ai_assistant.testing` is an in-memory
 > implementation of `SecretStore`, taking its installation namespace and its
