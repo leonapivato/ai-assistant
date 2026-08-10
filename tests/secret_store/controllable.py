@@ -52,6 +52,24 @@ class ControllableKeyring:
         self.available = True
         self.last_backend_failure: str | None = None
         self._armed: dict[SecretMethod, Disclosure] = {}
+        self._untranslated: dict[SecretMethod, Disclosure] = {}
+
+    def arm_untranslated(self, method: SecretMethod, disclosure: Disclosure) -> None:
+        """Arm ``method`` to fail with an exception the library never wraps.
+
+        A backend translates *some* of what its transport raises and passes the rest
+        through — the Secret Service backend reaches ``secretstorage`` over D-Bus,
+        and a service that goes away after selection surfaces as that stack's own
+        exception rather than a ``KeyringError``. The double stands for that class,
+        and carries the same disclosing text, because an adapter that normalised the
+        type while passing the message on would have moved the leak rather than
+        closed it.
+
+        Args:
+            method: Which of the seam's three methods fails.
+            disclosure: Which derivation ADR-0125 §6 forbids the error carries.
+        """
+        self._untranslated[method] = disclosure
 
     def arm(self, method: SecretMethod, disclosure: Disclosure) -> None:
         """Make the next call to ``method`` fail with an error naming the value.
@@ -95,18 +113,30 @@ class ControllableKeyring:
 
         Raises:
             KeyringLocked: If the backend has been made unavailable.
-            KeyringError: If ``method`` was armed. Its own text carries the
-                derivation, which is what the adapter must not pass on.
+            RuntimeError: If ``method`` was armed by :meth:`arm_untranslated` — an
+                exception outside the library's own hierarchy, which the adapter
+                still owes its declared error surface for.
+            KeyringError: If ``method`` was armed by :meth:`arm`. Its own text
+                carries the derivation, which is what the adapter must not pass on.
         """
         if not self.available:
             msg = "the keyring is present and locked, and no unlock is possible in this session"
             raise keyring.errors.KeyringLocked(msg)
+        untranslated = self._untranslated.pop(method, None)
+        if untranslated is not None:
+            raise RuntimeError(self._record_failure(method, untranslated, plaintext))
         disclosure = self._armed.pop(method, None)
         if disclosure is None:
             return
+        raise keyring.errors.KeyringError(self._record_failure(method, disclosure, plaintext))
+
+    def _record_failure(
+        self, method: SecretMethod, disclosure: Disclosure, plaintext: str | None
+    ) -> str:
+        """Build the disclosing text and keep it as the case's negative control."""
         self.last_backend_failure = (
             None
             if plaintext is None
             else f"keyring: {method.value} rejected {disclosure_of(disclosure, plaintext)}"
         )
-        raise keyring.errors.KeyringError(self.last_backend_failure or "keyring: refused")
+        return self.last_backend_failure or "keyring: refused"

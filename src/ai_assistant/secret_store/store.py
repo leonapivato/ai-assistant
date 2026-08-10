@@ -317,7 +317,17 @@ class KeyringSecretStore:
             return await asyncio.to_thread(call)
         except _UNAVAILABLE as exc:
             unavailable, fault = True, type(exc).__name__
-        except keyring.errors.KeyringError as exc:
+        except Exception as exc:
+            # **Every failure a backend can produce, not only the library's own
+            # error type.** A backend translates *some* of what its transport raises
+            # and passes the rest through: the Secret Service backend reaches
+            # `secretstorage` over D-Bus, and a service that goes away after
+            # selection surfaces as that stack's exception rather than a
+            # ``KeyringError``. ADR-0125 §6 declares this seam's error surface to be
+            # two types, so an untranslated one escaping would make that declaration
+            # false — and would reach a caller as a traceback carrying whatever the
+            # backend put in it. ``Exception`` and not ``BaseException``, so a
+            # cancellation still propagates (ADR-0060).
             unavailable, fault = False, type(exc).__name__
         # Raised out here, past the ``except`` clauses, so that neither the backend's
         # exception nor anything it carries becomes this one's ``__context__`` —
