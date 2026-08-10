@@ -104,7 +104,7 @@ see it.
 
 ### What the store carries, checked rather than assumed
 
-Every definition below is only as good as its agreement with what a walked record
+Every definition below is only as good as its agreement with what a stored record
 actually holds, so this is the inventory it was checked against at `origin/main`.
 
 - **`MemoryRecord`** is the four-kind union over `MemoryBase`, which carries `id`,
@@ -123,10 +123,16 @@ actually holds, so this is the inventory it was checked against at `origin/main`
   ADR-0072 §4 keeps `source` the single classifier — so a band decomposition is a
   pure function of a field every record carries, and the census and the store cannot
   disagree about it.
-- **`MemoryStore` carries the walk** (ADR-0114): `walk_records` returns a chunk in
-  insertion order against a **named** cursor, and `advance_walk` persists that
-  cursor. `export` returns every record including the window-closed ones. Neither
-  returns an embedding, and `MemoryRecord` has no field for one.
+- **`MemoryStore` carries the walk, and the walk cannot see this census's
+  population** (ADR-0114). `walk_records` returns a chunk in insertion order against
+  a **named** cursor, `advance_walk` persists that cursor — and its contract is
+  explicit that "**Only records retained *and* live at the instant it reads are
+  yielded** … An expired record is never yielded and neither is one whose window is
+  closed or not yet open", because "the walk sides with `get`/`search` rather than
+  with `export`". So a store holding nothing but retired records produces an empty
+  walk. The one contract member that returns them is `export`, which returns the
+  whole store in one list. Neither returns an embedding, and `MemoryRecord` has no
+  field for one.
 - **The vectors are in the store and nowhere else.** `SqliteMemoryStore` creates
   `vec_records` as a `vec0` virtual table joined to `records` by `rowid` with no
   foreign key, and `search` reads `SELECT r.data, v.distance FROM vec_records v …`.
@@ -235,12 +241,11 @@ answer a question about accumulation that no window over the stream can.
 ADR-0128 §1's second clause refuses.** Those are about `MemoryStore.search` gaining a
 parameter that moves the instant its read-time predicates are evaluated against, and
 this ADR adds no parameter to any contract (§5) and does not go through `search` at
-all (§2). The census evaluates `Validity.live_at` itself, over records it walked, at
-an instant it states — which is what any reader of `export`'s output would have to do
-to say anything about liveness, since ADR-0045 §6's read semantics are that `get` and
-`search` hide a record on either end of the window while `export` keeps it — the
-window-closed records are visible to a walk by design. A diagnostic choosing which
-instant to describe is not a read path acquiring an axis.
+all (§2). The census evaluates `Validity.live_at` itself, over the records it read, at
+an instant it states — which is what any reader of the whole store has to do to say
+anything about liveness, since ADR-0045 §6's read semantics are that `get` and
+`search` hide a record on either end of the window while `export` keeps it. A
+diagnostic choosing which instant to describe is not a read path acquiring an axis.
 
 **The undefined clause is ADR-0120 §1's second clause restated for this family, and
 it is restated rather than cited because ADR-0120 §1 binds "every measure defined by
@@ -298,9 +303,15 @@ stand alone; either is sufficient.
 > **expired at `T`** when `expires_at` is set and at or before `T`. Liveness and
 > expiry are separate axes and a record may be both.
 
-> **Normative.** The report states the **closure census**: over every walked record,
-> the total and the counts live, retired, not-yet-live and expired at `T`, each as a
-> count and as a proportion of the total, store-wide and decomposed by `kind`.
+> **Normative.** The **census population** is every record the memory store holds,
+> whatever its liveness or retention state — the population `export` returns, not
+> the live-and-retained subset `walk_records` yields. A retired, not-yet-live or
+> expired record is in it. The report states the population's size.
+
+> **Normative.** The report states the **closure census**: over the census
+> population, the total and the counts live, retired, not-yet-live and expired at
+> `T`, each as a count and as a proportion of the total, store-wide and decomposed
+> by `kind`.
 
 > **Normative.** The report states the **neighbourhood closure density
 > distribution**: over a sample of records live at `T` for which the store holds a
@@ -326,12 +337,12 @@ stand alone; either is sufficient.
 > **Normative.** The report states the **closure-age distribution**: over every
 > record retired at `T`, the interval from its `valid_until` to `T`.
 
-> **Normative.** The report states the **band fill**: over every walked record, the
+> **Normative.** The report states the **band fill**: over the census population, the
 > count live and the count not live at `T` for each `BeliefBand`, taken as
 > `band_of` of the record's `provenance.source`.
 
-> **Normative.** The report states how many walked records the store holds no vector
-> for, separately from every other count.
+> **Normative.** The report states how many records of the census population the
+> store holds no vector for, separately from every other count.
 
 **The census is kept even though #799 ruled the proportion useless, and the job has
 changed.** #799 ruled it the wrong *tuning* statistic — it does not predict the
@@ -446,9 +457,13 @@ lock, which serialises it against the hub by construction and needs no new mecha
 — and ADR-0120 §9 took it for the trace reader. This is the same lock for the same
 reason.
 
-**The cursor clause exists because ADR-0114's walk is named and durable.** A
-diagnostic that reached for `walk_records` and then called `advance_walk` would
-consume a consumer's position and silently skip records for whatever job owns that
+**The cursor clause exists because ADR-0114's walk is named and durable, and it binds
+even though the census cannot come from a walk.** §3's population is every record the
+store holds and `walk_records` yields only the live and retained ones (§5), so the
+mechanism has no reason to touch a walk at all — but "no reason to" is not a rule, and
+the failure it prevents is severe and silent. A diagnostic that reached for
+`walk_records` and then called `advance_walk` would consume a consumer's position and
+silently skip records for whatever job owns that
 name. Reading through a walk is permitted; *advancing* one is not. This is stated as a
 clause rather than left to care, because the failure is invisible and lands on a
 different subsystem.
@@ -495,11 +510,17 @@ deployment that has never run the hub asking whether it has any traces".
 unavailable, and the reason is mechanical rather than stylistic. `pyproject.toml`'s
 "evaluation depends on core and nothing else" contract forbids `evaluation → memory`,
 so a reader placed there reaches the memory store only through the `MemoryStore`
-Protocol. That Protocol carries the walk (ADR-0114) and returns `MemoryRecord`s, which
-have no embedding field, and its `search` cannot see a retired row (§2). So the census,
-the closure age and the band fill are computable there and **the concentration figure
-is not** — the package boundary would pick the figures, which is backwards, and the
-figure it would drop is the one ADR-0128 §3 routed here.
+Protocol, and that Protocol cannot supply §3's figures. `search` cannot see a retired
+row after ADR-0128 §1 (§2). `walk_records` yields "only records retained *and* live at
+the instant it reads", so a walk cannot see one either — and that is not an oversight
+to route around but ADR-0114's ruling that "the walk sides with `get`/`search` rather
+than with `export`, because everything that *derives* new content reads the live set".
+The one member that returns the census population is `export`, which returns the whole
+store in a single `list[MemoryRecord]`, and none of the three returns an embedding. So
+a reader placed in `evaluation/` could compute the census, the closure age and the band
+fill only by holding every record in memory at once, and **could not compute the
+concentration figure at all** — the package boundary would pick the figures, which is
+backwards, and the figure it would drop is the one ADR-0128 §3 routed here.
 
 *Adding the vectors to the `MemoryStore` contract* would restore that placement and is
 declined on three grounds, none of which is the cost of writing the ADR. It is a
@@ -762,11 +783,13 @@ carrying the **walk**, and none reads a trace back" — is about the trace strea
 third clause keeps this tool out of the trace store entirely, in either direction, so
 §7 is not engaged rather than narrowed. **No record owed.**
 
-**ADR-0114 — nothing owed.** The walk and its named cursor are cited and used no more
-widely than they hold: §4's second clause *narrows* this tool's own behaviour by
-forbidding it to advance a cursor, which adds an obligation on this lane and none on
-ADR-0114. Nothing here reopens ADR-0114's total-insertion-order condition, because
-nothing here partitions the store (§9). **No record owed.**
+**ADR-0114 — nothing owed, and its lifecycle predicate is read as written rather than
+worked around.** §5 takes ADR-0114's ruling that a walk yields only the retained and
+live records at face value, and concludes from it that this census cannot be taken
+through a walk — not that the walk should change. §4's second clause *narrows* this
+tool's own behaviour by forbidding it to advance a cursor, which adds an obligation on
+this lane and none on ADR-0114. Nothing here reopens ADR-0114's total-insertion-order
+condition, because nothing here partitions the store (§9). **No record owed.**
 
 **ADR-0104 §5 — nothing owed.** The offline-tool placement is cited as the precedent it
 is, and this ADR takes it as written: entry point in `service/`, mechanism in the
