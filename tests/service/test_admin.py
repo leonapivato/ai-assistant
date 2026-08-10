@@ -52,6 +52,7 @@ async def _admin(tmp_path: Path) -> AsyncIterator[tuple[AdminListener, DeviceReg
     registry = DeviceRegistry(store, hub_identity=_HUB_ID)
     listener = AdminListener(registry, data_dir=tmp_path, now=_clock)
     await listener.start()
+    await listener.begin_serving()
     try:
         yield listener, registry
     finally:
@@ -348,6 +349,7 @@ async def test_a_listing_stays_inside_one_frame_however_long_the_record_is(
     registry = DeviceRegistry(store, hub_identity=_HUB_ID)
     listener = AdminListener(registry, data_dir=tmp_path, now=_clock)
     await listener.start()
+    await listener.begin_serving()
     try:
         listed = await _act(listener, {"act": "list"})
     finally:
@@ -562,6 +564,7 @@ async def test_a_full_listing_of_the_longest_identities_still_fits_one_frame(
     registry = DeviceRegistry(store, hub_identity=_HUB_ID)
     listener = AdminListener(registry, data_dir=tmp_path, now=_clock)
     await listener.start()
+    await listener.begin_serving()
     try:
         listed = await _act(listener, {"act": "list"})
     finally:

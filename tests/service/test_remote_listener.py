@@ -175,6 +175,7 @@ async def _remote(
         the_engine, settings, registry=registry, agent=the_agent, budget=the_budget
     )
     await listener.start(build="test")
+    await listener.begin_serving()
     listener.port = _bound_port(listener)
     try:
         yield _Hub(listener, registry, the_agent, the_engine, the_budget)
@@ -728,6 +729,7 @@ async def test_a_connection_stalled_in_the_identity_query_converges_on_shutdown(
         budget=budget,
     )
     await listener.start(build="test")
+    await listener.begin_serving()
     try:
         reader, writer = await asyncio.open_connection(_BIND, _bound_port(listener))
         await asyncio.wait_for(reached.wait(), _PATIENT.total_seconds())
@@ -907,3 +909,56 @@ async def test_a_served_device_is_recorded_as_admitted_once_the_handshake_comple
     assert admitted["overlay_identity"] == _DEVICE
     assert [e for e in captured if e["event"] == "hub_remote_admission_refused"] == []
     assert minted.credential not in repr(captured)
+
+
+async def test_a_bound_listener_answers_nothing_until_it_is_told_to_serve(
+    tmp_path: Path,
+) -> None:
+    """ADR-0083 §14.2, as a property of the bind rather than of the ordering.
+
+    "The transport must not accept before readiness" is about a hub not carrying out
+    a request it might then fail to have started for. A hub binding several doors
+    answers that by binding *all* of them before *any* accepts — otherwise a door
+    opened early serves a turn during a startup the next bind then fails, and the
+    request was carried out by a hub that never came up.
+
+    The two halves are asserted in order. After :meth:`start` the address is taken
+    — a bind that had failed would have raised there, which is the whole point of
+    doing it early — and the door is shut: a peer's connect is refused outright.
+    After :meth:`begin_serving` the same address admits an enrolled device. The
+    agent's counter is what says nothing was served in between rather than merely
+    not answered.
+    """
+    settings = _settings(tmp_path)
+    store = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
+    registry = DeviceRegistry(store, hub_identity=_HUB_ID)
+    agent = _FakeAgent()
+    listener = RemoteListener(
+        FakeAssistantEngine(),
+        settings,
+        registry=registry,
+        agent=agent,
+        budget=ConnectionBudget(max_connections=8, max_pending_handshakes=4),
+    )
+    await listener.start(build="test")
+    try:
+        port = _bound_port(listener)
+        minted = registry.enrol(_DEVICE, now=_MOMENT)
+        with pytest.raises(ConnectionRefusedError):
+            await asyncio.open_connection(_BIND, port)
+        assert agent.identified == 0
+
+        await listener.begin_serving()
+        reader, writer = await asyncio.open_connection(_BIND, port)
+        peer = _Peer(reader, writer)
+        try:
+            assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
+            assert agent.identified == 1
+        finally:
+            peer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+    finally:
+        await listener.stop_accepting()
+        await listener.aclose()
+        store.close()

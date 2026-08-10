@@ -608,10 +608,20 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
             # connection at all — ADR-0124 §2's "refused at load time rather than
             # bound", at the latest point this deployment can still refuse.
             remote = await _build_remote(engine, settings, data_dir=data_dir, budget=budget)
-            await listener.start(build=__version__)
+            # **Every door binds before any door accepts** (ADR-0083 §14.2). The two
+            # remote sockets are bound first and left not-serving, then the loopback
+            # socket binds and accepts, then the remote pair begins serving. What
+            # that buys is the property §14.2 is about: no request is carried out by
+            # a hub whose startup then failed on a bind it had not reached yet. The
+            # loopback listener keeps ADR-0084 §1's own `start`, so nothing about it
+            # changes; what changes is that nothing which can fail follows it.
             if remote is not None:
                 await remote.listener.start(build=__version__)
                 await remote.admin.start()
+            await listener.start(build=__version__)
+            if remote is not None:
+                await remote.listener.begin_serving()
+                await remote.admin.begin_serving()
             _log.info(
                 "hub_ready",
                 pid=os.getpid(),
