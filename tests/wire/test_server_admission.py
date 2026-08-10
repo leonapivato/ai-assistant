@@ -155,13 +155,31 @@ async def _serving(
         await server.wait_closed()
 
 
-def _connect(credential: object | None = None) -> env.Envelope:
-    """A connect frame carrying whatever a case needs in its credential member."""
+#: The default for :func:`_connect`, meaning **omit the member**.
+#:
+#: ``None`` cannot serve as that default, and the difference is a ruled one: ADR-0124
+#: §7 refuses an absent credential with ``credential_required`` and a present
+#: ``null`` — "present and… not a string" — with ``credential_rejected``, so a helper
+#: whose "leave it out" spelling *is* ``None`` cannot put the second case on the wire
+#: at all. Issue #917 is what that costs: the arm reached a live hub untested.
+_OMITTED: Final = object()
+
+
+def _connect(credential: object = _OMITTED) -> env.Envelope:
+    """A connect frame carrying whatever a case needs in its credential member.
+
+    Args:
+        credential: The member's value — ``None`` included, which the codec writes
+            as a JSON ``null``. :data:`_OMITTED` leaves the member out entirely.
+
+    Returns:
+        The connect frame.
+    """
     payload: dict[str, Any] = {
         env.CONNECT_VERSION: env.PROTOCOL_VERSION,
         env.CONNECT_CLIENT: "assistant-cli",
     }
-    if credential is not None:
+    if credential is not _OMITTED:
         payload[env.CONNECT_CREDENTIAL] = credential
     return env.Envelope(kind=env.FrameKind.CONNECT, id="c-0", payload=payload)
 
@@ -341,6 +359,15 @@ async def test_the_loopback_listener_is_untouched_by_any_of_it(tmp_path: Path) -
         await peer.send(_connect())
         assert (await peer.receive()).kind is env.FrameKind.CONNECT_ACK
 
+    # A present ``null`` is admitted here and refused on the remote listener, and
+    # both answers come from the same frozen clause: this transport refuses a
+    # **non-empty** credential, and a ``null`` is a client saying it carries none.
+    # Pinned at the wire because that is where the divergence would be observable —
+    # the reader's half is in ``test_remote_connect.py``.
+    async with _serving(FakeAssistantEngine(), None, tmp_path) as (peer, _):
+        await peer.send(_connect(None))
+        assert (await peer.receive()).kind is env.FrameKind.CONNECT_ACK
+
 
 async def test_the_wire_asks_before_every_frame_it_writes(tmp_path: Path) -> None:
     """The ordering §8 requires, counted rather than inferred.
@@ -362,7 +389,7 @@ async def test_the_wire_asks_before_every_frame_it_writes(tmp_path: Path) -> Non
     assert admission.liveness_checks == 3
 
 
-@pytest.mark.parametrize("credential", [1, {"a": 1}, [1], True])
+@pytest.mark.parametrize("credential", [1, {"a": 1}, [1], True, None])
 async def test_a_credential_of_the_wrong_type_never_reaches_admission(
     credential: object, tmp_path: Path
 ) -> None:
@@ -372,6 +399,11 @@ async def test_a_credential_of_the_wrong_type_never_reaches_admission(
     is that the refusal survives to a *frame* with the right code, rather than
     becoming "an uncaught type error that closes the connection with no refusal" —
     which §7 names as one of the three ways implementations diverge here.
+
+    **``None`` is in the list and it is the case issue #917 caught in a live hub**: a
+    present ``null`` is "present and… not a string", so it takes this code and not
+    the absent member's — and the code is the whole of what the peer and the hub's
+    own refusal record are told, which is what §7 requires distinguished.
     """
     admission = _ScriptedAdmission()
     async with _serving(FakeAssistantEngine(), admission, tmp_path) as (peer, _):

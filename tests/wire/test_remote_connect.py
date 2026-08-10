@@ -60,25 +60,75 @@ def test_a_well_formed_credential_is_read_back_whole() -> None:
     assert (version, client, credential) == (env.PROTOCOL_VERSION, "assistant-cli", _VALID)
 
 
-@pytest.mark.parametrize(
-    "payload", [_payload(), _payload(credential=""), _payload(credential=None)]
-)
+@pytest.mark.parametrize("payload", [_payload(), _payload(credential="")])
 def test_an_absent_or_empty_credential_is_refused_by_its_own_reason(
     payload: dict[str, Any],
 ) -> None:
     """ADR-0124 §7: absent or empty is "refused, with a distinct error naming the
     reason".
 
-    Three spellings of "nothing" — omitted, empty, and an explicit ``null`` — because
-    all three are things a client can send and a rule that caught only one would
-    admit the other two on a listener whose whole purpose is that something is
-    checked.
+    The two spellings of "nothing" the clause names, and **only** those two: a
+    member that is not there, and a member that is there and empty. An explicit
+    ``null`` is a third thing and it belongs to the clause below, which is the
+    distinction this file previously lost — see
+    ``test_a_null_credential_is_present_and_not_a_string``.
     """
     with pytest.raises(CredentialRequiredError):
         env.read_remote_connect(payload)
 
 
-@pytest.mark.parametrize("credential", [1, True, 1.5, {"credential": "x"}, ["x"]])
+def test_a_null_credential_is_present_and_not_a_string_so_it_is_rejected() -> None:
+    """ADR-0124 §7's two arms, on the one value that satisfies both readings at a
+    glance and only one of them on the text (issue #917).
+
+    §7 puts "absent or empty" in one arm and "present and… not a string" in the
+    other. A ``null`` member is **present**, and it is **not a string**, so the
+    second arm governs — the first is about a member that is not there. The arms are
+    asserted against each other rather than alone, because the defect this pins was
+    not a missing refusal but the wrong one of two: ``dict.get`` answers ``None``
+    both for a member that is absent and for one that is present and ``null``, so a
+    reader that tests the decoded value alone cannot tell them apart, and the
+    ``is None`` arm ran first and swallowed the case.
+
+    Both codes refuse and close, so this is a distinctness defect rather than an
+    admission one — and distinctness is a ruled obligation: §7 requires the reasons
+    told apart "in the error it returns **and in what the hub logs**", so an operator
+    debugging a non-conforming client is otherwise told it sent *no* credential when
+    it sent a malformed one.
+    """
+    present_and_null = _payload(credential=None)
+    assert env.CONNECT_CREDENTIAL in present_and_null  # the premise: the member is there
+    with pytest.raises(CredentialRejectedError):
+        env.read_remote_connect(present_and_null)
+
+    omitted = _payload()
+    assert env.CONNECT_CREDENTIAL not in omitted
+    with pytest.raises(CredentialRequiredError):
+        env.read_remote_connect(omitted)
+
+
+def test_a_null_credential_is_still_nothing_on_the_loopback_transport() -> None:
+    """The other reader's answer to the same value, pinned as a decision rather than
+    left as whatever the shared member-reader happens to do.
+
+    ADR-0124 §7 froze the loopback rule — "ADR-0084 §2's rule is unchanged on the
+    loopback transport" — and that rule refuses a **non-empty** credential. A
+    ``null`` is not one: it is a client saying it carries none, on a transport where
+    nothing is checked and the ``0600`` bit does the work, so admitting it asserts no
+    check that did not happen. §7's type rule comes with a code (``credential_rejected``)
+    that the same section forbids on this listener, so applying it here would mean
+    inventing an answer rather than reading one.
+
+    Asserted beside the remote reader's opposite answer because that is what makes
+    the two rules a decision: the same bytes, two listeners, two rulings, each from
+    its own clause.
+    """
+    assert env.read_connect(_payload(credential=None)) == (env.PROTOCOL_VERSION, "assistant-cli")
+    with pytest.raises(CredentialRejectedError):
+        env.read_remote_connect(_payload(credential=None))
+
+
+@pytest.mark.parametrize("credential", [1, True, 1.5, {"credential": "x"}, ["x"], None])
 def test_a_credential_that_is_not_a_string_is_refused_as_one_that_did_not_verify(
     credential: object,
 ) -> None:
@@ -89,6 +139,10 @@ def test_a_credential_that_is_not_a_string_is_refused_as_one_that_did_not_verify
     for text, and three implementations could diverge three ways: an uncaught type
     error that closes the connection with no refusal, a hash over some serialisation
     of the object, or a generic refusal."
+
+    **Every JSON type that is not a string is here, ``null`` included**, so the arm
+    is ruled once rather than type by type — a rule that named the types it had
+    thought of would leave whichever one it forgot to the arm above.
     """
     with pytest.raises(CredentialRejectedError):
         env.read_remote_connect(_payload(credential=credential))
