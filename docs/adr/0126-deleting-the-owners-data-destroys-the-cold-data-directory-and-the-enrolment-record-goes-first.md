@@ -7,7 +7,8 @@
   the durability form ADR-0100 established and ADR-0125 followed. Four of the ADRs
   this decision rests on — ADR-0004, ADR-0007, ADR-0017 and ADR-0124 — carry
   supersession or amendment records written within the last three weeks, two of
-  them within the last two days, and a citation that silently means "whatever this
+  them within the last two days, and ADR-0123's and ADR-0125's implementations
+  landed on `main` while this decision was in review, and a citation that silently means "whatever this
   ADR says when you read it" is not checkable. Where a later ADR changes one of
   them, this one is read against the text named here until an ADR says otherwise.
 - **This ADR partially supersedes ADR-0124 and ADR-0004, and both records land in
@@ -82,11 +83,13 @@ be deciding, silently and in passing, what ADR-0004 §6's delete right *is*.
 - **The CLI has `forget`, `forget-conversation` and `forget-question`, each with a
   show-then-confirm ceremony, and no whole-store command.** No `shutil.rmtree` of a
   data directory exists anywhere in `src/`.
-- **Five console scripts ship**: `assistant`, `ai-assistant-hub`,
-  `ai-assistant-reembed`, `ai-assistant-measures` and `ai-assistant-device`. Each
-  carries a comment in `pyproject.toml` recording that it is a separate script
-  because ADR-0083 §8 forbids anything importing `service`. ADR-0123 §10 ratifies a
-  sixth and seventh — backup and restore — which are in flight and not merged.
+- **Seven console scripts ship**: `assistant`, `ai-assistant-hub`,
+  `ai-assistant-reembed`, `ai-assistant-measures`, `ai-assistant-device`,
+  `ai-assistant-backup` and `ai-assistant-restore`. Each carries a comment in
+  `pyproject.toml` recording that it is a separate script because ADR-0083 §8
+  forbids anything importing `service`. The last two landed while this ADR was in
+  review, so ADR-0123 §10's "fourth member of the offline family" now names shipped
+  code rather than a ratified intention, and §2 below is the fifth.
 - **The enrolment record is `<data_dir>/devices.db`**, one table, with a partial
   unique index enforcing ADR-0124 §6's one-live-enrolment rule. `EnrolmentStore`
   offers `enrol`, `revoke`, `recent_enrolments`, `known_identities` and
@@ -99,8 +102,12 @@ be deciding, silently and in passing, what ADR-0004 §6's delete right *is*.
   surface below is three acts on the enrolment record and nothing else."
 - **ADR-0124 §8's device-side unenrolment act does not exist.** PR #902 records it
   as deferred with the rest of the client half, and the tree agrees: no `unenrol`
-  identifier in `src/`, and no `keyring` import anywhere. ADR-0125 declares the
-  `Secrets`/`SecretStore` seam and `core/protocols.py` does not carry it yet.
+  act on `ai-assistant-device` and no client that reads a credential. ADR-0125's
+  triad landed while this ADR was in review, so `core/protocols.py` now carries
+  `Secrets` and `SecretStore` and `core/types.py` carries `SecretName`,
+  `SecretScope` and `SecretValue` — but the concrete keyring-backed implementation
+  ADR-0125 §8 requires has not landed, **there is no `keyring` import anywhere in
+  `src/`**, and no production module holds either face.
 - **No hub-side component writes a keyring entry today.** The provider credential
   is read from the process environment by the provider SDK, which ADR-0125 §8
   records as pre-existing and not authorised by it; no tool transmits anything, so
@@ -276,8 +283,8 @@ the hub, and §2 is where that is paid for rather than avoided.**
 
 > **Normative.** The act has its own console entry point in
 > `ai_assistant/service/`, named `ai-assistant-purge`, beside `ai-assistant-hub`,
-> `ai-assistant-reembed`, `ai-assistant-measures`, `ai-assistant-device` and the
-> backup and restore pair ADR-0123 §10 ratifies. It is not an `assistant`
+> `ai-assistant-reembed`, `ai-assistant-measures`, `ai-assistant-device`,
+> `ai-assistant-backup` and `ai-assistant-restore`. It is not an `assistant`
 > subcommand.
 
 > **Normative.** It runs with the hub stopped. It takes the hub's instance lock
@@ -871,7 +878,7 @@ acts identically. Stacked addition.
 console entry point in `ai_assistant/service/`, beside `ai-assistant-hub`,
 `ai-assistant-reembed` and `ai-assistant-measures`", and calls them "the fourth
 member of the offline family". Both remain accurate statements about backup and
-restore and about the family as it stood; a sixth member joining does not make
+restore and about the family as it stood; a fifth member joining does not make
 either false, and nothing in §10 closes the family. Stacked addition. §3's forward
 clause about a *new file in the data directory* is likewise untouched: this ADR
 places no file there.
@@ -903,7 +910,7 @@ so nothing in it is read differently.
   implementation.** No callback crosses `app`, no contract is added, and
   `lint-imports`' "nothing imports the service" contract is satisfied by placement
   instead of by indirection.
-- **The offline family gains a sixth member** and, with ADR-0123's pair, a shape:
+- **The offline family gains a fifth member** and, with ADR-0123's pair, a shape:
   an act whose subject is `Settings.data_dir` is an offline console script in
   `service/` taking the instance lock. Three ADRs have now reached that placement
   independently, and a fourth lane should treat it as the default rather than
