@@ -978,12 +978,18 @@ so nothing in it is read differently.
   ADR-0124 §6 says a revocation never erases it, this ADR says one act destroys it
   — and an implementation that conflates them breaches one of them. §4's second
   clause is what a reviewer checks against.
-- **ADR-0004 §6's Tier 0 half is discharged vacuously on the hub's machine and has
-  no mechanism behind it.** That is true today because nothing writes a keyring
-  entry there, and it stops being true the moment something does — at which point
-  the purge path is a contract question, because ADR-0125 §5 puts deletion on the
-  consumer and §8 keeps `service` out of the seam. **#909** carries it and §6 binds
-  the lane that fires it.
+- **ADR-0004 §6's Tier 0 half is not discharged on the hub's machine, and the ADR
+  says so instead of counting an empty keyring as an empty tier.** Two different
+  states sit under one clause. The *keyring-held* set is empty today, so the act
+  misses nothing there — and it has no mechanism behind it either, so the moment
+  something writes an entry the purge path becomes a contract question, because
+  ADR-0125 §5 puts deletion on the consumer and §8 keeps `service` out of the seam;
+  **#909** carries that and only that. The *environment-held* provider credential
+  is Tier 0, is on that machine, and stays after the act — which §6 partially
+  supersedes ADR-0004 §6 for, against a replacement the implementing lane owes: the
+  report names it as not purged and names where the owner removes it. A purge that
+  omitted that line would breach a clause of this ADR, not merely fall short of a
+  hope in it.
 - **Revisit if** the delete right acquires an in-session surface, if a component on
   the hub's machine starts holding a Tier 0 keyring entry (#909 fires first), if
   ADR-0124 §8's device-side unenrolment act is descoped (§9), or if a
