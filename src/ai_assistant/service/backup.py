@@ -209,16 +209,19 @@ def _back_up(settings: Settings, args: argparse.Namespace) -> int:
     _refuse_destination_inside_source(destination, parent=parent, data_dir=data_dir)
     _refuse_existing(destination)
 
+    # The directory is validated before the passphrase is asked for, so an
+    # operator does not type one — twice — only to be told their data directory
+    # is unreadable. Everything above this line is cheaper still.
+    try:
+        datadir.prepare(data_dir)
+    except (AssistantError, OSError) as exc:
+        return _report(exc)
+
     secret = passphrase.resolve(
         source=args.passphrase_file, generated=args.generate_passphrase, confirm=True
     )
     if not args.generate_passphrase:
         print(f"note: {passphrase.CUSTODY_REMINDER}", file=sys.stderr)
-
-    try:
-        datadir.prepare(data_dir)
-    except (AssistantError, OSError) as exc:
-        return _report(exc)
 
     lock = InstanceLock(data_dir / LOCK_FILENAME)
     try:
