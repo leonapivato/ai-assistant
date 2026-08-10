@@ -394,6 +394,23 @@ inspection.
 > or replacing whatever it held. It never refuses on the ground that an entry
 > already exists.
 
+> **Normative.** `set` validates `value` through `secret_value` at its own
+> boundary, before touching the keyring, and raises `ValueError` for one that does
+> not satisfy §3. An implementation may not rely on the annotation having been
+> honoured upstream.
+
+**Without the boundary check §3's promise is false, and the reason is a property
+of `Annotated` rather than of this design.** `SecretValue` is
+`Annotated[SecretStr, …]`, which has no runtime identity distinct from
+`SecretStr`: pydantic runs the validator when a model field carrying the
+annotation is validated, and a caller who builds `SecretStr("")` or a
+2 KB one and passes it directly satisfies every static check while the validator
+never runs. `core/types.py`'s existing aliases have the identical property and
+`core/errors.py` already answers it the same way — `AssistantError.__init__` calls
+`encodable_text` on every string argument rather than trusting that
+`EncodableText` was honoured. So the annotation is the declaration, the callable
+is the enforcement, and the seam calls it.
+
 > **Normative.** `delete(name)` removes the entry under `name` and returns whether
 > one was there. It raises nothing for an absent entry, and calling it repeatedly is
 > safe.
@@ -413,10 +430,39 @@ ADR-0124 §8's device-side unenrolment, whose whole job is to make sure the entr
 gone; an unenrolment that raised the second time it ran would be a worse surface
 for the one operation an owner performs when something has already gone wrong.
 
-> **Normative.** Each method is atomic with respect to concurrent callers in other
-> processes: a `get` never observes a partially written value. The seam offers no
-> atomicity **across** names — no transaction, no compare-and-set, no multi-name
-> write — and a caller may not assume any.
+> **Normative.** A `get` never observes a partially written value: it returns
+> either what a concurrent `set` wrote or what preceded it, never a mixture and
+> never a fragment. Concurrent `set`s of one name leave one of the written values
+> whole.
+
+> **Normative.** Nothing further is guaranteed under concurrency, and two
+> assumptions are named as forbidden because they are the ones a caller would
+> reach for. `delete`'s `bool` is **not** a synchronisation primitive: two callers
+> deleting one entry may both be told `True`, so it may never be used to elect a
+> winner or to make an operation happen exactly once. And there is no atomicity
+> **across** names — no transaction, no compare-and-set, no multi-name write.
+
+**The claim is stated in the weaker, true form, which is this corpus's posture
+rather than a hedge.** An earlier draft said each method is "atomic with respect
+to concurrent callers", which reads as one `delete` winning; no cross-platform
+keyring offers a compare-and-delete, so an implementation doing a read followed by
+a removal would tell both callers `True` and be conforming on the backing that
+exists. Ratifying an obligation the chosen backing cannot meet is the failure
+ADR-0016 §5 names, and it is the same reason §5 above refuses enumeration.
+`core/protocols.py`'s cancellation clause makes the identical move for the
+identical reason — "the rule is cooperative and is stated in the weaker, true
+form: no seam can stop work that declines to be cancelled" — and buys the same
+thing, which is that what the contract does promise is true everywhere.
+
+**Nothing needs the stronger property.** ADR-0124 §8's unenrolment needs the entry
+gone, not a winner elected; two unenrolments racing is an owner running one command
+twice. If a consumer ever does need mutual exclusion over a secret, the place for it
+is a lock the consumer owns, not a return value from a keyring.
+
+**These are caller-facing rules rather than suite obligations**, because a shared
+suite running in one process cannot prove or refute any of them portably. Saying
+so here is the point: the contract states what a caller may not assume, which is
+the enforceable half, and §11 does not pretend to test it.
 
 **Two entries can therefore be half-written, and ADR-0124 already handles it.** A
 device holds a credential and an enrolled hub identity as two entries, and a crash
@@ -724,8 +770,9 @@ property being tested.
 > raises nothing; `delete` returns `True` once and `False` thereafter, and `get`
 > then returns `None`; `set` and `delete` each raise `ValueError` for a name
 > outside the subject's bound scope, and the entry that name would have addressed
-> is neither written nor removed; and the subject satisfies `SecretStore` by
-> `isinstance`.
+> is neither written nor removed; `set` raises `ValueError` for a blank value and
+> for an oversized one built directly as a bare `SecretStr`, storing nothing in
+> either case; and the subject satisfies `SecretStore` by `isinstance`.
 
 > **Normative.** The type obligations are proved beside the suites, over the types
 > themselves: a `SecretValue` of exactly 1024 UTF-8 bytes constructs and one of
@@ -899,6 +946,16 @@ that inversion.
   is the shape ADR-0017 already carries and where ADR-0124 §12 put the same ADR's
   own acceptance date. Nothing else of that header, and no ratified text of that
   ADR, is edited.
+
+  **Both `Status` lines are one physical line, and ADR-0004's is unwrapped with no
+  word changed.** ADR-0070 §4 requires a canonical status to occupy one physical
+  line and says the wrapped ones already in the corpus are "the exception the
+  consumer rule and issue #404 handle, not a licence to write new ones". Adding a
+  pair produces a new line, so it is written canonically rather than by extending a
+  continuation; the ADR-0017 and ADR-0124 pairs on that line keep their scope text
+  exactly as their own lanes wrote it. Each new scope is the short clause reference
+  §4 asks for, and the elaboration lives in the dated note, which §4 does not
+  constrain.
 - **ADR-0084 — a stacked addition on §11, on ADR-0083 §15's own test.** §11 defers
   authentication's storage, saying "`SecretStore` is the obvious home". That
   sentence **stays true and now has an answer**, which is the stacked-addition test
