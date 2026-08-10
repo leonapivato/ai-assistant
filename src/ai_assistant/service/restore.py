@@ -39,7 +39,6 @@ ADR-0120 §8 already rules what a report over an empty stream says.
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import stat
 import sys
@@ -187,7 +186,7 @@ def _publish(staging: Path, target: Path) -> None:
         )
         raise RefusalError(msg)
     try:
-        os.rename(staging, target)  # noqa: PTH104 - `Path.rename` is the same call
+        staging.rename(target)
     except OSError as exc:
         msg = f"the restored directory could not be published to {target}: {exc}"
         raise RefusalError(msg) from exc
