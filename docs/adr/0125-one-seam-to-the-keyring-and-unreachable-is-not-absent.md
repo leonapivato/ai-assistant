@@ -241,8 +241,8 @@ somebody has to make on the record rather than a wiring detail (§12).
 > **Normative.** A `key` is one to sixty-four characters drawn from lowercase ASCII
 > letters, digits, `.`, `_` and `-`, beginning and ending with a letter or digit. No
 > uppercase, no whitespace, no control character, no non-ASCII character, no `:` and
-> no `/`. A value violating this raises `ValueError` at construction, so no store
-> method ever receives a malformed name.
+> no `/`. A value violating this raises `ValueError` at construction, and §4
+> requires every method to check it again rather than assume construction happened.
 
 **The character rule is a portability rule and each exclusion earns its place.**
 The concrete implementation composes the backend's own coordinates out of an
@@ -412,22 +412,31 @@ inspection.
 > or replacing whatever it held. It never refuses on the ground that an entry
 > already exists.
 
-> **Normative.** `set` validates `value` through `secret_value` at its own
-> boundary, before touching the keyring, and raises `ValueError` for one that does
-> not satisfy §3. An implementation may not rely on the annotation having been
-> honoured upstream.
+> **Normative.** Every method validates its arguments at its own boundary, before
+> reading a field of `name` and before touching the keyring: `name` against
+> `SecretName`'s own model, and `set`'s `value` through `secret_value`. A failure
+> raises `ValueError` and changes nothing. An implementation may not rely on either
+> having been validated upstream.
 
-**Without the boundary check §3's promise is false, and the reason is a property
-of `Annotated` rather than of this design.** `SecretValue` is
-`Annotated[SecretStr, …]`, which has no runtime identity distinct from
-`SecretStr`: pydantic runs the validator when a model field carrying the
-annotation is validated, and a caller who builds `SecretStr("")` or a
+**Neither type protects the boundary on its own, and they fail to for different
+reasons.** `SecretValue` is `Annotated[SecretStr, …]`, which has no runtime
+identity distinct from `SecretStr`: pydantic runs the validator when a model field
+carrying the annotation is validated, and a caller who builds `SecretStr("")` or a
 2 KB one and passes it directly satisfies every static check while the validator
-never runs. `core/types.py`'s existing aliases have the identical property and
-`core/errors.py` already answers it the same way — `AssistantError.__init__` calls
-`encodable_text` on every string argument rather than trusting that
-`EncodableText` was honoured. So the annotation is the declaration, the callable
-is the enforcement, and the seam calls it.
+never runs. `SecretName` is a model and does validate when constructed normally —
+but `SecretName.model_construct(scope=…, key="GitHub")` skips validation
+altogether and yields a well-typed object carrying a key §2 forbids, which on a
+case-insensitive backend addresses the very entry `github` names. That is the
+collision §2's character rule exists to prevent, arriving past the rule.
+
+**The corpus already answers both, and this follows rather than invents.**
+`AssistantError.__init__` calls `encodable_text` on every string argument instead
+of trusting that `EncodableText` was honoured. `SourceGrantStore.record` is
+required to store "a detached, **validated** snapshot" and says why in the same
+terms: a record corrupted past its own model "would be stored and then make every
+later read incoherent, and the construction invariants would have been checked on
+an object nobody kept". A seam that treats its own types as proof of their
+invariants is trusting a check that may never have run.
 
 > **Normative.** `delete(name)` removes the entry under `name` and returns whether
 > one was there. It raises nothing for an absent entry, and calling it repeatedly is
@@ -799,6 +808,20 @@ property being tested.
 > `SecretValue` is not normalised between construction and `get_secret_value`; and
 > `SecretName` refuses uppercase, whitespace, `:`, `/`, an empty key and a
 > 65-character key.
+
+> **Normative.** Both suites prove the forged-argument path against every subject:
+> a `SecretName` built through `model_construct` carrying an uppercase key, a `:`
+> in the key, an over-long key or no valid scope is refused with `ValueError` by
+> every method the subject has, and nothing is read, written or removed.
+
+**A forged name is not a hypothetical, and it is the one case ordinary
+construction cannot reach.** `model_construct` exists, is public, and produces an
+object that passes `isinstance` and every type check while carrying a key §2
+forbids — so a suite that only builds names the normal way proves the validator
+runs, never that the seam calls it. The corresponding case for the value type is
+already above, arriving by a different route (a bare `SecretStr`) for the same
+reason: what the suite has to exercise is the argument a seam actually receives,
+not the one a well-behaved caller would have built.
 
 **The surrogate case is named rather than left to "UTF-8 encodable", because it
 is the one that survives every other check.** `"\ud800"` is non-blank, is one
