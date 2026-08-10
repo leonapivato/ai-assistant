@@ -45,6 +45,9 @@ class _ScriptedAdmission:
 
     Attributes:
         refusal: What :meth:`admit` answers, or ``None`` to admit.
+        refusals: Every code the wire recorded against this connection, so a test
+            can assert that a refusal decided before :meth:`admit` was still
+            recorded with its device (ADR-0124 §6).
         live: What :meth:`is_live` answers. A test flips it at the instant it wants
             a revocation to land, which is the whole point of this class.
         credentials: Every value that reached :meth:`admit`, so a test can assert
@@ -55,6 +58,7 @@ class _ScriptedAdmission:
 
     refusal: AdmissionRefusal | None = None
     live: bool = True
+    refusals: list[str] = field(default_factory=list)
     credentials: list[str] = field(default_factory=list)
     liveness_checks: int = 0
 
@@ -67,6 +71,10 @@ class _ScriptedAdmission:
         """Answer, and count the asking."""
         self.liveness_checks += 1
         return self.live
+
+    def record_refusal(self, code: str) -> None:
+        """Keep what the wire asked to be recorded."""
+        self.refusals.append(code)
 
 
 class _GatedEngine(FakeAssistantEngine):
@@ -175,6 +183,11 @@ async def test_a_credential_reaches_admission_only_when_it_is_well_formed(
     assert reply.kind is env.FrameKind.ERROR
     assert reply.payload["code"] == env.CREDENTIAL_REJECTED
     assert admission.credentials == []
+    assert admission.refusals == [env.CREDENTIAL_REJECTED]
+    # ADR-0124 §6: "each admission and each refusal with the device it named". A
+    # refusal decided by the frame reader never reaches ``admit``, so without this
+    # the hub would answer the peer and record nothing about who it was.
+    assert admission.refusals == [env.CREDENTIAL_REJECTED]
 
 
 async def test_a_missing_credential_is_refused_by_its_own_code(tmp_path: Path) -> None:
@@ -191,6 +204,7 @@ async def test_a_missing_credential_is_refused_by_its_own_code(tmp_path: Path) -
         reply = await peer.receive()
     assert reply.payload["code"] == env.CREDENTIAL_REQUIRED
     assert admission.credentials == []
+    assert admission.refusals == [env.CREDENTIAL_REQUIRED]
 
 
 async def test_a_refused_device_reads_the_code_the_hub_decided(tmp_path: Path) -> None:

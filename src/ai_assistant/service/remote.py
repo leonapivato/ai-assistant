@@ -409,11 +409,10 @@ class _DeviceAdmission:
         """
         verdict = self._registry.verify(self._identity, credential)
         if verdict.refusal is not None:
-            _log.info(
-                "hub_remote_admission_refused",
-                overlay_identity=self._identity,
-                reason=verdict.refusal.value,
-            )
+            # Returned rather than recorded here: the wire records **every** refusal
+            # through :meth:`record_refusal`, including the ones the frame reader
+            # decides before this method is reached, so one call site holds the
+            # obligation and no refusal is written twice.
             return _REFUSALS[verdict.refusal]
         self._enrolment_id = verdict.enrolment_id
         _log.info(
@@ -422,6 +421,19 @@ class _DeviceAdmission:
             enrolment_id=verdict.enrolment_id,
         )
         return None
+
+    def record_refusal(self, code: str) -> None:
+        """Record one refusal against the device the agent named (ADR-0124 §6, §7).
+
+        **The code is the wire's token rather than an internal name**, so what an
+        owner reads in the log is the same vocabulary the device was sent — which is
+        what §7's "in the error it returns and in what the hub logs" asks for, and
+        what makes two records of one event correlatable.
+
+        Args:
+            code: The lowercase refusal token.
+        """
+        _log.info("hub_remote_admission_refused", overlay_identity=self._identity, reason=code)
 
     def is_live(self) -> bool:
         """Whether the enrolment this connection was admitted under is still live.

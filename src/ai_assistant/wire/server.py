@@ -148,6 +148,24 @@ class Admission(Protocol):
             Whether a frame may still be written to this device.
         """
 
+    def record_refusal(self, code: str) -> None:
+        """Record a refusal this connection took, against the device it named.
+
+        **Every refusal on the remote listener is recorded with its device, and the
+        ones decided before :meth:`admit` are why this method exists.** ADR-0124 §6
+        makes a hub-side record of each use one of the three replacements standing in
+        for ADR-0004 §7's gate — "every use of the credential is recorded at the hub,
+        each admission and each refusal with the device it named" — and §7 requires
+        the reasons distinguished "in the error it returns **and in what the hub
+        logs**". A credential that is absent, empty, of the wrong type or malformed is
+        refused by the frame reader, before any verifier is consulted; without this
+        the hub would answer that peer and record nothing about who it was.
+
+        Args:
+            code: The lowercase refusal token the peer is being sent. Never the
+                credential and never the verifier (§7).
+        """
+
 
 async def serve_connection(  # noqa: PLR0913 — the engine, the two stream halves, and one keyword per policy the listener supplies
     engine: AssistantEngine,
@@ -271,13 +289,10 @@ async def _handshake(
         # here quietly turned an oversized handshake — which must close with no
         # response — into a credential refusal. The narrow clause lets it propagate
         # to the close it is owed.
-        await _refuse(
-            writer,
-            frame.id,
-            code=_refusal_code(exc),
-            message=str(exc),
-            limits=limits,
-        )
+        code = _refusal_code(exc)
+        if admission is not None:
+            admission.record_refusal(code)
+        await _refuse(writer, frame.id, code=code, message=str(exc), limits=limits)
         return False
 
     if version != env.PROTOCOL_VERSION:
