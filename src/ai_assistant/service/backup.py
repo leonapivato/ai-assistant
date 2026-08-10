@@ -388,8 +388,12 @@ def _publish(temporary: Path, destination: Path) -> None:
                 f"local filesystem and copy it there yourself"
             )
             raise RefusalError(msg) from exc
-        msg = f"the artifact could not be published to {destination}: {exc}"
-        raise RefusalError(msg) from exc
+        # Everything else — an exhausted disk, an I/O error — is left as it was
+        # raised, so `classify` decides whether it is worth another attempt.
+        # ADR-0083 §5 puts an exhausted disk on the restartable side, and only the
+        # two cases above are *policy*: a destination that exists, and a
+        # filesystem with no primitive that could publish without replacing one.
+        raise
     temporary.unlink(missing_ok=True)
 
 
