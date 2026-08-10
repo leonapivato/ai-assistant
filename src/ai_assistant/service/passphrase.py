@@ -59,6 +59,11 @@ _GROUP_SIZE: Final = 5
 #: obligation on the operator and requires the tool to keep it in front of them
 #: rather than in a document: "a passphrase held only on this machine does not
 #: survive the loss of this machine".
+#: How far the reader will look for the end of a passphrase file's first line. A
+#: passphrase past this is not one anybody typed, and without a bound a file with
+#: no line break at all is read whole into memory.
+_MAX_PASSPHRASE_BYTES: Final = 4096
+
 CUSTODY_REMINDER: Final = (
     "This passphrase is the only key to this artifact. Nothing on this machine can "
     "recover it, and a passphrase kept only on this machine does not survive losing "
@@ -140,11 +145,28 @@ def _from_file(source: Path) -> str:
     one would produce a file that opens nothing.
     """
     try:
-        text = source.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+        with source.open("rb") as handle:
+            # The *first line*, read as bytes and decoded on its own. Decoding the
+            # whole file first makes anything after that line able to refuse the
+            # backup — a stray byte past the passphrase is not a reason a recovery
+            # cannot happen, and this is a file an operator may well have appended
+            # a note to.
+            line = handle.readline(_MAX_PASSPHRASE_BYTES + 1)
+    except OSError as exc:
         msg = f"the passphrase file {source} could not be read: {exc}"
         raise RefusalError(msg) from exc
-    passphrase = text.split("\n", 1)[0].removesuffix("\r")
+    if len(line) > _MAX_PASSPHRASE_BYTES:
+        msg = (
+            f"the passphrase file {source} has no line break in its first "
+            f"{_MAX_PASSPHRASE_BYTES} bytes, so its first line is not a passphrase"
+        )
+        raise RefusalError(msg)
+    try:
+        text = line.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        msg = f"the passphrase file {source} does not begin with UTF-8 text: {exc}"
+        raise RefusalError(msg) from exc
+    passphrase = text.removesuffix("\n").removesuffix("\r")
     if not passphrase:
         msg = f"the passphrase file {source} is empty, or its first line is"
         raise RefusalError(msg)
