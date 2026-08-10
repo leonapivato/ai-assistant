@@ -60,6 +60,29 @@ class AncestorFault:
     kind: Literal["replaceable", "foreign"]
 
 
+def others_can_create_in(directory: Path) -> bool:
+    """Whether a user other than the owner can add a *new* entry to ``directory``.
+
+    **The sticky bit does not bear on this, and that is why it is asked
+    separately.** Sticky stops a user removing or renaming an entry they do not
+    own, and a name that does not exist yet is neither owned nor removable. So
+    ``/tmp`` is a safe place to keep something that already exists and an unsafe
+    place to leave a name unclaimed for something that does not — a distinction
+    :func:`first_ancestor_fault` deliberately cannot make, because for the entries
+    it walks over the sticky bit is exactly the right answer.
+
+    Args:
+        directory: The directory an entry would be created in.
+
+    Returns:
+        ``True`` when the group or other write bit is set, sticky or not.
+
+    Raises:
+        OSError: If the directory cannot be stat'ed.
+    """
+    return bool(directory.stat().st_mode & _WRITABLE_BY_OTHERS)
+
+
 def first_ancestor_fault(path: Path) -> AncestorFault | None:
     """The nearest ancestor that lets an untrusted user replace the entry below it.
 

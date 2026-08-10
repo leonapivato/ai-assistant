@@ -42,7 +42,7 @@ from typing import Any, Final, Protocol
 import structlog
 
 from ai_assistant.core.errors import ConfigurationError
-from ai_assistant.service.custody import first_ancestor_fault
+from ai_assistant.service.custody import first_ancestor_fault, others_can_create_in
 from ai_assistant.wire.address import sun_path_limit
 
 _log = structlog.get_logger(__name__)
@@ -377,6 +377,36 @@ def _stable_id(node: dict[str, Any]) -> str:
     return identity
 
 
+def _refuse_an_unclaimed_name(socket_path: Path, setting: str) -> None:
+    """A configured socket that does not exist yet must not be anybody's to create.
+
+    Split out because the condition is the opposite way round from the ancestry
+    walk's: there the sticky bit *earns* an other-writable directory its place, and
+    here it buys nothing at all.
+    """
+    parent = socket_path.parent
+    try:
+        plantable = others_can_create_in(parent)
+    except OSError as exc:
+        msg = (
+            f"the directory {parent} holding the overlay agent socket {setting} names "
+            f"cannot be read ({exc.strerror}), so whether an untrusted user could create "
+            f"that socket cannot be established; correct {setting}, or unset it"
+        )
+        raise ConfigurationError(msg) from exc
+    if plantable:
+        msg = (
+            f"no socket exists yet at {socket_path}, and {parent} is mode "
+            f"{stat.S_IMODE(parent.stat().st_mode):04o} — writable by other users, so any "
+            f"of them could create that socket first and answer for the overlay, which is "
+            f"the identity ADR-0124 §4 admits every device by. A sticky bit does not help "
+            f"here: it stops a user renaming an entry they do not own, and this name is "
+            f"not owned by anyone yet. Set {setting} to a path under a directory only you "
+            f"can write, or start the overlay agent so its socket exists"
+        )
+        raise ConfigurationError(msg)
+
+
 def check_configured_socket(socket_path: Path) -> None:
     """A configured agent socket keeps the custody the two defaults have.
 
@@ -410,9 +440,11 @@ def check_configured_socket(socket_path: Path) -> None:
     **It asks who could answer, never whether anybody currently does.** An absent
     socket is accepted, because refusing one would both contradict
     :func:`local_agent`'s contract and turn "the hub started a moment before its
-    agent" into a stay-down fault. What bounds who may place a socket there later
-    is the ancestry walk, which is the same thing that bounds it for a path that
-    exists.
+    agent" into a stay-down fault. But an absent socket is held to one condition a
+    present one is not: its directory must be one only its owner can write. The
+    ancestry walk lets a sticky ``/tmp`` through, correctly, because sticky stops a
+    user renaming an entry they do not own — and a name nobody has taken yet is not
+    such an entry, so it would leave the socket for whoever creates it first.
 
     Raises:
         ConfigurationError: If the path is too long to connect to, if any ancestor
@@ -469,14 +501,29 @@ def check_configured_socket(socket_path: Path) -> None:
     try:
         info = socket_path.stat()
     except FileNotFoundError:
-        # **Absence is not refused here, and that is deliberate.** `local_agent`'s
-        # contract is that "whether the daemon is actually there is answered by the
-        # first query, which is where a refusal belongs", and ADR-0124 §3 forbids
-        # launching one — so a hub that started a moment before its agent gets the
-        # same answer for a configured path as for a packaged one. Nothing is
-        # given up by allowing it: an absent socket answers for nobody, and the
-        # ancestry walk above is what bounds who can place one here later.
+        # **Absence itself is not refused; an unclaimed name others can take is.**
+        # `local_agent`'s contract is that "whether the daemon is actually there is
+        # answered by the first query", and ADR-0124 §3 forbids launching one, so a
+        # hub that started a moment before its agent must still come up. What
+        # cannot be allowed is that gap being usable by somebody else: the sticky
+        # bit protects entries that *exist* from being renamed away and says
+        # nothing about a name nobody has taken, so `/tmp/tailscaled.sock` is a
+        # socket any local user may be the first to create — and whoever creates it
+        # answers for the overlay, which is the identity §4 admits every device by.
+        _refuse_an_unclaimed_name(socket_path, setting)
         return
+    except OSError as exc:
+        # The same reasoning as the ancestry walk's own `OSError` above: a path the
+        # hub cannot read is a configuration fault, not a defect. Reached when a
+        # parent is owned by the hub's uid but not traversable, which the walk's
+        # `stat` of the directory itself does not detect.
+        msg = (
+            f"the overlay agent socket {socket_path}, which {setting} names, cannot be "
+            f"read ({exc.strerror}), so whether an untrusted user could answer for the "
+            f"overlay there cannot be established; correct {setting}, or unset it to look "
+            f"at the two paths the daemon is packaged to use ({', '.join(TAILSCALE_SOCKETS)})"
+        )
+        raise ConfigurationError(msg) from exc
     if not stat.S_ISSOCK(info.st_mode):
         msg = (
             f"{socket_path}, which {setting} names, is not a socket; the overlay agent's "
