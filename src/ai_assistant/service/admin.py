@@ -146,11 +146,20 @@ class AdminListener:
         _log.info("hub_admin_listening", socket=str(self.path))
 
     async def stop_accepting(self) -> None:
-        """Close the door and remove it, at the start of ADR-0083 §4's phase A."""
+        """Close the door and remove it, at the start of ADR-0083 §4's phase A.
+
+        **``wait_closed`` is deliberately not awaited**, and the reason is ADR-0083
+        §4's ordering rather than impatience. On this runtime
+        ``Server.wait_closed()`` does not return until every handler task has
+        finished, so awaiting it here would make *closing the door* wait for the
+        connections the drain has not run yet — the phases inverted, and a stop that
+        appears to hang for as long as the slowest peer holds a socket. ``close()``
+        is what stops the accepting, which is all this step is for;
+        :meth:`aclose` is what converges the handlers, after the drain, where §4 puts
+        it.
+        """
         if self._server is not None:
             self._server.close()
-            with contextlib.suppress(Exception):
-                await self._server.wait_closed()
             self._server = None
         self.path.unlink(missing_ok=True)
         _log.info("hub_admin_stopped_accepting", socket=str(self.path))
