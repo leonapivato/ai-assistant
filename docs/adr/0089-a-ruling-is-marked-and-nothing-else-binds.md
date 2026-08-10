@@ -1,6 +1,6 @@
 # 89. A ruling is marked, and in a marked ADR nothing else binds
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-01
 - **This ADR supersedes nothing.** It gives a ruling a delimited written form and
   says what that form obligates. Under ADR-0082 §1 every addition it makes is a
