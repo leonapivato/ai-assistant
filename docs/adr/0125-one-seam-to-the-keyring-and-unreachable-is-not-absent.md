@@ -920,21 +920,25 @@ it. Requiring two subjects makes that a red test rather than a support ticket.
 > high-entropy, so that a substring check over it is a real assertion rather than
 > one a short value would satisfy by accident.
 
-> **Normative.** The canonical fake carries one failure mode **per derivation §6
-> names** — the value verbatim, a prefix, a suffix, a truncation, a SHA-256 digest,
-> and a labelled length — and the suite runs the case above against every mode the
-> fake carries, asserting for each that none of the quoted text reaches the
-> surfaced error's message, arguments or `repr`, or any log line. §6's list is the
-> single source: a derivation added there is a mode the fake owes and a case the
-> suite runs, without this section being edited again.
+> **Normative.** The canonical fake carries a failure mode **per derivation §6
+> names** — the value verbatim, a prefix, a suffix, a truncation, a digest, and a
+> labelled length — and where a derivation has structurally different forms, more
+> than one: a digest is carried in at least two, differing in algorithm and in
+> encoding. The suite runs the case above against every mode the fake carries,
+> asserting for each that none of the quoted text reaches the surfaced error's
+> message, arguments or `repr`, or any log line. §6's list is the single source: a
+> derivation added there is a mode the fake owes and a case the suite runs, without
+> this section being edited again.
 
 **The obligation is bound to §6's list rather than to an enumeration of its own,
 and that is the decision.** A verbatim check catches none of the derivations: a
 wrapper reporting `value[:8]`, `value[-8:]` or a digest passes a substring
 assertion over the whole value while disclosing exactly what ADR-0021 §1 calls a
 weakened copy. Writing the modes out here a second time is how the two lists drift
-— review found three of them one at a time, each round closing the instance and
-leaving the class — so the suite tracks §6 instead. That is also what makes the
+— review found four of them one at a time, each round closing the instance and
+leaving the class — so the suite tracks §6 instead, and names no algorithm, since
+"a digest" is what §6 bans and a suite pinned to one hash tests string equality
+with that hash rather than the prohibition. That is also what makes the
 floor honest: §6 is the prohibition, and nothing it names is left with no case
 behind it.
 
