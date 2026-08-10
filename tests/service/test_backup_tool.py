@@ -17,13 +17,14 @@ alone can see.
 
 from __future__ import annotations
 
+import errno
 import inspect
 import os
 import resource
 import socket
 import sqlite3
 import stat
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
@@ -35,9 +36,6 @@ from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.service.refusal import RefusalError
 from ai_assistant.wire.address import SOCKET_FILENAME
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 pytestmark = pytest.mark.integration
 
@@ -834,3 +832,49 @@ def test_a_tree_deeper_than_the_descriptor_budget_still_backs_up_when_it_fits(
     staging.mkdir(mode=0o700)
     nested = "/".join(f"d{level}" for level in range(80))
     assert _contents(out_dir / "a.age", staging)[f"{nested}/deep.db"] == b"eighty levels down"
+
+
+def test_an_exhausted_disk_is_restartable_and_not_a_refusal(
+    settings: Settings,
+    out_dir: Path,
+    keyphrase_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0083 §5 puts an exhausted disk on the restartable side, and it stays there.
+
+    Wrapping every failure of the write as a refusal would give ``ENOSPC`` the
+    stay-down code, which tells an operator a human must act when what actually
+    has to happen is space appearing.
+    """
+
+    def out_of_space(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(artifact, "write_artifact", out_of_space)
+
+    assert _run(out_dir / "a.age", keyphrase_file) == EXIT_RESTART
+    assert _leftovers(out_dir) == []
+
+
+def test_a_refused_backup_leaks_no_descriptor(
+    settings: Settings, data_dir: Path, out_dir: Path, keyphrase_file: Path
+) -> None:
+    """The walk owns every descriptor it opens from the moment it opens one.
+
+    A refusal raised by the scan of a directory the walk had just opened left that
+    descriptor behind, because the frame holding it was only pushed once the scan
+    had returned. One leak per refused backup is invisible; a process that takes
+    them in a loop runs out.
+    """
+    open_descriptors = Path("/proc/self/fd")
+    if not open_descriptors.is_dir():
+        pytest.skip("counting open descriptors needs /proc")
+    (data_dir / "sub").mkdir(mode=0o700)
+    (data_dir / "sub" / "elsewhere").symlink_to(data_dir / "notes.txt")
+
+    assert _run(out_dir / "a.age", keyphrase_file) == EXIT_DEPLOYMENT
+    before = len(list(open_descriptors.iterdir()))
+    for _ in range(20):
+        assert _run(out_dir / "a.age", keyphrase_file) == EXIT_DEPLOYMENT
+
+    assert len(list(open_descriptors.iterdir())) == before
