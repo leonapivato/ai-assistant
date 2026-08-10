@@ -377,6 +377,33 @@ class TestTheDensityDomain:
         with pytest.raises(MemoryStoreError, match="at least one record"):
             _census_of(store_path, sample=sample, k=4)
 
+    @pytest.mark.parametrize(
+        "value",
+        [1.5, float("nan"), float("inf"), True, None, "4"],
+        ids=["fraction", "nan", "infinity", "bool", "none", "text"],
+    )
+    async def test_a_parameter_that_is_not_a_whole_number_is_refused(
+        self, make_store: _MakeStore, store_path: Path, value: object
+    ) -> None:
+        """§3 makes ``k`` a *positive integer*, and an ordering test is not that test.
+
+        A caller reaching the reader directly is not held to the annotation — the
+        entry point's parser is, but it is not the only caller. ``1.5`` passes
+        every comparison in the domain check and would divide a neighbourhood by a
+        fraction; ``nan`` passes them by refusing to compare, and used to reach an
+        empty heap and raise a raw ``IndexError``; ``True`` is a ``k`` of one by
+        accident of the type system rather than by anybody's intent.
+        """
+        store = make_store()
+        await _write(store, _plain(6))
+        store.close()
+        reader = StoreHealthReader(store=store_path, now=lambda: _NOW)
+
+        with pytest.raises(MemoryStoreError, match="whole number"):
+            reader.report(sample=value, k=3)  # type: ignore[arg-type]  # the annotation is the thing under test
+        with pytest.raises(MemoryStoreError, match="whole number"):
+            reader.report(sample=4, k=value)  # type: ignore[arg-type]  # likewise
+
     async def test_exactly_k_vector_bearing_records_reports_the_figure_undefined(
         self, make_store: _MakeStore, store_path: Path
     ) -> None:
@@ -593,6 +620,31 @@ class TestWhatTheReportCarries:
         assert "k 3" in rendered
         assert "records                        9" in rendered
         assert "no vector stored               0" in rendered
+
+    async def test_every_band_and_every_kind_is_stated_including_the_empty_ones(
+        self, make_store: _MakeStore, store_path: Path
+    ) -> None:
+        """§3 states the band fill "for each ``BeliefBand``", not for each band met.
+
+        A store of nothing but ``OBSERVED`` records has no attested belief and no
+        asserted one. Omitting those lines would leave a reader to guess whether
+        the band was empty or the report forgot it — which is §1's own argument
+        about a zero, applied to a count that really was measured.
+        """
+        store = make_store()
+        await _write(store, _plain(6))
+        store.close()
+
+        report = _census_of(store_path, k=2)
+
+        assert [fill.band for fill in report.bands] == sorted(BeliefBand, key=lambda b: b.value)
+        assert _band(report, BeliefBand.DERIVED) == (6, 0)
+        assert _band(report, BeliefBand.ASSERTED) == (0, 0)
+        assert _band(report, BeliefBand.ATTESTED) == (0, 0)
+        assert [kind for kind, _ in report.by_kind] == sorted(kind.value for kind in MemoryKind)
+        rendered = report.render()
+        for band in BeliefBand:
+            assert f"{band.value:<30} live" in rendered
 
     async def test_it_carries_no_identifier_no_content_and_no_vector(
         self, make_store: _MakeStore, store_path: Path
