@@ -59,14 +59,29 @@ class InstanceLock:
     Not reentrant and not thread-safe: one process, one hub, one lock.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, follow_symlinks: bool = True) -> None:
         """Name the lock file without touching it.
 
         Args:
             path: The lock file, normally ``<data_dir>/hub.lock``. Its parent must
                 exist by the time :meth:`acquire` is called.
+            follow_symlinks: Whether a symbolic link at ``path`` is followed to
+                whatever it names, which is what an ordinary ``open`` does and what
+                every holder before ADR-0126 wanted. **Pass ``False`` where writing
+                through such a link would be a fault rather than a nuisance**:
+                acquiring truncates the file and writes a pid into it, so a
+                ``hub.lock`` that is a link to somewhere else means acquiring
+                destroys the contents of a file outside the data directory. That is
+                harmless for a hub, whose own state is the thing at risk, and it is
+                a breach for ADR-0126 §1's act, which "destroys nothing whose path
+                is outside the resolved ``data_dir``" and never follows a link. The
+                default is the pre-existing behaviour, so no existing holder
+                changes; the flag is checked by the kernel in the same ``open``
+                that takes the lock, which a caller's own ``lstat`` beforehand could
+                not be.
         """
         self._path = path
+        self._follow_symlinks = follow_symlinks
         self._fd: int | None = None
 
     @property
@@ -100,9 +115,11 @@ class InstanceLock:
         Raises:
             OSError: If the lock file cannot be opened at all — a directory this
                 process may not write into, a read-only filesystem, a path that is
-                not a directory. Deliberately **not** caught and converted:
-                ADR-0083 §3 needs it distinguishable from contention, because the
-                two get opposite exit codes.
+                not a directory, or, when this lock was built with
+                ``follow_symlinks=False``, a lock path that is a symbolic link
+                (``ELOOP``). Deliberately **not** caught and converted: ADR-0083 §3
+                needs it distinguishable from contention, because the two get
+                opposite exit codes.
             RuntimeError: If this object already holds the lock. A second acquire
                 would leak the first descriptor, and silently re-taking a lock one
                 already holds is the shape of bug this class exists to prevent.
@@ -114,8 +131,13 @@ class InstanceLock:
         # live holder's recorded pid *before* this process learns it cannot have
         # the lock. O_CLOEXEC so the lock is not inherited by anything this
         # process might later exec, which would keep the data directory locked
-        # after the hub itself had exited.
-        fd = os.open(self._path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, _LOCK_FILE_MODE)
+        # after the hub itself had exited. O_NOFOLLOW only where the caller asked
+        # for it, because the truncate-and-write below would otherwise land on
+        # whatever a link at this path names.
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+        if not self._follow_symlinks:
+            flags |= os.O_NOFOLLOW
+        fd = os.open(self._path, flags, _LOCK_FILE_MODE)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
