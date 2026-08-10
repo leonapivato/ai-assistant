@@ -34,6 +34,7 @@ runs and fails is a failed backup, and the artifact is removed.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import os
 import shutil
@@ -81,6 +82,13 @@ _CHANGE_COUNTER_BYTES: Final = 4
 #: the mode everything this tool creates there carries (§9).
 _VERIFY_ROOT_STEM: Final = "ai-assistant-backup-verify"
 _OWNER_ONLY_DIR: Final = 0o700
+
+#: What a filesystem says when it cannot make a hard link at all. §2's
+#: publication has to be an operation that "fails when the destination already
+#: exists rather than replacing it", and ``link`` is the only such primitive for
+#: a file — so where it is unavailable the answer is a refusal naming the remedy,
+#: never a ``rename`` that would quietly replace a predecessor.
+_NO_HARD_LINKS: Final = frozenset({errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS, errno.EMLINK})
 
 #: How much of the data directory's digest names its verification namespace. §9
 #: keys the namespace to the *resolved* source directory so that two deployments
@@ -318,6 +326,19 @@ def _publish(temporary: Path, destination: Path) -> None:
         )
         raise RefusalError(msg) from exc
     except OSError as exc:
+        if exc.errno in _NO_HARD_LINKS:
+            # A filesystem with no hard links — FAT on a USB stick is the one an
+            # operator will actually meet, and §11's own example destination is
+            # `/media/usb/...`. There is no other non-replacing primitive to fall
+            # back to, and §2 forbids falling back to one that replaces, so this
+            # is a refusal with the remedy rather than a quiet `rename`.
+            msg = (
+                f"{destination} is on a filesystem that does not support the hard link this "
+                f"tool publishes by ({exc.strerror}), and the only alternative would be an "
+                f"operation that can overwrite an existing backup; write the artifact to a "
+                f"local filesystem and copy it there yourself"
+            )
+            raise RefusalError(msg) from exc
         msg = f"the artifact could not be published to {destination}: {exc}"
         raise RefusalError(msg) from exc
     temporary.unlink(missing_ok=True)

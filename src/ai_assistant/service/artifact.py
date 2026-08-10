@@ -94,6 +94,21 @@ SQLITE_MAGIC: Final = b"SQLite format 3\x00"
 #: What ``PRAGMA integrity_check`` says when it has nothing to say.
 _INTEGRITY_OK: Final = "ok"
 
+#: The most the manifest member may declare before restore will read it.
+#:
+#: The manifest is the one member read whole into memory rather than streamed to
+#: disk, because it has to be parsed before anything else can be checked against
+#: it — so its declared size is the one number an artifact can use to make a
+#: recovery machine allocate. That is the same failure #895 is about, one member
+#: earlier: "a tar member declaring a very large logical size … fills the recovery
+#: machine's filesystem before restore reaches its refusal-and-cleanup path."
+#:
+#: 64 MiB is far above any real manifest and far below anything that hurts. An
+#: entry is a path, a length and a 64-character digest — on the order of 150 bytes
+#: — so this admits something like 400,000 files, where the hub's data directory
+#: holds seven and ADR-0104 §3's retained copy makes it eight.
+_MAX_MANIFEST_BYTES: Final = 64 * 1024 * 1024
+
 
 class ArtifactError(RefusalError):
     """An artifact is malformed, or disagrees with its own manifest.
@@ -266,12 +281,23 @@ def materialise(artifact: Path, *, passphrase: str, staging: Path) -> Manifest:
         AgeError: If the artifact does not decrypt (:mod:`ai_assistant.service.agev1`).
         OSError: If ``staging`` cannot be written.
     """
-    with artifact.open("rb") as raw:
-        reader = DecryptingReader(raw, passphrase)
-        with tarfile.open(fileobj=reader, mode="r|") as archive:
-            members = iter(archive)
-            manifest = _read_manifest(archive, members)
-            _materialise_payload(archive, members, manifest=manifest, staging=staging)
+    try:
+        with artifact.open("rb") as raw:
+            reader = DecryptingReader(raw, passphrase)
+            with tarfile.open(fileobj=reader, mode="r|") as archive:
+                members = iter(archive)
+                manifest = _read_manifest(archive, members)
+                _materialise_payload(archive, members, manifest=manifest, staging=staging)
+    except tarfile.TarError as exc:
+        # An artifact that decrypts is not thereby an artifact that unpacks: the
+        # age layer authenticates the bytes against the passphrase, and says
+        # nothing about whether the plaintext under them is a ``tar`` stream at
+        # all. §8 is explicit that the checks are on "what was received, not on
+        # what §1 was supposed to have sent", so this is a refusal like any other
+        # — and a traceback out of a recovery command is the one outcome an
+        # operator on a broken machine cannot act on.
+        msg = f"the artifact decrypts but its archive cannot be read: {exc}"
+        raise ArtifactError(msg) from exc
     return manifest
 
 
@@ -285,6 +311,16 @@ def _read_manifest(archive: tarfile.TarFile, members: Iterator[tarfile.TarInfo])
         msg = (
             f"the artifact's first archive member is {first.name!r}, not the manifest at "
             f"{MANIFEST_MEMBER!r}; this tool reads the manifest before it writes anything"
+        )
+        raise ArtifactError(msg)
+    if first.size > _MAX_MANIFEST_BYTES:
+        # Refused from the header, before a byte of it is read: the manifest is
+        # the one member this tool holds whole in memory, so its declared size is
+        # the one number an artifact gets to spend on a recovery machine.
+        msg = (
+            f"the artifact's manifest declares {first.size} bytes, past the "
+            f"{_MAX_MANIFEST_BYTES} this tool will read; no manifest for a real data "
+            f"directory is anywhere near that large"
         )
         raise ArtifactError(msg)
     handle = archive.extractfile(first)
