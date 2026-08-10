@@ -1007,9 +1007,11 @@ optional case would have left the production path as the only untested one.
 > implementation of `SecretStore`, taking its installation namespace and its
 > `SecretScope` at construction so the suites can build two that differ in either,
 > and carrying two explicit switches: one that puts it into the unavailable state,
-> and one that makes the next `set` fail with a backend error quoting the value it
-> was given, one mode per derivation §6 forbids, so the suite can drive each of
-> them. It is test-only, and no composition root wires it.
+> and one that makes the next call fail with a backend error quoting a plaintext,
+> **selectable per method** — `get` and `delete` quoting the value they hold for
+> that name, `set` the value it was given — and carrying one mode per derivation §6
+> forbids, so the suite can drive each of them on each method. It is test-only, and
+> no composition root wires it.
 
 > **Normative.** Both Protocols get a concrete `Test…Contract` subclass running
 > the fake through its suite — through the narrow suite as a `Secrets`, and through
