@@ -298,9 +298,15 @@ stand alone; either is sufficient.
 > vector-bearing records that are not live at `T`.
 
 > **Normative.** The sample and `k` are parameters of the run, stated on the report.
-> `k` is the same for every sampled record in a run. The sample is a deterministic
-> function of the store's contents and the stated parameters: two runs over an
-> unchanged store produce identical figures.
+> `k` is a **positive integer** and is the same for every sampled record in a run.
+> The sample is a deterministic function of the store's contents and the stated
+> parameters: two runs over an unchanged store produce identical figures.
+
+> **Normative.** The density figure is **undefined** where the store holds fewer
+> than `k + 1` records with a vector, and the report states that it is undefined
+> and names both counts. Where the store holds at least `k + 1` such records, every
+> sampled record has `k` neighbours available: no sampled record is dropped for
+> want of a full neighbourhood, and no density is taken over fewer than `k`.
 
 > **Normative.** The report states the **closure-age distribution**: over every
 > record retired at `T`, the interval from its `valid_until` to `T`.
@@ -332,6 +338,20 @@ which is #457's mechanism in the store rather than in a read. That is the shape 
 operator is looking for, and it is why the figure is a *distribution* and not a mean:
 a mean over an evenly-aged store and a mean over a store with a few catastrophically
 crowded topics can be identical, which is the whole of what #799 found.
+
+**The `k + 1` clause is a domain rule, not a restatement of §1's empty-population
+rule, and the two do not overlap.** §1 makes a figure undefined where its
+population is empty; the density figure's population is the *sample*, and a store
+holding one live vector-bearing record supplies a sample of one — non-empty — whose
+single neighbourhood is empty, because the record itself is excluded. Every
+available reading of that case is wrong: a density of `0 ÷ k` reports "no closure
+nearby" from a store with no neighbourhood at all, a division by a count of
+available neighbours reports `0 ÷ 0`, and dropping the record silently shrinks a
+sample the report has already stated the size of. The condition is uniform across
+records — with `k + 1` vector-bearing records in the store, *every* record has `k`
+others — so one store-wide test settles it, and the figure is either taken over full
+neighbourhoods or not taken. `k` is required positive for the same reason from the
+other end: a `k` of zero makes the denominator zero on every record in every store.
 
 The null is approximate, and the approximation is named: a neighbourhood excludes the
 sampled record itself and is drawn from `k` nearest rather than uniformly, so the
@@ -567,6 +587,11 @@ that reads as numbers. Naming it separately costs a sentence and closes a door t
 > absent store, an empty store, a store with no retired record, a store with no
 > vector for any record, and a contended lock. Each is a stated output and not an
 > exception.
+
+> **Normative.** The tests assert §3's `k` domain at its boundaries: a store
+> holding exactly `k` vector-bearing records reports the figure undefined, a store
+> holding exactly `k + 1` reports it over full neighbourhoods, and a `k` that is
+> zero or negative is refused rather than run.
 
 > **Normative.** The tests assert §3's determinism clause directly — two runs of the
 > concentration figure over an unchanged store, with the same parameters, produce
