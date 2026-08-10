@@ -1433,3 +1433,87 @@ async def test_a_hub_whose_control_socket_will_not_bind_serves_no_remote_request
 
     assert code != EXIT_OK
     assert served == []
+
+
+async def test_the_configured_agent_socket_reaches_the_agent_the_hub_builds(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#918: the seam ADR-0124 §4 designs as substitutable is reachable from
+    configuration.
+
+    ``local_agent`` has always accepted a socket path and the composition root
+    always passed none, so the whole remote surface had no producer an operator
+    could point anywhere — §§6-8 were exercisable only from outside the
+    application. This asserts the one link that was missing: what
+    ``hub_overlay_agent_socket`` names is what the hub asks.
+
+    The agent is then made to refuse, so the assertion is about the *wiring* and
+    the hub still reaches a deterministic exit rather than standing up the remote
+    apparatus this test does not examine.
+    """
+    from ai_assistant.service.overlay import (  # noqa: PLC0415 - one call site
+        OverlayIdentityUnavailableError,
+    )
+
+    asked: list[str | None] = []
+
+    class _Recording:
+        async def hub_identity(self) -> Any:
+            msg = "the overlay agent is not running"
+            raise OverlayIdentityUnavailableError(msg)
+
+    def _record(socket_path: str | None = None) -> Any:
+        asked.append(socket_path)
+        return _Recording()
+
+    monkeypatch.setattr(hub, "local_agent", _record)
+    configured = settings.model_copy(
+        update={
+            "hub_remote_address": "100.64.0.9",
+            "hub_overlay_agent_socket": "/run/qa/tailscaled.sock",
+        }
+    )
+
+    code = await hub.serve(configured)
+
+    assert code == EXIT_DEPLOYMENT
+    assert asked == ["/run/qa/tailscaled.sock"]
+
+
+async def test_a_hub_with_no_configured_agent_socket_still_asks_for_the_defaults(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The discriminating half: unset means unset, not some new value.
+
+    Without this the test above would pass for a hub that always passed a path,
+    and the "unset changes nothing" claim that makes the field additive would be
+    untested.
+    """
+    from ai_assistant.service.overlay import (  # noqa: PLC0415 - one call site
+        OverlayIdentityUnavailableError,
+    )
+
+    asked: list[str | None] = []
+
+    class _Recording:
+        async def hub_identity(self) -> Any:
+            msg = "the overlay agent is not running"
+            raise OverlayIdentityUnavailableError(msg)
+
+    def _record(socket_path: str | None = None) -> Any:
+        asked.append(socket_path)
+        return _Recording()
+
+    monkeypatch.setattr(hub, "local_agent", _record)
+    configured = settings.model_copy(update={"hub_remote_address": "100.64.0.9"})
+
+    code = await hub.serve(configured)
+
+    assert code == EXIT_DEPLOYMENT
+    assert asked == [None]

@@ -1596,3 +1596,28 @@ def test_no_setting_can_supply_or_override_the_enrolled_hub_identity() -> None:
     both halves at once, which is the attack §4 exists to close.
     """
     assert not [name for name in Settings.model_fields if "identity" in name]
+
+
+def test_the_overlay_agent_socket_is_unset_and_means_the_packaged_paths() -> None:
+    """#918: the agent's *location* is configurable; its answer is still the agent's.
+
+    Unset is the ordinary deployment, where ``service.overlay.TAILSCALE_SOCKETS``
+    is looked at exactly as before — which is what makes the field additive rather
+    than a change to how any existing hub finds its agent.
+    """
+    assert Settings().hub_overlay_agent_socket is None
+
+
+def test_the_overlay_agent_socket_is_a_location_and_never_an_identity() -> None:
+    """ADR-0124 §4's third clause governs the *enrolled hub identity*, not where the
+    agent listens, and the distinction is the whole reason this field is permitted.
+
+    So the field that clause forbids stays absent while this one exists: there is
+    no setting that says who the hub or its peer *is*, only one that says where to
+    ask. Asserted rather than left to the comment beside it, because an added
+    identity field would be exactly the regression the clause is about.
+    """
+    fields = set(Settings.model_fields)
+
+    assert "hub_overlay_agent_socket" in fields
+    assert not {name for name in fields if "identity" in name}

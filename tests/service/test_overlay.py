@@ -11,10 +11,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import socket
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 
+from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.service.overlay import (
     MAX_OVERLAY_IDENTITY_BYTES,
     TAILSCALE_SOCKETS,
@@ -22,6 +25,7 @@ from ai_assistant.service.overlay import (
     TailscaleAgent,
     local_agent,
 )
+from ai_assistant.wire.address import sun_path_limit
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -259,3 +263,117 @@ async def test_an_identity_at_the_bound_is_accepted(tmp_path: Path) -> None:
     longest = {"Node": {"StableID": "n" * MAX_OVERLAY_IDENTITY_BYTES}}
     async with _daemon(tmp_path, {"/localapi/v0/whois": _ok(longest)}) as (agent, _):
         assert await agent.identify("100.64.0.11", 41234) == "n" * MAX_OVERLAY_IDENTITY_BYTES
+
+
+# --- The custody conditions on a configured socket (#918) -------------------
+#
+# ADR-0124 §4 makes this socket's answer the identity every remote admission turns
+# on, and `TAILSCALE_SOCKETS`' two defaults are trusted because "the operating
+# system's own access control" protects them. A path an operator can name has to
+# earn the same trust, and these are the conditions that make it do so — which is
+# what keeps exposing the setting a matter of implementation rather than a change
+# to §4's posture.
+
+
+def _bind(path: Path) -> socket.socket:
+    """A real Unix socket at ``path``, so ``S_ISSOCK`` is answered by the kernel."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(path))
+    return sock
+
+
+def test_a_configured_socket_under_a_directory_you_own_is_accepted(tmp_path: Path) -> None:
+    """The case the setting exists for, and the one #919 had to build a namespace
+    to reach: an agent socket the running uid owns, in a directory it owns.
+    """
+    path = tmp_path / "tailscaled.sock"
+    with contextlib.closing(_bind(path)):
+        assert local_agent(str(path)).socket_path == str(path)
+
+
+def test_a_configured_socket_that_is_absent_is_accepted(tmp_path: Path) -> None:
+    """The custody check asks who *could* answer, never whether anybody does.
+
+    Refusing an absent socket would contradict :func:`local_agent`'s contract —
+    "whether the daemon is actually there is answered by the first query" — and
+    would turn a hub that started a moment before its agent into a stay-down
+    fault. Nothing is given up: an absent socket answers for nobody, and the
+    ancestry walk is what bounds who may place one there later.
+    """
+    absent = tmp_path / "not-yet.sock"
+    assert not absent.exists()
+
+    assert local_agent(str(absent)).socket_path == str(absent)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root satisfies every ownership check")
+def test_a_configured_socket_whose_ancestor_is_replaceable_is_refused(tmp_path: Path) -> None:
+    """A socket anybody can replace answers for the overlay, which is the identity
+    ADR-0124 §4 admits every device by — the end the clause exists to prevent,
+    reached by the filesystem instead of by the peer.
+    """
+    loose = tmp_path / "shared"
+    loose.mkdir()
+    path = loose / "tailscaled.sock"
+    with contextlib.closing(_bind(path)):
+        loose.chmod(0o777)
+        try:
+            with pytest.raises(ConfigurationError, match="not sticky"):
+                local_agent(str(path))
+        finally:
+            loose.chmod(0o755)
+
+
+def test_a_configured_socket_whose_directory_is_missing_is_a_configuration_fault(
+    tmp_path: Path,
+) -> None:
+    """The ordinary typo, and it must not arrive as a defect.
+
+    ADR-0083 §5 maps ``ConfigurationError`` to a stay-down exit; a raw
+    ``FileNotFoundError`` out of the composition root would instead be reported as
+    an unexpected fault — the hub telling an operator who mistyped a path that the
+    hub is broken. The walk cannot establish custody of a directory it cannot read,
+    so it says exactly that.
+    """
+    missing = tmp_path / "no-such-dir" / "tailscaled.sock"
+
+    with pytest.raises(ConfigurationError, match="cannot be read"):
+        local_agent(str(missing))
+
+
+def test_a_configured_path_that_is_not_a_socket_is_refused(tmp_path: Path) -> None:
+    """The agent's local API is a Unix socket, so nothing can be asked of a file.
+
+    Refused here rather than left to ``connect``, which would report it as the
+    agent declining to answer — a diagnosis that sends the operator to look at
+    their daemon instead of at their setting.
+    """
+    path = tmp_path / "not-a-socket"
+    path.write_text("")
+
+    with pytest.raises(ConfigurationError, match="is not a socket"):
+        local_agent(str(path))
+
+
+def test_a_configured_socket_over_the_sun_path_budget_is_refused(tmp_path: Path) -> None:
+    """``sun_path`` bounds the path a socket can be *connected* to as much as bound.
+
+    Left unchecked this lands as a bare ``AF_UNIX path too long`` out of
+    ``connect``, which is the same failure #554 made legible for the data
+    directory.
+    """
+    path = tmp_path / ("x" * sun_path_limit()) / "tailscaled.sock"
+
+    with pytest.raises(ConfigurationError, match="sun_path budget"):
+        local_agent(str(path))
+
+
+def test_the_packaged_defaults_are_not_held_to_the_configured_conditions() -> None:
+    """Unset changes nothing, which is what makes this additive.
+
+    The two packaged paths keep their existing behaviour exactly: they are looked
+    at in order, and one of them is returned whether or not a daemon is there. A
+    guard that also ran here would refuse every machine with no Tailscale
+    installed — including this test run.
+    """
+    assert local_agent().socket_path in TAILSCALE_SOCKETS
