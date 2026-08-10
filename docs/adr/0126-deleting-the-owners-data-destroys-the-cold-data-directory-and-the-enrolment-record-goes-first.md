@@ -219,6 +219,11 @@ and the second in what it must do to the data.
 > and exits with a failure status. It may not report the delete as complete, it may
 > not pass over an entry silently, and it does not stop at the first failure.
 
+> **Normative.** `devices.db` is the one exception to the clause above. Where it
+> exists and its destruction fails, the act destroys **nothing further**, reports
+> that it destroyed nothing and why, and exits with a failure status. Best-effort
+> continuation begins only once the enrolment record has gone.
+
 > **Normative.** On a successful act the data directory itself survives, holding
 > nothing but the instance lock file the act is holding (§5), with the permissions
 > ADR-0083 §3's preparation gives it. A hub started afterwards finds an installation
@@ -313,6 +318,18 @@ act destroys what it can, and the honesty obligation is carried where it belongs
 in a report that names every path that remains, and a failure status. That is the
 same trade §7 makes for devices: the act does what it can reach, and says exactly
 what it did not.
+
+**`devices.db` is exempt from that trade because for it the trade runs the other
+way, and §5 is where the reason is argued in full.** Best effort past a failed
+enrolment record reconstructs precisely the state §5's ordering exists to make
+unreachable: live verifiers on disk and the stores around them gone, so the next
+hub start rebuilds empty stores and admits every enrolled device to them — "a
+device left holding a credential to a store that no longer exists", which is the
+outcome ADR-0124 §8 forbids, produced by the act meant to satisfy it. A permission
+preflight makes the case rare and does not make it impossible: an immutable
+attribute or an I/O error is not a permission. So for exactly one entry the safe
+failure is to have destroyed nothing, and the owner reruns the act once they have
+dealt with the file the report names.
 
 **The one thing per-store `clear` does that this does not is run without stopping
 the hub, and §2 is where that is paid for rather than avoided.**
