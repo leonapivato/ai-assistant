@@ -67,6 +67,8 @@ class _FakeAgent:
             refuse — which is §4's "a connection whose overlay identity cannot be
             obtained is refused".
         available: Whether the agent answers at all.
+        identified: How many peers it was asked about, so a test can assert that a
+            connection the hub must not serve never reached §4's query at all.
     """
 
     identity: str = _HUB_ID
@@ -74,6 +76,7 @@ class _FakeAgent:
     sequence: list[str] = field(default_factory=list)
     default_peer: str | None = _DEVICE
     available: bool = True
+    identified: int = 0
 
     async def hub_identity(self) -> HubOverlayIdentity:
         """What this machine is, or a refusal."""
@@ -85,6 +88,7 @@ class _FakeAgent:
     async def identify(self, host: str, port: int) -> str:
         """Who is at ``host``, taken from this machine and never from the peer."""
         del host, port
+        self.identified += 1
         found = self.sequence.pop(0) if self.sequence else self.default_peer
         if found is None:
             msg = "the overlay agent knows no node at that address"
@@ -738,3 +742,52 @@ async def test_a_connection_stalled_in_the_identity_query_converges_on_shutdown(
         with contextlib.suppress(Exception):
             await writer.wait_closed()
         store.close()
+
+
+async def test_a_callback_that_runs_after_the_close_is_refused_not_served(
+    tmp_path: Path,
+) -> None:
+    """ADR-0083 §4's release is a barrier, and this is the clause that makes it one.
+
+    ``Server.close()`` stops future accepts and says nothing about a callback
+    ``asyncio`` has *already queued* for a connection it accepted a turn earlier.
+    That callback runs on some later turn — possibly after the release has finished
+    and the engine and the enrolment record have been let go — and a connection
+    served then would be one the hub can no longer serve at all.
+
+    **What is asserted is the barrier's own contract rather than the scheduler's,
+    and that is a deliberate limit.** Producing the exact interleaving — accepted,
+    task created, task not yet run, shutdown — is not something a test can force
+    without reaching into ``asyncio``'s internals, and a test that merely hoped for
+    it would pin nothing. So the callback is invoked directly, in the state the
+    barrier exists for: after ``stop_accepting``. The engine is never called, the
+    agent is never asked who connected, the slot is given back, and the peer's
+    connection ends.
+    """
+    async with _remote(tmp_path) as hub:
+        hub.registry.enrol(_DEVICE, now=_MOMENT)
+        accepted: asyncio.Future[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = (
+            asyncio.get_running_loop().create_future()
+        )
+
+        async def _capture(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            accepted.set_result((reader, writer))
+
+        spare = await asyncio.start_server(_capture, host=_BIND, port=0)
+        port = int(spare.sockets[0].getsockname()[1])
+        client_reader, client_writer = await asyncio.open_connection(_BIND, port)
+        hub_reader, hub_writer = await accepted
+        try:
+            await hub.listener.stop_accepting()
+            await hub.listener._accept(hub_reader, hub_writer)
+
+            assert hub.engine.calls == []
+            assert hub.agent.identified == 0
+            assert hub.budget.serving == 0
+            assert await asyncio.wait_for(client_reader.read(), _PATIENT.total_seconds()) == b""
+        finally:
+            client_writer.close()
+            with contextlib.suppress(Exception):
+                await client_writer.wait_closed()
+            spare.close()
+            await spare.wait_closed()
