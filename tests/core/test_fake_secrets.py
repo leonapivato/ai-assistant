@@ -19,6 +19,7 @@ assertion would pass while proving nothing.
 from __future__ import annotations
 
 import contextlib
+import logging
 from typing import TYPE_CHECKING
 
 import pytest
@@ -30,6 +31,8 @@ from secret_contract import (
     Isolation,
     SecretsContract,
     SecretStoreContract,
+    assert_discloses_nothing,
+    assert_no_log_discloses,
     checkable_disclosures,
     held,
     secret_name,
@@ -303,3 +306,70 @@ def test_every_derivation_the_adr_forbids_is_checkable_over_a_real_plaintext() -
     derivation added to that list arrives as a case rather than as a skip.
     """
     assert set(checkable_disclosures(PLAINTEXT)) == set(Disclosure)
+
+
+# --- negative controls for the redaction floor the suites assert -------------
+# The two paths ADR-0125 §6 binds and §11's three renderings do not reach. Each
+# is asserted from the *failing* side: a helper that quietly stopped looking at
+# chained causes or at formatted log records would leave every redaction case in
+# both suites green while the obligation went untested, which is exactly the shape
+# of hole the widened helpers were written to close.
+
+
+def test_the_redaction_helper_catches_a_secret_chained_as_a_cause() -> None:
+    """The wrapper that defeats all three of §11's renderings at once.
+
+    ``raise SecretStoreError("the keyring read failed") from exc`` is the obvious,
+    conforming-*looking* adapter: its message, its arguments and its ``repr`` are
+    clean, and the traceback every reader sees carries the credential. ADR-0125 §6
+    binds "no exception raised by this seam", not three of its renderings, so the
+    shared helper has to reach the chain — and this is what proves it does.
+    """
+    backend = RuntimeError(f"keyring rejected {PLAINTEXT}")
+    surfaced = SecretStoreError("the keyring read failed")
+    surfaced.__cause__ = backend
+
+    assert PLAINTEXT not in str(surfaced)
+    assert PLAINTEXT not in repr(surfaced)
+    assert all(PLAINTEXT not in str(argument) for argument in surfaced.args)
+
+    with pytest.raises(AssertionError, match="disclosed"):
+        assert_discloses_nothing(surfaced, PLAINTEXT, context="a chained cause")
+
+
+def test_the_log_helper_catches_a_secret_carried_only_by_exc_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``logger.exception`` puts the backend's text in the line, not in the message.
+
+    The record's ``getMessage()`` is four harmless words; every formatter in
+    ordinary use emits the traceback beside it. A check reading only the message
+    passes an implementation that writes the credential into its log on every
+    failure, which is why :func:`~secret_contract.log_renderings` formats the
+    record the way a handler would.
+    """
+    logger = logging.getLogger("tests.core.test_fake_secrets.disclosure")
+    with caplog.at_level(logging.DEBUG):
+        try:
+            raise RuntimeError(f"keyring rejected {PLAINTEXT}")
+        except RuntimeError:
+            logger.exception("the keyring read failed")
+
+    assert all(PLAINTEXT not in record.getMessage() for record in caplog.records)
+
+    with pytest.raises(AssertionError, match="disclosed"):
+        assert_no_log_discloses(caplog.records, PLAINTEXT, context="an exc_info disclosure")
+
+
+def test_a_conforming_implementation_may_still_chain_a_redacted_cause() -> None:
+    """The floor forbids disclosure, not chaining (ADR-0125 §6).
+
+    Worth pinning because the cheap fix for the case above is "never chain
+    anything", and that would be this suite inventing an obligation the ADR does
+    not carry — a keyring adapter that chains its backend's *redacted* error is
+    conforming and more diagnosable than one that drops it.
+    """
+    surfaced = SecretStoreError("the keyring read failed")
+    surfaced.__cause__ = RuntimeError("the backend refused the write")
+
+    assert_discloses_nothing(surfaced, PLAINTEXT, context="a redacted cause")
