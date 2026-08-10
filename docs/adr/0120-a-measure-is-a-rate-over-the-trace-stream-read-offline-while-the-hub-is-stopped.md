@@ -1,7 +1,56 @@
 # 120. A measure is a rate over one window of the trace stream, read offline while the hub is stopped
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0128 (§7's #824 shortfall watch)
 - Date: 2026-08-09
+- Note (2026-08-10): **§7's #824 shortfall watch is retired by ADR-0128; §7's
+  other two diagnostics, §7's second normative clause and every measure below
+  stand.** §7's first normative clause rules that "the report carries three
+  diagnostics beside the measures: the #824 shortfall watch, the operation-latency
+  summary, and the stream-health counts".
+  [ADR-0128](0128-every-eligibility-predicate-binds-before-the-ranking-cut.md) §1
+  moves the `kind`, `expires_at` and validity-window predicates before the ranking
+  cut, joining the band predicate ADR-0113 §2 already binds there, and its §3
+  retires the watch as a consequence: the report states no shortfall incidence and
+  no window share, and `MeasureReport` carries no shortfall figure.
+
+  **Why the watch stops being readable rather than merely quiet.** Both of its
+  figures degenerate, and not by the same amount. The **window share**,
+  `excluded_window ÷ (candidates − returned)`, has a structural zero for a
+  numerator once no candidate can fail the window predicate — and §7 already
+  excludes from the share a shortfall "that excluded nothing", which is then every
+  shortfall, so the figure is undefined over an empty set rather than small. The
+  **incidence** survives arithmetically and stops measuring the store: with every
+  candidate eligible, a read falls short of `limit` only where the KNN ceiling
+  bound it, so the figure becomes the rate at which callers ask for more than the
+  backend's `k` ceiling — a fact about `retrieval_limit` and `conflict_limit`, not
+  about accumulated window closure. ADR-0128 §3 argues both and declines to
+  redefine the watch over the surviving case, because ADR-0128 §2 puts that case
+  on the contract as a per-call `capped` boolean the caller can act on, and §7's
+  own second clause forbids substituting a diagnostic for a measure.
+
+  **Why supersession and not an amendment.** A reader holding only this ADR builds
+  a diagnostic that no longer exists — acting differently, on a **marked** clause,
+  which under ADR-0089 §3 is the whole of what a marked ADR obligates. ADR-0070 §1
+  puts that on the supersession side; ADR-0082 §2 puts the record on this `Status`
+  line, which takes the leading token and drops `Accepted` (`docs/adr/template.md`).
+
+  **What stands, stated so the scope is checkable.** §1–§6 and §8–§13 are
+  untouched, including §2's counter-inconsistency rule, which stays a
+  well-formedness rule over the same eight counts. §7's second normative clause —
+  no diagnostic is a measure, none carries a threshold verdict — stands, as do the
+  operation-latency summary and the stream-health counts. §12's inventory stays
+  accurate: ADR-0128 §3 requires the `RETRIEVAL` trace to keep every metric key
+  §12 names, with `excluded_kind`, `excluded_retention` and `excluded_window`
+  joining `excluded_band` as structural zeros, so that this ADR's populations span
+  the intervention rather than being split by it (#829's window). §12 item 3 — the
+  emitter change that would have let the watch read "approaching" — is spent
+  rather than superseded: the watch it would have served is gone, and ADR-0128 §3
+  routes its question to a direct store-health measure read offline over the
+  store, in §9's pattern, whose own design that lane ratifies and this note does
+  not.
+
+  **No text below is rewritten** (ADR-0001 append-only, ADR-0070 §1). ADR-0128 §8
+  makes the same showing from the other side. Refs #824, #457, #829, #922.
 - Note (2026-08-09): **§6's numerator had no producer when this ADR was written,
   and §5's and §6's measured series have a discontinuity at ADR-0121. No clause
   of this ADR is amended or superseded, and no `Status` qualifier is owed.**

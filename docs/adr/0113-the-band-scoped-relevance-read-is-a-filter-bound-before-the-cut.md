@@ -1,7 +1,47 @@
 # 113. The band-scoped relevance read is a `bands` filter on `search`, bound before the cut
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0128 (§2's second normative clause — the post-cut placement of kind, expiry and both validity-window ends)
 - Date: 2026-08-06
+- **Note (2026-08-10): §2's second normative clause is partially superseded by
+  ADR-0128; every other clause of this ADR stands, and §2's first clause is
+  generalised rather than narrowed.** The superseded clause reads "`kind`,
+  `expires_at` and both window ends keep the post-cut placement ADR-0045 §6 and
+  ADR-0007 ratified for them, so an in-band record failing one of those may still
+  consume the candidate budget and a call may return fewer than `limit` records
+  while eligible ones exist."
+  [ADR-0128](0128-every-eligibility-predicate-binds-before-the-ranking-cut.md) §1
+  moves all three predicates before the cut, so both halves of that sentence stop
+  holding: no ineligible record consumes the candidate budget on any axis, and a
+  short result now means either that the eligible set is exhausted or that the
+  store's own candidate ceiling bound the read — which ADR-0128 §2 puts on the
+  contract as a `capped` boolean beside the records.
+
+  **Why supersession and not an amendment.** An implementer holding only this ADR
+  builds a post-cut pass for three predicates, which is acting differently, and
+  the sentence is a **marked** clause — under ADR-0089 §3 the marked set is the
+  whole of what a marked ADR obligates, so a marked clause going false is a
+  ruling changing rather than a stale phrase. ADR-0070 §1 puts that on the
+  supersession side and ADR-0082 §2 puts the record on this `Status` line, which
+  takes the leading token and drops `Accepted` accordingly (`docs/adr/template.md`).
+
+  **What stands, stated so the scope is checkable.** §1 (the `bands` parameter),
+  §2's **first** clause (the band binds before the ranking cut — ADR-0128 §1
+  generalises its argument to the other three axes and narrows nothing), §3, §4,
+  §5, §6, §7, §9, §10 and §11 are untouched. §8's two marked clauses stand: this
+  ADR still makes no headroom change and still authorises none, and its refusal to
+  add an under-service signal — "a lane wanting one owes its own ratified ADR
+  under golden rule 5" — is a deferral **discharged by the route it names**, since
+  ADR-0128 is that ADR. §5's third clause also stands and is *not* in this scope:
+  a consumer still may not read a short band-scoped result as evidence that the
+  band holds nothing more, because its ground is the id-preserving fold that moves
+  a record between bands *across* a turn's calls, which ADR-0128 §2's per-call
+  `capped=False` does not reach. §8's unmarked prose about where the residue falls
+  goes stale and, under ADR-0089 §3, supplied no obligation to begin with.
+
+  **No text below is rewritten** (ADR-0001 append-only, ADR-0070 §1): the
+  superseded clause stays exactly as ratified and this note records what replaced
+  it. ADR-0128 §8 makes the same showing from the other side. Refs #457, #824,
+  #922.
 - **Note (2026-08-07): ratified.** `Proposed` → `Accepted`, in the separate lane
   #633 requires, after **both** required lenses came back green on the content
   this ADR merged with: adversarial **APPROVE with no findings** and architecture

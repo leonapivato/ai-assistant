@@ -2,6 +2,36 @@
 
 - Status: Partially superseded by ADR-0080 (§4's window-close instruction for a target carrying a producer-set bounded window)
 - Date: 2026-07-22
+- Amended: 2026-08-10 by ADR-0128 — **§6's sentence placing the `valid_from` end
+  "in the post-filter step, not the SQL pre-filter" stops being true of the tree;
+  §6's read semantics are untouched.**
+  [ADR-0128](0128-every-eligibility-predicate-binds-before-the-ranking-cut.md) §1
+  rules that every read-time eligibility predicate `MemoryStore.search` applies —
+  `kinds`, ADR-0007 §2's `expires_at`, and **both** ends of §6's validity window —
+  binds before the ranking cut, joining the band predicate ADR-0113 §2 already
+  binds there. So `valid_from` is no longer filtered after the KNN, and neither is
+  `valid_until`.
+
+  **What §6 decided is untouched, which is why this is an amendment** (ADR-0070
+  §1, ADR-0082 §1). §6's ruling is the read semantics — `get` returns `None` and
+  `search` never returns a record on either end of the window, `export` keeps it,
+  and the `valid_from` end "is enforced, not assumed away … the store must honour
+  the contract regardless". Every one of those holds unchanged, and the
+  conformance obligation §6 states (before/at/after-boundary cases for **each**
+  end) is strengthened rather than relaxed: ADR-0128 §5 requires those cases to be
+  driven through a fixture that crowds the candidate budget with nearer ineligible
+  records, which is the shape that can tell a pre-filter from a post-filter at
+  all. The placement sentence is stated as the reason the rare end is cheap to
+  honour given §9's storage, not as a rule an implementer obeys, so a reader
+  acting on §6 acts identically before and after.
+
+  **The `Status` line is unchanged**, because ADR-0082 §2 puts the record in this
+  note alone on a line led by `Partially superseded by`. ADR-0128 §8 argues the
+  amend-versus-supersede classification at the site and names how to overturn it —
+  ADR-0113 §11 read the same sentence as "a ratified concession", and on that
+  reading the record moves to the partial-supersession form with its substance
+  unchanged. No text below is rewritten (ADR-0001 append-only). Refs #457, #792,
+  #824, #922.
 - Amended: 2026-08-09 by ADR-0121 — **§5's clause 1 gains its second exception:
   an *agreeing* `REINFORCE` from a user-asserted proposal onto a user-asserted
   target. §5's two stated justifications are untouched, because neither of them
