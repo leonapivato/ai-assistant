@@ -614,8 +614,24 @@ nothing about the store failed.
 ### 7. Platform posture: absent, locked and headless are one visible state
 
 > **Normative.** When no keyring backend is available, or the backend is present
-> and locked with no unlock possible in this session, every method raises
-> `SecretStoreUnavailableError`. `get` **never** returns `None` for that condition.
+> and locked with no unlock possible in this session, every method whose arguments
+> validated raises `SecretStoreUnavailableError`. `get` **never** returns `None`
+> for that condition.
+
+> **Normative.** Argument validation comes first and wins: a call carrying a
+> malformed name or value raises `ValueError` (§4) whatever the keyring's state,
+> including when there is no backend at all. §11's unavailable-state obligations
+> are read against calls whose arguments validated.
+
+**The precedence is ruled rather than left to whichever check an implementation
+wrote first**, and it goes this way for two reasons. §4 already requires
+revalidation *before* the keyring is touched, so an implementation that reported
+unavailability first would have had to reach the backend to find out — which is
+the ordering §4 forbids. And it is the more useful answer: an argument fault is
+deterministic and the caller's to fix, while an unavailable keyring is a condition
+of the machine, so reporting the machine's state to a caller who also passed a bad
+name would hide the one fault that call will keep hitting after the operator
+installs a keyring.
 
 **This is the clause that stops the worst failure available here.** If an
 unreachable keyring answered `None`, "this device is not enrolled" and "this
