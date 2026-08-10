@@ -643,14 +643,26 @@ nothing about the store failed.
 ### 7. Platform posture: absent, locked and headless are one visible state
 
 > **Normative.** When no keyring backend is available, or the backend is present
-> and locked with no unlock possible in this session, every method whose arguments
-> validated raises `SecretStoreUnavailableError`. `get` **never** returns `None`
-> for that condition.
+> and locked with no unlock possible in this session, every method that got past
+> the argument step raises `SecretStoreUnavailableError`. `get` **never** returns
+> `None` for that condition.
 
-> **Normative.** Argument validation comes first and wins: a call carrying a
-> malformed name or value raises `ValueError` (§4) whatever the keyring's state,
-> including when there is no backend at all. §11's unavailable-state obligations
-> are read against calls whose arguments validated.
+> **Normative.** The argument step comes first and wins, and it is two checks in
+> one: revalidation (§4) and the scope binding (§2). A call carrying a malformed
+> name or value, **or a well-formed name outside the instance's scope**, raises
+> `ValueError` whatever the keyring's state, including when there is no backend at
+> all. §11's unavailable-state obligations are read against calls that got past it.
+
+**The scope refusal sits inside the argument step rather than beside it**, which
+is what makes the precedence total. A name for another scope is structurally valid
+— it passes `SecretName`'s model — so a rule qualified on "arguments validated"
+alone would leave `INTEGRATION`-bound `get(SecretName(ENROLMENT, …))` against a
+locked backend owing two different errors at once, and the boundary §2 exists to
+draw would depend on which check an implementation happened to run first. It also
+has to win for that boundary to mean anything: a tool reaching for the device
+credential must be refused identically whether the keyring is locked, absent or
+wide open, or the refusal discloses the machine's state to the caller least
+entitled to ask.
 
 **The precedence is ruled rather than left to whichever check an implementation
 wrote first**, and it goes this way for two reasons. §4 already requires
@@ -869,7 +881,8 @@ property being tested.
 > the other; two subjects **over one backing** differing only in installation, and
 > two differing only in scope, each keep their entries isolated under the same
 > `key`; a name outside the subject's bound scope raises `ValueError` and the
-> subject's own scope still answers afterwards; the subject satisfies `Secrets` by
+> subject's own scope still answers afterwards, and does so with the subject driven
+> unavailable as well as available; the subject satisfies `Secrets` by
 > `isinstance`; and no secret value appears in the `repr` of the subject, of a
 > `SecretValue`, or of any error the subject raises.
 
