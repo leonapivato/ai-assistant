@@ -109,6 +109,28 @@ _INTEGRITY_OK: Final = "ok"
 #: holds seven and ADR-0104 §3's retained copy makes it eight.
 _MAX_MANIFEST_BYTES: Final = 64 * 1024 * 1024
 
+#: The most a ``tar`` *control* member may carry — a PAX extended or global
+#: header, or a GNU long-name header. These are the members ``tarfile`` consumes
+#: internally, before it yields a ``TarInfo`` to anything above it, and it
+#: consumes them **whole into memory**: :meth:`tarfile.TarInfo._proc_pax` reads
+#: the member's entire declared length in one call. So the manifest bound above
+#: does not reach them, and neither does the payload path, which streams to disk
+#: a megabyte at a time.
+#:
+#: **What that is and is not worth, measured rather than asserted.** A control
+#: member declaring 8 GiB and carrying nothing costs 210 KB — the streaming
+#: reader accumulates only what actually arrives, so a declared size alone buys
+#: an attacker nothing. What it does buy is a multiplier on bytes they really
+#: supply: 40 MiB of delivered PAX metadata peaked at 84 MB of allocation, about
+#: twice over, where the same 40 MiB as a payload member peaks at the copy buffer. A
+#: 4 GB artifact through that path is 8 GB of memory on a recovery machine, and
+#: through the payload path it is nothing.
+#:
+#: 1 MiB is three orders of magnitude above what the format produces: a PAX
+#: header exists here only to carry a path too long for tar's name field, and
+#: even a 4096-character path fits in about 4 KB.
+_MAX_CONTROL_BYTES: Final = 1024 * 1024
+
 
 class ArtifactError(RefusalError):
     """An artifact is malformed, or disagrees with its own manifest.
@@ -116,6 +138,39 @@ class ArtifactError(RefusalError):
     Every instance of this is a refusal under ADR-0123 §7's cleanup clause: the
     staging directory is removed whole and the target path is not touched.
     """
+
+
+class _BoundedTarInfo(tarfile.TarInfo):
+    """A ``TarInfo`` that refuses an oversized control member before reading it.
+
+    Installed through ``tarfile.open(..., tarinfo=...)``, which is the documented
+    extension point for exactly this. The two methods overridden are private to
+    ``tarfile``, and that is worth naming rather than hiding: if a future CPython
+    renames them, this subclass silently stops bounding anything. What keeps that
+    from being a silent failure is
+    ``test_an_oversized_tar_control_member_is_refused``, which fires the bound —
+    a rename breaks the test rather than the guard.
+    """
+
+    def _proc_pax(self, tarfile_: tarfile.TarFile) -> tarfile.TarInfo:
+        """Refuse an oversized PAX extended or global header, then defer."""
+        self._refuse_oversized("extended header")
+        return super()._proc_pax(tarfile_)  # type: ignore[misc,no-any-return]
+
+    def _proc_gnulong(self, tarfile_: tarfile.TarFile) -> tarfile.TarInfo:
+        """Refuse an oversized GNU long-name or long-link header, then defer."""
+        self._refuse_oversized("long-name header")
+        return super()._proc_gnulong(tarfile_)  # type: ignore[misc,no-any-return]
+
+    def _refuse_oversized(self, what: str) -> None:
+        """Raise if this control member declares more than the format ever needs."""
+        if self.size > _MAX_CONTROL_BYTES:
+            msg = (
+                f"the artifact's archive carries a {what} declaring {self.size} bytes, past "
+                f"the {_MAX_CONTROL_BYTES} this tool will hold in memory; tar metadata is "
+                f"read whole rather than streamed, and no real artifact needs that much"
+            )
+            raise ArtifactError(msg)
 
 
 class ManifestEntry(BaseModel):
@@ -284,7 +339,7 @@ def materialise(artifact: Path, *, passphrase: str, staging: Path) -> Manifest:
     try:
         with artifact.open("rb") as raw:
             reader = DecryptingReader(raw, passphrase)
-            with tarfile.open(fileobj=reader, mode="r|") as archive:
+            with tarfile.open(fileobj=reader, mode="r|", tarinfo=_BoundedTarInfo) as archive:
                 members = iter(archive)
                 manifest = _read_manifest(archive, members)
                 _materialise_payload(archive, members, manifest=manifest, staging=staging)
