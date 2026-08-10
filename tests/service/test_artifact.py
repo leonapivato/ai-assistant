@@ -72,7 +72,7 @@ def _artifact(tmp_path: Path, source: Path, manifest: Manifest) -> Path:
     with destination.open("wb") as out:
         artifact.write_artifact(
             out,
-            data_dir=source,
+            opener=artifact.path_opener(source),
             manifest=manifest,
             passphrase=_KEYPHRASE,
             work_factor=_TEST_WORK_FACTOR,
@@ -726,3 +726,44 @@ def test_a_pax_sparse_member_is_refused_too(staging: Path, tmp_path: Path) -> No
 
     with pytest.raises(ArtifactError, match="sparse archive member"):
         materialise(destination, passphrase=_KEYPHRASE, staging=staging)
+
+
+@pytest.mark.parametrize("path", [".", "..", "a/./b", "a/../b", "sub/."])
+def test_a_manifest_path_that_names_no_file_is_refused(path: str) -> None:
+    """``normpath`` alone does not reject a path that names a directory position.
+
+    ``normpath(".") == "."`` and ``normpath("..") == ".."``, so both survive the
+    normalisation check. ``"."`` is the one that matters: it resolves to the
+    staging root itself, where an exclusive create raises ``FileExistsError`` — an
+    ``OSError`` out of a *malformed artifact*, which the exit-code classifier
+    reads as "restarting might work" and an operator would believe.
+    """
+    with pytest.raises(ValueError, match="manifest path"):
+        ManifestEntry(path=path, length=0, sha256=_HELLO)
+
+
+def test_an_artifact_whose_manifest_names_the_staging_root_is_refused(
+    staging: Path, tmp_path: Path
+) -> None:
+    """The same case reached through a whole artifact, which is how it was found."""
+    encoded = (
+        '{"format_version":1,"taken_at":"2026-08-09T12:00:00Z","project_version":"0.1.0",'
+        '"files":[{"path":".","length":0,"sha256":"' + _HELLO + '"}]}'
+    ).encode()
+    destination = tmp_path / "dot.age"
+    with (
+        destination.open("wb") as raw,
+        EncryptingWriter(raw, _KEYPHRASE, work_factor=_TEST_WORK_FACTOR) as sealed,
+        tarfile.open(fileobj=sealed, mode="w|", format=tarfile.PAX_FORMAT) as archive,
+    ):
+        info = tarfile.TarInfo(MANIFEST_MEMBER)
+        info.size = len(encoded)
+        archive.addfile(info, io.BytesIO(encoded))
+        member = tarfile.TarInfo(PAYLOAD_PREFIX + ".")
+        member.size = 0
+        archive.addfile(member, io.BytesIO(b""))
+
+    with pytest.raises(ArtifactError, match="manifest is malformed"):
+        materialise(destination, passphrase=_KEYPHRASE, staging=staging)
+
+    assert _materialised(staging) == []
