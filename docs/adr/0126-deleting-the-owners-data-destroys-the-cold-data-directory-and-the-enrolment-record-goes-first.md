@@ -11,18 +11,21 @@
   landed on `main` while this decision was in review, and a citation that silently means "whatever this
   ADR says when you read it" is not checkable. Where a later ADR changes one of
   them, this one is read against the text named here until an ADR says otherwise.
-- **This ADR partially supersedes ADR-0124 and ADR-0004, and both records land in
-  this change.** One clause each, and each is scoped to the one act this ADR
-  defines. **ADR-0124 §6's** "A revocation is recorded rather than erasing the
+- **This ADR partially supersedes ADR-0124 and ADR-0004, and all three records
+  land in this change.** Each is one clause, and each is scoped to the one act this
+  ADR defines. **ADR-0124 §6's** "A revocation is recorded rather than erasing the
   enrolment it revokes", only as it reaches the act that destroys the enrolment
-  record itself (§4). **ADR-0004 §7's** gating clause, only for that act, because
-  `permissions/` runs inside a hub this act requires to be stopped and the audit
-  trail is a file it destroys (§11). §12 applies ADR-0070 §1's test to both and
-  states what survives, which is nearly all of both sections — every other sentence
-  of ADR-0124 §6, the whole of its §8 including both clauses this ADR exists to
-  give a home to, and every part of ADR-0004 §7 that governs any other access. No
-  ratified text of either is rewritten; each `Status` line and its appended dated
-  note are the whole of the record (ADR-0070 §1, ADR-0082 §1 and §2).
+  record itself (§4). **ADR-0004 §6's** Tier 0 purge clause, only as it reaches a
+  Tier 0 credential held on the hub's machine outside the OS keyring — today the
+  provider key the SDK reads from the environment (§6). **ADR-0004 §7's** gating
+  clause, only for that act, because `permissions/` runs inside a hub this act
+  requires to be stopped and the audit trail is a file it destroys (§11). §12
+  applies ADR-0070 §1's test to each and states what survives, which is nearly all
+  of all three sections — every other sentence of ADR-0124 §6, the whole of its §8
+  including both clauses this ADR exists to give a home to, every other right
+  ADR-0004 §6 grants, and every part of §7 that governs any other access. No
+  ratified text of either ADR is rewritten; each `Status` line and its appended
+  dated note are the whole of the record (ADR-0070 §1, ADR-0082 §1 and §2).
 - **No implementation lands with it.** No `src/`, no `tests/`. The tool §2 rules
   is a separate lane, briefed against this text once it merges, and §9 sequences it
   behind a prerequisite that does not exist yet.
@@ -497,7 +500,7 @@ it is pages no process in this system can open as a database, and the rerun remo
 it. The group is ordered by which file makes an enrolment live, not by which file
 is largest or listed first.
 
-### 6. The act reaches no keyring, the hub's machine holds no Tier 0 entry today, and the seam for when it does is not this ADR's
+### 6. The act reaches no keyring, and the Tier 0 credential it cannot reach is reported rather than counted as purged
 
 > **Normative.** The act reaches no keyring. It holds neither face of ADR-0125's
 > seam, performs no keyring operation, and enumerates nothing. ADR-0125 §8 names
@@ -506,13 +509,30 @@ is largest or listed first.
 > does not seek that exemption.
 
 > **Normative.** No component of this system writes a Tier 0 keyring entry on the
-> hub's machine today, so there is no such entry for the act to miss. ADR-0004 §6's
-> Tier 0 half is discharged there by that tier being empty, and by nothing else.
+> hub's machine today, so the act misses no keyring entry. That is a statement
+> about the keyring and not about Tier 0, which ADR-0004 §1 defines as
+> credentials — "OAuth tokens, API keys, refresh tokens" — wherever they sit.
 
-> **Normative.** The report states that no keyring was reached, and states the two
-> Tier 0 values that exist on the hub's machine outside one: a model provider
-> credential the operator holds in the process environment, and any credential a
-> future component holds. It may not describe a keyring as purged (§7).
+> **Normative.** ADR-0004 §6's clause that "deleting the user's data purges Tier 0
+> (keyring entries) and Tier 1 (database rows) together" is superseded **only** as
+> it reaches a Tier 0 credential held on the hub's own machine outside the OS
+> keyring. Today that is exactly one thing: the model provider credential the
+> provider SDK reads from the process environment. The act does not remove it, and
+> the two clauses below stand in the clause's place. Everything else §6 grants —
+> view, export, delete, retention rules, and the purge of every Tier 1 artifact and
+> every keyring-held Tier 0 artifact on that machine — is untouched.
+
+> **Normative.** The report names that credential as not purged: that a credential
+> the operator holds in their environment or a shell profile is not in the keyring,
+> is not in `data_dir`, and is not removed by this act, and that removing it is an
+> act at the place they set it. It may not describe Tier 0 as purged, and may not
+> describe a keyring as swept (§7).
+
+> **Normative.** This supersession is self-limiting. It reaches only a Tier 0
+> credential held outside the keyring, so it lapses for any credential a later lane
+> moves into the keyring under ADR-0004 §3, and no lane may cite it to hold a new
+> credential outside one — ADR-0125 §8 forbids that independently, and this clause
+> does not soften it.
 
 > **Normative.** The `ENROLMENT` scope is not reached by this act. ADR-0125 §5
 > rules that the hub holds neither face of that seam for enrolment purposes, and
@@ -527,18 +547,41 @@ is largest or listed first.
 > that this act could take. Until that decision lands, this ADR authorises no such
 > entry to be written, and no lane may cite this section as a route to one.
 
-**Stating that the set is empty is the load-bearing part, and it is checkable.**
-The tree has no `keyring` import; the provider credential is read from the process
-environment by the provider SDK, which ADR-0125 §8 records as pre-existing and not
-authorised by it; `tools/` transmits nothing, so ADR-0017 §3's seam is undesignated
-and holds no credential; and ADR-0004 §4's application-level encryption key is off
-by default with no wiring, which ADR-0125 §12 names as an open decision. Nor is
-there a component that *could* write one: ADR-0125 §8 gives `models/` only the
-reading face and says in as many words that "provisioning a provider credential is
-not `models/`'s". So a report that said "keyring purged" would be describing work
-that did not happen, and a clause requiring the act to purge one would be
-contracting an obligation nothing can meet — the failure ADR-0016 §5 names and
-ADR-0125 §4 twice declines to repeat.
+**"No keyring entry" and "no Tier 0" are different claims, and an earlier draft of
+this section made the second while checking only the first.** The keyring half is
+checkable and true: the tree has no `keyring` import, ADR-0125's concrete
+implementation has not landed, `tools/` transmits nothing so ADR-0017 §3's seam is
+undesignated and holds no credential, and ADR-0004 §4's application-level
+encryption key is off by default with no wiring (ADR-0125 §12). Nor is there a
+component that *could* write one: ADR-0125 §8 gives `models/` only the reading face
+and says in as many words that "provisioning a provider credential is not
+`models/`'s". But ADR-0004 §1 defines Tier 0 by what a value *is*, not by where it
+is kept, and the provider credential is an API key on the hub's own machine that
+this act leaves exactly where it found it. Declaring §6's Tier 0 half discharged on
+that evidence was reading §6's parenthetical "(keyring entries)" as its scope when
+it is its assumption — the assumption ADR-0004 §3 makes and the tree does not yet
+meet.
+
+**So the instrument is a supersession, and it is the one ADR-0124 §8 already used
+on this exact sentence for a different unreachable place.** That section narrowed
+§6's Tier 0 purge as it reaches an enrolled device's keyring entry, because a hub
+cannot reach another machine, and replaced it with a report the owner reads. The
+credential in the operator's own environment is the same shape of unreachable, one
+machine closer: not another device, but another custodian — a shell profile this
+system did not write and must not edit. The replacements are the same instrument
+too, because there is only one honest one: say what was not purged, and say what
+the owner must do about it.
+
+**The cause is pre-existing and the reach is not, which is why filing it would have
+been the wrong move.** ADR-0125 §8 records that the environment read "is
+pre-existing and is not authorised by this ADR", and **#74** is open on it. This
+ADR does not create that read and does not make it worse. What it creates is a
+*delete* — and ADR-0124 §6 is categorical that "a known violation does not
+authorise adding another": shipping an act that a ratified clause says purges Tier
+0, when it does not, changes what that clause governs. A clause requiring the act
+to purge the credential instead would be contracting an obligation nothing can meet
+— the failure ADR-0016 §5 names and ADR-0125 §4 twice declines to repeat — since
+the only implementation is editing the operator's shell profile.
 
 **The forward clause is deliberately not the shape ADR-0123 §3's is, and the
 difference is the whole finding this section was rewritten for.** That section
@@ -844,7 +887,7 @@ section standing. ADR-0124's `Status` line gains the pair and its appended dated
 note carries the record (ADR-0082 §1 and §2).
 
 **ADR-0004 §7 — partially superseded, one clause, one act, and the record lands in
-this change.** The clause is "Access to Tier 0/1 data and every side-effecting tool
+this change alongside §6's.** The clause is "Access to Tier 0/1 data and every side-effecting tool
 call is gated by the `permissions/` layer and recorded in an **audit trail**".
 ADR-0070 §1's test: a reader holding only §7 would read it as reaching this act,
 and would either build a gate that evaluates nothing against a policy layer that is
@@ -855,17 +898,21 @@ carries the argument and the three replacements. ADR-0004's `Status` line is not
 leading-token line, so under ADR-0082 §2 the pair accumulates on it and the dated
 note carries the record; both are written in this change.
 
-**ADR-0004 §6 — no record owed.** This ADR implements the right rather than
-changing it, and the sentence ADR-0124 §8 superseded is already recorded on
-ADR-0004's `Status` line. Every remaining sentence of §6 stays true: the user can
-view, export and delete; `memory/` exposes export and delete; retention rules hold;
-and the purge of every Tier 0 and Tier 1 artifact on the hub's own machine is what
-§1 performs for Tier 1 and what §6 finds already empty for Tier 0. A reader holding
-only ADR-0004 §6 acts identically before and after — which is ADR-0082 §1's test,
-and makes this a stacked addition recorded here and nowhere else. §6's fifth clause
-and **#909** are what keep that true when the Tier 0 set stops being empty; nothing
-here weakens the sentence, and nothing here supplies the mechanism it will then
-need.
+**ADR-0004 §6 — partially superseded, one clause, one place a credential can sit,
+and the record lands in this change.** The clause is "Deleting the user's data
+purges Tier 0 (keyring entries) and Tier 1 (database rows) together", already
+narrowed once by ADR-0124 §8 as it reaches an enrolled device. ADR-0070 §1's test:
+a reader holding only §6 would believe this act purged every Tier 0 credential on
+the hub's machine, and would be wrong about the provider key the SDK reads from the
+process environment — a clause read more widely than it now holds, ADR-0070 §1's
+second limb. §6 above carries the argument and the replacement, which is that the
+act names the credential it did not purge and the act at which the owner removes
+it. It is narrow in the same way ADR-0124 §8's was: one unreachable custodian,
+named, with the whole of the rest of §6 standing — view, export, delete, retention
+rules, every Tier 1 artifact, and every Tier 0 artifact that *is* in the keyring.
+It is also self-limiting, lapsing for any credential a later lane moves into the
+keyring. **#909** is the separate question of how the act would reach one there,
+and it is not this record.
 
 **ADR-0007 §4 and §5 — no record owed.** §4 says `MemoryStore.clear` "is not a
 whole-system erase" and that "the cross-tier coordinator is future work"; §5 defers

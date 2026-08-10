@@ -1,6 +1,6 @@
 # 4. Privacy and data handling
 
-- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause) and ADR-0126 (§7's gating clause, only for the offline whole-installation delete)
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause) and ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete)
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
@@ -79,6 +79,25 @@
   `Settings.data_dir`, performed by an offline console entry point in `service/`
   under the hub's instance lock with the hub stopped.
 
+  **Replaced — §6's Tier 0 purge clause, only as it reaches a credential held
+  outside the keyring.** "Deleting the user's data purges Tier 0 (keyring entries)
+  and Tier 1 (database rows) together." §1 defines Tier 0 by what a value *is* —
+  "OAuth tokens, API keys, refresh tokens" — and the parenthetical "(keyring
+  entries)" is §3's assumption rather than §6's scope. On the hub's machine today
+  that assumption does not hold for one value: the model provider credential the
+  provider SDK reads from the process environment, which ADR-0125 §8 records as
+  pre-existing and not authorised by it and which **#74** is open on. The act
+  cannot reach a shell profile this system did not write, so ADR-0126 §6 requires
+  it to **name that credential as not purged** and to name the act at which the
+  owner removes it, and forbids it describing Tier 0 as purged. This is the same
+  instrument ADR-0124 §8 used on this same sentence for an enrolled device's
+  keyring entry — one unreachable custodian, named to the owner rather than
+  silently missed — and it is **self-limiting**: it lapses for any credential a
+  later lane moves into the keyring under §3, and authorises no new credential to
+  be held outside one. **#909** carries the separate question of how a hub-side
+  delete would reach a keyring entry at all, given that ADR-0125 §5 puts the
+  deletion path on the consumer and §8 keeps `service` out of the seam.
+
   **Replaced — §7's gating clause, only for that act.** "Access to Tier 0/1 data
   and every side-effecting tool call is gated by the `permissions/` layer and
   recorded in an **audit trail**." Both halves are structurally unavailable to it:
@@ -98,16 +117,16 @@
   act that empties the installation, and ADR-0126 §11 rules that the one giving way
   is the one whose purpose is to make *later* accesses reviewable.
 
-  **Not replaced — everything else, which is nearly all of it.** §7's minimisation
-  clause; §7's gate over every other Tier 0 and Tier 1 access, in the hub, in the
-  other offline tools and on every device; §1's tiers; §2, §3, §4 and §5. And
-  **§6 itself is implemented rather than narrowed** — the user can still view,
-  export and delete, retention rules stand, and the purge of every Tier 0 and Tier
-  1 artifact on the hub's own machine is what the act performs, ADR-0126 §6
-  recording that the Tier 0 half is discharged there today by that tier being empty
-  and filing **#909** for the decision owed when it stops being. ADR-0126 §11 states
-  that it does not cite, rest on or widen ADR-0124 §6's exemption, which stays
-  confined to a client's bootstrap credential read; **#74** is untouched.
+  **Not replaced — everything else, which is nearly all of both sections.** §7's
+  minimisation clause; §7's gate over every other Tier 0 and Tier 1 access, in the
+  hub, in the other offline tools and on every device; §1's tiers; §2, §3, §4 and
+  §5. And nearly all of §6: the user can still view, export and delete, `memory/`
+  still exposes both, retention rules stand, and the act performs the purge of
+  every Tier 1 artifact on the hub's own machine and of every Tier 0 artifact that
+  is in the keyring — which today is none, because nothing writes one there yet.
+  ADR-0126 §11 states that it does not cite, rest on or widen ADR-0124 §6's
+  exemption, which stays confined to a client's bootstrap credential read; **#74**
+  is untouched and this ADR's §3 keyring rule is applied rather than narrowed.
 - Note (2026-07-20): **§2's egress clause is superseded by ADR-0017.** That
   clause named `models/` the only component permitted to send user data
   off-device; ADR-0017 §1 replaces it with `models/` plus a designated
