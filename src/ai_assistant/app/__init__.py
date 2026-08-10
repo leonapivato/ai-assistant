@@ -30,25 +30,36 @@ only layer that may name both the ``Embedder`` in ``models/`` and the migration
 in ``memory/`` (ADR-0104 §5). :func:`build_measure_reader` is the second offline
 tool arriving by that same route (ADR-0120 §9): ``service`` may not import
 ``evaluation`` directly, so leg 8's measure report reaches its mechanism through
-here.
+here. :func:`build_store_health_reader` is the third of that family (ADR-0129 §5),
+and it arrives by the *other* half of the same rule: its mechanism is in
+``memory/`` rather than in a leaf package, and ``service`` may name no subsystem
+type at all.
 """
 
 from __future__ import annotations
 
 from ai_assistant.app.composition import (
+    STORE_HEALTH_DEFAULT_K,
+    STORE_HEALTH_DEFAULT_SAMPLE,
+    STORE_HEALTH_MAX_K,
     Composition,
     build_composition,
     build_engine,
     build_measure_reader,
     build_reembedder,
+    build_store_health_reader,
     ensure_model_credentials,
 )
 
 __all__ = [
+    "STORE_HEALTH_DEFAULT_K",
+    "STORE_HEALTH_DEFAULT_SAMPLE",
+    "STORE_HEALTH_MAX_K",
     "Composition",
     "build_composition",
     "build_engine",
     "build_measure_reader",
     "build_reembedder",
+    "build_store_health_reader",
     "ensure_model_credentials",
 ]
