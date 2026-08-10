@@ -24,6 +24,7 @@ import pytest
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.service import artifact, backup, restore
+from ai_assistant.service.agev1 import EncryptingWriter
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK
 from ai_assistant.service.lock import LOCK_FILENAME
 
@@ -318,3 +319,27 @@ def test_the_restore_needs_nothing_from_the_machine_that_took_the_backup(
     assert _restore(written, target, keyphrase_file) == EXIT_OK
 
     assert (target / "notes.txt").read_bytes() == b"hello"
+
+
+def test_an_artifact_that_decrypts_but_does_not_unpack_is_a_refusal_not_a_traceback(
+    tmp_path: Path, keyphrase_file: Path
+) -> None:
+    """The age layer authenticates bytes, not archives (ADR-0123 §8).
+
+    A file that decrypts with the operator's own passphrase and holds something
+    that is not a ``tar`` stream — a half-written artifact, a resumed download —
+    has to arrive as exit ``78`` with a diagnostic. A traceback out of a recovery
+    command is the one outcome an operator on a broken machine cannot act on.
+    """
+    destination = tmp_path / "not-a-tar.age"
+    with (
+        destination.open("wb") as raw,
+        EncryptingWriter(raw, _KEYPHRASE, work_factor=_TEST_WORK_FACTOR) as sealed,
+    ):
+        sealed.write(b"this decrypts perfectly and is not an archive" * 100)
+    target = tmp_path / "restored"
+
+    assert _restore(destination, target, keyphrase_file) == EXIT_DEPLOYMENT
+
+    assert not target.exists()
+    assert _staging_left(tmp_path) == []

@@ -260,3 +260,44 @@ def test_an_artifact_declares_the_work_factor_it_was_written_at() -> None:
     artifact = _encrypt(b"the accumulated model", work_factor=9)
 
     assert artifact.split(b"\n")[1].endswith(b" 9")
+
+
+def test_an_oversized_header_line_is_refused_before_it_is_allocated() -> None:
+    """The header is parsed before it can be authenticated, so its cost is capped.
+
+    age's MAC covers the header, and the key that checks the MAC comes *out* of
+    the header — so a reader has no way to authenticate before parsing. An
+    unbounded ``readline`` on a line with no terminator allocates the whole line,
+    which is a recovery machine's memory spent on an artifact it is about to
+    refuse anyway.
+    """
+    absurd = b"age-encryption.org/v1\n-> scrypt " + b"A" * (2 * 1024 * 1024)
+
+    with pytest.raises(AgeError, match="runs past"):
+        _decrypt(absurd)
+
+
+def test_a_stanza_body_that_never_ends_is_refused() -> None:
+    """The body loop's only exit is a short line, so an artifact that never writes
+    one runs it forever — the same hazard as the line length, one level up.
+    """
+    endless = (
+        b"age-encryption.org/v1\n"
+        + b"-> scrypt "
+        + base64.b64encode(b"\x00" * 16).rstrip(b"=")
+        + b" 8\n"
+        + (b"A" * 64 + b"\n") * 500
+    )
+
+    with pytest.raises(AgeError, match="body lines"):
+        _decrypt(endless)
+
+
+def test_a_legitimate_header_is_nowhere_near_the_bounds() -> None:
+    """The bounds are headroom, not a constraint the format bumps into."""
+    artifact = _encrypt(b"the accumulated model")
+    header = artifact[: artifact.index(b"\n", artifact.index(b"--- ")) + 1]
+
+    lines = header.split(b"\n")
+    assert max(len(line) for line in lines) < 128
+    assert len(lines) < 8

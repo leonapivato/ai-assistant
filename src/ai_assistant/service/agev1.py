@@ -84,6 +84,24 @@ CHUNK_BYTES: Final = 64 * 1024
 #: needs a trailing empty line.
 _BODY_COLUMNS: Final = 64
 
+#: The most any one header line may be, and the most body lines a stanza may
+#: carry. **Both bound an attacker before the header is authenticated**, which is
+#: the window this format cannot close on its own: the MAC covers the header, but
+#: the key that checks it comes out of the header, so a reader has to parse bytes
+#: it cannot yet trust. Unbounded, `readline()` on a multi-gigabyte line with no
+#: terminator allocates that line — measured at ~200 MB of peak allocation for a
+#: 50 MB line, because the decode to `str` multiplies it — and an endless run of
+#: full-width body lines accumulates without limit.
+#:
+#: The figures are far above anything the format produces and far below anything
+#: that hurts. A whole legitimate header is about 155 bytes: a 21-byte version
+#: line, a ~40-byte scrypt stanza line, one 43-character body line (a 32-byte
+#: wrapped file key), and a 47-byte MAC line. 4 KiB and 64 lines leave three
+#: orders of magnitude of headroom for a future stanza this tool does not know
+#: while capping a hostile artifact's cost at a quarter of a megabyte.
+_MAX_LINE_BYTES: Final = 4096
+_MAX_BODY_LINES: Final = 64
+
 #: What the tool writes with, which is what ``rage`` writes with — checked, not
 #: assumed: an artifact from ``pyrage.passphrase.encrypt`` carries ``-> scrypt
 #: <salt> 19``. Matching it means an artifact this tool writes costs a recovery
@@ -425,10 +443,33 @@ class DecryptingReader(io.RawIOBase):
         del self._pending[:take]
         return take
 
+    def _read_line(self, what: str) -> bytes:
+        """Read one header line, refusing one longer than any header line can be.
+
+        Args:
+            what: Which line is being read, for the diagnostic.
+
+        Returns:
+            The line, terminator included.
+
+        Raises:
+            AgeError: If it runs past :data:`_MAX_LINE_BYTES`. Read with an
+                explicit limit rather than measured afterwards, because measuring
+                afterwards is measuring an allocation that has already happened.
+        """
+        line = self._src.readline(_MAX_LINE_BYTES + 1)
+        if len(line) > _MAX_LINE_BYTES:
+            msg = (
+                f"the artifact's {what} runs past {_MAX_LINE_BYTES} bytes, which no age v1 "
+                f"header line does; this is not a header worth spending memory on"
+            )
+            raise AgeError(msg)
+        return line
+
     def _read_header(self, passphrase: str) -> bytes:
         """Parse the header, verify its MAC and unwrap the file key."""
         raw = bytearray()
-        first = self._src.readline()
+        first = self._read_line("version line")
         raw += first
         if first.rstrip(b"\n") != _VERSION_LINE:
             msg = (
@@ -439,7 +480,7 @@ class DecryptingReader(io.RawIOBase):
 
         salt, work_factor, wrapped = self._read_scrypt_stanza(raw)
 
-        mac_line = self._src.readline()
+        mac_line = self._read_line("MAC line")
         if not mac_line.startswith(b"--- "):
             msg = "the artifact's header does not end with its MAC line"
             raise AgeError(msg)
@@ -468,7 +509,7 @@ class DecryptingReader(io.RawIOBase):
         carry no other recipient — so "exactly one, and it is scrypt" is the
         format's own rule rather than a narrowing of it.
         """
-        line = self._src.readline()
+        line = self._read_line("recipient stanza")
         raw += line
         parts = line.rstrip(b"\n").decode("ascii", "replace").split(" ")
         if len(parts) != _STANZA_FIELDS or parts[0] != "->" or parts[1] != _SCRYPT_TAG:
@@ -501,9 +542,14 @@ class DecryptingReader(io.RawIOBase):
         return salt, work_factor, wrapped
 
     def _read_body_lines(self, raw: bytearray) -> Iterator[str]:
-        """Yield a stanza body's base64 lines, stopping at the first short one."""
-        while True:
-            line = self._src.readline()
+        """Yield a stanza body's base64 lines, stopping at the first short one.
+
+        Bounded at :data:`_MAX_BODY_LINES` for the reason the line length is: the
+        loop's only exit is a line the artifact chooses to make short, so an
+        artifact that never does runs it forever, accumulating into ``raw``.
+        """
+        for _ in range(_MAX_BODY_LINES):
+            line = self._read_line("stanza body")
             if not line:
                 msg = "the artifact's header ends mid-stanza; it is truncated"
                 raise AgeError(msg)
@@ -512,6 +558,11 @@ class DecryptingReader(io.RawIOBase):
             yield text
             if len(text) < _BODY_COLUMNS:
                 return
+        msg = (
+            f"the artifact's recipient stanza runs past {_MAX_BODY_LINES} body lines, which "
+            f"no age v1 stanza does"
+        )
+        raise AgeError(msg)
 
     def _decrypt_next(self) -> None:
         """Decrypt one chunk, using a one-chunk lookahead to spot the last one.

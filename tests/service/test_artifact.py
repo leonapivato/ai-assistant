@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ai_assistant.service import artifact
-from ai_assistant.service.agev1 import AgeError, EncryptingWriter
+from ai_assistant.service.agev1 import AgeError, DecryptingReader, EncryptingWriter
 from ai_assistant.service.artifact import (
     FORMAT_VERSION,
     MANIFEST_MEMBER,
@@ -492,3 +492,81 @@ def test_a_deep_path_survives_the_round_trip(tmp_path: Path, staging: Path) -> N
     verify_materialised(staging, restored)
 
     assert (staging / relative).read_bytes() == b"hello"
+
+
+def test_an_authenticated_payload_that_is_not_a_tar_stream_is_refused(
+    staging: Path, tmp_path: Path
+) -> None:
+    """An artifact that decrypts is not thereby an artifact that unpacks.
+
+    The age layer authenticates the bytes against the passphrase and says nothing
+    about the plaintext under them, so anyone holding the passphrase — the
+    operator included, with a truncated or half-written file — can present one
+    that is not a ``tar`` stream. It has to arrive as a refusal: a traceback out
+    of a recovery command is the one outcome an operator on a broken machine
+    cannot act on.
+    """
+    destination = tmp_path / "not-a-tar.age"
+    with (
+        destination.open("wb") as raw,
+        EncryptingWriter(raw, _KEYPHRASE, work_factor=_TEST_WORK_FACTOR) as sealed,
+    ):
+        sealed.write(b"this is not a tar archive at all" * 100)
+
+    with pytest.raises(ArtifactError, match="archive cannot be read"):
+        materialise(destination, passphrase=_KEYPHRASE, staging=staging)
+
+    assert _materialised(staging) == []
+
+
+def test_a_truncated_archive_inside_a_whole_artifact_is_refused(
+    staging: Path, tmp_path: Path
+) -> None:
+    """A member that stops mid-content is refused rather than silently short.
+
+    The payload is made large on purpose. ``tar`` pads its stream to a 10 KiB
+    block, so cutting a small archive in half removes only zero padding and
+    leaves a complete, correct archive — a fact worth knowing, because a test
+    written the obvious way passes without testing anything.
+    """
+    directory = tmp_path / "big"
+    directory.mkdir(mode=0o700)
+    (directory / "memory.db").write_bytes(b"m" * 200_000)
+    sha256, length = digest_and_length(directory / "memory.db")
+    manifest = _manifest(ManifestEntry(path="memory.db", length=length, sha256=sha256))
+    whole = _artifact(tmp_path, directory, manifest).read_bytes()
+    plaintext = DecryptingReader(io.BytesIO(whole), _KEYPHRASE).read()
+    destination = tmp_path / "cut-short.age"
+    with (
+        destination.open("wb") as raw,
+        EncryptingWriter(raw, _KEYPHRASE, work_factor=_TEST_WORK_FACTOR) as sealed,
+    ):
+        sealed.write(plaintext[: len(plaintext) // 2])
+
+    with pytest.raises(ArtifactError, match=r"ends before its declared size|cannot be read"):
+        materialise(destination, passphrase=_KEYPHRASE, staging=staging)
+
+
+def test_a_manifest_declaring_an_absurd_size_is_refused_from_its_header(
+    staging: Path, tmp_path: Path
+) -> None:
+    """The manifest is the one member held whole in memory, so its size is capped.
+
+    Built from a bare ``tar`` header rather than from real content, which is the
+    point: the refusal has to arrive from the declared size, before the member's
+    body is read. A test that had to write a gigabyte to provoke it would be
+    testing a check that had already failed.
+    """
+    info = tarfile.TarInfo(MANIFEST_MEMBER)
+    info.size = 8 * 1024 * 1024 * 1024
+    destination = tmp_path / "greedy.age"
+    with (
+        destination.open("wb") as raw,
+        EncryptingWriter(raw, _KEYPHRASE, work_factor=_TEST_WORK_FACTOR) as sealed,
+    ):
+        sealed.write(info.tobuf(tarfile.PAX_FORMAT))
+
+    with pytest.raises(ArtifactError, match="declares 8589934592 bytes"):
+        materialise(destination, passphrase=_KEYPHRASE, staging=staging)
+
+    assert _materialised(staging) == []
