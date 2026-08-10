@@ -419,9 +419,10 @@ duty cycle, or a reason to open the assistant tomorrow, and the arc is ordered s
 the cheapest of those comes first.
 
 9. **Reach and daily use.** The leg that makes the hub something the owner lives
-   in rather than something they drive. **Built and QA'd; the exit test stands
-   unruled.** All four of the things the ruling named shipped, in the order it
-   fixed them; the batch record is #883.
+   in rather than something they drive. **Built and QA'd; the exit is ruled met
+   in single-machine scope (2026-08-10, on #919), with the two remaining
+   validations converted to named triggers.** All four of the things the ruling
+   named shipped, in the order it fixed them; the batch record is #883.
 
    **Backup and restore came first, as ruled** — daily accumulation happens on
    one laptop holding the only copy of the store, which is fragile from the day
@@ -491,16 +492,24 @@ the cheapest of those comes first.
    days, reachable from somewhere other than the hub's own machine, and losing
    the laptop does not lose the model.*
 
-   **That test stands unruled, and what it awaits is named rather than assumed.**
-   ADR-0124 §11 makes a **two-device validation** normative: the remote listener
-   is not ruled validated until its checks run with the hub on one physical
-   machine and the client on a second commodity device the owner already has
-   (#882 fixes that shape), and #919 reached none of it. ADR-0123 §9 carries its
-   own discharge clause — the decision is not discharged until an artifact has
-   been restored on a machine other than the one that wrote it, by an operator
-   supplying the passphrase from their own custody, and a hub has served the
-   restored directory. And the test opens on daily use, which no lane delivers.
-   The ruling is the operator's.
+   **That test was ruled on 2026-08-10 (the comment on #919), in leg 7's
+   pattern: met in the scope single-machine evidence reaches, with what cannot
+   yet be tested named and armed rather than asserted.** The operator has no
+   second physical device for the near future, so the two validations the
+   previous revision of this paragraph listed became the ruling's named
+   triggers. **#882 carries ADR-0124 §11's two-device validation**, armed by a
+   second commodity device becoming available or by the box migration (#879)
+   completing — at which point the laptop itself is the second device; until it
+   fires the remote listener is not ruled validated and stays dark in operation
+   (`hub_remote_address` unset), so no unvalidated surface is exposed.
+   **ADR-0123 §9's restore discharge is assigned to the box migration** —
+   carrying the store onto the box is a restore on a machine other than the
+   writer, passphrase from operator custody, hub serving the result; until then
+   backups are taken but the artifact is not ruled proven, and same-machine
+   drills do not discharge §9. Daily accumulation opens on the laptop hub, and
+   the leg-order gate is released: leg 10 may be dispatched. #917 and #918 were
+   in lanes as of the ruling and gate nothing (#919 classed neither as exit
+   substance).
 
    **What the hop feeds** — a device as a context facet (a VISION §Principle-4
    input), a device-scoped permission input (ADR-0004's deferred catalogue gains
