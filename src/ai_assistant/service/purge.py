@@ -473,25 +473,46 @@ def _pin_record(root: int, *, shown: Path) -> _Pinned | str:
 def _read_record(record: Path, *, pinned: _Pinned) -> tuple[Enrolment, ...]:
     """Read every live enrolment, and refuse if the entry moved under the read.
 
-    **The re-check is the shape ``backup._refuse_if_source_moved`` has, and for the
-    same reason it is stated rather than claimed away**: SQLite opens a *path*, so
-    this is the one resolution of the record's name that :func:`_pin_record` cannot
-    make on the descriptor it holds. The descriptor is kept open across the read, so
-    the pinned inode cannot be recycled, and the entry is compared against it
-    afterwards — an entry replaced around the read is caught and refused rather
-    than reported as this installation's device list. It narrows the window and
-    does not close it, and nothing here claims it does.
+    **SQLite resolves the name it is given, and no arrangement of it does not.** It
+    has to: the ``-wal`` and ``-shm`` paths are derived from the database's own
+    filename, so the unix VFS canonicalises that filename to build them. Three
+    routes out were tried against a real database and each fails on its own terms.
+    Handing it ``/proc/self/fd/N`` pins nothing, because it canonicalises that link
+    too. Adding ``immutable=1`` stops the canonicalisation *and* stops it reading a
+    ``-wal`` — which a hub killed mid-transaction leaves holding committed
+    enrolments, and §7's list "enumerates every live enrolment with no bound, no
+    page and no omission". Asking for ``mode=ro`` prevents the contents being
+    altered but still builds a ``-shm`` beside whatever it opened, and cannot replay
+    a ``-wal`` at all, so it trades one write for another and loses a real record.
+
+    So the one resolution is unavoidable, and it is bounded on both sides instead.
+    The pinned descriptor is held open across it — the inode cannot be recycled
+    while it is — and the entry is compared against it before the open and again
+    after the read. A replaced entry is refused, so what an entry resolved at the
+    wrong instant reaches never becomes this installation's device list. Nor can it
+    be destroyed: the destroying walk resolves nothing by path, every removal there
+    going through a descriptor opened ``O_NOFOLLOW``.
+
+    What remains is that a deliberately raced entry could be opened and read. It is
+    stated rather than claimed away — the posture ``backup._refuse_if_source_moved``
+    takes about its own window — and the two ways to close it are worse than it:
+    copying the record's bytes out of ``data_dir`` leaves the owner's enrolment
+    history outside the directory this act exists to empty, which is §11's residue;
+    hard-linking an alias inside it writes into the data directory to compose the
+    report, which is what §7 calls "absurd" and, "on a crashed run, a file left
+    behind that the installation never had".
 
     Raises:
         RefusalError: If the record cannot be opened or read, or if the entry no
             longer names the file that was pinned.
     """
+    _refuse_if_moved(record, pinned=pinned, when="before it was opened")
     try:
         store = EnrolmentStore(record)
     except sqlite3.Error as exc:
         msg = (
             f"{record} could not be opened as the enrolment record, so this act cannot state "
-            f"which devices are enrolled: {exc}. Move it aside and run this again"
+            f"which devices are enrolled and nothing was destroyed: {exc}"
         )
         raise RefusalError(msg) from exc
     try:
@@ -499,25 +520,40 @@ def _read_record(record: Path, *, pinned: _Pinned) -> tuple[Enrolment, ...]:
     except sqlite3.Error as exc:
         msg = (
             f"{record} could not be read, so this act cannot state which devices are "
-            f"enrolled: {exc}. Move it aside and run this again"
+            f"enrolled and nothing was destroyed: {exc}"
         )
         raise RefusalError(msg) from exc
     finally:
         store.close()
+    _refuse_if_moved(record, pinned=pinned, when="while it was being read")
+    return live
 
+
+def _refuse_if_moved(record: Path, *, pinned: _Pinned, when: str) -> None:
+    """Refuse unless the record's name still resolves to the entry that was pinned.
+
+    Args:
+        record: The record's path.
+        pinned: The entry :func:`_pin_record` opened, still held open — which is
+            what makes the comparison meaningful, since a closed descriptor's inode
+            could be handed to a different file.
+        when: What to say the change happened around.
+
+    Raises:
+        RefusalError: If it names something else now, or nothing.
+    """
     try:
-        after = record.stat()
+        found = record.stat()
     except OSError as exc:
-        msg = f"{record} vanished while it was being read, so nothing was destroyed: {exc}"
+        msg = f"{record} vanished {when}, so nothing was destroyed: {exc}"
         raise RefusalError(msg) from exc
-    if (after.st_dev, after.st_ino) != (pinned.device, pinned.inode):
+    if (found.st_dev, found.st_ino) != (pinned.device, pinned.inode):
         msg = (
-            f"{record} was replaced while it was being read, so the device list may not be "
-            f"this installation's and nothing was destroyed; make sure nothing else is "
-            f"writing to the data directory and run this again"
+            f"{record} was replaced {when}, so the device list may not be this "
+            f"installation's and nothing was destroyed; make sure nothing else is writing "
+            f"to the data directory and run this again"
         )
         raise RefusalError(msg)
-    return live
 
 
 def _refuse_descendant_mounts(data_dir: Path) -> None:

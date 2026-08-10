@@ -835,11 +835,16 @@ def test_a_record_swapped_for_a_link_around_the_read_is_refused(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """§1: "what it names is not read". SQLite opens a path, so the entry is pinned.
+    """§1: what a raced entry names never becomes this installation's device list.
 
     The swap is staged where the real race would land it — after the entry has been
-    examined and before the record is opened by name — which is the window an
-    ``lstat``-then-open pair leaves and the descriptor closes.
+    examined and around the one resolution SQLite makes for itself, which
+    ``_read_record`` documents as unavoidable. What the pinned descriptor buys is
+    asserted here at exactly its size: the act refuses, destroys nothing, and never
+    reports the other record's devices. What it does *not* buy is that SQLite never
+    opened the file, which is the residue the implementation states rather than
+    claims away — so this asserts the bound that matters instead, that the external
+    record still exists and still holds its own rows afterwards.
     """
     elsewhere = tmp_path / "another-record.db"
     _enrol(tmp_path, "somewhere-elses-device.example.ts.net")
@@ -862,6 +867,13 @@ def test_a_record_swapped_for_a_link_around_the_read_is_refused(
     printed = capsys.readouterr()
     assert "was replaced while it was being read" in printed.err
     assert "somewhere-elses-device.example.ts.net" not in printed.out
+
+    survivor = EnrolmentStore(elsewhere)
+    try:
+        identities = [enrolment.overlay_identity for enrolment in survivor.live_enrolments()]
+    finally:
+        survivor.close()
+    assert identities == ["somewhere-elses-device.example.ts.net"]
 
 
 @pytest.mark.usefixtures("settings")
