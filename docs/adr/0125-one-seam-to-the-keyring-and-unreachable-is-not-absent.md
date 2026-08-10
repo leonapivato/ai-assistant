@@ -45,13 +45,23 @@
   validating callable; and both supersession records in §13, each drafted as a
   stacked addition and neither one. Each is recorded at the clause it changed
   rather than only here.
-- **Ratified before its terminal round, so the reviews cover the text that
-  merges.** The `Status` above reads `Accepted` from the last round onward, which
-  is the shape ADR-0124 used and the failure #622 records having paid for twice —
-  an ADR merged `Proposed` whose reviews never saw the ratified text. The
-  ratification touches this header and nothing else: no decision text moves, and
-  no marked clause acquires, loses or alters an obligation, which is ADR-0070 §1's
-  own test applied to the ratifying edit first.
+- **Reviewed while `Proposed`, then ratified inside this PR — the prescribed
+  order, not a shortcut around it.** `CONTRIBUTING.md` -> "Contract ADRs land
+  before their implementation" requires a substantive contract ADR to be reviewed
+  while `Proposed` "so a finding can still change the decision", and both required
+  reviews were: rounds 1-4 ran against `Proposed` text and between them produced
+  every change the bullet above lists. That same section prescribes what follows --
+  "Triage the findings, fold real ones into the draft, **flip the ADR to
+  `Accepted`, merge that PR**, then build against it" -- and classes the `Proposed`
+  -> `Accepted` flip as a trivial edit that skips "a separate review *of the edit
+  itself*". Ratification is the author's: "the author still owns ratification; the
+  reviewer only surfaces blind spots." Merging `Proposed` would be the failure
+  **#622** records having been paid for twice -- a decision sitting in `main` that
+  nothing ever ratified -- and ADR-0124, the ADR this one is a prerequisite of,
+  carries `Accepted` for that reason. The flip touches this header and nothing
+  else: no decision text moves and no marked clause acquires, loses or alters an
+  obligation, which is ADR-0070 §1's own test applied to the ratifying edit first.
+  The rounds run after it were not required, and they bought two real findings.
 
 ## Context
 
