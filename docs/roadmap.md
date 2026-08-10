@@ -83,11 +83,13 @@ interaction-implicit learning language covers.
    CLI on the hub's own machine, over a loopback Unix socket in the data
    directory. All large network constraints — transport security, device
    identity and enrolment, push delivery, backup — were deliberately deferred
-   until a second physical device matters, and that is **leg 9**, where they now
-   come due. ADR-0084 §1 and §11 fix the price of crossing that line: a
-   non-loopback hop is user data leaving the device, so it engages ADR-0017 §1
-   and owes its own ratified decision — leg 9's first contract question. It is
-   not reached by swapping an address family. The caution this
+   until a second physical device matters, and that is **leg 9**, where all but
+   push delivery came due; ADR-0124 §10 restates the prohibition on the hub
+   dialling a spoke and leaves the delivery seam to a wire decision of its own.
+   ADR-0084 §1 and §11 fixed the price of crossing that line: a non-loopback hop
+   is user data leaving the device, so it engages ADR-0017 §1 and owed its own
+   ratified decision — leg 9's first contract question, and **ADR-0124 is that
+   decision**. It is not reached by swapping an address family. The caution this
    stance carried before the hub existed — that a slice must not bake in
    single-shot or single-client assumptions — is now the standing rule above
    rather than advice: a subsequent interface is a client of the API or it is not
@@ -520,10 +522,14 @@ the cheapest of those comes first.
 10. **Proactivity.** The push seam, `NotificationCandidate`, and the interruption
     policy — the one proposal artifact of the propose/dispose principle still
     unbuilt. Of its two structural requirements, leg 5 met one: something is
-    awake to notice, with a scheduler to notice on (ADR-0083 §7). Leg 9 meets the
-    other, because a delivery channel is a push seam over a hop, and a hub that
-    notices and cannot reach the user has produced a candidate and delivered
-    nothing. The policy is the hard half: what earns an interruption is a
+    awake to notice, with a scheduler to notice on (ADR-0083 §7). Leg 9 supplies
+    the prerequisite for the other but not the other itself: a hub that notices
+    and cannot reach the user has produced a candidate and delivered nothing, and
+    the hop gives the hub an address for an enrolled device — but ADR-0124 §10
+    rules that an address is not a delivery channel, the hub still never dialling
+    a spoke (ADR-0094 §2) over an envelope that is still serial (ADR-0084 §3). So
+    the seam is this leg's to decide as well. The policy is the hard half: what
+    earns an interruption is a
     judgement the propose/dispose chassis has never had to make, because every
     other proposal it gates waits patiently to be read.
     *Exit: the assistant tells the user something they did not ask for and were
