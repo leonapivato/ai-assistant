@@ -61,7 +61,7 @@ import sqlite_vec
 
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import MemoryStoreError
-from ai_assistant.core.types import BeliefBand, band_of
+from ai_assistant.core.types import BeliefBand, MemoryKind, band_of, describe_untrusted
 from ai_assistant.memory.sqlite_store import _ADAPTER, _VEC_KNN_MAX_K
 
 if TYPE_CHECKING:
@@ -622,7 +622,9 @@ class StoreHealthReader:
             MemoryStoreError: If ``sample`` or ``k`` is outside its domain, or the
                 store cannot be opened or read.
         """
-        _require_domain(sample=sample, k=k)
+        # Both are re-read out of the guard rather than used as passed, so nothing
+        # below can be computed with a value that never met §3's domain.
+        sample, k = _require_domain(sample=sample, k=k)
         if not self._store.is_file():
             # §4: not a failure, and opening the database to find out would create
             # the very thing being asked about.
@@ -636,34 +638,76 @@ class StoreHealthReader:
             conn.close()
 
 
-def _require_domain(*, sample: int, k: int) -> None:
+def _whole(value: object, what: str) -> int:
+    """Read one parameter as a whole number, disbelieving its annotation.
+
+    Typed ``object`` deliberately, for the reason ``core/clock.py``'s
+    ``_checked_reading`` gives about the value it guards: the declared ``int`` is
+    what this exists to disbelieve, and annotating it ``int`` would make the check
+    unreachable to the type checker while leaving it entirely reachable at
+    runtime. §3 makes ``k`` a **positive integer**, and the ordering comparisons
+    below are not that test — ``1.5`` passes every one of them, and ``nan`` passes
+    them by refusing to compare, which is how it reached an empty heap and an
+    ``IndexError`` rather than a stated refusal.
+
+    **A ``bool`` is refused**, on ADR-0120 §2's precedent for the counts it reads:
+    a count is "a non-negative integer that is not a ``bool``". ``k=True`` is a
+    ``k`` of one by accident of the type system rather than by anybody's intent.
+
+    Args:
+        value: What the caller passed.
+        what: The parameter's name, for the diagnostic.
+
+    Returns:
+        The value as an ``int``.
+
+    Raises:
+        MemoryStoreError: If it is not a whole number, or is a ``bool``.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"{what} must be a whole number, got {describe_untrusted(value)}"
+        raise MemoryStoreError(msg)
+    return value
+
+
+def _require_domain(*, sample: object, k: object) -> tuple[int, int]:
     """Refuse a run whose parameters no figure could be taken under (§3).
 
-    ``k`` positive is §3's own clause, and its reason is arithmetic: a ``k`` of
-    zero makes the denominator zero on every record in every store. The ceiling is
-    the backend's rather than the ADR's, and refusing here — before the instance
-    lock has bought anything — is what keeps it from surfacing as a ``sqlite3``
-    error from the middle of a run.
+    ``k`` a positive integer is §3's own clause, and its reason is arithmetic: a
+    ``k`` of zero makes the denominator zero on every record in every store, and a
+    fractional one makes the density a share of something no neighbourhood has.
+    The ceiling is the backend's rather than the ADR's, and refusing here — before
+    the instance lock has bought anything — is what keeps it from surfacing as a
+    ``sqlite3`` error from the middle of a run.
 
     Args:
         sample: The requested sample size.
         k: The requested neighbourhood size.
 
+    Returns:
+        Both, as the integers every figure below is computed with.
+
     Raises:
         MemoryStoreError: If either is outside its domain.
     """
-    if k < 1:
-        msg = f"k must be a positive integer, got {k}: a density over {k} neighbours has no value"
-        raise MemoryStoreError(msg)
-    if k > MAX_K:
+    neighbours = _whole(k, "k")
+    size = _whole(sample, "the sample")
+    if neighbours < 1:
         msg = (
-            f"k must be at most {MAX_K}: a neighbourhood of k needs k + 1 from the vector "
-            f"index, whose own ceiling is {_VEC_KNN_MAX_K}; got {k}"
+            f"k must be a positive integer, got {neighbours}: a density over "
+            f"{neighbours} neighbours has no value"
         )
         raise MemoryStoreError(msg)
-    if sample < 1:
-        msg = f"the sample must be at least one record, got {sample}"
+    if neighbours > MAX_K:
+        msg = (
+            f"k must be at most {MAX_K}: a neighbourhood of k needs k + 1 from the vector "
+            f"index, whose own ceiling is {_VEC_KNN_MAX_K}; got {neighbours}"
+        )
         raise MemoryStoreError(msg)
+    if size < 1:
+        msg = f"the sample must be at least one record, got {size}"
+        raise MemoryStoreError(msg)
+    return size, neighbours
 
 
 def _connect(store: Path) -> sqlite3.Connection:
@@ -802,8 +846,18 @@ class _Tally:
         self.without_vector = 0
         self.candidates = 0
         self.candidates_not_live = 0
-        self.kinds: dict[str, list[int]] = {}
-        self.bands: dict[BeliefBand, list[int]] = {}
+        #: Every ``kind`` and every ``BeliefBand`` starts at zero rather than
+        #: appearing when one is first met. §3 states the band fill "for each
+        #: ``BeliefBand``", which a store holding no ``EXTERNAL`` record would
+        #: otherwise answer by omitting ``attested`` altogether — and §1's own
+        #: argument about a zero is that "an omitted line asserts nothing and is
+        #: read as zero anyway". A band nothing is in is a *measured* zero over a
+        #: non-empty census population, which is a fact worth stating: it says the
+        #: store has no attested belief at all, where a missing line leaves a
+        #: reader to guess whether the band was empty or the report forgot it. The
+        #: kind decomposition is completed for the same reason.
+        self.kinds: dict[str, list[int]] = {kind.value: [0, 0, 0, 0, 0] for kind in MemoryKind}
+        self.bands: dict[BeliefBand, list[int]] = {band: [0, 0] for band in BeliefBand}
         self.ages: list[float] = []
         #: A min-heap of at most ``sample`` candidates, so the tally holds the
         #: sample rather than the candidate set. What survives is the ``sample``
@@ -827,10 +881,10 @@ class _Tally:
         self.retired += retired
         self.not_yet_live += not_yet
         self.expired += expired
-        counts = self.kinds.setdefault(record.kind, [0, 0, 0, 0, 0])
+        counts = self.kinds[record.kind]
         for index, flag in enumerate((True, live, retired, not_yet, expired)):
             counts[index] += flag
-        band = self.bands.setdefault(band_of(record.provenance.source), [0, 0])
+        band = self.bands[band_of(record.provenance.source)]
         band[0 if live else 1] += 1
         if retired and validity.valid_until is not None:
             self.ages.append((self._at - validity.valid_until).total_seconds())
@@ -865,7 +919,7 @@ class _Tally:
         )
 
     def by_kind(self) -> tuple[tuple[str, Census], ...]:
-        """The same census per ``kind`` label, in label order."""
+        """The same census per ``kind`` label, in label order and for every kind."""
         return tuple(
             (
                 kind,
@@ -881,7 +935,7 @@ class _Tally:
         )
 
     def band_fill(self) -> tuple[BandFill, ...]:
-        """§3's band fill, in band order and only for the bands present."""
+        """§3's band fill, in band order and for **every** band, empty ones included."""
         return tuple(
             BandFill(band=band, live=counts[0], not_live=counts[1])
             for band, counts in sorted(self.bands.items(), key=lambda item: item[0].value)
