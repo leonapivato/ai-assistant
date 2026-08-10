@@ -317,13 +317,13 @@ def _write_temporary(
     publication is atomic "only within one filesystem and same-directory is the
     only placement that guarantees it without probing".
     """
-    try:
-        handle, name = tempfile.mkstemp(
-            dir=destination.parent, prefix=f".{destination.name}.", suffix=".partial"
-        )
-    except OSError as exc:
-        msg = f"the artifact cannot be built beside {destination}: {exc}"
-        raise RefusalError(msg) from exc
+    # Not wrapped: a destination that cannot be written to is a *filesystem*
+    # answer, and `classify` is what decides whether it is worth another attempt
+    # (ADR-0083 §5). Converting it to a refusal here would give an exhausted disk
+    # the stay-down code §5 explicitly puts on the restartable side.
+    handle, name = tempfile.mkstemp(
+        dir=destination.parent, prefix=f".{destination.name}.", suffix=".partial"
+    )
     temporary = Path(name)
     try:
         with os.fdopen(handle, "wb") as out:
@@ -336,11 +336,23 @@ def _write_temporary(
             )
             out.flush()
             os.fsync(out.fileno())
-    except (OSError, tarfile.TarError) as exc:
+    except tarfile.TarError as exc:
+        # The one `TarError` this path produces is a member that ran out before
+        # its declared size — a source file that shrank while it was being
+        # copied, which is §2's "changed while the backup was being written" and
+        # a refusal for the same reason: a human stops the writer.
         temporary.unlink(missing_ok=True)
-        msg = f"the artifact could not be written: {exc}"
+        msg = (
+            f"the data directory changed while it was being copied, so the artifact would "
+            f"be torn: {exc}. Stop whatever is writing to it and run the backup again"
+        )
         raise RefusalError(msg) from exc
     except BaseException:
+        # Everything else — an exhausted disk during `fsync`, no descriptor left
+        # for the copy's own traversal, an I/O error — is left exactly as it was
+        # raised, so `classify` decides between "come back" and "stay down"
+        # rather than this function deciding for it. The temporary file still
+        # goes, on every one of those paths (§2).
         temporary.unlink(missing_ok=True)
         raise
     return temporary
@@ -526,9 +538,14 @@ def _walk(data_dir: Path, *, excluded: frozenset[str]) -> Generator[_SourceFile]
     """
     frames: list[_Frame] = []
     try:
+        # Pushed *before* the scan that can raise, so the `finally` below owns
+        # every descriptor this walk opened from the moment it exists. Appending
+        # after the scan leaks one on every refused backup, and a long-lived
+        # process taking refused backups would run out.
         root = artifact.open_directory_at(None, str(data_dir), shown=data_dir)
+        frames.append(_Frame(descriptor=root, children=deque()))
         files, children = _level(root, "", data_dir=data_dir, excluded=excluded)
-        frames.append(_Frame(descriptor=root, children=children))
+        frames[-1].children.extend(children)
         yield from files
         while frames:
             frame = frames[-1]
@@ -543,8 +560,9 @@ def _walk(data_dir: Path, *, excluded: frozenset[str]) -> Generator[_SourceFile]
             child = _open_level(
                 frame.descriptor, name, shown=data_dir / relative, depth=len(frames)
             )
+            frames.append(_Frame(descriptor=child, children=deque()))
             files, children = _level(child, f"{relative}/", data_dir=data_dir, excluded=excluded)
-            frames.append(_Frame(descriptor=child, children=children))
+            frames[-1].children.extend(children)
             yield from files
     finally:
         for frame in frames:
