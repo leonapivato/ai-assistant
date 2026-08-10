@@ -72,7 +72,7 @@ def _artifact(tmp_path: Path, source: Path, manifest: Manifest) -> Path:
     with destination.open("wb") as out:
         artifact.write_artifact(
             out,
-            opener=artifact.path_opener(source),
+            sources=artifact.path_sources(source, manifest),
             manifest=manifest,
             passphrase=_KEYPHRASE,
             work_factor=_TEST_WORK_FACTOR,
