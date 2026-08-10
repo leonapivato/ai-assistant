@@ -33,6 +33,7 @@ from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.service.admin import ADMIN_FRAME_BYTES, ADMIN_TIMEOUT, ENROL, LIST, REVOKE
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.wire.address import admin_socket_path
+from ai_assistant.wire.errors import TransportError
 from ai_assistant.wire.framing import read_frame, write_frame
 
 if TYPE_CHECKING:
@@ -119,6 +120,13 @@ async def _perform(socket: Path, request: dict[str, Any]) -> int:
     except OSError as exc:
         print(f"device: cannot reach the hub at {socket}: {exc}", file=sys.stderr)
         return EXIT_RESTART
+    # **The decode is inside the guarded block, and so is ``TransportError``.**
+    # ``read_frame`` reports a hub that went away mid-exchange as
+    # ``ConnectionClosedError`` — the project's own hierarchy, which is neither an
+    # ``OSError`` nor a ``ValueError`` — and a reply that does not decode is the
+    # same class of failure as one that never arrived. Either escaping would leave
+    # a device command printing a traceback where ADR-0083's ruling 4 asks for a
+    # sentence and an exit code.
     try:
         async with asyncio.timeout(ADMIN_TIMEOUT.total_seconds()):
             await write_frame(
@@ -130,14 +138,15 @@ async def _perform(socket: Path, request: dict[str, Any]) -> int:
                 timeout=ADMIN_TIMEOUT,
                 idle_timeout=ADMIN_TIMEOUT,
             )
-    except (TimeoutError, OSError, ValueError) as exc:
+            reply = json.loads(body)
+    except (TimeoutError, OSError, ValueError, TransportError) as exc:
         print(f"device: the hub did not answer: {exc}", file=sys.stderr)
         return EXIT_RESTART
     finally:
         writer.close()
         with contextlib.suppress(OSError):
             await writer.wait_closed()
-    return _render(json.loads(body), request["act"])
+    return _render(reply, request["act"])
 
 
 def _render(reply: Any, act: str) -> int:
@@ -179,4 +188,10 @@ def _render(reply: Any, act: str) -> int:
     for device in devices:
         state = "live" if device["live"] else f"revoked {device['revoked_at']}"
         print(f"  {device['overlay_identity']}  enrolled {device['enrolled_at']}  {state}")
+    # Said rather than left to be inferred: the record keeps every revocation, so a
+    # long-lived hub has more history than one listing carries, and a listing that
+    # stopped silently would read as a complete record that it is not.
+    omitted = reply.get("omitted", 0)
+    if omitted:
+        print(f"  ({omitted} older enrolment(s) not shown; the newest are listed above.)")
     return EXIT_OK

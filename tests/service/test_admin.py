@@ -18,11 +18,16 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 
 from ai_assistant.service.admin import ADMIN_FRAME_BYTES, ADMIN_TIMEOUT, AdminListener
-from ai_assistant.service.device import _render
-from ai_assistant.service.enrolment import ENROLMENTS_FILENAME, DeviceRegistry, EnrolmentStore
-from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK
+from ai_assistant.service.device import _perform, _render
+from ai_assistant.service.enrolment import (
+    ENROLMENTS_FILENAME,
+    LISTING_LIMIT,
+    DeviceRegistry,
+    EnrolmentStore,
+)
+from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME
-from ai_assistant.wire.credential import is_well_formed
+from ai_assistant.wire.credential import is_well_formed, verifier_for
 from ai_assistant.wire.framing import read_frame, write_frame
 
 if TYPE_CHECKING:
@@ -227,7 +232,7 @@ async def test_a_malformed_act_is_refused_and_changes_nothing(
     async with _admin(tmp_path) as (listener, registry):
         reply = await _act(listener, request_body)
         assert reply["ok"] is False
-        assert registry.enrolments() == []
+        assert registry.enrolments() == ([], 0)
 
 
 async def test_a_request_that_is_not_json_is_abandoned_without_taking_the_hub_down(
@@ -252,7 +257,7 @@ async def test_a_request_that_is_not_json_is_abandoned_without_taking_the_hub_do
         assert json.loads(body)["ok"] is False
         # Still serving: the next act succeeds on the same listener.
         assert (await _act(listener, {"act": "enrol", "identity": _DEVICE}))["ok"]
-        assert len(registry.enrolments()) == 1
+        assert registry.enrolments()[1] == 1
 
 
 def test_the_command_prints_the_credential_and_says_it_is_shown_once(
@@ -316,3 +321,160 @@ def test_an_admin_timeout_is_short_because_both_ends_are_on_this_machine() -> No
     device command that met a wedged hub look like a hub that is thinking.
     """
     assert timedelta(seconds=1) <= ADMIN_TIMEOUT <= timedelta(seconds=30)
+
+
+# --- the record grows without end, and the surface over it must not ----------
+
+
+async def test_a_listing_stays_inside_one_frame_however_long_the_record_is(
+    tmp_path: Path,
+) -> None:
+    """The record only ever grows, and the surface that reads it is what breaks first.
+
+    ADR-0124 §6 keeps every revocation, so a device re-enrolled on a schedule leaves
+    rows without end. An unbounded listing eventually builds a reply larger than the
+    frame it has to travel in, and ``write_frame`` refuses it — so the act an owner
+    uses to *check* the record would fail as a closed connection, which is both the
+    least legible failure available and the one the record's own growth guarantees.
+
+    Driven past the frame ceiling rather than near it: at ~139 bytes a row, one
+    mebibyte is a few thousand, so ten thousand acts is comfortably over.
+    """
+    store = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
+    verifier = verifier_for("x" * 43)
+    for index in range(10_000):
+        store.enrol(f"n{index:012d}", verifier=verifier, now=_MOMENT)
+    registry = DeviceRegistry(store, hub_identity=_HUB_ID)
+    listener = AdminListener(registry, data_dir=tmp_path, now=_clock)
+    await listener.start()
+    try:
+        listed = await _act(listener, {"act": "list"})
+    finally:
+        await listener.stop_accepting()
+        await listener.aclose()
+        store.close()
+
+    assert listed["ok"]
+    assert len(json.dumps(listed).encode()) < ADMIN_FRAME_BYTES
+    assert len(listed["devices"]) == LISTING_LIMIT
+    assert listed["omitted"] == 10_000 - LISTING_LIMIT
+
+
+async def test_a_listing_says_what_it_did_not_show(tmp_path: Path) -> None:
+    """A bound is only honest if the surface reports it (ADR-0083's ruling 4).
+
+    "A listing that quietly stopped at a limit" would read as a complete record, and
+    an owner checking which devices they enrolled would draw a conclusion from a
+    partial answer. So ``omitted`` is on every reply — zero when nothing was — and
+    the command prints it.
+    """
+    async with _admin(tmp_path) as (listener, _):
+        await _act(listener, {"act": "enrol", "identity": _DEVICE})
+        assert (await _act(listener, {"act": "list"}))["omitted"] == 0
+
+
+def test_the_command_says_how_many_enrolments_it_did_not_show(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The operator-facing half of the clause above."""
+    code = _render(
+        {
+            "ok": True,
+            "hub_identity": _HUB_ID,
+            "devices": [
+                {
+                    "overlay_identity": _DEVICE,
+                    "enrolled_at": _MOMENT.isoformat(),
+                    "revoked_at": None,
+                    "live": True,
+                }
+            ],
+            "omitted": 42,
+        },
+        "list",
+    )
+    assert code == EXIT_OK
+    assert "42 older enrolment(s) not shown" in capsys.readouterr().out
+
+
+async def test_a_hub_that_goes_away_mid_act_is_reported_rather_than_raised(
+    tmp_path: Path,
+) -> None:
+    """The device command reports a transport failure; it does not traceback.
+
+    ``read_frame`` reports a peer that closed as ``ConnectionClosedError``, which is
+    this project's own hierarchy and is neither an ``OSError`` nor a ``ValueError``.
+    A handler that named only those two would let it escape ``asyncio.run`` and
+    print a stack trace — where ADR-0083's ruling 4 asks for a sentence and an exit
+    code, and where the hub being mid-shutdown is the commonest way to meet it.
+    """
+    socket = tmp_path / ADMIN_SOCKET_FILENAME
+
+    async def _hang_up(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        del reader
+        writer.close()
+
+    server = await asyncio.start_unix_server(_hang_up, path=str(socket))
+    try:
+        code = await _perform(socket, {"act": "list"})
+    finally:
+        server.close()
+        await server.wait_closed()
+    assert code == EXIT_RESTART
+
+
+async def test_a_reply_that_does_not_decode_is_reported_rather_than_raised(
+    tmp_path: Path,
+) -> None:
+    """The same handler's other limb, and the pair is what makes it a rule.
+
+    A hub answering with bytes that are not JSON is the same class of failure as one
+    that never answered: the act's outcome is unknown either way, and the command
+    says so instead of failing inside the decode.
+    """
+    socket = tmp_path / ADMIN_SOCKET_FILENAME
+
+    async def _gibberish(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_frame(
+            reader,
+            max_frame_bytes=ADMIN_FRAME_BYTES,
+            timeout=ADMIN_TIMEOUT,
+            idle_timeout=ADMIN_TIMEOUT,
+        )
+        await write_frame(writer, b"\xff\xfe not json", max_frame_bytes=ADMIN_FRAME_BYTES)
+        writer.close()
+
+    server = await asyncio.start_unix_server(_gibberish, path=str(socket))
+    try:
+        code = await _perform(socket, {"act": "list"})
+    finally:
+        server.close()
+        await server.wait_closed()
+    assert code == EXIT_RESTART
+
+
+async def test_a_device_command_that_finds_no_hub_says_where_it_looked(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Device acts are the running hub's, so "no hub" is the expected answer when it
+    is stopped — and it names the socket and the command that starts one."""
+    code = await _perform(tmp_path / ADMIN_SOCKET_FILENAME, {"act": "list"})
+    assert code == EXIT_RESTART
+    assert "ai-assistant-hub" in capsys.readouterr().err
+
+
+async def test_a_client_that_hangs_up_mid_act_does_not_fault_the_hub(tmp_path: Path) -> None:
+    """The mirror of the two cases above, on the hub's side.
+
+    A device command interrupted between frames is the ordinary ending, not a fault:
+    the hub logs it and goes on serving. Without the transport clause it would reach
+    the catch-all and print a traceback for somebody pressing Ctrl-C.
+    """
+    async with _admin(tmp_path) as (listener, registry):
+        reader, writer = await asyncio.open_unix_connection(str(listener.path))
+        del reader
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+        assert (await _act(listener, {"act": "enrol", "identity": _DEVICE}))["ok"]
+        assert registry.enrolments()[1] == 1

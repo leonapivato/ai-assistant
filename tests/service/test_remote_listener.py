@@ -493,7 +493,8 @@ async def test_revocation_is_prospective_and_the_record_keeps_what_the_owner_dec
             hub.registry.revoke(_DEVICE, now=_MOMENT + timedelta(minutes=1))
             assert await asyncio.wait_for(peer.reader.read(), _PATIENT.total_seconds()) == b""
         assert answered.kind is env.FrameKind.RESULT
-        (recorded,) = hub.registry.enrolments()
+        ((recorded,), total) = hub.registry.enrolments()
+        assert total == 1
         assert recorded.enrolled_at == _MOMENT
         assert recorded.revoked_at == _MOMENT + timedelta(minutes=1)
 
