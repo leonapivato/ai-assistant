@@ -1328,3 +1328,63 @@ def test_main_reports_a_settings_failure_as_a_deployment_fault(
     stderr = capsys.readouterr().err
     assert "unknown log level" in stderr
     assert "will not be fixed by restarting" in stderr
+
+
+# --- ADR-0124 §2: the remote listener is off unless it is configured on ------
+
+
+async def test_a_hub_with_no_remote_configuration_binds_only_the_loopback_socket(
+    settings: Settings, wired: dict[str, list[Any]], engine: FakeEngine
+) -> None:
+    """ADR-0124 §2: "a hub with no remote-listener configuration binds only ADR-0084
+    §1's loopback socket, and the loopback socket is bound whether or not the remote
+    listener is".
+
+    Asserted through the readiness event, which is where an operator reads it, and
+    through the enrolment record's *absence*: a hub that built the apparatus anyway
+    would need an overlay agent it is not running, and would leave a database in the
+    data directory for a door it never opened.
+    """
+    engine.on_start = _stop_after_start()
+
+    with structlog.testing.capture_logs() as captured:
+        code = await hub.serve(settings)
+
+    assert code == EXIT_OK
+    ready = _only(captured, "hub_ready")
+    assert ready["remote"] is None
+    assert "hub_remote_listening" not in _events(captured)
+    assert not (settings.data_dir / "devices.db").exists()
+
+
+async def test_a_configured_hub_that_cannot_ask_its_agent_stays_down(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured remote listener whose overlay agent is absent is a deployment
+    fault, not a hub that quietly serves loopback alone.
+
+    ADR-0124 §6 discloses the hub's own overlay identity at enrolment and §4 reads a
+    device's at admission; neither can happen without the agent. Coming up anyway
+    would be the hub silently ignoring the configuration the operator set, which is
+    ADR-0083's ruling 4 failure — so it is a ``ConfigurationError`` and exit 78,
+    "this will not be fixed by restarting".
+    """
+    from ai_assistant.service.overlay import (  # noqa: PLC0415 - one call site
+        OverlayIdentityUnavailableError,
+        TailscaleAgent,
+    )
+
+    async def _absent(self: TailscaleAgent) -> Any:
+        del self
+        msg = "the overlay agent is not running"
+        raise OverlayIdentityUnavailableError(msg)
+
+    monkeypatch.setattr(TailscaleAgent, "hub_identity", _absent)
+    configured = settings.model_copy(update={"hub_remote_address": "100.64.0.9"})
+
+    code = await hub.serve(configured)
+
+    assert code == EXIT_DEPLOYMENT

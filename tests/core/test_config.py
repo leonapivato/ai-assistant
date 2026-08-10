@@ -1455,3 +1455,87 @@ def test_load_settings_reports_a_bad_transport_setting_as_a_configuration_error(
     monkeypatch.setenv("ASSISTANT_HUB_MAX_FRAME_BYTES", "10")
     with pytest.raises(ConfigurationError, match="invalid configuration"):
         load_settings()
+
+
+# --- ADR-0124 §2: where the remote listener may bind, decided at load ---------
+
+
+def test_the_remote_listener_is_off_unless_it_is_configured_on() -> None:
+    """ADR-0124 §2: "the remote listener is off unless it is configured on. A hub
+    with no remote-listener configuration binds only ADR-0084 §1's loopback socket."
+
+    The address **is** the switch: there is no separate boolean, because two
+    settings that can disagree about whether a listener exists is one more state than
+    the hub has.
+    """
+    assert Settings().hub_remote_address is None
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("0.0.0.0", "wildcard"),  # noqa: S104 — the value being refused is the point
+        ("::", "wildcard"),
+        ("127.0.0.1", "loopback"),
+        ("::1", "loopback"),
+        ("169.254.7.7", "link-local"),
+        ("224.0.0.1", "multicast"),
+        ("8.8.8.8", "public internet"),
+        ("2606:4700:4700::1111", "public internet"),
+    ],
+)
+def test_an_address_adr_0124_forbids_is_refused_at_load(value: str, reason: str) -> None:
+    """ADR-0124 §2: "it may not bind a wildcard address, an address of a physical
+    interface, or any address reachable from the public internet, and a
+    configuration that would have it do so is refused at load time rather than
+    bound".
+
+    The wildcard case is the one that matters most and the one an operator reaches
+    for first: it "would put the hub on every interface this machine has", which is
+    precisely the door §2 refuses to open. Each refusal names its own reason, because
+    an operator who is told only "invalid" has to guess which of five rules they met.
+    """
+    with pytest.raises(ValidationError, match=reason):
+        Settings(hub_remote_address=value)
+
+
+@pytest.mark.parametrize("value", ["hub.example.ts.net", "localhost", "", "100.64.0"])
+def test_an_address_that_is_not_an_ip_address_is_refused(value: str) -> None:
+    """A name is refused rather than resolved.
+
+    "Resolving one is a lookup whose answer another party supplies, and the address a
+    listener binds would then be a fact about a resolver rather than about this
+    deployment" — which is ADR-0124 §1's rule that a destination never comes "from a
+    discovery mechanism", applied at the other end of the hop.
+    """
+    with pytest.raises(ValidationError, match="not an IP address"):
+        Settings(hub_remote_address=value)
+
+
+@pytest.mark.parametrize("value", ["100.64.0.9", "fd7a:115c:a1e0::42", "10.1.2.3"])
+def test_an_overlay_address_is_admitted(value: str) -> None:
+    """The discriminating half: a validator that refused everything would pass above.
+
+    The two overlay ranges an operator will actually meet are here — Tailscale's
+    CGNAT range and its IPv6 ULA prefix, which ADR-0124 §2 accepts "as the first
+    implementation" — beside a private LAN address, which passes *this* check on
+    purpose. Nothing decidable from the string tells a LAN address from an overlay
+    one, so §2's physical-interface clause is closed before the bind instead, by the
+    overlay agent (``tests/service/test_remote_listener.py``).
+    """
+    assert Settings(hub_remote_address=value).hub_remote_address == value
+
+
+def test_the_address_is_trimmed_rather_than_refused_for_surrounding_space() -> None:
+    """An environment variable that picked up a trailing newline is a deployment that
+    works, not one that fails at load with a message about a value that looks
+    correct."""
+    assert Settings(hub_remote_address="  100.64.0.9\n").hub_remote_address == "100.64.0.9"
+
+
+@pytest.mark.parametrize("value", [0, 65536, -1])
+def test_a_port_outside_its_range_is_refused(value: int) -> None:
+    """A port is not nullable and not zero: zero would bind whatever the kernel
+    offered, so the hub would listen somewhere no client was told about."""
+    with pytest.raises(ValidationError):
+        Settings(hub_remote_address="100.64.0.9", hub_remote_port=value)
