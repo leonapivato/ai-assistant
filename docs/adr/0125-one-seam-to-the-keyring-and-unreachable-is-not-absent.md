@@ -167,8 +167,15 @@ answer, and both available answers are wrong.
 > **Normative.** `core/protocols.py` declares two Protocols. `Secrets` has one
 > method, `get`. `SecretStore` extends `Secrets` and adds `set` and `delete`. Both
 > are `@runtime_checkable`, and one object satisfies both structurally, so a
-> composition root builds one implementation and hands each consumer the face its
-> job needs.
+> composition root hands each consumer the face its job needs without needing two
+> classes.
+
+> **Normative.** There is one implementation **class** and one keyring backing, and
+> the composition root builds **one instance per scope it wires** — §2 binds an
+> instance to a single `SecretScope`, so `PROVIDER`, `INTEGRATION` and `ENROLMENT`
+> are three instances of that one class. Every instance in one installation takes
+> the same installation namespace, so the scope is what differs between them and
+> nothing else.
 
 > **Normative.** Every method on both Protocols is `async`.
 
@@ -207,6 +214,16 @@ holds — so that rule is inherited rather than restated.
 Getting this wrong in either direction is a real failure and not a stylistic one:
 a synchronous `get` returns a value to a consumer that wrote `await`, and an
 asynchronous one returns an un-awaited coroutine to a consumer that did not.
+
+**One class, several instances — and an earlier draft said "one implementation"
+without distinguishing the two.** That was written before §2 bound an instance to
+a scope, and read literally it required a root to hand a tool an object that
+refuses every name the tool has, or to abandon the scope boundary. Neither is
+intended: the thing there is one of is the class and the backing, which is what
+ADR-0004 §3's "faked in tests and swapped per platform" is about, and the thing
+there are several of is the capability handed out — which is the whole mechanism
+§2 and §8 rest on. Sharing the namespace across them is what keeps three instances
+addressing one installation's entries.
 
 The shape is `SourceGrants` and `SourceGrantStore`'s, taken deliberately rather
 than by resemblance: the same problem produced it, which is that a seam with one
