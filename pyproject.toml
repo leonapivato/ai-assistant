@@ -83,6 +83,27 @@ dependencies = [
     # plaintext breaks §4's clause". So `rage` moves to the dev group instead,
     # where it is the independent implementation §4's interop clause requires.
     "cryptography>=46",
+    # The OS keyring, for the one seam ADR-0125 declares and for nothing else. It
+    # is imported only by `ai_assistant/secret_store/`, which a contract below
+    # confines it to — ADR-0125 §8's marked clause, so ADR-0004 §3's single-path
+    # rule is mechanical rather than review-checked. ADR-0125 §12 leaves the
+    # library's *adoption* to ADR-0004 §3, which already names it, and asks this
+    # lane only for `CONTRIBUTING.md`'s dependency justification and #664's Python
+    # 3.14 wheel check. It clears both: `keyring` is pure Python (`py3-none-any`),
+    # as are its `jaraco.*` and `more-itertools` dependencies and the
+    # `secretstorage`/`jeepney` pair it pulls on Linux, so 3.14 needs no source
+    # build anywhere; `cryptography`, `secretstorage`'s own dependency, is already
+    # pinned above for ADR-0123 and ships 3.14 wheels.
+    #
+    # **What it buys that the standard library cannot.** Four unrelated platform
+    # APIs behind one call — Secret Service over D-Bus, KWallet, the macOS Keychain
+    # and the Windows Credential Vault — which is what ADR-0004 §3's "swapped per
+    # platform" means in practice. What this lane does *not* take from it is its
+    # backend selection: ADR-0125 §7 forbids falling back to a file or an
+    # environment variable, and `keyring`'s own chain can select exactly such
+    # alternatives, so `ai_assistant.secret_store` selects against an allow-list of
+    # backends the operating system protects and raises where none is usable.
+    "keyring>=25.7.0",
 ]
 
 [project.scripts]
