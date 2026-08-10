@@ -18,6 +18,7 @@ alone can see.
 from __future__ import annotations
 
 import errno
+import getpass
 import inspect
 import os
 import resource
@@ -30,7 +31,7 @@ import pytest
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError
-from ai_assistant.service import artifact, backup
+from ai_assistant.service import artifact, backup, passphrase
 from ai_assistant.service.artifact import materialise, verify_materialised
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
@@ -910,3 +911,37 @@ def test_a_passphrase_file_with_no_line_break_at_all_is_refused(
         EXIT_DEPLOYMENT
     )
     assert _leftovers(out_dir) == []
+
+
+def test_an_undecodable_passphrase_from_the_terminal_is_a_refusal(
+    settings: Settings, out_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A terminal can hand back bytes that are not text, and both tools must survive it.
+
+    Python carries undecodable input as lone surrogates in an otherwise ordinary
+    ``str``; encoding one raises ``UnicodeEncodeError``, which is a ``ValueError``
+    and so is caught by neither entry point. It has to arrive as exit ``78`` with a
+    sentence, and without echoing the passphrase — which is the thing being
+    protected.
+    """
+    monkeypatch.setattr(getpass, "getpass", lambda _prompt="": "good\udcff")
+
+    assert backup.main([str(out_dir / "a.age")]) == EXIT_DEPLOYMENT
+    assert _leftovers(out_dir) == []
+
+
+def test_an_undecodable_passphrase_is_not_reported_as_memory_pressure(
+    settings: Settings, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `ENOMEM` translation is for the machine, and this is not the machine.
+
+    Deriving a key encodes the passphrase, so an unencodable one used to surface
+    through the guard that exists for a failed allocation — telling an operator to
+    find a gigabyte when what they need is to retype.
+    """
+    monkeypatch.setattr(getpass, "getpass", lambda _prompt="": "good\udcff")
+
+    with pytest.raises(RefusalError, match="not valid text"):
+        passphrase.resolve(source=None, generated=False, confirm=False)
+
+    assert "memory" not in capsys.readouterr().err
