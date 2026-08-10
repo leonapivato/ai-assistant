@@ -581,9 +581,15 @@ own. It subclasses the base rather than sitting beside it, which is
 `MemoryStoreConflictError`'s and `DeferralIdConflictError`'s shape, so a caller that
 only wants "the secret is not available" writes one handler.
 
-A malformed name or value is not a store error at all: `SecretName` and
-`SecretValue` validate at construction and raise `ValueError`, which is ADR-0073
-§2's spelling inherited unchanged, so the store's methods never see one.
+A malformed name or value is not a store error at all. It is a `ValueError` --
+ADR-0073 §2's spelling, inherited unchanged -- raised first by `SecretName`'s own
+model and by `secret_value`, and raised again by whichever method receives one
+that got past them (§4). The second half is not redundant, and an earlier draft
+said instead that the store's methods "never see one": they do, because
+`model_construct` and a bare `SecretStr` both reach them, so an implementation
+owes the refusal rather than inheriting it. What this section settles is only
+which error family the refusal belongs to, and the answer is none of them --
+nothing about the store failed.
 
 ### 7. Platform posture: absent, locked and headless are one visible state
 
