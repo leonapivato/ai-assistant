@@ -422,11 +422,31 @@ inspection.
 > or replacing whatever it held. It never refuses on the ground that an entry
 > already exists.
 
-> **Normative.** Every method validates its arguments at its own boundary, before
-> reading a field of `name` and before touching the keyring: `name` against
-> `SecretName`'s own model, and `set`'s `value` through `secret_value`. A failure
-> raises `ValueError` and changes nothing. An implementation may not rely on either
-> having been validated upstream.
+> **Normative.** Every method revalidates its arguments at its own boundary:
+> `name` against `SecretName`'s own model, and `set`'s `value` through
+> `secret_value`. An argument of the declared type that does not satisfy that
+> type's invariants raises `ValueError`, and changes nothing. An implementation may
+> not rely on either having been validated upstream.
+
+> **Normative.** The revalidation happens **before** any attribute of the argument
+> is read and before the keyring is touched — `name` is validated as a whole, not
+> dereferenced and then checked.
+
+**The ordering clause exists because the obvious implementation gets it backwards.**
+Revalidating by reaching into the argument first — dumping its fields, reading its
+`scope` to pick a backend prefix — checks the invariants after it has already
+depended on them, so a forged or absent argument fails somewhere other than the
+boundary and with something other than the `ValueError` above. Validating the
+whole object first is both correct and, with pydantic, shorter.
+
+**A wrong runtime type is deliberately outside this contract.** `mypy --strict`
+runs in the gate over every caller of this seam, this seam is in-process only, and
+none of the twenty-three Protocols in `core/protocols.py` defends against an
+argument of the wrong type. Requiring it here would make this one unique for no
+reason this ADR can state. What is *not* outside the contract is the ordering
+above, which is where that concern actually bites: it is the difference between an
+implementation that refuses a bad argument at its boundary and one that discovers
+it halfway through.
 
 **Neither type protects the boundary on its own, and they fail to for different
 reasons.** `SecretValue` is `Annotated[SecretStr, …]`, which has no runtime
