@@ -24,6 +24,8 @@ from ai_assistant.core.errors import (
     ModelResponseError,
     ModelTimeoutError,
     ModelUnavailableError,
+    SecretStoreError,
+    SecretStoreUnavailableError,
     UnresolvedEvidenceError,
 )
 
@@ -143,3 +145,42 @@ def test_the_translation_and_the_seams_own_class_are_separate_hierarchies() -> N
     """
     assert not issubclass(MemoryStoreEmbeddingExpiredError, EmbeddingDeadlineExpiredError)
     assert not issubclass(EmbeddingDeadlineExpiredError, MemoryStoreError)
+
+
+# --- the keyring seam's two errors (ADR-0125 §6, §7) -------------------------
+# Structural claims rather than behavioural ones, so they are pinned here rather
+# than in either conformance suite: what a caller can catch with one handler, and
+# which family a malformed argument is *not* in.
+
+
+def test_an_unavailable_keyring_is_caught_by_a_secret_store_handler() -> None:
+    """Every ``except SecretStoreError`` catches both (ADR-0125 §6).
+
+    The narrowing exists because the correct response differs — an absent or
+    locked keyring is a deployment condition a human clears, so retrying is
+    futile, while a write the backend rejected may be transient — and it
+    subclasses rather than sits beside so that a caller who only wants "the secret
+    is not available" writes one handler. That is
+    :class:`MemoryStoreConflictError`'s shape, taken for the same reason.
+    """
+    error = SecretStoreUnavailableError("no keyring backend was found on this machine")
+
+    assert isinstance(error, SecretStoreError)
+    assert isinstance(error, AssistantError)
+
+
+def test_a_caller_can_still_tell_the_two_apart() -> None:
+    """Or the narrowing would buy nothing: one fault ends the process's attempt."""
+    assert not isinstance(SecretStoreError("the write failed"), SecretStoreUnavailableError)
+
+
+def test_a_malformed_argument_is_in_neither_family() -> None:
+    """It is a ``ValueError`` — ADR-0073 §2's spelling, inherited unchanged (§6).
+
+    Nothing about the store failed, so calling it a store error would misreport a
+    caller fault as a deployment one. Asserted from the other direction because
+    that is the direction a handler is written in: ``except SecretStoreError``
+    around a call must not swallow a bad name.
+    """
+    assert not issubclass(SecretStoreError, ValueError)
+    assert not issubclass(ValueError, SecretStoreError)

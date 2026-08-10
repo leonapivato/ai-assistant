@@ -44,6 +44,16 @@ from ai_assistant.testing.readers import (
     FakeReader,
     attested_proposal,
 )
+from ai_assistant.testing.secrets import (
+    DEFAULT_INSTALLATION,
+    OTHER_INSTALLATION,
+    Disclosure,
+    FakeSecrets,
+    FakeSecretStore,
+    SecretBacking,
+    SecretMethod,
+    disclosure_of,
+)
 from ai_assistant.testing.tools import FakeToolRegistry
 from ai_assistant.testing.traces import (
     DEFAULT_OCCURRED_AT,
@@ -58,11 +68,14 @@ from ai_assistant.testing.writer import FakeMemoryWriter
 __all__ = [
     "DEFAULT_DECIDED_AT",
     "DEFAULT_GRANTED_SOURCE",
+    "DEFAULT_INSTALLATION",
     "DEFAULT_MAX_BATCH_SIZE",
     "DEFAULT_MAX_PROPOSALS",
     "DEFAULT_OCCURRED_AT",
     "DEFAULT_READER_NAME",
+    "OTHER_INSTALLATION",
     "TRACE_NOT_RECORDED",
+    "Disclosure",
     "FakeActionPolicy",
     "FakeAssistantEngine",
     "FakeAuditTrail",
@@ -79,6 +92,8 @@ __all__ = [
     "FakePlanStore",
     "FakePlanner",
     "FakeReader",
+    "FakeSecretStore",
+    "FakeSecrets",
     "FakeSourceGrantStore",
     "FakeSourceGrants",
     "FakeToolImplementation",
@@ -91,7 +106,10 @@ __all__ = [
     "ObservationGate",
     "ObservedBelief",
     "PolicyCall",
+    "SecretBacking",
+    "SecretMethod",
     "attested_proposal",
+    "disclosure_of",
     "evaluation_trace",
     "revocation_of",
     "source_grant",
