@@ -1,6 +1,6 @@
 # 124. The hop is a third egress boundary, and a device is admitted by two independent facts
 
-- Status: Partially superseded by ADR-0125 (§6's reader clause)
+- Status: Partially superseded by ADR-0125 (§6's reader clause) and ADR-0126 (§6's revocation-recording clause, only as it reaches an act that destroys the enrolment record)
 - Date: 2026-08-09
 - Accepted: 2026-08-09
 - Partially superseded: 2026-08-09 by ADR-0125 — **one clause, one limb of it, and
@@ -35,6 +35,42 @@
   §7's exemption keeps all three of its replacements, and ADR-0125 §9 states that it
   gates nothing and does not widen the exemption to a second access. Every other
   section of this ADR is untouched, §12's records included.
+- Partially superseded: 2026-08-10 by ADR-0126 — **one clause, reaching one act,
+  and the act is the one §8 of this ADR named without giving it a home.** ADR-0126
+  rules that "deleting the owner's data at the hub" is the destruction of the
+  contents of `Settings.data_dir`, performed by an offline console entry point in
+  `service/` under the hub's instance lock.
+
+  **Replaced — §6's revocation-recording clause, only as it reaches that act.** "A
+  revocation is recorded rather than erasing the enrolment it revokes, so the
+  record says what the owner actually decided and when." That act destroys
+  `devices.db` outright rather than writing a revocation into it, and ADR-0126 §4
+  states why the two cannot both hold here: a delete that revoked by recording
+  would leave behind, in a file the owner asked to destroy, every device they ever
+  enrolled and the instants each was enrolled and revoked — Tier 1 personal data
+  surviving the exercise of the right that exists to remove it, against ADR-0004
+  §6's purge of every Tier 0 and Tier 1 artifact on the hub's own machine, which
+  §8 below explicitly left untouched. A reader holding only §6 would implement that
+  act by preserving the record through the delete, which is ADR-0070 §1's second
+  limb.
+
+  **Not replaced — the clause everywhere else.** Every revocation performed by any
+  other means still records rather than erases: the control socket's `revoke`, and
+  the rotation §6 folds into `enrol`. ADR-0126 §4 forbids citing its clause to
+  erase an enrolment in any other circumstance.
+
+  **Not replaced — the rest of §6, and the whole of §8.** §6's uniqueness rule, the
+  credential's shape and single disclosure, the verifier-only retention, the record
+  living in `data_dir`, the hub-local enrolment requirement and the prohibition on
+  a remote connection creating, extending or modifying an enrolment are all
+  untouched — and that last one is what ADR-0126 §2 cites to refuse putting the
+  delete on `AssistantEngine`. §8 is untouched in every clause, both of the two
+  ADR-0126 exists to give a home to included: ADR-0126 §4 satisfies "revokes every
+  enrolment as part of the same act" by the record ceasing to exist under one
+  instance lock, and its §7 is what "reports what it did not purge" requires of the
+  surface. §8's prospective rule, its two-lever rule, its supersession of ADR-0004
+  §6 and its device-side unenrolment act all stand; ADR-0126 §9 makes that last one
+  a prerequisite of its own implementation rather than changing it.
 - **This ADR partially supersedes ADR-0017 and ADR-0004, and both records land in
   this change.** ADR-0004's two clauses are §12's; each is scoped to the one thing
   a device boundary makes unreachable — a hub-side delete cannot purge a keyring
