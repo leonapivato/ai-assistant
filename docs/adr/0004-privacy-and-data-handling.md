@@ -1,6 +1,6 @@
 # 4. Privacy and data handling
 
-- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled) and ADR-0125 (§3's reader clause)
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause) and ADR-0126 (§7's gating clause, only for the offline whole-installation delete)
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
@@ -73,6 +73,41 @@
   condition, and does not widen ADR-0124 §6's exemption. **#74 stays open on its
   own subject**, and ADR-0125 §8 records that the existing environment read of the
   provider key is pre-existing and not authorised by it.
+- Partially superseded: 2026-08-10 by ADR-0126 — **one clause, one act, and the
+  act is the one that gives §6's delete right a surface.** ADR-0126 rules that
+  "deleting the owner's data at the hub" is the destruction of the contents of
+  `Settings.data_dir`, performed by an offline console entry point in `service/`
+  under the hub's instance lock with the hub stopped.
+
+  **Replaced — §7's gating clause, only for that act.** "Access to Tier 0/1 data
+  and every side-effecting tool call is gated by the `permissions/` layer and
+  recorded in an **audit trail**." Both halves are structurally unavailable to it:
+  `permissions/` runs inside the hub and this act requires the hub stopped, and the
+  audit trail is `<data_dir>/audit.db`, a file the act destroys — so a record of the
+  act would be written into the thing being removed. ADR-0126 §11 puts three
+  replacements in its place, and an implementation that omits any of them does not
+  have the exemption: the act is confined to one purpose and one path; custody is
+  the operating system's own control on an owner-only data directory and on the
+  instance lock; and the owner confirms against the resolved path before anything
+  is destroyed.
+
+  **The audit residue is forbidden rather than merely absent, and that is why this
+  is a supersession rather than an unmet obligation.** A durable record saying the
+  owner destroyed everything is Tier 1 data about the owner surviving in a system
+  they asked to hold nothing — §6's purge and §7's record cannot both hold for the
+  act that empties the installation, and ADR-0126 §11 rules that the one giving way
+  is the one whose purpose is to make *later* accesses reviewable.
+
+  **Not replaced — everything else, which is nearly all of it.** §7's minimisation
+  clause; §7's gate over every other Tier 0 and Tier 1 access, in the hub, in the
+  other offline tools and on every device; §1's tiers; §2, §3, §4 and §5. And
+  **§6 itself is implemented rather than narrowed** — the user can still view,
+  export and delete, retention rules stand, and the purge of every Tier 0 and Tier
+  1 artifact on the hub's own machine is what the act performs, ADR-0126 §6
+  recording that the Tier 0 half is discharged there today by that tier being empty
+  and filing **#909** for the decision owed when it stops being. ADR-0126 §11 states
+  that it does not cite, rest on or widen ADR-0124 §6's exemption, which stays
+  confined to a client's bootstrap credential read; **#74** is untouched.
 - Note (2026-07-20): **§2's egress clause is superseded by ADR-0017.** That
   clause named `models/` the only component permitted to send user data
   off-device; ADR-0017 §1 replaces it with `models/` plus a designated

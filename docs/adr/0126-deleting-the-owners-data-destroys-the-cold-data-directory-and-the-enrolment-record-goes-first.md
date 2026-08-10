@@ -9,14 +9,18 @@
   them within the last two days, and a citation that silently means "whatever this
   ADR says when you read it" is not checkable. Where a later ADR changes one of
   them, this one is read against the text named here until an ADR says otherwise.
-- **This ADR partially supersedes ADR-0124, and the record lands in this change.**
-  One clause: §6's "A revocation is recorded rather than erasing the enrolment it
-  revokes", and only as it reaches the one act that destroys the enrolment record
-  itself. §11 applies ADR-0070 §1's test to it and states what survives, which is
-  every other sentence of §6 and the whole of §8 — including both clauses this ADR
-  exists to give a home to. No ratified text of ADR-0124 is rewritten; its `Status`
-  line and its appended dated note are the whole of the record (ADR-0070 §1,
-  ADR-0082 §1 and §2).
+- **This ADR partially supersedes ADR-0124 and ADR-0004, and both records land in
+  this change.** One clause each, and each is scoped to the one act this ADR
+  defines. **ADR-0124 §6's** "A revocation is recorded rather than erasing the
+  enrolment it revokes", only as it reaches the act that destroys the enrolment
+  record itself (§4). **ADR-0004 §7's** gating clause, only for that act, because
+  `permissions/` runs inside a hub this act requires to be stopped and the audit
+  trail is a file it destroys (§11). §12 applies ADR-0070 §1's test to both and
+  states what survives, which is nearly all of both sections — every other sentence
+  of ADR-0124 §6, the whole of its §8 including both clauses this ADR exists to
+  give a home to, and every part of ADR-0004 §7 that governs any other access. No
+  ratified text of either is rewritten; each `Status` line and its appended dated
+  note are the whole of the record (ADR-0070 §1, ADR-0082 §1 and §2).
 - **No implementation lands with it.** No `src/`, no `tests/`. The tool §2 rules
   is a separate lane, briefed against this text once it merges, and §9 sequences it
   behind a prerequisite that does not exist yet.
@@ -414,7 +418,7 @@ The purpose is "so the record says what the owner actually decided and when" —
 protection against an implementation quietly dropping a row and leaving the owner's
 decision unrecorded. Here the owner's decision *is* that nothing survives, and a
 record of it would be the residue rather than the evidence. The mischief §6 aims
-at is an erasure the owner did not ask for; this is the one they did. §11 records
+at is an erasure the owner did not ask for; this is the one they did. §12 records
 the supersession and applies ADR-0070 §1's test to it.
 
 **What is not superseded, and a lane will be tempted to think it is.** §6's
@@ -741,7 +745,75 @@ ADR-0101's erasure never has — devices on other machines. They are different a
 with different honesty obligations, and a lane that implemented one by citing the
 other would get both wrong.
 
-### 11. Records under ADR-0070 §1 and ADR-0082 §1
+### 11. ADR-0004 §7's gate cannot reach this act, so it is superseded for it rather than left engaged and unmet
+
+> **Normative.** ADR-0004 §7's gating clause is superseded **only** for this act —
+> the offline whole-installation delete §1 and §2 define, performed by the owner at
+> the hub's own machine with the hub stopped — and for nothing else. Every other
+> Tier 0 and Tier 1 access, in the hub and in every other tool, stays under §7
+> unchanged, and no lane may cite this clause to widen the exemption to a second
+> access.
+
+> **Normative.** Three replacements stand in the exemption's place, and an
+> implementation that omits any of them does not have it: the act is confined to one
+> purpose and one path, destroying the resolved `data_dir` and nothing else, with no
+> argument that widens it; custody is the operating system's own access control — the
+> data directory is owner-only at `0700` (ADR-0083 §3), the act runs as the owner's
+> own user, and the instance lock is the kernel's (ADR-0083 §1); and the owner's
+> confirmation against the resolved path (§7) is taken before anything is destroyed,
+> in person, at that machine.
+
+> **Normative.** No record of the act survives inside this system, and that is
+> required rather than tolerated. The act writes no audit record anywhere, and no
+> lane may make it write one that outlives the directory it destroys.
+
+> **Normative.** This ADR does not cite ADR-0124 §6's exemption, does not widen it,
+> and does not rest on it. That clause is confined to a client's bootstrap
+> credential read and stays so; this is a separate access with its own argument,
+> and if that argument is rejected this exemption falls with it.
+
+**Both halves of §7 are structurally unavailable here, and neither is unavailable
+by choice.** `permissions/` runs inside the hub and the audit trail is a Tier 1
+store the hub owns exclusively (ADR-0083). This act runs with the hub stopped —
+which §2 shows is forced rather than preferred — so there is no policy layer
+running to consult. And the audit trail is `<data_dir>/audit.db`: a record of the
+act would be written into a file the act removes moments later, which is not a
+record but a rounding error.
+
+**Building the gate anyway was considered and it produces nothing.** `service` may
+import `app` (ADR-0083 §8), so the tool could construct a permission policy through
+the composition root rather than reaching a subsystem directly, and §3's "imports no
+subsystem directly" would survive. What it would evaluate is a request from the
+owner, at their own terminal, on their own machine, for an act §7 already requires
+them to confirm by naming the directory — and ADR-0004 §7's own words make the gate
+"transparent and reviewable", a property supplied by a record that here cannot
+exist. It would be ceremony that consumes a decision and writes it to a file it is
+about to unlink.
+
+**The audit residue is not merely impossible, it is forbidden, and that is what
+makes the supersession principled rather than convenient.** A durable record saying
+"the owner destroyed everything on this date" is Tier 1 data about the owner,
+surviving in a system they asked to hold nothing. It is §4's argument about the
+enrolment record, arriving a second time on a different file: the two clauses
+ADR-0004 grants — a gate that records, and a purge that leaves nothing — cannot both
+hold for the act that empties the installation, and the one that gives way is the
+one whose whole purpose is to make *later* accesses reviewable.
+
+**What is lost is real and is named rather than smoothed over, in ADR-0124 §6's
+posture.** An OS permission on a directory is custody, not a policy decision
+traceable to an answer about *this* access; a confirmation at a terminal is
+evidence only to the person who gave it; and nothing anywhere in this system will
+afterwards be able to say the act happened. The owner's own shell history and their
+own machine's logs are outside this system and are not offered as a substitute.
+That is the price of an act whose purpose is to leave nothing behind, it is bounded
+to one act on one path, and it is paid visibly here rather than deferred to an issue
+that would make it look temporary.
+
+**#74 is untouched.** It asks whether §7's gate reaches the model provider
+credential, and this ADR neither answers it nor moves it; ADR-0125 §9 says the same
+of its own seam.
+
+### 12. Records under ADR-0070 §1 and ADR-0082 §1
 
 **ADR-0124 §6 — partially superseded, one clause, and the record lands in this
 change.** The clause is "A revocation is recorded rather than erasing the enrolment
@@ -755,6 +827,18 @@ supersession rather than an amendment. It is narrow in the way ADR-0124 §8's ow
 supersession of ADR-0004 §6 is narrow: one act, named, with everything else of the
 section standing. ADR-0124's `Status` line gains the pair and its appended dated
 note carries the record (ADR-0082 §1 and §2).
+
+**ADR-0004 §7 — partially superseded, one clause, one act, and the record lands in
+this change.** The clause is "Access to Tier 0/1 data and every side-effecting tool
+call is gated by the `permissions/` layer and recorded in an **audit trail**".
+ADR-0070 §1's test: a reader holding only §7 would read it as reaching this act,
+and would either build a gate that evaluates nothing against a policy layer that is
+not running, or write an audit record into the file the act is about to unlink —
+and on discovering neither is possible would conclude the act may not exist. That is
+a clause read more widely than it now holds, ADR-0070 §1's second limb. §11 above
+carries the argument and the three replacements. ADR-0004's `Status` line is not a
+leading-token line, so under ADR-0082 §2 the pair accumulates on it and the dated
+note carries the record; both are written in this change.
 
 **ADR-0004 §6 — no record owed.** This ADR implements the right rather than
 changing it, and the sentence ADR-0124 §8 superseded is already recorded on
