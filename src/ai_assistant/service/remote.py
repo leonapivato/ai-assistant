@@ -324,6 +324,17 @@ class RemoteListener:
                 return
             admission = _DeviceAdmission(self._registry, identity)
             self._writers.setdefault(identity, set()).add(writer)
+
+            def _handshaken() -> None:
+                """Settle the budget and record the admission, in that order.
+
+                The wire calls this once the handshake has completed, which is the
+                only moment at which both are true: the connection has left the
+                pending ceiling, and the device really is being served.
+                """
+                settled()
+                admission.record_admission()
+
             try:
                 await serve_connection(
                     self._engine,
@@ -334,7 +345,7 @@ class RemoteListener:
                         read_timeout=self._settings.hub_read_timeout,
                         build=self._build,
                     ),
-                    on_handshake=settled,
+                    on_handshake=_handshaken,
                     admission=admission,
                 )
             finally:
@@ -415,12 +426,23 @@ class _DeviceAdmission:
             # obligation and no refusal is written twice.
             return _REFUSALS[verdict.refusal]
         self._enrolment_id = verdict.enrolment_id
+        return None
+
+    def record_admission(self) -> None:
+        """Record that this device completed the handshake and is being served.
+
+        **Fired when the handshake completes, not when the two facts hold**, and the
+        difference is one an operator reads. A device whose credential verifies can
+        still be refused a moment later — a protocol version this hub does not speak
+        is the case — and an "admitted" line written at the claim would leave the log
+        asserting a connection that was never served. ADR-0124 §6 wants the record to
+        say what the credential was used *for*.
+        """
         _log.info(
             "hub_remote_admitted",
             overlay_identity=self._identity,
-            enrolment_id=verdict.enrolment_id,
+            enrolment_id=self._enrolment_id,
         )
-        return None
 
     def record_refusal(self, code: str) -> None:
         """Record one refusal against the device the agent named (ADR-0124 §6, §7).

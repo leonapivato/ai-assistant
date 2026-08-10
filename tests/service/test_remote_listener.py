@@ -849,3 +849,61 @@ async def test_an_admission_and_its_refusal_speak_the_same_vocabulary(
     (refused,) = [e for e in captured if e["event"] == "hub_remote_admission_refused"]
     assert refused["reason"] == env.DEVICE_REVOKED
     assert good.credential not in repr(captured)
+
+
+async def test_a_version_mismatch_after_a_good_credential_is_recorded_as_a_refusal(
+    tmp_path: Path,
+) -> None:
+    """ADR-0124 §6's record covers a refusal that arrives *after* the credential.
+
+    A device presenting a credential that verifies can still be refused a moment
+    later, and a protocol version this hub does not speak is that case. It is a use
+    of the credential — the verifier really was consulted — so §6's "each admission
+    and each refusal with the device it named" reaches it, and an operator otherwise
+    reads a connection that presented a good credential and then vanished.
+
+    **And no admission is logged for it**, which is the other half: an "admitted"
+    line written when the two facts held would have the log asserting a connection
+    that was never served.
+    """
+    async with _remote(tmp_path) as hub:
+        minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        with structlog.testing.capture_logs() as captured:
+            async with _dialling(hub) as peer:
+                await peer.send(
+                    env.Envelope(
+                        kind=env.FrameKind.CONNECT,
+                        id="c-0",
+                        payload={
+                            env.CONNECT_VERSION: env.PROTOCOL_VERSION + 1,
+                            env.CONNECT_CLIENT: "assistant-cli",
+                            env.CONNECT_CREDENTIAL: minted.credential,
+                        },
+                    )
+                )
+                reply = await peer.receive()
+    assert reply.payload["code"] == env.VERSION_MISMATCH
+    (refused,) = [e for e in captured if e["event"] == "hub_remote_admission_refused"]
+    assert (refused["overlay_identity"], refused["reason"]) == (_DEVICE, env.VERSION_MISMATCH)
+    assert [e for e in captured if e["event"] == "hub_remote_admitted"] == []
+    assert minted.credential not in repr(captured)
+
+
+async def test_a_served_device_is_recorded_as_admitted_once_the_handshake_completes(
+    tmp_path: Path,
+) -> None:
+    """The discriminating half: a hub that recorded no admission at all would pass
+    every refusal test above and leave §6's record telling only half the story."""
+    async with _remote(tmp_path) as hub:
+        minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        with structlog.testing.capture_logs() as captured:
+            async with _dialling(hub) as peer:
+                assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
+                await peer.send(
+                    env.Envelope(kind=env.FrameKind.REQUEST, id="r-0", payload={}, method="beliefs")
+                )
+                assert (await peer.receive()).kind is env.FrameKind.RESULT
+    (admitted,) = [e for e in captured if e["event"] == "hub_remote_admitted"]
+    assert admitted["overlay_identity"] == _DEVICE
+    assert [e for e in captured if e["event"] == "hub_remote_admission_refused"] == []
+    assert minted.credential not in repr(captured)
