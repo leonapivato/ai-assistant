@@ -21,6 +21,14 @@ from typing import TYPE_CHECKING, Literal, cast
 
 import pytest
 import sqlite_vec
+from aged_store import (
+    AgedStoreSpec,
+    ClusteredEmbedder,
+    Instants,
+    filtered_neighbours,
+    install,
+    plant,
+)
 from memory_store_contract import _BEYOND_MARGIN, MemoryStoreContract
 from pydantic import ValidationError
 
@@ -46,7 +54,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.memory._walk import mint_position
-from ai_assistant.memory.sqlite_store import _run_to_completion
+from ai_assistant.memory.sqlite_store import _VEC_KNN_MAX_K, _run_to_completion
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing import FakeTraceSink
 from ai_assistant.testing.cancellation import (
@@ -214,7 +222,7 @@ async def test_search_ranks_by_similarity_and_scores(
     await store.add(_semantic("c2", "coffee milk"))
     await store.add(_semantic("r1", "rocket ship"))
 
-    results = await store.search("coffee")
+    results = (await store.search("coffee")).records
 
     assert {results[0].id, results[1].id} == {"c1", "c2"}
     assert results[-1].id == "r1"
@@ -238,7 +246,7 @@ async def test_search_filters_by_kind(make_store: Callable[..., SqliteMemoryStor
     await store.add(_semantic("s", "coffee fact"))
     await store.add(_preference("p", "coffee preference"))
 
-    results = await store.search("coffee", kinds=[MemoryKind.PREFERENCE])
+    results = (await store.search("coffee", kinds=[MemoryKind.PREFERENCE])).records
 
     assert [r.id for r in results] == ["p"]
 
@@ -290,7 +298,7 @@ async def test_a_band_scoped_search_reports_a_corrupt_row_as_a_store_error(
 async def test_empty_query_matches_nothing(make_store: Callable[..., SqliteMemoryStore]) -> None:
     store = make_store()
     await store.add(_semantic("1", "some content"))
-    assert await store.search("   ") == []
+    assert (await store.search("   ")).records == ()
 
 
 async def test_non_positive_limit_matches_nothing(
@@ -299,8 +307,8 @@ async def test_non_positive_limit_matches_nothing(
     store = make_store()
     await store.add(_semantic("1", "coffee"))
 
-    assert await store.search("coffee", limit=0) == []
-    assert await store.search("coffee", limit=-3) == []
+    assert (await store.search("coffee", limit=0)).records == ()
+    assert (await store.search("coffee", limit=-3)).records == ()
 
 
 @pytest.mark.parametrize(
@@ -326,7 +334,7 @@ async def test_over_large_limit_serves_instead_of_overflowing_knn(
     await store.add(_semantic("c1", "coffee tea"))
     await store.add(_semantic("c2", "coffee milk"))
 
-    results = await store.search("coffee", limit=limit)
+    results = (await store.search("coffee", limit=limit)).records
 
     assert {record.id for record in results} == {"c1", "c2"}
 
@@ -346,7 +354,7 @@ async def test_failed_write_leaves_store_unchanged(
     got = await store.get("1")
     assert got is not None
     assert got.content == "original content"  # the failed overwrite did not apply
-    assert [r.id for r in await store.search("original")] == ["1"]  # still consistent
+    assert [r.id for r in (await store.search("original")).records] == ["1"]  # still consistent
 
 
 async def test_rollback_on_mid_transaction_failure(
@@ -483,7 +491,7 @@ async def test_a_frozen_record_cannot_be_mutated_in_the_construct_then_await_win
         got = await store.get("orig")
         assert got is not None
         assert got.content == "alpha"  # the constructed record, unchanged
-        assert [r.id for r in await store.search("alpha")] == ["orig"]
+        assert [r.id for r in (await store.search("alpha")).records] == ["orig"]
     finally:
         store.close()
 
@@ -502,7 +510,7 @@ async def test_expiry_precision_survives_at_the_datetime_range_extreme(
     await store.add(_semantic("edge", "coffee at the range extreme", expires_at=expires))
 
     assert await store.get("edge") is not None  # not expired: expires_at > now, exactly
-    assert [r.id for r in await store.search("coffee")] == ["edge"]  # search agrees
+    assert [r.id for r in (await store.search("coffee")).records] == ["edge"]  # search agrees
 
 
 async def test_valid_until_precision_survives_at_the_datetime_range_extreme(
@@ -520,7 +528,7 @@ async def test_valid_until_precision_survives_at_the_datetime_range_extreme(
     )
 
     assert await store.get("edge") is not None  # window still open: now < valid_until
-    assert [r.id for r in await store.search("coffee")] == ["edge"]
+    assert [r.id for r in (await store.search("coffee")).records] == ["edge"]
 
 
 async def test_write_atomic_recovers_to_neither_write_after_a_crash(tmp_path: Path) -> None:
@@ -653,7 +661,7 @@ async def test_a_persist_holds_off_a_deletion_in_another_process(tmp_path: Path)
         # Whichever order the two landed in, the file is internally consistent:
         # the deletion is last, so nothing is left behind either.
         assert await reopened.get("T") is None
-        assert await reopened.search("coffee") == []
+        assert (await reopened.search("coffee")).records == ()
     finally:
         reopened.close()
 
@@ -1138,7 +1146,7 @@ async def test_delete_removes_record_and_reports_existence(
 
     assert await store.delete("1") is True
     assert await store.get("1") is None
-    assert await store.search("fact") == []  # vector row gone too
+    assert (await store.search("fact")).records == ()  # vector row gone too
     assert await store.delete("1") is False  # already gone
 
 
@@ -1151,7 +1159,7 @@ async def test_clear_removes_all_and_returns_count(
 
     assert await store.clear() == 2
     assert await store.get("1") is None
-    assert await store.search("one") == []
+    assert (await store.search("one")).records == ()
     assert await store.clear() == 0
 
 
@@ -1176,7 +1184,9 @@ async def test_expired_records_are_hidden_from_get_and_search(
     await store.add(_semantic("2", "coffee fact live"))
 
     assert await store.get("1") is None
-    assert [r.id for r in await store.search("coffee")] == ["2"]  # expired one filtered out
+    assert [r.id for r in (await store.search("coffee")).records] == [
+        "2"
+    ]  # expired one filtered out
 
 
 async def test_a_naive_injected_clock_is_the_subsystems_error(
@@ -1670,7 +1680,7 @@ async def test_migration_rebuilds_a_full_real_schema_preserving_vectors(tmp_path
         assert _valid_until_column(store, "live") == _micros(far_future)
         assert await store.get("live") is not None  # still live: now < valid_until
         # The carried-forward vectors still match — the rowid join survived.
-        assert {r.id for r in await store.search("coffee")} == {"live", "plain"}
+        assert {r.id for r in (await store.search("coffee")).records} == {"live", "plain"}
     finally:
         store.close()
 
@@ -1884,6 +1894,145 @@ async def test_the_rebuild_path_also_produces_the_subject_column(tmp_path: Path)
         store.close()
 
 
+async def _write_pre_window_column_db(
+    path: Path, records: list[MemoryRecord], embedder: HashingEmbedder
+) -> None:
+    """Create a database on the schema immediately before ADR-0128's ``valid_from``.
+
+    Both lifecycle columns already ``INTEGER`` epochs and ``about_person`` present,
+    so both older migrations correctly decline, and ``AUTOINCREMENT`` already
+    adopted so the walk-key rebuild declines too. What is left is exactly the
+    ``ALTER`` plus backfill under test — the case a migration keyed only on the
+    epoch check would silently skip, as ``about_person``'s was.
+
+    ``vec_records`` is populated, which is what lets the case assert through
+    ``search``: the backfilled column is the one ``search`` binds, and ``get``
+    would answer correctly from the blob whether or not the migration ran. No
+    fixture record sets ``valid_until``, so that column is ``NULL`` and honestly so.
+    """
+    conn = sqlite3.connect(path)
+    try:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        conn.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.executemany(
+            "INSERT INTO meta(key, value) VALUES (?, ?)",
+            [("embedding_model", embedder.model_id), ("dimensions", str(embedder.dimensions))],
+        )
+        conn.execute(
+            "CREATE TABLE records(rowid INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "id TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, "
+            "expires_at INTEGER, valid_until INTEGER, about_person TEXT)"
+        )
+        conn.execute(
+            "CREATE VIRTUAL TABLE vec_records "
+            f"USING vec0(embedding float[{embedder.dimensions}] distance_metric=cosine)"
+        )
+        vectors = await embedder.embed([record.content for record in records])
+        for record, vector in zip(records, vectors, strict=True):
+            cursor = conn.execute(
+                "INSERT INTO records(id, kind, data, expires_at, valid_until, about_person) "
+                "VALUES (?, ?, ?, NULL, NULL, NULL)",
+                (record.id, record.kind, record.model_dump_json()),
+            )
+            conn.execute(
+                "INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)",
+                (cursor.lastrowid, sqlite_vec.serialize_float32(list(vector))),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def test_migration_backfills_the_open_window_column_from_json(tmp_path: Path) -> None:
+    """ADR-0128 §1's column, added in place and backfilled — never left ``NULL``.
+
+    ``search`` binds both ends of the validity window before its ranking cut, and
+    the rare end has no column to bind on a store written before this. Adding one
+    is the easy half; the value is the half that bites, because ``NULL`` reads as
+    *open*. An un-backfilled column would make every not-yet-live record on every
+    migrated store eligible for every read — a record ADR-0045 §6 requires the read
+    path to hide, resurrected by a migration.
+
+    So the fixture plants one record on each side of the boundary and asserts
+    through **``search``**, which is the read the column serves: ``get`` decodes the
+    blob and would answer correctly whether or not the migration ran at all.
+    """
+    embedder = HashingEmbedder(dimensions=8)
+    db = tmp_path / "pre-window-column.db"
+    await _write_pre_window_column_db(
+        db,
+        [
+            _semantic("open", "the weekly planning meeting"),
+            _semantic(
+                "future",
+                "the weekly planning meeting",
+                validity=Validity(valid_from=_NOW + timedelta(days=1)),
+            ),
+            _semantic(
+                "already",
+                "the weekly planning meeting",
+                validity=Validity(valid_from=_NOW - timedelta(days=1)),
+            ),
+        ],
+        embedder,
+    )
+
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=embedder, now=_fixed_now
+    )
+    try:
+        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
+        assert "valid_from" in columns
+        found = await store.search("the weekly planning meeting", limit=10)
+        assert {record.id for record in found.records} == {"open", "already"}, (
+            "the not-yet-live record came back from a migrated store, so the added column "
+            "was left NULL and reads as an open window (ADR-0045 §6)"
+        )
+        # And the column agrees with each blob rather than being uniformly NULL,
+        # which is what a bare `ADD COLUMN` would have left.
+        stored = dict(store._conn.execute("SELECT id, valid_from FROM records"))
+        assert stored["open"] is None  # an absent window end is open, and stays open
+        assert stored["already"] == _micros(_NOW - timedelta(days=1))
+        assert stored["future"] == _micros(_NOW + timedelta(days=1))
+    finally:
+        store.close()
+
+
+async def test_the_rebuild_path_also_backfills_the_open_window_column(tmp_path: Path) -> None:
+    """A table old enough to need the rebuild arrives with the column filled too.
+
+    The migrations are ordered rather than independent — the rebuild recreates the
+    table, so a column added before it would be dropped — and a pre-ADR-0007 table
+    has neither lifecycle column, so it takes the rebuild. It must come out with
+    the window column *and* its value, for the reason above: a rebuild that carried
+    the column through as ``NULL`` would revive the record it was added to hide.
+    """
+    db = tmp_path / "ancient-window.db"
+    _write_legacy_db(
+        db,
+        [
+            _semantic(
+                "future",
+                "written long before the column existed",
+                validity=Validity(valid_from=_NOW + timedelta(days=1)),
+            )
+        ],
+    )
+
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
+    try:
+        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
+        assert {"expires_at", "valid_until", "valid_from", "about_person"} <= columns
+        assert await store.get("future") is None
+        assert {record.id for record in await store.export()} == {"future"}
+    finally:
+        store.close()
+
+
 async def test_export_wraps_corrupt_stored_record(
     make_store: Callable[..., SqliteMemoryStore],
 ) -> None:
@@ -2010,6 +2159,95 @@ def test_a_sidecar_that_was_already_there_is_restricted_at_open(
     assert [each.stat().st_mode & 0o777 for each in sidecars] == [0o600, 0o600]
 
 
+# --- the #457 regression (ADR-0128 §1, §5 item 4) ---------------------------
+#: The instants #457's fixture is dated against, on this module's own clock.
+#: ``closed`` is strictly before ``now``, which is what makes a record the fixture
+#: labels window-closed actually closed at the measurement instant.
+_AGED_INSTANTS = Instants(
+    now=_NOW,
+    written=datetime(2026, 1, 1, tzinfo=UTC),
+    closed=datetime(2026, 4, 1, tzinfo=UTC),
+    opened=datetime(2026, 2, 1, tzinfo=UTC),
+)
+
+#: What ``_RESULT_OVERFETCH`` was before ADR-0128 §1 removed it, kept here as the
+#: **counterfactual** and deliberately not read from the store module: it no longer
+#: exists there, and the number's whole job now is to say how badly the fixture
+#: below would have beaten the arithmetic #457 filed against. A store over-fetching
+#: ``limit * 8`` candidates and filtering afterwards serves *nothing* eligible once
+#: more than that many ineligible records rank nearer.
+_RETIRED_OVERFETCH = 8
+
+#: The conflict-probe shape ``MemoryIngestor._detect_conflicts`` reads with: the
+#: ceiling plus two rows of headroom (ADR-0079 §1's overflow probe and the
+#: proposal's own record). #457 is a report about this call.
+_CONFLICT_PROBE_LIMIT = 5
+
+
+async def test_an_above_threshold_same_kind_conflict_survives_a_crowd_that_used_to_hide_it(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """Issue #457's regression, in the shape the issue asks for (ADR-0128 §5 item 4).
+
+    #457 asks for "a ``SqliteMemoryStore`` regression that plants enough filtered
+    nearer neighbours (other-kind and window-closed) to hide an above-threshold
+    same-kind conflict, since the shared conformance suite runs over
+    ``FakeMemoryStore`` and cannot reach this path". This is that regression, over
+    #799's aged-store fixture, which already builds a store at a chosen closure
+    fraction with both of ADR-0112 §8's producers planting into it.
+
+    **The fixture is above the threshold and the assertion says so.** One topical
+    cluster, 90% of it window-closed, and half the live remainder a different kind
+    — so the oracle counts far more ineligible records nearer than the fifth
+    eligible one than the retired over-fetch could ever have held. Before ADR-0128
+    §1 this call returned **zero** of the conflicts it asked for while every one of
+    them was live, above threshold and the right kind, and nothing above the store
+    could tell that from a store that simply held none: ``_detect_conflicts``
+    records the consequence in its own docstring — "what it never surfaced is
+    invisible here" — and ``DefaultMemoryPolicy``'s asserted-conflict gates are
+    predicates over the set they are *handed*, so an unsurfaced ``USER_ASSERTED``
+    conflict turns what should be an ``ASK_USER`` into a ``SUPERSEDE`` and the
+    profile silently commits a self-contradiction.
+
+    **The counterfactual is asserted first**, because without it this case passes
+    on a store that was never crowded and would certify nothing. It is stated
+    against a frozen 8 rather than a live constant: the constant is gone, and the
+    number is a fact about the past.
+    """
+    spec = AgedStoreSpec.sized(
+        total=1_200, crowding=1_200, closed_fraction=0.9, preference_share=0.5
+    )
+    aged = await plant(spec, embedder=ClusteredEmbedder(), instants=_AGED_INSTANTS)
+    store = make_store(embedder=ClusteredEmbedder())
+    await install(store, aged)
+    query = aged.topic_query(0)
+    ranked = await aged.rank(query, kinds=[MemoryKind.SEMANTIC])
+    entitled = [entry.record_id for entry in ranked if entry.eligible]
+
+    crowd = filtered_neighbours(ranked, limit=_CONFLICT_PROBE_LIMIT)
+    assert crowd > _CONFLICT_PROBE_LIMIT * _RETIRED_OVERFETCH, (
+        f"only {crowd} ineligible records rank nearer than the fifth eligible one, which the "
+        f"retired over-fetch would have absorbed — this fixture cannot witness #457"
+    )
+
+    found = await store.search(query, limit=_CONFLICT_PROBE_LIMIT, kinds=[MemoryKind.SEMANTIC])
+
+    assert [record.id for record in found.records] == entitled[:_CONFLICT_PROBE_LIMIT], (
+        "the conflict probe did not surface the nearest eligible same-kind records — a "
+        "window-closed or other-kind neighbour spent a candidate slot (ADR-0128 §1)"
+    )
+    assert found.capped is False  # a full page, which certifies nothing (§2's third clause)
+
+    # And the other half of what #457 asks for: a caller can now tell "there are no
+    # more" from "I ran out of candidates". This read exhausts the eligible set, so
+    # `capped=False` is the certification ADR-0128 §2's first clause defines — the
+    # thing the issue says nothing above the store could do.
+    whole = await store.search(query, limit=len(entitled) + 5, kinds=[MemoryKind.SEMANTIC])
+
+    assert [record.id for record in whole.records] == entitled
+    assert whole.capped is False
+
+
 class TestSqliteMemoryStoreContract(MemoryStoreContract):
     """Runs SqliteMemoryStore through the shared MemoryStore conformance suite.
 
@@ -2020,6 +2258,19 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
     @pytest.fixture
     def store(self, make_store: Callable[..., SqliteMemoryStore]) -> MemoryStore:
         return make_store()
+
+    @pytest.fixture
+    def candidate_ceiling(self) -> int | None:
+        """sqlite-vec's own ``k`` cap, which is this store's whole ceiling.
+
+        The number the suite's two ceiling cases are constructed against, and the
+        only thing left that can shorten a ``SqliteMemoryStore`` result below
+        ``limit`` now that every eligibility predicate binds before the cut
+        (ADR-0128 §1). Read from the module rather than restated, so a lane that
+        decouples it from the pinned dependency (#411 part 2) re-runs these cases at
+        the new value instead of being failed by a stale literal.
+        """
+        return _VEC_KNN_MAX_K
 
     async def record_unusable_walk_position(self, store: MemoryStore, walk: str) -> None:
         """Write a position this build cannot read into ``walk_positions``.

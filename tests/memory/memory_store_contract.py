@@ -174,6 +174,22 @@ _BEYOND_MARGIN = 20
 _WALK_ROUNDS = 50
 
 
+async def _seed_past(store: MemoryStore, ceiling: int) -> None:
+    """Seed one more eligible, matching record than ``ceiling``.
+
+    Through ``write_atomic`` rather than a loop of ``add`` calls: a store whose
+    ceiling is the interesting number has a ceiling in the thousands, and one
+    transaction seeds it in a fraction of the time as many. It is contract API
+    either way, so the fixture reaches past nothing.
+    """
+    await store.write_atomic(
+        [
+            MemoryWrite(record=_semantic(f"seed-{index}", "coffee"), mode=MemoryWriteMode.UPSERT)
+            for index in range(ceiling + 1)
+        ]
+    )
+
+
 async def _walk_to_exhaustion(store: MemoryStore, walk: str, *, limit: int) -> list[str]:
     """Walk ``walk`` to its end, advancing on each chunk, collecting ids in order.
 
@@ -208,7 +224,7 @@ _LATE_FILTER = (
 
 async def _score_for(store: MemoryStore, query: str, record_id: str) -> float:
     """How relevant ``store`` finds ``record_id`` to ``query``; ``0.0`` if unmatched."""
-    for record in await store.search(query):
+    for record in (await store.search(query)).records:
         if record.id == record_id:
             return record.score or 0.0
     return 0.0
@@ -787,7 +803,7 @@ class MemoryStoreContract:
     async def test_search_finds_a_matching_record(self, store: MemoryStore) -> None:
         await store.add(_semantic("c", "the user likes coffee"))
 
-        results = await store.search("coffee")
+        results = (await store.search("coffee")).records
 
         assert "c" in {r.id for r in results}
 
@@ -795,7 +811,7 @@ class MemoryStoreContract:
         await store.add(_semantic("s", "coffee fact"))
         await store.add(_preference("p", "coffee preference"))
 
-        results = await store.search("coffee", kinds=[MemoryKind.PREFERENCE])
+        results = (await store.search("coffee", kinds=[MemoryKind.PREFERENCE])).records
 
         assert [r.id for r in results] == ["p"]
 
@@ -803,20 +819,20 @@ class MemoryStoreContract:
         for i in range(4):
             await store.add(_semantic(f"k{i}", "shared coffee keyword"))
 
-        results = await store.search("coffee", limit=2)
+        results = (await store.search("coffee", limit=2)).records
 
         assert len(results) <= 2
 
     async def test_empty_query_matches_nothing(self, store: MemoryStore) -> None:
         await store.add(_semantic("1", "some content"))
 
-        assert await store.search("   ") == []
+        assert (await store.search("   ")).records == ()
 
     async def test_non_positive_limit_matches_nothing(self, store: MemoryStore) -> None:
         await store.add(_semantic("1", "coffee"))
 
-        assert await store.search("coffee", limit=0) == []
-        assert await store.search("coffee", limit=-1) == []
+        assert (await store.search("coffee", limit=0)).records == ()
+        assert (await store.search("coffee", limit=-1)).records == ()
 
     async def test_a_search_limit_wider_than_a_backing_store_can_bind_still_answers(
         self, store: MemoryStore
@@ -848,7 +864,9 @@ class MemoryStoreContract:
         """
         await store.add(_semantic("1", "coffee"))
 
-        assert [record.id for record in await store.search("coffee", limit=2**63)] == ["1"]
+        assert [record.id for record in (await store.search("coffee", limit=2**63)).records] == [
+            "1"
+        ]
 
     async def test_delete_removes_and_reports_existence(self, store: MemoryStore) -> None:
         await store.add(_semantic("1", "a fact"))
@@ -877,7 +895,7 @@ class MemoryStoreContract:
         await store.add(_semantic("1", "coffee", expires_at=_LONG_AGO))
 
         assert await store.get("1") is None
-        assert "1" not in {r.id for r in await store.search("coffee")}
+        assert "1" not in {r.id for r in (await store.search("coffee")).records}
 
     async def test_purge_expired_removes_only_expired(self, store: MemoryStore) -> None:
         await store.add(_semantic("live", "keeps"))
@@ -895,7 +913,7 @@ class MemoryStoreContract:
         await store.add(_semantic("open", "coffee", validity=Validity()))
 
         assert await store.get("open") is not None
-        assert "open" in {r.id for r in await store.search("coffee")}
+        assert "open" in {r.id for r in (await store.search("coffee")).records}
         assert "open" in {r.id for r in await store.export()}
 
     async def test_window_closed_record_is_hidden_from_reads_but_kept_by_export(
@@ -906,7 +924,7 @@ class MemoryStoreContract:
         await store.add(_semantic("closed", "coffee", validity=Validity(valid_until=_LONG_AGO)))
 
         assert await store.get("closed") is None
-        assert "closed" not in {r.id for r in await store.search("coffee")}
+        assert "closed" not in {r.id for r in (await store.search("coffee")).records}
         assert "closed" in {r.id for r in await store.export()}
 
     async def test_not_yet_valid_record_is_hidden_from_reads_but_kept_by_export(
@@ -917,7 +935,7 @@ class MemoryStoreContract:
         await store.add(_semantic("future", "coffee", validity=Validity(valid_from=_FAR_FUTURE)))
 
         assert await store.get("future") is None
-        assert "future" not in {r.id for r in await store.search("coffee")}
+        assert "future" not in {r.id for r in (await store.search("coffee")).records}
         assert "future" in {r.id for r in await store.export()}
 
     async def test_expired_wins_over_a_closed_window_in_export(self, store: MemoryStore) -> None:
@@ -948,7 +966,7 @@ class MemoryStoreContract:
 
         assert await store.get("at_until") is None
         assert await store.get("before_until") is not None
-        found = {r.id for r in await store.search("coffee")}
+        found = {r.id for r in (await store.search("coffee")).records}
         assert "at_until" not in found
         assert "before_until" in found
 
@@ -969,7 +987,7 @@ class MemoryStoreContract:
         assert await store.get("before_from") is not None
         assert await store.get("at_from") is not None
         assert await store.get("after_from") is None
-        found = {r.id for r in await store.search("coffee")}
+        found = {r.id for r in (await store.search("coffee")).records}
         assert "before_from" in found
         assert "at_from" in found
         assert "after_from" not in found
@@ -1019,7 +1037,7 @@ class MemoryStoreContract:
         for i in range(3):
             await store.add(_semantic(f"c{i}", "coffee", validity=Validity(valid_until=deadline)))
 
-        results = await store.search("coffee")
+        results = (await store.search("coffee")).records
 
         assert {r.id for r in results} == {"c0", "c1", "c2"}
 
@@ -1189,7 +1207,257 @@ class MemoryStoreContract:
         assert set(await store.get_many(["legacy"])) == {"legacy"}
         assert "legacy" in {record.id for record in await store.list_beliefs()}
         assert "legacy" in {record.id for record in await store.export()}
-        assert "legacy" in {record.id for record in await store.search("accumulated")}
+        assert "legacy" in {record.id for record in (await store.search("accumulated")).records}
+
+    # --- every eligibility predicate binds before the cut (ADR-0128 §1) --------
+    # ADR-0128 §5's first normative clause: one crowding case per predicate §1
+    # moves, each seeding enough **nearer ineligible** records to exhaust any
+    # plausible candidate budget and asserting that the eligible records come back
+    # in full. The clause also names what a suite naturally writes instead — "a
+    # case asserting only that no ineligible record is returned is satisfied by
+    # returning nothing and does not test §1" — so every case here asserts the
+    # eligible records *arrive*, and treats their absence as the failure.
+    #
+    # This is ADR-0113 §7's lesson generalised. The band case below was written in
+    # the form that bites because a balanced fixture certifies a store that
+    # implements nothing; the same is true of each axis §1 adds, and for the same
+    # reason: with a handful of records per axis nothing floods, the candidate
+    # budget is never exhausted, and a post-cut filter passes.
+
+    @pytest.mark.parametrize(
+        "ineligible",
+        [
+            pytest.param(
+                lambda index: _preference(f"flood-{index}", "coffee"),
+                id="kind",
+            ),
+            pytest.param(
+                lambda index: _semantic(f"flood-{index}", "coffee", expires_at=_LONG_AGO),
+                id="retention",
+            ),
+            pytest.param(
+                lambda index: _semantic(
+                    f"flood-{index}", "coffee", validity=Validity(valid_until=_LONG_AGO)
+                ),
+                id="window-closed",
+            ),
+            pytest.param(
+                lambda index: _semantic(
+                    f"flood-{index}", "coffee", validity=Validity(valid_from=_FAR_FUTURE)
+                ),
+                id="window-not-yet-open",
+            ),
+        ],
+    )
+    async def test_search_binds_every_eligibility_predicate_before_the_ranking_cut(
+        self, store: MemoryStore, ineligible: Callable[[int], MemoryRecord]
+    ) -> None:
+        """ADR-0128 §1, once per axis it moves — the clause #457 is the report of.
+
+        Forty nearer ineligible records and three eligible ones, at ``limit=2``. A
+        store applying the predicate *after* its ranking cut spends its whole
+        candidate budget on the flood and serves **none** of the three, while every
+        one of them is live and matches the filter. That is the failure ADR-0113's
+        spike measured on the band axis (zero of four assertions at a 49x skew) and
+        #799 measured on the window axis as a threshold; §1's ground for moving all
+        four is that the mechanism is identical.
+
+        The arithmetic, stated because the fixture size is load-bearing: the flood
+        is 40, an order of magnitude past ``limit``, which survives any candidate
+        margin an implementation might keep without the suite reaching for a
+        constant belonging to one of them.
+
+        **The window axis is the one the system manufactures for itself**, which is
+        why both its ends are here rather than only the hot one: every
+        ``SUPERSEDE`` leaves a window-closed record beside the live record that
+        replaced it (ADR-0045 §4/§6) and ADR-0110 §3 adds a second producer, both
+        topically concentrated by construction — so the topic the user has
+        corrected most is the topic whose retrieval fails first.
+        """
+        for index in range(40):
+            await store.add(ineligible(index))
+        for index in range(3):
+            await store.add(_semantic(f"mine-{index}", "coffee please"))
+
+        found = await store.search("coffee", limit=2, kinds=[MemoryKind.SEMANTIC])
+
+        assert found.records, (
+            "a search returned none of the eligible records while every one of them "
+            "is live and matches the call's filters — the predicate bound after the "
+            "ranking cut and the flood spent the candidate budget (ADR-0128 §1)"
+        )
+        assert len(found.records) == 2, "two eligible records were asked for and three exist"
+        assert {record.id for record in found.records} <= {"mine-0", "mine-1", "mine-2"}
+
+    async def test_a_window_boundary_holds_under_crowding(
+        self, store: MemoryStore, now: datetime
+    ) -> None:
+        """ADR-0045 §6's boundaries, re-asserted through a fixture that crowds.
+
+        ADR-0128 §5 requires exactly this: the boundary cases each window end
+        already owes, but taken over a crowded candidate set rather than a balanced
+        one. The balanced cases above prove the comparison is half-open; this one
+        proves the comparison is *reached* — a store that binds the window after its
+        cut answers both boundary questions correctly about records it never
+        returns, and passes every balanced case while serving nothing here.
+
+        All three boundary records sit behind forty nearer window-closed neighbours,
+        which is the shape a well-corrected topic actually has.
+        """
+        for index in range(40):
+            await store.add(
+                _semantic(f"flood-{index}", "coffee", validity=Validity(valid_until=_LONG_AGO))
+            )
+        await store.add(_semantic("at_until", "coffee please", validity=Validity(valid_until=now)))
+        await store.add(_semantic("at_from", "coffee please", validity=Validity(valid_from=now)))
+        await store.add(
+            _semantic(
+                "after_from", "coffee please", validity=Validity(valid_from=now + _ONE_MINUTE)
+            )
+        )
+
+        found = {record.id for record in (await store.search("coffee", limit=10)).records}
+
+        assert "at_from" in found, "at valid_from the record is live, and crowding cannot hide it"
+        assert "at_until" not in found  # [from, until): at valid_until it is retired
+        assert "after_from" not in found  # and not yet open before valid_from
+
+    # --- the under-service signal: search(...).capped (ADR-0128 §2) ------------
+    # ADR-0128 §5's second normative clause. Two cases bind on **every**
+    # implementation and two more only on one that has a candidate ceiling, where
+    # the §5 clause is explicit that a store without one **skips** them rather than
+    # faking an input it cannot construct. Those two carry
+    # ``optional_obligation``, which is this corpus's own name for exactly that: an
+    # obligation a conforming implementation may bow out of, declared by the suite
+    # and never by the binding class, so a store cannot opt itself out of the pair.
+    #
+    # `capped` certifies in one direction: `False` is the claim that a short result
+    # is the whole eligible set, `True` is the absence of any claim. So the cases
+    # that matter are the ones where a wrong implementation would say `False` — and
+    # the full-page pair is where an earlier draft of §2 was unsatisfiable, because
+    # it read `capped` as a statement about how much of the store was examined
+    # rather than as a warning attached to a short answer.
+
+    @pytest.fixture
+    def candidate_ceiling(self) -> int | None:
+        """The store-under-test's own candidate ceiling, or ``None`` if it has none.
+
+        A subclass whose implementation caps the candidates it considers — a KNN
+        ``k``, a page the backend will not exceed — overrides this with that number,
+        and the two ceiling cases below run against it. Left ``None``, they skip:
+        ADR-0128 §5 requires that rather than a fake, because neither input is
+        constructible against a store with no ceiling and a case that manufactured
+        one would be testing the manufacture.
+
+        ``InMemoryMemoryStore`` and ``FakeMemoryStore`` have no KNN and so no
+        ceiling; ``SqliteMemoryStore`` has sqlite-vec's ``k`` cap.
+        """
+        return None
+
+    async def test_capped_is_false_on_a_short_result_over_an_exhausted_eligible_set(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0128 §2's first clause: ``False`` on a short result is a certification.
+
+        Two eligible records and a ``limit`` of ten. The result is short because the
+        store holds nothing more, which is exactly the state ``capped=False``
+        promises a caller may act on — and the state that, before this contract,
+        was indistinguishable from a truncated read (#457).
+        """
+        await store.add(_semantic("1", "coffee alpha"))
+        await store.add(_semantic("2", "coffee beta"))
+
+        found = await store.search("coffee", limit=10)
+
+        assert {record.id for record in found.records} == {"1", "2"}
+        assert len(found.records) < 10  # short, which is what makes `capped` mean anything
+        assert found.capped is False
+
+    async def test_capped_is_false_on_an_ordinary_full_page(self, store: MemoryStore) -> None:
+        """ADR-0128 §2's third clause: a full page is outside the question entirely.
+
+        Four eligible records and a ``limit`` of two. The caller got what it asked
+        for, so it is not being under-served and there is no warning to attach —
+        and the page certifies **nothing** about what lies below the cut, which §1's
+        second clause states in terms.
+        """
+        for index in range(4):
+            await store.add(_semantic(f"k{index}", "coffee"))
+
+        found = await store.search("coffee", limit=2)
+
+        assert len(found.records) == 2
+        assert found.capped is False
+
+    @pytest.mark.optional_obligation
+    async def test_capped_is_false_on_a_full_page_from_an_eligible_set_past_the_ceiling(
+        self, store: MemoryStore, candidate_ceiling: int | None
+    ) -> None:
+        """ADR-0128 §2's third clause where it actually bites — the unsatisfiable case.
+
+        An eligible set larger than the store's candidate ceiling, and a ``limit``
+        exactly at that ceiling. The page comes back full **without** the store
+        having considered every eligible record, and ``capped`` is ``False``.
+
+        This is the case an earlier draft of §2 could not satisfy: it demanded
+        ``False`` on every full page and, beside it, ``False`` only where the store
+        "considered every record eligible under the call's filters", and no
+        implementation could do both here. The correction is the substance of the
+        field — ``capped`` is not a statement about how much of the store was
+        examined, it is a statement about whether a **short** result may be trusted
+        as complete. A store that conflated the two fails exactly here.
+        """
+        if candidate_ceiling is None:
+            pytest.skip("this store has no candidate ceiling, so neither input is constructible")
+        await _seed_past(store, candidate_ceiling)
+
+        found = await store.search("coffee", limit=candidate_ceiling)
+
+        assert len(found.records) == candidate_ceiling  # a full page
+        assert found.capped is False
+
+    @pytest.mark.optional_obligation
+    async def test_capped_is_true_where_the_ceiling_bound_the_read(
+        self, store: MemoryStore, candidate_ceiling: int | None
+    ) -> None:
+        """ADR-0128 §2's second and fourth clauses: the one state that reports ``True``.
+
+        A ``limit`` above the store's candidate ceiling over an eligible set that
+        also exceeds it. The result is short of ``limit`` and the store cannot
+        certify it, because the rows it would have to reason about are rows it
+        deliberately never fetched — so it reports ``True``, which is a refusal to
+        certify and never a claim that more exists.
+        """
+        if candidate_ceiling is None:
+            pytest.skip("this store has no candidate ceiling, so neither input is constructible")
+        await _seed_past(store, candidate_ceiling)
+
+        found = await store.search("coffee", limit=candidate_ceiling + 1)
+
+        assert len(found.records) < candidate_ceiling + 1  # short of what was asked for
+        assert found.capped is True
+
+    async def test_a_result_matching_nothing_by_construction_is_not_capped(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0128 §2's fourth clause: an empty result is not a capped one.
+
+        A blank query, a non-positive ``limit`` and a filter selecting nothing each
+        match nothing *by construction* — no ceiling was reached and none could have
+        been — so each reports ``False``. Asserted apart from the emptiness cases
+        above because the failure it guards is a store reading "I returned less than
+        was asked for" as the trigger, which would make ``capped`` fire on every
+        refusal ``search`` already documents.
+        """
+        await store.add(_semantic("1", "coffee"))
+
+        for result in (
+            await store.search("   "),
+            await store.search("coffee", limit=0),
+            await store.search("coffee", bands=()),
+        ):
+            assert result.records == ()
+            assert result.capped is False
 
     # --- band-scoped relevance read: search(bands=...) (ADR-0113) --------------
     # ADR-0113 §7 states what this half owes and warns which clauses a suite
@@ -1209,11 +1477,13 @@ class MemoryStoreContract:
         await store.add(_semantic("external", "coffee reported", source=MemorySource.EXTERNAL))
         every = {"asserted", "observed", "inferred", "external"}
 
-        assert {r.id for r in await store.search("coffee")} == every
-        assert {r.id for r in await store.search("coffee", bands=None)} == every
-        derived = await store.search("coffee", bands=[BeliefBand.DERIVED])
+        assert {r.id for r in (await store.search("coffee")).records} == every
+        assert {r.id for r in (await store.search("coffee", bands=None)).records} == every
+        derived = (await store.search("coffee", bands=[BeliefBand.DERIVED])).records
         assert {r.id for r in derived} == {"observed", "inferred"}
-        pair = await store.search("coffee", bands=[BeliefBand.ASSERTED, BeliefBand.ATTESTED])
+        pair = (
+            await store.search("coffee", bands=[BeliefBand.ASSERTED, BeliefBand.ATTESTED])
+        ).records
         assert {r.id for r in pair} == {"asserted", "external"}
 
     async def test_search_with_an_empty_band_sequence_selects_nothing(
@@ -1230,9 +1500,9 @@ class MemoryStoreContract:
         """
         await store.add(_semantic("1", "coffee"))
 
-        assert await store.search("coffee", bands=[]) == []
-        assert await store.search("coffee", bands=()) == []
-        assert {r.id for r in await store.search("coffee", bands=None)} == {"1"}
+        assert (await store.search("coffee", bands=[])).records == ()
+        assert (await store.search("coffee", bands=())).records == ()
+        assert {r.id for r in (await store.search("coffee", bands=None)).records} == {"1"}
 
     async def test_search_composes_bands_and_kinds_by_conjunction(self, store: MemoryStore) -> None:
         """A record is eligible when its band is selected *and* its kind is (§3).
@@ -1247,9 +1517,9 @@ class MemoryStoreContract:
         await store.add(_semantic("ds", "coffee fact inferred", source=MemorySource.INFERRED))
         await store.add(_preference("dp", "coffee pref inferred", source=MemorySource.INFERRED))
 
-        found = await store.search(
-            "coffee", bands=[BeliefBand.ASSERTED], kinds=[MemoryKind.PREFERENCE]
-        )
+        found = (
+            await store.search("coffee", bands=[BeliefBand.ASSERTED], kinds=[MemoryKind.PREFERENCE])
+        ).records
 
         assert [r.id for r in found] == ["ap"]
 
@@ -1285,7 +1555,7 @@ class MemoryStoreContract:
                 _semantic(f"mine-{i}", "coffee please", source=MemorySource.USER_ASSERTED)
             )
 
-        found = await store.search("coffee", limit=2, bands=[BeliefBand.ASSERTED])
+        found = (await store.search("coffee", limit=2, bands=[BeliefBand.ASSERTED])).records
 
         assert found, (
             "a band-scoped search returned none of the user's own assertions while "
@@ -1316,7 +1586,7 @@ class MemoryStoreContract:
                 _semantic(f"mine-{i}", "coffee please", source=MemorySource.USER_ASSERTED)
             )
 
-        found = await store.search("coffee", limit=10, bands=[BeliefBand.ASSERTED])
+        found = (await store.search("coffee", limit=10, bands=[BeliefBand.ASSERTED])).records
 
         assert {r.id for r in found} == {"mine-0", "mine-1", "mine-2"}
 
@@ -1331,7 +1601,7 @@ class MemoryStoreContract:
         """
         await store.add(_semantic("a", "coffee told", source=MemorySource.USER_ASSERTED))
 
-        found = await store.search("coffee", bands=[BeliefBand.ASSERTED])
+        found = (await store.search("coffee", bands=[BeliefBand.ASSERTED])).records
 
         assert [r.id for r in found] == ["a"]
         assert all(record.score is not None for record in found)
@@ -1348,14 +1618,14 @@ class MemoryStoreContract:
             _semantic("a", "coffee told", source=MemorySource.USER_ASSERTED, validity=Validity())
         )
 
-        found = await store.search("coffee", bands=[BeliefBand.ASSERTED])
+        found = (await store.search("coffee", bands=[BeliefBand.ASSERTED])).records
         assert [record.id for record in found] == ["a"]
         with pytest.raises(ValidationError):
             found[0].validity.valid_until = _LONG_AGO  # would retire the stored belief
         with pytest.raises(ValidationError):
             found[0].provenance.confidence = 0.1  # nested model is frozen too
 
-        again = await store.search("coffee", bands=[BeliefBand.ASSERTED])
+        again = (await store.search("coffee", bands=[BeliefBand.ASSERTED])).records
         assert [record.id for record in again] == ["a"]
         assert again[0].provenance.confidence == 1.0  # USER_ASSERTED is certain
 
@@ -1372,8 +1642,8 @@ class MemoryStoreContract:
         """
         await store.add(_semantic("a", "coffee told", source=MemorySource.USER_ASSERTED))
 
-        assert await store.search("   ", bands=[BeliefBand.ASSERTED]) == []
-        assert await store.search("coffee", limit=0, bands=[BeliefBand.ASSERTED]) == []
+        assert (await store.search("   ", bands=[BeliefBand.ASSERTED])).records == ()
+        assert (await store.search("coffee", limit=0, bands=[BeliefBand.ASSERTED])).records == ()
 
     # --- band-scoped enumeration: list_beliefs (ADR-0073 §2) ------------------
     # One clause per obligation in ADR-0073 §2, as §8 requires. Two of them are
@@ -1607,7 +1877,7 @@ class MemoryStoreContract:
         # returning stored copies unchanged would surface a figure from some other
         # query. Asserting None over default-constructed records tests nothing.
         await store.add(_semantic("scored", "coffee"))
-        ranked = [r for r in await store.search("coffee") if r.id == "scored"]
+        ranked = [r for r in (await store.search("coffee")).records if r.id == "scored"]
         assert ranked
         assert ranked[0].score is not None  # the store populated one
         await store.add(ranked[0])  # re-add the *scored* copy
@@ -2250,7 +2520,7 @@ class MemoryStoreContract:
             gate = None if arm is None else arm("search")
             async with held_at_its_first_await(gate, subject.search("gamma", kinds=kinds)) as call:
                 kinds.append(MemoryKind.PREFERENCE)  # grow the caller's own list mid-flight
-            found = {record.id for record in await call}
+            found = {record.id for record in (await call).records}
 
             assert found == {"obs-search-s"}, _LATE_FILTER
 
@@ -2283,7 +2553,7 @@ class MemoryStoreContract:
             gate = None if arm is None else arm("search")
             async with held_at_its_first_await(gate, subject.search("delta", bands=bands)) as call:
                 bands.append(BeliefBand.ATTESTED)  # grow the caller's own list mid-flight
-            found = {record.id for record in await call}
+            found = {record.id for record in (await call).records}
 
             assert found == {"obs-band-d"}, _LATE_FILTER
 

@@ -2297,7 +2297,7 @@ class MemoryWriterContract:
         # Read at the planted end: off the read path, still in `export`.
         read_at[0] = _SELF_CLOSE
         assert await store.get("existing") is None
-        assert all(record.id != "existing" for record in await store.search(_CONTENT))
+        assert all(record.id != "existing" for record in (await store.search(_CONTENT)).records)
         live = await store.get("corrected")
         assert live is not None
         assert live.validity.valid_from is None

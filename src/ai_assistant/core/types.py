@@ -1352,6 +1352,41 @@ MemoryRecord = Annotated[
 """A unit of long-term memory: one of the four typed kinds, tagged by ``kind``."""
 
 
+# --- memory: what one relevance read returned (ADR-0128 §2) ------------------
+
+
+class MemorySearchResult(BaseModel):
+    """What one :meth:`~ai_assistant.core.protocols.MemoryStore.search` returned.
+
+    The ranked records, and one boolean saying whether the store's own candidate
+    ceiling cut the read short (ADR-0128 §2). It exists because a bare list leaves
+    a caller unable to tell a sparse answer from a truncated one — the silence
+    issue #457 is about — and a return type that cannot be consumed without naming
+    the field makes forgetting the signal a type error rather than a wrong answer.
+
+    **One boolean and nothing else.** No exclusion count, no coverage estimate, no
+    escalation hint: each would be an upper-layer quantity on a surface whose whole
+    design invariant is that it stays mechanical, and each would be a number three
+    implementations would have to agree on. ``capped`` has one meaning and two
+    states, and :meth:`~ai_assistant.core.protocols.MemoryStore.search` enumerates
+    both.
+
+    Attributes:
+        records: The matching records, most relevant first, each carrying its
+            relevance ``score``. Detached snapshots, as with every ``MemoryStore``
+            read.
+        capped: Whether the store's own candidate ceiling bound the read. See
+            :meth:`~ai_assistant.core.protocols.MemoryStore.search` for what each
+            state certifies — the contract is stated there, once, because it is a
+            statement about a *read* rather than about this container.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    records: tuple[MemoryRecord, ...]
+    capped: bool = False
+
+
 # --- memory: one write inside an atomic batch (ADR-0046 §2) ------------------
 
 

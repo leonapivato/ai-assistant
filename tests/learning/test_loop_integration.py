@@ -145,7 +145,7 @@ async def test_feedback_becomes_a_reusable_memory() -> None:
     stored = await store.get("pref-1")
     assert isinstance(stored, PreferenceMemory)
     assert stored.preference == "prefers concise replies"
-    assert [r.id for r in await store.search("concise")] == ["pref-1"]
+    assert [r.id for r in (await store.search("concise")).records] == ["pref-1"]
 
 
 # --------------------------------------------------------------------------- #

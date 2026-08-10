@@ -67,7 +67,6 @@ from aged_store import (
     ClusteredEmbedder,
     Instants,
     Ranked,
-    boundary_is_ambiguous,
     candidate_budget,
     eligible_total,
     filtered_neighbours,
@@ -79,7 +78,7 @@ from aged_store import (
 
 from ai_assistant.core.types import MemoryKind
 from ai_assistant.memory import SqliteMemoryStore
-from ai_assistant.memory.sqlite_store import _RESULT_OVERFETCH, _VEC_KNN_MAX_K
+from ai_assistant.memory.sqlite_store import _VEC_KNN_MAX_K
 from ai_assistant.testing import FakeTraceSink
 
 if TYPE_CHECKING:
@@ -94,13 +93,6 @@ _INSTANTS = Instants(
     closed=datetime(2026, 4, 1, tzinfo=UTC),
     opened=datetime(2026, 2, 1, tzinfo=UTC),
 )
-
-#: Rows of slack allowed between the oracle's prediction and the store's answer.
-#: The oracle ranks the ``float32`` vectors the store holds, but accumulates the
-#: dot product in Python's ``float64`` where ``sqlite-vec`` does its own, so a
-#: record sitting *on* the candidate-budget boundary can fall either side of it.
-#: One row absorbs that; a second would start absorbing a real disagreement.
-_ORACLE_SLACK = 1
 
 #: How far apart the two similarity computations may land before the difference
 #: stops being arithmetic. Comfortably above ``float32`` resolution accumulated
@@ -193,7 +185,7 @@ async def _timed_search(
 ) -> tuple[int, float]:
     """Run one search, returning how many rows came back and how long it took, in ms."""
     started = time.perf_counter()
-    got = await store.search(query, limit=limit, kinds=kinds)
+    got = (await store.search(query, limit=limit, kinds=kinds)).records
     return len(got), (time.perf_counter() - started) * 1000.0
 
 
@@ -208,30 +200,33 @@ async def _measured_search(  # noqa: PLR0913 — the graded call needs all of it
 ) -> int:
     """Run one search, grade it against the oracle, and return how many rows it served.
 
-    Every measurement the instrument reports comes through here, because an
-    under-return is only evidence about the over-fetch budget once the alternative
-    explanations are excluded. Three things are checked, in the order that makes
-    each one mean something:
+    Every measurement the instrument reports comes through here, because a
+    complete answer is only evidence once the ways of faking one are excluded.
+    Three things are checked, in the order that makes each one mean something:
 
     * **Every returned row is eligible.** Checked first and by identity, because
       the distance test below cannot see this: the ineligible records are by
       construction the *nearer* ones, so a leaked ``PREFERENCE`` or window-closed
       row sits comfortably inside any cutoff drawn from the eligible ranking. A
       store that leaked one while dropping an eligible row would otherwise have
-      matched the predicted count and passed.
-    * **The rows are the right rows.** The eligible records inside the candidate
-      budget are a prefix of the eligible ranking, so a served row's distance can
-      never exceed the last served position's. A store that dropped one eligible
-      row and back-filled with a farther eligible one fails here.
-    * **The count is exact**, unless the oracle itself reports the candidate cut
-      falling between two records too close to order reliably. An unconditional
-      row of slack — which this used to allow everywhere — would equally absolve a
-      regression that lost an eligible row in the middle of the ranking, and the
-      instrument would publish that fabricated loss as a k-shortfall.
+      matched the predicted count and passed. Since ADR-0128 §1 this is also the
+      check that would catch a pre-filter that is not actually binding: the
+      ineligible rows are no longer *dropped* anywhere, they are never fetched.
+    * **The rows are the right rows.** The served rows are a prefix of the eligible
+      ranking, so a served row's distance can never exceed the last served
+      position's. A store that dropped one eligible row and back-filled with a
+      farther eligible one fails here. This is where a ``float32`` disagreement at
+      the cut lands — which eligible record fills the last slot — and the tolerance
+      absorbs it.
+    * **The count is exact, with no slack at all.** ``served_prediction`` is now a
+      ``min`` of three integers and depends on no ordering, so the oracle and the
+      store cannot legitimately disagree about it. The conditional row of slack the
+      old KNN-then-filter prediction needed is gone with the prediction: it would
+      only ever have absolved a regression that lost an eligible row.
     """
     predicted = served_prediction(ranked, limit=limit)
     count, _ = await _timed_search(store, query, limit=limit, kinds=kinds)
-    got = await store.search(query, limit=limit, kinds=kinds)
+    got = (await store.search(query, limit=limit, kinds=kinds)).records
 
     eligible = [entry for entry in ranked if entry.eligible]
     eligible_ids = {entry.record_id for entry in eligible}
@@ -248,16 +243,10 @@ async def _measured_search(  # noqa: PLR0913 — the graded call needs all of it
                 f"{where}: {record.id} is not among the {count} nearest eligible records"
             )
 
-    if boundary_is_ambiguous(ranked, limit=limit, tolerance=_DISTANCE_TOLERANCE):
-        assert abs(count - predicted) <= _ORACLE_SLACK, (
-            f"{where}: served {count}, oracle predicts {predicted}, and the candidate "
-            f"cut is ambiguous — but not by as much as this"
-        )
-    else:
-        assert count == predicted, (
-            f"{where}: served {count} where the oracle predicts {predicted}, with an "
-            f"unambiguous candidate cut, so this is a disagreement and not float32"
-        )
+    assert count == predicted, (
+        f"{where}: served {count} where the oracle predicts {predicted}. The prediction "
+        f"depends on no ordering, so this is a disagreement and not float32"
+    )
     return count
 
 
@@ -327,19 +316,27 @@ async def test_retrieval_latency_scales_with_the_live_record_count(
 
 @pytest.mark.parametrize("closed_fraction", _SWEEP_CLOSED_FRACTIONS)
 @pytest.mark.parametrize("crowding", _SWEEP_CROWDINGS)
-async def test_k_shortfall_against_filtered_neighbour_density(
+async def test_no_shortfall_at_any_filtered_neighbour_density(
     make_store: Callable[[str], SqliteMemoryStore],
     profile: Profile,
     pytestconfig: pytest.Config,
     crowding: int,
     closed_fraction: float,
 ) -> None:
-    """Measure how often a kind-filtered search under-returns, and at what density.
+    """The #457 regression at scale: crowding no longer costs a caller anything.
 
-    Every query is graded against the oracle, so a shortfall is attributed rather
-    than merely observed: the reported density is the count of ineligible records
-    ranked *nearer* than the last row the caller asked for, which is exactly what
-    the over-fetch budget was competing with.
+    This case used to *measure* the k-shortfall — how often a kind-filtered search
+    under-returned, and at what density — and it reported 0% below a
+    filtered-neighbour density of ``fetch_k - limit`` and 100% above it. ADR-0128
+    §1 removes the mechanism: an ineligible row never enters the candidate set, so
+    the density this sweep varies has nothing left to compete with. The sweep is
+    kept and inverted rather than deleted, because the density is exactly what
+    makes the claim worth anything — a store that under-served on a clean fixture
+    would prove nothing either way, and the reported medians are the evidence that
+    these queries ran under real pressure.
+
+    Every query is still graded against the oracle, so a served row is checked to
+    be eligible, to be one of the right rows, and to be counted exactly.
     """
     spec = AgedStoreSpec.sized(
         total=profile.sweep_total, crowding=crowding, closed_fraction=closed_fraction
@@ -366,41 +363,51 @@ async def test_k_shortfall_against_filtered_neighbour_density(
         if count < entitled:
             shortfalls += 1
 
-    rate = shortfalls / profile.queries
     report(
         pytestconfig,
         [
-            f"k-shortfall  crowding={crowding:>5} closed={closed_fraction:<5} "
+            f"no-shortfall  crowding={crowding:>5} closed={closed_fraction:<5} "
             f"live={spec.live:>6} total={spec.total:>6} "
             f"filtered-neighbours(median)={statistics.median(densities):>7.1f} "
-            f"budget={candidate_budget(_SWEEP_LIMIT)} "
-            f"shortfall={shortfalls}/{profile.queries} ({rate:.0%})"
+            f"max={max(densities):>7} budget={candidate_budget(_SWEEP_LIMIT)} "
+            f"shortfall={shortfalls}/{profile.queries}"
         ],
     )
 
-    # The measurement's own claim: a shortfall is a crowding effect, never a
-    # volume effect. It cannot happen while the ineligible records nearer than
-    # the last wanted row fit inside the candidate budget.
-    budget = candidate_budget(_SWEEP_LIMIT)
-    if shortfalls:
-        assert max(densities) >= budget - _SWEEP_LIMIT, (
-            "a shortfall was observed without enough filtered nearer neighbours to cause one"
+    assert shortfalls == 0, (
+        f"{shortfalls} of {profile.queries} queries under-returned while eligible records "
+        f"existed — an eligibility predicate is binding after the ranking cut (ADR-0128 §1)"
+    )
+    # The claim only means something if these queries were actually crowded: at the
+    # densities this sweep reaches, the pre-ADR-0128 store lost every eligible row
+    # once the density passed `fetch_k - limit`, which was 70 at this limit.
+    if closed_fraction >= 0.5:
+        assert max(densities) > candidate_budget(_SWEEP_LIMIT), (
+            "no query in this sweep saw more filtered nearer neighbours than the whole "
+            "candidate budget, so the fixture is not dense enough to prove anything"
         )
 
 
-async def test_k_shortfall_concentrates_where_correction_does(
+async def test_a_concentrated_topic_is_served_in_full_like_an_untouched_one(
     make_store: Callable[[str], SqliteMemoryStore],
     profile: Profile,
     pytestconfig: pytest.Config,
 ) -> None:
-    """Measure the case #457 actually describes: one well-corrected topic, the rest healthy.
+    """The case #457 actually describes, now with the two topics agreeing.
 
-    The sweep above retires a store *evenly*, and at an even 50% closure no query
-    under-returns. But ADR-0112 §8's claim is local, not global — "a well-corrected
-    topic accumulates precisely the filtered-out nearer neighbours that eat the
-    over-fetch headroom". This case holds the store-wide closed fraction at that
-    same harmless 50% and moves all of it into one topic. If the claim is right,
-    the store-wide number is the wrong number to tune on.
+    The sweep above retires a store *evenly*. ADR-0112 §8's claim is local: "a
+    well-corrected topic accumulates precisely the filtered-out nearer neighbours
+    that eat the over-fetch headroom", so the store-wide number was the wrong number
+    to tune on. This case held the store-wide closed fraction at a harmless 50% and
+    moved all of it into one topic, and it used to assert the contrast — the
+    corrected topic under-returning while the untouched one did not.
+
+    It now asserts the contrast is **gone**, which is the whole of what ADR-0128 §1
+    buys and the inversion #457 records: the failure grew with use and grew fastest
+    exactly where the user had been most engaged, so a well-corrected topic was the
+    topic whose retrieval failed first. Both topics now serve their entitlement, and
+    the corrected one's filtered-neighbour count is reported beside it as the
+    evidence that it is still the crowded one.
     """
     limit = _SWEEP_LIMIT
     kinds = [MemoryKind.SEMANTIC]
@@ -428,7 +435,7 @@ async def test_k_shortfall_concentrates_where_correction_does(
         pytestconfig,
         [
             "",
-            f"k-shortfall instrument — closure concentrated in one topic "
+            f"concentrated closure — one topic carries all of it "
             f"(store-wide closed {spec.closed_fraction:.0%}, "
             f"supersede {census['closed_supersede']} / absence {census['closed_absence']})",
             f"{'topic':>11} {'entitled':>9} {'served':>7} {'filtered-nbrs':>14}",
@@ -439,65 +446,88 @@ async def test_k_shortfall_concentrates_where_correction_does(
         ],
     )
 
-    corrected_entitled, corrected_served, _ = measured["corrected"]
+    corrected_entitled, corrected_served, corrected_density = measured["corrected"]
     untouched_entitled, untouched_served, _ = measured["untouched"]
-    assert corrected_served < corrected_entitled, (
-        "the corrected topic served its full request, so this store is not concentrated enough "
-        "to measure the effect"
+    assert corrected_density > candidate_budget(limit), (
+        "the corrected topic is not actually crowded, so this store cannot witness the effect"
     )
-    assert untouched_served == untouched_entitled, (
-        "the untouched topic under-returned too, so the contrast is not attributable to closure"
+    assert corrected_served == corrected_entitled, (
+        "the corrected topic under-returned: closure concentrated in one topic still costs "
+        "that topic its retrieval, which is the inversion #457 records (ADR-0128 §1)"
     )
+    assert untouched_served == untouched_entitled
 
 
-async def test_k_shortfall_arrives_earlier_once_the_knn_cap_clamps_the_over_fetch(
+async def test_the_knn_cap_is_the_only_ceiling_left_and_search_reports_it(
     make_store: Callable[[str], SqliteMemoryStore],
     pytestconfig: pytest.Config,
 ) -> None:
-    """Measure #411's arithmetic bound: past ``limit`` 512 the effective multiple shrinks.
+    """#411's arithmetic, and what replaced it: the ceiling is reported rather than silent.
 
-    One dense cluster, four fifths of it window-closed. At ``limit`` 512 the
-    over-fetch is the full ``8 x limit`` and the live minority still fills the
-    request; at ``limit`` 1024 the same fetch is clamped to ``_VEC_KNN_MAX_K``,
-    the effective multiple is 4, and the identical store under-serves. Same
-    population, same query, same filter — only the arithmetic differs.
+    This case used to measure the over-fetch clamp — at ``limit`` 512 the fetch was
+    the full ``8 x limit`` and the live minority filled the request, at 1024 the
+    same fetch was clamped and the identical store under-served. ADR-0128 §1 removes
+    the multiple along with the pass it padded for, so neither ``limit`` under-serves
+    now and the arithmetic #411 and #115 both record stops having a consequence.
 
-    The volumes here are fixed rather than scaled by the profile: the clamp bites
-    at an absolute candidate count, so a smaller store would not reach it and a
-    larger one would measure nothing further.
+    What is left is the ``k`` cap itself, and it is the whole of what ``capped``
+    reports (ADR-0128 §2). The three reads below are the ceiling's three states on a
+    store holding more eligible records than the cap:
+
+    * below it — a full page, ``capped`` false, and the store certifies nothing;
+    * exactly at it — still a full page, still false, and this is the case an
+      earlier draft of §2 made unsatisfiable by reading ``capped`` as "the store
+      examined everything";
+    * above it — short of what was asked for, and ``capped`` true, which is the
+      refusal to certify that #457 says nothing above the store could make.
+
+    The volumes are fixed rather than scaled by the profile: the cap bites at an
+    absolute candidate count, so a smaller store would not reach it and a larger one
+    would measure nothing further.
     """
-    boundary = _VEC_KNN_MAX_K // _RESULT_OVERFETCH
     spec = AgedStoreSpec(
-        live=boundary * 3, topics=1, closed_fraction=0.8, preference_share=0.0, seed=411
+        live=_VEC_KNN_MAX_K + 500, topics=1, closed_fraction=0.5, preference_share=0.0, seed=411
     )
     store = make_store("knn-cap")
     aged = await _aged(spec, store)
     query = aged.topic_query(0)
     ranked = await aged.rank(query, kinds=None)
+    eligible = eligible_total(ranked)
+    assert eligible > _VEC_KNN_MAX_K, "the fixture must hold more eligible records than the cap"
 
-    rows = ["", "k-shortfall instrument — the over-fetch clamp at limit = 512 (#411)"]
-    rows.append(f"{'limit':>7} {'budget':>8} {'multiple':>9} {'entitled':>9} {'served':>7}")
-    observed: dict[int, tuple[int, int]] = {}
-    for limit in (boundary, boundary * 2):
-        entitled = min(limit, eligible_total(ranked))
+    rows = ["", "the KNN cap — the only ceiling left, and the only thing `capped` reports"]
+    rows.append(f"{'limit':>7} {'budget':>8} {'eligible':>9} {'served':>7} {'capped':>7}")
+    observed: dict[int, tuple[int, bool]] = {}
+    for limit in (_VEC_KNN_MAX_K // 8, _VEC_KNN_MAX_K, _VEC_KNN_MAX_K + 1):
+        found = await store.search(query, limit=limit, kinds=None)
         count = await _measured_search(
             store, ranked, query=query, limit=limit, kinds=None, where=f"limit={limit}"
         )
-        budget = candidate_budget(limit)
-        rows.append(f"{limit:>7} {budget:>8} {budget / limit:>9.2f} {entitled:>9} {count:>7}")
-        observed[limit] = (entitled, count)
+        rows.append(
+            f"{limit:>7} {candidate_budget(limit):>8} {eligible:>9} {count:>7} {found.capped!s:>7}"
+        )
+        observed[limit] = (count, found.capped)
     report(pytestconfig, rows)
 
-    assert candidate_budget(boundary) == boundary * _RESULT_OVERFETCH
-    assert candidate_budget(boundary * 2) == _VEC_KNN_MAX_K
+    assert candidate_budget(_VEC_KNN_MAX_K // 8) == _VEC_KNN_MAX_K // 8  # no multiple to clamp
+    assert candidate_budget(_VEC_KNN_MAX_K + 1) == _VEC_KNN_MAX_K  # the clamp, and the ceiling
 
-    entitled_at_boundary, served_at_boundary = observed[boundary]
-    assert served_at_boundary == entitled_at_boundary, (
-        "the unclamped over-fetch should still have served this store in full"
+    below_served, below_capped = observed[_VEC_KNN_MAX_K // 8]
+    assert below_served == _VEC_KNN_MAX_K // 8, "a limit under the cap is served in full"
+    assert below_capped is False
+
+    at_served, at_capped = observed[_VEC_KNN_MAX_K]
+    assert at_served == _VEC_KNN_MAX_K, "a limit exactly at the cap is still a full page"
+    assert at_capped is False, (
+        "a full page reports `capped` false however much of the store went unexamined "
+        "(ADR-0128 §2's third clause)"
     )
-    entitled_above, served_above = observed[boundary * 2]
-    assert served_above < entitled_above, (
-        f"expected a shortfall past the clamp: served {served_above} of {entitled_above} entitled"
+
+    above_served, above_capped = observed[_VEC_KNN_MAX_K + 1]
+    assert above_served == _VEC_KNN_MAX_K, "the cap bounds the read one row short"
+    assert above_capped is True, (
+        "the ceiling bound this read short of `limit` and the store said nothing about it — "
+        "which is the silence #457 is the report of (ADR-0128 §2)"
     )
 
 
@@ -530,7 +560,7 @@ async def test_the_oracle_agrees_with_an_unfiltered_search(
         query = aged.topic_query(topic)
         ranked = await aged.rank(query, kinds=None)
         oracle_distance = {entry.record_id: entry.distance for entry in ranked}
-        got = await store.search(query, limit=limit, kinds=None)
+        got = (await store.search(query, limit=limit, kinds=None)).records
 
         assert len(got) == limit
         cutoff = ranked[limit - 1].distance
@@ -559,72 +589,18 @@ async def test_the_oracle_agrees_with_an_unfiltered_search(
 def test_the_instrument_reads_the_constants_it_is_measuring() -> None:
     """Guard the instrument's premise: the budget it predicts is the store's own.
 
-    ``candidate_budget`` is the store's ``fetch_k`` expression, not a copy of it,
-    so a lane that raises ``_RESULT_OVERFETCH`` under ADR-0112 §7's gate gets a
-    re-measurement rather than a red test with a stale 8 in it. This case fails
-    only if that wiring is broken.
+    ``candidate_budget`` is the store's ``fetch_k`` expression, not a copy of it, so
+    a lane that moves the ceiling (#411 part 2) gets a re-measurement rather than a
+    red test with a stale 4096 in it. This case fails only if that wiring is broken.
+
+    There is no over-fetch multiple to read any more — ADR-0128 §1 removed it with
+    the post-cut pass it padded for — so ``fetch_k`` is ``limit`` under the ceiling
+    and the ceiling above it, and the case pins both sides of that boundary.
     """
-    assert candidate_budget(1) == _RESULT_OVERFETCH
+    assert candidate_budget(1) == 1
+    assert candidate_budget(_VEC_KNN_MAX_K - 1) == _VEC_KNN_MAX_K - 1
     assert candidate_budget(_VEC_KNN_MAX_K) == _VEC_KNN_MAX_K
-    assert candidate_budget(_VEC_KNN_MAX_K // _RESULT_OVERFETCH) == _VEC_KNN_MAX_K
-
-
-def test_the_candidate_cut_is_ambiguous_only_when_a_swap_could_change_the_count() -> None:
-    """Pin the one predicate that decides whether a served count may be off by one.
-
-    It licenses the instrument's only tolerance, so every case it wrongly admits
-    is a hole a genuinely dropped row fits through. Proximity at the cut is
-    necessary and not sufficient: an exchange changes nothing when the two rows
-    agree on eligibility, and nothing when the prefix already holds ``limit``
-    eligible rows. Built by hand rather than sampled from a planted store, because
-    the interesting rankings are the ones a fixture will not produce on demand.
-    """
-    limit = 2
-    budget = candidate_budget(limit)
-
-    def ranking(eligibility: Sequence[bool], *, gap: float) -> tuple[Ranked, ...]:
-        """Rank one row per flag, stepping by 1.0 except across the cut."""
-        entries: list[Ranked] = []
-        distance = 0.0
-        for index, eligible in enumerate(eligibility):
-            if index:
-                distance += gap if index == budget else 1.0
-            entries.append(Ranked(record_id=f"r{index}", distance=distance, eligible=eligible))
-        return tuple(entries)
-
-    close, far = 1e-9, 1.0
-    # One eligible row inside the budget, so the prefix is short of `limit`.
-    starved = [False] * (budget + 2)
-    starved[0] = True
-    full = [True] * (budget + 2)
-
-    # Ineligible inside, eligible outside, prefix short of `limit`: exchanging
-    # them moves the served count, so the row of slack is genuinely owed.
-    differing = list(starved)
-    differing[budget - 1], differing[budget] = False, True
-    assert boundary_is_ambiguous(ranking(differing, gap=close), limit=limit, tolerance=1e-5)
-
-    # The same rows, well separated: no float32 disagreement is possible.
-    assert not boundary_is_ambiguous(ranking(differing, gap=far), limit=limit, tolerance=1e-5)
-
-    # Both sides ineligible, and both sides eligible: the budget holds the same
-    # number of servable rows either way, so no slack is owed.
-    for eligibility in (starved, full):
-        pair = list(eligibility)
-        pair[budget - 1] = pair[budget] = eligibility[budget - 1]
-        assert not boundary_is_ambiguous(ranking(pair, gap=close), limit=limit, tolerance=1e-5)
-
-    # Differing across the cut, but the prefix already holds `limit` eligible
-    # rows, so the count is capped and the exchange cannot move it.
-    capped = list(full)
-    capped[budget - 1], capped[budget] = False, True
-    assert not boundary_is_ambiguous(ranking(capped, gap=close), limit=limit, tolerance=1e-5)
-
-    # Nothing sits outside the budget, so there is no exchange to make.
-    assert not boundary_is_ambiguous(
-        ranking([True] * budget, gap=close), limit=limit, tolerance=1e-5
-    )
-    assert not boundary_is_ambiguous((), limit=limit, tolerance=1e-5)
+    assert candidate_budget(_VEC_KNN_MAX_K + 1) == _VEC_KNN_MAX_K
 
 
 def test_the_reported_percentile_is_the_percentile_and_not_the_maximum() -> None:

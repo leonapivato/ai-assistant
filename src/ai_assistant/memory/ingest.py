@@ -2001,14 +2001,20 @@ class MemoryIngestor:
             MemoryStoreError: If retrieval surfaced more conflicts than this
                 ingestor will resolve in one ingest.
         """
-        matches = await self._store.search(
+        # ``capped`` is unwrapped and not acted on. ADR-0128 §6 leaves that policy to
+        # its own lane, and the fact lands before the policy that reads it: this
+        # read now *knows* whether the ceiling bound it, where before "retrieval
+        # surfaced everything" and "retrieval ran out of candidates" were the same
+        # short answer. Refusing on it would be a new refusal on the write path and
+        # needs the ruling ADR-0079 §1's ceiling is stated under.
+        found = await self._store.search(
             record.content,
             limit=self._conflict_limit + 2,
             kinds=[MemoryKind(record.kind)],
         )
         conflicts = [
             match
-            for match in matches
+            for match in found.records
             if match.id != record.id and (match.score or 0.0) >= self._conflict_threshold
         ]
         if len(conflicts) > self._conflict_limit:

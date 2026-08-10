@@ -104,11 +104,13 @@ RESOLUTION_KINDS: tuple[MemoryKind, ...] = (
 #: is personalised from does not silently move what a correction is filed under.
 #:
 #: Only the best-ranked candidate decides the drawer, so this is not a budget being
-#: spent; it is padding. ``kinds`` keeps the post-cut placement ADR-0045 §6 and
-#: ADR-0007 ratified for it (ADR-0113 §2 moves the *band* alone), so a store may
-#: rank a page and filter it afterwards, and a page of one is a page a single
-#: topically similar episode can empty. ``MemoryStore.search``'s own default is the
-#: same number, which is the width this corpus already treats as "a page".
+#: spent; it is padding — against the *ranking cut*, which is the only thing left
+#: that can hide a live target from this read. ADR-0128 §1 moved every eligibility
+#: predicate ahead of that cut, ``kinds`` among them, so a page can no longer be
+#: emptied by records the filter would have dropped afterwards; what a page of one
+#: still cannot survive is a single higher-ranked record that *is* eligible.
+#: ``MemoryStore.search``'s own default is the same number, which is the width this
+#: corpus already treats as "a page".
 _DEFAULT_RESOLUTION_LIMIT = 10
 
 
@@ -500,10 +502,14 @@ class LearningLoop:
         Raises:
             MemoryStoreError: As the store raises.
         """
-        candidates = await self._memory.search(
+        # ``capped`` is unwrapped and not acted on (ADR-0128 §6). This read only
+        # wants the nearest neighbour's kind, so a prefix answers it exactly as a
+        # complete set would; whether ``LoopEngine`` should set ``memory_degraded``
+        # from the signal is a policy this ADR deliberately does not decide.
+        found = await self._memory.search(
             content, limit=self._resolution_limit, kinds=RESOLUTION_KINDS
         )
-        best = next(iter(candidates), None)
+        best = next(iter(found.records), None)
         return MemoryKind.SEMANTIC if best is None else MemoryKind(best.kind)
 
     def _goal_from(self, utterance: str) -> Goal:

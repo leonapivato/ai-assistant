@@ -17,6 +17,7 @@ from ai_assistant.core.types import (
     MemoryDecision,
     MemoryDecisionKind,
     MemoryRecord,
+    MemorySearchResult,
     MemorySource,
     MemoryUpdateProposal,
     PreferenceMemory,
@@ -726,13 +727,17 @@ async def test_a_superseded_targets_hiding_is_read_time_relative(
         # Read BEHIND the close (store clock 2026-01-01 < valid_until 2026-06-01): the
         # retired target is transiently still visible — the read-time-relative property.
         assert await store.get("stale") is not None
-        assert any(r.id == "stale" for r in await store.search("user prefers morning meetings"))
+        assert any(
+            r.id == "stale" for r in (await store.search("user prefers morning meetings")).records
+        )
 
         # Advance the store's read clock to the close instant: now hidden from
         # get/search (the half-open window makes `valid_until` itself exclusive).
         read_at[0] = datetime(2026, 6, 1, tzinfo=UTC)
         assert await store.get("stale") is None
-        assert all(r.id != "stale" for r in await store.search("user prefers morning meetings"))
+        assert all(
+            r.id != "stale" for r in (await store.search("user prefers morning meetings")).records
+        )
 
         # `export` keeps the retired target regardless of its validity window (at
         # either read clock); both records here are non-expired, so both appear.
@@ -1656,7 +1661,7 @@ class _PauseOnFirstSearch(InMemoryMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-    ) -> list[MemoryRecord]:
+    ) -> MemorySearchResult:
         """Delegate, then hold the first search's result until ``resume``."""
         matches = await super().search(query, limit=limit, kinds=kinds, bands=bands)
         if self._pending:

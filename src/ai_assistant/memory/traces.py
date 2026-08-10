@@ -105,44 +105,69 @@ SEAM_INGEST_READING: Final = "memory_ingest_reading"
 #: fault-path trace too — §8 names it there by name.
 LIMIT: Final = "limit"
 
-#: The ceiling the KNN was actually asked for, after the over-fetch multiplier and
-#: sqlite-vec's ``k`` clamp. Not derivable from :data:`LIMIT` once the clamp binds,
-#: and #799's shortfall threshold is stated as a density crossing ``fetch_k`` less
-#: ``limit``.
+#: The ceiling the KNN was actually asked for, after sqlite-vec's ``k`` clamp. Not
+#: derivable from :data:`LIMIT` once the clamp binds, and the clamp is now the only
+#: thing between the two: ADR-0128 §1 removed the over-fetch multiplier along with
+#: the post-cut pass it padded for, so ``fetch_k`` below ``limit`` says the store's
+#: candidate ceiling bound the read — the same fact ``capped`` reports to the
+#: caller, from the offline side.
 FETCH_K: Final = "fetch_k"
 
-#: The pre-filter candidate count the store fetched (§8).
+#: The candidate count the store fetched (§8). Since ADR-0128 §1 every one of them
+#: is *eligible*: the predicates bind before the cut, so this counts rows the caller
+#: could have been served rather than rows the store was about to sift.
 CANDIDATES: Final = "candidates"
 
 #: How many records the read returned (§8).
 RETURNED: Final = "returned"
 
+# --- the four exclusion counts ------------------------------------------------
+# **All four are structural zeros** since ADR-0128 §1 (§3's first clause). Every
+# read-time eligibility predicate binds before the ranking cut, so no candidate is
+# ever dropped for any of them and the rows that would have been counted are never
+# fetched. Each store writes them as **literals** rather than as counters that can
+# only stay at zero, so nobody later "fixes" a dead increment back into a post-cut
+# eligibility pass and reintroduces the failure ADR-0113 §2 and #457 describe.
+#
+# **They are kept rather than dropped, and that is a decision** (ADR-0128 §3, on
+# #829's window). ADR-0119 §8 requires a count per read-time predicate; ADR-0120
+# §7's population is *defined* as the traces carrying these keys. Dropping three of
+# them would put every trace before the pre-filter and every trace after it in
+# different populations — making the before/after unreadable at exactly the moment
+# it matters — and would make "nothing was dropped" and "no candidate set existed"
+# the same record. Held at zero, the same population spans the change and the
+# counters going to zero on a date **is** the observation.
+#
+# **The zero is not the placeholder ADR-0119 §3 forbids.** §3's rule is about a
+# quantity the event did not reach; these four decompose the candidate set the same
+# trace reports, so they stand or fall together — which is why all four are absent
+# *together* on the fault and short-circuit paths, where no candidate set exists.
+
 #: Candidates dropped because their ``kind`` was not among those asked for (§8).
+#: Structurally zero — see above.
 EXCLUDED_KIND: Final = "excluded_kind"
 
 #: Candidates dropped by ADR-0007's ``expires_at`` — §8's "retention" predicate.
+#: Structurally zero — see above.
 EXCLUDED_RETENTION: Final = "excluded_retention"
 
 #: Candidates dropped by ADR-0045 §6's validity window, either end (§8). The one
-#: #824's trigger watches, which is why it is counted apart from the other two.
+#: #824's trigger watched, which is why it is counted apart from the other two —
+#: and the reason that watch is retired rather than redefined (ADR-0128 §3): its
+#: window share had this count as its numerator, so after §1 it is undefined over
+#: an empty set rather than merely uninformative. Structurally zero — see above.
 EXCLUDED_WINDOW: Final = "excluded_window"
 
-#: Candidates dropped by the belief-band predicate (§8), and **the one of the four
-#: that is structurally zero in ``SqliteMemoryStore``**. ADR-0113 §2 binds the band
-#: *before* the ranking cut, so an out-of-band record never becomes a candidate and
-#: the post-KNN pass has none to drop. The key is still emitted whenever that pass
-#: runs, for the reason :data:`EXCLUDED_KIND` is emitted as zero on an unfiltered
-#: read: the four counts decompose **the candidate set the same trace reports**, and
-#: a key that appeared only when it was non-zero would make "nothing was dropped"
-#: and "nothing was looked at" the same record. §3's prohibition on a zero
-#: placeholder is about a quantity the event **did not reach**, which is why all
-#: four are absent together on the fault and short-circuit paths, where no pass ran
-#: and no candidate set exists.
+#: Candidates dropped by the belief-band predicate (§8), and the count that was
+#: structurally zero *first* — ADR-0113 §2 bound the band before the ranking cut
+#: three ADRs before ADR-0128 §1 joined the other three to it. Structurally zero —
+#: see above.
 #:
 #: **What it does not mean.** It is not a count of records the band kept out of the
 #: *store's* answer — that population is filtered inside the KNN, is unbounded, and
 #: could only be counted by a second vector search on the interactive read path.
-#: :data:`BANDS` is what says a restriction was in force at all.
+#: :data:`BANDS` is what says a restriction was in force at all. The same now holds
+#: of the other three.
 EXCLUDED_BAND: Final = "excluded_band"
 
 #: How many bands the caller restricted the read to, absent when it restricted

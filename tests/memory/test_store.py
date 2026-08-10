@@ -63,7 +63,7 @@ async def test_add_returns_id_and_persists() -> None:
     returned = await store.add(_semantic("1", "the user likes espresso"))
 
     assert returned == "1"
-    results = await store.search("espresso")
+    results = (await store.search("espresso")).records
     assert [r.id for r in results] == ["1"]
 
 
@@ -83,8 +83,8 @@ async def test_add_overwrites_same_id() -> None:
     await store.add(_semantic("1", "old content about tea"))
     await store.add(_semantic("1", "new content about coffee"))
 
-    assert await store.search("tea") == []
-    assert [r.id for r in await store.search("coffee")] == ["1"]
+    assert (await store.search("tea")).records == ()
+    assert [r.id for r in (await store.search("coffee")).records] == ["1"]
 
 
 async def test_search_orders_by_relevance_and_scores() -> None:
@@ -93,7 +93,7 @@ async def test_search_orders_by_relevance_and_scores() -> None:
     await store.add(_semantic("one", "coffee only"))
     await store.add(_semantic("none", "unrelated note"))
 
-    results = await store.search("coffee tea")
+    results = (await store.search("coffee tea")).records
 
     assert [r.id for r in results] == ["both", "one"]
     assert results[0].score == 1.0  # both query terms matched
@@ -105,7 +105,7 @@ async def test_search_filters_by_kind() -> None:
     await store.add(_semantic("s", "shared coffee keyword"))
     await store.add(_preference("p", "shared coffee keyword"))
 
-    results = await store.search("coffee", kinds=[MemoryKind.PREFERENCE])
+    results = (await store.search("coffee", kinds=[MemoryKind.PREFERENCE])).records
 
     assert [r.id for r in results] == ["p"]
     assert results[0].kind == "preference"
@@ -116,7 +116,7 @@ async def test_search_respects_limit() -> None:
     for i in range(5):
         await store.add(_semantic(str(i), "shared keyword here"))
 
-    results = await store.search("keyword", limit=3)
+    results = (await store.search("keyword", limit=3)).records
 
     assert len(results) == 3
 
@@ -125,22 +125,22 @@ async def test_non_positive_limit_matches_nothing() -> None:
     store = InMemoryMemoryStore()
     await store.add(_semantic("1", "shared keyword here"))
 
-    assert await store.search("keyword", limit=0) == []
-    assert await store.search("keyword", limit=-2) == []
+    assert (await store.search("keyword", limit=0)).records == ()
+    assert (await store.search("keyword", limit=-2)).records == ()
 
 
 async def test_empty_query_matches_nothing() -> None:
     store = InMemoryMemoryStore()
     await store.add(_semantic("1", "some content"))
 
-    assert await store.search("   ") == []
+    assert (await store.search("   ")).records == ()
 
 
 async def test_no_match_returns_empty() -> None:
     store = InMemoryMemoryStore()
     await store.add(_semantic("1", "content about cats"))
 
-    assert await store.search("spacecraft") == []
+    assert (await store.search("spacecraft")).records == ()
 
 
 async def test_delete_removes_record_and_reports_existence() -> None:
@@ -177,7 +177,7 @@ async def test_expired_records_are_hidden_from_get_and_search() -> None:
     await store.add(_semantic("1", "shared keyword", expires_at=datetime(2026, 1, 2, tzinfo=UTC)))
 
     assert await store.get("1") is None
-    assert await store.search("keyword") == []
+    assert (await store.search("keyword")).records == ()
 
 
 async def test_expiry_boundary_is_exclusive_at_now() -> None:

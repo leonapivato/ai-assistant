@@ -68,7 +68,7 @@ from ai_assistant.core.types import (
     SemanticMemory,
     Validity,
 )
-from ai_assistant.memory.sqlite_store import _RESULT_OVERFETCH, _VEC_KNN_MAX_K
+from ai_assistant.memory.sqlite_store import _VEC_KNN_MAX_K
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -648,10 +648,13 @@ def eligible_total(ranked: Sequence[Ranked]) -> int:
 def filtered_neighbours(ranked: Sequence[Ranked], *, limit: int) -> int:
     """Ineligible records ranked nearer than the ``limit``-th eligible one.
 
-    The independent variable k-shortfall is a function of. ``search`` drops these
-    *after* the KNN has already spent a candidate on each, so this count is what
-    the over-fetch budget competes with. Where fewer than ``limit`` eligible
-    records exist at all, every ineligible record is counted.
+    The independent variable the k-shortfall **used to be** a function of, kept
+    because it is what says a measurement was taken under pressure rather than on a
+    clean store. ``search`` once dropped these *after* the KNN had already spent a
+    candidate on each, so this count was what the over-fetch budget competed with;
+    since ADR-0128 §1 the KNN never sees them, and the instrument's job is to
+    report how high this went while service stayed complete. Where fewer than
+    ``limit`` eligible records exist at all, every ineligible record is counted.
     """
     seen = 0
     ineligible = 0
@@ -666,53 +669,37 @@ def filtered_neighbours(ranked: Sequence[Ranked], *, limit: int) -> int:
 
 
 def candidate_budget(limit: int) -> int:
-    """The ``fetch_k`` ``SqliteMemoryStore._search_sync`` spends for ``limit``."""
-    return min(limit * _RESULT_OVERFETCH, _VEC_KNN_MAX_K)
+    """The ``fetch_k`` ``SqliteMemoryStore._search_sync`` spends for ``limit``.
 
-
-def boundary_is_ambiguous(ranked: Sequence[Ranked], *, limit: int, tolerance: float) -> bool:
-    """Whether the candidate cut falls between two records too close to order reliably.
-
-    The oracle and ``sqlite-vec`` accumulate the same ``float32`` components with
-    different arithmetic, so where the records either side of ``fetch_k`` are
-    within ``tolerance`` of each other the two rankings may disagree about which
-    one the budget reached — and the served count may legitimately differ by one.
-
-    **Everywhere else there is no such licence**, which is the point of asking:
-    an unconditional row of slack would also absolve a store that dropped an
-    eligible row from the middle of the ranking, and the instrument would then
-    report that fabricated loss as a k-shortfall.
-
-    So proximity is necessary and not sufficient, and the question asked is the
-    one that matters: *would exchanging these two rows change the served count?*
-    It would not when they agree on eligibility — the budget then holds the same
-    number of servable records either way — and it would not when the prefix
-    already holds ``limit`` of them, because the count is capped there. Both cases
-    used to be granted a row of slack that no float32 disagreement could have
-    spent, and each of them is a hole a dropped row elsewhere would have fitted
-    through. The count is recomputed under the exchange rather than reasoned
-    about, so the answer stays right if ``served_prediction`` ever changes shape.
+    Since ADR-0128 §1 that is ``limit`` itself, clamped to sqlite-vec's ``k``
+    ceiling: every candidate the KNN returns is eligible, so there is nothing an
+    over-fetch could buy. Read from the store module rather than restated, so a
+    lane that moves the ceiling (#411 part 2) re-measures through this instrument
+    instead of being failed by it.
     """
-    budget = candidate_budget(limit)
-    if budget >= len(ranked) or budget < 1:
-        return False
-    inside, outside = ranked[budget - 1], ranked[budget]
-    if abs(outside.distance - inside.distance) > tolerance:
-        return False
-    served = sum(1 for entry in ranked[:budget] if entry.eligible)
-    exchanged = served - int(inside.eligible) + int(outside.eligible)
-    return min(limit, served) != min(limit, exchanged)
+    return min(limit, _VEC_KNN_MAX_K)
 
 
 def served_prediction(ranked: Sequence[Ranked], *, limit: int) -> int:
-    """How many rows the store's KNN-then-filter arithmetic can serve.
+    """How many rows the store can serve.
 
-    Takes the candidate budget off the top of the ranking exactly as the KNN does
-    and counts the eligible survivors. A k-shortfall is this coming out below
-    ``min(limit, eligible_total(ranked))``.
+    Since ADR-0128 §1 this is the caller's entitlement and nothing else: every
+    candidate the KNN returns is eligible, so the store serves the ``limit``
+    nearest eligible records, bounded only by how many exist and by its own
+    candidate ceiling. A k-shortfall would be this coming out below
+    ``min(limit, eligible_total(ranked))`` — which after §1 can only happen at the
+    ceiling, where ``search`` also reports ``capped``.
+
+    **It no longer depends on the ranking's arithmetic**, which is why
+    ``boundary_is_ambiguous`` is gone with it: the old prediction counted eligible
+    survivors inside a candidate prefix, so two records either side of the budget
+    could swap under ``float32`` and change the count. The count here is a
+    ``min`` of three integers, so the oracle and the store cannot disagree about it
+    at all, and a row of slack would only have absolved a real regression. Which
+    *records* fill the page is still float-sensitive at the cut, and
+    ``_measured_search`` grades that against the eligible ranking's distances.
     """
-    budget = candidate_budget(limit)
-    return min(limit, sum(1 for entry in ranked[:budget] if entry.eligible))
+    return min(limit, eligible_total(ranked), _VEC_KNN_MAX_K)
 
 
 def _live_drafts(spec: AgedStoreSpec, rng: Random, instants: Instants) -> list[Draft]:

@@ -134,7 +134,7 @@ async def test_a_future_entry_is_retrievable_the_moment_it_is_ingested(
     held = await _held(store)
     assert len(held) == 1
     assert held[0].validity.live_at(NOW), "live three hours before the meeting starts"
-    assert await store.search("design review", limit=5), "and reachable by search"
+    assert (await store.search("design review", limit=5)).records, "and reachable by search"
 
 
 async def test_repeated_identical_reads_fold_rather_than_minting_duplicates(
