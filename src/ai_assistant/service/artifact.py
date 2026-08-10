@@ -39,6 +39,7 @@ the one machine the operator is depending on.
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import posixpath
 import sqlite3
@@ -234,7 +235,7 @@ def write_artifact(
         info.size = len(encoded)
         info.mode = _FILE_MODE
         info.mtime = int(manifest.taken_at.timestamp())
-        archive.addfile(info, _BytesReader(encoded))
+        archive.addfile(info, io.BytesIO(encoded))
         for entry in manifest.files:
             source = data_dir / entry.path
             member = tarfile.TarInfo(PAYLOAD_PREFIX + entry.path)
@@ -242,22 +243,6 @@ def write_artifact(
             member.mode = _FILE_MODE
             with source.open("rb") as handle:
                 archive.addfile(member, handle)
-
-
-class _BytesReader:
-    """The minimal file-like ``tarfile.addfile`` needs for an in-memory member."""
-
-    def __init__(self, data: bytes) -> None:
-        """Hold the bytes and a cursor."""
-        self._data = data
-        self._offset = 0
-
-    def read(self, size: int = -1, /) -> bytes:
-        """Return the next ``size`` bytes, or the rest when ``size`` is negative."""
-        end = len(self._data) if size < 0 else min(len(self._data), self._offset + size)
-        block = self._data[self._offset : end]
-        self._offset = end
-        return block
 
 
 def materialise(artifact: Path, *, passphrase: str, staging: Path) -> Manifest:
