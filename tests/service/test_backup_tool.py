@@ -878,3 +878,35 @@ def test_a_refused_backup_leaks_no_descriptor(
         assert _run(out_dir / "a.age", keyphrase_file) == EXIT_DEPLOYMENT
 
     assert len(list(open_descriptors.iterdir())) == before
+
+
+def test_a_passphrase_file_reads_only_its_first_line(
+    settings: Settings, out_dir: Path, tmp_path: Path
+) -> None:
+    """The flag says first line, so what follows it cannot refuse the backup.
+
+    Decoding the whole file first made a stray byte after the passphrase — a note
+    an operator appended, a truncated append — able to stop a backup, and on the
+    restore side to stop a recovery.
+    """
+    noted = tmp_path / "phrase-with-a-note"
+    noted.write_bytes(_KEYPHRASE.encode() + b"\n\xff\xfe not text at all\n")
+
+    assert backup.main([str(out_dir / "a.age"), "--passphrase-file", str(noted)]) == EXIT_OK
+
+    staging = out_dir.parent / "check"
+    staging.mkdir(mode=0o700)
+    assert set(_contents(out_dir / "a.age", staging)) == {"memory.db", "notes.txt"}
+
+
+def test_a_passphrase_file_with_no_line_break_at_all_is_refused(
+    settings: Settings, out_dir: Path, keyphrase_file: Path, tmp_path: Path
+) -> None:
+    """Reading "the first line" of a file that has none must not read the file."""
+    endless = tmp_path / "endless"
+    endless.write_bytes(b"x" * (64 * 1024))
+
+    assert backup.main([str(out_dir / "a.age"), "--passphrase-file", str(endless)]) == (
+        EXIT_DEPLOYMENT
+    )
+    assert _leftovers(out_dir) == []

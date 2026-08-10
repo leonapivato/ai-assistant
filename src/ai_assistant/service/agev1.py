@@ -37,6 +37,7 @@ altered directory", made concrete.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import hmac
 import io
@@ -207,6 +208,28 @@ def _scrypt_key(passphrase: str, salt: bytes, work_factor: int) -> bytes:
         The 32-byte key that wraps the file key.
     """
     n = 1 << work_factor
+    try:
+        return _derive(passphrase, salt, n)
+    except ValueError as exc:
+        # `scrypt` signals a failed allocation as a `ValueError`, and every
+        # *parameter* it could otherwise object to is validated before the call —
+        # so what reaches here is the machine, not the artifact. Re-raised as an
+        # `OSError` carrying `ENOMEM` because that is what makes it *retryable*:
+        # `classify` reads it as "come back", which is the honest answer when a
+        # legitimate work factor of 20 wants a gigabyte the process was not given.
+        # A `ValueError` reaches neither entry point's `except` and would be a
+        # traceback out of a recovery command.
+        needed = scrypt_maxmem(n) // (1024 * 1024)
+        msg = (
+            f"the artifact's key could not be derived: work factor {work_factor} needs about "
+            f"{needed} MiB and the allocation failed ({exc}). Run this where that much memory "
+            f"is available"
+        )
+        raise OSError(errno.ENOMEM, msg) from exc
+
+
+def _derive(passphrase: str, salt: bytes, n: int) -> bytes:
+    """The bare ``scrypt`` call, split out so its failure has one place to be caught."""
     return hashlib.scrypt(
         passphrase.encode("utf-8"),
         salt=_SCRYPT_LABEL + salt,

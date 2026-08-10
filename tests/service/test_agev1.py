@@ -24,6 +24,7 @@ artifact for no additional coverage.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import io
 import string
@@ -31,6 +32,7 @@ import string
 import pyrage
 import pytest
 
+from ai_assistant.service import agev1
 from ai_assistant.service.agev1 import (
     CHUNK_BYTES,
     DEFAULT_WORK_FACTOR,
@@ -301,3 +303,30 @@ def test_a_legitimate_header_is_nowhere_near_the_bounds() -> None:
     lines = header.split(b"\n")
     assert max(len(line) for line in lines) < 128
     assert len(lines) < 8
+
+
+def test_a_failed_key_derivation_is_retryable_and_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A work factor of 20 is legitimate and wants a gigabyte, which a machine may refuse.
+
+    ``scrypt`` signals a failed allocation as a ``ValueError``, which reaches
+    neither entry point's ``except`` — so a recovery command would emit a
+    traceback. It is re-raised as an ``OSError`` carrying ``ENOMEM``, which is what
+    makes the exit-code classifier read it as "come back": unlike a refusal, a run
+    on a machine with the memory really does succeed.
+
+    Simulated rather than provoked, because the only way to provoke it in-process
+    is an address-space limit that breaks the test runner with it.
+    """
+
+    def out_of_memory(*_args: object, **_kwargs: object) -> bytes:
+        msg = "memory allocation failed"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(agev1, "_derive", out_of_memory)
+
+    with pytest.raises(OSError, match="allocation failed") as raised:
+        _encrypt(b"the accumulated model")
+
+    assert raised.value.errno == errno.ENOMEM
