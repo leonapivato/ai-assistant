@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import traceback
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
@@ -59,7 +60,14 @@ from ai_assistant.core.types import (
 from ai_assistant.testing import Disclosure, SecretMethod, disclosure_of
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator, Mapping
+    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+
+#: How long a derivation must be, once stripped, for its absence from a rendering
+#: to mean anything. Below this a "derivation" is whitespace and an ellipsis —
+#: what the slicing modes produce over a blank value — which ordinary source text
+#: and ordinary messages contain, so asserting its absence would fail every
+#: implementation while proving nothing about any of them.
+MINIMUM_DISTINCTIVE_LENGTH: Final = 4
 
 #: The scope every subject below is bound to unless a case is about another one.
 BOUND_SCOPE: Final = SecretScope.PROVIDER
@@ -176,9 +184,14 @@ def checkable_disclosures(plaintext: str) -> Mapping[Disclosure, str]:
     Two are dropped, each for a stated reason rather than by convenience. A
     derivation of an **unencodable** plaintext has no byte form at all, so a
     digest and a length are not merely absent from a message but uncomputable.
-    And a derivation that is **entirely whitespace** is not a disclosure: a
-    conforming message legitimately contains spaces, so asserting its absence
-    would fail every implementation while proving nothing about any of them.
+    And a derivation shorter than :data:`MINIMUM_DISTINCTIVE_LENGTH` once
+    stripped is not a *disclosure*: the slicing derivations of a blank value are
+    whitespace and an ellipsis, which ordinary source text and ordinary messages
+    contain, so asserting their absence would fail every implementation while
+    proving nothing about any of them. The derivations that stay distinctive for a
+    short value — its digest and its length — are unaffected, and
+    ``test_fake_secrets.py`` pins that nothing at all is dropped over the plaintext
+    the cases actually store.
 
     Args:
         plaintext: The value a refusal or a backend error was about.
@@ -192,9 +205,67 @@ def checkable_disclosures(plaintext: str) -> Mapping[Disclosure, str]:
             text = disclosure_of(disclosure, plaintext)
         except UnicodeEncodeError:
             continue
-        if text.strip():
+        if len(text.strip()) >= MINIMUM_DISTINCTIVE_LENGTH:
             checkable[disclosure] = text
     return checkable
+
+
+def disclosing_renderings(error: BaseException) -> tuple[str, ...]:
+    """Everything ``error`` can put in front of a reader (ADR-0125 §6).
+
+    **Wider than ADR-0125 §11's three renderings, deliberately, because §6 is
+    wider.** §11 requires the surfaced error's message, its arguments and its
+    ``repr`` to disclose nothing, and those three are the floor rather than the
+    prohibition: §6 binds "**no exception raised by this seam**", and the obvious
+    conforming-looking adapter defeats all three at once with
+
+        raise SecretStoreError("the keyring read failed") from exc
+
+    where ``exc`` is the backend's own error naming the credential. Message, args
+    and ``repr`` are all clean; the traceback anyone reads — in a log, in a crash
+    report, in a terminal — carries the secret. So the chain is walked and the
+    formatted traceback is included, and a conforming implementation may still
+    chain, as long as what it chains discloses nothing.
+
+    ``traceback.format_exception`` already renders the whole chain, which is
+    exactly what a reader sees. The explicit walk beside it adds each link's own
+    ``str``, ``repr`` and arguments, because an argument may be an object whose
+    rendering inside a traceback differs from its own, and it is cycle-guarded
+    because ``__context__`` can close a loop.
+
+    Args:
+        error: The exception the seam surfaced.
+
+    Returns:
+        Every rendering to assert against.
+    """
+    renderings: list[str] = list(traceback.format_exception(error))
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        renderings.extend((str(current), repr(current), *(str(a) for a in current.args)))
+        pending.extend(
+            link for link in (current.__cause__, current.__context__) if link is not None
+        )
+    return tuple(renderings)
+
+
+def log_renderings(records: Sequence[logging.LogRecord]) -> tuple[str, ...]:
+    """Every log line ``records`` would actually emit (ADR-0125 §6).
+
+    **Formatted rather than ``getMessage()``**, and that is the whole point.
+    ``logger.exception("keyring read failed")`` inside a handler produces a record
+    whose message is four harmless words and whose ``exc_info`` carries the backend
+    exception naming the credential; every formatter in ordinary use emits the
+    traceback with it. A check reading only ``getMessage()`` passes an
+    implementation that writes the secret into its log on every failure.
+    """
+    formatter = logging.Formatter()
+    return tuple(formatter.format(record) for record in records)
 
 
 class SecretsContract:
@@ -442,6 +513,8 @@ class SecretsContract:
                     await call()
                 assert isinstance(method, SecretMethod)
 
+        await self.assert_witness_intact(secrets)
+
     @pytest.mark.parametrize("differing", list(Isolation), ids=str)
     async def test_two_subjects_over_one_backing_share_no_entry(self, differing: Isolation) -> None:
         """Under one key, neither subject's entry reaches the other (§2, §11).
@@ -537,14 +610,7 @@ class SecretsContract:
             await calls[method]()
 
         assert_discloses_nothing(raised.value, PLAINTEXT, context=(method, disclosure))
-        leaked = [
-            record.getMessage()
-            for record in caplog.records
-            if any(
-                text in record.getMessage() for text in checkable_disclosures(PLAINTEXT).values()
-            )
-        ]
-        assert leaked == [], f"a log line disclosed the value: {method}, {disclosure}"
+        assert_no_log_discloses(caplog.records, PLAINTEXT, context=(method, disclosure))
 
 
 class SecretStoreContract(SecretsContract):
@@ -641,6 +707,35 @@ class SecretStoreContract(SecretsContract):
 
     # --- the write path's own argument refusals (ADR-0125 §3, §4, §7) --------
 
+    async def assert_set_refuses(self, store: SecretStore, value: SecretValue) -> None:
+        """Assert ``set`` refuses ``value`` against an unset name **and an occupied one**.
+
+        Both, because "stores nothing" has two halves and the weaker one is the
+        easy assertion to stop at. Against an unset name a refusal must create no
+        entry; against a name that already holds a value it must not overwrite or
+        remove what is there — and an implementation that wrote first and validated
+        afterwards passes the first half while failing the second, having destroyed
+        a credential on its way to reporting a refusal.
+
+        The refusal itself must also disclose nothing, which ADR-0125 §11 binds to
+        *every* way this seam raises rather than to backend failures alone: "secret
+        length is 1025" is what a size check naturally reports, and it hands over a
+        derivation from the seam's own code.
+
+        The caller asserts the surviving state afterwards, because the doubled
+        variant runs this inside the unavailable context and can only read the
+        subject back once it has left.
+        """
+        rejected = value.get_secret_value()
+
+        with pytest.raises(ValueError) as on_unset:  # noqa: PT011  # the type is the assertion
+            await store.set(secret_name(SECOND_KEY), value)
+        assert_discloses_nothing(on_unset.value, rejected, context="refused on an unset name")
+
+        with pytest.raises(ValueError) as on_occupied:  # noqa: PT011  # the type is the assertion
+            await store.set(WITNESS, value)
+        assert_discloses_nothing(on_occupied.value, rejected, context="refused on an occupied name")
+
     @pytest.mark.parametrize("value", REFUSED_VALUES)
     async def test_set_refuses_a_value_its_type_would_not_admit(
         self, store: SecretStore, value: SecretValue
@@ -669,13 +764,12 @@ class SecretStoreContract(SecretsContract):
         "secret length is 1025" is what a size check naturally reports, and it
         hands over a derivation from the seam's own code.
         """
-        rejected = value.get_secret_value()
+        await store.set(WITNESS, held())
 
-        with pytest.raises(ValueError) as raised:  # noqa: PT011  # the type is the assertion
-            await store.set(WITNESS, value)
+        await self.assert_set_refuses(store, value)
 
-        assert_discloses_nothing(raised.value, rejected, context="a refused value")
-        assert await store.get(WITNESS) is None, "a refused write stored something"
+        await self.assert_witness_intact(store)
+        assert await store.get(secret_name(SECOND_KEY)) is None, "a refused write created an entry"
 
     @pytest.mark.optional_obligation
     @pytest.mark.parametrize("value", REFUSED_VALUES)
@@ -688,14 +782,13 @@ class SecretStoreContract(SecretsContract):
         blank values not. Doubling *every* refusal is a mechanical rule with no edge
         for a later variant to arrive through.
         """
-        rejected = value.get_secret_value()
+        await store.set(WITNESS, held())
 
         with self.unavailable(store):
-            with pytest.raises(ValueError) as raised:  # noqa: PT011  # the type is the assertion
-                await store.set(WITNESS, value)
-            assert_discloses_nothing(raised.value, rejected, context="a refused value")
+            await self.assert_set_refuses(store, value)
 
-        assert await store.get(WITNESS) is None, "a refused write stored something"
+        await self.assert_witness_intact(store)
+        assert await store.get(secret_name(SECOND_KEY)) is None, "a refused write created an entry"
 
     async def test_an_out_of_scope_write_or_delete_leaves_the_other_scope_alone(
         self, store: SecretStore
@@ -744,11 +837,12 @@ class SecretStoreContract(SecretsContract):
         assert survived.get_secret_value() == PLAINTEXT
 
 
-def assert_discloses_nothing(error: Exception, plaintext: str, *, context: object) -> None:
+def assert_discloses_nothing(error: BaseException, plaintext: str, *, context: object) -> None:
     """Assert ``error`` carries no derivation of ``plaintext`` (ADR-0125 §6).
 
-    Over the message, over every exception argument, and over the ``repr`` — the
-    three renderings §11 binds. The derivations come from
+    Over everything :func:`disclosing_renderings` reaches — the message, the
+    arguments and the ``repr`` §11 names, and the chained causes and formatted
+    traceback §6 also binds. The derivations come from
     :func:`checkable_disclosures`, which reads §6's list rather than repeating it,
     so a derivation added to that list is a case this helper starts making without
     any of the suites being edited.
@@ -758,7 +852,29 @@ def assert_discloses_nothing(error: Exception, plaintext: str, *, context: objec
         plaintext: The value the failing call was about.
         context: What the case was doing, for a legible failure.
     """
-    rendered = (str(error), repr(error), *(str(argument) for argument in error.args))
+    _assert_none_disclose(disclosing_renderings(error), plaintext, context=context)
+
+
+def assert_no_log_discloses(
+    records: Sequence[logging.LogRecord], plaintext: str, *, context: object
+) -> None:
+    """Assert no captured log line carries a derivation of ``plaintext`` (§6).
+
+    ADR-0125 §6 binds "no log line an implementation emits" on the same terms as
+    the exception, so this reads the same derivation list and formats each record
+    the way a handler would — see :func:`log_renderings` for why ``getMessage()``
+    alone is not the line that gets emitted.
+
+    Args:
+        records: Whatever the case captured while the subject ran.
+        plaintext: The value the failing call was about.
+        context: What the case was doing, for a legible failure.
+    """
+    _assert_none_disclose(log_renderings(records), plaintext, context=context)
+
+
+def _assert_none_disclose(renderings: Sequence[str], plaintext: str, *, context: object) -> None:
+    """The one assertion both public helpers make, over whatever they rendered."""
     for disclosure, text in checkable_disclosures(plaintext).items():
-        for rendering in rendered:
+        for rendering in renderings:
             assert text not in rendering, f"{disclosure} disclosed in {rendering!r} ({context})"
