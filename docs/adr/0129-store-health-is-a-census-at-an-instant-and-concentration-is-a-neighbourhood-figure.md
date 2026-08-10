@@ -374,10 +374,14 @@ history, so a record the system promised to forget cannot resurface here" — wh
 right for an export and wrong for a census, because an unpurged expired row is still a
 row in the scan, in the backup and in a re-embed until `purge_expired` runs. That
 backlog is one of the things an operator reads this report to see. `walk_records`
-drops more still. So the population is stated as physical presence, which is the same
-notion `SqliteMemoryStore.get` already works in, and §5 records that no contract
-member supplies it — a third and independent reason the mechanism reads the store's
-storage rather than its contract.
+drops more still. So the population is stated as physical presence, which is a notion
+the corpus already names — ADR-0046 §3's collision rule is decided on it, and
+`MemoryStore.write_atomic` refuses an `INSERT_IF_ABSENT` whose id names a stored
+record, "physical presence, so an expired or window-closed row still collides". No
+*read* member works in it: `get`, `search` and `walk_records` each apply the lifecycle
+predicate and `export` applies its retention half, so the rows this census counts are
+visible to the store's writer and to none of its readers. That is §5's third and
+independent reason for reading the store's storage rather than its contract.
 
 **The census is kept even though #799 ruled the proportion useless, and the job has
 changed.** #799 ruled it the wrong *tuning* statistic — it does not predict the
