@@ -317,18 +317,24 @@ class KeyringSecretStore:
             return await asyncio.to_thread(call)
         except _UNAVAILABLE as exc:
             unavailable, fault = True, type(exc).__name__
-        except Exception as exc:
-            # **Every failure a backend can produce, not only the library's own
-            # error type.** A backend translates *some* of what its transport raises
-            # and passes the rest through: the Secret Service backend reaches
-            # `secretstorage` over D-Bus, and a service that goes away after
-            # selection surfaces as that stack's exception rather than a
-            # ``KeyringError``. ADR-0125 §6 declares this seam's error surface to be
-            # two types, so an untranslated one escaping would make that declaration
-            # false — and would reach a caller as a traceback carrying whatever the
-            # backend put in it. ``Exception`` and not ``BaseException``, so a
-            # cancellation still propagates (ADR-0060).
+        except keyring.errors.KeyringError as exc:
             unavailable, fault = False, type(exc).__name__
+        except Exception as exc:
+            # **Untranslated means it came from under the backend, which is why this
+            # is the *unavailable* branch and not the other one.** A backend turns
+            # every outcome it decides into a ``KeyringError``; what reaches here
+            # instead came from the transport beneath it — the Secret Service
+            # backend speaks to `secretstorage` over D-Bus, and a service that goes
+            # away after selection surfaces as that stack's own exception. ADR-0125
+            # §6 draws the line by "the correct response differs": a keyring that is
+            # "absent, locked or not running is a deployment condition a human
+            # clears… a write the backend *rejected* may be transient". A dead
+            # transport is the first of those, and it is also the safe direction —
+            # ``SecretStoreUnavailableError`` is a subclass, so every
+            # ``except SecretStoreError`` still catches it and nothing is narrowed.
+            # ``Exception`` and not ``BaseException``, so a cancellation still
+            # propagates (ADR-0060).
+            unavailable, fault = True, type(exc).__name__
         # Raised out here, past the ``except`` clauses, so that neither the backend's
         # exception nor anything it carries becomes this one's ``__context__`` —
         # ADR-0125 §6 binds every rendering of an exception this seam raises, and a
@@ -337,10 +343,11 @@ class KeyringSecretStore:
         # than a derivation of a value.
         if unavailable:
             msg = (
-                f"this machine's keyring refused a {operation} ({fault}): it is present but "
-                f"could not be opened or unlocked in this session. Unlock it and try again; "
-                f"this seam never falls back to storage the operating system does not "
-                f"protect (ADR-0125 §7)"
+                f"this machine's keyring could not complete a {operation} ({fault}): it is "
+                f"present but could not be reached, opened or unlocked in this session. "
+                f"Start and unlock your platform's credential service and try again; this "
+                f"seam never falls back to storage the operating system does not protect "
+                f"(ADR-0125 §7)"
             )
             raise SecretStoreUnavailableError(msg)
         msg = (

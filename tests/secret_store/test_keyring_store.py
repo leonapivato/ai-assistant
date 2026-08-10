@@ -204,6 +204,11 @@ async def test_a_locked_backend_is_unavailable_and_a_rejected_call_is_not() -> N
     condition a human clears, and retrying it is futile; a write the backend
     rejected may be transient". That distinction is worth a type check rather than a
     message match, and this is what makes it one here.
+
+    **This is the other half of the classification** and it is what stops the
+    unavailable branch from swallowing everything: an error the backend itself
+    produced is an outcome of the *operation*, so it stays the wider type however
+    the transport underneath is behaving.
     """
     backing = ControllableKeyring()
     store = store_over(backing)
@@ -289,21 +294,26 @@ async def test_the_installation_is_length_prefixed_so_a_colon_cannot_shift_it() 
 
 @pytest.mark.parametrize("method", list(SecretMethod), ids=str)
 @pytest.mark.parametrize("disclosure", list(Disclosure), ids=str)
-async def test_a_backend_failure_the_library_never_wraps_still_reaches_the_declared_surface(
+async def test_a_backend_failure_the_library_never_wraps_reads_as_unavailable(
     method: SecretMethod, disclosure: Disclosure, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """ADR-0125 §6 declares two error types, so an untranslated one must not escape.
+    """An untranslated failure came from *under* the backend, so the keyring is unreachable.
 
-    A backend translates *some* of what its transport raises and passes the rest
-    through: the Secret Service backend reaches ``secretstorage`` over D-Bus, and a
-    service that goes away after selection surfaces as that stack's own exception
-    rather than a ``KeyringError``. An adapter catching only the library's hierarchy
-    would let it out as a traceback — past every caller's error boundary, and
-    carrying whatever the backend put in its message.
+    A backend turns every outcome it decides into a ``KeyringError``; what arrives
+    instead came from the transport beneath it — the Secret Service backend speaks
+    to ``secretstorage`` over D-Bus, and a service that goes away after selection
+    surfaces as that stack's own exception. ADR-0125 §6 draws the line by "the
+    correct response differs": a keyring "absent, locked or not running is a
+    deployment condition a human clears", where "a write the backend *rejected* may
+    be transient". A dead transport is the first, so it reads as unavailable — and
+    that is also the safe direction, since the type is a subclass and every
+    ``except SecretStoreError`` still catches it.
 
-    Run over every method and every derivation, on the suites' own terms, because
-    normalising the *type* while passing the *message* on would move the leak rather
-    than close it.
+    An adapter catching only the library's hierarchy would instead let it out as a
+    traceback, past every caller's error boundary and carrying whatever the backend
+    put in its message — so this runs over every method and every derivation on the
+    suites' own terms, because normalising the *type* while passing the *message* on
+    would move the leak rather than close it.
     """
     backing = ControllableKeyring()
     store = store_over(backing)
@@ -315,9 +325,10 @@ async def test_a_backend_failure_the_library_never_wraps_still_reaches_the_decla
         SecretMethod.DELETE: lambda: store.delete(WITNESS),
     }
 
-    with caplog.at_level(logging.DEBUG), pytest.raises(SecretStoreError) as raised:
+    with caplog.at_level(logging.DEBUG), pytest.raises(SecretStoreUnavailableError) as raised:
         await calls[method]()
 
+    assert isinstance(raised.value, SecretStoreError), "the narrower type is still the wider one"
     assert backing.last_backend_failure is not None, "the case did not model a disclosure"
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
