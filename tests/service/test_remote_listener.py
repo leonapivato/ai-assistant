@@ -791,3 +791,61 @@ async def test_a_callback_that_runs_after_the_close_is_refused_not_served(
                 await client_writer.wait_closed()
             spare.close()
             await spare.wait_closed()
+
+
+@pytest.mark.parametrize(
+    ("credential", "code"),
+    [
+        (None, env.CREDENTIAL_REQUIRED),
+        ("", env.CREDENTIAL_REQUIRED),
+        ("not-a-credential", env.CREDENTIAL_REJECTED),
+        (7, env.CREDENTIAL_REJECTED),
+    ],
+)
+async def test_every_remote_refusal_is_recorded_against_its_device(
+    credential: object, code: str, tmp_path: Path
+) -> None:
+    """ADR-0124 §6: "each admission and each refusal with the device it named".
+
+    That record is one of the three replacements standing in for ADR-0004 §7's gate
+    over the client's bootstrap credential read — "so what the credential was used
+    for is auditable even though the read that produced it is not" — and §7 requires
+    the reasons distinguished "in the error it returns **and in what the hub logs**".
+
+    The four cases here are the ones the *frame reader* refuses, before any verifier
+    is consulted: they never reach the admission's own decision, so without a seam
+    for them the hub would answer the peer and record nothing about who it was. The
+    log carries neither the credential nor the verifier (§7).
+    """
+    async with _remote(tmp_path) as hub:
+        hub.registry.enrol(_DEVICE, now=_MOMENT)
+        with structlog.testing.capture_logs() as captured:
+            async with _dialling(hub) as peer:
+                reply = await peer.connect(credential)
+    assert reply.payload["code"] == code
+    refused = [entry for entry in captured if entry["event"] == "hub_remote_admission_refused"]
+    assert [(entry["overlay_identity"], entry["reason"]) for entry in refused] == [(_DEVICE, code)]
+    rendered = repr(captured)
+    assert "not-a-credential" not in rendered
+    assert "verifier" not in rendered
+
+
+async def test_an_admission_and_its_refusal_speak_the_same_vocabulary(
+    tmp_path: Path,
+) -> None:
+    """§7's "in the error it returns and in what the hub logs", read strictly.
+
+    An internal name in the log and a wire token in the frame would be two records
+    of one event that an owner cannot correlate — so the log carries the code the
+    device was actually sent.
+    """
+    async with _remote(tmp_path) as hub:
+        good = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        hub.registry.revoke(_DEVICE, now=_MOMENT + timedelta(minutes=1))
+        with structlog.testing.capture_logs() as captured:
+            async with _dialling(hub) as peer:
+                reply = await peer.connect(good.credential)
+    assert reply.payload["code"] == env.DEVICE_REVOKED
+    (refused,) = [e for e in captured if e["event"] == "hub_remote_admission_refused"]
+    assert refused["reason"] == env.DEVICE_REVOKED
+    assert good.credential not in repr(captured)
