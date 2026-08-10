@@ -31,7 +31,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ai_assistant.service import artifact
-from ai_assistant.service.agev1 import AgeError, DecryptingReader, EncryptingWriter
+from ai_assistant.service.agev1 import (
+    CHUNK_BYTES,
+    AgeError,
+    DecryptingReader,
+    EncryptingWriter,
+)
 from ai_assistant.service.artifact import (
     FORMAT_VERSION,
     MANIFEST_MEMBER,
@@ -767,3 +772,62 @@ def test_an_artifact_whose_manifest_names_the_staging_root_is_refused(
         materialise(destination, passphrase=_KEYPHRASE, staging=staging)
 
     assert _materialised(staging) == []
+
+
+def test_a_flipped_byte_after_the_archive_still_fails_the_restore(
+    source: Path, staging: Path, tmp_path: Path
+) -> None:
+    """§4's promise has to hold over the whole file, not the part ``tar`` wanted.
+
+    ``tarfile`` stops at tar's end markers, so an artifact carrying a valid
+    archive followed by further age chunks leaves those unread — and unread is
+    unauthenticated. Before the drain, corrupting a chunk after tar EOF left every
+    materialised file and every §8 check intact and the restore *succeeded*, while
+    reading the same artifact whole raised ``AgeError`` at that chunk.
+    """
+    manifest = _manifest(_entry())
+    plain = io.BytesIO()
+    with tarfile.open(fileobj=plain, mode="w|", format=tarfile.PAX_FORMAT) as archive:
+        encoded = manifest.model_dump_json().encode("utf-8")
+        info = tarfile.TarInfo(MANIFEST_MEMBER)
+        info.size = len(encoded)
+        archive.addfile(info, io.BytesIO(encoded))
+        member = tarfile.TarInfo(PAYLOAD_PREFIX + "notes.txt")
+        member.size = 5
+        archive.addfile(member, io.BytesIO(b"hello"))
+    destination = _sealed(tmp_path, "trailing.age", plain.getvalue() + b"T" * (3 * CHUNK_BYTES))
+    corrupted = bytearray(destination.read_bytes())
+    corrupted[-40] ^= 0x01
+    destination.write_bytes(bytes(corrupted))
+
+    with pytest.raises(AgeError, match="authentication"):
+        materialise(destination, passphrase=_KEYPHRASE, staging=staging)
+
+
+def test_an_honest_artifact_still_reads_after_the_drain(
+    source: Path, staging: Path, tmp_path: Path
+) -> None:
+    """The drain costs an honest artifact nothing: what follows is tar's own padding."""
+    manifest = _manifest(_entry())
+
+    restored = materialise(
+        _artifact(tmp_path, source, manifest), passphrase=_KEYPHRASE, staging=staging
+    )
+    verify_materialised(staging, restored)
+
+    assert (staging / "notes.txt").read_bytes() == b"hello"
+
+
+@pytest.mark.parametrize("order", [("a", "a/b"), ("a/b", "a")])
+def test_a_manifest_listing_a_path_and_something_beneath_it_is_refused(
+    order: tuple[str, str],
+) -> None:
+    """Both are well-formed and both are unique; the filesystem is what disagrees.
+
+    Extracting ``a`` then ``a/b`` makes the second one's ``mkdir`` raise
+    ``FileExistsError`` — an ``OSError`` out of a malformed artifact, which the
+    classifier reads as "restarting might work". Refused once, at the manifest,
+    in either member order.
+    """
+    with pytest.raises(ValueError, match="cannot be both a file and a directory"):
+        _manifest(_entry(path=order[0], length=0), _entry(path=order[1], length=0))
