@@ -343,3 +343,43 @@ def test_an_artifact_that_decrypts_but_does_not_unpack_is_a_refusal_not_a_traceb
 
     assert not target.exists()
     assert _staging_left(tmp_path) == []
+
+
+def test_a_maximum_length_passphrase_opens_the_artifact_it_keyed(
+    settings: Settings, data_dir: Path, tmp_path: Path
+) -> None:
+    """§5's recovery path needs only the operator's passphrase, at any length this tool takes.
+
+    The bound is on the passphrase, not on the line that carries it — a
+    maximum-length passphrase saved as a file's first line is one byte longer as a
+    *line*, and measuring the line refused an artifact the same passphrase had
+    just written.
+    """
+    longest = "p" * 4096
+    phrase_file = tmp_path / "longest"
+    phrase_file.write_text(f"{longest}\n")
+    written = tmp_path / "backups" / "a.age"
+    written.parent.mkdir(mode=0o700)
+    assert backup.main([str(written), "--passphrase-file", str(phrase_file)]) == EXIT_OK
+    target = tmp_path / "restored"
+
+    assert _restore(written, target, phrase_file) == EXIT_OK
+
+    assert (target / "notes.txt").read_bytes() == b"hello"
+
+
+def test_a_passphrase_longer_than_the_bound_is_refused_at_the_backup(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """Refused where it would key an artifact, not only where it would open one.
+
+    A bound applied to one source alone is what produced the case above: a
+    passphrase long enough to write and too long to read back.
+    """
+    too_long = tmp_path / "too-long"
+    too_long.write_text("p" * 4097 + "\n")
+    destination = tmp_path / "backups" / "a.age"
+    destination.parent.mkdir(mode=0o700)
+
+    assert backup.main([str(destination), "--passphrase-file", str(too_long)]) == EXIT_DEPLOYMENT
+    assert not destination.exists()

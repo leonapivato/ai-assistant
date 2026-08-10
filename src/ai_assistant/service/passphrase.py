@@ -59,9 +59,14 @@ _GROUP_SIZE: Final = 5
 #: obligation on the operator and requires the tool to keep it in front of them
 #: rather than in a document: "a passphrase held only on this machine does not
 #: survive the loss of this machine".
-#: How far the reader will look for the end of a passphrase file's first line. A
-#: passphrase past this is not one anybody typed, and without a bound a file with
-#: no line break at all is read whole into memory.
+#: The longest passphrase this tool will use, from **any** source.
+#:
+#: It exists because a passphrase file with no line break at all would otherwise
+#: be read whole into memory — but it is applied to the prompt as well, and that
+#: is the part that matters. A bound on one source alone breaks §5's recovery
+#: path: a passphrase long enough to be typed at the backup and *not* long enough
+#: to be read back from a file is a passphrase that keys an artifact nothing can
+#: open. What can write has to be able to read.
 _MAX_PASSPHRASE_BYTES: Final = 4096
 
 CUSTODY_REMINDER: Final = (
@@ -103,10 +108,37 @@ def resolve(*, source: Path | None, generated: bool, confirm: bool) -> str:
             generated passphrase cannot be shown to the operator.
     """
     if generated:
-        return _generated()
-    if source is not None:
-        return _from_file(source)
-    return _prompted(confirm=confirm)
+        passphrase = _generated()
+    elif source is not None:
+        passphrase = _from_file(source)
+    else:
+        passphrase = _prompted(confirm=confirm)
+    _refuse_oversized(passphrase)
+    return passphrase
+
+
+def _refuse_oversized(passphrase: str) -> None:
+    """Hold every source to one length, so what wrote an artifact can open it.
+
+    Checked on the passphrase rather than on the bytes a particular source read,
+    because a terminator is not part of it: a maximum-length passphrase saved as
+    a file's first line is one byte longer *as a line*, and refusing that is
+    refusing to open an artifact the same passphrase wrote.
+
+    Args:
+        passphrase: The passphrase this run obtained.
+
+    Raises:
+        RefusalError: If it is longer than :data:`_MAX_PASSPHRASE_BYTES` encoded.
+    """
+    encoded = len(passphrase.encode("utf-8"))
+    if encoded > _MAX_PASSPHRASE_BYTES:
+        msg = (
+            f"the passphrase is {encoded} bytes, past the {_MAX_PASSPHRASE_BYTES} this tool "
+            f"uses from any source; a longer one could key an artifact it could not then "
+            f"read back from a file"
+        )
+        raise RefusalError(msg)
 
 
 def _generated() -> str:
@@ -151,16 +183,14 @@ def _from_file(source: Path) -> str:
             # backup — a stray byte past the passphrase is not a reason a recovery
             # cannot happen, and this is a file an operator may well have appended
             # a note to.
-            line = handle.readline(_MAX_PASSPHRASE_BYTES + 1)
+            # One past the bound *and* its terminator, so a maximum-length
+            # passphrase written as a line is read whole and only something
+            # genuinely longer is cut short — `resolve` is what judges the length,
+            # on the passphrase rather than on the line.
+            line = handle.readline(_MAX_PASSPHRASE_BYTES + 2)
     except OSError as exc:
         msg = f"the passphrase file {source} could not be read: {exc}"
         raise RefusalError(msg) from exc
-    if len(line) > _MAX_PASSPHRASE_BYTES:
-        msg = (
-            f"the passphrase file {source} has no line break in its first "
-            f"{_MAX_PASSPHRASE_BYTES} bytes, so its first line is not a passphrase"
-        )
-        raise RefusalError(msg)
     try:
         text = line.decode("utf-8")
     except UnicodeDecodeError as exc:
