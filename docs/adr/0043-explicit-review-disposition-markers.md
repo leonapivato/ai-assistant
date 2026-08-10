@@ -1,6 +1,6 @@
 # 43. Explicit review markers: a grounded withdrawal and a tagged proposal replace inference
 
-- Status: Withdrawn 2026-08-10 by operator ruling — never ratified, never in force
+- Status: Withdrawn
 - Date: 2026-07-22
 - Amends: ADR-0025 §2 and §3. §2 required a finding to be "retired only by
   Codex's own updated assessment, recorded in the review artifact." The v1
@@ -68,81 +68,31 @@
   reviving it would readopt a specification nobody has re-examined against the
   further weeks of review practice since.
 
-  **No new ADR is issued for this, and the header edit is the whole of it.** The
-  objection to answer is that ADR-0070 §1 enumerates the permitted in-place header
-  edits — ratifying, recording a landed supersession, correcting a `Status` line
-  to match what landed, adding a dated header note — and that `Withdrawn` is none
-  of them. Four things answer it, and the first is the substantive one.
+  **The authority for this status is ADR-0127 §1**, which adds `Proposed` →
+  `Withdrawn` as a fifth permitted in-place header edit under ADR-0070 §1 and
+  makes it available from `Proposed` alone. That ADR exists because of this
+  document. The first attempt at this withdrawal (PR #913) flipped the status with
+  no such authority and was blocked three times on the ground that ADR-0070's
+  enumeration of permitted header edits named no withdrawal and its §4 vocabulary
+  held four forms, none of them this one. The objection was upheld rather than
+  argued past, on the corpus's own method: when a ratified rule is found to miss a
+  real case, ADR-0090 wrote an ADR and ADR-0082 §1 refused to demote an
+  enumeration to illustrations. ADR-0127 is that ADR, and this is the case that
+  produced it.
 
-  - **§1 governs *amendment*, and there is no decision here to amend.** Its first
-    sentence is "An ADR may be **amended** in place only when the amendment
-    changes no decision", its append-only paragraph protects "ratified decision
-    text", and its second rule sends "any change to what was decided" to a
-    superseding ADR. Every clause presupposes a document that decided something.
-    A `Proposed` ADR decided nothing: `CONTRIBUTING.md` → "Contract ADRs land
-    before their implementation" says to "review it while it is still `Proposed`,
-    so a finding can still change the decision", and this document's own Context
-    records the ratify-before-build gate that never released it. §1 is silent on
-    disposing of a proposal that was never adopted because, until now, none had
-    been — not because it forbade it. Its enumeration is what §1's test yields for
-    a ratified ADR, and reading it as a bar here would make a merged `Proposed`
-    document permanently un-disposable: neither ratifiable (the evidence says no)
-    nor withdrawable (no clause names it), which is not a state ADR-0070 chose.
-  - **§1's own test is met on its own terms.** The test is whether "a reader
-    acting on the ADR would act **identically** before and after", and "a change
-    to what was decided is anything a reader would act on differently". The reader
-    §1 means is one acting on the *decision*. Under `Proposed` and under
-    `Withdrawn` alike this decision is not in force and nothing implements it, so
-    that reader acts identically. What changes is what an *author* would do next —
-    pursue ratification, or not — and §1's test is not about that; if it were, the
-    ratifying flip it expressly permits would fail it too.
-  - **Supersession is unavailable here, and incoherent if forced.** §1's
-    supersession route requires "a new ADR that supersedes the old one", and its
-    own status clause is explicit that recording one "presupposes the superseding
-    ADR *exists*" and describes "flipping a **live** decision". There is no live
-    decision to supersede and no successor decision to write: the operator's
-    ruling is that the corpus should hold *no* decision here, and an ADR whose
-    content is "the previous ADR is not adopted" would be a decision-shaped record
-    of the absence of one.
-  - **`Withdrawn` decides nothing ADR-0070 §4 reserved, and cannot cause the
-    failure §4 exists to prevent.** §4 does say "the canonical vocabulary is §4's
-    four forms", and the sentence is read here in its place: it sits inside the
-    consumer rule headed "Partial supersession is a distinct, scope-bearing state;
-    a consumer must not collapse it", naming the set that rule ranges over. §4
-    states no closure clause, and what it reserves as "the **machine-legible**
-    part" is "the leading token and the `ADR-NNNN` references" — the supersession
-    state, which a withdrawal never enters: no scope, no successor, no live
-    remainder. The hazard §4 was built against is #87's, a superseded ADR read as
-    fully current with its replaced scope hidden. `Withdrawn` can only err the
-    other way: a consumer that does not recognise it drops the record from a
-    live-rule collection, which is the right answer for a document that was never
-    in one, where mis-reading it as `Accepted` — the collapse §4 forbids — is the
-    one thing this value makes impossible. §4's own treatment of a qualifier that
-    "names no ADR" is that "there is nothing to resolve", and there is nothing
-    here to resolve. Its closing paragraph records that "nothing classifies ADR
-    liveness from status" today and binds the rule to "any liveness-classifying
-    consumer added later" — which is why the vocabulary question is filed for that
-    consumer's lane rather than answered by assumption in this one. What §4 would
-    owe a new decision is a status form that changes the supersession read, the
-    one-physical-line rule, or the accumulation and precedence rules; this changes
-    none of them, and ADR-0082 §6 has already refused a mechanical `Status`
-    cross-check that would make the field an enum.
-  - **The template edit is owed and is filed, not assumed.**
-    `docs/adr/template.md` carries the vocabulary itself (§4's last structural
-    sentence) and does not yet carry `Withdrawn`. That file is outside this
-    change's fence, so the edit is filed as #914 — the disposition ADR-0089 took
-    for the template edit its own §2 owed, "filed as an issue rather than written
-    here, because this lane's fence".
+  **What that ADR fixes about this record.** Its §3 requires this note in the same
+  change as the status edit, stating the date, the authority and the ground —
+  which is what the paragraphs above are. Its §4 fixes the value as the bare
+  token, so the record lives here rather than trailing the `Status` line, and
+  `Withdrawn` names no ADR and enters no supersession read. Its §2 makes the
+  status terminal: if the question is reopened it is a new ADR, not a revival of
+  this one. Its §5 is why this document stays exactly where it is — the file, its
+  number and its text remain, and a citation of it for what its text says, such as
+  ADR-0089 §2's, is unaffected by the withdrawal.
 
-  Recording an operator's ruling on a never-ratified proposal therefore authors no
-  decision, and there is nothing for a new ADR to hold. Ratification and
-  withdrawal are the two exits from `Proposed`, held by the same authority —
-  ADR-0015 §5 and `CONTRIBUTING.md` leave ratification to the author and the
-  operator's ruling — and only one of them had been written down, because only one
-  had ever been used. The Context, Decision, Alternatives and Consequences below
-  are untouched, as append-only requires (ADR-0001): they remain the full
-  statement of what was proposed and why, which is what makes this withdrawal
-  checkable.
+  The Context, Decision, Alternatives and Consequences below are untouched, as
+  append-only requires (ADR-0001): they remain the full statement of what was
+  proposed and why, which is what makes this withdrawal checkable.
 
 ## Context
 
