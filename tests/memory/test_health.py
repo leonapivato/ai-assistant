@@ -40,6 +40,7 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
+    PreferenceMemory,
     Provenance,
     SemanticMemory,
     Validity,
@@ -141,6 +142,17 @@ async def _write(store: SqliteMemoryStore, records: Sequence[MemoryRecord]) -> N
     """Install ``records`` in one atomic batch."""
     await store.write_atomic(
         [MemoryWrite(record=record, mode=MemoryWriteMode.INSERT_IF_ABSENT) for record in records]
+    )
+
+
+def _preference(record_id: str, content: str, *, validity: Validity | None = None) -> MemoryRecord:
+    """One preference record, so a case can decompose a store by more than one kind."""
+    return PreferenceMemory(
+        id=record_id,
+        content=content,
+        preference=content,
+        validity=validity if validity is not None else Validity(),
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_NOW),
     )
 
 
@@ -620,6 +632,50 @@ class TestWhatTheReportCarries:
         assert "k 3" in rendered
         assert "records                        9" in rendered
         assert "no vector stored               0" in rendered
+
+    async def test_each_kind_states_its_four_counts_and_their_proportions(
+        self, make_store: _MakeStore, store_path: Path
+    ) -> None:
+        """§3: each count "as a count **and as a proportion of the total**, … by ``kind``".
+
+        Over a store where the two kinds have different liveness, so a share taken
+        of the wrong denominator — the store-wide total rather than the kind's own
+        — would come out as a different number rather than the same one.
+        """
+        closed = Validity(valid_until=_NOW - timedelta(days=1))
+        store = make_store()
+        await _write(
+            store,
+            [
+                _record("s0", "t0 p0 u0"),
+                _record("s1", "t0 p1 u1", validity=closed),
+                _record("s2", "t0 p2 u2", validity=closed),
+                _preference("p0", "t0 p3 u3"),
+                _preference("p1", "t0 p4 u4"),
+                _preference("p2", "t0 p5 u5", validity=closed),
+            ],
+        )
+        store.close()
+
+        report = _census_of(store_path, k=2)
+
+        kinds = dict(report.by_kind)
+        semantic = kinds[MemoryKind.SEMANTIC.value]
+        preference = kinds[MemoryKind.PREFERENCE.value]
+        assert (semantic.total, semantic.live, semantic.retired) == (3, 1, 2)
+        assert (preference.total, preference.live, preference.retired) == (3, 2, 1)
+        # Of the kind's own total, which is what "the total" is inside a part of a
+        # decomposition — and 1/3 rather than the 1/6 a store-wide denominator gives.
+        assert semantic.live_share.value == pytest.approx(1 / 3)
+        assert preference.live_share.value == pytest.approx(2 / 3)
+        assert semantic.retired_share.value == pytest.approx(2 / 3)
+        assert kinds[MemoryKind.EPISODIC.value].live_share.defined is False
+
+        rendered = report.render()
+        assert "0.3333" in rendered
+        assert "0.6667" in rendered
+        assert "own total" in rendered, "the denominator must be stated, not inferred"
+        assert "0 (undefined)" in rendered, "an empty kind states no proportion (§1)"
 
     async def test_every_band_and_every_kind_is_stated_including_the_empty_ones(
         self, make_store: _MakeStore, store_path: Path
