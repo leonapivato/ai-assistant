@@ -920,6 +920,21 @@ it. Requiring two subjects makes that a red test rather than a support ticket.
 > high-entropy, so that a substring check over it is a real assertion rather than
 > one a short value would satisfy by accident.
 
+> **Normative.** The same case is run for each derivation the canonical fake can
+> produce — a backend error quoting the value verbatim, one quoting its first
+> eight characters, and one quoting its SHA-256 hex digest — and for each, none of
+> the quoted text reaches the surfaced error's message, arguments or `repr`, or any
+> log line. The fake carries all three failure modes.
+
+**Three derivations rather than one, because §6 bans derivations and a verbatim
+check catches none of them.** A wrapper that replaces a rejected value with
+`value[:8]` or a digest of it passes a substring assertion over the whole value
+while disclosing exactly what ADR-0021 §1 calls a weakened copy. §6's ban is wider
+still — it reaches a value's *length*, which no portable assertion can separate
+from a number an error legitimately carries — so the suite pins the three that are
+checkable and the rest stays a review concern, which is what `CONTRIBUTING.md`
+says the adequacy of any test is.
+
 **This is the leak the other redaction test cannot see.** Proving that a
 `SecretValue`'s `repr` redacts says nothing about the path where the value has
 already left the type: a backend that rejects a write and names the rejected value
@@ -956,7 +971,9 @@ whoever first ran the system on a headless box.
 > `SecretScope` at construction so the suites can build two that differ in either,
 > and carrying two explicit switches: one that puts it into the unavailable state,
 > and one that makes the next `set` fail with a backend error quoting the value it
-> was given. It is test-only, and no composition root wires it.
+> was given — verbatim, truncated to eight characters, or as a SHA-256 digest, so
+> the suite can drive each of §6's forbidden derivations. It is test-only, and no
+> composition root wires it.
 
 > **Normative.** Both Protocols get a concrete `Test…Contract` subclass running
 > the fake through its suite — through the narrow suite as a `Secrets`, and through
