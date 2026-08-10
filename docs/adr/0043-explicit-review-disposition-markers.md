@@ -1,6 +1,6 @@
 # 43. Explicit review markers: a grounded withdrawal and a tagged proposal replace inference
 
-- Status: Proposed
+- Status: Withdrawn 2026-08-10 by operator ruling — never ratified, never in force
 - Date: 2026-07-22
 - Amends: ADR-0025 §2 and §3. §2 required a finding to be "retired only by
   Codex's own updated assessment, recorded in the review artifact." The v1
@@ -20,6 +20,63 @@
   the review-contract floor). ADR-0001 (ADRs are append-only; ADR-0025's body is
   not rewritten). ADR-0019, ADR-0026 §6, ADR-0031 §7 (an amendment edit to a
   ratified ADR is recorded to apply on ratification, not made while `Proposed`).
+- **Note (2026-08-10): withdrawn.** `Proposed` → `Withdrawn`, by the operator's
+  ruling recorded on #898. **This decision is not in force and never was.** It
+  merged `Proposed` on 2026-07-23 behind its own ratify-before-build gate
+  (Context), that gate never released it, and no part of it is implemented: the
+  two inferences it proposed to replace — retirement inferred from a finding's
+  *absence* in `codex-review.sh` `_write_snapshot`, and the fence heuristic in
+  `render_dispositions` — are still the live mechanism, and `WITHDRAW` appears
+  nowhere in `scripts/` or `docs/review/` (checked against `main` for this note).
+  The `Amends:` line above and §5's recorded ADR-0025 edit are therefore claims
+  that never took effect: ADR-0025 is unamended by this document, its text and
+  its `Status` line untouched. That is the disagreement #898 named, resolved from
+  this side rather than by editing a ratified ADR.
+
+  **The ground is the evidence, not a second thought about the defect.** This
+  ADR's case rested on urgency — that an inferred disposition would let a
+  silently dropped finding reach a merge. In the 17 days between its merge and
+  this note, 257 pull requests merged, every one reviewed through those same
+  inference mechanisms, including loops that ran past round 20 (rounds 21, 23 and
+  27 are recorded in this corpus). The operator's ruling records no wrong merge
+  attributable to a dropped finding across that load. The defect this ADR
+  describes is real and unchanged; what did not survive contact with the evidence
+  is the claim that it was urgent enough to justify the contract specified below.
+  A decision whose cost is paid now against a harm that has not appeared at that
+  volume is withdrawn rather than ratified.
+
+  **What survives is the form, not the tooling decision.** ADR-0089 §2 cites this
+  document's column-0 marker discipline — markers that open and close "on their
+  **own column-0 line**, preceded by a blank line" — as precedent for a marker in
+  a different document class, and its own obligations sweep records that nothing
+  is owed to this ADR. That citation is a claim about this text, which is
+  unchanged and still says what it says; it does not depend on this ADR being in
+  force, so the withdrawal does not disturb it. Nothing about the review
+  protocol's markers changes, because there are none to change.
+
+  **What stays open.** #144 and #145 — the two follow-ups this ADR was written to
+  answer — close with it: the change they asked for is this withdrawn decision,
+  not a defect left unattended. #275 and #276 stay open as ordinary hardening
+  backlog against the inference mechanisms as they actually are — cross-round
+  proposal retention, and `_finding_id`'s lossy normalisation. Neither depends on
+  this ADR, and neither is withdrawn by it.
+
+  **Revisit if** a finding is silently dropped and a wrong merge follows. That is
+  the harm this ADR predicted and the evidence has not produced; should it
+  appear, the answer is a fresh decision written against what actually failed,
+  not a revival of this one. A withdrawn document records a road not taken, and
+  reviving it would readopt a specification nobody has re-examined against the
+  further weeks of review practice since.
+
+  **No new ADR is issued for this, and the header edit is the whole of it.**
+  ADR-0070 §1 protects *ratified* decision text and bounds in-place header edits
+  to those that change no decision; this document was never ratified, so no
+  reader was acting on it and none acts differently after — §1's own test, met.
+  Recording an operator's ruling on a never-ratified proposal authors no
+  decision, so there is nothing for a new ADR to hold. The Context, Decision,
+  Alternatives and Consequences below are untouched, as append-only requires
+  (ADR-0001): they remain the full statement of what was proposed and why, which
+  is what makes this withdrawal checkable.
 
 ## Context
 
