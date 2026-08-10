@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 
 from ai_assistant.service.overlay import (
+    MAX_OVERLAY_IDENTITY_BYTES,
     TAILSCALE_SOCKETS,
     OverlayIdentityUnavailableError,
     TailscaleAgent,
@@ -73,6 +74,16 @@ async def _daemon(
 def _ok(payload: dict[str, Any]) -> tuple[int, bytes]:
     """A 200 carrying one JSON object."""
     return 200, json.dumps(payload).encode()
+
+
+def _ok_lenient(payload: dict[str, Any]) -> tuple[int, bytes]:
+    """A 200 whose body carries a value only a decoder will produce.
+
+    ``json.dumps`` escapes a lone surrogate as ``\\ud800``, which is what a real
+    agent's encoder would emit and what ``json.loads`` turns back into an unencodable
+    string — so the fixture has to write the *escape* rather than the character.
+    """
+    return 200, json.dumps(payload).encode("ascii", errors="backslashreplace")
 
 
 async def test_the_hubs_own_identity_and_addresses_are_read_from_the_daemon(
@@ -198,3 +209,53 @@ def test_the_agent_is_located_and_never_launched(tmp_path: Path) -> None:
     explicit = local_agent(str(tmp_path / "custom.sock"))
     assert explicit.socket_path == str(tmp_path / "custom.sock")
     assert local_agent().socket_path in TAILSCALE_SOCKETS
+
+
+async def test_an_identity_with_no_utf8_form_is_refused_rather_than_raised(
+    tmp_path: Path,
+) -> None:
+    """A string a JSON decoder produced is not always a string that can be encoded.
+
+    ``"\\ud800"`` is a lone surrogate: it survives ``json.loads``, passes every type
+    and emptiness check, and then raises ``UnicodeEncodeError`` — a ``ValueError``,
+    so nothing watching for :class:`OverlayIdentityUnavailableError` catches it.
+    An identity that cannot be encoded cannot be recorded, compared or reported, so
+    not knowing it is the same condition as not being told it, and takes ADR-0124
+    §4's same answer.
+    """
+    surrogate = {"Node": {"StableID": "\ud800"}}
+    async with _daemon(tmp_path, {"/localapi/v0/whois": _ok_lenient(surrogate)}) as (agent, _):
+        with pytest.raises(OverlayIdentityUnavailableError, match="no UTF-8 form"):
+            await agent.identify("100.64.0.11", 41234)
+
+
+async def test_this_machines_identity_with_no_utf8_form_is_refused_too(
+    tmp_path: Path,
+) -> None:
+    """The same value on the startup path, where it would otherwise escape the
+    configuration-error clause and turn a legible stay-down refusal into an
+    unclassified fault."""
+    surrogate = {"Self": {"StableID": "\ud800", "TailscaleIPs": ["100.64.0.9"]}}
+    async with _daemon(tmp_path, {"/localapi/v0/status": _ok_lenient(surrogate)}) as (agent, _):
+        with pytest.raises(OverlayIdentityUnavailableError, match="no UTF-8 form"):
+            await agent.hub_identity()
+
+
+async def test_an_identity_no_overlay_would_produce_is_refused(tmp_path: Path) -> None:
+    """The bound, at the seam that produces an identity.
+
+    Refusing here is what keeps every value downstream — the record's rows, the
+    enrolment reply, the listing — bounded without each of them re-deriving the
+    rule.
+    """
+    huge = {"Node": {"StableID": "n" * (MAX_OVERLAY_IDENTITY_BYTES + 1)}}
+    async with _daemon(tmp_path, {"/localapi/v0/whois": _ok(huge)}) as (agent, _):
+        with pytest.raises(OverlayIdentityUnavailableError, match="bytes"):
+            await agent.identify("100.64.0.11", 41234)
+
+
+async def test_an_identity_at_the_bound_is_accepted(tmp_path: Path) -> None:
+    """The discriminating half: a bound that refused everything would pass above."""
+    longest = {"Node": {"StableID": "n" * MAX_OVERLAY_IDENTITY_BYTES}}
+    async with _daemon(tmp_path, {"/localapi/v0/whois": _ok(longest)}) as (agent, _):
+        assert await agent.identify("100.64.0.11", 41234) == "n" * MAX_OVERLAY_IDENTITY_BYTES

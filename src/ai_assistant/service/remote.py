@@ -229,7 +229,37 @@ class RemoteListener:
             _log.info("hub_remote_device_expelled", reason=reason, connections=len(held))
 
     async def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        """Serve one accepted connection, or refuse it before it costs anything.
+        """Serve one accepted connection, and name any fault the steps before it hit.
+
+        **One connection's fault is never the resident process's**, which
+        :func:`~ai_assistant.wire.serve_connection` keeps for everything after the
+        handshake (ADR-0084 §3's "the reason is robustness, not secrecy"). The steps
+        *before* it — the ceilings and §4's identity query — run in a callback
+        ``asyncio`` invokes directly, and this clause is what gives them the same
+        rule.
+
+        **What it buys is the diagnosis, and being exact about that matters.**
+        ``asyncio`` does close the transport when a client-connected callback raises,
+        and the budget slot is returned by :func:`~ai_assistant.service.transport.hold`'s
+        own ``finally``, so this is not repairing a leak. What it replaces is the
+        loop's generic "Task exception was never retrieved" with a named event on
+        the hub's own log — which is the difference between an operator seeing that
+        the remote door is refusing connections and seeing a stack trace from
+        somewhere in ``asyncio``. The seam declares one failure
+        (:class:`~ai_assistant.service.overlay.OverlayIdentityUnavailableError`) and
+        an implementation of it may still raise another; ADR-0083's ruling 4 is why
+        that arrives as a sentence rather than as a traceback.
+        """
+        try:
+            await self._accepted(reader, writer)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.exception("hub_remote_accept_failed")
+            await refuse(writer, "hub_remote_accept_failed", "the connection was abandoned")
+
+    async def _accepted(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Refuse against the two ceilings and §4's identity, then serve.
 
         Three refusals happen here rather than in the protocol, and all three are
         the pre-envelope class ADR-0084 §3 answers with a close: the two shared

@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+import structlog
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError
@@ -89,6 +90,22 @@ class _FakeAgent:
             msg = "the overlay agent knows no node at that address"
             raise OverlayIdentityUnavailableError(msg)
         return found
+
+
+class _BrokenAgent(_FakeAgent):
+    """An agent implementation that does not honour the seam it stands in for.
+
+    Exactly how a leaky implementation of
+    :class:`~ai_assistant.service.overlay.OverlayAgent` arrives: the Protocol
+    declares one failure and this raises another, which nothing on the accept path
+    is watching for.
+    """
+
+    async def identify(self, host: str, port: int) -> str:
+        """Fail in a way the seam does not declare."""
+        del host, port
+        msg = "an agent implementation that does not honour the seam"
+        raise RuntimeError(msg)
 
 
 class _GatedEngine(FakeAssistantEngine):
@@ -625,3 +642,46 @@ async def test_an_admitted_connection_frees_the_pending_slot(tmp_path: Path) -> 
             assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
             await _once(lambda: budget.handshaking == 0, what="the pending slot is given back")
             assert budget.serving == 1
+
+
+async def test_a_fault_before_the_handshake_is_named_on_the_hubs_own_log(
+    tmp_path: Path,
+) -> None:
+    """One connection's fault is never the resident process's — on the accept
+    callback too, where nothing else supplies that rule.
+
+    **What is asserted is the diagnosis, because that is what the clause buys.**
+    ``asyncio`` closes the transport of its own accord when a client-connected
+    callback raises, so the connection closing is not the discriminating fact and a
+    test asserting only that would pass with no handler at all. The named event is:
+    without it an operator meets the loop's generic "Task exception was never
+    retrieved" and has to work out for themselves that the remote door is the thing
+    refusing connections, which is ADR-0083's ruling 4 failure.
+
+    The agent raises something the seam does not declare, which is how a
+    non-conforming implementation of it actually arrives.
+    """
+    async with _remote(tmp_path, agent=_BrokenAgent()) as hub:
+        hub.registry.enrol(_DEVICE, now=_MOMENT)
+        with structlog.testing.capture_logs() as captured:
+            async with _dialling(hub) as peer:
+                assert await asyncio.wait_for(peer.reader.read(), _PATIENT.total_seconds()) == b""
+    assert "hub_remote_accept_failed" in [entry["event"] for entry in captured]
+
+
+async def test_a_broken_accept_gives_its_budget_slot_back(tmp_path: Path) -> None:
+    """The other half: a fault must not spend a ceiling permanently.
+
+    ADR-0124 §7 makes both ceilings the hub's totals, so a slot never given back is
+    a hub that serves fewer connections after every such fault until it serves none
+    — which looks from outside exactly like a hub that is down. It holds because
+    :func:`~ai_assistant.service.transport.hold` returns the slot from a ``finally``
+    rather than because anything here catches; asserting it is what stops a future
+    edit from moving the accounting somewhere an exception can skip.
+    """
+    budget = ConnectionBudget(max_connections=2, max_pending_handshakes=2)
+    async with _remote(tmp_path, agent=_BrokenAgent(), budget=budget) as hub:
+        for _ in range(4):
+            async with _dialling(hub) as peer:
+                assert await asyncio.wait_for(peer.reader.read(), _PATIENT.total_seconds()) == b""
+        await _once(lambda: budget.serving == 0, what="every slot is given back")

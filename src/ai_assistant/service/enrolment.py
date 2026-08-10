@@ -522,7 +522,14 @@ def _bounded_identity(identity: str) -> None:
     Raises:
         ValueError: If it exceeds the bound.
     """
-    size = len(identity.encode("utf-8"))
+    try:
+        size = len(identity.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        msg = (
+            "an overlay identity with no UTF-8 form cannot be recorded or compared; "
+            "a lone surrogate survives a JSON decode and has no encoded form at all"
+        )
+        raise ValueError(msg) from exc
     if size > MAX_OVERLAY_IDENTITY_BYTES:
         msg = (
             f"an overlay identity of {size} bytes is over the "
