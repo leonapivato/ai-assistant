@@ -580,3 +580,68 @@ def test_an_empty_passphrase_file_is_refused_before_the_lock_is_taken(
     probe = InstanceLock(data_dir / LOCK_FILENAME)
     assert probe.acquire()
     probe.release()
+
+
+def test_a_file_that_becomes_a_symlink_after_the_walk_is_refused(
+    settings: Settings,
+    data_dir: Path,
+    out_dir: Path,
+    keyphrase_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§1's "It never follows a symbolic link" has to hold at the open, not the listing.
+
+    The static case — a link already there when the walk runs — is covered above.
+    This is the one that made it a defect rather than a hardening: a regular file
+    replaced by a link *between* being listed and being opened was followed, and
+    because both fingerprints were then the link's, they agreed and the artifact
+    was published carrying a file from outside the data directory under a
+    data-directory-relative path.
+
+    The swap is driven deterministically rather than raced, by performing it in
+    exactly the window the walk leaves.
+    """
+    outside = out_dir.parent / "outside-the-data-directory.txt"
+    outside.write_bytes(b"a file the artifact must never carry")
+    original = backup._measure
+
+    def swap_then_measure(path: Path) -> object:
+        if path.name == "notes.txt" and not path.is_symlink():
+            path.unlink()
+            path.symlink_to(outside)
+        return original(path)
+
+    monkeypatch.setattr(backup, "_measure", swap_then_measure)
+
+    assert _run(out_dir / "a.age", keyphrase_file) == EXIT_DEPLOYMENT
+    assert _leftovers(out_dir) == []
+
+
+def test_a_file_that_becomes_a_symlink_after_the_scan_is_refused_at_the_copy(
+    settings: Settings,
+    data_dir: Path,
+    out_dir: Path,
+    keyphrase_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same window, one pass later: the copy opens the path a second time.
+
+    §1's clause is about what the artifact ends up carrying, so the second open
+    is held to it too — a scan that passed does not license the copy to follow a
+    link that appeared afterwards.
+    """
+    outside = out_dir.parent / "outside-the-data-directory.txt"
+    outside.write_bytes(b"a file the artifact must never carry")
+    original = artifact.write_artifact
+
+    def swap_then_write(*args: object, **kwargs: object) -> None:
+        target = data_dir / "notes.txt"
+        if not target.is_symlink():
+            target.unlink()
+            target.symlink_to(outside)
+        original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(artifact, "write_artifact", swap_then_write)
+
+    assert _run(out_dir / "a.age", keyphrase_file) == EXIT_DEPLOYMENT
+    assert _leftovers(out_dir) == []
