@@ -920,17 +920,23 @@ it. Requiring two subjects makes that a red test rather than a support ticket.
 > high-entropy, so that a substring check over it is a real assertion rather than
 > one a short value would satisfy by accident.
 
-> **Normative.** The same case is run for each derivation the canonical fake can
-> produce — a backend error quoting the value verbatim, one quoting its first
-> eight characters, one quoting its SHA-256 hex digest, and one reporting its
-> length in a labelled form the suite chose — and for each, none of the quoted text
-> reaches the surfaced error's message, arguments or `repr`, or any log line. The
-> fake carries all four failure modes.
+> **Normative.** The canonical fake carries one failure mode **per derivation §6
+> names** — the value verbatim, a prefix, a suffix, a truncation, a SHA-256 digest,
+> and a labelled length — and the suite runs the case above against every mode the
+> fake carries, asserting for each that none of the quoted text reaches the
+> surfaced error's message, arguments or `repr`, or any log line. §6's list is the
+> single source: a derivation added there is a mode the fake owes and a case the
+> suite runs, without this section being edited again.
 
-**Four derivations rather than one, because §6 bans derivations and a verbatim
-check catches none of them.** A wrapper that replaces a rejected value with
-`value[:8]` or a digest of it passes a substring assertion over the whole value
-while disclosing exactly what ADR-0021 §1 calls a weakened copy.
+**The obligation is bound to §6's list rather than to an enumeration of its own,
+and that is the decision.** A verbatim check catches none of the derivations: a
+wrapper reporting `value[:8]`, `value[-8:]` or a digest passes a substring
+assertion over the whole value while disclosing exactly what ADR-0021 §1 calls a
+weakened copy. Writing the modes out here a second time is how the two lists drift
+— review found three of them one at a time, each round closing the instance and
+leaving the class — so the suite tracks §6 instead. That is also what makes the
+floor honest: §6 is the prohibition, and nothing it names is left with no case
+behind it.
 
 **The length case is included, and an earlier draft wrongly excluded it.** That
 draft argued no portable assertion can separate a value's length from a number an
@@ -976,9 +982,8 @@ whoever first ran the system on a headless box.
 > `SecretScope` at construction so the suites can build two that differ in either,
 > and carrying two explicit switches: one that puts it into the unavailable state,
 > and one that makes the next `set` fail with a backend error quoting the value it
-> was given — verbatim, truncated to eight characters, as a SHA-256 digest, or as
-> a labelled length — so the suite can drive each of §6's forbidden derivations. It
-> is test-only, and no composition root wires it.
+> was given, one mode per derivation §6 forbids, so the suite can drive each of
+> them. It is test-only, and no composition root wires it.
 
 > **Normative.** Both Protocols get a concrete `Test…Contract` subclass running
 > the fake through its suite — through the narrow suite as a `Secrets`, and through
