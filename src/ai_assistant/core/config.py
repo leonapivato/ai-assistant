@@ -965,6 +965,40 @@ class Settings(BaseSettings):
         ),
     )
 
+    # **This names the agent's *location*, and a location is not an identity.**
+    # ADR-0124 §4 makes the overlay agent's answer the fact every remote admission
+    # turns on, and the temptation is to read its third clause — "not an ordinary
+    # configuration value… no configuration setting may override that identity" —
+    # as forbidding this field too. It does not: that clause governs the *client's
+    # enrolled hub identity*, whose deliberate absence from `Settings` is recorded
+    # on `remote_hub_address` below. The identity still comes from an agent, over a
+    # local interface, and nothing here lets a peer assert one.
+    #
+    # **What makes the difference is that the path carries conditions.** The two
+    # packaged defaults are trusted because the operating system's access control
+    # protects them (`service.overlay.TAILSCALE_SOCKETS`), and a configured path is
+    # held to the same custody before it is used — ADR-0084 §1's ancestry walk, and
+    # a socket owned by root or by the hub's own uid. So the trust still rests on
+    # the OS rather than on the operator having typed carefully, and ADR-0124 §4's
+    # posture is preserved rather than traded away. Unset changes nothing: the two
+    # defaults are looked at exactly as before.
+    #
+    # It exists because ADR-0124's remote surface had no locally reachable producer
+    # without it (#918) — the leg 9 QA run could reach §§6-8 only from outside the
+    # application, under a mount namespace, so nothing routine could ever
+    # re-verify them. ADR-0125 §2's bar for an additive `Settings` field is "a
+    # deployment asking for it", and #919 is one asking.
+    hub_overlay_agent_socket: str | None = Field(
+        default=None,
+        description=(
+            "The Unix socket of the overlay agent this machine runs, or unset to "
+            "look at the two paths the daemon is packaged to use (ADR-0124 §4). A "
+            "configured path is held to the same custody conditions as the data "
+            "directory, and the socket must be owned by root or by the hub's uid. "
+            "Ignored when hub_remote_address is unset."
+        ),
+    )
+
     @field_validator("hub_remote_address")
     @classmethod
     def _the_remote_listener_binds_only_an_overlay_address(cls, value: str | None) -> str | None:

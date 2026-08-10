@@ -50,6 +50,7 @@ import stat
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.service.custody import first_ancestor_fault
 from ai_assistant.wire.address import check_socket_path
 
 if TYPE_CHECKING:
@@ -134,26 +135,28 @@ def _check_leaf(data_dir: Path) -> None:
 
 
 def _check_ancestors(data_dir: Path) -> None:
-    """No ancestor lets an untrusted user replace the entry beneath it."""
-    euid = os.geteuid()
-    for ancestor in data_dir.parents:
-        info = ancestor.stat()
-        replaceable = bool(info.st_mode & _WRITABLE_BY_OTHERS)
-        # The sticky bit is precisely what stops a user removing or renaming an
-        # entry they do not own, which is the only thing an ancestor's mode can
-        # do to the directory below it.
-        if replaceable and not info.st_mode & stat.S_ISVTX:
-            msg = (
-                f"{ancestor} is mode {stat.S_IMODE(info.st_mode):04o}, writable by other "
-                f"users and not sticky, so another user could rename or replace the path "
-                f"below it and the data directory's own mode would not apply; chmod it, "
-                f"set its sticky bit, or move the data directory"
-            )
-            raise ConfigurationError(msg)
-        if info.st_uid not in (0, euid):
-            msg = (
-                f"{ancestor} is owned by uid {info.st_uid}, neither root nor the "
-                f"uid {euid} the hub runs as, so that user controls the path to the "
-                f"data directory; move the data directory under one you own"
-            )
-            raise ConfigurationError(msg)
+    """No ancestor lets an untrusted user replace the entry beneath it.
+
+    The condition itself lives in :mod:`ai_assistant.service.custody`, shared with
+    the overlay agent's socket, which depends on the same property for the same
+    reason (ADR-0124 §4). Only the wording is chosen here — what an operator should
+    do about an untrustworthy ancestor is different for a data directory than for a
+    daemon's socket, so each caller phrases its own refusal.
+    """
+    fault = first_ancestor_fault(data_dir)
+    if fault is None:
+        return
+    if fault.kind == "replaceable":
+        msg = (
+            f"{fault.ancestor} is mode {fault.mode:04o}, writable by other "
+            f"users and not sticky, so another user could rename or replace the path "
+            f"below it and the data directory's own mode would not apply; chmod it, "
+            f"set its sticky bit, or move the data directory"
+        )
+        raise ConfigurationError(msg)
+    msg = (
+        f"{fault.ancestor} is owned by uid {fault.uid}, neither root nor the "
+        f"uid {os.geteuid()} the hub runs as, so that user controls the path to the "
+        f"data directory; move the data directory under one you own"
+    )
+    raise ConfigurationError(msg)
