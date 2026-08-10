@@ -16,7 +16,7 @@ from secret_contract import assert_discloses_nothing
 
 from ai_assistant.core.errors import SecretStoreError, SecretStoreUnavailableError
 from ai_assistant.core.logging import _SENSITIVE_KEY_PARTS
-from ai_assistant.core.types import SECRET_VALUE_MAX_BYTES, SecretScope
+from ai_assistant.core.types import SECRET_VALUE_MAX_BYTES, SecretName, SecretScope, SecretValue
 from ai_assistant.testing import Disclosure, FakeSecretStore, SecretMethod
 from ai_assistant.wire.credential import mint_credential
 from ai_assistant.wire.enrolment import (
@@ -32,6 +32,38 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 
 HUB = "nQ8xYt2CNTRL"
 OTHER_HUB = "zK1mBv9QOTHR"
+
+
+class CountingSecret(SecretStr):
+    """A ``SecretStr`` that counts the unwraps performed on it."""
+
+    unwraps: int = 0
+
+    def get_secret_value(self) -> str:
+        """Count the unwrap, then answer as the real type does."""
+        type(self).unwraps += 1
+        return super().get_secret_value()
+
+
+class CountingStore:
+    """A store whose reads hand back a value that counts its own unwraps.
+
+    Delegating rather than patching, so the subject under test stays
+    :mod:`ai_assistant.wire.enrolment` driven through the canonical fake.
+    """
+
+    def __init__(self, inner: FakeSecretStore) -> None:
+        self.inner = inner
+
+    async def get(self, name: SecretName) -> SecretValue | None:
+        held = await self.inner.get(name)
+        return None if held is None else CountingSecret(held.get_secret_value())
+
+    async def set(self, name: SecretName, value: SecretValue) -> None:
+        await self.inner.set(name, value)
+
+    async def delete(self, name: SecretName) -> bool:
+        return await self.inner.delete(name)
 
 
 @pytest.fixture
@@ -403,3 +435,41 @@ def test_the_entry_is_named_so_the_log_redaction_covers_it() -> None:
     than to be pretty.
     """
     assert any(part in ENROLMENT_KEY.casefold() for part in _SENSITIVE_KEY_PARTS)
+
+
+# --- how many times the record is unwrapped, and where ------------------------
+
+
+async def test_the_record_is_unwrapped_exactly_once_per_read(store: FakeSecretStore) -> None:
+    """One unwrap of the stored value, in the one function ADR-0124 §6 confines it to.
+
+    Packing the pair means :func:`read_enrolment` unwraps the *record* to split it,
+    which is the cost of the shape ADR-0125 §4 licenses and the one that removes the
+    mismatched-pair state two entries admit. What this pins is the bound on that
+    cost: it happens once, in the connect path, and the credential leaves still
+    wrapped — so the number of places a Tier 0 value is in the clear does not grow
+    with the number of members the record gains.
+    """
+    await store_enrolment(store, hub_identity=HUB, credential=mint_credential())
+    counting = CountingStore(store)
+    CountingSecret.unwraps = 0
+
+    await read_enrolment(counting)
+
+    assert CountingSecret.unwraps == 1
+
+
+async def test_unenrolment_never_unwraps_the_record(store: FakeSecretStore) -> None:
+    """The purge removes a name and reads nothing (ADR-0124 §6, §8).
+
+    "No other code in the client reads it" is the marked clause, and the act most
+    likely to grow a read is this one — a surface tempted to report *which* hub it
+    just unbound would have to open the record to find out.
+    """
+    await store_enrolment(store, hub_identity=HUB, credential=mint_credential())
+    counting = CountingStore(store)
+    CountingSecret.unwraps = 0
+
+    assert await remove_enrolment(counting) is True
+
+    assert CountingSecret.unwraps == 0
