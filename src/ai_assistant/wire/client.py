@@ -30,6 +30,15 @@ is listening the client raises
 how to start the hub. It does not spawn the hub (ruling 3) and does not build an
 in-process engine (ruling 5) — the latter now also mechanically impossible, since
 ``interfaces`` may no longer import ``app``.
+
+**Two transports, one client** (ADR-0124 §1). Everything above holds on the remote
+transport too, so :class:`HubClient` carries it and the two concrete clients differ
+in exactly one method: how a connection is opened, who is authenticated on the
+other end, and what the connect frame carries. That is also the whole of what
+ADR-0124 §9 needs to be true — "the remote listener adds no member to the connect
+exchange, changes no frame's encoding, and changes no method's arguments or
+results" — and it is why ``PROTOCOL_VERSION`` does not move for the hop. The remote
+half lives in :mod:`ai_assistant.wire.remote`.
 """
 
 from __future__ import annotations
@@ -37,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from ai_assistant.core.types import DEFAULT_PAGE_SIZE
@@ -100,36 +110,86 @@ DEFAULT_CLIENT_NAME: Final[str] = "assistant-cli"
 _HANDSHAKE_FRAME_BYTES: Final[int] = 64 * 1024
 
 
-class HubEngineClient:
-    """An :class:`~ai_assistant.core.protocols.AssistantEngine` over a Unix socket.
+@dataclass(frozen=True, slots=True)
+class Opened:
+    """A connection a transport has opened, with the connect frame it will send.
+
+    The one thing the two transports do not share, handed back as a value so that
+    each of them decides its own order in local variables. That matters for exactly
+    one member: ADR-0125 §3 puts the credential's single authorised unwrap
+    "immediately before encoding the connect frame's credential member, and nowhere
+    else", so the payload is built by whoever holds the secret rather than passed to
+    a shared method as a plaintext argument.
 
     Attributes:
-        socket_path: Where the hub listens — ``<data_dir>/hub.sock``, derived from
-            the one setting that locates both the data and the door (ADR-0084 §9).
+        reader: The open connection's reader.
+        writer: Its writer. Whoever receives this owns hanging it up.
+        connect_payload: The connect frame's members, already bounded by
+            :func:`~ai_assistant.wire.envelope.connect_payload`.
+    """
+
+    reader: asyncio.StreamReader
+    writer: asyncio.StreamWriter
+    connect_payload: dict[str, Any]
+
+
+class HubClient:
+    """Everything a client of the promoted surface does once it has a connection.
+
+    The nineteen methods, the request/reply exchange, the handshake and the frame
+    limits — all of which ADR-0124 §9 requires to be *identical* on both transports,
+    since the hop "adds no member to the connect exchange, changes no frame's
+    encoding, and changes no method's arguments or results".
+
+    A subclass supplies :meth:`_open`, which is where the two differ: a Unix socket
+    and a peer-credential check (:class:`HubEngineClient`, ADR-0084 §1), or an
+    overlay address, an identity the local agent attests and a credential from the
+    keyring (:class:`~ai_assistant.wire.remote.RemoteHubEngineClient`, ADR-0124 §4,
+    §7).
     """
 
     def __init__(
         self,
-        socket_path: Path,
         *,
         read_timeout: timedelta,
         client_name: str = DEFAULT_CLIENT_NAME,
     ) -> None:
-        """Point a client at a hub.
+        """Prepare a client. Nothing is opened here.
 
-        Nothing is opened here: the first connection is made by the first call, or
-        by :meth:`probe`. A constructor that connected would make "is the hub up"
-        a question asked at a moment no command chose.
+        The first connection is made by the first call, or by :meth:`probe`. A
+        constructor that connected would make "is the hub up" a question asked at a
+        moment no command chose.
 
         Args:
-            socket_path: Where the hub listens.
             read_timeout: How long a frame's body may stall before the connection
                 is abandoned.
             client_name: The free-form identifier the connect frame carries.
         """
-        self.socket_path = socket_path
         self._read_timeout = read_timeout
         self._client_name = client_name
+
+    @property
+    def where(self) -> str:
+        """How this client's destination reads in a message.
+
+        Returns:
+            The socket path or the overlay address and port.
+        """
+        raise NotImplementedError
+
+    async def _open(self) -> Opened:
+        """Open a connection, authenticate the hub, and build the connect frame.
+
+        Returns:
+            The connection and the frame to send on it.
+
+        Raises:
+            HubUnavailableError: If there is nothing to connect to.
+            TransportError: If the hub on the other end is not one this client may
+                talk to. Nothing has been sent at that point, which is the direction
+                both ADR-0084 §1 and ADR-0124 §4 fix.
+        """
+        raise NotImplementedError
 
     async def probe(self) -> None:
         """Connect, handshake and hang up, so a closed door is reported early.
@@ -145,7 +205,7 @@ class HubEngineClient:
             ProtocolError: On a version mismatch, or a hub running as another user.
         """
         reader, writer, _limit = await self._connect()
-        await _hang_up(writer)
+        await hang_up(writer)
         del reader
 
     # --- the nineteen methods ---------------------------------------------
@@ -542,42 +602,29 @@ class HubEngineClient:
             # other one.
             check_payload(result, max_bytes=limit, subject=f"the result of {method}()")
         finally:
-            await _hang_up(writer)
+            await hang_up(writer)
         return result
 
     async def _connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, int]:
-        """Open a connection, authenticate the hub, and complete the handshake.
+        """Open a connection through the transport, then complete the handshake.
+
+        Everything after :meth:`_open` is the same exchange on both transports,
+        which is ADR-0124 §9's ground for not bumping ``PROTOCOL_VERSION``: "a peer
+        at version 2 on either listener exchanges exactly the frames it exchanges
+        today".
 
         Returns:
             The reader, the writer, and the contract limit the hub published — its
             effective frame size less ADR-0085 §8b's envelope reserve.
 
         Raises:
-            HubUnavailableError: If nothing is listening on the socket.
-            ProtocolError: If the hub runs as another user, claims another protocol
-                version, or refuses the connect frame.
+            HubUnavailableError: If nothing is listening.
+            TransportError: If the hub is not one this client may talk to, claims
+                another protocol version, or refuses the connect frame.
         """
+        opened = await self._open()
+        reader, writer = opened.reader, opened.writer
         try:
-            reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
-        except (FileNotFoundError, ConnectionRefusedError) as exc:
-            msg = (
-                f"no assistant hub is listening at {self.socket_path}. Start it with "
-                f"'ai-assistant-hub' and leave it running, then try again. "
-                f"(This client never starts one for you, and never falls back to "
-                f"running the assistant in-process.)"
-            )
-            raise HubUnavailableError(msg) from exc
-        except OSError as exc:
-            msg = f"cannot reach the assistant hub at {self.socket_path}: {exc}"
-            raise HubUnavailableError(msg) from exc
-
-        try:
-            raw: socket.socket | None = writer.get_extra_info("socket")
-            if raw is None:  # pragma: no cover — asyncio always supplies one here
-                msg = "the connection exposes no socket, so the hub cannot be authenticated"
-                raise ProtocolError(msg)
-            check_peer_is_self(raw)
-
             correlation = str(uuid.uuid4())
             await write_frame(
                 writer,
@@ -585,7 +632,7 @@ class HubEngineClient:
                     env.Envelope(
                         kind=env.FrameKind.CONNECT,
                         id=correlation,
-                        payload=env.connect_payload(client=self._client_name),
+                        payload=opened.connect_payload,
                     )
                 ),
                 max_frame_bytes=_HANDSHAKE_FRAME_BYTES,
@@ -605,12 +652,12 @@ class HubEngineClient:
             if version != env.PROTOCOL_VERSION:
                 msg = (
                     f"this client speaks protocol version {env.PROTOCOL_VERSION} and the hub "
-                    f"at {self.socket_path} speaks version {version}; the two halves ship "
-                    f"together, so restart the hub from this installation"
+                    f"at {self.where} speaks version {version}; the two halves ship "
+                    f"together, so upgrade whichever of the two is behind"
                 )
                 raise ProtocolError(msg)
         except BaseException:
-            await _hang_up(writer)
+            await hang_up(writer)
             raise
         return reader, writer, frame_bytes - ENVELOPE_RESERVE_BYTES
 
@@ -641,6 +688,84 @@ class HubEngineClient:
         return env.decode_envelope(body)
 
 
+class HubEngineClient(HubClient):
+    """The hub on this machine, over ADR-0084 §1's Unix socket.
+
+    Attributes:
+        socket_path: Where the hub listens — ``<data_dir>/hub.sock``, derived from
+            the one setting that locates both the data and the door (ADR-0084 §9).
+    """
+
+    def __init__(
+        self,
+        socket_path: Path,
+        *,
+        read_timeout: timedelta,
+        client_name: str = DEFAULT_CLIENT_NAME,
+    ) -> None:
+        """Point a client at the hub on this machine.
+
+        Args:
+            socket_path: Where the hub listens.
+            read_timeout: How long a frame's body may stall before the connection
+                is abandoned.
+            client_name: The free-form identifier the connect frame carries.
+        """
+        super().__init__(read_timeout=read_timeout, client_name=client_name)
+        self.socket_path = socket_path
+
+    @property
+    def where(self) -> str:
+        """The socket path, for a message."""
+        return str(self.socket_path)
+
+    async def _open(self) -> Opened:
+        """Connect, read the peer's credentials from the kernel, and refuse a stranger.
+
+        ADR-0084 §1's check, and it runs "after ``connect()`` and before sending
+        anything" — "a direct check on *who is actually on the other end*, not an
+        inference from who could have written where".
+
+        **The connect frame carries no credential**, which ADR-0124 §7 leaves
+        exactly where ADR-0084 §2 put it: "on the loopback transport… a non-empty
+        credential is still refused with ``credential_not_supported``. The two
+        listeners hold opposite rules, and a hub running both applies each rule to
+        its own listener."
+
+        Returns:
+            The connection and a credential-free connect frame.
+
+        Raises:
+            HubUnavailableError: If nothing is listening on the socket.
+            ProtocolError: If the hub runs as another user, or this platform cannot
+                say who it runs as.
+        """
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
+        except (FileNotFoundError, ConnectionRefusedError) as exc:
+            msg = (
+                f"no assistant hub is listening at {self.socket_path}. Start it with "
+                f"'ai-assistant-hub' and leave it running, then try again. "
+                f"(This client never starts one for you, and never falls back to "
+                f"running the assistant in-process.)"
+            )
+            raise HubUnavailableError(msg) from exc
+        except OSError as exc:
+            msg = f"cannot reach the assistant hub at {self.socket_path}: {exc}"
+            raise HubUnavailableError(msg) from exc
+        try:
+            raw: socket.socket | None = writer.get_extra_info("socket")
+            if raw is None:  # pragma: no cover — asyncio always supplies one here
+                msg = "the connection exposes no socket, so the hub cannot be authenticated"
+                raise ProtocolError(msg)
+            check_peer_is_self(raw)
+            payload = env.connect_payload(client=self._client_name)
+        except BaseException:
+            await hang_up(writer)
+            raise
+        return Opened(reader=reader, writer=writer, connect_payload=payload)
+
+
 def _raise_handshake_error(payload: object) -> None:
     """Report a refused handshake as the transport failure it is.
 
@@ -649,14 +774,34 @@ def _raise_handshake_error(payload: object) -> None:
     declares them", so neither is reconstructed as an exception from
     ``core/errors.py``.
 
+    **The message is rendered as the hub wrote it, and the code is appended.**
+    ADR-0124 §7 requires the remote listener to distinguish an unenrolled device, a
+    revoked one and a credential that did not verify "in the error it returns **and
+    in what the hub logs**", against the login-surface reflex of saying only "no" —
+    "an owner who cannot tell 'I never enrolled this laptop' from 'I revoked it last
+    week' from 'I pasted the wrong string' is ADR-0083's ruling 4 failure". The
+    sentence carries the diagnosis; the token is what makes the owner's screen and
+    the hub's log two records of one event. Neither ever carries the credential or
+    the verifier (§7).
+
+    **It does not switch on the code**, and that is deliberate rather than a gap
+    (ADR-0124 §Context): a handshake refusal an older client cannot name still
+    renders, because it renders from the message. The closed set lives on the *call*
+    path, in :func:`_raise_reply_error`, where an unknown token would otherwise be
+    handed to a reconstruction expecting a class name.
+
     Raises:
         ProtocolError: Always.
     """
     message = ""
+    code = ""
     if isinstance(payload, dict):
         raw = payload.get("message")
         message = raw if isinstance(raw, str) else ""
-    raise ProtocolError(message or "the hub refused the connection without saying why")
+        token = payload.get("code")
+        code = token if isinstance(token, str) else ""
+    rendered = message or "the hub refused the connection without saying why"
+    raise ProtocolError(f"{rendered} [{code}]" if code else rendered)
 
 
 def _raise_reply_error(payload: object) -> None:
@@ -682,7 +827,7 @@ def _raise_reply_error(payload: object) -> None:
     raise_from_payload(payload)
 
 
-async def _hang_up(writer: asyncio.StreamWriter) -> None:
+async def hang_up(writer: asyncio.StreamWriter) -> None:
     """Close one connection, tolerating a peer that has already gone.
 
     A stateless client holds nothing a close can lose, so a failure to shut a

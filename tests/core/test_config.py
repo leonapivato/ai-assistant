@@ -857,6 +857,13 @@ def test_every_integer_setting_is_discovered() -> None:
         # so an unprivileged run would fail at bind with an errno rather than at
         # load with the value it was given.
         "hub_remote_port",
+        # ADR-0124 §1's client-side port, the mirror of the one above and
+        # acknowledged for the same reason. ``remote_hub_port=True`` would have a
+        # client dial port 1 rather than the port the owner configured, so the two
+        # halves of one hop would disagree about where the door is — and the
+        # failure would arrive as a connection refused, which is exactly what a
+        # hub that is down looks like.
+        "remote_hub_port",
         # ADR-0093 §7a's four counting caps. Acknowledged here for the reason the
         # transport figures are: each is refused at load outside its range, and
         # joining this tuple is what subjects it to the guards below. The ``bool``
@@ -1539,3 +1546,53 @@ def test_a_port_outside_its_range_is_refused(value: int) -> None:
     offered, so the hub would listen somewhere no client was told about."""
     with pytest.raises(ValidationError):
         Settings(hub_remote_address="100.64.0.9", hub_remote_port=value)
+
+
+# --- reaching a hub on another machine (ADR-0124 §1) ------------------------
+
+
+def test_a_client_reaches_the_hub_on_this_machine_by_default() -> None:
+    """The address is the switch, and its default is "the hub on this machine".
+
+    ADR-0124 §2 gave the hub's own listener the same shape, and for the same reason:
+    there is no separate boolean, because "two settings that can disagree about
+    whether a listener exists is one more state than the hub has".
+    """
+    assert Settings().remote_hub_address is None
+
+
+def test_the_two_ports_default_to_the_same_figure() -> None:
+    """The two halves of one hop, so an owner who sets neither still has a hop.
+
+    A default the client and the hub disagreed about would make the ordinary case
+    fail with a connection refused — which looks exactly like a hub that is down.
+    """
+    assert Settings().remote_hub_port == Settings().hub_remote_port
+
+
+def test_the_client_address_is_held_as_written() -> None:
+    """Validated where the destination is composed, not here.
+
+    The refusals are ``wire.address.check_remote_address``'s, and they belong there
+    for two reasons: a ``Settings`` validator would make every command on the *hub's*
+    machine — where this is unset and irrelevant — answer for a value only a client
+    reads, and it would put a ``wire`` rule in ``core``, where ``wire`` cannot be
+    named.
+    """
+    assert Settings(remote_hub_address="100.64.1.7").remote_hub_address == "100.64.1.7"
+
+
+def test_no_setting_can_supply_or_override_the_enrolled_hub_identity() -> None:
+    """ADR-0124 §4's third clause, as an absence — which is its whole content.
+
+    > The enrolled hub identity is held beside the credential, in the same Tier 0
+    > place and by the same mechanism (§6), and it is **not an ordinary
+    > configuration value**… **no configuration setting may override that
+    > identity**.
+
+    It is what stops §4's second clause from being circular: an edit that redirects
+    the client changes the destination and leaves the check that destination has to
+    pass exactly where it was. A field here would hand an attacker with an editor
+    both halves at once, which is the attack §4 exists to close.
+    """
+    assert not [name for name in Settings.model_fields if "identity" in name]

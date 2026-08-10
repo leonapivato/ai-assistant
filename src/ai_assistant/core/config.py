@@ -1047,6 +1047,52 @@ class Settings(BaseSettings):
                 raise ValueError(msg)
         return text
 
+    # --- Reaching a hub on another machine (ADR-0124 §1) -----------------
+    # **The client's half of the hop, and it is two settings holding one fact.**
+    # ADR-0124 §1 requires a client to obtain "its destination from configuration
+    # and never from a discovery mechanism, a redirect, or anything a peer tells
+    # it", so the address is the switch here exactly as `hub_remote_address` is on
+    # the other end: unset means the hub on this machine, over ADR-0084 §1's Unix
+    # socket, and there is no separate boolean for the same reason — two settings
+    # that can disagree about which transport is in use is one more state than a
+    # deployment has.
+    #
+    # **What is deliberately *not* here is the enrolled hub identity**, and its
+    # absence is ADR-0124 §4's third clause rather than an omission: "the enrolled
+    # hub identity is held beside the credential, in the same Tier 0 place and by
+    # the same mechanism (§6), and it is **not an ordinary configuration value**…
+    # no configuration setting may override that identity." That is what stops §4's
+    # check from being circular: a configuration edit moves the *destination* and
+    # leaves the identity that destination must match exactly where it was, in the
+    # device's keyring. A `Settings` field for it would hand an attacker with an
+    # editor both halves at once.
+    #
+    # **The value is validated in `wire`, not here**, which is the one place this
+    # pair departs from `hub_remote_address` above. The refusals are the same five
+    # (`wire.address.check_remote_address`), but a `Settings` validator would make
+    # every command on the *hub's* machine — where this is unset and irrelevant —
+    # answer for a value only a client reads, and would put a `wire` rule in `core`
+    # where `wire` cannot be named. So the value is held as written and refused
+    # where the destination is composed, which is before anything is opened.
+    remote_hub_address: str | None = Field(
+        default=None,
+        description=(
+            "The overlay address of the hub this device connects to, or unset to use "
+            "the hub on this machine over its Unix socket (ADR-0124 §1). A literal IP "
+            "address on the overlay — never a name, which would make the address "
+            "dialled a fact about a resolver."
+        ),
+    )
+    remote_hub_port: _IntegerSetting = Field(
+        default=50084,
+        ge=1,
+        le=65535,
+        description=(
+            "The port the hub's remote listener binds (ADR-0124 §2). Must match the "
+            "hub's hub_remote_port. Ignored when remote_hub_address is unset."
+        ),
+    )
+
     # --- Model layer -----------------------------------------------------
     # The assistant is model-agnostic; this names the default model the
     # orchestration layer reaches for when a caller doesn't specify one.

@@ -785,3 +785,70 @@ async def test_an_oversized_handshake_closes_while_a_credential_still_earns_a_re
 
     assert env.CREDENTIAL_NOT_SUPPORTED.encode() in credentialled
     assert oversized == b"", "an undecodable handshake closes with no response at all"
+
+
+# --- the loopback client, after the hop split it from the remote one --------
+
+
+async def test_the_loopback_client_presents_no_credential(tmp_path: Path) -> None:
+    """ADR-0084 §2's rule on this transport, unchanged by ADR-0124 (§7).
+
+    > ADR-0084 §2's rule is unchanged on the loopback transport: there a non-empty
+    > credential is still refused with ``credential_not_supported``. The two
+    > listeners hold opposite rules, and a hub running both applies each rule to its
+    > own listener.
+
+    Asserted from the *client's* side rather than the hub's, and it is the half that
+    became possible to get wrong: the two transports now share a handshake and
+    differ only in how a connection is opened, so a credential leaking into the
+    loopback frame would be refused by a hub — and by nothing else.
+    """
+    seen: list[object] = []
+
+    async def _hub(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        frame = await _read_one(reader)
+        seen.append(frame.payload)
+        await _send(
+            writer,
+            env.Envelope(
+                kind=env.FrameKind.CONNECT_ACK,
+                id=frame.id,
+                payload=env.connect_ack_payload(build="test", max_frame_bytes=_FRAME),
+            ),
+        )
+
+    async with _listening(tmp_path / "hub.sock", _hub) as client:
+        await client.probe()
+
+    assert seen == [
+        {env.CONNECT_VERSION: env.PROTOCOL_VERSION, env.CONNECT_CLIENT: "assistant-cli"}
+    ]
+    assert env.CONNECT_CREDENTIAL not in seen[0]  # type: ignore[operator]  # a decoded object
+
+
+async def test_the_loopback_client_still_authenticates_the_peer_before_sending(
+    tmp_path: Path,
+) -> None:
+    """ADR-0084 §1's peer-credential check, still ahead of the first byte.
+
+    The refactor that gave the two transports one handshake moved this into the
+    loopback half's own ``_open``, which is where §1 puts it — "after ``connect()``
+    and before sending anything". A hub that never received a frame is the assertion:
+    a check that ran after the write would have handed over the utterance already.
+    """
+    seen: list[object] = []
+
+    async def _hub(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        seen.append(await _read_one(reader))
+
+    def _another_user(_sock: socket.socket) -> None:
+        msg = "the process listening on this socket runs as another uid"
+        raise ProtocolError(msg)
+
+    async with _listening(tmp_path / "hub.sock", _hub) as client:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr("ai_assistant.wire.client.check_peer_is_self", _another_user)
+            with pytest.raises(ProtocolError):
+                await client.probe()
+
+    assert seen == []
