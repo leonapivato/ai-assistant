@@ -794,9 +794,22 @@ property being tested.
 
 > **Normative.** The type obligations are proved beside the suites, over the types
 > themselves: a `SecretValue` of exactly 1024 UTF-8 bytes constructs and one of
-> 1025 raises `ValueError`; a blank one raises; a `SecretValue` is not normalised
-> between construction and `get_secret_value`; and `SecretName` refuses uppercase,
-> whitespace, `:`, `/`, an empty key and a 65-character key.
+> 1025 raises `ValueError`; a blank one raises; one carrying an unpaired surrogate
+> raises, both through `secret_value` and through `set`, and nothing is stored; a
+> `SecretValue` is not normalised between construction and `get_secret_value`; and
+> `SecretName` refuses uppercase, whitespace, `:`, `/`, an empty key and a
+> 65-character key.
+
+**The surrogate case is named rather than left to "UTF-8 encodable", because it
+is the one that survives every other check.** `"\ud800"` is non-blank, is one
+character, and has no byte length at all — measuring it *is* encoding it, so a
+budget check written as `len(value.encode())` raises `UnicodeEncodeError` instead
+of the `ValueError` §3 promises, and an adapter that skips the check hands a
+string with no wire form to a backend. `AssistantError` carries the same refusal
+for the same reason and `core/types.py`'s `encodable_text` is the predicate; ADR-0087
+§2b is where the corpus first named this `str`. Requiring it at both entry points
+is deliberate: the callable is where a hand-built value is caught and `set` is
+where a bare `SecretStr` is (§4).
 
 **The installation obligation is in the suite rather than left to the adapter,
 and that placement is the point of it.** Every other test on this list passes
@@ -811,6 +824,22 @@ it. Requiring two subjects makes that a red test rather than a support ticket.
 > raises `SecretStoreUnavailableError` and that `get` does not return `None` — as a
 > test marked `@pytest.mark.optional_obligation`, so an implementation that cannot
 > be driven into that state skips it and the canonical fake, which can, does not.
+
+> **Normative.** The suite proves §6's redaction against a **failing** backend, on
+> the same optional marking: a subject driven to fail a `set` with a backend error
+> whose own text contains the supplied plaintext surfaces a `SecretStoreError`
+> whose message, whose arguments and whose `repr` contain no part of that
+> plaintext, and emits no log line that does.
+
+**This is the leak the other redaction test cannot see.** Proving that a
+`SecretValue`'s `repr` redacts says nothing about the path where the value has
+already left the type: a backend that rejects a write and names the rejected value
+in its message, wrapped by the obvious `SecretStoreError(str(exc))`, writes the
+credential into an error that ADR-0004 §5's redaction processor will not catch
+because it redacts by key rather than by content. §6 forbids it in a marked
+clause; without a case that constructs one, every conforming implementation can
+still do it. The canonical fake carries the switch that produces it, which is what
+keeps the obligation from being skipped everywhere.
 
 The optional marking is the mechanism `CONTRIBUTING.md` provides and
 `ContextProviderContract.test_each_assembly_recomputes_from_the_clock` is its
@@ -836,8 +865,9 @@ whoever first ran the system on a headless box.
 > **Normative.** The canonical fake in `ai_assistant.testing` is an in-memory
 > implementation of `SecretStore`, taking its installation namespace and its
 > `SecretScope` at construction so the suites can build two that differ in either,
-> and carrying an explicit switch that puts it into the unavailable state. It is
-> test-only, and no composition root wires it.
+> and carrying two explicit switches: one that puts it into the unavailable state,
+> and one that makes the next `set` fail with a backend error quoting the value it
+> was given. It is test-only, and no composition root wires it.
 
 > **Normative.** Both Protocols get a concrete `Test…Contract` subclass running
 > the fake through its suite — through the narrow suite as a `Secrets`, and through
