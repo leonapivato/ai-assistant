@@ -346,9 +346,10 @@ default runs the other way.
 > **Normative.** A normative clause is added only before ratification. No mark is
 > added to a ratified ADR, by a dated note or otherwise.
 
-**The first clause binds on ratification, while `docs/adr/template.md` and
-`CONTRIBUTING.md` still say nothing about the form.** That gap is real and it is
-deliberate. ADR-0070 §5 and ADR-0088 §5 are the precedent on both halves: each
+**The first clause was written to bind on ratification, while
+`docs/adr/template.md` and `CONTRIBUTING.md` still said nothing about the form.**
+That gap was real and it was deliberate. ADR-0070 §5 and ADR-0088 §5 are the
+precedent on both halves: each
 ratified a forward-only authoring rule here and directed the corresponding
 `CONTRIBUTING.md` correction elsewhere, ADR-0088 three days ago and as an issue
 (#595) rather than in its own diff. Deferring the rule until the authoring
@@ -362,7 +363,8 @@ clause" by doing nothing — so the risk that the next few ADRs land unmarked is
 real one. §4 is what bounds the damage: an ADR that marks nothing is unmarked,
 binds as prose, and is exactly as useful as every ADR on `main` today. The rule
 degrades to the status quo rather than to a defect, which is why it can bind
-before its authoring path exists. #600 and #601 close the gap.
+before its authoring path exists. #600 and #601 closed the gap, in PR #607 on
+2026-08-02.
 
 **The 87 ADRs on `main` at this ADR's date stay unmarked, permanently.** Context
 gives the ground and it is ratified law rather than a cost calculation: ADR-0070
@@ -482,20 +484,29 @@ else.
 - **ADR-0015, ADR-0027 — nothing owed.** Neither the contract-ADR sequencing nor
   the review floor is touched; `docs/adr/**` remains in ADR-0027 §3's floor and
   this ADR does not ask to change that.
-- **`docs/adr/template.md` — an edit is owed and this ADR does not write it.**
+- **`docs/adr/template.md` — an edit was owed and this ADR did not write it.**
   The template is where an author meets the form, and §2's mark belongs in its
   Decision guidance. ADR-0070 §4 is the precedent for an ADR directing a template
   correction. Filed as an issue rather than written here, because this lane's
-  fence is one file (Consequences).
-- **`CONTRIBUTING.md` — an edit is owed and this ADR does not write it**, for the
-  same reason and on ADR-0070 §5's precedent. It rides with #595, which already
-  owes it ADR-0088's forms.
-- **This ADR's `Status`.** It ships `Proposed` and is reviewed while `Proposed`,
-  so a finding can still change the decision, then flips to `Accepted` before
-  merge (ADR-0015 §5; `CONTRIBUTING.md`, "Contract ADRs land before their
-  implementation"). It touches no Protocol and no `core` type and decides no
-  contract surface, so **adversarial is the required set** — the same reading
-  ADR-0082 §5 and ADR-0088 §8 recorded for themselves.
+  fence is one file (Consequences). It landed in PR #607 on 2026-08-02, closing
+  #600.
+- **`CONTRIBUTING.md` — an edit was owed and this ADR did not write it**, for the
+  same reason and on ADR-0070 §5's precedent. It rode with #595, which already
+  owed it ADR-0088's forms. It landed in the same PR, as one section — "Cite in
+  form, and mark what binds" — closing #595 and #601.
+- **This ADR's `Status`.** It was written to ship `Proposed`, be reviewed while
+  `Proposed` so a finding could still change the decision, then flip to
+  `Accepted` before merge (ADR-0015 §5; `CONTRIBUTING.md`, "Contract ADRs land
+  before their implementation"). **The flip was missed and it merged
+  `Proposed`.** #622 found that and this change corrects it: the ratification is
+  the in-place `Proposed` → `Accepted` edit ADR-0070 §1 permits first, so it
+  finalises this decision rather than changing any. Nothing decided here moves.
+  In the interval the rule was in force by a second route — `CONTRIBUTING.md`'s
+  "Cite in form, and mark what binds" (ratified by ADR-0003) and
+  `docs/adr/template.md`, both landed by PR #607 — so no ADR authored since was
+  authored against a rule the corpus did not carry. It touches no Protocol and no
+  `core` type and decides no contract surface, so **adversarial is the required
+  set** — the same reading ADR-0082 §5 and ADR-0088 §8 recorded for themselves.
 - **This ADR is its own worked example, including where it failed.** Its
   normative core is eleven clauses occupying about thirty physical lines, and
   both figures are recomputable from the file by anyone with `grep`, at any
@@ -571,7 +582,8 @@ else.
 
 - **This ADR fixes none of the three instances that motivated it, and that is the
   honest headline.** ADR-0086, ADR-0045 and ADR-0088 are ratified and unmarked, and
-  §5 keeps them that way. #586 stays open. The `testing/store.py` defect is
+  §5 keeps them that way. #586 was not closed by it; other work closed it on
+  2026-08-02. The `testing/store.py` defect is
   ADR-0088 §2(b)'s subject and was never this ADR's to catch. What this delivers
   is a form for the ADRs written after it, and it earns out over months — the same
   thin, honest promise ADR-0088 §4 made about its reverse record.
@@ -593,13 +605,17 @@ else.
   byte comparison and against 87 unmarked ADRs it is a substring search over
   wrapped prose, which ADR-0088 §6 already identifies as the hard case. Backfill
   pays this, once per clause, and §9 records the revisit condition.
-- **§5 binds before the authoring path carries it.** `docs/adr/template.md` is
-  where an author meets the ADR form and it says nothing about marks until #600
-  lands, so the ADRs written immediately after this one may well be unmarked. §5
-  explains why the sequence is right and §4 is why it is survivable — an unmarked
-  ADR binds as prose — but the cost is that §5 could sit dead for several ADRs,
-  which is the failure mode ADR-0088 §9 named when it refused to ratify a rule
-  nobody was following. #600 and #601 are the mitigation and they should not sit.
+- **§5 bound before the authoring path carried it.** `docs/adr/template.md` is
+  where an author meets the ADR form and it said nothing about marks until #600
+  landed, so the ADRs written immediately after this one might well have been
+  unmarked. §5 explains why the sequence is right and §4 is why it is survivable —
+  an unmarked ADR binds as prose — but the cost was that §5 could sit dead for
+  several ADRs, which is the failure mode ADR-0088 §9 named when it refused to
+  ratify a rule nobody was following. #600 and #601 were the mitigation and they
+  did not sit: PR #607 landed both on 2026-08-02, within hours of this ADR
+  merging, so no ADR was authored in the gap at all. The risk did not
+  materialise — ADR-0090, the first ADR authored under this one, is marked and
+  records itself as such.
 - **A `docs/adr/**` change still cannot fail on any of this.** No check is decided
   (§7), so nothing mechanical enforces §2's form or §5's forward-only rule until
   someone decides one. Until then this is a convention with a reviewer behind it,
@@ -607,11 +623,12 @@ else.
 
 **Follow-on.**
 
-- **`docs/adr/template.md` owes §2's mark** in its Decision guidance (**#600**),
-  and **`CONTRIBUTING.md` owes §1's test, §3's rule and §4's reviewer obligation**
-  (**#601**). Neither is written here (§8). #601 rides naturally with #595, which
-  already owes `CONTRIBUTING.md` ADR-0088's citation forms — one lane, one
-  section, both ADRs.
+- **`docs/adr/template.md` owed §2's mark** in its Decision guidance (**#600**),
+  and **`CONTRIBUTING.md` owed §1's test, §3's rule and §4's reviewer obligation**
+  (**#601**). Neither was written here (§8). #601 rode naturally with #595, which
+  already owed `CONTRIBUTING.md` ADR-0088's citation forms — one lane, one
+  section, both ADRs — and that is how it landed. PR #607 (2026-08-02) wrote the
+  one section and the template's Decision comment, closing #595, #600 and #601.
 - **ADR-0045's `testing/store.py` citation had no issue and now has one
   (#602).** #597 attributes it to #596; #596 is `ClassifiedToolError` and
   `UserProfile`. It is an ADR-0088 §1 b1 citation, so #588's checker reports it
