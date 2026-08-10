@@ -1,6 +1,6 @@
 # 125. One seam to the keyring, reading narrower than writing, and an unreachable keyring is not an absent secret
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-09
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-09**,
   the durability form ADR-0100 established. Three of the ADRs this decision rests
@@ -33,7 +33,25 @@
   contract surface, a placement rule for a concrete that has no package yet, and
   the shape a still-open question (#74) has to be able to land into. Every one of
   those is answerable from prose before an implementation commits to an answer
-  (`CONTRIBUTING.md` → "Contract ADRs land before their implementation").
+  (`CONTRIBUTING.md` → "Contract ADRs land before their implementation"). **Both
+  ran against this decision while it was `Proposed`, and both changed it.**
+  Adversarial produced §1's `async` ruling and its full declarations — the word
+  did not appear anywhere in the first draft, so a triad lane could have built a
+  synchronous seam against consumers that wrote `await` — §11's split into two
+  suites, §11's adapter-level floor, §4's boundary validation, §4's weakened
+  atomicity claim, and the canonical one-line form of both `Status` lines it
+  edits. Architecture produced §2's scope binding, without which §8's consumer
+  boundary was a sentence a tool could ignore by naming an `ENROLMENT` entry; §3's
+  validating callable; and both supersession records in §13, each drafted as a
+  stacked addition and neither one. Each is recorded at the clause it changed
+  rather than only here.
+- **Ratified before its terminal round, so the reviews cover the text that
+  merges.** The `Status` above reads `Accepted` from the last round onward, which
+  is the shape ADR-0124 used and the failure #622 records having paid for twice —
+  an ADR merged `Proposed` whose reviews never saw the ratified text. The
+  ratification touches this header and nothing else: no decision text moves, and
+  no marked clause acquires, loses or alters an obligation, which is ADR-0070 §1's
+  own test applied to the ratifying edit first.
 
 ## Context
 
