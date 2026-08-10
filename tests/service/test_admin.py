@@ -26,6 +26,7 @@ from ai_assistant.service.enrolment import (
     EnrolmentStore,
 )
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
+from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
 from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME
 from ai_assistant.wire.credential import is_well_formed, verifier_for
 from ai_assistant.wire.framing import read_frame, write_frame
@@ -478,3 +479,95 @@ async def test_a_client_that_hangs_up_mid_act_does_not_fault_the_hub(tmp_path: P
             await writer.wait_closed()
         assert (await _act(listener, {"act": "enrol", "identity": _DEVICE}))["ok"]
         assert registry.enrolments()[1] == 1
+
+
+async def test_an_over_long_identity_is_refused_and_leaves_no_enrolment_behind(
+    tmp_path: Path,
+) -> None:
+    """The boundary the enrolment reply, not the request, actually binds.
+
+    An identity can be short enough for the *request* to fit inside
+    :data:`ADMIN_FRAME_BYTES` and long enough that the *reply* — which repeats it
+    beside the credential — does not. Committing first and rendering second would
+    leave the device enrolled under a credential nobody ever read, defeating
+    ADR-0124 §6's "disclosed to the owner once at enrolment and never again" with
+    a value nothing bounded.
+
+    So the refusal comes before the act, and both halves are asserted: the owner
+    reads a sentence naming the bound, and the record is untouched.
+    """
+    async with _admin(tmp_path) as (listener, registry):
+        huge = "n" * (ADMIN_FRAME_BYTES - 200)
+        reply = await _act(listener, {"act": "enrol", "identity": huge})
+        assert reply["ok"] is False
+        assert str(MAX_OVERLAY_IDENTITY_BYTES) in reply["error"]
+        assert registry.enrolments() == ([], 0)
+
+
+async def test_an_identity_at_the_bound_is_admitted_and_its_reply_fits(
+    tmp_path: Path,
+) -> None:
+    """The discriminating half: a bound that refused everything would pass above.
+
+    Driven *at* the bound rather than inside it, so an off-by-one that refused the
+    longest permitted identity fails here — and the reply is measured, which is what
+    makes the bound's own justification true rather than asserted.
+    """
+    async with _admin(tmp_path) as (listener, registry):
+        longest = "n" * MAX_OVERLAY_IDENTITY_BYTES
+        reply = await _act(listener, {"act": "enrol", "identity": longest})
+        assert reply["ok"]
+        assert len(json.dumps(reply).encode()) < ADMIN_FRAME_BYTES
+        assert registry.verify(longest, reply["credential"]).enrolment_id is not None
+
+
+def test_the_record_refuses_an_over_long_identity_before_it_writes_a_row(
+    tmp_path: Path,
+) -> None:
+    """The invariant beneath the surface's message, held by the store itself.
+
+    The surface's refusal is what an owner reads; this is what makes the guarantee
+    true of any caller — including a future act that forgot to check, which is
+    exactly how the bug this closes would come back.
+    """
+    store = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
+    try:
+        with pytest.raises(ValueError, match=str(MAX_OVERLAY_IDENTITY_BYTES)):
+            store.enrol(
+                "n" * (MAX_OVERLAY_IDENTITY_BYTES + 1),
+                verifier=verifier_for("x" * 43),
+                now=_MOMENT,
+            )
+        assert store.recent_enrolments(limit=10) == ([], 0)
+    finally:
+        store.close()
+
+
+async def test_a_full_listing_of_the_longest_identities_still_fits_one_frame(
+    tmp_path: Path,
+) -> None:
+    """The two bounds are only a bound together, which is why this is one test.
+
+    A limit on *rows* bounds the answer only if a row is bounded too: two hundred
+    unbounded identities would overflow the frame exactly as one would. Driven at
+    both maxima at once — the row limit and the identity bound — so the arithmetic
+    is checked rather than assumed.
+    """
+    store = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
+    verifier = verifier_for("x" * 43)
+    for index in range(LISTING_LIMIT + 20):
+        store.enrol(
+            f"{index:04d}".ljust(MAX_OVERLAY_IDENTITY_BYTES, "n"), verifier=verifier, now=_MOMENT
+        )
+    registry = DeviceRegistry(store, hub_identity=_HUB_ID)
+    listener = AdminListener(registry, data_dir=tmp_path, now=_clock)
+    await listener.start()
+    try:
+        listed = await _act(listener, {"act": "list"})
+    finally:
+        await listener.stop_accepting()
+        await listener.aclose()
+        store.close()
+    assert len(listed["devices"]) == LISTING_LIMIT
+    assert listed["omitted"] == 20
+    assert len(json.dumps(listed).encode()) < ADMIN_FRAME_BYTES
