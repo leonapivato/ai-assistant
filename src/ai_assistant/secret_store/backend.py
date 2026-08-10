@@ -161,8 +161,18 @@ def select_backend() -> KeyringBackend:
     """
     try:
         selected = keyring.get_keyring()
-    except keyring.errors.KeyringError:
-        found = "the library could not resolve one at all"
+    except Exception as exc:
+        # **Every failure, not only the library's own error type.** Selecting a
+        # backend runs a priority check inside whichever backend was named, and that
+        # check reports an unreachable service by raising whatever *it* uses:
+        # `PYTHON_KEYRING_BACKEND=keyring.backends.SecretService.Keyring` on a
+        # machine with no D-Bus raises a bare ``RuntimeError``, which is not a
+        # ``KeyringError`` — and that is not an exotic case, it is precisely the
+        # configured headless deployment ADR-0125 §7 spends its longest argument on.
+        # An escape there is a traceback where §7 promises a legible refusal.
+        # ``Exception`` and not ``BaseException``, so a cancellation still
+        # propagates (ADR-0060).
+        found = f"a {type(exc).__name__} while resolving one"
     else:
         leaves = tuple(_leaves(selected))
         for leaf in leaves:

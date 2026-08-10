@@ -194,7 +194,7 @@ def test_a_library_that_cannot_resolve_one_at_all_is_refused(
     with pytest.raises(SecretStoreUnavailableError) as raised:
         select_backend()
 
-    assert "could not resolve one at all" in str(raised.value)
+    assert "NoKeyringError" in str(raised.value), "the message must name what failed"
     assert raised.value.__context__ is None, "a backend error must not be chained (§6)"
 
 
@@ -218,3 +218,31 @@ def test_the_two_placeholders_are_absent_from_the_allow_list() -> None:
     assert "keyring.backends.fail" not in PROTECTED_BACKEND_MODULES
     assert "keyring.backends.null" not in PROTECTED_BACKEND_MODULES
     assert not any(name.startswith("keyrings.alt") for name in PROTECTED_BACKEND_MODULES)
+
+
+def test_a_resolution_failure_outside_the_library_hierarchy_is_still_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The configured-headless case, which is the one ADR-0125 §7 argues hardest about.
+
+    Selecting a backend runs a priority check *inside* whichever backend was named,
+    and that check reports an unreachable service by raising whatever it uses:
+    ``PYTHON_KEYRING_BACKEND=keyring.backends.SecretService.Keyring`` on a machine
+    with no D-Bus raises a bare ``RuntimeError``, which is not a ``KeyringError``.
+    That is not an exotic configuration — it is the headless box ADR-0125 §7 was
+    written for — and an escape there is a traceback where §7 promises "a legible
+    refusal rather than a silent plaintext fallback".
+    """
+
+    def refuse() -> Any:
+        msg = "The Secret Service daemon is neither running nor activatable through D-Bus"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(keyring, "get_keyring", refuse)
+
+    with pytest.raises(SecretStoreUnavailableError) as raised:
+        select_backend()
+
+    assert "RuntimeError" in str(raised.value)
+    assert "never falls back" in str(raised.value)
+    assert raised.value.__context__ is None, "a backend error must not be chained (§6)"

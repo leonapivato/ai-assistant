@@ -24,6 +24,7 @@ constructed".
 from __future__ import annotations
 
 import contextlib
+import logging
 from typing import TYPE_CHECKING
 
 import pytest
@@ -36,6 +37,8 @@ from secret_contract import (
     Isolation,
     SecretsContract,
     SecretStoreContract,
+    assert_discloses_nothing,
+    assert_no_log_discloses,
     held,
     secret_name,
 )
@@ -52,7 +55,7 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Awaitable, Callable, Iterator
 
     from ai_assistant.core.types import SecretName, SecretValue
 
@@ -282,3 +285,41 @@ async def test_the_installation_is_length_prefixed_so_a_colon_cannot_shift_it() 
     assert survived is not None
     assert survived.get_secret_value() == "the real one"
     assert len(backing.entries) == 2
+
+
+@pytest.mark.parametrize("method", list(SecretMethod), ids=str)
+@pytest.mark.parametrize("disclosure", list(Disclosure), ids=str)
+async def test_a_backend_failure_the_library_never_wraps_still_reaches_the_declared_surface(
+    method: SecretMethod, disclosure: Disclosure, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ADR-0125 §6 declares two error types, so an untranslated one must not escape.
+
+    A backend translates *some* of what its transport raises and passes the rest
+    through: the Secret Service backend reaches ``secretstorage`` over D-Bus, and a
+    service that goes away after selection surfaces as that stack's own exception
+    rather than a ``KeyringError``. An adapter catching only the library's hierarchy
+    would let it out as a traceback — past every caller's error boundary, and
+    carrying whatever the backend put in its message.
+
+    Run over every method and every derivation, on the suites' own terms, because
+    normalising the *type* while passing the *message* on would move the leak rather
+    than close it.
+    """
+    backing = ControllableKeyring()
+    store = store_over(backing)
+    await store.set(WITNESS, held())
+    backing.arm_untranslated(method, disclosure)
+    calls: dict[SecretMethod, Callable[[], Awaitable[object]]] = {
+        SecretMethod.GET: lambda: store.get(WITNESS),
+        SecretMethod.SET: lambda: store.set(WITNESS, held()),
+        SecretMethod.DELETE: lambda: store.delete(WITNESS),
+    }
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(SecretStoreError) as raised:
+        await calls[method]()
+
+    assert backing.last_backend_failure is not None, "the case did not model a disclosure"
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert_discloses_nothing(raised.value, PLAINTEXT, context=(method, disclosure))
+    assert_no_log_discloses(caplog.records, PLAINTEXT, context=(method, disclosure))
