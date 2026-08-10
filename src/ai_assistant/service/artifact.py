@@ -44,6 +44,7 @@ import os
 import posixpath
 import sqlite3
 import stat
+import struct
 import tarfile
 from datetime import datetime
 from pathlib import Path
@@ -161,6 +162,44 @@ class _BoundedTarInfo(tarfile.TarInfo):
         """Refuse an oversized GNU long-name or long-link header, then defer."""
         self._refuse_oversized("long-name header")
         return super()._proc_gnulong(tarfile_)  # type: ignore[misc,no-any-return]
+
+    def _proc_sparse(self, _tarfile: tarfile.TarFile) -> tarfile.TarInfo:
+        """Refuse an old-GNU sparse member before its extension blocks are parsed."""
+        return self._refuse_sparse()
+
+    def _proc_gnusparse_00(self, _next: tarfile.TarInfo, _raw_headers: object) -> None:
+        """Refuse PAX sparse format 0.0."""
+        self._refuse_sparse()
+
+    def _proc_gnusparse_01(self, _next: tarfile.TarInfo, _pax_headers: object) -> None:
+        """Refuse PAX sparse format 0.1."""
+        self._refuse_sparse()
+
+    def _proc_gnusparse_10(
+        self, _next: tarfile.TarInfo, _pax_headers: object, _tarfile: tarfile.TarFile
+    ) -> None:
+        """Refuse PAX sparse format 1.0, whose map length is attacker-chosen."""
+        self._refuse_sparse()
+
+    def _refuse_sparse(self) -> tarfile.TarInfo:
+        """Refuse a sparse member at the parser rather than after it.
+
+        Sparse members were already unsupported — :func:`_checked_relative_path`
+        refuses one on ``issparse()`` — so this changes no artifact's outcome. What
+        it changes is *when*: ``tarfile`` parses a sparse map before it yields a
+        ``TarInfo`` to anything above it, and that parsing is where the damage is.
+        An old-GNU header whose extension stream is truncated indexes past the end
+        of a short block and raises a bare ``IndexError``, which is a traceback out
+        of a recovery command rather than a refusal; the PAX 1.0 map takes its
+        length from a number the artifact chooses. Refusing here means neither
+        parser ever runs.
+        """
+        msg = (
+            "the artifact carries a sparse archive member, which this tool does not read; "
+            "a sparse member's declared and stored sizes differ, and no artifact this tool "
+            "writes has one"
+        )
+        raise ArtifactError(msg)
 
     def _refuse_oversized(self, what: str) -> None:
         """Raise if this control member declares more than the format ever needs."""
@@ -343,7 +382,7 @@ def materialise(artifact: Path, *, passphrase: str, staging: Path) -> Manifest:
                 members = iter(archive)
                 manifest = _read_manifest(archive, members)
                 _materialise_payload(archive, members, manifest=manifest, staging=staging)
-    except tarfile.TarError as exc:
+    except (tarfile.TarError, ValueError, IndexError, EOFError, struct.error) as exc:
         # An artifact that decrypts is not thereby an artifact that unpacks: the
         # age layer authenticates the bytes against the passphrase, and says
         # nothing about whether the plaintext under them is a ``tar`` stream at
@@ -351,6 +390,17 @@ def materialise(artifact: Path, *, passphrase: str, staging: Path) -> Manifest:
         # what §1 was supposed to have sent", so this is a refusal like any other
         # — and a traceback out of a recovery command is the one outcome an
         # operator on a broken machine cannot act on.
+        #
+        # **Four exception types, not just `TarError`, and that is the point.**
+        # `tarfile` parses attacker-supplied header fields with `int()`, tuple
+        # unpacking, `struct` and bare indexing, so a malformed stream surfaces as
+        # `ValueError`, `IndexError`, `EOFError` or `struct.error` at least as
+        # often as it does as a `TarError` — a truncated sparse extension block
+        # raises `IndexError` from `buf[504]`, which is how this was found. The
+        # guards above close the routes that are known; this is what keeps an
+        # unknown one from reaching an operator as a traceback. It is deliberately
+        # not `except Exception`: these four are what a *parser* raises on bad
+        # input, and widening further would swallow a defect in this module.
         msg = f"the artifact decrypts but its archive cannot be read: {exc}"
         raise ArtifactError(msg) from exc
     return manifest

@@ -631,3 +631,98 @@ def test_a_control_member_declaring_more_than_it_carries_costs_nothing(
 
     with pytest.raises(ArtifactError):
         materialise(destination, passphrase=_KEYPHRASE, staging=staging)
+
+
+def _rechecksummed(header: bytearray) -> bytes:
+    """Recompute a tar header's checksum after its fields have been edited."""
+    header[148:156] = b" " * 8
+    header[148:156] = f"{sum(header):06o}\x00 ".encode("ascii")
+    return bytes(header)
+
+
+def _old_gnu_sparse_header(*, extended: bool) -> bytes:
+    """An old-GNU sparse member header, with an all-zero sparse map."""
+    info = tarfile.TarInfo(PAYLOAD_PREFIX + "sparse.db")
+    info.type = tarfile.GNUTYPE_SPARSE
+    info.size = 0
+    header = bytearray(info.tobuf(tarfile.GNU_FORMAT))
+    header[386:482] = b"\x00" * 96
+    header[482] = int(extended)
+    header[483:495] = f"{0:011o}\x00".encode("ascii")
+    return _rechecksummed(header)
+
+
+def _sealed(tmp_path: Path, name: str, plaintext: bytes) -> Path:
+    """An artifact whose payload is exactly ``plaintext``, whatever that is."""
+    destination = tmp_path / name
+    with (
+        destination.open("wb") as raw,
+        EncryptingWriter(raw, _KEYPHRASE, work_factor=_TEST_WORK_FACTOR) as sealed,
+    ):
+        sealed.write(plaintext)
+    return destination
+
+
+def test_a_sparse_member_is_refused_at_the_parser(staging: Path, tmp_path: Path) -> None:
+    """Sparse members are refused before ``tarfile`` parses their map, not after.
+
+    They were already unsupported, so no artifact's outcome changes. What changes
+    is when: the map is parsed inside ``tarfile`` before any ``TarInfo`` reaches
+    this module, and that parsing is where the damage is.
+    """
+    destination = _sealed(tmp_path, "sparse.age", _old_gnu_sparse_header(extended=False))
+
+    with pytest.raises(ArtifactError, match="sparse archive member"):
+        materialise(destination, passphrase=_KEYPHRASE, staging=staging)
+
+    assert _materialised(staging) == []
+
+
+def test_a_truncated_sparse_extension_stream_is_a_refusal_not_a_traceback(
+    staging: Path, tmp_path: Path
+) -> None:
+    """The case that made this a blocker rather than a tidy-up.
+
+    An old-GNU sparse header whose ``isextended`` flag is set, with nothing behind
+    it, sends ``tarfile`` to ``buf[504]`` on an empty block — a bare ``IndexError``
+    out of a recovery command, which is a traceback where the operator needs an
+    exit code and a sentence.
+    """
+    destination = _sealed(tmp_path, "cut-sparse.age", _old_gnu_sparse_header(extended=True))
+
+    with pytest.raises(ArtifactError):
+        materialise(destination, passphrase=_KEYPHRASE, staging=staging)
+
+
+def test_a_pax_sparse_member_is_refused_too(staging: Path, tmp_path: Path) -> None:
+    """The other sparse route: a PAX header announcing GNU sparse format 1.0.
+
+    Its map length is a number the artifact chooses, read from the stream after
+    the extended header's own size bound has already been satisfied — so the
+    control-member bound does not reach it and the refusal has to be its own.
+    """
+    # Built with `tarfile`'s own PAX writer rather than by hand: a PAX record's
+    # length prefix counts itself, so hand-rolling one is a fixed point and an
+    # off-by-one produces a header `tarfile` rejects before the sparse dispatch
+    # this test is about.
+    # Typeshed does not declare this private helper, which is the same reason the
+    # subclass under test overrides private methods: the sparse machinery has no
+    # public surface at all.
+    pax_writer = tarfile.TarInfo._create_pax_generic_header  # type: ignore[attr-defined]
+    extended = pax_writer(
+        {
+            "GNU.sparse.major": "1",
+            "GNU.sparse.minor": "0",
+            "GNU.sparse.name": PAYLOAD_PREFIX + "sparse.db",
+            "GNU.sparse.realsize": "4096",
+        },
+        tarfile.XHDTYPE,
+        "utf-8",
+    )
+    member = tarfile.TarInfo(PAYLOAD_PREFIX + "sparse.db")
+    member.size = 0
+    plaintext = extended + member.tobuf(tarfile.PAX_FORMAT)
+    destination = _sealed(tmp_path, "pax-sparse.age", plaintext)
+
+    with pytest.raises(ArtifactError, match="sparse archive member"):
+        materialise(destination, passphrase=_KEYPHRASE, staging=staging)
