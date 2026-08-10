@@ -941,3 +941,79 @@ class OversizedValueError(AssistantError):
         self.limit = limit
         self.size = size
         self.field = None if field is None else encodable_text(field)
+
+
+class SecretStoreError(AssistantError):
+    """A keyring operation failed (ADR-0125 §6).
+
+    Its own class rather than a member of an existing family: the keyring is not
+    a store under ``Settings.data_dir``, it is an operating-system service with
+    its own custody, and ADR-0004 §3 keeps Tier 0 in it and out of every database
+    named elsewhere in this module.
+
+    **Absence is never this error.** An unset name is a ``None`` from
+    :meth:`~ai_assistant.core.protocols.Secrets.get` and a ``False`` from
+    :meth:`~ai_assistant.core.protocols.SecretStore.delete`, and neither raises
+    (ADR-0125 §4, §6). Confusing the two is the failure §7 spends its longest
+    argument on, and :class:`SecretStoreUnavailableError` is what keeps them
+    apart.
+
+    **A malformed argument is not this error either.** A key outside §2's
+    grammar, a blank or oversized value, and a name for another scope are all
+    ``ValueError`` — ADR-0073 §2's spelling, inherited unchanged — because
+    nothing about the store failed (§6). Every method raises them *before* the
+    keyring is touched, so a caller that gets this one knows the backend was
+    reached and answered badly.
+
+    **No secret reaches it.** Neither this exception's message, nor its
+    arguments, nor its ``repr``, nor any log line an implementation emits
+    alongside it may contain a secret value or anything derived from one — a
+    prefix, a suffix, a truncation, a digest, or its length (ADR-0125 §6). The
+    :class:`~ai_assistant.core.types.SecretName` may appear in all of them, and
+    should: diagnosing a keyring fault requires saying which entry it was about.
+    The obvious wrapper is the leak — a backend that names the value it rejected,
+    re-raised as ``SecretStoreError(str(exc))``, writes the credential into an
+    error that ``core/logging.py``'s redaction cannot catch, because that
+    processor redacts by key name rather than by content.
+    """
+
+
+class SecretStoreUnavailableError(SecretStoreError):
+    """The keyring cannot be reached on this machine at all (ADR-0125 §7).
+
+    No backend is available, or the backend is present and locked with no unlock
+    possible in this session. Absent, locked and headless are deliberately **one
+    visible state**: what they have in common is that no call can succeed until a
+    human acts, and telling them apart would tell a caller more about the
+    machine's state than it is entitled to ask.
+
+    Narrowed out of :class:`SecretStoreError` for the reason this module narrows
+    anywhere — **the correct response differs**, which is
+    :class:`IncompatibleStateError`'s own argument applied to a second fault. A
+    keyring that is absent or locked is a deployment condition a human clears, so
+    retrying is futile and the operator has to be told; a write the backend
+    rejected may be transient. It subclasses rather than sits beside, as
+    :class:`MemoryStoreConflictError` and :class:`DeferralIdConflictError` do, so
+    a caller that only wants "the secret is not available" writes one handler.
+
+    **``get`` never returns ``None`` for this condition**, and that clause is the
+    reason this class exists. If an unreachable keyring answered ``None``, "this
+    device is not enrolled" and "this device's keyring is locked" would be one
+    observation: a client would report the owner as unenrolled while they are
+    enrolled, and an enrolment flow reading ``None`` as a first run could mint a
+    replacement credential and, under ADR-0124 §6's uniqueness clause, revoke the
+    working one — a locked keyring turned into a revocation nobody asked for.
+
+    **An argument fault still wins.** A malformed name or value, or a
+    well-formed name outside the instance's bound scope, raises ``ValueError``
+    whatever the keyring's state, including when there is no backend at all
+    (ADR-0125 §7). Reporting the machine's state to a caller who also passed a
+    bad name would hide the one fault that call will keep hitting after the
+    operator installs a keyring — and a tool reaching for the device credential
+    must be refused identically whether the keyring is locked, absent or wide
+    open.
+
+    **The message states the condition in terms the operator can act on** —
+    which backend was looked for and what was found — and never in terms of a
+    value (§7).
+    """
