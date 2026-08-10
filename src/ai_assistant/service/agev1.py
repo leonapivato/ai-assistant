@@ -208,8 +208,17 @@ def _scrypt_key(passphrase: str, salt: bytes, work_factor: int) -> bytes:
         The 32-byte key that wraps the file key.
     """
     n = 1 << work_factor
+    # Encoded outside the guard below, so an unencodable passphrase — a lone
+    # surrogate off a terminal — cannot be reported as the memory pressure that
+    # guard is for. Callers reach this through `service.passphrase`, which refuses
+    # one first; this keeps the module honest for any caller that does not.
     try:
-        return _derive(passphrase, salt, n)
+        encoded = passphrase.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        msg = "the passphrase is not encodable as UTF-8, so no key can be derived from it"
+        raise ValueError(msg) from exc
+    try:
+        return _derive(encoded, salt, n)
     except ValueError as exc:
         # `scrypt` signals a failed allocation as a `ValueError`, and every
         # *parameter* it could otherwise object to is validated before the call —
@@ -228,10 +237,10 @@ def _scrypt_key(passphrase: str, salt: bytes, work_factor: int) -> bytes:
         raise OSError(errno.ENOMEM, msg) from exc
 
 
-def _derive(passphrase: str, salt: bytes, n: int) -> bytes:
+def _derive(encoded: bytes, salt: bytes, n: int) -> bytes:
     """The bare ``scrypt`` call, split out so its failure has one place to be caught."""
     return hashlib.scrypt(
-        passphrase.encode("utf-8"),
+        encoded,
         salt=_SCRYPT_LABEL + salt,
         n=n,
         r=_SCRYPT_R,

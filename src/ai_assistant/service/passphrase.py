@@ -129,9 +129,22 @@ def _refuse_oversized(passphrase: str) -> None:
         passphrase: The passphrase this run obtained.
 
     Raises:
-        RefusalError: If it is longer than :data:`_MAX_PASSPHRASE_BYTES` encoded.
+        RefusalError: If it is longer than :data:`_MAX_PASSPHRASE_BYTES` encoded,
+            or is not encodable at all.
     """
-    encoded = len(passphrase.encode("utf-8"))
+    try:
+        encoded = len(passphrase.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        # A terminal can hand back bytes that do not decode, and Python carries
+        # them as lone surrogates in an otherwise ordinary `str`. Encoding one is
+        # a `UnicodeEncodeError`, which is a `ValueError` and so is caught by
+        # neither entry point — a traceback where an operator needs a sentence.
+        # The passphrase itself is never echoed: it is the thing being protected.
+        msg = (
+            "the passphrase contains characters that are not valid text, so it cannot be "
+            "used as a key; retype it, or supply it with --passphrase-file"
+        )
+        raise RefusalError(msg) from exc
     if encoded > _MAX_PASSPHRASE_BYTES:
         msg = (
             f"the passphrase is {encoded} bytes, past the {_MAX_PASSPHRASE_BYTES} this tool "
@@ -210,7 +223,7 @@ def _prompted(*, confirm: bool) -> str:
         if confirm and getpass.getpass("passphrase (again): ") != passphrase:
             msg = "the two passphrases do not match; nothing was written"
             raise RefusalError(msg)
-    except (EOFError, OSError) as exc:
+    except (EOFError, OSError, UnicodeDecodeError) as exc:
         msg = (
             "no passphrase could be read from the terminal; pass --passphrase-file to run "
             "this unattended, or --generate-passphrase to have one minted and shown"
