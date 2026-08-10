@@ -1097,9 +1097,16 @@ the obvious somewhere. It is refused because ADR-0125 §8 names `service` among 
 packages that hold neither face and forbids acquiring one without the ADR its §2
 requires. Seeking that exemption here would be a `core` decision arriving inside an
 ADR about a directory, which is the move golden rule 5 and ADR-0124 §10 both exist
-to stop. What §6 does instead is obey both clauses, record that the set they govern
-is empty today, and bind the lane that first makes it non-empty to decide the
-question (**#909**) rather than inherit a tool that cannot answer it.
+to stop. What §6 does instead is obey both clauses, record that the **keyring-held**
+set they govern is empty today, and bind the lane that first makes it non-empty to
+decide the question (**#909**) rather than inherit a tool that cannot answer it.
+
+**That leaves a Tier 0 residue rather than none, and this alternative is not the
+place it is disposed of.** The provider credential in the operator's environment is
+Tier 0 and is outside every version of this alternative — a `SecretStore` would not
+have reached a shell profile either. It is dealt with in §6 by a narrow
+supersession of ADR-0004 §6 and a line the report owes, and rejecting this
+alternative does not discharge it.
 
 **Naming the tool `ai-assistant-erase`.** Shorter and unambiguous against the
 retention senses of "purge" in the tree. Refused because ADR-0101 uses "erasure"
