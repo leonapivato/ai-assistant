@@ -685,3 +685,56 @@ async def test_a_broken_accept_gives_its_budget_slot_back(tmp_path: Path) -> Non
             async with _dialling(hub) as peer:
                 assert await asyncio.wait_for(peer.reader.read(), _PATIENT.total_seconds()) == b""
         await _once(lambda: budget.serving == 0, what="every slot is given back")
+
+
+async def test_a_connection_stalled_in_the_identity_query_converges_on_shutdown(
+    tmp_path: Path,
+) -> None:
+    """ADR-0083 §4's release must reach a connection that has not been admitted yet.
+
+    §4's phases own accepted connections, and
+    :meth:`~ai_assistant.service.remote.RemoteListener.aclose` is what lets go of
+    the ones whose peers never spoke again. A connection *awaiting* ADR-0124 §4's
+    identity query is the case a listener most easily loses: the identity is the
+    natural key to track it under, and it does not exist yet — so tracking it there
+    would leave nothing for the release to cancel, and a hub could finish draining
+    with an accepted connection still live that then entered ``serve_connection``
+    against an engine already closed.
+
+    The seam is a Protocol, so "the agent answers quickly" is not something this
+    listener may rest on: the fake here never answers at all.
+    """
+    reached = asyncio.Event()
+
+    class _StalledAgent(_FakeAgent):
+        async def identify(self, host: str, port: int) -> str:
+            del host, port
+            reached.set()
+            await asyncio.Event().wait()
+            raise AssertionError  # pragma: no cover — the wait above never returns
+
+    settings = _settings(tmp_path)
+    store = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
+    budget = ConnectionBudget(max_connections=8, max_pending_handshakes=4)
+    listener = RemoteListener(
+        FakeAssistantEngine(),
+        settings,
+        registry=DeviceRegistry(store, hub_identity=_HUB_ID),
+        agent=_StalledAgent(),
+        budget=budget,
+    )
+    await listener.start(build="test")
+    try:
+        reader, writer = await asyncio.open_connection(_BIND, _bound_port(listener))
+        await asyncio.wait_for(reached.wait(), _PATIENT.total_seconds())
+        await listener.stop_accepting()
+        # The release returns rather than hanging, and the peer sees the connection
+        # end — which is what "converges" means to the device on the other side.
+        await asyncio.wait_for(listener.aclose(), _PATIENT.total_seconds())
+        assert await asyncio.wait_for(reader.read(), _PATIENT.total_seconds()) == b""
+        assert budget.serving == 0
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+        store.close()

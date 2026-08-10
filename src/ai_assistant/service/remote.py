@@ -30,7 +30,6 @@ at the two points the wire calls them.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from typing import TYPE_CHECKING
 
 import structlog
@@ -182,11 +181,20 @@ class RemoteListener:
         )
 
     async def stop_accepting(self) -> None:
-        """Close the door, at the start of ADR-0083 §4's phase A."""
+        """Close the door, at the start of ADR-0083 §4's phase A.
+
+        **``wait_closed`` is deliberately not awaited**, and the reason is ADR-0083
+        §4's ordering rather than impatience. On this runtime
+        ``Server.wait_closed()`` does not return until every handler task has
+        finished, so awaiting it here would make *closing the door* wait for the
+        connections the drain has not run yet — the phases inverted, and a stop that
+        appears to hang for as long as the slowest peer holds a socket. ``close()``
+        is what stops the accepting, which is all this step is for;
+        :meth:`aclose` is what converges the handlers, after the drain, where §4 puts
+        it.
+        """
         if self._server is not None:
             self._server.close()
-            with contextlib.suppress(Exception):
-                await self._server.wait_closed()
             self._server = None
         _log.info("hub_remote_stopped_accepting", serving=len(self._tasks))
 
@@ -249,7 +257,20 @@ class RemoteListener:
         (:class:`~ai_assistant.service.overlay.OverlayIdentityUnavailableError`) and
         an implementation of it may still raise another; ADR-0083's ruling 4 is why
         that arrives as a sentence rather than as a traceback.
+
+        **The connection joins the shutdown's set here, on the first line, and that
+        placement is the decision.** Tracking it after §4's identity query — which is
+        where the identity is first known and therefore the tempting place — would
+        leave a connection *awaiting* that query invisible to
+        :meth:`aclose`: nothing would cancel it, so ADR-0083 §4's release would
+        finish with an accepted connection still live, which could then enter
+        ``serve_connection`` against an engine that had already drained. The seam is
+        a Protocol and an implementation of it need not bound its own answer, so
+        "the agent replies quickly" is not something this listener may rest on.
         """
+        task = asyncio.current_task()
+        if task is not None:
+            self._tasks.add(task)
         try:
             await self._accepted(reader, writer)
         except asyncio.CancelledError:
@@ -257,6 +278,13 @@ class RemoteListener:
         except Exception:
             _log.exception("hub_remote_accept_failed")
             await refuse(writer, "hub_remote_accept_failed", "the connection was abandoned")
+        finally:
+            if task is not None:
+                self._tasks.discard(task)
+            # Closed here as well as in ``serve_connection``'s own hang-up, because a
+            # connection cancelled *before* it got that far has never reached one. A
+            # second close is a no-op.
+            writer.close()
 
     async def _accepted(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Refuse against the two ceilings and §4's identity, then serve.
@@ -280,9 +308,6 @@ class RemoteListener:
             if identity is None:
                 return
             admission = _DeviceAdmission(self._registry, identity)
-            task = asyncio.current_task()
-            if task is not None:
-                self._tasks.add(task)
             self._writers.setdefault(identity, set()).add(writer)
             try:
                 await serve_connection(
@@ -298,8 +323,6 @@ class RemoteListener:
                     admission=admission,
                 )
             finally:
-                if task is not None:
-                    self._tasks.discard(task)
                 held = self._writers.get(identity, set())
                 held.discard(writer)
                 if not held:
