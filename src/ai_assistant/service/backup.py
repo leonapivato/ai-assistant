@@ -42,6 +42,7 @@ import stat
 import sys
 import tarfile
 import tempfile
+from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -86,13 +87,14 @@ _OWNER_ONLY_DIR: Final = 0o700
 #: never a ``rename`` that would quietly replace a predecessor.
 _NO_HARD_LINKS: Final = frozenset({errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS, errno.EMLINK})
 
-#: How deeply the walk will nest before refusing. One descriptor is held per
-#: level and that is not removable — dropping an ancestor's means re-finding it
-#: by name, which is the re-resolution the descriptors exist to avoid — so the
-#: honest answer is a bound with a diagnostic rather than an ``EMFILE`` or a
-#: ``RecursionError`` an operator has to decode. ADR-0083's data directory does
-#: not nest at all, so 64 is headroom rather than a constraint.
-_MAX_DEPTH: Final = 64
+#: What a platform reports when this process, or the machine, has no descriptor
+#: left. One is held per level of nesting and that is not removable — dropping an
+#: ancestor's means re-finding it by name, which is the re-resolution the
+#: descriptors exist to avoid — so a tree deep enough to exhaust the limit fails.
+#: It fails as a *restartable* fault with the remedy named, never as a refusal:
+#: ADR-0123 §1 says "at any depth" and authorises no depth policy, and unlike a
+#: refusal this really does succeed on a later run once ``ulimit -n`` is raised.
+_NO_DESCRIPTORS: Final = frozenset({errno.EMFILE, errno.ENFILE})
 
 #: How much of the data directory's digest names its verification namespace. §9
 #: keys the namespace to the *resolved* source directory so that two deployments
@@ -137,7 +139,7 @@ class _Frame:
     """One level of the iterative walk: a held directory and what is left to enter."""
 
     descriptor: int
-    children: list[tuple[str, str]]
+    children: deque[tuple[str, str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -493,12 +495,10 @@ def _walk(data_dir: Path, *, excluded: frozenset[str]) -> Generator[_SourceFile]
     descriptor per level of nesting, and it is not removable: dropping an
     ancestor's descriptor means re-finding it by name to reach its later
     children, which is precisely the re-resolution this walk exists to avoid.
-    What is done instead is to make the limit legible — the traversal is
-    iterative, so depth costs no interpreter stack, and a tree deeper than
-    :data:`_MAX_DEPTH` is a refusal that names the number rather than an
-    ``EMFILE`` an operator has to decode. Nothing in this system nests the data
-    directory at all, so the bound is three orders of magnitude of headroom over
-    the shape ADR-0083 actually describes.
+    What is done instead is to make that cost legible rather than to cap it — the
+    traversal is iterative, so depth costs no interpreter stack, and running out
+    of descriptors names ``ulimit -n`` and stays a *restartable* fault. Capping it
+    would be a depth policy, and §1's "at any depth" authorises none.
 
     **The copy walks a second time rather than holding the first walk open**, and
     the two walks are reconciled rather than assumed equal: both are sorted and
@@ -518,8 +518,11 @@ def _walk(data_dir: Path, *, excluded: frozenset[str]) -> Generator[_SourceFile]
         those descriptors when a caller stops early.
 
     Raises:
-        RefusalError: On a symbolic link, an entry of any other kind (§1), or a
-            tree deeper than :data:`_MAX_DEPTH`.
+        RefusalError: On a symbolic link, or an entry of any other kind (§1).
+        OSError: If the process runs out of descriptors part-way down. Left as a
+            restartable fault with the remedy named rather than converted to a
+            refusal: §1 says "at any depth" and authorises no depth policy, and a
+            later run with a higher ``ulimit -n`` really does succeed.
     """
     frames: list[_Frame] = []
     try:
@@ -532,15 +535,14 @@ def _walk(data_dir: Path, *, excluded: frozenset[str]) -> Generator[_SourceFile]
             if not frame.children:
                 os.close(frames.pop().descriptor)
                 continue
-            name, relative = frame.children.pop(0)
-            if len(frames) >= _MAX_DEPTH:
-                msg = (
-                    f"{data_dir / relative} is more than {_MAX_DEPTH} directories deep; this "
-                    f"tool holds one descriptor per level and will not walk further, so move "
-                    f"whatever nests that far out of the data directory"
-                )
-                raise RefusalError(msg)
-            child = artifact.open_directory_at(frame.descriptor, name, shown=data_dir / relative)
+            # `popleft` on a deque rather than `pop(0)` on a list: the list form
+            # shifts every remaining sibling, so a directory with a hundred
+            # thousand of them costs the square of that in element moves before
+            # any of their contents is read.
+            name, relative = frame.children.popleft()
+            child = _open_level(
+                frame.descriptor, name, shown=data_dir / relative, depth=len(frames)
+            )
             files, children = _level(child, f"{relative}/", data_dir=data_dir, excluded=excluded)
             frames.append(_Frame(descriptor=child, children=children))
             yield from files
@@ -549,9 +551,39 @@ def _walk(data_dir: Path, *, excluded: frozenset[str]) -> Generator[_SourceFile]
             os.close(frame.descriptor)
 
 
+def _open_level(directory: int, name: str, *, shown: Path, depth: int) -> int:
+    """Open a subdirectory, naming the descriptor limit if that is what ran out.
+
+    Args:
+        directory: The parent's descriptor.
+        name: The subdirectory's own name.
+        shown: The path to name in a diagnostic.
+        depth: How many levels are already held, for the diagnostic.
+
+    Returns:
+        A descriptor for the subdirectory.
+
+    Raises:
+        RefusalError: If it is a symbolic link (§1).
+        OSError: If no descriptor is available — re-raised with the remedy, and
+            deliberately still an ``OSError`` so it classifies as restartable.
+    """
+    try:
+        return artifact.open_directory_at(directory, name, shown=shown)
+    except OSError as exc:
+        if exc.errno in _NO_DESCRIPTORS:
+            msg = (
+                f"no file descriptor was available to open {shown}, {depth} directories "
+                f"down; this tool holds one per level of nesting, so raise the limit "
+                f"(ulimit -n) and run the backup again"
+            )
+            raise OSError(exc.errno, msg, str(shown)) from exc
+        raise
+
+
 def _level(
     directory: int, prefix: str, *, data_dir: Path, excluded: frozenset[str]
-) -> tuple[list[_SourceFile], list[tuple[str, str]]]:
+) -> tuple[list[_SourceFile], deque[tuple[str, str]]]:
     """Read one directory: its copyable files, and the subdirectories to descend into.
 
     The ``scandir`` is drained here rather than iterated across the descent,
@@ -573,7 +605,7 @@ def _level(
     with os.scandir(directory) as scan:
         entries = sorted(scan, key=lambda item: item.name)
     files: list[_SourceFile] = []
-    children: list[tuple[str, str]] = []
+    children: deque[tuple[str, str]] = deque()
     for entry in entries:
         relative = prefix + entry.name
         if relative in excluded:
