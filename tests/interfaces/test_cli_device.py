@@ -23,7 +23,7 @@ from ai_assistant.interfaces import cli
 from ai_assistant.testing import FakeSecretStore
 from ai_assistant.wire import HubEngineClient, RemoteHubEngineClient
 from ai_assistant.wire.credential import mint_credential
-from ai_assistant.wire.enrolment import credential_name, hub_identity_name, read_enrolment
+from ai_assistant.wire.enrolment import enrolment_name, read_enrolment
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -211,8 +211,7 @@ def test_a_mistyped_credential_is_refused_and_nothing_is_stored(
     )
 
     assert result.exit_code == 1
-    assert await_sync(secrets.get(hub_identity_name())) is None
-    assert await_sync(secrets.get(credential_name())) is None
+    assert await_sync(secrets.get(enrolment_name())) is None
 
 
 def test_a_keyring_that_cannot_be_reached_is_reported_rather_than_swallowed(
@@ -254,8 +253,7 @@ def test_unenrolment_removes_the_pair_and_says_what_it_removed(
     result = CliRunner().invoke(cli.app, ["device", "unenrol"])
 
     assert result.exit_code == 0, result.output
-    assert await_sync(secrets.get(credential_name())) is None
-    assert await_sync(secrets.get(hub_identity_name())) is None
+    assert await_sync(secrets.get(enrolment_name())) is None
     assert "the credential and the hub identity" in rendered.getvalue()
 
 

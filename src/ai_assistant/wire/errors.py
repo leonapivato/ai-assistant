@@ -124,13 +124,19 @@ class NotEnrolledError(TransportError):
 
 
 class IncompleteEnrolmentError(NotEnrolledError):
-    """This device holds one half of an enrolment and not the other.
+    """This device holds an enrolment record that is not a whole pair.
 
     ADR-0124 §6, in as many words: "holding the credential without the hub identity
-    is an incomplete enrolment the client refuses to connect on". ADR-0125 §4 names
-    how it arises — a device holds the credential and the enrolled hub identity as
-    two entries, and "a crash between the two ``set`` calls leaves one" — and rules
-    that closing it is the client's obligation whatever the storage does.
+    is an incomplete enrolment the client refuses to connect on", and closing that
+    state is the client's obligation whatever the storage does.
+
+    **The state it reports is a record this build cannot read, not a half-written
+    one.** :mod:`ai_assistant.wire.enrolment` stores the pair as one value under one
+    name, and ADR-0125 §4 guarantees that a ``get`` "never observes a partially
+    written value… never a mixture and never a fragment" — so a partial write is not
+    a state a device can be in. What reaches here is a record written by something
+    else, or by a build whose format this one does not know, and §6's answer to
+    holding half an enrolment is its answer to holding an unreadable one.
 
     **A subclass of :class:`NotEnrolledError`, so a caller that only wants "this
     device cannot connect" writes one handler**, while an owner still reads which of

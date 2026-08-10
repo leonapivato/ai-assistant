@@ -1180,18 +1180,12 @@ async def _remove_device_enrolment() -> int:
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
-    if not removed.removed_anything:
+    if not removed:
         console.print("This device held no enrolment; nothing changed.")
         return _EXIT_OK
-    gone = [
-        name
-        for name, was_there in (
-            ("the credential", removed.credential_removed),
-            ("the hub identity", removed.hub_identity_removed),
-        )
-        if was_there
-    ]
-    console.print(f"[green]Removed[/] {' and '.join(gone)} from this machine's keyring.")
+    console.print(
+        "[green]Removed[/] the credential and the hub identity from this machine's keyring."
+    )
     console.print(
         "The hub still holds this device's enrolment until you revoke it there — run "
         "'ai-assistant-device revoke' on the hub's own machine."

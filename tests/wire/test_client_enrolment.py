@@ -3,26 +3,25 @@
 ADR-0124 §6's hand-off performed at the device, and §8's unenrolment. The subject
 is :mod:`ai_assistant.wire.enrolment` over the canonical ``FakeSecretStore``, bound
 to ``ENROLMENT`` — which is the wiring ADR-0125 §8 requires, so a store bound to any
-other scope refuses these names outright rather than answering them.
+other scope refuses this name outright rather than answering it.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
 
 import pytest
 from pydantic import SecretStr
 
-from ai_assistant.core.errors import SecretStoreUnavailableError
+from ai_assistant.core.errors import SecretStoreError, SecretStoreUnavailableError
 from ai_assistant.core.logging import _SENSITIVE_KEY_PARTS
-from ai_assistant.core.types import SecretName, SecretScope
-from ai_assistant.testing import FakeSecretStore
+from ai_assistant.core.types import SECRET_VALUE_MAX_BYTES, SecretScope
+from ai_assistant.testing import Disclosure, FakeSecretStore, SecretMethod
 from ai_assistant.wire.credential import mint_credential
 from ai_assistant.wire.enrolment import (
-    CREDENTIAL_KEY,
-    HUB_IDENTITY_KEY,
-    credential_name,
-    hub_identity_name,
+    ENROLMENT_KEY,
+    Enrolment,
+    enrolment_name,
     read_enrolment,
     remove_enrolment,
     store_enrolment,
@@ -30,39 +29,8 @@ from ai_assistant.wire.enrolment import (
 from ai_assistant.wire.errors import IncompleteEnrolmentError, NotEnrolledError
 from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 
-if TYPE_CHECKING:
-    from ai_assistant.core.types import SecretValue
-
 HUB = "nQ8xYt2CNTRL"
-
-
-class RecordingStore:
-    """A ``SecretStore`` that notes the order of the writes it passes through.
-
-    A delegating wrapper rather than a patched method, because the order under test
-    is a property of :func:`store_enrolment` and the subject it drives must stay the
-    canonical fake — a store with one method replaced is a subject nothing else in
-    the corpus has run against.
-    """
-
-    def __init__(self, inner: FakeSecretStore) -> None:
-        self.inner = inner
-        self.written: list[str] = []
-
-    async def get(self, name: SecretName) -> SecretValue | None:
-        return await self.inner.get(name)
-
-    async def set(self, name: SecretName, value: SecretValue) -> None:
-        self.written.append(name.key)
-        await self.inner.set(name, value)
-
-    async def delete(self, name: SecretName) -> bool:
-        return await self.inner.delete(name)
-
-
-def _held(plaintext: str) -> SecretValue:
-    """A value built the way a caller builds one, for arranging a half-written state."""
-    return SecretStr(plaintext)
+OTHER_HUB = "zK1mBv9QOTHR"
 
 
 @pytest.fixture
@@ -71,19 +39,42 @@ def store() -> FakeSecretStore:
     return FakeSecretStore(scope=SecretScope.ENROLMENT)
 
 
+async def held_record(store: FakeSecretStore) -> str:
+    """The record as it is actually stored, for the cases that are about its shape."""
+    stored = await store.get(enrolment_name())
+    assert stored is not None
+    return stored.get_secret_value()
+
+
+async def put(store: FakeSecretStore, plaintext: str) -> None:
+    """Write a record directly, for arranging a state the intake cannot produce."""
+    await store.set(enrolment_name(), SecretStr(plaintext))
+
+
 async def test_a_stored_pair_reads_back_whole(store: FakeSecretStore) -> None:
     """The ordinary path: both values in, both values out, the secret still wrapped."""
     credential = mint_credential()
     await store_enrolment(store, hub_identity=HUB, credential=credential)
 
-    held = await read_enrolment(store)
+    assert await read_enrolment(store) == Enrolment(
+        hub_identity=HUB, credential=SecretStr(credential)
+    )
 
-    assert held.hub_identity == HUB
-    assert held.credential.get_secret_value() == credential
+
+async def test_the_pair_occupies_one_entry(store: FakeSecretStore) -> None:
+    """One name, which is what makes the act atomic (ADR-0125 §4).
+
+    Asserted over the backing rather than through the seam, because the number of
+    entries is exactly what a reader cannot see from above — and it is the fact the
+    whole atomicity argument rests on.
+    """
+    await store_enrolment(store, hub_identity=HUB, credential=mint_credential())
+
+    assert len(store.backing) == 1
 
 
 async def test_the_credential_is_returned_still_wrapped(store: FakeSecretStore) -> None:
-    """ADR-0125 §3's one authorised unwrap belongs to the connect path, not here.
+    """ADR-0125 §3's one authorised unwrap belongs to the connect frame, not here.
 
     A read that handed back a plain ``str`` would put the credential in front of
     every caller of this module, and the type whose default rendering is
@@ -93,10 +84,10 @@ async def test_the_credential_is_returned_still_wrapped(store: FakeSecretStore) 
     credential = mint_credential()
     await store_enrolment(store, hub_identity=HUB, credential=credential)
 
-    held = await read_enrolment(store)
+    found = await read_enrolment(store)
 
-    assert credential not in repr(held.credential)
-    assert credential not in str(held.credential)
+    assert credential not in repr(found.credential)
+    assert credential not in str(found.credential)
 
 
 async def test_a_device_holding_nothing_is_not_enrolled(store: FakeSecretStore) -> None:
@@ -108,32 +99,53 @@ async def test_a_device_holding_nothing_is_not_enrolled(store: FakeSecretStore) 
     assert "ai-assistant-device enrol" in str(raised.value)
 
 
-async def test_a_credential_without_a_hub_identity_is_refused(store: FakeSecretStore) -> None:
-    """ADR-0124 §6's own sentence, as a test.
+@pytest.mark.parametrize(
+    ("record", "shape"),
+    [
+        ("not json at all", "not JSON"),
+        ('["hub", "credential"]', "a list rather than an object"),
+        ('{"credential": "x"}', "no hub member"),
+        ('{"hub": "h"}', "no credential member"),
+        ('{"hub": "", "credential": "x"}', "a blank hub"),
+        ('{"hub": "   ", "credential": "x"}', "a whitespace-only hub"),
+        ('{"hub": "h", "credential": ""}', "a blank credential"),
+        ('{"hub": 7, "credential": "x"}', "a hub that is not a string"),
+        ('{"hub": "h", "credential": null}', "a credential that is not a string"),
+    ],
+)
+async def test_a_record_that_is_not_a_whole_pair_is_refused(
+    store: FakeSecretStore, record: str, shape: str
+) -> None:
+    """ADR-0124 §6's refusal, over every way a record can fail to be a pair.
 
     > holding the credential without the hub identity is an incomplete enrolment
     > the client refuses to connect on
 
-    It is the dangerous half: a device holding a credential and no identity has
-    nothing to check a destination against, so it would hand the credential to
-    whichever node answered.
+    One sentence for all of them, because the owner's act is the same and a taxonomy
+    would only invite a branch that tried to use half a record.
     """
-    await store.set(credential_name(), _held(mint_credential()))
+    del shape
+    await put(store, record)
 
     with pytest.raises(IncompleteEnrolmentError):
         await read_enrolment(store)
 
 
-async def test_a_hub_identity_without_a_credential_is_refused(store: FakeSecretStore) -> None:
-    """The other half, which a crash between the two writes can produce (ADR-0125 §4).
+async def test_a_refused_record_is_never_quoted(store: FakeSecretStore) -> None:
+    """ADR-0125 §6 binds every exception this seam raises, and the record is Tier 0.
 
-    Refused for the same reason and with a different sentence, so an owner can tell
-    which act to repeat.
+    A message quoting what failed to parse would be the disclosure that section
+    forbids arriving through the error path — and the record holds the credential
+    whether or not it parses.
     """
-    await store.set(hub_identity_name(), _held(HUB))
+    credential = mint_credential()
+    await put(store, f'{{"hub": "{HUB}", "credential-typo": "{credential}"}}')
 
-    with pytest.raises(IncompleteEnrolmentError):
+    with pytest.raises(IncompleteEnrolmentError) as raised:
         await read_enrolment(store)
+
+    assert credential not in str(raised.value)
+    assert credential[:8] not in str(raised.value)
 
 
 async def test_an_unreachable_keyring_is_not_an_unenrolled_device(
@@ -153,19 +165,55 @@ async def test_an_unreachable_keyring_is_not_an_unenrolled_device(
         await read_enrolment(store)
 
 
-async def test_the_identity_is_written_before_the_credential(store: FakeSecretStore) -> None:
-    """So a crash between the two cannot leave the half ADR-0124 §6 names.
+# --- rotation, and the state one entry makes unreachable ---------------------
 
-    Both incomplete states are refused, so the ordering buys nothing about
-    *correctness* — it buys which of the two an interrupted intake leaves behind,
-    and the one to avoid is the credential sitting on a device with nothing to
-    check a destination against.
+
+async def test_intake_over_a_live_enrolment_replaces_it(store: FakeSecretStore) -> None:
+    """Rotation is one act, which is why ADR-0125 §4 makes ``set`` replace.
+
+    ADR-0124 §6 makes re-enrolling a live device "a **single act**… and the two
+    halves are not separable". A device that had to remove before it could store
+    would hold nothing in between, and a crash there would leave it unenrolled.
     """
-    recorder = RecordingStore(store)
+    await store_enrolment(store, hub_identity=HUB, credential=mint_credential())
+    rotated = mint_credential()
 
-    await store_enrolment(recorder, hub_identity=HUB, credential=mint_credential())
+    await store_enrolment(store, hub_identity=HUB, credential=rotated)
 
-    assert recorder.written == [HUB_IDENTITY_KEY, CREDENTIAL_KEY]
+    assert (await read_enrolment(store)).credential.get_secret_value() == rotated
+    assert len(store.backing) == 1
+
+
+async def test_a_failed_re_enrolment_leaves_the_previous_pair_whole(
+    store: FakeSecretStore,
+) -> None:
+    """**The state one entry exists to make unreachable.**
+
+    With the pair under two names, re-enrolling at a second hub writes twice, and a
+    failure between the writes leaves the *new* identity beside the *old*
+    credential. That pair is syntactically whole, so a read accepts it, ADR-0124
+    §4's identity check passes against the new hub, and the client presents the
+    previous hub's credential to it — a Tier 0 value sent to a node it was never
+    minted for, in a state neither end can detect.
+
+    One entry removes it rather than detecting it: ADR-0125 §4 guarantees a ``get``
+    "never observes a partially written value… never a mixture and never a
+    fragment", so a device holds the old pair or the new one and nothing else.
+    """
+    first = mint_credential()
+    await store_enrolment(store, hub_identity=HUB, credential=first)
+    store.fail(SecretMethod.SET, Disclosure.VERBATIM)
+
+    with pytest.raises(SecretStoreError):
+        await store_enrolment(store, hub_identity=OTHER_HUB, credential=mint_credential())
+
+    survived = await read_enrolment(store)
+    assert survived.hub_identity == HUB, "a failed re-enrolment moved the identity alone"
+    assert survived.credential.get_secret_value() == first
+    assert len(store.backing) == 1
+
+
+# --- what intake refuses ------------------------------------------------------
 
 
 async def test_intake_refuses_a_credential_the_scheme_could_not_have_minted(
@@ -181,7 +229,7 @@ async def test_intake_refuses_a_credential_the_scheme_could_not_have_minted(
     with pytest.raises(ValueError, match="copied whole"):
         await store_enrolment(store, hub_identity=HUB, credential="not-a-credential")
 
-    assert await store.get(hub_identity_name()) is None, "a refused intake stored a half"
+    assert await store.get(enrolment_name()) is None, "a refused intake stored a record"
 
 
 async def test_a_refused_credential_is_never_echoed(store: FakeSecretStore) -> None:
@@ -223,38 +271,54 @@ async def test_intake_refuses_a_hub_identity_no_overlay_produces(
     with pytest.raises(ValueError):  # noqa: PT011 - the type is the assertion
         await store_enrolment(store, hub_identity=identity, credential=mint_credential())
 
-    assert await store.get(credential_name()) is None, "a refused intake stored the credential"
+    assert await store.get(enrolment_name()) is None, "a refused intake stored a record"
 
 
-async def test_intake_over_a_live_enrolment_replaces_it(store: FakeSecretStore) -> None:
-    """Rotation is one act, which is why ADR-0125 §4 makes ``set`` replace.
+# --- what the record is -------------------------------------------------------
 
-    ADR-0124 §6 makes re-enrolling a live device "a **single act**… and the two
-    halves are not separable". A device that had to remove before it could store
-    would hold nothing in between, and a crash there would leave it unenrolled.
+
+async def test_the_record_carries_both_values_verbatim(store: FakeSecretStore) -> None:
+    """Stored byte for byte, which is what ADR-0125 §3's verbatim clause requires.
+
+    Two spellings of a secret are two different secrets, so nothing between intake
+    and the connect frame may trim, fold or re-encode either member.
     """
-    await store_enrolment(store, hub_identity=HUB, credential=mint_credential())
-    rotated = mint_credential()
+    credential = mint_credential()
+    await store_enrolment(store, hub_identity=HUB, credential=credential)
 
-    await store_enrolment(store, hub_identity=HUB, credential=rotated)
-
-    held = await read_enrolment(store)
-    assert held.credential.get_secret_value() == rotated
+    assert json.loads(await held_record(store)) == {"hub": HUB, "credential": credential}
 
 
-async def test_unenrolment_removes_both_and_says_what_it_removed(
+async def test_the_widest_record_this_device_accepts_fits_the_value_bound(
+    store: FakeSecretStore,
+) -> None:
+    """ADR-0125 §3's 1024 UTF-8 bytes, against the largest pair intake admits.
+
+    The bound is the store's and it refuses rather than truncating, so a record that
+    did not fit would be an enrolment the owner could perform at the hub and not
+    complete at the device. Driven at the widest admissible identity — in a script
+    that costs more than one byte a character — so the margin is measured rather
+    than assumed.
+    """
+    wide = "ǆ" * (MAX_OVERLAY_IDENTITY_BYTES // len("ǆ".encode()))
+    await store_enrolment(store, hub_identity=wide, credential=mint_credential())
+
+    assert len((await held_record(store)).encode("utf-8")) <= SECRET_VALUE_MAX_BYTES
+    assert (await read_enrolment(store)).hub_identity == wide
+
+
+# --- unenrolment (ADR-0124 §8) ------------------------------------------------
+
+
+async def test_unenrolment_removes_the_record_and_says_it_did(
     store: FakeSecretStore,
 ) -> None:
     """ADR-0124 §8's device-side act, and ADR-0125 §5's "say what you did"."""
     await store_enrolment(store, hub_identity=HUB, credential=mint_credential())
 
-    removed = await remove_enrolment(store)
-
-    assert removed.credential_removed is True
-    assert removed.hub_identity_removed is True
-    assert removed.removed_anything is True
-    assert await store.get(credential_name()) is None
-    assert await store.get(hub_identity_name()) is None
+    assert await remove_enrolment(store) is True
+    assert await store.get(enrolment_name()) is None
+    assert len(store.backing) == 0
 
 
 async def test_unenrolment_is_safe_to_repeat(store: FakeSecretStore) -> None:
@@ -267,50 +331,48 @@ async def test_unenrolment_is_safe_to_repeat(store: FakeSecretStore) -> None:
     await store_enrolment(store, hub_identity=HUB, credential=mint_credential())
     await remove_enrolment(store)
 
-    again = await remove_enrolment(store)
-
-    assert again.removed_anything is False
+    assert await remove_enrolment(store) is False
 
 
-async def test_unenrolment_on_a_device_that_holds_a_half_removes_it(
+async def test_unenrolment_removes_a_record_this_build_cannot_read(
     store: FakeSecretStore,
 ) -> None:
     """A purge composed from the names its holder knows (ADR-0125 §5).
 
-    There is no enumeration, so this act is the only thing that removes these two
-    entries — and a device left in the half-written state is one whose purge has to
-    reach the half that is there.
+    There is no enumeration, so this act is the only thing that removes this entry —
+    and a device holding a record nothing can read is exactly the device an owner
+    reaches for it on. A purge that first tried to *parse* what it was removing
+    would leave behind the one entry it exists to remove.
     """
-    await store.set(credential_name(), _held(mint_credential()))
+    await put(store, "not json at all")
 
-    removed = await remove_enrolment(store)
-
-    assert removed.credential_removed is True
-    assert removed.hub_identity_removed is False
-    assert await store.get(credential_name()) is None
+    assert await remove_enrolment(store) is True
+    assert await store.get(enrolment_name()) is None
 
 
-async def test_the_two_names_are_enrolment_scoped_and_distinct() -> None:
+# --- the name, and the scope it is reached through ----------------------------
+
+
+async def test_the_name_is_enrolment_scoped_and_no_other_scope_may_reach_it() -> None:
     """The scope is a property of the object a consumer holds (ADR-0125 §2, §8).
 
-    A store bound to another scope refuses these names rather than answering them,
-    which is what makes "the wire client's enrolment paths hold an
-    ``ENROLMENT``-scoped store" mechanical instead of advisory.
+    A store bound to another scope refuses this name rather than answering it, which
+    is what makes "the wire client's enrolment paths hold an ``ENROLMENT``-scoped
+    store" mechanical instead of advisory — and it is the boundary that keeps a tool
+    from reading the device credential.
     """
-    assert credential_name().scope is SecretScope.ENROLMENT
-    assert hub_identity_name().scope is SecretScope.ENROLMENT
-    assert credential_name() != hub_identity_name()
+    assert enrolment_name().scope is SecretScope.ENROLMENT
 
     elsewhere = FakeSecretStore(scope=SecretScope.INTEGRATION)
     with pytest.raises(ValueError, match="scope"):
-        await elsewhere.get(credential_name())
+        await elsewhere.get(enrolment_name())
 
 
-def test_the_credential_key_is_one_the_log_redaction_covers() -> None:
+def test_the_entry_is_named_so_the_log_redaction_covers_it() -> None:
     """ADR-0124 §6: "no implementation may give it a name that redaction misses".
 
     ``core/logging.py`` redacts by *key name*, matching ``credential`` as a
     case-insensitive substring, so the name is chosen to be covered by it rather
     than to be pretty.
     """
-    assert any(part in CREDENTIAL_KEY.casefold() for part in _SENSITIVE_KEY_PARTS)
+    assert any(part in ENROLMENT_KEY.casefold() for part in _SENSITIVE_KEY_PARTS)
