@@ -344,7 +344,21 @@ def _stable_id(node: dict[str, Any]) -> str:
             "recorded against a name or an address would follow a rename or a reassignment"
         )
         raise OverlayIdentityUnavailableError(msg)
-    if len(identity.encode("utf-8")) > MAX_OVERLAY_IDENTITY_BYTES:
+    try:
+        size = len(identity.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        # **A string JSON decoded is not always a string that can be sent.** A lone
+        # surrogate survives ``json.loads`` and has no UTF-8 form at all, which is
+        # the category :func:`ai_assistant.wire.envelope._finite` handles for a
+        # non-finite number — "it has no form on this wire". An identity that cannot
+        # be encoded cannot be recorded, compared or reported, so not knowing it is
+        # the same condition as not being told it, and takes §4's same answer.
+        msg = (
+            "the overlay agent reported a stable identity with no UTF-8 form, so it "
+            "cannot be recorded or compared; the peer is refused"
+        )
+        raise OverlayIdentityUnavailableError(msg) from exc
+    if size > MAX_OVERLAY_IDENTITY_BYTES:
         # Refused at the seam that *produces* an identity, so nothing downstream has
         # to re-derive the bound. §4's answer to an identity it cannot use is the
         # same as its answer to one it cannot obtain: the connection is refused.

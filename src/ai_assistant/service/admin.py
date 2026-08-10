@@ -243,7 +243,14 @@ class AdminListener:
         # device enrolled under a credential nobody read. The store refuses it too
         # (:func:`~ai_assistant.service.enrolment._bounded_identity`); that refusal
         # is the invariant and this one is the sentence an owner gets.
-        if len(identity.encode("utf-8")) > MAX_OVERLAY_IDENTITY_BYTES:
+        try:
+            size = len(identity.encode("utf-8"))
+        except UnicodeEncodeError:
+            # A lone surrogate survives ``json.loads`` and has no UTF-8 form; the
+            # store refuses it too, but a ``ValueError`` raised there would reach
+            # the catch-all below and close the socket without a word.
+            return _failed("an overlay identity must be text that can be encoded")
+        if size > MAX_OVERLAY_IDENTITY_BYTES:
             return _failed(
                 f"an overlay identity is at most {MAX_OVERLAY_IDENTITY_BYTES} bytes; "
                 f"use the stable identifier your overlay agent reports for the device"
