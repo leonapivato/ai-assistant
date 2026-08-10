@@ -159,6 +159,17 @@ class Share:
             return f"{_UNDEFINED}  ({self.count} of 0)"
         return f"{value:.4f}  ({self.count} of {self.total})"
 
+    def compact(self) -> str:
+        """The count and its proportion, for a column in a table.
+
+        The same two facts as :meth:`rendered` in the other order, because a table
+        column is read down: the counts line up and the shares sit beside them.
+        The undefined case still refuses to state a figure — it says so in the
+        space a figure would have occupied rather than printing a zero.
+        """
+        value = self.value
+        return f"{self.count} (undefined)" if value is None else f"{self.count} ({value:.4f})"
+
 
 @dataclass(frozen=True, slots=True)
 class Spread:
@@ -501,8 +512,17 @@ def _percentile(ordered: Sequence[float], fraction: float) -> float:
 def _census_lines(
     census: Census, by_kind: Sequence[tuple[str, Census]], without_vector: int
 ) -> list[str]:
-    """The closure census, store-wide and by kind."""
-    lines = [
+    """The closure census, store-wide and decomposed by kind.
+
+    §3 requires each of the four counts "as a count and as a proportion of the
+    total, store-wide **and decomposed by** ``kind``", so the decomposition
+    carries its shares too. Each share is of that kind's own total, because that
+    is what "the total" is inside a part of a decomposition — a share of the
+    store-wide total would be a different quantity, and one already recoverable
+    from the counts. Said on the heading rather than left to the reader, since the
+    two readings differ by exactly the number an operator would act on.
+    """
+    return [
         "census — every record physically present, whatever its lifecycle state",
         f"  records                        {census.total}",
         f"  live at T                      {census.live_share.rendered()}",
@@ -510,14 +530,20 @@ def _census_lines(
         f"  not yet live at T              {census.not_yet_live_share.rendered()}",
         f"  expired at T, not yet purged   {census.expired_share.rendered()}",
         f"  no vector stored               {without_vector}",
-        "  by kind                        total / live / retired / not-yet-live / expired",
+        "  by kind — each share is of that kind's own total",
+        (
+            f"    {'kind':<14}{'total':>7}  {'live':<16}{'retired':<16}"
+            f"{'not yet live':<16}{'expired':<16}"
+        ).rstrip(),
+        *(
+            (
+                f"    {kind:<14}{part.total:>7}  {part.live_share.compact():<16}"
+                f"{part.retired_share.compact():<16}{part.not_yet_live_share.compact():<16}"
+                f"{part.expired_share.compact():<16}"
+            ).rstrip()
+            for kind, part in by_kind
+        ),
     ]
-    lines += [
-        f"    {kind:<28} {part.total} / {part.live} / {part.retired}"
-        f" / {part.not_yet_live} / {part.expired}"
-        for kind, part in by_kind
-    ]
-    return lines
 
 
 def _concentration_lines(concentration: Concentration) -> list[str]:
