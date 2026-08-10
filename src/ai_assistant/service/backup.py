@@ -86,6 +86,14 @@ _OWNER_ONLY_DIR: Final = 0o700
 #: never a ``rename`` that would quietly replace a predecessor.
 _NO_HARD_LINKS: Final = frozenset({errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS, errno.EMLINK})
 
+#: How deeply the walk will nest before refusing. One descriptor is held per
+#: level and that is not removable — dropping an ancestor's means re-finding it
+#: by name, which is the re-resolution the descriptors exist to avoid — so the
+#: honest answer is a bound with a diagnostic rather than an ``EMFILE`` or a
+#: ``RecursionError`` an operator has to decode. ADR-0083's data directory does
+#: not nest at all, so 64 is headroom rather than a constraint.
+_MAX_DEPTH: Final = 64
+
 #: How much of the data directory's digest names its verification namespace. §9
 #: keys the namespace to the *resolved* source directory so that two deployments
 #: sharing a temporary parent cannot sweep each other's live verification tree.
@@ -122,6 +130,14 @@ class _Fingerprint:
     length: int
     mtime_ns: int
     change_counter: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Frame:
+    """One level of the iterative walk: a held directory and what is left to enter."""
+
+    descriptor: int
+    children: list[tuple[str, str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,7 +475,7 @@ def _sources(data_dir: Path, *, excluded: frozenset[str]) -> Iterator[tuple[str,
 
 
 def _walk(data_dir: Path, *, excluded: frozenset[str]) -> Generator[_SourceFile]:
-    """Walk the directory depth-first, holding a descriptor per *level*.
+    """Walk the directory depth-first, holding one descriptor per *level*.
 
     **Descriptors, because a name is not an object** (ADR-0123 §1). A directory
     that was a directory when it was listed can be a symlink by the time a file
@@ -468,12 +484,21 @@ def _walk(data_dir: Path, *, excluded: frozenset[str]) -> Generator[_SourceFile]
     parent's descriptor, so the open that matters goes to the directory that was
     verified.
 
-    **Per level, not per directory, and that distinction is a bug this had.**
-    Retaining a descriptor for every directory in the tree made the backup's cost
-    a function of how many directories there are: past ``RLIMIT_NOFILE`` — 1024 by
-    default — a perfectly ordinary wide tree would fail with ``EMFILE`` and produce
-    no artifact at all, which contradicts §1's "at any depth". Closing each on the
-    way back out bounds the cost by the tree's *depth* instead.
+    **Per level rather than per directory**, which is what keeps the cost off the
+    tree's *width*: retaining one descriptor for every directory made an ordinary
+    wide tree fail with ``EMFILE`` past ``RLIMIT_NOFILE`` and produce no artifact,
+    against §1's "at any depth".
+
+    **And per level is where it stops**, deliberately. The remaining cost is one
+    descriptor per level of nesting, and it is not removable: dropping an
+    ancestor's descriptor means re-finding it by name to reach its later
+    children, which is precisely the re-resolution this walk exists to avoid.
+    What is done instead is to make the limit legible — the traversal is
+    iterative, so depth costs no interpreter stack, and a tree deeper than
+    :data:`_MAX_DEPTH` is a refusal that names the number rather than an
+    ``EMFILE`` an operator has to decode. Nothing in this system nests the data
+    directory at all, so the bound is three orders of magnitude of headroom over
+    the shape ADR-0083 actually describes.
 
     **The copy walks a second time rather than holding the first walk open**, and
     the two walks are reconciled rather than assumed equal: both are sorted and
@@ -493,24 +518,61 @@ def _walk(data_dir: Path, *, excluded: frozenset[str]) -> Generator[_SourceFile]
         those descriptors when a caller stops early.
 
     Raises:
-        RefusalError: On a symbolic link, or an entry of any other kind (§1).
+        RefusalError: On a symbolic link, an entry of any other kind (§1), or a
+            tree deeper than :data:`_MAX_DEPTH`.
     """
-    root = artifact.open_directory_at(None, str(data_dir), shown=data_dir)
+    frames: list[_Frame] = []
     try:
-        yield from _descend(root, "", data_dir=data_dir, excluded=excluded)
+        root = artifact.open_directory_at(None, str(data_dir), shown=data_dir)
+        files, children = _level(root, "", data_dir=data_dir, excluded=excluded)
+        frames.append(_Frame(descriptor=root, children=children))
+        yield from files
+        while frames:
+            frame = frames[-1]
+            if not frame.children:
+                os.close(frames.pop().descriptor)
+                continue
+            name, relative = frame.children.pop(0)
+            if len(frames) >= _MAX_DEPTH:
+                msg = (
+                    f"{data_dir / relative} is more than {_MAX_DEPTH} directories deep; this "
+                    f"tool holds one descriptor per level and will not walk further, so move "
+                    f"whatever nests that far out of the data directory"
+                )
+                raise RefusalError(msg)
+            child = artifact.open_directory_at(frame.descriptor, name, shown=data_dir / relative)
+            files, children = _level(child, f"{relative}/", data_dir=data_dir, excluded=excluded)
+            frames.append(_Frame(descriptor=child, children=children))
+            yield from files
     finally:
-        os.close(root)
+        for frame in frames:
+            os.close(frame.descriptor)
 
 
-def _descend(
+def _level(
     directory: int, prefix: str, *, data_dir: Path, excluded: frozenset[str]
-) -> Iterator[_SourceFile]:
-    """Yield one directory's files, then recurse, closing each child on the way out."""
+) -> tuple[list[_SourceFile], list[tuple[str, str]]]:
+    """Read one directory: its copyable files, and the subdirectories to descend into.
+
+    The ``scandir`` is drained here rather than iterated across the descent,
+    because an open one holds a descriptor of its own — leaving it open would put
+    the per-directory cost this walk exists to bound straight back.
+
+    Args:
+        directory: The descriptor for the directory to read.
+        prefix: Its data-directory-relative path, with a trailing separator.
+        data_dir: The data directory, for diagnostics.
+        excluded: §3's exclusion set.
+
+    Returns:
+        Its files, and its subdirectories as ``(name, relative)`` pairs.
+
+    Raises:
+        RefusalError: On a symbolic link or an entry of any other kind (§1).
+    """
     with os.scandir(directory) as scan:
-        # Drained before recursing: an open `scandir` holds a descriptor of its
-        # own, so iterating it across the recursion would put the very cost this
-        # walk exists to bound back on a per-directory footing.
         entries = sorted(scan, key=lambda item: item.name)
+    files: list[_SourceFile] = []
     children: list[tuple[str, str]] = []
     for entry in entries:
         relative = prefix + entry.name
@@ -526,19 +588,14 @@ def _descend(
         if entry.is_dir(follow_symlinks=False):
             children.append((entry.name, relative))
         elif entry.is_file(follow_symlinks=False):
-            yield _SourceFile(relative=relative, name=entry.name, directory=directory)
+            files.append(_SourceFile(relative=relative, name=entry.name, directory=directory))
         else:
             msg = (
                 f"{shown} is neither a regular file nor a directory, so it cannot be copied "
                 f"byte for byte; move it out of the data directory"
             )
             raise RefusalError(msg)
-    for name, relative in children:
-        child = artifact.open_directory_at(directory, name, shown=data_dir / relative)
-        try:
-            yield from _descend(child, f"{relative}/", data_dir=data_dir, excluded=excluded)
-        finally:
-            os.close(child)
+    return files, children
 
 
 def _refuse_sidecars(data_dir: Path) -> None:
