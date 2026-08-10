@@ -1,7 +1,8 @@
 # 127. Withdrawing a proposal that was never ratified
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-10
+- Accepted: 2026-08-10
 - Partially supersedes: ADR-0070 — §1's enumeration of permitted in-place header
   edits and §4's canonical status vocabulary, each only as it reaches an ADR that
   stands `Proposed` and is withdrawn. Everything else of both sections stands:
@@ -28,6 +29,20 @@
   theorised.** PR #913 was dispatched to withdraw ADR-0043 on the operator's
   ruling and blocked three times on the same objection: ADR-0070 permits no such
   edit. The Context below is that lane's evidence.
+- **Adversarial ran against this decision while it stood `Proposed`, and changed
+  it twice.** Round 1 found §3's provenance requirement unenforceable against §4's
+  consumer rule — a note-less `Withdrawn` carried a valid withdrawal's
+  consequences with nothing said about recovery — which produced §3's second
+  clause, §4's "keying on the token alone" wording, and the paragraphs separating
+  the author's obligation from the consumer's read. Round 2 found that the repair
+  path §3's second clause first offered contradicted §3's own same-change rule,
+  since no later commit can make an earlier status edit have happened "together
+  with" a note written after it; that produced the single-correction rule —
+  restore `Proposed`, then make the withdrawal again properly. Round 1 also found
+  that this document had been authored `Accepted` on arrival, so no finding could
+  be recorded as having changed it while `Proposed`; it was returned to `Proposed`
+  for rounds 2 and 3 and is ratified here, on round 3's **APPROVE with no
+  findings**. Each change is recorded at the clause it produced as well as here.
 - Refs: #898 (the ruling that found the gap), #913 (the blocked withdrawal, which
   lands after this ADR), #914 (the template's vocabulary, closed by §6).
 
