@@ -1,6 +1,6 @@
 # 7. Memory data rights and retention
 
-- Status: Accepted, §3 amended by ADR-0045 (export returns window-closed records)
+- Status: Accepted, §3 amended by ADR-0045 (export returns window-closed records); Consequences' post-filter caveat amended by ADR-0128 (the expiry predicate binds before the ranking cut)
 - Date: 2026-07-17
 - Amended: 2026-07-23 by ADR-0045 — §3's "live (non-expired) snapshot" is
   widened to a **retained** snapshot. Once a superseded belief is retired by
@@ -14,6 +14,34 @@
   which `get`/`search` hide but `export` deliberately keeps (ADR-0045 §6). The
   §3 text below is unchanged (ADR-0001 append-only); every other ruling here —
   read-time retention, `clear`'s tier scope, the deferrals — stands.
+- Amended: 2026-08-10 by ADR-0128 — **the Consequences bullet "Search inherits the
+  existing expiry/kind post-filter caveat" describes a pass that stops existing.**
+  [ADR-0128](0128-every-eligibility-predicate-binds-before-the-ranking-cut.md) §1
+  rules that every read-time eligibility predicate `search` applies — `kinds`, §2's
+  `expires_at`, and both ends of ADR-0045 §6's validity window — binds **before**
+  the ranking cut, joining the band predicate ADR-0113 §2 already binds there. So
+  the expiry predicate is no longer applied after the vector KNN, no over-fetch is
+  required to pad for it, and the "tracked limitation" the bullet records is not
+  narrowed or corrected but retired: an expired record never becomes a candidate
+  at all.
+
+  **Nothing this ADR decided moves, which is why this is an amendment and not a
+  supersession** (ADR-0070 §1, ADR-0082 §1). §1's four data-rights operations, §2's
+  read-time retention guarantee, §3's export snapshot and §4's tier scope are
+  untouched, and §2 is if anything stronger — an expired record is still never
+  returned by `get` or `search`, and now is never even ranked. The bullet is a
+  statement of fact about the implementation at the time of writing rather than a
+  rule an implementer obeys, which is how ADR-0112 §11 and ADR-0113 §11 each read
+  it ("the residue it describes … read no more widely than it holds"). A reader
+  acting on this ADR acts identically before and after.
+
+  **This closes #792**, which asked whether the bullet's two-predicate count owed
+  a record now that the pass carries three (the validity window having been added
+  by ADR-0045 §6 and given a second producer by ADR-0110 §3). The answer is that
+  the count is not corrected, because the pass it counts no longer runs; ADR-0128
+  §8 argues it at the site. No text below is rewritten (ADR-0001 append-only), and
+  the `Status` line's qualifier accumulates in the shape ADR-0082 §2 permits on a
+  line carrying no leading supersession token. Refs #792, #457, #824, #922.
 
 ## Context
 
