@@ -25,7 +25,15 @@ from math import isfinite
 from typing import Annotated, Any, Final, Literal, assert_never
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic.functional_serializers import PlainSerializer
 from pydantic.functional_validators import AfterValidator
 
@@ -7376,3 +7384,259 @@ class TraceChunk(BaseModel):
 
     traces: tuple[EvaluationTrace, ...]
     position: TracePosition
+
+
+# --- secrets: what names a keyring entry, and what one holds (ADR-0125) ------
+# The three types the two keyring Protocols exchange. They sit in `core` for the
+# ordinary reason (ADR-0068 §1: boundary-crossing types) and are declared last
+# because they depend on the scalar refinements above and on nothing else here.
+#
+# The concrete keyring-backed implementation is a later lane's, in a leaf package
+# no subsystem imports (ADR-0125 §8). Nothing below reaches a keyring, or knows
+# that one exists.
+
+
+class SecretScope(StrEnum):
+    """Which kind of Tier 0 secret an entry holds (ADR-0125 §2).
+
+    **Closed at three members, and the closure is the mechanism rather than a
+    limit nobody got round to raising.** ADR-0004 §3's discipline — one
+    contracted path to the keyring, not a bespoke one per layer — was a sentence
+    a lane could overlook for as long as it stayed prose. As an enum it is a
+    question that has to be answered at the point a subsystem holds a secret: if
+    none of these three fits, the mechanical answer is the ratified one, which is
+    that a fourth member is `core` surface and owes its own ADR (ADR-0125 §2,
+    §10). ADR-0004 §4's application-level encryption key is the standing example
+    — held in the OS keyring by a ratified clause, covered by no member here.
+
+    An instance of :class:`~ai_assistant.core.protocols.Secrets` is bound to
+    exactly one of these, so the member is a property of the object a consumer
+    holds rather than a rule the consumer is trusted to follow (§2, §8).
+    """
+
+    PROVIDER = "provider"
+    """A model provider credential, read on the way to a completion."""
+
+    INTEGRATION = "integration"
+    """A tool's credential for the external service it integrates."""
+
+    ENROLMENT = "enrolment"
+    """The device credential, and the enrolled hub identity beside it (ADR-0124 §6)."""
+
+
+#: The longest a :attr:`SecretName.key` may be. Bounded so a name composes into
+#: a backend coordinate every mainstream keyring accepts, rather than into one
+#: that stores on the developer's platform and fails on the owner's.
+SECRET_KEY_MAX_LENGTH: Final = 64
+
+#: The characters a key may contain: lowercase ASCII letters, digits, and the
+#: three joining punctuation marks that no keyring backend treats specially.
+_SECRET_KEY_CHARACTERS: Final = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
+
+#: The characters a key may begin and end with — no leading or trailing
+#: punctuation, so a key is never mistaken for a fragment of a composed one.
+_SECRET_KEY_EDGES: Final = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
+
+
+def _secret_key(value: str) -> str:
+    """Require ADR-0125 §2's key grammar, returning the key unchanged.
+
+    One to sixty-four characters drawn from lowercase ASCII letters, digits,
+    ``.``, ``_`` and ``-``, beginning and ending with a letter or a digit. No
+    uppercase, no whitespace, no control character, no non-ASCII character, no
+    ``:`` and no ``/``.
+
+    **This is a portability rule and every exclusion earns its place.** The
+    concrete implementation composes the backend's own coordinates out of an
+    installation namespace, the scope and the key, and that composition must be
+    injective — two distinct :class:`SecretName` values that collide on the
+    backend are one secret silently overwriting another. Two things break
+    injectivity. A component containing the joining character, which is why
+    ``:`` and ``/`` are refused rather than discouraged. And case, which is the
+    subtler one: at least one mainstream backend matches its target names
+    case-insensitively, so ``github`` and ``GitHub`` would be one entry there and
+    two elsewhere — a credential stored on Linux that cannot be found on Windows,
+    or worse, that finds a different one.
+
+    **Refused, never normalised.** Case-folding a key here would produce exactly
+    the collision the rule exists to prevent, silently, at the one layer that
+    could still have reported it (ADR-0096 §2's rule: a tightening may reject,
+    and may not rewrite).
+
+    **The message echoes the key**, which is safe and is meant to be: a
+    ``SecretName`` is not a secret and may be logged, carried in an error and
+    shown to the owner (ADR-0125 §2). A caller may therefore never encode a
+    secret value into a key, and that prohibition is what makes this echo safe.
+
+    Raises:
+        ValueError: If the value is not a key under ADR-0125 §2's grammar.
+    """
+    described = describe_untrusted(value)
+    if not 1 <= len(value) <= SECRET_KEY_MAX_LENGTH:
+        msg = (
+            f"a secret key must be 1 to {SECRET_KEY_MAX_LENGTH} characters, "
+            f"got {len(value)}: {described}"
+        )
+        raise ValueError(msg)
+    if not _SECRET_KEY_CHARACTERS.issuperset(value):
+        msg = (
+            "a secret key must be lowercase ASCII letters, digits, '.', '_' or '-', "
+            f"so that it composes into a backend coordinate injectively; got {described}"
+        )
+        raise ValueError(msg)
+    if value[0] not in _SECRET_KEY_EDGES or value[-1] not in _SECRET_KEY_EDGES:
+        msg = f"a secret key must begin and end with a letter or a digit, got {described}"
+        raise ValueError(msg)
+    return value
+
+
+type _SecretKey = Annotated[EncodableText, AfterValidator(_secret_key)]
+"""The bounded token half of a :class:`SecretName` (ADR-0125 §2).
+
+**Private, deliberately.** ADR-0125 decides three types in this module, and this
+is not one of them: it is the field's annotation, and a caller builds a
+:class:`SecretName` rather than a key. Layered on :data:`EncodableText` like
+every other ``str`` refinement here, even though :func:`_secret_key` already
+refuses everything that alias would — see that alias's note on why no ``str``
+field in this module opts out.
+"""
+
+
+class SecretName(BaseModel):
+    """Which entry, inside one installation's keyring (ADR-0125 §2).
+
+    Two names address the same entry when and only when both fields are equal.
+    The installation is **not** here and is bound to the object a consumer holds
+    instead (§2), which is what keeps a caller from naming another
+    installation's entries: a second data directory on one machine would
+    otherwise overwrite the first's credential at enrolment and delete it at
+    unenrolment, a data loss produced by a namespace nobody chose.
+
+    **A name is not a secret.** It may be logged, held in a Tier 1 store, carried
+    in an error and shown to the owner — diagnosing "the keyring has no entry for
+    this" requires saying which entry. The permission and its prohibition are one
+    rule: because a name is disclosable, **a caller may never encode a secret
+    value into a key**. What makes the permission safe is that the name is chosen
+    by the code and not by the secret.
+
+    **Revalidated at every seam method** rather than trusted (ADR-0125 §4).
+    ``model_construct`` is public and yields a well-typed object carrying a key
+    §2 forbids, so ``revalidate_instances`` is set to ``"always"`` here: an
+    implementation revalidates the object **as a whole**, before reading any
+    attribute of it, and the model itself is what makes that one call.
+
+    Attributes:
+        scope: Which kind of secret this is, and — since an instance is bound to
+            one scope — which instance may address it at all.
+        key: The entry's name inside that scope, under §2's grammar.
+    """
+
+    model_config = ConfigDict(frozen=True, revalidate_instances="always")
+
+    scope: SecretScope = Field(description="Which kind of secret this entry holds.")
+    key: _SecretKey = Field(description="The entry's name within its scope. Never a secret value.")
+
+
+#: The most a secret's plaintext may encode to, in UTF-8 bytes (ADR-0125 §3).
+#:
+#: **The arithmetic is the reason.** The tightest limit among the backends a
+#: cross-platform keyring selects is a credential blob of a few kilobytes stored
+#: UTF-16, where a character of value costs two bytes of storage. A UTF-8 budget
+#: of 1024 converts to at most 2048 UTF-16 bytes — a character costing k UTF-8
+#: bytes costs at most 2 when k <= 3 and exactly 4 when k = 4, so twice the UTF-8
+#: budget bounds it in every case — which clears every mainstream backend with
+#: margin. Above it, a value stores on one platform and fails on another, and the
+#: failure arrives on the owner's machine rather than in CI.
+#:
+#: Every credential this system holds or plans to hold sits far below it:
+#: ADR-0124 §6's is 128 bits of ``urandom`` in an encoded form of a few tens of
+#: bytes, a provider API key is around a hundred, an OAuth refresh token a few
+#: hundred. A scheme that does not fit is refused here rather than discovered
+#: later, and raising the bound is an amendment somebody argues for.
+SECRET_VALUE_MAX_BYTES: Final = 1024
+
+
+def secret_value(value: SecretStr) -> SecretStr:
+    r"""Validate a secret's plaintext, returning the value unchanged (ADR-0125 §3).
+
+    Non-blank, UTF-8 encodable, and at most :data:`SECRET_VALUE_MAX_BYTES` bytes
+    once encoded — :data:`NonBlankEncodableText`'s obligations, including that
+    type's refusal to *normalise* what it accepts, plus the byte bound. **The
+    value is returned byte-for-byte**: two spellings of a secret are two
+    different secrets, and a store that helpfully stripped a trailing newline
+    would produce an authentication failure nobody could reproduce by inspection.
+
+    **This callable is the only supported way to build one**, and it is not
+    decoration. :data:`SecretValue` is an ``Annotated`` alias, which is a *field*
+    annotation: pydantic runs its ``AfterValidator`` when a model carrying the
+    field is validated, and constructing the origin directly — ``SecretStr("")``,
+    or a 2 KB one — satisfies every static check while the validator never runs.
+    So a seam revalidates through this function rather than trusting the
+    annotation (ADR-0125 §4), exactly as
+    :class:`~ai_assistant.core.errors.AssistantError` calls
+    :func:`encodable_text` instead of trusting :data:`EncodableText`.
+
+    **The checks are ordered, and the order is load-bearing.** Encodability comes
+    first because measuring an unencodable ``str`` *is* encoding it: a budget
+    check written as ``len(text.encode())`` over ``"\ud800"`` raises
+    ``UnicodeEncodeError`` rather than the ``ValueError`` this contract promises,
+    and the surrogate is the case that survives every other check — non-blank,
+    one character, and with no byte length at all (ADR-0087 §2b).
+
+    **No message here names the value, any part of it, or its length.** ADR-0125
+    §6 forbids a prefix, a suffix, a truncation, a digest *or a length* in any
+    exception this seam raises, and a refusal is the likeliest leak of the two:
+    "secret length is 1025" is what a size check naturally reports, and it hands
+    over a derivation from the seam's own code rather than from a backend it was
+    wrapping. The bound is a constant and may be named; the rejected value's
+    measurement may not.
+
+    Args:
+        value: The secret to validate, still wrapped in its redacting holder.
+
+    Returns:
+        The same value, unchanged and unnormalised.
+
+    Raises:
+        ValueError: If the plaintext is blank, has no UTF-8 encoding, or encodes
+            to more than :data:`SECRET_VALUE_MAX_BYTES` bytes.
+    """
+    plaintext = value.get_secret_value()
+    if not _is_encodable(plaintext):
+        msg = "a secret value must have a UTF-8 encoding, so a keyring backend can store it"
+        raise ValueError(msg)
+    if not plaintext.strip():
+        msg = "a secret value must not be blank"
+        raise ValueError(msg)
+    if len(plaintext.encode("utf-8")) > SECRET_VALUE_MAX_BYTES:
+        msg = f"a secret value must encode to at most {SECRET_VALUE_MAX_BYTES} UTF-8 bytes"
+        raise ValueError(msg)
+    return value
+
+
+type SecretValue = Annotated[SecretStr, AfterValidator(secret_value)]
+"""A Tier 0 secret's plaintext, bounded and self-redacting (ADR-0125 §3).
+
+Built on :class:`pydantic.SecretStr`, so its ``repr`` and its ``str`` disclose no
+part of the plaintext and the plaintext is reached only through that class's own
+accessor, ``get_secret_value``. No implementation may define a value type whose
+default rendering is the secret, and no lane may reimplement the redaction or the
+accessor under another name.
+
+**The redacting type is the mechanism, not a convenience.** ``core/logging.py``
+redacts by *key name*, and ADR-0124 §6 leans on exactly that when it requires an
+implementation not to "give it a name that redaction misses". A plain ``str``
+keeps that promise only for as long as every call site chooses a covered key, and
+the whole history of credential leaks is call sites that did not. A type whose
+default rendering is ``**********`` inverts the default: a disclosure requires
+somebody to write the unwrapping call, which makes it deliberate and reviewable
+rather than accidental. The claim is exactly that and no more — an unwrapped
+value can still be logged, and this type does not pretend otherwise. ADR-0124 §7
+is where the one authorised unwrap lives: the client unwraps immediately before
+encoding the connect frame's credential member, and nowhere else.
+
+**Both spellings are real, and :func:`secret_value` is the second one.** A model
+field annotated with this alias validates through pydantic; a hand-built value
+validates through the callable. That is :data:`EncodableText`'s arrangement with
+:func:`encodable_text`, taken deliberately.
+"""

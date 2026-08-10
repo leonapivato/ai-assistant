@@ -157,6 +157,8 @@ if TYPE_CHECKING:
         PlanExport,
         Question,
         RecordChunk,
+        SecretName,
+        SecretValue,
         SourceGrant,
         SourceReading,
         StepTransition,
@@ -4942,5 +4944,265 @@ class AssistantEngine(Protocol):
             TypeError: If ``limit`` is not an integer, or is a ``bool``. The type is
                 checked before the range for :meth:`beliefs`' reason.
             GrantError: If the grant store could not be read.
+        """
+        ...
+
+
+@runtime_checkable
+class Secrets(Protocol):
+    """Reads one scope's Tier 0 secrets from this installation's keyring (ADR-0125 §1).
+
+    The reading face of the keyring seam, and the one **every read-only consumer
+    holds**: `models/` for a provider credential, a `tools/` tool for its own
+    integration credential, and the wire client's connect path for the device
+    credential ADR-0124 §6 confines to one purpose and one path (ADR-0125 §8).
+    None of them holds :class:`SecretStore`, and the split is what makes that a
+    type rather than a promise — a tool handed a three-method store can delete the
+    device's enrolment credential, and neither the type system nor review would
+    notice, because the two entries sit in one keyring behind one object.
+
+    **An instance is bound to two facts the composition root chooses, and a
+    caller can name neither.** One installation — the resolved
+    ``Settings.data_dir`` ADR-0084 §9 already locates everything else by, injected
+    as a namespace rather than read from a setting here — and one
+    :class:`~ai_assistant.core.types.SecretScope`. So two data directories on one
+    machine share no entry, which is what stops a QA hub's enrolment from
+    overwriting the owner's real credential; and a tool's object *refuses* an
+    ``ENROLMENT`` name rather than answering it. Every scope word in ADR-0125 §8
+    is mechanical for that reason and not advisory.
+
+    **One class and one keyring backing, several instances.** ``PROVIDER``,
+    ``INTEGRATION`` and ``ENROLMENT`` are three instances of the one
+    keyring-backed implementation, each taking the same installation namespace,
+    so the scope is what differs between them and nothing else (§1). One object
+    satisfies this Protocol and :class:`SecretStore` structurally, so a root
+    hands each consumer the face its job needs without needing two classes.
+
+    **This is a storage seam, not an authorisation one.** No method here performs
+    a permission check, consults `permissions/`, or writes an audit record
+    (ADR-0125 §9). Nothing here discharges ADR-0017 §3's "credential access
+    gated, not just transmission" condition, narrows ADR-0004 §7, or answers #74.
+    What the shape does buy is that #74 can land without changing a signature: a
+    gating implementation is an object that implements *this* Protocol, consults
+    `permissions/` and delegates — a decorator at the composition root, which is
+    why :meth:`get` takes a name and returns a value and carries no
+    decision-shaped parameter for a decision nobody has made.
+
+    **There is no enumeration**, here or on the wider face. No method lists the
+    entries in an installation, in a scope, or at all; every caller reaches an
+    entry by naming it (ADR-0125 §5). No consumer needs one, the capability it
+    would hand a tool is "discover and read every secret on this machine" rather
+    than "read the secret I was given a name for", and a cross-platform keyring's
+    portable surface is get, set and delete. The honest consequence is that a
+    complete purge of Tier 0 data is composed from the names its holders know, so
+    every consumer that writes an entry owes a path that deletes it, and no lane
+    may present a purge that skips a scope as complete.
+
+    **Not a Tier 1 store, and not the hub's enrolment-verifier store.** Nothing
+    but a Tier 0 secret goes in it, with one exception: a non-secret value
+    ADR-0124 §4 and §6 require to travel with one, which today is the enrolled hub
+    identity. And ADR-0124 §6's enrolment record — a device's overlay identity,
+    its credential *verifier*, its enrolment and revocation instants — stays in
+    ``data_dir`` under ADR-0083's layout. A hub that kept credentials here would
+    have destroyed the property §6 retains, that the hub holds no device's Tier 0
+    secret at rest.
+
+    Cancelling :meth:`get` is governed by this module's cancellation clause
+    (ADR-0060), and it **has bite**: a keyring call is I/O and may be in flight.
+    Its input-observation clause (ADR-0065) is **vacuous** here and is meant to
+    stay that way — :class:`~ai_assistant.core.types.SecretName` is frozen and
+    :data:`~ai_assistant.core.types.SecretValue` is immutable, so there is no
+    caller-owned container for a result to be torn across.
+    """
+
+    async def get(self, name: SecretName) -> SecretValue | None:
+        """The value last written under ``name``, or ``None`` if there is none.
+
+        Reads nothing else, consults no policy, writes no record, and creates no
+        entry (ADR-0125 §4). The value comes back **verbatim** — no whitespace
+        trimmed, no Unicode normalised, no case changed, no re-encoding, nothing
+        altered between a :meth:`SecretStore.set` and a subsequent read (§3). Two
+        spellings of a secret are two different secrets, and a store that
+        helpfully stripped a trailing newline would produce an authentication
+        failure nobody could reproduce by inspection.
+
+        **``None`` means the entry is unset, and never that the keyring could not
+        be read.** An unreachable keyring raises, and that distinction is the one
+        this contract most depends on: if it answered ``None``, "this device is
+        not enrolled" and "this device's keyring is locked" would be the same
+        observation, and an enrolment flow reading a first run could mint a
+        replacement credential that revokes the working one (ADR-0125 §7).
+
+        **``name`` is revalidated here, as a whole, before anything else
+        happens** (ADR-0125 §4, §7). Before the keyring is touched, and before
+        any attribute of the argument is read: reaching in to dump its fields or
+        to read its ``scope`` for a backend prefix checks the invariants *after*
+        having depended on them, so a forged argument would fail somewhere other
+        than this boundary and with something other than a ``ValueError``. A
+        well-typed ``SecretName`` is not proof its invariants ran —
+        ``model_construct`` is public and yields one carrying a key ADR-0125 §2
+        forbids, which on a case-insensitive backend addresses the very entry its
+        lowercase spelling names.
+
+        A concurrent write is never observed half-applied: this returns either
+        what a concurrent ``set`` wrote or what preceded it, never a mixture and
+        never a fragment. Nothing further is guaranteed under concurrency.
+
+        Args:
+            name: The entry to read. Its ``scope`` must be the one this instance
+                is bound to.
+
+        Returns:
+            The stored value, verbatim, or ``None`` if the entry is unset.
+
+        Raises:
+            ValueError: If ``name`` does not satisfy
+                :class:`~ai_assistant.core.types.SecretName`'s own invariants, or
+                if its ``scope`` is not this instance's. Raised **whatever the
+                keyring's state**, including when there is no backend at all: an
+                argument fault is deterministic and the caller's to fix, and a
+                tool reaching for another scope must be refused identically
+                whether the keyring is locked, absent or wide open (ADR-0125 §7).
+            SecretStoreUnavailableError: If no keyring backend is available, or
+                the backend is locked with no unlock possible in this session.
+                Never ``None``.
+            SecretStoreError: If the keyring was reached and the read failed.
+        """
+        ...
+
+
+@runtime_checkable
+class SecretStore(Secrets, Protocol):
+    """The whole keyring seam: read, write and remove (ADR-0125 §1).
+
+    :class:`Secrets` plus the two methods that change what is stored. **Only the
+    wire client's enrolment and unenrolment paths hold one** — it is the sole
+    consumer that writes, at enrolment and at unenrolment, and even it is given
+    the narrow face on its connect path (ADR-0125 §8). `models/` and `tools/`
+    hold neither method here, and no other subsystem holds either face:
+    `orchestration`, `memory`, `context`, `planning`, `permissions`, `learning`,
+    `readers`, `evaluation`, `service` and `interfaces` hold none, and none may
+    acquire one without the ADR ADR-0125 §2 requires for a fourth scope.
+
+    Every clause on :class:`Secrets` binds here unchanged — the scope and
+    installation binding, the refusal to enumerate, the storage-not-authorisation
+    rule, and what may go in it. One object satisfies both Protocols
+    structurally, which is what lets a composition root pass a single instance to
+    a consumer's ``Secrets`` parameter and to the client's ``SecretStore`` one;
+    what a read-only consumer cannot do is *name* :meth:`set` or :meth:`delete`,
+    because ``mypy --strict`` runs over ``src`` and ``tests`` and the attributes
+    are not on the annotated type.
+
+    **Nothing further is guaranteed under concurrency, and two assumptions are
+    named as forbidden because they are the ones a caller would reach for**
+    (ADR-0125 §4). :meth:`delete`'s ``bool`` is **not** a synchronisation
+    primitive: two callers deleting one entry may both be told ``True``, so it may
+    never elect a winner or make an operation happen exactly once. And there is no
+    atomicity **across** names — no transaction, no compare-and-set, no
+    multi-name write. The claim is stated in the weaker, true form for this
+    module's own reason: no cross-platform keyring offers a compare-and-delete, so
+    contracting one would ratify an obligation the chosen backing cannot meet. A
+    consumer that genuinely needs mutual exclusion over a secret owns a lock; it
+    does not read one out of a return value.
+
+    **Two entries can therefore be half-written, and ADR-0124 already handles
+    it.** A device holds a credential and an enrolled hub identity, and a crash
+    between two :meth:`set` calls leaves one — which ADR-0124 §6 already rules is
+    "an incomplete enrolment the client refuses to connect on", a state the client
+    must detect whatever the storage does. A client that prefers to avoid it
+    entirely may store the pair as one value under one name; both satisfy
+    ADR-0124 §6 and ADR-0125 rules neither in.
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060), and its last paragraph is the one with bite: **a cancelled write
+    may or may not have committed**, so a caller may not assume a cancelled
+    :meth:`set` did not land. An implementation driving a synchronous keyring
+    library from a worker thread is exactly the shape ADR-0054 ruled on — a
+    cancelled call must not release what a worker thread still holds — and that
+    rule is inherited here rather than restated.
+    """
+
+    async def set(self, name: SecretName, value: SecretValue) -> None:
+        """Store ``value`` under ``name``, creating or replacing the entry.
+
+        **Replaces rather than refuses, because rotation is the case that
+        matters** (ADR-0125 §4). ADR-0124 §6 makes re-enrolling a device that
+        already has a live enrolment a single act that mints a replacement
+        credential and forbids an intermediate state; a store that refused an
+        occupied name would force delete-then-set at the device, with a window in
+        which it holds nothing and a crash in that window leaving it unenrolled.
+        So this never refuses on the ground that an entry already exists.
+
+        The value is stored **verbatim** (§3): nothing is trimmed, normalised,
+        re-cased or re-encoded between here and a subsequent :meth:`Secrets.get`.
+
+        **Both arguments are revalidated here, at this boundary, before the
+        keyring is touched** (ADR-0125 §4) — ``name`` against its own model as a
+        whole, and ``value`` through
+        :func:`~ai_assistant.core.types.secret_value`. Neither type protects the
+        boundary on its own, and they fail to for different reasons.
+        :data:`~ai_assistant.core.types.SecretValue` is
+        ``Annotated[SecretStr, …]`` with no runtime identity distinct from
+        ``SecretStr``, so a caller who builds ``SecretStr("")`` or a 2 KB one and
+        passes it directly satisfies every static check while the validator never
+        runs; ``SecretName`` does validate when constructed normally, and
+        ``model_construct`` skips that altogether. An implementation may not rely
+        on either having been validated upstream, exactly as
+        :class:`~ai_assistant.core.errors.AssistantError` calls
+        :func:`~ai_assistant.core.types.encodable_text` rather than trusting the
+        annotation, and as :meth:`SourceGrantStore.record` stores a *validated*
+        snapshot rather than the object it was handed.
+
+        A refusal changes nothing: no entry is created, none is replaced, and the
+        entry the argument would have addressed is left exactly as it was.
+
+        Args:
+            name: The entry to write. Its ``scope`` must be this instance's.
+            value: The secret to store, verbatim.
+
+        Raises:
+            ValueError: If ``name`` or ``value`` does not satisfy its own type's
+                invariants, or if ``name``'s ``scope`` is not this instance's.
+                Raised whatever the keyring's state, and nothing is written.
+            SecretStoreUnavailableError: If no keyring backend is available, or
+                the backend is locked with no unlock possible in this session.
+            SecretStoreError: If the keyring was reached and the write failed.
+        """
+        ...
+
+    async def delete(self, name: SecretName) -> bool:
+        """Remove the entry under ``name``, reporting whether one was there.
+
+        **Raises nothing for an absent entry, and calling it repeatedly is
+        safe** (ADR-0125 §4, §6). The caller is ADR-0124 §8's device-side
+        unenrolment, whose whole job is to make sure the entry is gone; an
+        unenrolment that raised the second time it ran would be a worse surface
+        for the one operation an owner performs when something has already gone
+        wrong. A ``bool`` rather than an exception is
+        :class:`DeferralStore`'s spelling, for its reason: absence and refusal get
+        a return value where one exists, and exceptions are kept for faults.
+
+        **The ``bool`` is not a synchronisation primitive.** Two callers deleting
+        one entry may both be told ``True`` — no cross-platform keyring offers a
+        compare-and-delete — so it may never be used to elect a winner or to make
+        an operation happen exactly once (ADR-0125 §4).
+
+        ``name`` is revalidated as a whole before the keyring is touched, on
+        :meth:`Secrets.get`'s terms, and a refusal removes nothing.
+
+        Args:
+            name: The entry to remove. Its ``scope`` must be this instance's.
+
+        Returns:
+            ``True`` if an entry was removed, ``False`` if there was none.
+
+        Raises:
+            ValueError: If ``name`` does not satisfy
+                :class:`~ai_assistant.core.types.SecretName`'s invariants, or if
+                its ``scope`` is not this instance's. Raised whatever the
+                keyring's state, and nothing is removed.
+            SecretStoreUnavailableError: If no keyring backend is available, or
+                the backend is locked with no unlock possible in this session.
+            SecretStoreError: If the keyring was reached and the removal failed.
         """
         ...
