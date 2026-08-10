@@ -588,8 +588,20 @@ looking like the first.
 > and a `False` from `delete`, and neither raises.
 
 > **Normative.** No exception raised by this seam, no message, no exception
-> argument, and no log line an implementation emits may contain a secret value or
-> any part of one. The `SecretName` may appear in all of them (§2).
+> argument, and no log line an implementation emits may contain a secret value, or
+> anything derived from one — a prefix, a suffix, a truncation, a digest, or its
+> length. The `SecretName` may appear in all of them (§2).
+
+**"Or any part of one" is what an earlier draft said, and it is unsatisfiable.**
+A one-character `SecretValue` is valid under §3, so a message reading "keyring
+write failed" contains a part of it, and every conforming implementation is in
+breach of a rule no test can express. What the clause is actually about is
+*derivation*: a truncated token and a hash of one are both weakened copies rather
+than absences, which is ADR-0021 §1's finding about a digest over a low-entropy
+secret, adopted here. So the prohibition names the derivations, and §11 asserts
+the predicate a suite can check — that the complete value does not appear —
+against a plaintext long and distinctive enough for the assertion to mean
+something.
 
 `SecretStoreUnavailableError` is narrowed out for the reason the corpus narrows:
 **the correct response differs**. A keyring that is absent, locked or not running
@@ -903,8 +915,10 @@ it. Requiring two subjects makes that a red test rather than a support ticket.
 > **Normative.** The suite proves §6's redaction against a **failing** backend, on
 > the same optional marking: a subject driven to fail a `set` with a backend error
 > whose own text contains the supplied plaintext surfaces a `SecretStoreError`
-> whose message, whose arguments and whose `repr` contain no part of that
-> plaintext, and emits no log line that does.
+> whose message, whose arguments and whose `repr` do not contain that plaintext,
+> and emits no log line that does. The plaintext the case uses is long and
+> high-entropy, so that a substring check over it is a real assertion rather than
+> one a short value would satisfy by accident.
 
 **This is the leak the other redaction test cannot see.** Proving that a
 `SecretValue`'s `repr` redacts says nothing about the path where the value has
