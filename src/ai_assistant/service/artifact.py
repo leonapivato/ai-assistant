@@ -426,12 +426,8 @@ def _safe_target(root: Path, relative: str) -> Path:
         ArtifactError: If the destination is not under ``root``.
     """
     target = root / relative
-    resolved = target.resolve()
-    if resolved != target and not resolved.is_relative_to(root):
+    if not target.resolve().is_relative_to(root):
         msg = f"the artifact's member {relative!r} resolves outside the restore directory"
-        raise ArtifactError(msg)
-    if not target.is_relative_to(root):  # pragma: no cover - the manifest validator precedes it
-        msg = f"the artifact's member {relative!r} names a path outside the restore directory"
         raise ArtifactError(msg)
     return target
 

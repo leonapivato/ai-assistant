@@ -143,8 +143,12 @@ def _restore(args: argparse.Namespace, *, live_data_dir: Path) -> int:
     target = parent / named.name
 
     _refuse_missing_artifact(Path(args.artifact))
-    _refuse_existing_target(target)
+    # The live-directory refusal comes first even though the existing-path one
+    # would usually catch the same target: an operator who typed the path their
+    # hub serves should be told *that*, not that something is already there. The
+    # case §7 is actually written for is the one where it is not.
     _refuse_live_data_dir(target, live_data_dir=live_data_dir)
+    _refuse_existing_target(target)
     _refuse_shared_parent(parent)
 
     # Read after the refusals, so a mistyped target costs no prompt (§5's

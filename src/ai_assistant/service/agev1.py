@@ -157,6 +157,26 @@ def _hkdf(ikm: bytes, salt: bytes, info: bytes) -> bytes:
     return hmac.new(prk, info + b"\x01", hashlib.sha256).digest()
 
 
+def scrypt_maxmem(n: int) -> int:
+    """The memory budget CPython's ``scrypt`` must be given for this ``N``.
+
+    OpenSSL refuses to allocate past ``maxmem``, whose default (32 MiB) is below
+    what any realistic work factor needs — and it also refuses a ``maxmem`` at or
+    above 2 GiB. So the budget is scrypt's own working-set formula rather than a
+    round number with slack: a doubling of it would be over that ceiling at
+    :data:`MAX_WORK_FACTOR`, and every artifact at the highest work factor this
+    tool accepts would then fail to open on the recovery machine, which is the
+    worst place to find out.
+
+    Args:
+        n: scrypt's cost parameter, ``1 << work_factor``.
+
+    Returns:
+        The budget, in bytes.
+    """
+    return 128 * _SCRYPT_R * (n + _SCRYPT_P + 2)
+
+
 def _scrypt_key(passphrase: str, salt: bytes, work_factor: int) -> bytes:
     """Derive the stanza's wrapping key, exactly as age v1 specifies.
 
@@ -176,14 +196,7 @@ def _scrypt_key(passphrase: str, salt: bytes, work_factor: int) -> bytes:
         r=_SCRYPT_R,
         p=_SCRYPT_P,
         dklen=_KEY_BYTES,
-        # OpenSSL refuses to allocate past `maxmem`, whose default (32 MiB) is
-        # below what any realistic work factor needs, and it also refuses a
-        # `maxmem` at or above 2 GiB. So the budget is scrypt's own working-set
-        # formula rather than a round number with slack: at
-        # `MAX_WORK_FACTOR` a doubling of it would be over that ceiling and every
-        # artifact at the highest work factor this tool accepts would fail to
-        # open — on the recovery machine, which is the worst place to find out.
-        maxmem=128 * _SCRYPT_R * (n + _SCRYPT_P + 2),
+        maxmem=scrypt_maxmem(n),
     )
 
 
@@ -238,6 +251,12 @@ class EncryptingWriter(io.RawIOBase):
                 what this module reads back.
         """
         super().__init__()
+        # Set before anything can raise: `io.RawIOBase.__del__` calls `close`,
+        # and a half-built writer whose `close` raises `AttributeError` turns a
+        # clean refusal into an unraisable exception at garbage-collection time.
+        # `True` rather than `False`, so that close on a writer that never got a
+        # header emits no final chunk into a stream that has no payload.
+        self._finished = True
         if not passphrase:
             msg = "an age v1 artifact cannot be keyed to an empty passphrase"
             raise ValueError(msg)
@@ -248,7 +267,6 @@ class EncryptingWriter(io.RawIOBase):
         self._out = out
         self._buffer = bytearray()
         self._counter = 0
-        self._finished = False
 
         file_key = os.urandom(_FILE_KEY_BYTES)
         salt = os.urandom(_FILE_KEY_BYTES)
@@ -266,6 +284,7 @@ class EncryptingWriter(io.RawIOBase):
         nonce = os.urandom(_PAYLOAD_NONCE_BYTES)
         out.write(nonce)
         self._aead = ChaCha20Poly1305(_hkdf(file_key, nonce, b"payload"))
+        self._finished = False
 
     def writable(self) -> bool:
         """This stream is write-only."""
