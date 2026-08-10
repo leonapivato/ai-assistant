@@ -513,6 +513,29 @@ def _refuse_an_oversized_handshake(payload: dict[str, Any], *, member: str) -> N
         raise UndecodableFrameError(msg)
 
 
+class _AbsentMember:
+    """The type of :data:`_ABSENT`, so that "not there" has a type of its own."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        """Name it for a traceback; it never reaches a wire frame or a log line."""
+        return "<absent>"
+
+
+#: What :func:`_read_connect_members` reports for a connect member that **is not
+#: there**, as distinct from one that is there and is JSON ``null``.
+#:
+#: **The two are different frames and ADR-0124 §7 gives them different answers**,
+#: so ``dict.get``'s ``None`` cannot stand for both: §7 refuses an "absent or empty"
+#: credential with ``credential_required``, and a member "present and… not a
+#: string" — which a ``null`` is — "as a credential that did not verify". A reader
+#: that collapses them tells an operator its client sent *no* credential when it
+#: sent a malformed one, which is exactly the distinction §7 requires "in the error
+#: it returns **and in what the hub logs**".
+_ABSENT: Final = _AbsentMember()
+
+
 def _read_connect_members(payload: object) -> tuple[int, str, object]:
     """Read the members every connect frame carries, whichever listener it reached.
 
@@ -532,7 +555,10 @@ def _read_connect_members(payload: object) -> tuple[int, str, object]:
 
     Returns:
         The version, the client identifier, and the credential member exactly as
-        it was decoded — including absent, as ``None``.
+        it was decoded — or :data:`_ABSENT` where the frame carries no such member.
+        **A present ``null`` comes back as ``None``**, which is a different frame
+        from one that omits the member and, on the remote listener, a different
+        refusal (ADR-0124 §7).
 
     Raises:
         UndecodableFrameError: If the payload is not an object, is over ADR-0085
@@ -550,7 +576,7 @@ def _read_connect_members(payload: object) -> tuple[int, str, object]:
     if not isinstance(client, str):
         msg = "a connect payload must name its client"
         raise UndecodableFrameError(msg)
-    return version, client, payload.get(CONNECT_CREDENTIAL)
+    return version, client, payload.get(CONNECT_CREDENTIAL, _ABSENT)
 
 
 def read_connect(payload: object) -> tuple[int, str]:
@@ -579,7 +605,15 @@ def read_connect(payload: object) -> tuple[int, str]:
             member of an envelope that parsed" (ADR-0084 §3).
     """
     version, client, credential = _read_connect_members(payload)
-    if credential not in (None, ""):
+    # **A present ``null`` stays on the "carries nothing" side here**, which is
+    # where this reader has always put it, and ADR-0124 §7 is why it stays: "ADR-0084
+    # §2's rule is unchanged on the loopback transport", and that rule refuses a
+    # **non-empty** credential. A ``null`` is not a non-empty credential — it is a
+    # client saying it has none — so refusing it would be this module widening a rule
+    # the same section froze. The remote listener's opposite answer is not a
+    # contradiction: §7 gives it a type rule *and* a code of its own, and neither
+    # exists on this transport.
+    if credential not in (_ABSENT, None, ""):
         msg = (
             "this transport carries no credential, and admitting one would tell the client "
             "its credential had been checked when nothing checked anything; the 0600 bit on "
@@ -610,6 +644,17 @@ def read_remote_connect(payload: object) -> tuple[int, str, str]:
     gets — so a peer learns nothing from the shape of its own mistake that it
     could not learn by guessing.
 
+    **A present ``null`` is on the malformed side of that line, and it is the one
+    place the distinction is easy to lose.** ``null`` is *present* and is *not a
+    string*, which is §7's own wording for the rejected arm; only a member that is
+    not there at all — or is the empty string — is the required arm. The two look
+    alike through ``dict.get``, which answers ``None`` for both, so the member is
+    read against :data:`_ABSENT` instead. Getting it wrong is fail-closed either way
+    — both codes refuse and close — but it tells an operator debugging a
+    non-conforming client that it sent *no* credential when it sent a malformed one,
+    and §7 requires the reasons distinguished "in the error it returns **and in what
+    the hub logs**".
+
     Args:
         payload: The connect frame's payload, as decoded.
 
@@ -620,11 +665,12 @@ def read_remote_connect(payload: object) -> tuple[int, str, str]:
     Raises:
         UndecodableFrameError: As :func:`read_connect`.
         CredentialRequiredError: If the credential member is absent or empty.
-        CredentialRejectedError: If it is present and is not a well-formed
-            credential. The value is discarded here and never reaches a verifier.
+        CredentialRejectedError: If it is present and is not a string — ``null``
+            included — or is a string that is not a well-formed value of the
+            scheme. The value is discarded here and never reaches a verifier.
     """
     version, client, credential = _read_connect_members(payload)
-    if credential is None or credential == "":
+    if credential is _ABSENT or credential == "":
         msg = (
             "this listener admits a device on two facts and a credential is one of them; "
             "a connect carrying none is refused rather than admitted on the overlay's "
