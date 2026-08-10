@@ -1,7 +1,22 @@
 # 129. Store health is a census at an instant, and closure concentration is a neighbourhood figure the retrieval path can no longer see
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-10
+- **Note (2026-08-10, UTC): ratified.** `Proposed` → `Accepted` after the
+  reviews came back green on the content this ADR merged with: adversarial
+  **APPROVE with no findings** and architecture **APPROVE with no findings**,
+  round 8, 965 lines net across 8 commits, churn `1.2×` (1197 touched), posted
+  to PR #928 by `just ship` — architecture run by the lane's own choice for a
+  placement decision, though this ADR decides no `core` surface and ADR-0112's
+  precedent required adversarial alone. The outcome is taken from that comment
+  rather than from a report. The comment's `<!-- ship:5ac451cb… -->` anchor is
+  the pre-merge branch head, not an ancestor of `main` after the rebase-merge;
+  identity was established through the tree rather than assumed —
+  `5ac451cb^{tree}` and `a9a055c3^{tree}`, the tip the PR merged as, are both
+  `cb1c0d664607`, the tree both review artifacts record. This edit takes
+  `CONTRIBUTING.md` → "Trivial ADR edits"' exemption for the ratification flip
+  and ADR-0015 §5's trivial-ADR exemption; beyond the `Status` token and this
+  note, not one word below is edited.
 - **Durability clause.** Every reference below to ADR-NNNN is to its text as it
   stood at this ADR's base, `4204438`, not to its status on any later day. Every
   ADR this decision composes with reads `Accepted` there (or partially superseded
