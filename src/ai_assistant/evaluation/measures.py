@@ -50,7 +50,6 @@ from ai_assistant.evaluation._figures import (
     Rate,
     Restart,
     SeamLatency,
-    Shortfall,
     StreamHealth,
 )
 from ai_assistant.evaluation._stream import (
@@ -67,21 +66,16 @@ from ai_assistant.evaluation._stream import (
     walk,
 )
 from ai_assistant.evaluation._vocabulary import (
-    CANDIDATES,
     DECISION_KEYS,
     DECISIONS_REINFORCE,
     DECISIONS_SUPERSEDE,
     DIRECT_SEAMS,
-    EXCLUDED_WINDOW,
-    FETCH_K,
-    LIMIT,
     OBSERVE_SEAM,
-    RETURNED,
 )
 from ai_assistant.evaluation.sqlite_store import SqliteTraceStore
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
     from datetime import datetime
     from pathlib import Path
 
@@ -374,9 +368,6 @@ class _Collector:
         self._reads: list[_Read] = []
         self._overturns: defaultdict[str, list[_Overturn]] = defaultdict(list)
         self._latency: defaultdict[str, list[float]] = defaultdict(list)
-        self._shares: list[float] = []
-        self._shortfall_reads = 0
-        self._shortfall_population = 0
 
     def add(self, ordinal: int, trace: EvaluationTrace) -> None:
         """Fold one trace into every population it belongs to.
@@ -474,10 +465,10 @@ class _Collector:
             totals.observe_reinforcements += decisions[DECISIONS_REINFORCE]
 
     def _add_retrieval(self, ordinal: int, trace: EvaluationTrace) -> None:
-        """Feed §7's shortfall watch and §4's surfacings from one read."""
+        """Count §2's counter-inconsistency and feed §4's surfacings from one read."""
         read = retrieval_counts(trace)
-        if read is not None:
-            self._watch_shortfall(read)
+        if read is not None and is_counter_inconsistent(read):
+            self._health.counter_inconsistent += 1
         returned = joinable(trace, TraceRecordSet.RETURNED)
         if returned is None:
             return
@@ -490,19 +481,6 @@ class _Collector:
                 part=self._part_of(trace.occurred_at),
             )
         )
-
-    def _watch_shortfall(self, read: Mapping[str, int]) -> None:
-        """#824's incidence and window share, over the eight counts (§7)."""
-        if is_counter_inconsistent(read):
-            self._health.counter_inconsistent += 1
-            return
-        self._shortfall_population += 1
-        if not (read[RETURNED] < read[LIMIT] and read[CANDIDATES] >= read[FETCH_K]):
-            return
-        self._shortfall_reads += 1
-        dropped = read[CANDIDATES] - read[RETURNED]
-        if dropped:
-            self._shares.append(read[EXCLUDED_WINDOW] / dropped)
 
     def _part_of(self, instant: datetime) -> int:
         """Which part of the window ``instant`` falls in."""
@@ -531,12 +509,6 @@ class _Collector:
             settling=self._settling,
             whole=whole,
             parts=tuple(parts) if len(parts) > 1 else (),
-            shortfall=Shortfall(
-                incidence=Rate(
-                    numerator=self._shortfall_reads, denominator=self._shortfall_population
-                ),
-                shares=Distribution.over(self._shares),
-            ),
             latency=tuple(
                 SeamLatency(seam=seam, elapsed=Distribution.over(self._latency[seam]))
                 for seam in sorted(self._latency)
