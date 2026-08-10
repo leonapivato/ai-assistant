@@ -1,7 +1,41 @@
 # 124. The hop is a third egress boundary, and a device is admitted by two independent facts
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0125 (§6's reader clause — which Protocol the
+  client's connect path is handed, and nothing else of §6)
 - Date: 2026-08-09
+- Accepted: 2026-08-09
+- Partially superseded: 2026-08-09 by ADR-0125 — **one clause, one limb of it, and
+  the seam it named now exists.** §6 made the `SecretStore` Protocol a prerequisite
+  of the client half and declined to mint it; ADR-0125 mints it, as two Protocols
+  rather than one — `Secrets` reads, `SecretStore` extends it and writes.
+
+  **Replaced — the first limb of §6's reader clause.** "The client reads the
+  credential through the `SecretStore` Protocol ADR-0004 §3 provisions." The client
+  half holds a `SecretStore`, because §6 makes the credential persist and §8
+  makes unenrolment delete it — but the **connect-path read** this clause is about
+  goes through `Secrets`, bound to the `ENROLMENT` scope and to that device's
+  installation (ADR-0125 §2). A reader holding only §6 would wire that call site
+  with the wider Protocol, which is ADR-0070 §1's first limb. What replaces it is
+  strictly narrower and serves every purpose §6 gave for naming a Protocol at all.
+
+  **Not replaced — the clause's second limb, which is strengthened rather than
+  weakened.** "and through no other path to the keyring" stands, and ADR-0125 §8
+  makes it mechanical: one concrete implementation in one leaf package, with an
+  import-linter contract confining the keyring library to it.
+
+  **Not replaced — the rest of §6, which is nearly all of it.** Enrolment is still
+  an act the owner performs at the hub; it still mints one credential of at least
+  128 bits disclosed once; the hub still retains only a verifier and holds no
+  device's Tier 0 secret at rest — ADR-0125 §5 states in a marked clause that the
+  enrolment record stays in `data_dir` and that the hub holds neither face of that
+  seam. The hub identity still travels with the credential; the credential is still
+  Tier 0, still persisted, still held only in the OS keyring, still read only on the
+  connect path and for no other purpose, and still reaches no log, audit record or
+  error message — ADR-0125 §3 adds a self-redacting value type so that last
+  obligation stops depending on every call site choosing a covered key. ADR-0004
+  §7's exemption keeps all three of its replacements, and ADR-0125 §9 states that it
+  gates nothing and does not widen the exemption to a second access. Every other
+  section of this ADR is untouched, §12's records included.
 - **This ADR partially supersedes ADR-0017 and ADR-0004, and both records land in
   this change.** ADR-0004's two clauses are §12's; each is scoped to the one thing
   a device boundary makes unreachable — a hub-side delete cannot purge a keyring
