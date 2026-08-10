@@ -1,6 +1,6 @@
 # 70. Amendment and supersession rules for ADRs
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0127 (§1's enumeration of permitted in-place header edits and §4's canonical status vocabulary, each only as it reaches an ADR that stands `Proposed` and is withdrawn)
 - Date: 2026-07-26
 - Amended: 2026-07-31 (§4 — the display limitation it records twice has been
   fixed since). §4 states that "the sole status consumer,
@@ -89,6 +89,29 @@
   structure, and append-only — stand.
 - Directs: `CONTRIBUTING.md`'s "Trivial ADRs" wording (ratified by ADR-0003; §5
   below) and `docs/adr/template.md`'s status vocabulary (§4 below).
+- Partially superseded: 2026-08-10 by ADR-0127 — **two clauses, one status, and
+  the case is a `Proposed` ADR ruled against.** §1's "In-place edits to the header
+  lines are permitted only where they change no decision" and the four bullets
+  enumerating them, and §4's "The canonical vocabulary is §4's four forms", are
+  each replaced only as they reach an ADR standing `Proposed` that is withdrawn.
+  ADR-0127 §1 adds a fifth permitted header edit — `Proposed` → `Withdrawn`,
+  available from that status alone — and its §4 adds `Withdrawn` to the vocabulary
+  as a bare token carrying no `ADR-NNNN` and entering no supersession read. The
+  case arose on `main`: ADR-0043 merged `Proposed`, was ruled against on the
+  evidence rather than ratified, and was neither ratifiable nor disposable under
+  the enumeration as it stood (#898, PR #913). **Everything else of both sections
+  stands.** §1's amend-vs-supersede test, its append-only mechanism, its protection
+  of ratified decision text and all four existing permitted edits are unaltered and
+  unreordered; §4's partial-supersession grammar, its `ADR-XXXX (<scope>)` pairs
+  and their accumulation and precedence rules, its one-physical-line rule, its
+  no-retrofit rule, its whole-field consumer rule and its transitive walk are
+  untouched, and no existing status line in the corpus is rewritten. §4's
+  reservation of its rule to "any liveness-classifying consumer added later" is
+  not narrowed — ADR-0127 §4 supplies that consumer's rule for the one new form.
+  Withdrawal from `Accepted` is **not** granted: changing what a live ADR decided
+  remains §1's supersession side. ADR-0127 §7 applies §1's test to each clause.
+  This ADR's ratified text below is not rewritten; the `Status` line above and this
+  note are the whole of the record (§1, ADR-0082 §1 and §2).
 
 ## Context
 
