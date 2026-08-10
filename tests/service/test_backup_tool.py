@@ -945,3 +945,47 @@ def test_an_undecodable_passphrase_is_not_reported_as_memory_pressure(
         passphrase.resolve(source=None, generated=False, confirm=False)
 
     assert "memory" not in capsys.readouterr().err
+
+
+def test_an_exhausted_disk_at_publication_is_restartable_and_not_a_refusal(
+    settings: Settings,
+    out_dir: Path,
+    keyphrase_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only two publication failures are policy; the rest are the filesystem.
+
+    A destination that already exists, and a filesystem with no primitive that
+    could publish without replacing one, are refusals — an operator changes
+    something. An exhausted disk is not: ADR-0083 §5 puts it on the restartable
+    side, and wrapping it here told the operator to act when what has to happen is
+    space appearing.
+    """
+
+    def out_of_space(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(os, "link", out_of_space)
+
+    assert _run(out_dir / "a.age", keyphrase_file) == EXIT_RESTART
+    assert _leftovers(out_dir) == []
+
+
+def test_a_filesystem_without_hard_links_is_still_a_refusal(
+    settings: Settings,
+    out_dir: Path,
+    keyphrase_file: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The policy half stays policy: there is no non-replacing alternative to offer."""
+
+    def unsupported(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "link", unsupported)
+
+    assert _run(out_dir / "a.age", keyphrase_file) == EXIT_DEPLOYMENT
+
+    assert "does not support the hard link" in capsys.readouterr().err
+    assert _leftovers(out_dir) == []

@@ -15,21 +15,19 @@ directory", and none of that is visible in an exit code.
 
 from __future__ import annotations
 
+import errno
 import shutil
 import sqlite3
 import stat
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.service import artifact, backup, restore
 from ai_assistant.service.agev1 import EncryptingWriter
-from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK
+from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.lock import LOCK_FILENAME
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 pytestmark = pytest.mark.integration
 
@@ -383,3 +381,45 @@ def test_a_passphrase_longer_than_the_bound_is_refused_at_the_backup(
 
     assert backup.main([str(destination), "--passphrase-file", str(too_long)]) == EXIT_DEPLOYMENT
     assert not destination.exists()
+
+
+def test_an_exhausted_disk_at_publication_is_restartable_and_not_a_refusal(
+    written: Path, tmp_path: Path, keyphrase_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A verified restore that cannot be published is the filesystem, not the artifact.
+
+    ADR-0083 §5 puts an exhausted disk on the restartable side. Reporting ``78``
+    tells an operator a human must act, when what has to happen is space
+    appearing — and the staging directory still goes either way.
+    """
+    target = tmp_path / "restored"
+
+    def out_of_space(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(Path, "rename", out_of_space)
+
+    assert _restore(written, target, keyphrase_file) == EXIT_RESTART
+
+    assert not target.exists()
+    assert _staging_left(tmp_path) == []
+
+
+def test_a_target_that_the_rename_itself_finds_occupied_is_a_refusal(
+    written: Path, tmp_path: Path, keyphrase_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The policy half: §7's "publication fails rather than replacing anything".
+
+    ``rename`` refuses a non-empty directory outright, which is what makes the
+    guarantee structural for that case rather than a check this run has to win.
+    """
+    target = tmp_path / "restored"
+
+    def occupied(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.ENOTEMPTY, "Directory not empty")
+
+    monkeypatch.setattr(Path, "rename", occupied)
+
+    assert _restore(written, target, keyphrase_file) == EXIT_DEPLOYMENT
+
+    assert _staging_left(tmp_path) == []

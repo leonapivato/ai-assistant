@@ -39,12 +39,13 @@ ADR-0120 §8 already rules what a report over an empty stream says.
 from __future__ import annotations
 
 import argparse
+import errno
 import shutil
 import stat
 import sys
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import AssistantError, ConfigurationError
@@ -71,6 +72,11 @@ configuration, only the passphrase. What it does not restore is the machine's
 credentials, which live in the OS keyring and never enter an artifact — the hub
 comes up with the accumulated model intact and its provider keys to re-provision.
 """
+
+#: What ``rename`` reports when something already occupies the target. These are
+#: the *policy* half of a publication failure — §7's "publication fails rather
+#: than replacing anything" — and the only half that is a refusal.
+_TARGET_IN_THE_WAY: Final = frozenset({errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR})
 
 _EPILOG = """
 example:
@@ -191,8 +197,21 @@ def _publish(staging: Path, target: Path) -> None:
     try:
         staging.rename(target)
     except OSError as exc:
-        msg = f"the restored directory could not be published to {target}: {exc}"
-        raise RefusalError(msg) from exc
+        if exc.errno in _TARGET_IN_THE_WAY:
+            # The race the check above cannot close, caught by the rename itself:
+            # something arrived at the target between the two. `rename` refuses a
+            # non-empty directory and a file outright, which is what makes "never
+            # replaces" structural for those rather than a check this run wins.
+            msg = (
+                f"{target} came into existence while the restore was running, so nothing "
+                f"was published — publishing would have replaced whatever is there now"
+            )
+            raise RefusalError(msg) from exc
+        # Anything else is the filesystem, not the artifact: an exhausted disk, an
+        # I/O error, a cross-device target. ADR-0083 §5 puts those on the
+        # restartable side, so they go to `classify` with their errno intact
+        # rather than becoming a refusal that tells an operator to act.
+        raise
 
 
 def _refuse_missing_artifact(path: Path) -> None:
