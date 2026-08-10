@@ -175,9 +175,12 @@ def _publish(staging: Path, target: Path) -> None:
         RefusalError: If the target exists at that moment. Publication fails rather
             than replacing anything — a non-empty directory at the target makes
             the rename itself fail, and the check before it is what covers an
-            empty one. §7 is explicit that this narrows the window rather than
-            closing it, and that closing it needs a descriptor-relative shared
-            mechanism rather than one tool's hardening (#889).
+            empty one — ``rename`` refuses a non-empty directory with ``ENOTEMPTY``
+            and replaces an empty one, and Python exposes no ``RENAME_NOREPLACE``
+            to close that. What is at stake there is the guarantee rather than any
+            data, and §7 is explicit that it narrows the window rather than
+            closing it: the flag needs a descriptor-relative shared mechanism
+            rather than one tool's hardening (#905, and #889 for the wider case).
     """
     if target.exists() or target.is_symlink():
         msg = (
