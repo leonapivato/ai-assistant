@@ -478,46 +478,65 @@ it is pages no process in this system can open as a database, and the rerun remo
 it. The group is ordered by which file makes an enrolment live, not by which file
 is largest or listed first.
 
-### 6. Tier 0 is composed from the names its holders know, and today that set is empty
+### 6. The act reaches no keyring, the hub's machine holds no Tier 0 entry today, and the seam for when it does is not this ADR's
 
-> **Normative.** The act purges, for each hub-side holder of a Tier 0 keyring
-> entry, the entries whose names that holder knows, through the seam ADR-0125 §1
-> declares. It performs no enumeration of the keyring and reaches no entry no
-> component named.
+> **Normative.** The act reaches no keyring. It holds neither face of ADR-0125's
+> seam, performs no keyring operation, and enumerates nothing. ADR-0125 §8 names
+> `service` among the packages that "hold neither" and forbids any of them
+> acquiring one without the ADR §2 requires; this act is in `service`, and this ADR
+> does not seek that exemption.
 
-> **Normative.** Today no hub-side component writes a keyring entry, so that set
-> is empty and the act reaches no keyring at all. The report states this rather
-> than passing over it (§7).
+> **Normative.** No component of this system writes a Tier 0 keyring entry on the
+> hub's machine today, so there is no such entry for the act to miss. ADR-0004 §6's
+> Tier 0 half is discharged there by that tier being empty, and by nothing else.
 
-> **Normative.** A later lane that gives a hub-side component a Tier 0 keyring
-> entry adds that entry's deletion to this act in the same change, and states the
-> scope it belongs to. Until it does, this ADR authorises no hub-side component to
-> write one.
+> **Normative.** The report states that no keyring was reached, and states the two
+> Tier 0 values that exist on the hub's machine outside one: a model provider
+> credential the operator holds in the process environment, and any credential a
+> future component holds. It may not describe a keyring as purged (§7).
 
 > **Normative.** The `ENROLMENT` scope is not reached by this act. ADR-0125 §5
 > rules that the hub holds neither face of that seam for enrolment purposes, and
 > ADR-0124 §8 supersedes ADR-0004 §6 precisely as it reaches an enrolled device's
 > keyring entry — which is what §7's report is for.
 
-**This is ADR-0125 §5's clause applied at its first opportunity, not a new rule.**
-That section refuses enumeration and states the honest consequence in a marked
-clause: "A complete purge of Tier 0 data is therefore composed from the names its
-holders know, and every consumer that writes an entry owes a path that deletes it.
-No lane may present a purge that skips a scope as complete." This act is the purge
-that clause anticipated, and the third clause above is its forward obligation
-written where the lane that would breach it will be looking — the same construction
-ADR-0123 §3 used for the exclusion list, and for the same reason: a sentence in an
-ADR nobody re-reads while adding a credential binds nothing.
+> **Normative.** The lane that first gives a component on the hub's machine a Tier
+> 0 keyring entry owes, in the same change, a decision about how a hub-side delete
+> reaches it. That decision is a contract question and not a wiring detail — ADR-0125
+> §5 refuses enumeration and puts the deletion path on the consumer that wrote the
+> entry, and ADR-0125 §8 keeps `service` out of the seam, so no path exists today
+> that this act could take. Until that decision lands, this ADR authorises no such
+> entry to be written, and no lane may cite this section as a route to one.
 
 **Stating that the set is empty is the load-bearing part, and it is checkable.**
 The tree has no `keyring` import; the provider credential is read from the process
 environment by the provider SDK, which ADR-0125 §8 records as pre-existing and not
 authorised by it; `tools/` transmits nothing, so ADR-0017 §3's seam is undesignated
 and holds no credential; and ADR-0004 §4's application-level encryption key is off
-by default with no wiring, which ADR-0125 §12 names as an open decision. So
-ADR-0004 §6's Tier 0 half is discharged on the hub's machine by there being nothing
-in that tier there — and a report that said "keyring purged" would be describing
-work that did not happen.
+by default with no wiring, which ADR-0125 §12 names as an open decision. Nor is
+there a component that *could* write one: ADR-0125 §8 gives `models/` only the
+reading face and says in as many words that "provisioning a provider credential is
+not `models/`'s". So a report that said "keyring purged" would be describing work
+that did not happen, and a clause requiring the act to purge one would be
+contracting an obligation nothing can meet — the failure ADR-0016 §5 names and
+ADR-0125 §4 twice declines to repeat.
+
+**The forward clause is deliberately not the shape ADR-0123 §3's is, and the
+difference is the whole finding this section was rewritten for.** That section
+could tell a later lane to "add it to the exclusions above" because a backup tool
+in `service/` may read a path constant from anywhere. This one cannot tell a later
+lane to add a deletion to this act, because a deletion requires holding
+`SecretStore`, and ADR-0125 §8 forbids `service` to hold it. An instruction to do
+it anyway would be this ADR directing a lane to breach a clause ratified the day
+before. So what the forward clause binds is that the question be *decided* — by
+whoever creates it, at the moment they create it — rather than that it be answered
+here in a package that may not answer it.
+
+**What that decision will have to weigh is named so the lane does not start
+cold**, and none of it is decided here: whether the purge is composed by each
+consumer offering its own deletion path to a coordinator, whether the coordinator
+is the hub rather than an offline tool, and whether either requires a fourth face
+or a widened scope enum. **#909** carries it, filed from this lane.
 
 **The credential in the operator's environment is the one thing this cannot reach
 and must not be silent about.** A provider key exported from a shell profile is not
@@ -532,9 +551,9 @@ the one moment the owner is entitled to know about it.
 > `data_dir` it will destroy; every device holding a live enrolment at that
 > instant, by its overlay identity as the record holds it; for each such device,
 > the act at that device that purges its local credential; that a hub-side delete
-> cannot reach any of them; that a Tier 0 credential the operator holds in their
-> environment rather than in the keyring is not reached; and that a backup artifact
-> taken under ADR-0123 is not reached.
+> cannot reach any of them; that no keyring is reached, so a Tier 0 credential the
+> operator holds in their environment is not removed by it (§6); and that a backup
+> artifact taken under ADR-0123 is not reached.
 
 > **Normative.** It destroys nothing until the owner confirms against that
 > statement. A non-interactive confirmation names the resolved `data_dir` the act
@@ -742,9 +761,12 @@ changing it, and the sentence ADR-0124 §8 superseded is already recorded on
 ADR-0004's `Status` line. Every remaining sentence of §6 stays true: the user can
 view, export and delete; `memory/` exposes export and delete; retention rules hold;
 and the purge of every Tier 0 and Tier 1 artifact on the hub's own machine is what
-§1 and §6 above perform. A reader holding only ADR-0004 §6 acts identically before
-and after — which is ADR-0082 §1's test, and makes this a stacked addition recorded
-here and nowhere else.
+§1 performs for Tier 1 and what §6 finds already empty for Tier 0. A reader holding
+only ADR-0004 §6 acts identically before and after — which is ADR-0082 §1's test,
+and makes this a stacked addition recorded here and nowhere else. §6's fifth clause
+and **#909** are what keep that true when the Tier 0 set stops being empty; nothing
+here weakens the sentence, and nothing here supplies the mechanism it will then
+need.
 
 **ADR-0007 §4 and §5 — no record owed.** §4 says `MemoryStore.clear` "is not a
 whole-system erase" and that "the cross-tier coordinator is future work"; §5 defers
@@ -762,10 +784,15 @@ either false, and nothing in §10 closes the family. Stacked addition. §3's for
 clause about a *new file in the data directory* is likewise untouched: this ADR
 places no file there.
 
-**ADR-0125 §5 — no record owed.** §6 above is that section's marked clause
-applied, not narrowed: the purge is composed from the names its holders know, no
-enumeration is performed, and the report does not present a skipped scope as
-complete. Its sentences are what §6 obeys. Stacked addition.
+**ADR-0125 §5 and §8 — no record owed, and §6 above was rewritten to keep it that
+way.** §5's marked clause is obeyed rather than narrowed: no enumeration is
+performed, and the report does not present a skipped scope as complete. §8's clause
+that `service` holds neither face is obeyed by the act reaching no keyring at all.
+An earlier draft of §6 required the act to delete each hub-side holder's entries
+"through the seam ADR-0125 §1 declares", which would have put a `SecretStore` in
+`service` and made §8's sentence false for this act — architecture review named it,
+and the answer was to obey the clause and file the open question as **#909**, not to
+claim an exemption. Stacked addition.
 
 **ADR-0101 — no record owed.** §10 above states that neither of §7's conditions
 fires and that §8's symmetry clause is untouched. No sentence of ADR-0101 becomes
@@ -805,9 +832,15 @@ so nothing in it is read differently.
   ADR-0124 §6 says a revocation never erases it, this ADR says one act destroys it
   — and an implementation that conflates them breaches one of them. §4's second
   clause is what a reviewer checks against.
-- **Revisit if** the delete right acquires an in-session surface, if a hub-side
-  component starts holding a Tier 0 keyring entry (§6's forward clause fires
-  first), if ADR-0124 §8's device-side unenrolment act is descoped (§9), or if a
+- **ADR-0004 §6's Tier 0 half is discharged vacuously on the hub's machine and has
+  no mechanism behind it.** That is true today because nothing writes a keyring
+  entry there, and it stops being true the moment something does — at which point
+  the purge path is a contract question, because ADR-0125 §5 puts deletion on the
+  consumer and §8 keeps `service` out of the seam. **#909** carries it and §6 binds
+  the lane that fires it.
+- **Revisit if** the delete right acquires an in-session surface, if a component on
+  the hub's machine starts holding a Tier 0 keyring entry (#909 fires first), if
+  ADR-0124 §8's device-side unenrolment act is descoped (§9), or if a
   later decision puts a file in the data directory that must survive a delete —
   which this ADR does not contemplate and which would need its own exclusion and
   its own argument.
@@ -852,13 +885,17 @@ who runs the first and not the second has revoked every device and deleted nothi
 with no record anywhere that the act was begun. §5's ordering achieves the same
 guarantee inside one lock with no window to leave open.
 
-**Reporting the Tier 0 residual instead of ruling on it.** §6 could have said only
-that a keyring is not reached and left the composition to a later lane. It is
-refused because ADR-0125 §5 already ruled the composition — "every consumer that
-writes an entry owes a path that deletes it" — and an ADR that restated the residual
-without applying the rule would leave the first hub-side credential to be added by a
-lane with no clause pointing at it. The forward clause is the cheap half of the
-decision and the half that stops the gap opening.
+**Purging Tier 0 from inside the act, by giving the tool a `SecretStore`.** This
+is what §6 said in an earlier draft, and it is the shape a reader arrives at from
+ADR-0125 §5 alone — "every consumer that writes an entry owes a path that deletes
+it" reads like an instruction to compose the deletions somewhere, and this act is
+the obvious somewhere. It is refused because ADR-0125 §8 names `service` among the
+packages that hold neither face and forbids acquiring one without the ADR its §2
+requires. Seeking that exemption here would be a `core` decision arriving inside an
+ADR about a directory, which is the move golden rule 5 and ADR-0124 §10 both exist
+to stop. What §6 does instead is obey both clauses, record that the set they govern
+is empty today, and bind the lane that first makes it non-empty to decide the
+question (**#909**) rather than inherit a tool that cannot answer it.
 
 **Naming the tool `ai-assistant-erase`.** Shorter and unambiguous against the
 retention senses of "purge" in the tree. Refused because ADR-0101 uses "erasure"
