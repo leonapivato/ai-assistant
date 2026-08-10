@@ -570,3 +570,64 @@ def test_a_manifest_declaring_an_absurd_size_is_refused_from_its_header(
         materialise(destination, passphrase=_KEYPHRASE, staging=staging)
 
     assert _materialised(staging) == []
+
+
+def _pax_header(size: int) -> bytes:
+    """A PAX extended header block declaring ``size`` bytes of metadata."""
+    info = tarfile.TarInfo("././@PaxHeader")
+    info.type = tarfile.XHDTYPE
+    info.size = size
+    return info.tobuf(tarfile.PAX_FORMAT)
+
+
+def test_an_oversized_tar_control_member_is_refused(staging: Path, tmp_path: Path) -> None:
+    """``tarfile`` reads its own metadata whole, so that path needs its own bound.
+
+    A PAX extended header is consumed inside ``tarfile`` before any ``TarInfo``
+    reaches this module, so neither the manifest bound nor the payload's
+    streaming copy applies to it — measured at about twice the metadata's size in
+    peak allocation, where the same bytes as a payload member cost the copy
+    buffer and nothing else.
+
+    **This test is also what keeps the guard from failing silently.** It is
+    installed by overriding a private ``tarfile`` method, so a rename in a future
+    CPython would stop it bounding anything; the assertion below is what turns
+    that into a failure instead of a quiet regression.
+    """
+    oversized = 4 * 1024 * 1024
+    destination = tmp_path / "greedy-metadata.age"
+    with (
+        destination.open("wb") as raw,
+        EncryptingWriter(raw, _KEYPHRASE, work_factor=_TEST_WORK_FACTOR) as sealed,
+    ):
+        sealed.write(_pax_header(oversized))
+        sealed.write(b"A" * oversized)
+
+    with pytest.raises(ArtifactError, match="extended header declaring 4194304 bytes"):
+        materialise(destination, passphrase=_KEYPHRASE, staging=staging)
+
+    assert _materialised(staging) == []
+
+
+def test_a_control_member_declaring_more_than_it_carries_costs_nothing(
+    staging: Path, tmp_path: Path
+) -> None:
+    """The declared size alone buys an attacker nothing, and saying so is the point.
+
+    The streaming reader accumulates only what actually arrives, so an 8 GiB
+    declaration behind an empty stream is refused at a couple of hundred
+    kilobytes. Recorded because the opposite is the intuitive reading, and it
+    would have justified a much more invasive bound than the one above.
+    """
+    destination = tmp_path / "empty-claim.age"
+    with (
+        destination.open("wb") as raw,
+        EncryptingWriter(raw, _KEYPHRASE, work_factor=_TEST_WORK_FACTOR) as sealed,
+    ):
+        sealed.write(_pax_header(8 * 1024 * 1024 * 1024))
+
+    # Under two kilobytes on disk, against a declaration of eight gigabytes.
+    assert destination.stat().st_size < 2048
+
+    with pytest.raises(ArtifactError):
+        materialise(destination, passphrase=_KEYPHRASE, staging=staging)
