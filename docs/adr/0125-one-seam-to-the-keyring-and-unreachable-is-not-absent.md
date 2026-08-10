@@ -947,6 +947,21 @@ than support tickets.
 > `set` alone: a failing `get` and a failing `delete` each reach a backend holding
 > the value, so each can surface it in an error the same way.
 
+> **Normative.** It also runs over **every way this seam raises**, not over backend
+> failures alone. §6 binds every exception the seam produces, so the argument
+> refusals of §4 are covered on the same terms: a `set` refusing an oversized or
+> blank value, and `secret_value` refusing one directly, disclose neither the
+> plaintext nor any derivation of it — a rejected value's own length included.
+
+**A refusal is the likeliest leak of the two, because the obvious message
+contains one.** "secret length is 1025" is what a size check naturally reports,
+and it hands over a derivation §6 names — from the seam's own code rather than
+from a backend it was wrapping. Binding the obligation to *every exception the
+seam raises* rather than to a list of failure sources is the third time this ADR
+has replaced an enumeration with the rule behind it, and for the same reason each
+time: review kept finding the enumeration narrower than the prohibition, one entry
+per round.
+
 **`set` alone would have been the wrong half, and the `get` case is the worse
 one.** A `set` failure discloses a value the caller already holds; a `get` failure
 discloses one the caller was refused, which is the credential a reader was not
