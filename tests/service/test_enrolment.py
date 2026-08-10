@@ -17,6 +17,7 @@ import pytest
 
 from ai_assistant.service.enrolment import (
     ENROLMENTS_FILENAME,
+    LISTING_LIMIT,
     DeviceRegistry,
     EnrolmentStore,
     Refusal,
@@ -310,3 +311,34 @@ def test_one_device_is_not_another(registry: DeviceRegistry) -> None:
 
     assert registry.verify(_LAPTOP, laptop.credential).refusal is Refusal.REVOKED
     assert registry.verify(_PHONE, phone.credential).enrolment_id is not None
+
+
+def test_the_live_read_is_complete_where_the_listing_is_bounded(store: EnrolmentStore) -> None:
+    """ADR-0126 §7: the whole-store delete's device list carries "no bound, no page".
+
+    Asserted past ``LISTING_LIMIT`` because that is the number the surface beside
+    it stops at, and a delete that named the first two hundred devices "would be a
+    delete presenting itself as complete for every device it did not name".
+    """
+    identities = [f"nDEVICE{index:05d}" for index in range(LISTING_LIMIT + 3)]
+    for identity in identities:
+        store.enrol(identity, verifier="v", now=_MOMENT)
+
+    _shown, total = store.recent_enrolments(limit=LISTING_LIMIT)
+    assert total > LISTING_LIMIT
+
+    live = store.live_enrolments()
+    assert [enrolment.overlay_identity for enrolment in live] == sorted(identities)
+
+
+def test_the_live_read_carries_no_verifier_and_no_revoked_row(store: EnrolmentStore) -> None:
+    """ADR-0124 §7 keeps the verifier out of anything rendered; §6 keeps the row."""
+    store.enrol(_LAPTOP, verifier="laptop-verifier", now=_MOMENT)
+    store.enrol(_PHONE, verifier="phone-verifier", now=_MOMENT)
+    store.revoke(_PHONE, now=_MOMENT + timedelta(minutes=1))
+
+    live = store.live_enrolments()
+    assert [enrolment.overlay_identity for enrolment in live] == [_LAPTOP]
+    assert all(enrolment.is_live for enrolment in live)
+    assert not any("verifier" in str(field) for field in live[0].__slots__)
+    assert _PHONE in store.known_identities()
