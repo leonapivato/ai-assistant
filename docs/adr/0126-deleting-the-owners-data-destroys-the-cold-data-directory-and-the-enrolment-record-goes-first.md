@@ -208,11 +208,23 @@ and the second in what it must do to the data.
 > its mount points, the act refuses to run rather than proceeding on a test it
 > knows to be incomplete.
 
-> **Normative.** The data directory itself survives, holding nothing but the
-> instance lock file the act is holding (§5), with the permissions ADR-0083 §3's
-> preparation gives it. A hub started afterwards finds an installation with no data
-> in it, which is the state a first start already handles, and not a missing or
-> malformed directory.
+> **Normative.** Before it destroys anything, the act checks that every entry it
+> found is one it can destroy: every directory it must descend into readable and
+> writable by the process, and every entry's parent directory writable. It refuses,
+> destroying nothing, with a diagnostic naming each path that fails and what about
+> it fails.
+
+> **Normative.** Where a destruction nevertheless fails once the act has begun, the
+> act destroys everything else it can, then reports every path that remains and why,
+> and exits with a failure status. It may not report the delete as complete, it may
+> not pass over an entry silently, and it does not stop at the first failure.
+
+> **Normative.** On a successful act the data directory itself survives, holding
+> nothing but the instance lock file the act is holding (§5), with the permissions
+> ADR-0083 §3's preparation gives it. A hub started afterwards finds an installation
+> with no data in it, which is the state a first start already handles, and not a
+> missing or malformed directory. On a failed act it holds, in addition, exactly the
+> entries the report names.
 
 **The unit is forced by the same argument ADR-0123 §1 made, pointed the other
 way.** A backup assembled from per-store exports is incomplete the moment a lane
@@ -278,6 +290,29 @@ that installation for a property that threatens nothing: a mount point *at* the
 boundary is the boundary, and destroying everything inside it is the act. What the
 clause is for is a mount point that lets the act reach storage the boundary does
 not contain, and only a descendant can do that.
+
+**Permitting the volume root is what makes the removability check owed, and
+`lost+found` is the case that showed it.** `mkfs` puts a root-owned, mode-`0700`
+`lost+found` at the root of an ext filesystem, and it survives an operator
+`chown`ing that root to themselves — which `service/datadir.prepare` then accepts.
+The act cannot read into that directory to empty it, so an implementation walking
+the tree meets a `PermissionError` partway through, having already destroyed the
+enrolment record and most of the stores. The two clauses above turn that into a
+refusal before anything is destroyed, which is ADR-0123 §2's posture applied where
+it matters more: a backup that fails halfway has copied nothing anyone relies on,
+and a delete that fails halfway has destroyed data and reported nothing. The
+diagnostic names the path, and the operator's remedy is theirs to choose —
+commonly, pointing `ASSISTANT_DATA_DIR` at a child directory of the mount rather
+than at its root.
+
+**Continuing past a late failure rather than stopping is the choice worth
+defending, and it follows from what the owner asked for.** They asked for their
+data to be gone; stopping at the first entry that resists would leave behind
+everything the act had not reached yet, for the sake of a tidier failure. So the
+act destroys what it can, and the honesty obligation is carried where it belongs —
+in a report that names every path that remains, and a failure status. That is the
+same trade §7 makes for devices: the act does what it can reach, and says exactly
+what it did not.
 
 **The one thing per-store `clear` does that this does not is run without stopping
 the hub, and §2 is where that is paid for rather than avoided.**
