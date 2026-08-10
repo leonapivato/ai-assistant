@@ -1,7 +1,6 @@
 # 124. The hop is a third egress boundary, and a device is admitted by two independent facts
 
-- Status: Partially superseded by ADR-0125 (§6's reader clause — which Protocol the
-  client's connect path is handed, and nothing else of §6)
+- Status: Partially superseded by ADR-0125 (§6's reader clause)
 - Date: 2026-08-09
 - Accepted: 2026-08-09
 - Partially superseded: 2026-08-09 by ADR-0125 — **one clause, one limb of it, and

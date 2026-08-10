@@ -1,9 +1,6 @@
 # 4. Privacy and data handling
 
-- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause),
-  ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a
-  device the owner has enrolled) and ADR-0125 (§3's reader clause — which Protocol
-  `models/` and `tools/` are handed, and nothing else of §3)
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled) and ADR-0125 (§3's reader clause)
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
