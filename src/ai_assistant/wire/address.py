@@ -30,6 +30,15 @@ if TYPE_CHECKING:
 #: The socket's name inside the data directory (ADR-0084 §1).
 SOCKET_FILENAME: Final[str] = "hub.sock"
 
+#: The hub-local control socket's name (ADR-0124 §6). It is bound only where the
+#: remote listener is configured, because it exists for one purpose: the enrolment
+#: and revocation acts, which ADR-0124 §6 requires to be performed "at the hub —
+#: on the hub's own machine, over ADR-0084 §1's loopback transport or a hub-local
+#: entry point". Its own name rather than a second use of ``hub.sock`` so that the
+#: promoted engine surface and the owner's device acts cannot be reached through
+#: one door by accident.
+ADMIN_SOCKET_FILENAME: Final[str] = "admin.sock"
+
 #: Owner-only, which is ADR-0004 §4's existing posture applied to a new object of
 #: the same kind rather than a control invented here — and on Linux the kernel
 #: enforces it at ``connect()``, so ``0600`` on ``hub.sock`` is what makes a Unix
@@ -77,6 +86,37 @@ def socket_path(data_dir: Path) -> Path:
     return data_dir / SOCKET_FILENAME
 
 
+def admin_socket_path(data_dir: Path) -> Path:
+    """Where the hub takes the owner's device acts (ADR-0124 §6).
+
+    Args:
+        data_dir: The absolute, canonical data directory ``Settings`` guarantees.
+
+    Returns:
+        ``<data_dir>/admin.sock``.
+    """
+    return data_dir / ADMIN_SOCKET_FILENAME
+
+
+def check_admin_socket_path(data_dir: Path) -> None:
+    """Refuse a data directory whose path cannot hold the control socket.
+
+    The same ``sun_path`` argument as :func:`check_socket_path`, applied where it
+    is owed. It is **not** folded into ADR-0083 §3's step 2 with the other one,
+    deliberately: this socket is bound only where the remote listener is configured
+    (ADR-0124 §2), and a deployment that never binds it must not be refused at
+    startup for a path length that could never bind anything.
+
+    Args:
+        data_dir: The data directory the socket would live in.
+
+    Raises:
+        ConfigurationError: If the encoded path plus its terminator exceeds the
+            platform's budget.
+    """
+    _check_path(admin_socket_path(data_dir), what="the hub's control socket")
+
+
 def check_socket_path(data_dir: Path) -> None:
     """Refuse a data directory whose path cannot hold the socket (ADR-0084 §1).
 
@@ -97,12 +137,26 @@ def check_socket_path(data_dir: Path) -> None:
             platform's budget. The message names the limit, the encoded length and
             the directory, which is what ADR-0084 §1 asks of it.
     """
+    _check_path(socket_path(data_dir), what="the hub's socket")
+
+
+def _check_path(path: Path, *, what: str) -> None:
+    """Hold one socket path to this platform's ``sun_path`` budget.
+
+    Args:
+        path: The path a socket would be bound at.
+        what: How the path reads in the message.
+
+    Raises:
+        ConfigurationError: If the encoded path plus its terminator exceeds the
+            budget. The message names the limit, the encoded length and the path,
+            which is what ADR-0084 §1 asks of it.
+    """
     limit = sun_path_limit()
-    path = socket_path(data_dir)
     encoded = len(str(path).encode("utf-8")) + 1  # the NUL terminator counts
     if encoded > limit:
         msg = (
-            f"the hub's socket path {path} encodes to {encoded} bytes including its "
+            f"{what} path {path} encodes to {encoded} bytes including its "
             f"terminator, over this platform's {limit}-byte sun_path budget, so no socket "
             f"can be bound there; move the data directory somewhere shorter "
             f"(ASSISTANT_DATA_DIR)"

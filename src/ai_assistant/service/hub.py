@@ -70,11 +70,15 @@ from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.logging import configure_logging
 from ai_assistant.orchestration.engine import DrainPhase
 from ai_assistant.service import datadir
+from ai_assistant.service.admin import AdminListener
 from ai_assistant.service.configuration import ConfigurationStamp
+from ai_assistant.service.enrolment import ENROLMENTS_FILENAME, DeviceRegistry, EnrolmentStore
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART, classify
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
+from ai_assistant.service.overlay import OverlayIdentityUnavailableError, local_agent
+from ai_assistant.service.remote import RemoteListener
 from ai_assistant.service.scheduler import Scheduler, jobs_for
-from ai_assistant.service.transport import Listener
+from ai_assistant.service.transport import ConnectionBudget, Listener
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -125,7 +129,9 @@ class _ShutdownStage(StrEnum):
     """
 
     #: :meth:`~ai_assistant.service.transport.Listener.stop_accepting` — the door
-    #: closes at the start of phase A (ADR-0084 §1), before anything else.
+    #: closes at the start of phase A (ADR-0084 §1), before anything else. Both
+    #: doors, where a remote listener is configured (ADR-0124 §2): they are one
+    #: stage because they are one act — the hub stops accepting.
     CLOSING_THE_DOOR = "closing_the_door"
     #: :meth:`~ai_assistant.service.scheduler.Scheduler.aclose` — stopped and
     #: joined before the engine is closed (ADR-0083 §8).
@@ -249,6 +255,33 @@ class _ShutdownRecord:
         dressed as an extra fact.
         """
         return self.unwinding_from if self.failed_at is not None else None
+
+
+@dataclass(slots=True)
+class _Remote:
+    """Everything the remote listener needs, built only where it is configured.
+
+    ADR-0124 §2: "The remote listener is off unless it is configured on. A hub with
+    no remote-listener configuration binds only ADR-0084 §1's loopback socket, and
+    the loopback socket is bound whether or not the remote listener is." So this is
+    ``None`` on an unconfigured hub and nothing about the loopback path changes.
+
+    The enrolment record, the control socket and the listener are one bundle
+    because they have one lifetime: the record exists to be admitted against, and
+    the control socket exists to write it. A hub with no remote listener has no use
+    for either, and would need an overlay agent it is not running to build them.
+
+    Attributes:
+        store: The durable enrolment record.
+        registry: Its live view, and where a revocation takes effect (ADR-0124 §8).
+        listener: The remote door.
+        admin: The hub-local entry point for the owner's acts (§6).
+    """
+
+    store: EnrolmentStore
+    registry: DeviceRegistry
+    listener: RemoteListener
+    admin: AdminListener
 
 
 def main() -> int:
@@ -508,7 +541,16 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
         # on a stop that arrives between here and step 5. An unstarted scheduler's
         # ``aclose`` is a no-op, which is what makes that unconditional join safe.
         scheduler = Scheduler(jobs_for(engine, settings))
-        listener = Listener(engine, settings, data_dir=data_dir)
+        # One budget, held by every listener the hub binds (ADR-0124 §7): "adding
+        # it may not let the hub's total concurrent connections exceed
+        # `hub_max_connections`", and two listeners each honouring the figure
+        # independently would mean the hub honours neither.
+        budget = ConnectionBudget(
+            max_connections=settings.hub_max_connections,
+            max_pending_handshakes=settings.hub_max_pending_handshakes,
+        )
+        listener = Listener(engine, settings, data_dir=data_dir, budget=budget)
+        remote: _Remote | None = None
         try:
             # ADR-0119 §9's configuration stamp, "after the stores are open and
             # before the API accepts a request". Both bounds are satisfied
@@ -561,12 +603,23 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
             # instance lock has been held since step 2 (ADR-0084 §1).
             if stop.is_set():
                 return EXIT_OK
+            # The remote apparatus is built *before* either door opens, so a hub
+            # whose overlay agent cannot confirm its bind address never accepts a
+            # connection at all — ADR-0124 §2's "refused at load time rather than
+            # bound", at the latest point this deployment can still refuse.
+            remote = await _build_remote(engine, settings, data_dir=data_dir, budget=budget)
             await listener.start(build=__version__)
+            if remote is not None:
+                await remote.listener.start(build=__version__)
+                await remote.admin.start()
             _log.info(
                 "hub_ready",
                 pid=os.getpid(),
                 data_dir=str(data_dir),
                 socket=str(listener.path),
+                remote=None
+                if remote is None
+                else f"{remote.listener.address}:{remote.listener.port}",
                 jobs=list(scheduler.job_names),
             )
             await stop.wait()
@@ -578,7 +631,12 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
             raise
         finally:
             await _shut_down(
-                engine, scheduler, listener, shutdown, budget=settings.shutdown_drain_seconds
+                engine,
+                scheduler,
+                listener,
+                remote,
+                shutdown,
+                budget=settings.shutdown_drain_seconds,
             )
     except BaseException as exc:
         # The second capture point, for the steps *above* the inner ``try``:
@@ -597,10 +655,67 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
     return EXIT_OK
 
 
-async def _shut_down(
+async def _build_remote(
+    engine: Engine,
+    settings: Settings,
+    *,
+    data_dir: Path,
+    budget: ConnectionBudget,
+) -> _Remote | None:
+    """Build the remote listener's apparatus, or nothing where it is not configured.
+
+    The overlay agent is asked one question here — what this machine is on the
+    overlay — and its answer supplies two things ADR-0124 needs before a device can
+    be admitted: the hub's own overlay identity, which §6 discloses beside every
+    credential because §4 makes it "the thing a destination has to match", and the
+    addresses §2's bind restriction is checked against
+    (:meth:`~ai_assistant.service.remote.RemoteListener.start`).
+
+    Args:
+        engine: The in-process engine this hub owns.
+        settings: The deployment's configuration.
+        data_dir: The directory the hub owns.
+        budget: The hub's shared ceilings (ADR-0124 §7).
+
+    Returns:
+        The apparatus, or ``None`` on a hub with no remote-listener configuration.
+
+    Raises:
+        ConfigurationError: If the overlay agent cannot say what this machine is.
+            A stay-down deployment fault: an operator who configured a remote
+            listener and has no agent running has a deployment to fix, and a hub
+            that came up serving loopback alone would be silently ignoring the
+            configuration they set (ADR-0083 §5, ruling 4).
+    """
+    if settings.hub_remote_address is None:
+        return None
+    agent = local_agent()
+    try:
+        identity = (await agent.hub_identity()).identity
+    except OverlayIdentityUnavailableError as exc:
+        msg = (
+            f"a remote listener is configured on {settings.hub_remote_address}, and the "
+            f"overlay agent on this machine could not be asked what this machine is "
+            f"({exc}). Enrolment discloses the hub's own overlay identity and admission "
+            f"reads a device's, so neither can happen without it; start the overlay agent, "
+            f"or unset ASSISTANT_HUB_REMOTE_ADDRESS to serve the loopback socket alone"
+        )
+        raise ConfigurationError(msg) from exc
+    store = EnrolmentStore(data_dir / ENROLMENTS_FILENAME)
+    registry = DeviceRegistry(store, hub_identity=identity)
+    return _Remote(
+        store=store,
+        registry=registry,
+        listener=RemoteListener(engine, settings, registry=registry, agent=agent, budget=budget),
+        admin=AdminListener(registry, data_dir=data_dir),
+    )
+
+
+async def _shut_down(  # noqa: PLR0913 — one parameter per thing ADR-0083 §4's sequence closes, in the order it closes them
     engine: Engine,
     scheduler: Scheduler,
     listener: Listener,
+    remote: _Remote | None,
     record: _ShutdownRecord,
     *,
     budget: timedelta,
@@ -641,6 +756,8 @@ async def _shut_down(
         engine: The façade to drain and close.
         scheduler: The loop to stop and join first. Never started is fine.
         listener: The door to close before either.
+        remote: The remote listener, its control socket and its record, on a hub
+            that was configured for one (ADR-0124 §2), or ``None``.
         record: Filled in as each part completes.
         budget: Phase A's configured budget, reported so a drain time can be read
             against the figure it was measured against.
@@ -651,6 +768,9 @@ async def _shut_down(
     try:
         with _during(record, _ShutdownStage.CLOSING_THE_DOOR):
             await listener.stop_accepting()
+            if remote is not None:
+                await remote.listener.stop_accepting()
+                await remote.admin.stop_accepting()
         with _during(record, _ShutdownStage.STOPPING_THE_SCHEDULER):
             await scheduler.aclose()
         record.scheduler_join_seconds = round(time.monotonic() - began, 3)
@@ -669,6 +789,10 @@ async def _shut_down(
             record.phase = engine.drain_phase
             with _during(record, _ShutdownStage.RELEASING_CONNECTIONS):
                 await listener.aclose()
+                if remote is not None:
+                    await remote.listener.aclose()
+                    await remote.admin.aclose()
+                    remote.store.close()
     finally:
         record.elapsed_seconds = round(time.monotonic() - began, 3)
 

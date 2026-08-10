@@ -7,6 +7,7 @@ configuration knob is discoverable, typed, and validated in one place.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import re
@@ -926,6 +927,125 @@ class Settings(BaseSettings):
             )
             raise ValueError(msg)
         return self
+
+    # --- The remote listener (ADR-0124 §2) -------------------------------
+    # **Off unless configured on, and the loopback socket is bound either way.**
+    # ADR-0124 §2: "A hub with no remote-listener configuration binds only ADR-0084
+    # §1's loopback socket, and the loopback socket is bound whether or not the
+    # remote listener is." So the address is the switch, and its default is
+    # ``None`` — there is no separate boolean, because two settings that can
+    # disagree about whether a listener exists is one more state than the hub has.
+    #
+    # **The two ceilings above are *not* repeated here**, and that is ADR-0124 §7's
+    # clause rather than an omission: "Adding it may not let the hub's total
+    # concurrent connections exceed ``hub_max_connections``, and a connection
+    # awaiting admission on the remote listener counts against
+    # ``hub_max_pending_handshakes``." A per-listener figure is exactly the mistake
+    # that clause exists to forbid — "two listeners each honouring the figure
+    # independently would mean the hub honours neither".
+    hub_remote_address: str | None = Field(
+        default=None,
+        description=(
+            "The overlay address the hub's remote listener binds, or unset to bind "
+            "only the loopback socket (ADR-0124 §2). A literal IP address on the "
+            "overlay — never a name, a wildcard, or a public address."
+        ),
+    )
+    # Inside IANA's dynamic/private range (49152-65535), where no registry can
+    # assign a conflicting service, with the last two digits recalling ADR-0084.
+    # Named here rather than left to the implementation, following ADR-0083 §7's
+    # rule that "a 'bounded default' with no figure" is two deployments disagreeing.
+    hub_remote_port: _IntegerSetting = Field(
+        default=50084,
+        ge=1,
+        le=65535,
+        description=(
+            "The port the hub's remote listener binds on its overlay address "
+            "(ADR-0124 §2). Ignored when hub_remote_address is unset."
+        ),
+    )
+
+    @field_validator("hub_remote_address")
+    @classmethod
+    def _the_remote_listener_binds_only_an_overlay_address(cls, value: str | None) -> str | None:
+        """Refuse at load what ADR-0124 §2 forbids the listener to bind.
+
+        > The remote listener binds only to an address that exists on that overlay.
+        > It may not bind a wildcard address, an address of a physical interface,
+        > or any address reachable from the public internet, and a configuration
+        > that would have it do so is refused at load time rather than bound.
+
+        **What is decidable from the string alone is decided here, and the rest is
+        decided before the bind rather than by it.** A wildcard, a name, a loopback
+        or link-local address and a globally-routable one are properties of the
+        value; *which* private address belongs to the overlay is a fact only the
+        overlay agent holds, so :mod:`ai_assistant.service.remote` refuses to bind
+        an address the agent does not report as the hub's own. Neither half is
+        sufficient alone — this one would pass a LAN address on ``eth0``, and the
+        agent check alone would let a wildcard reach a process that has already
+        opened its stores — and together they are "refused… rather than bound".
+
+        **A name is refused rather than resolved.** Resolving one is a lookup whose
+        answer another party supplies, and the address a listener binds would then
+        be a fact about a resolver rather than about this deployment; §1's rule
+        that a destination never comes "from a discovery mechanism" is the same
+        principle on the other end of the hop.
+
+        Args:
+            value: The configured address, or ``None`` when the listener is off.
+
+        Returns:
+            The address, unchanged.
+
+        Raises:
+            ValueError: If the value is not an IP address, or is one ADR-0124 §2
+                forbids. Reported as a ``ConfigurationError`` by ``load_settings``,
+                which is a stay-down deployment fault (ADR-0083 §5).
+        """
+        if value is None:
+            return None
+        text = value.strip()
+        try:
+            address = ipaddress.ip_address(text)
+        except ValueError as exc:
+            msg = (
+                f"hub_remote_address={value!r} is not an IP address. The remote listener "
+                f"binds a literal address that exists on the overlay (ADR-0124 §2); a name "
+                f"would make the bound address a fact about a resolver. Run your overlay "
+                f"agent's status command and use the address it reports for this machine"
+            )
+            raise ValueError(msg) from exc
+        # A sequence of pairs rather than a mapping keyed on the predicate: there
+        # are only two booleans, so a dictionary would collapse five conditions
+        # into two entries and silently report the wrong reason.
+        forbidden = (
+            (
+                address.is_unspecified,
+                "a wildcard address, which would put the hub on every interface this "
+                "machine has, including any reachable from the public internet",
+            ),
+            (
+                address.is_loopback,
+                "a loopback address, which is not on the overlay; the loopback transport "
+                "is ADR-0084 §1's Unix socket and is bound whether or not this listener is",
+            ),
+            (address.is_multicast, "a multicast address, which no listener may hold"),
+            (address.is_link_local, "a link-local address, which is not on the overlay"),
+            (
+                address.is_global,
+                "reachable from the public internet, where the population that can attempt "
+                "the credential is everyone — which is the door ADR-0124 §2 refuses to open",
+            ),
+        )
+        for holds, reason in forbidden:
+            if holds:
+                msg = (
+                    f"hub_remote_address={value!r} is {reason}. Configure the address your "
+                    f"overlay agent reports for this machine, or unset it to bind only the "
+                    f"loopback socket"
+                )
+                raise ValueError(msg)
+        return text
 
     # --- Model layer -----------------------------------------------------
     # The assistant is model-agnostic; this names the default model the
