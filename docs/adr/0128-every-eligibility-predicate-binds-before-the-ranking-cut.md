@@ -187,6 +187,12 @@ it visible.
 > nothing about whether the store holds further eligible records below the cut.
 > The completeness a caller *does* get is stated in §2 and nowhere else.
 
+> **Normative.** This moves **where** `search`'s read-time eligibility axes bind
+> and changes nothing about what they mean or which instant they are read
+> against. No axis is added, removed or relaxed: `search` gains no
+> `include_retired` axis and no as-of axis, and the liveness it applies stays
+> read-time-relative exactly as ADR-0045 §6 has it and ADR-0079 §1 left it.
+
 > **Normative.** A candidate over-fetch is no longer required on a read whose
 > eligibility predicates all bind before the cut, and reducing or removing one is
 > **not** a headroom change: ADR-0112 §7's second clause gates a change that buys
@@ -227,7 +233,7 @@ on the pinned dependency and is in production, and naming one here would ratify
 a schema decision this ADR has no need to make. Whether `SqliteMemoryStore`
 grows an indexed column or a migration is §6's, not this clause's.
 
-**The third clause exists because the over-fetch will otherwise be read as
+**The fourth clause exists because the over-fetch will otherwise be read as
 protected.** ADR-0112 §7's gate is worded as a list of moves — "raising
 `_RESULT_OVERFETCH`, decoupling or lifting the KNN `k` cap to buy a larger
 candidate budget, deepening the candidate scan …" — and a lane that reads the
@@ -252,6 +258,12 @@ and no longer in when they filter.
 > in place of a bare `list[MemoryRecord]`. No other `MemoryStore` member changes,
 > `list_beliefs` is untouched, no other `core` type is added, and the result
 > carries no field beyond those two.
+
+> **Normative.** The under-service signal lives on `search`'s result and nowhere
+> else. `search` does not raise or otherwise refuse because a read was capped, no
+> parameter selects a refusing or completeness-requiring mode, and no second
+> `MemoryStore` member reports on a `search` that has already returned. A lane
+> wanting any of those owes its own ratified ADR under golden rule 5.
 
 > **Normative.** Where `capped` is `False` **and the result holds fewer than
 > `limit` records**, the store holds **no** further record matching the call's
@@ -570,7 +582,21 @@ substance.
 
 ### 7. Explicitly declined
 
-- **A headroom change.** §1's third clause. Nothing here raises
+**This section supplies no obligation of its own, and that is deliberate rather
+than an oversight.** This is a marked ADR, so under ADR-0089 §3 the marked
+clauses are the whole of what it obligates and unmarked text only says what a
+mark *means*. Every refusal below that is meant to constrain a later lane
+therefore lives in a clause above, and each entry names it; the rest is the
+reasoning for a refusal, which ADR-0089 §1's conduct test leaves unmarked. An
+architecture reviewer raised this list as under-marked and was right about four
+entries: the refusal of a raising or `require_complete` mode and of a second
+reporting member are now §2's second clause, the refusal of an `include_retired`
+or as-of axis is now §1's second clause, and a documented maximum `limit` has
+been struck from this list entirely because it is #411 part 1 — a question §6
+leaves open, not one this ADR refuses, and listing a deferral among the refusals
+was itself the error.
+
+- **A headroom change.** §1's fourth clause. Nothing here raises
   `_RESULT_OVERFETCH`, lifts or decouples the KNN `k` cap, deepens a candidate
   scan or adopts hybrid retrieval; ADR-0112 §7's second clause is untouched and
   #799's measurement remains the warrant for any of them.
@@ -579,24 +605,24 @@ substance.
   an escalation hint, or a "there is more below the cut" flag. §2, on #838's
   entitlement invariant. The last is refused separately: it is not free, since
   answering it means looking past `limit`.
-- **Raising on a capped read, or a `require_complete` keyword.** §2. It moves a
-  consumer policy into the store and serves every caller the strictest one.
-- **A separate status method beside `search`.** Two reads racing each other to
-  describe one read, and a caller may skip the second — which is the silence
-  #457 is about.
+- **Raising on a capped read, or a `require_complete` keyword.** §2's second
+  clause. It moves a consumer policy into the store and serves every caller the
+  strictest one.
+- **A separate status method beside `search`.** §2's second clause. Two reads
+  racing each other to describe one read, and a caller may skip the second —
+  which is the silence #457 is about.
 - **Keeping the bare `list[MemoryRecord]` and reporting under-service only in the
-  trace.** The trace is read offline by a tool no subsystem may import (ADR-0120
-  §9); the caller that must refuse is in-process and in the turn.
-- **A documented maximum `limit` on the contract**, which would make §2's ceiling
-  case unreachable by refusing instead. That is #411 part 1 and is out of this
-  lane's scope (§6); it is also a worse answer for a ceiling that is version-
-  coupled (#411 part 2).
-- **Redefining ADR-0120 §7's watch rather than retiring it.** §3.
-- **Dropping the three exclusion counts from the trace.** §3, on #829's window.
-- **An `include_retired` axis or any relaxation of the read-time axes.**
-  `search`'s axes are ADR-0007 §2's and ADR-0045 §6's; this ADR moves where they
-  bind and does not touch what they mean. ADR-0073 §3 refused the retired axis on
-  the sibling read, and ADR-0113 §9 refused it here.
+  trace.** §2's first clause. The trace is read offline by a tool no subsystem
+  may import (ADR-0120 §9); the caller that must refuse is in-process and in the
+  turn.
+- **Redefining ADR-0120 §7's watch rather than retiring it.** §3's second clause.
+- **Dropping the three exclusion counts from the trace.** §3's first clause, on
+  #829's window.
+- **An `include_retired` axis, an as-of axis, or any relaxation of the read-time
+  axes.** §1's second clause. `search`'s axes are ADR-0007 §2's and ADR-0045 §6's;
+  this ADR moves where they bind and does not touch what they mean. ADR-0073 §3
+  refused the retired axis on the sibling read, ADR-0113 §9 refused it here, and
+  ADR-0045 §1 deferred as-of retrieval.
 
 ### 8. What this records against earlier ADRs
 
@@ -691,7 +717,7 @@ is identical either way and only its form moves.
 **ADR-0112 §7, §8 and §10 — nothing owed, and this is the finding a reader would
 most expect to go the other way.** §7's first clause (the measurement is leg 7's
 obligation) is untouched and satisfied by #799. §7's second clause gates headroom
-changes and this ADR makes none — §1's third clause shows the reduction is not
+changes and this ADR makes none — §1's fourth clause shows the reduction is not
 one, using §7's own "the bet, never the mechanism" test rather than an exception
 to it. §7's third clause names both of this ADR's shapes as correctness remedies
 outside the gate, by name; taking a permission as written narrows nothing. §7's
