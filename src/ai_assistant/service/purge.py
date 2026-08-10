@@ -93,6 +93,17 @@ _MOUNT_POINT_FIELDS: Final = 5
 #: a mount point containing a space is one field rather than two.
 _OCTAL_ESCAPE: Final = re.compile(r"\\([0-7]{3})")
 
+#: What ``O_NOFOLLOW`` reports when the entry it met is a symbolic link. Linux says
+#: ``ELOOP``; the BSDs and macOS say ``EMLINK``, and :mod:`ai_assistant.service.artifact`
+#: names the same pair for the same reason — treating only the first as the symlink
+#: case turns a decision §1 makes into a raw errno on half the platforms.
+_SYMLINK_ERRNOS: Final = frozenset({errno.ELOOP, errno.EMLINK})
+
+#: What an open reports when the entry it was told about is no longer there, or is
+#: no longer a directory. Neither is a path that would stop the act: the entry that
+#: is there now is whatever the destroying walk finds and unlinks.
+_ENTRY_MOVED: Final = frozenset({errno.ENOENT, errno.ENOTDIR, *_SYMLINK_ERRNOS})
+
 #: Whether this platform can answer an access question about the *effective* user.
 #: ``os.access`` asks about the real one by default, and a tool run under ``sudo -u``
 #: would then be told about the wrong identity.
@@ -145,6 +156,23 @@ class _Survivor:
     path: Path
     error: OSError
     opaque: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _Pinned:
+    """The enrolment record's entry, held open so its identity cannot be recycled.
+
+    Attributes:
+        handle: A no-follow read-only descriptor on the entry. Its only job is to
+            be held: while it is open the inode below cannot be reused by a
+            different file, so comparing against it afterwards means something.
+        device: The pinned file's device.
+        inode: The pinned file's inode.
+    """
+
+    handle: int
+    device: int
+    inode: int
 
 
 @dataclass(slots=True)
@@ -319,7 +347,7 @@ def _acquire(lock: InstanceLock) -> bool:
     try:
         return lock.acquire()
     except OSError as exc:
-        if exc.errno != errno.ELOOP:
+        if exc.errno not in _SYMLINK_ERRNOS:
             raise
         msg = (
             f"{lock.path} is a symbolic link. Taking the instance lock writes to that path, "
@@ -375,28 +403,89 @@ def _live_enrolments(data_dir: Path) -> _Devices:
             everything behind a report it knows to be silent.
     """
     record = data_dir / ENROLMENTS_FILENAME
+    root = _open_directory(None, str(data_dir))
     try:
-        info = record.lstat()
+        pinned = _pin_record(root, shown=record)
+        if isinstance(pinned, str):
+            return _Devices(live=(), note=pinned or None)
+        try:
+            return _Devices(live=_read_record(record, pinned=pinned))
+        finally:
+            os.close(pinned.handle)
+    finally:
+        os.close(root)
+
+
+def _pin_record(root: int, *, shown: Path) -> _Pinned | str:
+    """Open the record's entry no-follow, so the type decision is the kernel's (§1).
+
+    **The open is the check.** An ``lstat`` followed by an open by path is two
+    resolutions of one name, and the entry can change between them — the hole
+    ``backup._measure`` records having had and closed for the same reason: "a
+    regular file could become a symbolic link: the ``lstat`` recorded the link, the
+    open followed it". ``O_NOFOLLOW`` moves the decision into the same call that
+    produces the descriptor, so a link at this path can never be read through.
+
+    ``O_NONBLOCK`` beside it because the entry is not necessarily a file: opening a
+    FIFO ``O_RDONLY`` blocks until a writer arrives, and an act that hung forever on
+    a named pipe someone left in the data directory would be worse than one that
+    refused.
+
+    Args:
+        root: The data directory's descriptor.
+        shown: The record's path, for the note and for the read.
+
+    Returns:
+        The pinned regular file, or the note §7 requires in place of a list — the
+        empty string where there is simply no record and nothing to say beyond
+        that this installation has enrolled no device.
+
+    Raises:
+        RefusalError: If the entry exists and cannot be examined at all.
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        handle = os.open(ENROLMENTS_FILENAME, flags, dir_fd=root)
     except FileNotFoundError:
-        return _Devices(live=())
+        return ""
     except OSError as exc:
+        if exc.errno in _SYMLINK_ERRNOS:
+            return (
+                f"{shown} is a symbolic link, so it was not opened and not read — this act "
+                f"never follows one. The entry is destroyed as the link it is, and whatever "
+                f"it names is neither read nor destroyed"
+            )
         msg = (
-            f"{record} could not be examined, so this act cannot state which devices are "
+            f"{shown} could not be examined, so this act cannot state which devices are "
             f"enrolled: {exc}"
         )
         raise RefusalError(msg) from exc
+    info = os.fstat(handle)
+    if stat.S_ISREG(info.st_mode):
+        return _Pinned(handle=handle, device=info.st_dev, inode=info.st_ino)
+    os.close(handle)
+    return (
+        f"{shown} is not a regular file, so it was not opened as the enrolment record. "
+        f"The entry is destroyed as the entry it is"
+    )
 
-    if not stat.S_ISREG(info.st_mode):
-        # §1 decides an entry's type on the entry and never on what it resolves
-        # to, and what a link names "is not read". So the record is not opened
-        # through it; the entry is still destroyed, as the entry it is.
-        note = (
-            f"{record} is not a regular file, so it was not opened and not read — this act "
-            f"never follows a link. The entry is destroyed as the entry it is, and whatever "
-            f"it may name is neither read nor destroyed"
-        )
-        return _Devices(live=(), note=note)
 
+def _read_record(record: Path, *, pinned: _Pinned) -> tuple[Enrolment, ...]:
+    """Read every live enrolment, and refuse if the entry moved under the read.
+
+    **The re-check is the shape ``backup._refuse_if_source_moved`` has, and for the
+    same reason it is stated rather than claimed away**: SQLite opens a *path*, so
+    this is the one resolution of the record's name that :func:`_pin_record` cannot
+    make on the descriptor it holds. The descriptor is kept open across the read, so
+    the pinned inode cannot be recycled, and the entry is compared against it
+    afterwards — an entry replaced around the read is caught and refused rather
+    than reported as this installation's device list. It narrows the window and
+    does not close it, and nothing here claims it does.
+
+    Raises:
+        RefusalError: If the record cannot be opened or read, or if the entry no
+            longer names the file that was pinned.
+    """
     try:
         store = EnrolmentStore(record)
     except sqlite3.Error as exc:
@@ -415,7 +504,20 @@ def _live_enrolments(data_dir: Path) -> _Devices:
         raise RefusalError(msg) from exc
     finally:
         store.close()
-    return _Devices(live=live)
+
+    try:
+        after = record.stat()
+    except OSError as exc:
+        msg = f"{record} vanished while it was being read, so nothing was destroyed: {exc}"
+        raise RefusalError(msg) from exc
+    if (after.st_dev, after.st_ino) != (pinned.device, pinned.inode):
+        msg = (
+            f"{record} was replaced while it was being read, so the device list may not be "
+            f"this installation's and nothing was destroyed; make sure nothing else is "
+            f"writing to the data directory and run this again"
+        )
+        raise RefusalError(msg)
+    return live
 
 
 def _refuse_descendant_mounts(data_dir: Path) -> None:
@@ -496,6 +598,15 @@ def _refuse_unremovable(data_dir: Path) -> None:
     of the clause: the directories to descend into are exactly the directories
     checked, and every entry's parent is one of them.
 
+    **The walk is descriptor-relative and no-follow, exactly as the destroying one
+    is**, and for the reason that one is: a directory listed as a directory can be a
+    symbolic link by the time it is entered, and a path-based check would then read
+    an external tree and could refuse over permissions found in it. Every name here
+    is resolved once, against a descriptor opened ``O_NOFOLLOW`` from its parent's,
+    and every access question is asked with ``follow_symlinks=False`` — so a
+    swapped entry is a link this preflight passes over and the destroying walk
+    unlinks, never a tree either of them reads.
+
     Args:
         data_dir: The directory whose contents will be destroyed.
 
@@ -503,20 +614,12 @@ def _refuse_unremovable(data_dir: Path) -> None:
         RefusalError: Naming each path that fails and what about it fails.
     """
     failures: list[str] = []
-    for directory in _directories(data_dir, failures):
-        lacking = [
-            word
-            for mode, word in _REQUIRED_ACCESS
-            if not os.access(directory, mode, effective_ids=_EFFECTIVE_IDS)
-        ]
-        # A directory that went away between being listed and being checked is not
-        # one that would stop the act — there is nothing left to descend into — and
-        # refusing over it would deny the delete right for a path that no longer
-        # exists. Checked only when something failed, so the ordinary walk pays
-        # nothing for it.
-        if not lacking or not directory.is_dir():
-            continue
-        failures.extend(f"{directory} is not {word} by this process" for word in lacking)
+    root = _open_directory(None, str(data_dir))
+    try:
+        _check_access(root, ".", shown=data_dir, failures=failures)
+        _check_tree(root, data_dir=data_dir, failures=failures)
+    finally:
+        os.close(root)
     if not failures:
         return
     listed = "\n  ".join(failures)
@@ -530,33 +633,105 @@ def _refuse_unremovable(data_dir: Path) -> None:
     raise RefusalError(msg)
 
 
-def _directories(data_dir: Path, failures: list[str]) -> Iterator[Path]:
-    """The data directory and every real directory beneath it, breadth first.
+def _check_tree(root: int, *, data_dir: Path, failures: list[str]) -> None:
+    """Check every directory beneath the root, one held descriptor per *level*.
 
-    A symbolic link is never descended into, whatever it names: §1 makes every
-    decision about an entry's type on the entry itself.
+    Per level rather than per directory, for the reason the destroying walk gives:
+    a descriptor for every directory makes an ordinary wide tree fail with
+    ``EMFILE``, and §1 authorises no depth or width policy.
 
     Args:
-        data_dir: The root of the walk.
-        failures: Collects directories that could not be listed, which are as much
-            a reason to refuse as one that fails an access check.
-
-    Yields:
-        Each directory, including ``data_dir`` itself.
+        root: The data directory's descriptor, which this does not close.
+        data_dir: The data directory, for the paths a diagnostic names.
+        failures: Collects what would have stopped the act.
     """
-    pending = deque([data_dir])
-    while pending:
-        directory = pending.popleft()
-        yield directory
-        try:
-            with os.scandir(directory) as scan:
-                entries = sorted(scan, key=lambda item: item.name)
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            failures.append(f"{directory} could not be listed: {exc}")
-            continue
-        pending.extend(Path(entry.path) for entry in entries if entry.is_dir(follow_symlinks=False))
+    frames: list[tuple[int, str, deque[str]]] = [
+        (root, "", _subdirectories(root, shown=data_dir, failures=failures))
+    ]
+    try:
+        while frames:
+            descriptor, relative, children = frames[-1]
+            if not children:
+                frames.pop()
+                if frames:
+                    os.close(descriptor)
+                continue
+            name = children.popleft()
+            child_relative = f"{relative}/{name}" if relative else name
+            shown = data_dir / child_relative
+            if not _check_access(descriptor, name, shown=shown, failures=failures):
+                continue
+            try:
+                child = _open_directory(descriptor, name)
+            except OSError as exc:
+                if exc.errno not in _ENTRY_MOVED:
+                    failures.append(f"{shown} could not be opened: {exc}")
+                continue
+            frames.append(
+                (child, child_relative, _subdirectories(child, shown=shown, failures=failures))
+            )
+    finally:
+        for descriptor, _relative, _children in frames[1:]:
+            os.close(descriptor)
+
+
+def _subdirectories(descriptor: int, *, shown: Path, failures: list[str]) -> deque[str]:
+    """Name every entry of a held directory that is itself a directory.
+
+    ``follow_symlinks=False`` on the type decision, because §1 makes every one of
+    them "on the entry itself and never on what it resolves to".
+    """
+    try:
+        with os.scandir(descriptor) as scan:
+            entries = sorted(scan, key=lambda item: item.name)
+    except OSError as exc:
+        failures.append(f"{shown} could not be listed: {exc}")
+        return deque()
+    return deque(entry.name for entry in entries if entry.is_dir(follow_symlinks=False))
+
+
+def _check_access(directory: int, name: str, *, shown: Path, failures: list[str]) -> bool:
+    """Ask §1's three questions about one entry, without resolving its name again.
+
+    ``dir_fd`` and ``follow_symlinks=False`` together are what make this the entry's
+    own answer: the name is resolved against a descriptor this walk opened, and a
+    link at the final component is answered about rather than followed. Both are
+    supported wherever this act can run at all — it refuses a platform with no
+    readable mount table long before reaching here (§1).
+
+    Args:
+        directory: The descriptor to resolve ``name`` against.
+        name: The entry, or ``"."`` for the held directory itself.
+        shown: The path a diagnostic names.
+        failures: Collects what would have stopped the act.
+
+    Returns:
+        Whether every permission is held, and therefore whether the walk may
+        descend into it.
+    """
+    lacking = [
+        word
+        for mode, word in _REQUIRED_ACCESS
+        if not os.access(
+            name, mode, dir_fd=directory, effective_ids=_EFFECTIVE_IDS, follow_symlinks=False
+        )
+    ]
+    if not lacking:
+        return True
+    try:
+        info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except OSError:
+        # It went away between being listed and being asked about. There is
+        # nothing left to descend into, and refusing over a path that no longer
+        # exists would withhold the delete right for nothing.
+        return False
+    if not stat.S_ISDIR(info.st_mode):
+        # It is a link or a file now, not a directory this act must descend into.
+        # The destroying walk unlinks whatever is there, which needs none of these
+        # three permissions on the entry itself.
+        return False
+    failures.extend(f"{shown} is not {word} by this process" for word in lacking)
+    return False
 
 
 def _state_before(data_dir: Path, devices: _Devices) -> None:

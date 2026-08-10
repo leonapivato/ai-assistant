@@ -640,7 +640,7 @@ def test_a_record_that_is_not_a_regular_file_is_not_read_through(
     assert _run(data_dir) == EXIT_OK
     printed = capsys.readouterr().out
     assert "somewhere-elses-device.example.ts.net" not in printed
-    assert "not a regular file" in printed
+    assert "is a symbolic link" in printed
     assert elsewhere.exists()
     assert _remaining(data_dir) == {LOCK_FILENAME}
 
@@ -826,3 +826,79 @@ def test_a_directory_removed_between_listing_and_descent_is_not_a_survivor(
     assert _run(data_dir) == EXIT_OK
     assert _remaining(data_dir) == {LOCK_FILENAME}
     assert "did not complete" not in capsys.readouterr().out
+
+
+@pytest.mark.usefixtures("settings")
+def test_a_record_swapped_for_a_link_around_the_read_is_refused(
+    tmp_path: Path,
+    data_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """§1: "what it names is not read". SQLite opens a path, so the entry is pinned.
+
+    The swap is staged where the real race would land it — after the entry has been
+    examined and before the record is opened by name — which is the window an
+    ``lstat``-then-open pair leaves and the descriptor closes.
+    """
+    elsewhere = tmp_path / "another-record.db"
+    _enrol(tmp_path, "somewhere-elses-device.example.ts.net")
+    (tmp_path / ENROLMENTS_FILENAME).rename(elsewhere)
+    _enrol(data_dir, "this-installations-device.example.ts.net")
+
+    record = data_dir / ENROLMENTS_FILENAME
+    real_store = EnrolmentStore
+
+    def swap_then_open(path: Path) -> EnrolmentStore:
+        if path == record and record.exists() and not record.is_symlink():
+            record.unlink()
+            record.symlink_to(elsewhere)
+        return real_store(path)
+
+    monkeypatch.setattr(purge, "EnrolmentStore", swap_then_open)
+    before = _remaining(data_dir)
+    assert _run(data_dir) == EXIT_DEPLOYMENT
+    assert _remaining(data_dir) == before
+    printed = capsys.readouterr()
+    assert "was replaced while it was being read" in printed.err
+    assert "somewhere-elses-device.example.ts.net" not in printed.out
+
+
+@pytest.mark.usefixtures("settings")
+def test_a_record_that_is_a_fifo_does_not_hang_the_act(data_dir: Path) -> None:
+    """Opening a FIFO ``O_RDONLY`` blocks until a writer arrives; ``O_NONBLOCK`` is why."""
+    os.mkfifo(data_dir / ENROLMENTS_FILENAME)
+    assert _run(data_dir) == EXIT_OK
+    assert _remaining(data_dir) == {LOCK_FILENAME}
+
+
+@pytest.mark.usefixtures("settings")
+def test_the_preflight_never_reads_a_tree_a_swapped_directory_names(
+    tmp_path: Path, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§1's type decisions are the entry's, in the preflight as much as in the act.
+
+    A directory replaced by a link to an unreadable tree used to make the preflight
+    scan that tree and refuse over permissions found outside the boundary. Now the
+    link is passed over here and unlinked by the act, and the external tree is
+    neither read nor destroyed.
+    """
+    outside = tmp_path / "not-ours"
+    outside.mkdir()
+    (outside / "sealed").mkdir(mode=0o000)
+    swapped = data_dir / "vectors"
+    real_open = purge._open_directory
+
+    def swapping(directory: int | None, name: str) -> int:
+        if name == swapped.name and not swapped.is_symlink():
+            shutil.rmtree(swapped)
+            swapped.symlink_to(outside)
+        return real_open(directory, name)
+
+    monkeypatch.setattr(purge, "_open_directory", swapping)
+    try:
+        assert _run(data_dir) == EXIT_OK
+        assert _remaining(data_dir) == {LOCK_FILENAME}
+        assert (outside / "sealed").is_dir()
+    finally:
+        (outside / "sealed").chmod(0o700)
