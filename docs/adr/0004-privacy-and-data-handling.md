@@ -1,8 +1,9 @@
 # 4. Privacy and data handling
 
-- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause) and
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause),
   ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a
-  device the owner has enrolled)
+  device the owner has enrolled) and ADR-0125 (§3's reader clause — which Protocol
+  `models/` and `tools/` are handed, and nothing else of §3)
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
@@ -46,6 +47,35 @@
   ADR-0124 forbids citing its exemption to widen it to a second access. #74, which
   asks whether §7's gate reaches the model provider credential, is untouched and
   stays open on that subject.
+- Partially superseded: 2026-08-09 by ADR-0125 — **one clause, and it is about
+  which Protocol a reader is handed rather than about the keyring.** ADR-0125
+  declares the `SecretStore` Protocol §3 provisions and has never had, splitting
+  the seam into a reading face and a writing one.
+
+  **Replaced — §3's reader clause.** "The `models/` and `tools/` layers read
+  credentials through a small `SecretStore` Protocol (added to
+  `core/protocols.py`) so the keyring backing can be faked in tests and swapped
+  per platform." Those two layers only read, so ADR-0125 §8 hands them `Secrets` —
+  the reading face — and states that neither holds `SecretStore`. A reader holding
+  only §3 would wire them with the wider Protocol, which is ADR-0070 §1's first
+  limb. The sentence's stated purpose is carried unchanged: `Secrets` is in
+  `core/protocols.py`, is fakeable in tests, is swappable per platform, and is the
+  only path either layer has to the keyring. What the split buys is that a layer
+  which only reads cannot overwrite or delete the credential it reads.
+
+  **Not replaced — everything else of §3, which is the part with the teeth.** Tier
+  0 secrets still live in the OS keyring via the `keyring` library, never in the
+  memory database and never in a committed file; ADR-0125 §7 applies that rule by
+  forbidding any fallback to a file, an environment variable or a backend without
+  the operating system's own access control, and requiring a visible refusal
+  instead. §3's third consumer, the stacked addition ADR-0124 §12 recorded, is
+  untouched and ADR-0125 adds no fourth — its scope enum is closed at three, so a
+  fourth consumer owes its own ADR. §1's tiers, §2's residency and telemetry
+  clauses, §4's at-rest posture, §5's redaction, §6's rights and §7 are all
+  untouched: ADR-0125 §9 states that it gates nothing, discharges no ADR-0017 §3
+  condition, and does not widen ADR-0124 §6's exemption. **#74 stays open on its
+  own subject**, and ADR-0125 §8 records that the existing environment read of the
+  provider key is pre-existing and not authorised by it.
 - Note (2026-07-20): **§2's egress clause is superseded by ADR-0017.** That
   clause named `models/` the only component permitted to send user data
   off-device; ADR-0017 §1 replaces it with `models/` plus a designated

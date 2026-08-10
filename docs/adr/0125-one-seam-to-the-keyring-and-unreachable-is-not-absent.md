@@ -8,6 +8,16 @@
   the last two days, and a citation that silently means "whatever this ADR says
   when you read it" is not checkable. Where a later ADR changes one of them, this
   one is read against the text named here until an ADR says otherwise.
+- **This ADR partially supersedes ADR-0004 and ADR-0124, and both records land in
+  this change.** One clause each, and they are the same clause twice: §3 of the
+  first and §6 of the second each name `SecretStore` as the Protocol a consumer
+  reads credentials through, and §1 below gives a read-only consumer the reading
+  face of that seam instead. §13 applies ADR-0070 §1's test to both and states what
+  survives, which is nearly all of both sections — including §3's keyring rule and
+  every one of §6's obligations about where the device credential lives, what may
+  read it, and what may never see it. No ratified text of either is rewritten; each
+  `Status` line and its appended dated note are the whole of the record (ADR-0070
+  §1, ADR-0082 §1 and §2).
 - **No implementation lands with it.** No `src/`, no `tests/`, no `pyproject.toml`.
   The Protocol, its shared conformance suite and its canonical fake are the triad
   lane, briefed against this text once it merges (golden rule 5, ADR-0015 §5,
@@ -247,6 +257,36 @@ reference in the queue" would rest on (§10).
 > resolved `Settings.data_dir` — and the implementation receives its namespace by
 > injection rather than reading a setting itself.
 
+> **Normative.** An instance is bound to exactly one `SecretScope` as well. Every
+> method raises `ValueError` for a `SecretName` whose `scope` is not the
+> instance's, before reaching the keyring, and a consumer therefore reaches only
+> the scope it was given.
+
+**Without the scope binding, §8's consumer boundary is a sentence rather than a
+mechanism, and the gap is the whole seam.** A `SecretName` carries its scope as
+data and §2 makes it safe to log, so a tool holding a `Secrets` bound only to an
+installation can construct an `ENROLMENT` name — a value it can read off this ADR
+— and read the device credential ADR-0124 §6 spent a section confining. Splitting
+read from write (§1) does not touch that: the whole attack is a read. Binding the
+scope to the object is what makes "for `INTEGRATION`-scoped reads" a property of
+the thing the tool is holding rather than a rule the tool is trusted to follow.
+
+**It is a `ValueError` and not a permission refusal**, because nothing was denied:
+a call for another scope is a consumer holding the wrong instance, which is a
+wiring fault at the composition root and reproduces identically on every attempt.
+`PermissionDeniedError` would say a policy ran, which §9 is explicit that none
+did; a `SecretStoreError` would say the store failed. The corpus's spelling for an
+argument a seam refuses on its own terms is `ValueError`, and it is what
+`SecretName` and `SecretValue` already raise.
+
+**The residual is named rather than hidden: within `INTEGRATION`, one tool can
+read another's credential.** Per-tool confinement would need a scope per tool,
+which §2's closed enum forbids by design. It is accepted because tools are code in
+this repository behind ADR-0016's registry rather than third-party plugins, so the
+boundary crossed would be one between two modules the same review approved. A
+plugin model would change that answer, and the fix would be additive — a
+capability narrower than a scope, handed out at the same wiring point.
+
 **Without this the second hub on a machine silently shares the first's
 credentials.** ADR-0083 puts one resident process per data directory, so two data
 directories on one machine is a supported deployment and a routine one during QA.
@@ -277,19 +317,35 @@ deployment asking for it.
 > define a `SecretValue` whose default rendering is the secret, and no lane may
 > reimplement the redaction or the accessor under another name.
 
+> **Normative.** `core/types.py` also exports `secret_value`, the callable that
+> applies those refusals and returns the validated `SecretValue`. It is the only
+> supported way to build one, and every clause in this ADR saying a violation
+> "raises `ValueError` at construction" means through it.
+
 ```python
-type SecretValue = Annotated[SecretStr, AfterValidator(_secret_value)]
+type SecretValue = Annotated[SecretStr, AfterValidator(secret_value)]
+
+
+def secret_value(value: SecretStr) -> SecretStr: ...
 ```
 
-Building on the library's type rather than writing one is the decision, not a
-detail: the redaction and the accessor are then the ones every reader of this
-codebase already knows, and `_secret_value` adds only the three refusals §3
-requires. It is also what makes the accessor nameable here, which the client half
-needs — ADR-0124 §7 requires the connect frame's credential member to be a JSON
-string, so the client unwraps with `get_secret_value` immediately before encoding
-and nowhere else. `Annotated` with an `AfterValidator` is `core/types.py`'s
-existing idiom for a refined scalar, as `Identifier` and `NonBlankEncodableText`
-both are.
+**The callable is not decoration, and leaving it out would have made §3's
+promise false.** An `Annotated` alias is a *field* annotation: pydantic runs its
+`AfterValidator` when a model carrying the field is validated, and calling the
+alias directly constructs the bare `SecretStr` origin with no validator in the
+path. So a blank or oversized value could reach `set` through a direct
+construction while this ADR claimed it could not. `core/types.py` already carries
+the answer — `encodable_text` is the callable beside `EncodableText`, and
+`core/errors.py` calls it in a constructor for exactly this reason — and this
+follows it. Both spellings are then real: a model field annotated `SecretValue`
+validates through pydantic, and a hand-built value validates through the callable.
+
+Building on the library's type rather than writing one is the other half of the
+decision: the redaction and the accessor are then the ones every reader of this
+codebase already knows. It is also what makes the accessor nameable here, which
+the client half needs — ADR-0124 §7 requires the connect frame's credential member
+to be a JSON string, so the client unwraps with `get_secret_value` immediately
+before encoding and nowhere else.
 
 **The redacting type is the mechanism, not a convenience.** `core/logging.py`
 redacts by key name — ADR-0124 §6 relies on exactly that, requiring that no
@@ -512,6 +568,14 @@ laptop.
 > `ENROLMENT`-scoped, and the connect-path read is the one ADR-0124 §6 confines to
 > one purpose and one path.
 
+**Every scope word in the four clauses of this section is mechanical, not
+advisory.** §2 binds an instance to one scope and makes every method refuse a name
+outside it, so "`tools/` holds `Secrets` ... for `INTEGRATION`-scoped reads"
+describes what the object the tool holds can do, and a tool naming an `ENROLMENT`
+entry gets a `ValueError` rather than the device credential. The composition root
+is where the two facts about an instance — its installation and its scope — are
+chosen, which is the one place that knows both.
+
 > **Normative.** No other subsystem holds either face. `orchestration`, `memory`,
 > `context`, `planning`, `permissions`, `learning`, `readers`, `evaluation`,
 > `service` and `interfaces` hold neither, and none of them may acquire one without
@@ -648,16 +712,20 @@ property being tested.
 > unset name returns `None`; two names differing only in `scope` are distinct
 > entries, and two differing only in `key` are distinct; two subjects bound to
 > different installations share no entry, so an entry arranged in one is `None` in
-> the other; the subject satisfies `Secrets` by `isinstance`; and no secret value
-> appears in the `repr` of the subject, of a `SecretValue`, or of any error the
-> subject raises.
+> the other; a name outside the subject's bound scope raises `ValueError` and the
+> subject's own scope still answers afterwards; the subject satisfies `Secrets` by
+> `isinstance`; and no secret value appears in the `repr` of the subject, of a
+> `SecretValue`, or of any error the subject raises.
 
 > **Normative.** `SecretStoreContract` inherits every obligation above, binding
 > the same subject through the narrow face rather than a second object, and adds:
 > a `set` then `get` round trip returns the value verbatim; `set` over an occupied
 > name replaces and leaves one entry; `delete` of an unset name returns `False` and
 > raises nothing; `delete` returns `True` once and `False` thereafter, and `get`
-> then returns `None`; and the subject satisfies `SecretStore` by `isinstance`.
+> then returns `None`; `set` and `delete` each raise `ValueError` for a name
+> outside the subject's bound scope, and the entry that name would have addressed
+> is neither written nor removed; and the subject satisfies `SecretStore` by
+> `isinstance`.
 
 > **Normative.** The type obligations are proved beside the suites, over the types
 > themselves: a `SecretValue` of exactly 1024 UTF-8 bytes constructs and one of
@@ -701,10 +769,10 @@ recorded as a debt on a lane that does not exist yet, it would be discovered by
 whoever first ran the system on a headless box.
 
 > **Normative.** The canonical fake in `ai_assistant.testing` is an in-memory
-> implementation of `SecretStore`, bound to an installation namespace it takes at
-> construction so two of them can be built, and carrying an explicit switch that
-> puts it into the unavailable state. It is test-only, and no composition root
-> wires it.
+> implementation of `SecretStore`, taking its installation namespace and its
+> `SecretScope` at construction so the suites can build two that differ in either,
+> and carrying an explicit switch that puts it into the unavailable state. It is
+> test-only, and no composition root wires it.
 
 > **Normative.** Both Protocols get a concrete `Test…Contract` subclass running
 > the fake through its suite — through the narrow suite as a `Secrets`, and through
@@ -759,27 +827,78 @@ differently, or read one of its clauses more widely than it now holds? Every ADR
 this one relies on was read for **what it is relied on for**, which is ADR-0084
 §12's semantic method rather than a phrase search.
 
-**No ADR is superseded, wholly or partially, and no earlier ADR's `Status` line is
-touched by this change.** Two records are owed and both are stacked additions,
-which ADR-0082 §1 places in this ADR and nowhere else.
+**Two clauses are partially superseded — ADR-0004 §3's and ADR-0124 §6's — and
+both records land in this change**, on each ADR's `Status` line and in its
+appended dated note. They are the same clause twice: each names `SecretStore` as
+the Protocol a consumer reads through, and §1 above hands a read-only consumer
+`Secrets` instead. One further record is owed and is a stacked addition, which
+ADR-0082 §1 places in this ADR and nowhere else.
 
-- **ADR-0004 — a stacked addition on §3, and nothing else.** §3's keyring rule is
-  applied rather than narrowed. Its `SecretStore` sentence requires `models/` and
-  `tools/` to "read credentials through a small `SecretStore` Protocol"; §1 above
-  splits that seam into a reading face and a writing one, gives those two layers
-  the reading face, and leaves the seam's name and its single-path discipline
-  intact. Every sentence of §3 stays true — both layers read through the
-  `SecretStore` seam, neither reaches the keyring by another path, and the backing
-  is fakeable and swappable, which is the purpose §3 states for the Protocol. A
-  reader holding only §3 builds one Protocol and gives a tool the ability to write;
-  after this they build two and give it less, which is narrower than §3 and not
-  wider, so neither limb of ADR-0070 §1's test is met. **Recorded here and nowhere
-  else.** §3's third consumer is already recorded, by ADR-0124 §12 and on ADR-0004's
-  own `Status` line, and this ADR adds no fourth. §1's tiers, §4's at-rest posture,
-  §5's redaction and §6's rights are used as given; §6's Tier 0 purge gains the
-  mechanism §5 above describes and loses nothing. §7 is not engaged: §9 above gates
-  nothing and widens nothing, and ADR-0124 §6's exemption is left exactly where it
-  was put.
+**Both were drafted as stacked additions and neither is one.** The first draft
+argued that §3's sentence "stays true" because `models/` still reads through the
+`SecretStore` *seam*, of which `Secrets` is a face. Architecture review named the
+substitution: §3 says **Protocol**, not seam, and a reader holding only §3 wires
+`models/` with a `SecretStore` where after this ADR they wire it with something
+else. That is ADR-0070 §1's first limb met, and the reasoning is adopted rather
+than argued with — the same outcome ADR-0124 §12 records for its own two clauses,
+found the same way. Applying the identical test to ADR-0124 §6 then gives the
+identical answer, which is why there are two records and not one; leaving the
+second unrecorded because it was not the one review named would be keeping a
+misclassification that the finding had already refuted.
+
+**What was *not* conceded is the design.** Narrowing what a read-only consumer
+holds is the decision (§1), and ADR-0082 §1 is explicit that a record is a
+book-keeping consequence of a decision rather than a reason to choose a different
+one. Weakening the seam to avoid two status-line edits would have been exactly
+that inversion.
+
+- **ADR-0004 §3's reader clause is partially superseded, and only that clause.**
+  The sentence is "The `models/` and `tools/` layers read credentials through a
+  small `SecretStore` Protocol (added to `core/protocols.py`) so the keyring
+  backing can be faked in tests and swapped per platform." §1 and §8 above give
+  those two layers `Secrets` and state that neither holds `SecretStore`, so a
+  reader holding only §3 wires them differently from a reader holding this ADR —
+  ADR-0070 §1's first limb, met. In its place: the seam is two Protocols, a
+  read-only consumer holds the reading one, and the sentence's own purpose is
+  carried unchanged, because `Secrets` is in `core/protocols.py`, is fakeable, is
+  swappable per platform, and is the only path either layer has to the keyring
+  (§8). **Nothing else of §3 moves.** Its keyring rule — Tier 0 in the OS keyring,
+  never in the memory database, never in a committed file — is applied rather than
+  narrowed, and §7 above turns it into a refusal-to-fall-back. Its third consumer,
+  recorded by ADR-0124 §12, is untouched and this ADR adds no fourth. §1's tiers,
+  §4's at-rest posture, §5's redaction and §6's rights are used as given; §6's
+  Tier 0 purge gains the mechanism §5 above describes and loses nothing. §7 is not
+  engaged: §9 above gates nothing and widens nothing, and ADR-0124 §6's exemption
+  is left exactly where it was put.
+- **ADR-0124 §6's reader clause is partially superseded, and only that clause.**
+  The marked sentence is "The client reads the credential through the
+  `SecretStore` Protocol ADR-0004 §3 provisions, and through no other path to the
+  keyring." Its second limb is untouched and is in fact strengthened — §8 above
+  adds an import-linter contract confining the keyring library to one package, so
+  "no other path" becomes mechanical. Its first limb fails the same test as
+  ADR-0004 §3's: the client half holds a `SecretStore` for enrolment and
+  unenrolment, but the **connect-path read** this clause is about goes through
+  `Secrets`, so a reader holding only §6 wires that call site with the wider
+  Protocol. In its place: the connect path holds `Secrets`, bound to `ENROLMENT`
+  and to the device's installation (§2), which is strictly narrower than what §6
+  described and serves every purpose §6 gave for naming the Protocol at all.
+  **Nothing else of §6 moves**, and the parts that matter most are used exactly as
+  ratified: the credential persists, it is held only in the OS keyring, the read is
+  confined to one purpose and one path, it reaches no log or audit record or error
+  message, the enrolment is unique per identity, and ADR-0004 §7's exemption keeps
+  its three replacements. §7's credential wire type is untouched — the client
+  unwraps with `get_secret_value` immediately before encoding (§3) — and §8's
+  device-side unenrolment gains `delete` as its mechanism with none of its rules
+  changed.
+
+  **One header field is added to ADR-0124 rather than lost.** Its `Status` was the
+  bare token `Accepted`, and the leading `Partially superseded by` token replaces
+  it — the template drops `Accepted` so that a prefix match cannot read the
+  replaced part as live. That would have left the file with no record of having
+  been ratified, so an `Accepted: 2026-08-09` field is added beside `Date`, which
+  is the shape ADR-0017 already carries and where ADR-0124 §12 put the same ADR's
+  own acceptance date. Nothing else of that header, and no ratified text of that
+  ADR, is edited.
 - **ADR-0084 — a stacked addition on §11, on ADR-0083 §15's own test.** §11 defers
   authentication's storage, saying "`SecretStore` is the obvious home". That
   sentence **stays true and now has an answer**, which is the stacked-addition test
@@ -787,21 +906,13 @@ which ADR-0082 §1 places in this ADR and nowhere else.
   untouched — it reads no credential — and §9's `data_dir` remains the one setting
   that locates everything, which is what §2 above binds the installation namespace
   to. **Recorded here and nowhere else.**
-- **ADR-0124 — no record owed, and the check is worth stating rather than
-  asserting.** §6's marked clause requires the client to read "through the
-  `SecretStore` Protocol ADR-0004 §3 provisions, and through no other path to the
-  keyring". It stays true on both limbs. The client half holds a `SecretStore` —
-  §8 above requires it, because §6 makes the credential persist and §8 of that ADR
-  makes unenrolment delete it — and its connect path is handed the reading face of
-  that same seam, which is not a second path to the keyring but a narrower view of
-  the one. The operative half of the clause is "and through no other path", and §8
-  above strengthens it with an import-linter contract. §6's persistence, its Tier 0
-  placement, its one-purpose-one-path confinement, its no-log obligation, its
-  uniqueness clause and its ADR-0004 §7 exemption are all used as given. §7's
-  requirement that the connect frame's credential member be a JSON string is
-  untouched: `SecretValue` is what the store returns, the client unwraps it before
-  encoding, and no refusal of §7 changes. §8's device-side unenrolment gains
-  `delete` as its mechanism and none of §8's rules change.
+- **ADR-0124's other sections — no record owed.** §6's reader clause is recorded
+  above; nothing else of that ADR is touched. §1's three egress boundaries are not
+  engaged, because a keyring read leaves no device. §4's requirement that the
+  enrolled hub identity travel with the credential is satisfied by both storage
+  shapes §4 above permits. §7's admission rule and §8's revocation levers are used
+  as given, and §12's own records — including the stacked addition on ADR-0004 §3
+  that put a third consumer there — stand exactly as written.
 - **ADR-0029 — no record owed, and §6 was a constraint on this ADR that this ADR
   meets.** §6 recorded that invocation "must not later grow a `credentials=`
   parameter or a `SecretStore` argument on `invoke`", that "a tool fetching its own
