@@ -45,7 +45,6 @@ from ai_assistant.wire.client import HubClient, HubEngineClient
 from ai_assistant.wire.codec import ENVELOPE_RESERVE_BYTES, canonical_payload
 from ai_assistant.wire.enrolment import (
     Enrolment,
-    Unenrolment,
     read_enrolment,
     remove_enrolment,
     store_enrolment,
@@ -93,7 +92,6 @@ __all__ = [
     "RemoteHubEngineClient",
     "TransportError",
     "UndecodableFrameError",
-    "Unenrolment",
     "canonical_payload",
     "check_remote_address",
     "check_socket_path",

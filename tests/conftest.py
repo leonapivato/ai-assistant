@@ -21,10 +21,23 @@ selection one: both scales run the same tests, so it is deliberately absent from
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+
+# A shared conformance suite with no owning subsystem package sits under
+# `tests/core/` — `reader_contract.py` and `secret_contract.py` both do, because
+# their Protocols' implementations live in leaf packages (ADR-0093 §2, ADR-0125 §8).
+# Under pytest's `prepend` import mode a test module's *own* directory goes on
+# `sys.path` and another test directory's does not, so `from secret_contract import
+# ...` in `tests/secret_store/` resolves in a whole-suite run only because
+# `tests/core` sorts first, and not at all when that directory is run on its own.
+# Pinning it here, in the one conftest the corpus has (mypy refuses a second module
+# named `conftest`), makes a narrowed run import the same suite the gate does.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "core"))
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

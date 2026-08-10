@@ -21,6 +21,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from pydantic import SecretStr
 
 from ai_assistant.core.types import SecretScope
 from ai_assistant.testing import FakeSecretStore
@@ -28,7 +29,7 @@ from ai_assistant.wire import envelope as env
 from ai_assistant.wire.address import RemoteDestination
 from ai_assistant.wire.codec import CONNECT_PAYLOAD_BYTES, encode_projection
 from ai_assistant.wire.credential import mint_credential
-from ai_assistant.wire.enrolment import credential_name, store_enrolment
+from ai_assistant.wire.enrolment import enrolment_name, store_enrolment
 from ai_assistant.wire.errors import (
     HubIdentityMismatchError,
     HubUnavailableError,
@@ -313,11 +314,15 @@ async def test_a_device_with_no_enrolment_sends_nothing(hub: RecordingHub) -> No
     assert hub.connects == []
 
 
-async def test_a_half_written_enrolment_sends_nothing(hub: RecordingHub) -> None:
-    """ADR-0124 §6: an incomplete enrolment "the client refuses to connect on"."""
+async def test_an_enrolment_this_build_cannot_read_sends_nothing(hub: RecordingHub) -> None:
+    """ADR-0124 §6: an incomplete enrolment "the client refuses to connect on".
+
+    A record that is not a whole pair is one this device cannot check a destination
+    against, so it dials nothing rather than presenting whatever it does hold.
+    """
     await hub.start()
     store, _ = await enrolled()
-    await store.delete(credential_name())
+    await store.set(enrolment_name(), SecretStr('{"hub": "' + HUB + '"}'))
 
     with pytest.raises(NotEnrolledError):
         await client_of(hub.port, store, FakeOverlayAgent()).probe()
