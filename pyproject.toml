@@ -153,6 +153,10 @@ dev = [
     # to our own reading of it. Dev group precisely so the clause's last sentence
     # stays true: nothing on the restore path imports it.
     "pyrage>=1.3.0",
+    # `pyrage` ships no `py.typed`, and `mypy --strict` covers `tests/` as well as
+    # `src/`. PEP 561 stubs from the same author, so the test that discharges §4's
+    # interop clause type-checks like everything else.
+    "pyrage-stubs>=1.3.1",
 ]
 
 # ADR-0024 §4 supersedes ADR-0002's `uv_build` clause: `uv_build` supports no

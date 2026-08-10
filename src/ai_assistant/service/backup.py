@@ -578,21 +578,43 @@ def _verification_namespace(data_dir: Path) -> Path | None:
         An empty, owner-only directory, or ``None`` when no such location can be
         established — which §9 routes to written-but-unverified.
     """
-    root = Path(tempfile.gettempdir()) / f"{_VERIFY_ROOT_STEM}-{os.geteuid()}"
+    namespace = _namespace_for(data_dir)
     try:
+        root = namespace.parent
         root.mkdir(mode=_OWNER_ONLY_DIR, exist_ok=True)
         info = root.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
             return None
         if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             return None
-        digest = hashlib.sha256(str(data_dir).encode("utf-8")).hexdigest()
-        namespace = root / digest[:_NAMESPACE_CHARS]
         shutil.rmtree(namespace, ignore_errors=True)
         namespace.mkdir(mode=_OWNER_ONLY_DIR)
     except OSError:
         return None
     return namespace
+
+
+def _namespace_for(data_dir: Path) -> Path:
+    """Where this source's verification tree lives, without creating anything.
+
+    Separate from :func:`_verification_namespace` because that one sweeps, and a
+    caller — or a test — that wants to know whether an earlier run left something
+    behind must be able to ask without destroying the answer.
+
+    §9 keys the namespace to the **resolved** source directory "for the reason
+    §11's containment check is resolved — two spellings of one directory would
+    otherwise be two namespaces, and the sweep would never reach half of what it
+    is for".
+
+    Args:
+        data_dir: The source directory whose backup is being verified.
+
+    Returns:
+        The namespace directory's path.
+    """
+    root = Path(tempfile.gettempdir()) / f"{_VERIFY_ROOT_STEM}-{os.geteuid()}"
+    digest = hashlib.sha256(str(data_dir.resolve()).encode("utf-8")).hexdigest()
+    return root / digest[:_NAMESPACE_CHARS]
 
 
 def _report_contention(lock: InstanceLock) -> int:
