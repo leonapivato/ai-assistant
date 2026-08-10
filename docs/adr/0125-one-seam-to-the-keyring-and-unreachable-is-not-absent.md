@@ -913,12 +913,23 @@ it. Requiring two subjects makes that a red test rather than a support ticket.
 > be driven into that state skips it and the canonical fake, which can, does not.
 
 > **Normative.** The suite proves §6's redaction against a **failing** backend, on
-> the same optional marking: a subject driven to fail a `set` with a backend error
-> whose own text contains the supplied plaintext surfaces a `SecretStoreError`
+> the same optional marking: a subject driven to fail with a backend error whose
+> own text contains a stored or supplied plaintext surfaces a `SecretStoreError`
 > whose message, whose arguments and whose `repr` do not contain that plaintext,
 > and emits no log line that does. The plaintext the case uses is long and
 > high-entropy, so that a substring check over it is a real assertion rather than
 > one a short value would satisfy by accident.
+
+> **Normative.** That case runs for **every method the subject has**, not for
+> `set` alone: a failing `get` and a failing `delete` each reach a backend holding
+> the value, so each can surface it in an error the same way.
+
+**`set` alone would have been the wrong half, and the `get` case is the worse
+one.** A `set` failure discloses a value the caller already holds; a `get` failure
+discloses one the caller was refused, which is the credential a reader was not
+able to obtain arriving through the error path instead. An adapter that redacts
+`set` and wraps `get`'s backend exception with `SecretStoreError(str(exc))` is
+both plausible and a leak, and every case written only around `set` passes it.
 
 > **Normative.** The canonical fake carries a failure mode **per derivation §6
 > names** — the value verbatim, a prefix, a suffix, a truncation, a digest, and a
@@ -966,12 +977,14 @@ standing example. It is used here rather than dropping the obligation because th
 unavailable path is the one §7 argues hardest about, and a suite that could not
 test it at all would leave the argument unenforced.
 
-> **Normative.** Two obligations are the landing lane's rather than the triad's,
+> **Normative.** Three obligations are the landing lane's rather than the triad's,
 > because a shared suite running against a fake cannot reach them, and the lane
-> that lands the keyring-backed implementation owes both: that a backend selection
-> which finds nothing usable **raises rather than falling back** (§7), and that no
-> backend storing a value without the operating system's own access control is
-> ever selected.
+> that lands the keyring-backed implementation owes all three: that a backend
+> selection which finds nothing usable **raises rather than falling back** (§7);
+> that no backend storing a value without the operating system's own access control
+> is ever selected; and that §6's redaction holds over that adapter's **own** error
+> wrapping, proved against a controllable backend it can drive to fail on each
+> method with the value in the failure's text.
 
 **Naming them here is what stops them from evaporating between two lanes.** Every
 obligation the shared suite carries can be satisfied by the canonical fake, which
@@ -980,6 +993,15 @@ nothing about the property §7 spends its longest argument on. The adapter is wh
 that property lives and the adapter's own tests are where it has to be pinned;
 recorded as a debt on a lane that does not exist yet, it would be discovered by
 whoever first ran the system on a headless box.
+
+**The redaction obligation is on both lists deliberately, and only one of the two
+copies can be skipped.** The suite's version is marked optional because a subject
+that cannot be driven to fail cannot run it — but §6 is an invariant of every
+implementation, not of the ones convenient to test, so an adapter allowed to skip
+it on that ground is exactly the implementation whose error wrapping nobody has
+looked at. The fake proves the contract is expressible; the adapter proves the one
+that touches a real credential honours it, against a backend it controls. A single
+optional case would have left the production path as the only untested one.
 
 > **Normative.** The canonical fake in `ai_assistant.testing` is an in-memory
 > implementation of `SecretStore`, taking its installation namespace and its
