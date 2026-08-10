@@ -27,8 +27,11 @@ from math import isfinite
 from typing import Any, Final, NoReturn
 
 from ai_assistant.wire.codec import CONNECT_PAYLOAD_BYTES, canonical_payload, encode_projection
+from ai_assistant.wire.credential import is_well_formed
 from ai_assistant.wire.errors import (
     CredentialNotSupportedError,
+    CredentialRejectedError,
+    CredentialRequiredError,
     ProtocolError,
     UndecodableFrameError,
 )
@@ -102,6 +105,43 @@ ACK_MAX_FRAME_BYTES: Final = "max_frame_bytes"
 #: reconstructable failure from a transport refusal by looking at the code alone.
 VERSION_MISMATCH: Final = "protocol_version_mismatch"
 CREDENTIAL_NOT_SUPPORTED: Final = "credential_not_supported"
+
+#: The four refusals ADR-0124 §7 adds, on the **remote** listener only. Same
+#: spelling rule and the same reason: "a refusal code this section introduces is a
+#: lowercase token, not a class name, so a client can tell a transport refusal from
+#: a reconstructable ``AssistantError`` by the code alone (ADR-0085 §9, §10a). It
+#: appears on the handshake path and never on the call path."
+#:
+#: **Three of the four are distinct because §7 requires them to be**, against the
+#: login-surface reflex of saying only "no": "an owner who cannot tell 'I never
+#: enrolled this laptop' from 'I revoked it last week' from 'I pasted the wrong
+#: string' is ADR-0083's ruling 4 failure", and §2 has already made the audience
+#: the owner's own devices.
+CREDENTIAL_REQUIRED: Final = "credential_required"
+CREDENTIAL_REJECTED: Final = "credential_rejected"
+DEVICE_NOT_ENROLLED: Final = "device_not_enrolled"
+DEVICE_REVOKED: Final = "device_revoked"
+
+#: Every handshake-vocabulary code, as one set.
+#:
+#: **This is ADR-0124 §7's named enforcement point**, and it is a constant here
+#: rather than a literal at the call site so that it cannot go stale:
+#: ``_raise_reply_error`` (:mod:`ai_assistant.wire.client`) carries this set so
+#: that a handshake code arriving on the *call* path is raised as a protocol fault
+#: rather than handed to ``raise_from_payload``, "which expects a class name. A new
+#: refusal code that is not added to that set would reach an older client's
+#: reconstruction path as an unknown class." Adding a code beside the six above is
+#: therefore the whole of what a future refusal has to do.
+HANDSHAKE_REFUSALS: Final[frozenset[str]] = frozenset(
+    {
+        VERSION_MISMATCH,
+        CREDENTIAL_NOT_SUPPORTED,
+        CREDENTIAL_REQUIRED,
+        CREDENTIAL_REJECTED,
+        DEVICE_NOT_ENROLLED,
+        DEVICE_REVOKED,
+    }
+)
 
 
 class FrameKind(StrEnum):
@@ -334,12 +374,15 @@ def connect_payload(*, client: str, credential: str | None = None) -> dict[str, 
 
     The **credential field is optional on the wire**: "on this transport a
     conforming client either omits the member or sends it empty, and both are
-    accepted". This client omits it, because it has nothing to put there.
+    accepted" (ADR-0084 §2). Which listener the frame is bound for decides what
+    belongs there, and the member's shape is the same either way — which is why
+    ADR-0124 §9 bumps no version for the remote listener.
 
     Args:
         client: A free-form name for logs — ``assistant-cli``.
-        credential: Deliberately unused on this transport; a non-empty value is
-            refused by the server, so passing one is only ever a test of that.
+        credential: Omitted on the loopback transport, where a non-empty value is
+            refused by the server (ADR-0084 §2); carried on the remote transport,
+            where a connect without one is refused (ADR-0124 §7).
 
     Returns:
         The connect payload's members.
@@ -470,8 +513,53 @@ def _refuse_an_oversized_handshake(payload: dict[str, Any], *, member: str) -> N
         raise UndecodableFrameError(msg)
 
 
+def _read_connect_members(payload: object) -> tuple[int, str, object]:
+    """Read the members every connect frame carries, whichever listener it reached.
+
+    Everything up to the credential is the same on both transports, and ADR-0124
+    §9 rests on its being so: "the remote listener adds no member to the connect
+    exchange, changes no frame's encoding… A peer at version 2 on either listener
+    exchanges exactly the frames it exchanges today." One reader is what makes that
+    a property of the code rather than of two implementations that agree today.
+
+    **The 256-byte bound is applied here, first**, which is what ADR-0124 §7 relies
+    on when it says the width "is already bounded and nothing new is needed for
+    it": an oversized credential is refused as an oversized handshake and never
+    reaches either transport's credential rule.
+
+    Args:
+        payload: The connect frame's payload, as decoded.
+
+    Returns:
+        The version, the client identifier, and the credential member exactly as
+        it was decoded — including absent, as ``None``.
+
+    Raises:
+        UndecodableFrameError: If the payload is not an object, is over ADR-0085
+            §8d's bound, or is missing a required member.
+    """
+    if not isinstance(payload, dict):
+        msg = f"a connect payload must be an object, got {type(payload).__name__}"
+        raise UndecodableFrameError(msg)
+    _refuse_an_oversized_handshake(payload, member=CONNECT_CLIENT)
+    version = payload.get(CONNECT_VERSION)
+    if not isinstance(version, int) or isinstance(version, bool):
+        msg = "a connect payload's version must be an integer"
+        raise UndecodableFrameError(msg)
+    client = payload.get(CONNECT_CLIENT)
+    if not isinstance(client, str):
+        msg = "a connect payload must name its client"
+        raise UndecodableFrameError(msg)
+    return version, client, payload.get(CONNECT_CREDENTIAL)
+
+
 def read_connect(payload: object) -> tuple[int, str]:
-    """Read the client's connect payload, applying §2's credential rule.
+    """Read a **loopback** connect payload, applying ADR-0084 §2's credential rule.
+
+    ADR-0124 §7 leaves this rule exactly where it was: "ADR-0084 §2's rule is
+    unchanged on the loopback transport: there a non-empty credential is still
+    refused with ``credential_not_supported``. The two listeners hold opposite
+    rules, and a hub running both applies each rule to its own listener."
 
     Args:
         payload: The connect frame's payload, as decoded.
@@ -490,19 +578,7 @@ def read_connect(payload: object) -> tuple[int, str]:
             checks anything." This one *is* reported before the close, being "a
             member of an envelope that parsed" (ADR-0084 §3).
     """
-    if not isinstance(payload, dict):
-        msg = f"a connect payload must be an object, got {type(payload).__name__}"
-        raise UndecodableFrameError(msg)
-    _refuse_an_oversized_handshake(payload, member=CONNECT_CLIENT)
-    version = payload.get(CONNECT_VERSION)
-    if not isinstance(version, int) or isinstance(version, bool):
-        msg = "a connect payload's version must be an integer"
-        raise UndecodableFrameError(msg)
-    client = payload.get(CONNECT_CLIENT)
-    if not isinstance(client, str):
-        msg = "a connect payload must name its client"
-        raise UndecodableFrameError(msg)
-    credential = payload.get(CONNECT_CREDENTIAL)
+    version, client, credential = _read_connect_members(payload)
     if credential not in (None, ""):
         msg = (
             "this transport carries no credential, and admitting one would tell the client "
@@ -511,6 +587,58 @@ def read_connect(payload: object) -> tuple[int, str]:
         )
         raise CredentialNotSupportedError(msg)
     return version, client
+
+
+def read_remote_connect(payload: object) -> tuple[int, str, str]:
+    """Read a **remote** connect payload, applying ADR-0124 §7's credential rules.
+
+    The inversion of :func:`read_connect`, and one principle stands behind both —
+    ADR-0084 §2's own: **admission never asserts a check that did not happen.**
+
+    **The type rule is here rather than at the verifier, because the connect
+    payload is untrusted decoded JSON.** ADR-0124 §7: on loopback "an object, a
+    boolean or a number is already refused and the question never arises. On the
+    remote listener the same value would otherwise reach a verifier written for
+    text, and three implementations could diverge three ways: an uncaught type
+    error that closes the connection with no refusal, a hash over some
+    serialisation of the object, or a generic refusal."
+
+    **Absent and malformed are different refusals and that is deliberate.** An
+    absent or empty member is "refused, with a distinct error naming the reason";
+    a present member that is not a well-formed credential "is refused as a
+    credential that did not verify", which is the same answer a wrong credential
+    gets — so a peer learns nothing from the shape of its own mistake that it
+    could not learn by guessing.
+
+    Args:
+        payload: The connect frame's payload, as decoded.
+
+    Returns:
+        The version the client claims, its identifier, and a credential already
+        known to be a well-formed value of the scheme (ADR-0124 §6).
+
+    Raises:
+        UndecodableFrameError: As :func:`read_connect`.
+        CredentialRequiredError: If the credential member is absent or empty.
+        CredentialRejectedError: If it is present and is not a well-formed
+            credential. The value is discarded here and never reaches a verifier.
+    """
+    version, client, credential = _read_connect_members(payload)
+    if credential is None or credential == "":
+        msg = (
+            "this listener admits a device on two facts and a credential is one of them; "
+            "a connect carrying none is refused rather than admitted on the overlay's "
+            "membership alone, which is a decision the owner never made at this hub"
+        )
+        raise CredentialRequiredError(msg)
+    if not isinstance(credential, str) or not is_well_formed(credential):
+        msg = (
+            "a connect frame's credential is not a value this hub could have minted, so it "
+            "is refused as one that did not verify; check that the whole credential the "
+            "enrolment printed was pasted, and re-enrol the device if it was lost"
+        )
+        raise CredentialRejectedError(msg)
+    return version, client, credential
 
 
 def read_connect_ack(payload: object) -> tuple[int, int]:

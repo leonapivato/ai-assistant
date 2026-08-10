@@ -37,6 +37,7 @@ from ai_assistant.wire.address import SOCKET_MODE, socket_path
 from ai_assistant.wire.server import ConnectionLimits
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from ai_assistant.core.config import Settings
@@ -53,6 +54,77 @@ _log = structlog.get_logger(__name__)
 _OWNER_ONLY_UMASK: Final[int] = 0o177
 
 
+class ConnectionBudget:
+    """The hub's two ceilings, held once and shared by every listener it binds.
+
+    **A figure per listener is the mistake ADR-0124 §7 exists to forbid**, and it
+    says so:
+
+    > Adding it may not let the hub's total concurrent connections exceed
+    > ``hub_max_connections``, and a connection awaiting admission on the remote
+    > listener counts against ``hub_max_pending_handshakes``.
+    >
+    > …Two listeners each honouring the figure independently would mean the hub
+    > honours neither.
+
+    ADR-0084 §3 set both ceilings against "a *resident* process being held down by a
+    peer that connects and stops sending", and that is a property of the process
+    rather than of a socket — so the counters are the process's.
+
+    **The counting is synchronous and holds no lock**, because the loop is single
+    threaded and a check followed by an increment inside one step is already
+    indivisible; a lock would add a suspension point where the whole value of this
+    object is that there is none.
+
+    Attributes:
+        max_connections: What the hub serves at once, across every listener.
+        max_pending_handshakes: How many of those may be awaiting admission.
+    """
+
+    def __init__(self, *, max_connections: int, max_pending_handshakes: int) -> None:
+        """Hold the deployment's two figures.
+
+        Args:
+            max_connections: ``hub_max_connections``.
+            max_pending_handshakes: ``hub_max_pending_handshakes``.
+        """
+        self.max_connections = max_connections
+        self.max_pending_handshakes = max_pending_handshakes
+        self._serving = 0
+        self._handshaking = 0
+
+    @property
+    def serving(self) -> int:
+        """How many connections the hub currently holds, across every listener."""
+        return self._serving
+
+    @property
+    def handshaking(self) -> int:
+        """How many of those have not completed a handshake."""
+        return self._handshaking
+
+    def at_connection_ceiling(self) -> bool:
+        """Whether another connection would exceed ``hub_max_connections``."""
+        return self._serving >= self.max_connections
+
+    def at_handshake_ceiling(self) -> bool:
+        """Whether another pending handshake would exceed its ceiling."""
+        return self._handshaking >= self.max_pending_handshakes
+
+    def opened(self) -> None:
+        """Count a connection the hub has accepted and not yet handshaken."""
+        self._serving += 1
+        self._handshaking += 1
+
+    def handshake_settled(self) -> None:
+        """Move one connection off the pending ceiling and onto the total alone."""
+        self._handshaking -= 1
+
+    def closed(self) -> None:
+        """Give one connection's slot back."""
+        self._serving -= 1
+
+
 class Listener:
     """The hub's door: one Unix socket, and the connections it is serving.
 
@@ -60,20 +132,33 @@ class Listener:
         path: Where it listens.
     """
 
-    def __init__(self, engine: AssistantEngine, settings: Settings, *, data_dir: Path) -> None:
+    def __init__(
+        self,
+        engine: AssistantEngine,
+        settings: Settings,
+        *,
+        data_dir: Path,
+        budget: ConnectionBudget | None = None,
+    ) -> None:
         """Prepare a listener; nothing is bound until :meth:`start`.
 
         Args:
             engine: The in-process engine this hub owns and every request runs on.
             settings: The deployment's transport ceilings and deadline.
             data_dir: The directory the hub owns, which locates the socket.
+            budget: The hub's shared ceilings (ADR-0124 §7). Defaulted from
+                ``settings`` for a hub that binds this listener alone, so a caller
+                that has no second listener does not have to construct one.
         """
         self._engine = engine
         self._settings = settings
         self.path = socket_path(data_dir)
         self._server: asyncio.Server | None = None
         self._connections: set[asyncio.Task[None]] = set()
-        self._handshaking = 0
+        self._budget = budget or ConnectionBudget(
+            max_connections=settings.hub_max_connections,
+            max_pending_handshakes=settings.hub_max_pending_handshakes,
+        )
         self._build = ""
 
     async def start(self, *, build: str) -> None:
@@ -145,48 +230,85 @@ class Listener:
         from a hung hub". The refusal is a close before the handshake, which is the
         pre-envelope class: nothing has decoded, so there is nothing to correlate a
         typed error against.
+
+        **Both figures are the hub's rather than this socket's** (ADR-0124 §7), so
+        a remote listener saturating either ceiling is felt here — which is what
+        §11's step 11 checks, "in both orders… and for both figures".
         """
-        if len(self._connections) >= self._settings.hub_max_connections:
-            await _refuse(writer, "hub_connection_ceiling", self._settings.hub_max_connections)
+        if self._budget.at_connection_ceiling():
+            await refuse(writer, "hub_connection_ceiling", self._budget.max_connections)
             return
-        if self._handshaking >= self._settings.hub_max_pending_handshakes:
-            await _refuse(
-                writer, "hub_handshake_ceiling", self._settings.hub_max_pending_handshakes
-            )
+        if self._budget.at_handshake_ceiling():
+            await refuse(writer, "hub_handshake_ceiling", self._budget.max_pending_handshakes)
             return
 
         task = asyncio.current_task()
         if task is not None:
             self._connections.add(task)
-        self._handshaking += 1
-        settled = False
-
-        def _handshake_done() -> None:
-            nonlocal settled
-            if not settled:
-                settled = True
-                self._handshaking -= 1
-
         try:
-            await serve_connection(
-                self._engine,
-                reader,
-                writer,
-                limits=ConnectionLimits(
-                    max_frame_bytes=self._settings.hub_max_frame_bytes,
-                    read_timeout=self._settings.hub_read_timeout,
-                    build=self._build,
-                ),
-                on_handshake=_handshake_done,
-            )
+            with hold(self._budget) as settled:
+                await serve_connection(
+                    self._engine,
+                    reader,
+                    writer,
+                    limits=ConnectionLimits(
+                        max_frame_bytes=self._settings.hub_max_frame_bytes,
+                        read_timeout=self._settings.hub_read_timeout,
+                        build=self._build,
+                    ),
+                    on_handshake=settled,
+                )
         finally:
-            _handshake_done()
             if task is not None:
                 self._connections.discard(task)
 
 
-async def _refuse(writer: asyncio.StreamWriter, event: str, ceiling: int) -> None:
-    """Close a connection the hub has no budget for, and say so in the log."""
+@contextlib.contextmanager
+def hold(budget: ConnectionBudget) -> Iterator[Callable[[], None]]:
+    """Occupy one slot of the hub's budget for the length of a connection.
+
+    Yields the callback a listener hands to
+    :func:`~ai_assistant.wire.serve_connection` as ``on_handshake``, which moves
+    this connection off the *pending* ceiling and onto the total alone. Calling it
+    twice is harmless — the block's exit calls it again — because the handshake can
+    settle either by completing or by the connection ending before it did, and a
+    listener should not have to tell those apart to keep a counter straight.
+
+    Args:
+        budget: The hub's shared ceilings.
+
+    Yields:
+        The settle callback.
+    """
+    budget.opened()
+    settled = False
+
+    def settle() -> None:
+        nonlocal settled
+        if not settled:
+            settled = True
+            budget.handshake_settled()
+
+    try:
+        yield settle
+    finally:
+        settle()
+        budget.closed()
+
+
+async def refuse(writer: asyncio.StreamWriter, event: str, ceiling: int | str) -> None:
+    """Close a connection the hub has no budget for, and say so in the log.
+
+    Shared with :mod:`ai_assistant.service.remote`, which refuses against the same
+    ceilings and in the same pre-envelope class: nothing has decoded, so there is
+    nothing to correlate a typed error against.
+
+    Args:
+        writer: The connection to close.
+        event: The log event naming which refusal this is.
+        ceiling: The figure it was judged against, or a short reason where the
+            refusal is not a ceiling's.
+    """
     _log.warning(
         event,
         ceiling=ceiling,

@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import structlog
 
@@ -36,6 +36,9 @@ from ai_assistant.wire.codec import ENVELOPE_RESERVE_BYTES
 from ai_assistant.wire.errors import (
     ConnectionClosedError,
     CredentialNotSupportedError,
+    CredentialRejectedError,
+    CredentialRequiredError,
+    DeviceExpelledError,
     ProtocolError,
     UndecodableFrameError,
     error_payload,
@@ -87,13 +90,73 @@ class ConnectionLimits:
         return self.max_frame_bytes - ENVELOPE_RESERVE_BYTES
 
 
-async def serve_connection(
+@dataclass(frozen=True, slots=True)
+class AdmissionRefusal:
+    """Why a device is not admitted, in the two things the refusal has to carry.
+
+    Attributes:
+        code: One of ADR-0124 §7's lowercase tokens.
+        message: What an owner reads. It never includes the credential or the
+            verifier (§7), and the three reasons are distinguished in it exactly as
+            they are in the code.
+    """
+
+    code: str
+    message: str
+
+
+class Admission(Protocol):
+    """The remote listener's half of ADR-0124's two-fact rule, per connection.
+
+    **Both methods are synchronous, and that is the mechanism rather than a
+    style.** ADR-0124 §8 requires the liveness check and the write it authorises to
+    be "one step with respect to a revocation: an implementation in which a
+    revocation may take effect between the two does not satisfy this clause" — and
+    the clause's own commentary is explicit that placing a read *near* a write is
+    not enough, because "whether anything may [interleave] is a property of where
+    the awaits fall — not of how few lines apart the read and the write are
+    written". A synchronous check followed by a synchronous ``write`` has no
+    suspension point between them, on a system that "composes on one event loop",
+    so no revocation can land in the gap because there is no gap.
+
+    That is §8's **compare-and-claim on a generation the revocation bumps**, of the
+    three mechanisms it names; ADR-0083 §6 leaves the choice to this lane with the
+    store in hand, and this one is the one that costs no lock across I/O.
+
+    **``wire`` declares the seam and the hub implements it**, because the enrolment
+    record is deployment state (ADR-0083 §8) and ``wire`` depends on ``core``
+    alone. It is a local ``Protocol``, not ``core/protocols.py`` surface: ADR-0124
+    §10 decides none, and a listener's own collaborator is not a contract between
+    subsystems (the precedent is :mod:`ai_assistant.service.scheduler`'s).
+    """
+
+    def admit(self, credential: str) -> AdmissionRefusal | None:
+        """Decide ADR-0124 §7's two facts and claim the enrolment they name.
+
+        Args:
+            credential: A well-formed credential, already checked against the
+                scheme by :func:`~ai_assistant.wire.envelope.read_remote_connect`.
+
+        Returns:
+            ``None`` to admit, or why not.
+        """
+
+    def is_live(self) -> bool:
+        """Whether the enrolment this connection was admitted under is still live.
+
+        Returns:
+            Whether a frame may still be written to this device.
+        """
+
+
+async def serve_connection(  # noqa: PLR0913 — the engine, the two stream halves, and one keyword per policy the listener supplies
     engine: AssistantEngine,
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     *,
     limits: ConnectionLimits,
     on_handshake: Callable[[], None] | None = None,
+    admission: Admission | None = None,
 ) -> None:
     """Drive one accepted connection to its end.
 
@@ -102,6 +165,13 @@ async def serve_connection(
     *hub's* failure and a resident process must not treat a misbehaving spoke as a
     fault of its own (ADR-0084 §3's "the reason is robustness, not secrecy").
 
+    **``admission`` is what makes this the same protocol on two listeners.**
+    ADR-0124 §9 rests on that being literally true — "what differs between the two
+    listeners is which connect frames are admitted, which is policy reported in the
+    ratified error frame rather than a change to what a frame is" — so the frame
+    loop, the dispatch and the error mapping below are one code path and only the
+    connect frame's credential rule forks.
+
     Args:
         engine: The in-process engine this hub owns.
         reader: The connection's reader.
@@ -109,15 +179,23 @@ async def serve_connection(
         limits: The frame ceiling, the deadline and the build identifier.
         on_handshake: Called once the handshake completes, so a listener can move
             this connection off its *pending* ceiling and onto its total. The
-            listener owns both figures (ADR-0084 §3) and the handshake happens
-            here, so one of the two has to tell the other.
+            listener owns both figures (ADR-0084 §3, ADR-0124 §7's shared budget)
+            and the handshake happens here, so one of the two has to tell the other.
+        admission: The remote listener's two-fact rule, or ``None`` on the loopback
+            listener, where ADR-0084 §2's opposite rule stands unchanged.
     """
     try:
-        if not await _handshake(reader, writer, limits=limits):
+        if not await _handshake(reader, writer, limits=limits, admission=admission):
             return
         if on_handshake is not None:
             on_handshake()
-        await _serve_requests(engine, reader, writer, limits=limits)
+        await _serve_requests(engine, reader, writer, limits=limits, admission=admission)
+    except DeviceExpelledError as exc:
+        # Its own clause, above the protocol faults, because it is not one: the
+        # owner revoked the device and §8's finality is being honoured. Logged at
+        # info with its own event so an operator reading two logs can tell an
+        # expulsion from a spoke that misbehaved.
+        _log.info("hub_connection_expelled", reason=str(exc))
     except (ConnectionClosedError, UndecodableFrameError, ProtocolError) as exc:
         _log.info("hub_connection_closed", reason=str(exc), error_class=type(exc).__name__)
     except asyncio.CancelledError:
@@ -135,15 +213,33 @@ async def serve_connection(
 
 
 async def _handshake(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, limits: ConnectionLimits
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    *,
+    limits: ConnectionLimits,
+    admission: Admission | None,
 ) -> bool:
-    """Run ADR-0084 §2's one-frame-each connect exchange.
+    """Run ADR-0084 §2's one-frame-each connect exchange, under §7's rule for it.
+
+    **The credential rule is decided before the version is**, on both listeners,
+    and that order is the one already in the tree rather than a new choice: a
+    non-empty credential on loopback is refused before the version is looked at,
+    and the remote listener keeps the shape. It is also the stronger posture — the
+    hub says nothing about itself to a peer it has not admitted.
+
+    Args:
+        reader: The connection's reader.
+        writer: The connection's writer.
+        limits: The frame ceiling, the deadline and the build identifier.
+        admission: ADR-0124 §7's two-fact rule, or ``None`` on loopback.
 
     Returns:
         Whether the connection may go on to carry requests.
 
     Raises:
         UndecodableFrameError: If the connect frame does not decode, which closes.
+        DeviceExpelledError: If a revocation took effect before the reply was
+            written, which closes without one (ADR-0124 §8).
     """
     body = await read_frame(
         reader,
@@ -157,13 +253,20 @@ async def _handshake(
         raise UndecodableFrameError(msg)
 
     try:
-        version, client = env.read_connect(frame.payload)
-    except CredentialNotSupportedError as exc:
+        version, client = _read_connect(frame.payload, admission=admission)
+    except (
+        CredentialNotSupportedError,
+        CredentialRequiredError,
+        CredentialRejectedError,
+        _AdmissionRefusedError,
+    ) as exc:
         # §2's credential refusal: "a version mismatch and a non-empty credential
         # are members of an envelope that parsed, so they are reported properly and
-        # only then does the connection close."
+        # only then does the connection close." ADR-0124 §7 gives its own refusals
+        # "the decoded-frame treatment ADR-0084 §3 gives the handshake's own
+        # refusals", which is the same sentence applied to four more codes.
         #
-        # **Caught by its own type, never as a ``ProtocolError``.**
+        # **Caught by their own types, never as a ``ProtocolError``.**
         # ``UndecodableFrameError`` is a ``ProtocolError`` too, and a broad clause
         # here quietly turned an oversized handshake — which must close with no
         # response — into a credential refusal. The narrow clause lets it propagate
@@ -171,7 +274,7 @@ async def _handshake(
         await _refuse(
             writer,
             frame.id,
-            code=env.CREDENTIAL_NOT_SUPPORTED,
+            code=_refusal_code(exc),
             message=str(exc),
             limits=limits,
         )
@@ -191,21 +294,117 @@ async def _handshake(
         )
         return False
 
-    await write_frame(
-        writer,
-        env.encode_envelope(
-            env.Envelope(
-                kind=env.FrameKind.CONNECT_ACK,
-                id=frame.id,
-                payload=env.connect_ack_payload(
-                    build=limits.build, max_frame_bytes=limits.max_frame_bytes
-                ),
-            )
-        ),
-        max_frame_bytes=limits.max_frame_bytes,
+    reply = env.encode_envelope(
+        env.Envelope(
+            kind=env.FrameKind.CONNECT_ACK,
+            id=frame.id,
+            payload=env.connect_ack_payload(
+                build=limits.build, max_frame_bytes=limits.max_frame_bytes
+            ),
+        )
     )
+    _check_live(admission)
+    await write_frame(writer, reply, max_frame_bytes=limits.max_frame_bytes)
     _log.debug("hub_client_connected", client=client, protocol_version=version)
     return True
+
+
+class _AdmissionRefusedError(Exception):
+    """One device's admission refused, carrying ADR-0124 §7's code and message.
+
+    Private and never seen outside this module: it exists so that the four ways a
+    connect frame can be refused on the remote listener reach one ``except`` clause
+    and one reply path, rather than forking the handshake into two shapes.
+    """
+
+    def __init__(self, refusal: AdmissionRefusal) -> None:
+        """Wrap a refusal the hub already decided.
+
+        Args:
+            refusal: The code and the message it carries.
+        """
+        super().__init__(refusal.message)
+        self.refusal = refusal
+
+
+#: Which lowercase token each frame-level credential fault is reported under
+#: (ADR-0124 §7). A malformed or non-string credential shares
+#: ``credential_rejected`` with one that simply did not verify, deliberately: §7
+#: refuses it "as a credential that did not verify", so a peer learns nothing from
+#: the shape of its own mistake.
+_CREDENTIAL_CODES: Final[dict[type[Exception], str]] = {
+    CredentialNotSupportedError: env.CREDENTIAL_NOT_SUPPORTED,
+    CredentialRequiredError: env.CREDENTIAL_REQUIRED,
+    CredentialRejectedError: env.CREDENTIAL_REJECTED,
+}
+
+
+def _refusal_code(exc: Exception) -> str:
+    """The error code one refused handshake is reported under."""
+    if isinstance(exc, _AdmissionRefusedError):
+        return exc.refusal.code
+    return _CREDENTIAL_CODES[type(exc)]
+
+
+def _read_connect(payload: object, *, admission: Admission | None) -> tuple[int, str]:
+    """Apply whichever listener's credential rule governs this connection.
+
+    The one fork ADR-0124 §9 permits, and it is a fork in *policy* rather than in
+    the frame: both branches read the same members from the same payload, and the
+    two listeners "hold opposite rules, and a hub running both applies each rule to
+    its own listener" (§7).
+
+    Args:
+        payload: The connect frame's payload, as decoded.
+        admission: The remote rule, or ``None`` for loopback's.
+
+    Returns:
+        The version the client claims, and its identifier.
+
+    Raises:
+        CredentialNotSupportedError: On loopback, if a credential was carried.
+        CredentialRequiredError: On the remote listener, if none was.
+        CredentialRejectedError: On the remote listener, if it was not a
+            well-formed value of the scheme.
+        _AdmissionRefusedError: If the two facts do not both hold.
+    """
+    if admission is None:
+        return env.read_connect(payload)
+    version, client, credential = env.read_remote_connect(payload)
+    refusal = admission.admit(credential)
+    if refusal is not None:
+        raise _AdmissionRefusedError(refusal)
+    return version, client
+
+
+def _check_live(admission: Admission | None) -> None:
+    """Refuse to write a frame to a device whose enrolment is no longer live.
+
+    **Every call site puts this immediately before a write, with no ``await``
+    between the two**, which is ADR-0124 §8's indivisibility discharged by ordering
+    rather than by a lock across I/O: "an implementation that reads the record,
+    awaits, and then writes has satisfied the letter of 'check immediately before'
+    and none of the rule."
+
+    It is called even where a claim a moment earlier already established liveness —
+    at the connect reply — because the property being kept is a property of the
+    *ordering*, and a check that is only correct while nobody inserts a suspension
+    point above it is one an edit can silently remove. Here the cost is a dictionary
+    lookup and the guarantee is local to the two lines.
+
+    Args:
+        admission: The connection's admission, or ``None`` on loopback, where no
+            enrolment governs and there is nothing to revoke.
+
+    Raises:
+        DeviceExpelledError: If a revocation has taken effect.
+    """
+    if admission is not None and not admission.is_live():
+        msg = (
+            "this device's enrolment was revoked, so the frame that would have gone to it "
+            "is abandoned and the connection is closed rather than served"
+        )
+        raise DeviceExpelledError(msg)
 
 
 async def _serve_requests(
@@ -214,6 +413,7 @@ async def _serve_requests(
     writer: asyncio.StreamWriter,
     *,
     limits: ConnectionLimits,
+    admission: Admission | None,
 ) -> None:
     """Read requests one at a time, and refuse a second one that overlaps.
 
@@ -229,6 +429,20 @@ async def _serve_requests(
     slow would be the deadline defeating the purpose it was added for. The idle
     deadline applies where the hub genuinely is idle — waiting for the *first*
     frame of the next request.
+
+    **ADR-0124 §8's linearization is the pair of checks below**, and where each one
+    sits is the decision rather than the code. The first is at **dispatch**, which
+    §8 defends against the tempting alternative: fixing it at admission "would
+    demand that the whole handshake be atomic against a revocation, which is a much
+    larger obligation on an implementation and buys nothing: a device that completes
+    a handshake and is then refused every request has learned only that it
+    connected." The second is at the **write**, because "a request dispatched a
+    moment before a revocation may be awaiting a model provider for seconds; if the
+    rule stopped at dispatch, the hub would finish that work and write the answer to
+    a device the owner has expelled."
+
+    Both are also on the loopback listener's path and both are no-ops there
+    (``admission is None``), which is what keeps this one code path rather than two.
     """
     while True:
         try:
@@ -236,6 +450,7 @@ async def _serve_requests(
         except ConnectionClosedError:
             return
 
+        _check_live(admission)
         watcher = asyncio.ensure_future(_read_request(reader, limits=limits, idle=None))
         try:
             reply = await _dispatch(engine, frame, limit=limits.payload_limit)
@@ -250,9 +465,9 @@ async def _serve_requests(
                 "framed bytes at"
             )
             raise ProtocolError(msg)
-        await write_frame(
-            writer, env.encode_envelope(reply), max_frame_bytes=limits.max_frame_bytes
-        )
+        body = env.encode_envelope(reply)
+        _check_live(admission)
+        await write_frame(writer, body, max_frame_bytes=limits.max_frame_bytes)
 
 
 async def _settle(watcher: asyncio.Future[env.Envelope]) -> bool:

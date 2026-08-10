@@ -666,14 +666,18 @@ def _raise_reply_error(payload: object) -> None:
     rather than a declared failure, and telling the two apart by the code is what
     the lowercase spelling of ADR-0084 §2's and §3's refusals is for.
 
+    **The set is** :data:`~ai_assistant.wire.envelope.HANDSHAKE_REFUSALS` **rather
+    than a literal here**, which is ADR-0124 §7's named enforcement point closed by
+    construction: "a new refusal code that is not added to that set would reach an
+    older client's reconstruction path as an unknown class". A literal would have
+    to be found and edited by every lane that adds a refusal; a shared constant is
+    edited where the refusal itself is declared.
+
     Raises:
         AssistantError: The declared failure, reconstructed (ADR-0085 §10a).
         ProtocolError: If the frame carries a handshake refusal instead.
     """
-    if isinstance(payload, dict) and payload.get("code") in {
-        env.VERSION_MISMATCH,
-        env.CREDENTIAL_NOT_SUPPORTED,
-    }:
+    if isinstance(payload, dict) and payload.get("code") in env.HANDSHAKE_REFUSALS:
         _raise_handshake_error(payload)
     raise_from_payload(payload)
 

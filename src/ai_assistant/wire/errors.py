@@ -76,6 +76,22 @@ class ConnectionClosedError(TransportError):
     """
 
 
+class DeviceExpelledError(TransportError):
+    """A revocation took effect, so this connection is closed rather than served.
+
+    ADR-0124 §8: "no request is dispatched on such a connection, and the connection
+    is closed rather than served", and "once a revocation has taken effect, the hub
+    writes no further frame to that device on any connection — including the
+    response to a request dispatched before the revocation, which is abandoned
+    rather than delivered."
+
+    **Not a** :class:`ProtocolError`, **because the peer broke no rule.** It is the
+    owner's act arriving, and flattening it into a protocol fault would put an
+    expulsion in the log under the vocabulary of a misbehaving client. The device
+    reads a transport failure either way — which is what §11's step 7 checks for.
+    """
+
+
 class ProtocolError(TransportError):
     """A peer broke the protocol's own rules.
 
@@ -101,6 +117,33 @@ class CredentialNotSupportedError(ProtocolError):
     was answered with a credential refusal instead of being closed on. Naming the
     one case that earns a typed error is what makes the distinction unmissable
     rather than a matter of which ``except`` clause comes first.
+    """
+
+
+class CredentialRequiredError(ProtocolError):
+    """A remote connect frame carried no credential, on a listener that checks one.
+
+    ADR-0124 §7's inversion of ADR-0084 §2, and it earns a type of its own for the
+    reason :class:`CredentialNotSupportedError` does: the server has to tell a
+    refusal that gets a typed error from a frame that closes with none, and
+    catching :class:`ProtocolError` would silently catch
+    :class:`UndecodableFrameError` too.
+
+    "A client admitted without presenting a credential, on a listener whose whole
+    purpose is that something is checked, has been told by admission that it was
+    admitted on a check that never ran."
+    """
+
+
+class CredentialRejectedError(ProtocolError):
+    """A remote connect frame's credential is not a value the scheme could mint.
+
+    ADR-0124 §7: a credential member "present and… not a string, or… a string that
+    is not a well-formed value of the scheme §6 mints, is refused as a credential
+    that did not verify, and the value never reaches the verifier or the
+    comparison". Raising rather than passing the value on is what makes that last
+    clause true of this implementation: the malformed value is discarded where it
+    is read.
     """
 
 

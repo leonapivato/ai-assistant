@@ -851,6 +851,12 @@ def test_every_integer_setting_is_discovered() -> None:
         "hub_max_frame_bytes",
         "hub_max_connections",
         "hub_max_pending_handshakes",
+        # ADR-0124 §2's remote listener port. Acknowledged here for the same reason
+        # and with the same ``bool`` argument: ``hub_remote_port=True`` would have
+        # the hub bind port 1 — privileged, and not the port the owner configured —
+        # so an unprivileged run would fail at bind with an errno rather than at
+        # load with the value it was given.
+        "hub_remote_port",
         # ADR-0093 §7a's four counting caps. Acknowledged here for the reason the
         # transport figures are: each is refused at load outside its range, and
         # joining this tuple is what subjects it to the guards below. The ``bool``

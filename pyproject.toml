@@ -86,6 +86,13 @@ ai-assistant-reembed = "ai_assistant.service.reembed:main"
 # subcommand." An `assistant` subcommand would be a measure reachable from the
 # client, which is the read path ADR-0119 §7 exists to keep out of the pipeline.
 ai-assistant-measures = "ai_assistant.service.measures:main"
+# The owner's device acts (ADR-0124 §6, §8), here by the same rule a fourth time —
+# the control socket's path and the data directory both live in `service`, and
+# nothing may import `service`. It differs from the three above in one way worth
+# recording: it requires the hub to be **running**, where the re-embed and measure
+# tools require it to be stopped, because ADR-0124 §8 makes revoking a device close
+# the connections that device holds and a stopped hub has none to close.
+ai-assistant-device = "ai_assistant.service.device:main"
 
 [dependency-groups]
 dev = [
