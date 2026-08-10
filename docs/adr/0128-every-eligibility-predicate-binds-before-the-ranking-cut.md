@@ -267,12 +267,13 @@ and no longer in when they filter.
 > eligible set is and whether or not a ceiling was reached in filling the page.
 > `capped` reports the store's ceiling, never the size of the eligible set.
 
-> **Normative.** `capped` is a refusal to certify and never a claim that more
-> exists. An implementation reports `False` only where the clause above lets it
-> certify, and may report `True` wherever it cannot — including where its eligible
-> set exactly meets its ceiling. It reports `False`, never `True`, where `search`
-> matches nothing by construction: a blank query, a non-positive `limit`, or a
-> filter selecting nothing. An empty result is not a capped one.
+> **Normative.** `True` is available on a result **shorter than `limit`** and
+> nowhere else. On such a result `capped` is a refusal to certify and never a
+> claim that more exists: an implementation reports `False` only where the first
+> clause lets it certify and reports `True` wherever it cannot, including where
+> its eligible set exactly meets its ceiling. It reports `False`, never `True`,
+> where `search` matches nothing by construction: a blank query, a non-positive
+> `limit`, or a filter selecting nothing. An empty result is not a capped one.
 
 The illustrative model; the semantics above are the contract:
 
@@ -306,15 +307,27 @@ being under-served — and reading a full page as a completeness claim is the
 mistake ADR-0113 §5's third clause already warns consumers off in the
 band-scoped case.
 
-**And `capped` certifies in one direction, which keeps it mechanically
-decidable.** `False` is the claim and `True` is the absence of one, so an
-implementation that cannot tell reports `True` and is conforming. That is what
-makes the boundary case — an eligible set exactly meeting the ceiling, where the
-result happens to be complete and the store cannot know it — a permitted `True`
-rather than a defect to design around. The alternative, requiring exactness in
-both directions, would oblige a store to prove a negative about rows it never
-fetched, which is the second vector search ADR-0113's `excluded_band` reasoning
-already refuses on the interactive read path.
+**And on a short result `capped` certifies in one direction, which keeps it
+mechanically decidable.** `False` is the claim and `True` is the absence of one,
+so an implementation that cannot tell reports `True` and is conforming. That is
+what makes the boundary case — an eligible set exactly meeting the ceiling, where
+the result happens to be complete and the store cannot know it — a permitted
+`True` rather than a defect to design around. The alternative, requiring
+exactness in both directions, would oblige a store to prove a negative about rows
+it never fetched, which is the second vector search ADR-0113's `excluded_band`
+reasoning already refuses on the interactive read path.
+
+**That latitude is confined to short results, and the confinement is the second
+correction this section took.** The first revision granted the "report `True`
+wherever you cannot certify" permission unscoped, which reached the full page —
+where the previous clause *requires* `False` — so one call was simultaneously
+obliged to report `False` and permitted to report `True`, and two conforming
+stores could disagree about it. The adversarial lens caught it on the round after
+the one that produced it, which is worth recording: both defects are the same
+mistake in different clothes, reading `capped` as a claim about the store's
+knowledge rather than as a warning attached to a short answer. On a full page
+there is no warning to attach, so there is nothing to be uncertain about and
+`False` is the whole of it.
 
 **Wrapping the list is the point, not a cost of it.** #457's harm is that a
 caller "silently believes it saw everything", and every shape that leaves the
