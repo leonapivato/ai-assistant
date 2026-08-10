@@ -1,7 +1,23 @@
 # 128. Every eligibility predicate binds before the ranking cut, and `search` reports when its ceiling bound the read
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-10
+- **Note (2026-08-10, UTC): ratified.** `Proposed` → `Accepted` after the
+  required reviews came back green on the content this ADR merged with — both
+  lenses, because this ADR decides `core` surface: adversarial **APPROVE with
+  no findings** and architecture **APPROVE with no findings**, round 5, 1027
+  lines net across 5 commits, churn `1.1×` (1147 touched), posted to PR #923 by
+  `just ship`. The outcome is taken from that comment rather than from a
+  report. The comment's `<!-- ship:e40ef140… -->` anchor is the pre-merge
+  branch head, not an ancestor of `main` after the rebase-merge; identity was
+  established through the tree rather than assumed — `e40ef140^{tree}` and
+  `04600e10^{tree}`, the tip the PR merged as (2026-08-10T15:50:03Z), are both
+  `8845e4d021b5`, the tree both review artifacts record. This edit takes
+  `CONTRIBUTING.md` → "Trivial ADR edits"' exemption for the ratification flip
+  and ADR-0015 §5's trivial-ADR exemption; beyond the `Status` token and this
+  note, not one word below is edited. Filed as the fix for #925, whose standing
+  review finding on PR #924 — correctly triaged there as outside that lane's
+  fence — this discharges.
 - **Durability clause.** Every reference below to ADR-NNNN is to its text as it
   stood at this ADR's base, `3dc22af`, not to its status on any later day. Every
   ADR this decision composes with reads `Accepted` there (or partially superseded
