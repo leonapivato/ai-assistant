@@ -26,6 +26,16 @@ check from being circular is that the two values live in different places: the
 address is ordinary configuration, and the identity is in the keyring beside the
 credential, where no setting reaches it.
 
+**The enrolment is read on every connect, and not cached.** ADR-0084 §7 makes this
+client stateless by decision and ADR-0084 §3 gives it one connection per call, so a
+command that makes three calls reads the keyring three times. Holding the value
+between calls would be the only way to avoid that, and it is the wrong trade: it
+keeps a Tier 0 secret in a process's memory for longer than the frame that carries
+it, to save a call to a service that on every mainstream platform is unlocked once
+per login session. What the owner would notice is a keyring that prompts per
+operation, and the remedy for that is unlocking it — not this client keeping the
+secret instead.
+
 **The credential is unwrapped on one line and nowhere else** (ADR-0125 §3, ADR-0124
 §7). It is read through :class:`~ai_assistant.core.protocols.Secrets` — the reading
 face and nothing wider (ADR-0125 §8) — on the connect path and for no other
