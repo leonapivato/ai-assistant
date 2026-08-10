@@ -326,18 +326,30 @@ def _decode(data: str, record_id: object) -> MemoryRecord:
         raise MemoryStoreError(msg) from exc
 
 
-def _derived(record: MemoryRecord) -> tuple[int | None, int | None, str | None]:
-    """The lifecycle and subject columns, exactly as the store's write path derives them.
+def _derived(record: MemoryRecord) -> tuple[int | None, int | None, int | None, str | None]:
+    """The lifecycle, window and subject columns, as the store's write path derives them.
 
     Kept in this shape — read off the decoded model, not re-parsed from the JSON —
     so it cannot drift from ``SqliteMemoryStore._persist_record``, which is the
-    only other place these three values are computed.
+    only other place these values are computed.
+
+    **``valid_from`` is here because dropping it hides nothing and reveals
+    everything.** ADR-0128 §1 binds that end of the window before ``search``'s
+    ranking cut, which it can only do from a column; a rebuild that carried the
+    blob and left the column ``NULL`` would leave the *read* wrong while every
+    record round-tripped intact, because ``NULL`` is an open window. That is the
+    quietest failure this module can produce — a not-yet-live record becomes
+    searchable on a store that was only re-embedded — so :func:`_verify` compares
+    this tuple against the blob for every row before anything is moved.
     """
     expires = _to_micros(record.expires_at) if record.expires_at is not None else None
     valid_until = (
         _to_micros(record.validity.valid_until) if record.validity.valid_until is not None else None
     )
-    return expires, valid_until, record.about_person
+    valid_from = (
+        _to_micros(record.validity.valid_from) if record.validity.valid_from is not None else None
+    )
+    return expires, valid_until, valid_from, record.about_person
 
 
 def _discard(path: Path) -> None:
@@ -851,11 +863,12 @@ def _insert(
 ) -> None:
     """Write one copied row and its recomputed vector into the open transaction."""
     rowid, record_id, kind, data = row
-    expires, valid_until, about_person = _derived(record)
+    expires, valid_until, valid_from, about_person = _derived(record)
     work.execute(
-        "INSERT INTO records(rowid, id, kind, data, expires_at, valid_until, about_person) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (rowid, record_id, kind, data, expires, valid_until, about_person),
+        "INSERT INTO records"
+        "(rowid, id, kind, data, expires_at, valid_until, valid_from, about_person) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (rowid, record_id, kind, data, expires, valid_until, valid_from, about_person),
     )
     work.execute(
         "INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)",
@@ -933,7 +946,7 @@ def _verify(
     if meta.get("dimensions") != str(embedder.dimensions):
         _fail(f"it is {meta.get('dimensions')}-dimensional, expected {embedder.dimensions}")
 
-    destination = "rowid, id, kind, data, expires_at, valid_until, about_person"
+    destination = "rowid, id, kind, data, expires_at, valid_until, valid_from, about_person"
     for left, right in zip_longest(_rows(source, _SOURCE_COLUMNS), _rows(work, destination)):
         if left is None or right is None:
             _fail("it holds a different number of records")

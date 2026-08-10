@@ -1949,6 +1949,55 @@ async def _write_pre_window_column_db(
         conn.close()
 
 
+async def test_the_window_column_backfill_reaches_a_record_at_a_negative_rowid(
+    tmp_path: Path,
+) -> None:
+    """The backfill's cursor must start below every stored ``rowid``, and cannot.
+
+    ``rowid`` is an explicit ``INTEGER PRIMARY KEY`` on every table this store has
+    ever written, so a database predating ADR-0114's ``AUTOINCREMENT`` can carry an
+    explicitly inserted negative one — the shape
+    ``test_a_walk_yields_a_legacy_record_whose_rowid_is_below_zero`` plants and the
+    migrations preserve. ADR-0114 §4 names the failure for the walk's cursor and it
+    is the same failure here: a page starting at ``0`` "silently skips every row at
+    or below it".
+
+    What makes it worse for this cursor than for the walk's is the value a skipped
+    row keeps. An unvisited ``valid_from`` stays ``NULL``, ``NULL`` is an *open*
+    window, and ``search`` binds that column before its ranking cut — so the record
+    the migration skipped is not merely missed, it is **returned**, on a store where
+    ADR-0045 §6 requires it hidden. There is no sentinel below every possible
+    ``rowid``, so the first page takes no bound at all.
+    """
+    db = tmp_path / "pre-walk-window.db"
+    _write_pre_walk_db(db, [], drop_top=False)
+    future = _semantic(
+        "below", "not yet live", validity=Validity(valid_from=_NOW + timedelta(days=1))
+    )
+    live = _semantic("above", "already live")
+    legacy = sqlite3.connect(db)
+    for rowid, record in ((-9, future), (1, live)):
+        legacy.execute(
+            "INSERT INTO records(rowid, id, kind, data) VALUES (?, ?, ?, ?)",
+            (rowid, record.id, record.kind, record.model_dump_json()),
+        )
+    legacy.commit()
+    legacy.close()
+
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now
+    )
+    try:
+        stored = dict(store._conn.execute("SELECT id, valid_from FROM records"))
+        assert stored["below"] == _micros(_NOW + timedelta(days=1)), (
+            "the record at a negative rowid was skipped by the backfill, so its window "
+            "column reads as open and search would return it (ADR-0045 §6)"
+        )
+        assert stored["above"] is None
+    finally:
+        store.close()
+
+
 async def test_migration_backfills_the_open_window_column_from_json(tmp_path: Path) -> None:
     """ADR-0128 §1's column, added in place and backfilled — never left ``NULL``.
 

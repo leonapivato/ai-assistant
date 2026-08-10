@@ -612,21 +612,34 @@ class SqliteMemoryStore:
         behaviour of a scan undefined when the table under it is modified. Paging
         by ``rowid`` keeps the memory bound of a streamed read without opening a
         cursor across an ``UPDATE``.
+
+        **The first page is unbounded, and that is not a stylistic choice.** A
+        ``rowid`` is a signed 64-bit integer and a legacy table can hold a
+        *negative* one — this store has a case that plants exactly that
+        (``test_a_walk_yields_a_legacy_record_whose_rowid_is_below_zero``), because
+        ``rowid`` was only issued by ``AUTOINCREMENT`` from ADR-0114 onwards.
+        Seeding the cursor at ``0`` and paging on ``rowid > ?`` would skip every row
+        at or below it, which is the failure ADR-0114 §4 names for the walk's own
+        cursor — ``0`` "silently skips every row at or below it". It is worse here
+        than there: a skipped row keeps ``valid_from = NULL``, ``NULL`` is an *open*
+        window, and ``search`` binds that column before its ranking cut, so the
+        skipped record is not merely missed but **returned**. There is no sentinel
+        below every possible ``rowid`` to seed with, so the first page takes no
+        bound at all and the cursor starts from what it actually found.
         """
-        after = 0
-        while True:
-            chunk = conn.execute(
-                "SELECT rowid, data FROM records WHERE rowid > ? ORDER BY rowid LIMIT ?",
-                (after, _BACKFILL_CHUNK),
-            ).fetchall()
-            if not chunk:
-                return
+        chunk = conn.execute(
+            "SELECT rowid, data FROM records ORDER BY rowid LIMIT ?", (_BACKFILL_CHUNK,)
+        ).fetchall()
+        while chunk:
             for rowid, data in chunk:
                 conn.execute(
                     "UPDATE records SET valid_from = ? WHERE rowid = ?",
                     (self._micros_from_json(data, "valid_from", nested="validity"), rowid),
                 )
-            after = chunk[-1][0]
+            chunk = conn.execute(
+                "SELECT rowid, data FROM records WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                (chunk[-1][0], _BACKFILL_CHUNK),
+            ).fetchall()
 
     def _migrate_walk_key(self, conn: sqlite3.Connection) -> None:
         """Adopt the never-reissued walk key over an existing table (ADR-0114 §1).
