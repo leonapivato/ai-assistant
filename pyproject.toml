@@ -1040,13 +1040,26 @@ forbidden_modules = ["keyring"]
 # there by name. Listing it would make the module unreachable in production for
 # good.
 #
-# **`ai_assistant.memory` is the other**, and for a reason no earlier contract has
-# met: the module *is* in that package. A source list naming its own parent asks
-# import-linter to check a package against a descendant of itself, which is not
-# what the clause is about — what the clause is about is the pipeline reaching in
-# from outside. The intra-package separation (nothing in `memory/` that serves a
-# read imports this module) is left to review, which is where §5's fourth clause
-# says the rest of it lives anyway.
+# **The owning package is listed too, as `ai_assistant.memory.**` rather than as
+# `ai_assistant.memory`, and the difference is the whole enforcement.** §5's
+# fourth clause names `memory` among the components that may not compute, hold,
+# cache or consult one of these figures, and the fifth makes the fourth
+# mechanical — so the one package with the shortest path to the module is the last
+# one that may go unchecked.
+#
+# Naming the *parent* does not check it. A `forbidden` contract whose source is
+# `ai_assistant.memory` and whose target is `ai_assistant.memory.health` passes
+# while `memory/ingest.py` imports `health` outright: import-linter resolves the
+# source package as one node and the intra-package edge never becomes a chain it
+# reports. That was verified by probe rather than assumed — an `import` of
+# `health` added to `memory/ingest.py` left the contract `KEPT` under
+# `ai_assistant.memory`, and breaks it under the recursive wildcard, which is what
+# is written below. The wildcard also means a module added to `memory/` later is
+# covered the day it is added rather than the day somebody remembers this list.
+#
+# The wildcard matches the census module itself, which is harmless and deliberate:
+# it imports no module of its own, so there is no self-edge to report, and
+# excluding it by hand would be a second place to keep in step.
 #
 # **Direct imports only**, for the reason the three sibling contracts state: the
 # chain `service -> app -> memory.health` is the sanctioned one and exists the
@@ -1058,6 +1071,9 @@ allow_indirect_imports = "true"
 source_modules = [
     "ai_assistant.core",
     "ai_assistant.models",
+    # The package that *holds* the census, matched module by module. See the
+    # paragraph above for why the parent package's own name does not work here.
+    "ai_assistant.memory.**",
     "ai_assistant.context",
     "ai_assistant.planning",
     "ai_assistant.tools",
