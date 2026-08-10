@@ -172,9 +172,18 @@ and the second in what it must do to the data.
 > not read, not descended into and not destroyed. Every decision about an entry's
 > type is made on the entry itself and never on what it resolves to.
 
-> **Normative.** The act destroys nothing outside the filesystem `data_dir` is on.
-> It refuses, before destroying anything, if any directory under `data_dir` is a
-> mount point for another filesystem, with a diagnostic naming that path.
+> **Normative.** The act destroys nothing whose path is outside the resolved
+> `data_dir`. That is the obligation; the two clauses below are how it is met and
+> do not narrow it.
+
+> **Normative.** The act refuses, before destroying anything, if any directory at
+> or under `data_dir` is a mount point of any kind — a mount of another filesystem,
+> and equally a bind mount whose source is on the same one — with a diagnostic
+> naming that path.
+
+> **Normative.** Where the platform gives an implementation no way to enumerate
+> its mount points, the act refuses to run rather than proceeding on a test it
+> knows to be incomplete.
 
 > **Normative.** The data directory itself survives, holding nothing but the
 > instance lock file the act is holding (§5), with the permissions ADR-0083 §3's
@@ -216,13 +225,26 @@ is destroyed **as a link**, because what it names is not.
 hypothetical.** `data_dir/x -> /home/owner/photos` turns "destroy every entry, to
 any depth" into the destruction of a directory the owner never named and this act
 has no claim on. The same reasoning extends one step further than symbolic links,
-which is why the mount-point clause is separate: a filesystem mounted under
+which is why the mount-point clauses are separate: a directory mounted under
 `data_dir` is storage the directory names rather than holds, its contents were not
 put there by this installation, and unlinking through it is the same error with no
 link to notice. Refusal is right *there* — unlike a stray link, a mount point is a
 deliberate deployment arrangement, so the operator can unmount and rerun, and the
 diagnostic tells them which path to deal with. Refusing before destroying anything
 is the strictly safer direction and is ADR-0123 §2's own posture.
+
+**The bind mount is named because the obvious test does not catch it, and an
+unnamed false negative here is the whole failure.** `mount --bind /home/owner/photos
+<data_dir>/photos` produces a mount point whose source is on the same device as
+`data_dir`, so a rule phrased over *filesystems* does not reach it and a check that
+compares a directory's device with its parent's — which is what a portable
+`ismount` reduces to — returns false for it. Everything under it would then be
+destroyed while the act satisfied a clause about not leaving its filesystem. So the
+boundary the obligation is stated over is `data_dir` itself, the filesystem is not
+mentioned in it, and an implementation consults the platform's own mount table
+rather than inferring one from `stat`. The refusal-when-unenumerable clause is the
+conservative close: an act that cannot see its own boundary does not get to guess
+where it is.
 
 **The one thing per-store `clear` does that this does not is run without stopping
 the hub, and §2 is where that is paid for rather than avoided.**
@@ -341,6 +363,10 @@ decided it either way.
 > against. It writes no revocation row first, and it retains nothing of the
 > record.
 
+> **Normative.** An installation that has never configured a remote listener holds
+> no enrolment record, and there the clause above is satisfied with nothing to
+> destroy. The act neither creates the record nor treats its absence as a fault.
+
 > **Normative.** ADR-0124 §6's clause that "a revocation is recorded rather than
 > erasing the enrolment it revokes" is superseded **only** as it reaches this act.
 > Every revocation performed by any other means — the control socket's `revoke`,
@@ -388,10 +414,12 @@ every clause of §8. This decision removes one sentence's reach over one act.
 
 ### 5. The instance lock is the atomicity, and the enrolment record goes first
 
-> **Normative.** `devices.db` itself is the **first** entry the act destroys. Its
-> SQLite sidecars — its `-journal`, `-wal` and `-shm`, each matched exactly as that
-> path's name followed by the suffix — are destroyed immediately after it, before
-> any other entry in the data directory.
+> **Normative.** Where `devices.db` exists, it is the **first** entry the act
+> destroys. Its SQLite sidecars — its `-journal`, `-wal` and `-shm`, each matched
+> exactly as that path's name followed by the suffix — are destroyed immediately
+> after it, before any other entry in the data directory. Where it does not exist,
+> the act creates nothing and this ordering places nothing; the rest of the act is
+> unchanged.
 
 > **Normative.** The act holds the instance lock from before the first destruction
 > until after the last. It does not destroy the lock file it holds, and the lock
@@ -510,6 +538,11 @@ the one moment the owner is entitled to know about it.
 > enrolment record directly rather than through the control socket's bounded
 > `list`.
 
+> **Normative.** The act never creates the enrolment record in order to report on
+> it. Where `devices.db` is absent the device list is empty and the report says so
+> plainly — that this installation has enrolled no device — rather than omitting
+> the subject.
+
 > **Normative.** The report may not present the act as having purged everything;
 > may not present it as reaching anything on an enrolled device; and may not
 > present the revocation as retracting what a device already holds. What a device
@@ -536,6 +569,17 @@ rest would be a delete presenting itself as complete for every device it did not
 name, which is the second clause of §8 breached by a paging default. Reading the
 record directly costs nothing — the act is already in `service/` and already
 opening that file to destroy it.
+
+**The absent record is a real installation and not an edge case, which is why it
+is ruled rather than left to an implementation's judgement.** `service/hub.py`
+builds the `EnrolmentStore` only when `Settings.hub_remote_address` is configured,
+so every loopback-only hub — which is every hub the corpus has shipped so far
+(ADR-0124 §1's Context, and the hop is unimplemented on the client side) — holds
+a full data directory and no `devices.db`. The trap is that `EnrolmentStore`
+*creates* the file it is pointed at: an implementation that opened the record in
+order to compose §7's list would write a database in the moment before destroying
+everything, which is both absurd and, on a crashed run, a file left behind that the
+installation never had. Saying the list is empty costs a stat.
 
 **Confirmation is required because this act has no undo and one recovery.** The
 only way back from it is restoring a backup (ADR-0123 §9), and a backup taken
