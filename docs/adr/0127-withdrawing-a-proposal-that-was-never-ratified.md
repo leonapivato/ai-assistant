@@ -174,9 +174,10 @@ into the new document.
 
 > **Normative.** A `Status` of `Withdrawn` carrying no such note is a defective
 > record and not a withdrawal: §1 is unsatisfied, the ADR is not withdrawn, and §2
-> does not bind it. It is corrected in place — by appending the note the
-> withdrawal owed, or by restoring `Proposed` — under ADR-0070 §1's third
-> permitted edit, correcting a `Status` line to match what actually landed.
+> does not bind it. Its only correction is restoring `Proposed` — ADR-0070 §1's
+> third permitted edit, correcting a `Status` line to match what actually landed —
+> after which the withdrawal may be made again under §1, status and note together
+> in one change.
 
 **A bare `Withdrawn` would be a state claim with no record behind it**, which is
 the shape ADR-0019 refuses and ADR-0070 §1 already avoids for every other status
@@ -206,13 +207,25 @@ no live rule, which is the same answer it would have reached while the ADR stood
 nothing live becomes dead — only the record is poorer, which is what §3's second
 clause makes correctable.
 
+**Restoration is the single correction, and a late note is not offered as one.**
+§3's first clause makes the note part of the act rather than an attachment to it:
+a withdrawal is one change or it is not a withdrawal. Allowing a second change to
+supply the missing note would contradict that in the same breath — the status edit
+in the first commit cannot retroactively have happened "together with" a note
+written later — and it would leave the withdrawal's date unfixable, since neither
+commit is the moment the act occurred. So a defective record is undone and the
+act redone properly, which costs one commit and leaves an accurate history.
+
+**Restoring `Proposed` does not breach §2**, because §2 binds a withdrawal and a
+defective record was never one. That an author could therefore reach a restored
+`Proposed` by writing a defective withdrawal first is not a loophole worth
+armouring against: it is two visible edits to a floor path in the history of a
+document whose whole purpose is to be read, and the corpus armours nowhere against
+an author acting in bad faith. A *well-formed* withdrawal has no such path.
+
 **Whether any tool reports the defect is left open, as ADR-0089 §7 left the
 equivalent question open** for a malformed mark: no tier, no gate step, no hook is
-decided here. That an author could reach a restored `Proposed` by first writing a
-defective withdrawal and then correcting it is not a loophole worth armouring
-against — it is two visible edits to a floor path in the history of a document
-whose whole purpose is to be read, and the corpus armours nowhere against an
-author acting in bad faith.
+decided here.
 
 ### 4. `Withdrawn` in the vocabulary, and what a consumer does with it
 
