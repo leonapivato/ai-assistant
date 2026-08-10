@@ -104,15 +104,35 @@
     ruling is that the corpus should hold *no* decision here, and an ADR whose
     content is "the previous ADR is not adopted" would be a decision-shaped record
     of the absence of one.
-  - **The status vocabulary is a human-readable record, not a typed enum, so a
-    new value decides nothing mechanical.** ADR-0070 §4 records that nothing
-    classifies ADR liveness from status and that the sole consumer only *displays*
-    the field; ADR-0082 §6 refused a mechanical `Status` cross-check. The one
-    machine-legible job §4 keeps for the field is the supersession state, which a
-    withdrawal does not touch. `docs/adr/template.md` does enumerate the
-    vocabulary and does not yet carry `Withdrawn`; that edit is outside this
-    change's fence and is filed as #914 rather than assumed here, which is the
-    disposition ADR-0089 took for the template edit its own §2 owed.
+  - **`Withdrawn` decides nothing ADR-0070 §4 reserved, and cannot cause the
+    failure §4 exists to prevent.** §4 does say "the canonical vocabulary is §4's
+    four forms", and the sentence is read here in its place: it sits inside the
+    consumer rule headed "Partial supersession is a distinct, scope-bearing state;
+    a consumer must not collapse it", naming the set that rule ranges over. §4
+    states no closure clause, and what it reserves as "the **machine-legible**
+    part" is "the leading token and the `ADR-NNNN` references" — the supersession
+    state, which a withdrawal never enters: no scope, no successor, no live
+    remainder. The hazard §4 was built against is #87's, a superseded ADR read as
+    fully current with its replaced scope hidden. `Withdrawn` can only err the
+    other way: a consumer that does not recognise it drops the record from a
+    live-rule collection, which is the right answer for a document that was never
+    in one, where mis-reading it as `Accepted` — the collapse §4 forbids — is the
+    one thing this value makes impossible. §4's own treatment of a qualifier that
+    "names no ADR" is that "there is nothing to resolve", and there is nothing
+    here to resolve. Its closing paragraph records that "nothing classifies ADR
+    liveness from status" today and binds the rule to "any liveness-classifying
+    consumer added later" — which is why the vocabulary question is filed for that
+    consumer's lane rather than answered by assumption in this one. What §4 would
+    owe a new decision is a status form that changes the supersession read, the
+    one-physical-line rule, or the accumulation and precedence rules; this changes
+    none of them, and ADR-0082 §6 has already refused a mechanical `Status`
+    cross-check that would make the field an enum.
+  - **The template edit is owed and is filed, not assumed.**
+    `docs/adr/template.md` carries the vocabulary itself (§4's last structural
+    sentence) and does not yet carry `Withdrawn`. That file is outside this
+    change's fence, so the edit is filed as #914 — the disposition ADR-0089 took
+    for the template edit its own §2 owed, "filed as an issue rather than written
+    here, because this lane's fence".
 
   Recording an operator's ruling on a never-ratified proposal therefore authors no
   decision, and there is nothing for a new ADR to hold. Ratification and
