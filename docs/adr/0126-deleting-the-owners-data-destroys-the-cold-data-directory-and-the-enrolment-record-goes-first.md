@@ -176,10 +176,11 @@ and the second in what it must do to the data.
 > `data_dir`. That is the obligation; the two clauses below are how it is met and
 > do not narrow it.
 
-> **Normative.** The act refuses, before destroying anything, if any directory at
-> or under `data_dir` is a mount point of any kind — a mount of another filesystem,
-> and equally a bind mount whose source is on the same one — with a diagnostic
-> naming that path.
+> **Normative.** The act refuses, before destroying anything, if any directory
+> *strictly beneath* `data_dir` is a mount point of any kind — a mount of another
+> filesystem, and equally a bind mount whose source is on the same one — with a
+> diagnostic naming that path. `data_dir` itself being a mount point is not a
+> refusal and is a supported deployment.
 
 > **Normative.** Where the platform gives an implementation no way to enumerate
 > its mount points, the act refuses to run rather than proceeding on a test it
@@ -245,6 +246,16 @@ mentioned in it, and an implementation consults the platform's own mount table
 rather than inferring one from `stat`. The refusal-when-unenumerable clause is the
 conservative close: an act that cannot see its own boundary does not get to guess
 where it is.
+
+**The refusal reaches only *beneath* the boundary, and the difference is a whole
+supported deployment.** `ASSISTANT_DATA_DIR` pointed at the root of a dedicated
+local volume is a mount point, and it is a good arrangement rather than a
+suspicious one — ADR-0123's Context is about exactly the operator who cares where
+this data sits. A refusal phrased over "at or under" would deny the delete right to
+that installation for a property that threatens nothing: a mount point *at* the
+boundary is the boundary, and destroying everything inside it is the act. What the
+clause is for is a mount point that lets the act reach storage the boundary does
+not contain, and only a descendant can do that.
 
 **The one thing per-store `clear` does that this does not is run without stopping
 the hub, and §2 is where that is paid for rather than avoided.**
