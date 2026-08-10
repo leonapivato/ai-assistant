@@ -12,12 +12,15 @@ can say *why* a search under-returned rather than only *that* it did.
   after months of use. Retrieval latency is measured against this.
 * **Topical-cluster density** (:attr:`AgedStoreSpec.cluster_population`) — how
   many records crowd around one topic. Leg 3's observer mass-produces topically
-  clustered ``OBSERVED``/``INFERRED`` records (ADR-0077), and it is crowding
-  rather than raw volume that consumes ``search``'s over-fetch budget: a
-  candidate is spent on a near neighbour whether or not it is servable.
+  clustered ``OBSERVED``/``INFERRED`` records (ADR-0077), and it was crowding
+  rather than raw volume that consumed ``search``'s candidate budget: a candidate
+  was spent on a near neighbour whether or not it was servable. Since ADR-0128 §1
+  it is not — an ineligible row never becomes a candidate — so this axis now
+  measures how much pressure a complete answer was given under.
 * **The window-closed proportion** (:attr:`AgedStoreSpec.closed_fraction`) —
-  records off the read path but still in the vector index, so they occupy KNN
-  candidates and return nothing. There are **two producers** and this module
+  records off the read path but still in the vector index. They used to occupy KNN
+  candidates and return nothing, which is #457; they are now excluded before the
+  KNN sees them. There are **two producers** and this module
   plants both, because ADR-0112 §8 records that the pressure now grows with
   reconciliation as well as with correction:
 
@@ -34,11 +37,11 @@ can say *why* a search under-returned rather than only *that* it did.
 Python against the same embedder the store was built with, so every measurement
 has ground truth: which records are eligible for a query, how many ineligible
 ones sit nearer than the last one a caller asked for
-(:func:`filtered_neighbours` — the density k-shortfall is a function of), and how
-many rows the store's KNN-then-filter arithmetic can serve
-(:func:`served_prediction`). The oracle reads ``_RESULT_OVERFETCH`` and
-``_VEC_KNN_MAX_K`` from the store module rather than restating them, so a lane
-that raises the over-fetch is **re-measured** by this instrument rather than
+(:func:`filtered_neighbours` — the density the k-shortfall used to be a function
+of, and now the measure of how crowded a complete answer was), and how many rows
+the store can serve (:func:`served_prediction`). The oracle reads
+``_VEC_KNN_MAX_K`` from the store module rather than restating it, so a lane that
+moves the ceiling (#411 part 2) is **re-measured** by this instrument rather than
 failed by it.
 
 Everything here is seeded and offline: :class:`ClusteredEmbedder` is a pure

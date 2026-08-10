@@ -8,10 +8,12 @@ literal metric keys. The two emitting methods hold what is theirs — the counts
 only they can see.
 
 **The store emits its own retrieval trace and that placement is forced** (§8).
-The per-predicate exclusion counts "do not exist outside the store": ADR-0113 §8
-leaves the post-KNN ``kind``/expiry/window predicates inside the read, so a
-trace emitted one layer up "would satisfy the letter of 'we have retrieval
-telemetry' and be blind to the exact thing #824 watches for".
+The candidate count and the per-predicate exclusion counts "do not exist outside
+the store", so a trace emitted one layer up "would satisfy the letter of 'we have
+retrieval telemetry' and be blind to the exact thing #824 watches for". ADR-0128
+§1 has since moved every one of those predicates *ahead* of the ranking cut, which
+takes all four counts to a structural zero and changes nothing about where the
+trace is emitted: what only the store can see is now the candidate set itself.
 
 **Everything here is subordinate to the work it observes** (§5). No trace failure
 propagates: not a clock that will not read, not a mapper that raises, not an id

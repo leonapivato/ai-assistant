@@ -1,36 +1,46 @@
-"""Leg 7's retrieval exit instrument: latency and k-shortfall on an aged store (#789).
+"""Leg 7's retrieval exit instrument: latency and service on an aged store (#789).
 
 `docs/roadmap.md`'s leg-7 exit test asks that months of use make retrieval
 better, not slower, "measured in this leg, as retrieval latency and k-shortfall
 against a synthetically aged store". ADR-0112 §7 rules that measurement to be the
 obligation itself, and gates every **headroom** change to retrieval behind it:
-raising ``_RESULT_OVERFETCH``, lifting the KNN ``k`` cap, or adopting hybrid
-retrieval are bets on a frequency, and this module is where that frequency is
-read off rather than guessed.
+lifting the KNN ``k`` cap or adopting hybrid retrieval are bets on a frequency,
+and this module is where that frequency is read off rather than guessed.
+
+**The k-shortfall it was built to measure no longer exists**, and the instrument
+is inverted rather than retired. ADR-0128 §1 binds every eligibility predicate
+before the ranking cut, so an ineligible row never enters the candidate set and
+the density these cases vary has nothing left to compete with. The sweeps are
+kept because the density is exactly what makes the new claim worth anything: a
+store that served in full on a clean fixture would prove nothing, and the medians
+reported below are the evidence that these queries ran under real pressure. What
+was a shortfall *rate* is now a shortfall *count asserted to be zero*, at
+filtered-neighbour densities an order of magnitude past the retired budget.
 
 **What it measures.** Two things, over
 :class:`~ai_assistant.memory.SqliteMemoryStore` specifically. The store is the
 subject and not a stand-in for it: issue #457 records that the shared conformance
-suite runs over ``FakeMemoryStore``, which has no KNN and therefore no post-KNN
-filter pass to under-serve from, so nothing in that suite can reach this at all.
+suite runs over ``FakeMemoryStore``, which has no KNN and therefore no candidate
+ceiling to under-serve from, so nothing in that suite can reach this at all.
 
 1. **Retrieval latency** against the live-record count, so the "not slower" half
-   of the exit test is a number.
-2. **k-shortfall** — how often ``search(query, limit=N, kinds=[k])`` returns
-   fewer than ``N`` rows while more than ``N`` eligible rows exist — as a
-   function of the filtered-neighbour density that causes it. The store
-   over-fetches ``min(N * _RESULT_OVERFETCH, _VEC_KNN_MAX_K)`` candidates and
-   filters afterwards, so the shortfall arrives when ineligible *nearer*
-   neighbours crowd the eligible ones out of that budget. #411 records the
-   arithmetic: past ``limit = _VEC_KNN_MAX_K / _RESULT_OVERFETCH`` (512) the
-   effective multiple shrinks below 8, so the same store under-serves a larger
-   ``limit`` at a density that a smaller one survives.
+   of the exit test is a number. This is the half ADR-0128 §1 could plausibly have
+   cost something, since the pre-filter reads more per search; the trip-wire is
+   unchanged and the figures are below it.
+2. **Service under crowding** — that ``search(query, limit=N, kinds=[k])`` returns
+   ``min(N, eligible)`` rows however many ineligible *nearer* neighbours surround
+   them. Before ADR-0128 §1 it did not: the store over-fetched
+   ``min(N * 8, _VEC_KNN_MAX_K)`` candidates and filtered afterwards, so service
+   collapsed once the filtered-neighbour density passed ``fetch_k - N``, and #411
+   recorded the arithmetic that made a *larger* ``limit`` fail at a density a
+   smaller one survived. What is left of that is the ``k`` cap itself, which is
+   the whole of what ``capped`` reports (ADR-0128 §2).
 
 **What it asserts, and what it only reports.** Every case asserts that the store
 agrees with :mod:`aged_store`'s independent oracle — the instrument is worth
-nothing if it cannot predict the subject — and the k-shortfall cases assert the
-qualitative claims that carry the measurement (a shortfall appears only under
-crowding; the ``limit``-512 boundary is real). The latency numbers are
+nothing if it cannot predict the subject — and the sweep cases assert the
+qualitative claims that carry the measurement (service is complete at every
+density; the fixture really was crowded). The latency numbers are
 **reported**, under a deliberately loose ceiling: a wall-clock target asserted in
 a test is a claim about the CI runner, and ADR-0112 §7 wants a measurement, not a
 threshold nobody chose. The ceiling that is asserted is a regression trip-wire,
