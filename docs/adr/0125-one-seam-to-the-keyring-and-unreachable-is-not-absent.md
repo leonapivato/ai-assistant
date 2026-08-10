@@ -881,8 +881,7 @@ property being tested.
 > the other; two subjects **over one backing** differing only in installation, and
 > two differing only in scope, each keep their entries isolated under the same
 > `key`; a name outside the subject's bound scope raises `ValueError` and the
-> subject's own scope still answers afterwards, and does so with the subject driven
-> unavailable as well as available; the subject satisfies `Secrets` by
+> subject's own scope still answers afterwards; the subject satisfies `Secrets` by
 > `isinstance`; and no secret value appears in the `repr` of the subject, of a
 > `SecretValue`, or of any error the subject raises.
 
@@ -892,10 +891,8 @@ property being tested.
 > name replaces and leaves one entry; `delete` of an unset name returns `False` and
 > raises nothing; `delete` returns `True` once and `False` thereafter, and `get`
 > then returns `None`; `set` and `delete` each raise `ValueError` for a name
-> outside the subject's bound scope — with the subject driven unavailable as well
-> as available, so §7's argument-step precedence is proved on the writing methods
-> and not only on `get` — and the entry that name would have addressed is neither
-> written nor removed; `set` raises `ValueError` for a blank value and
+> outside the subject's bound scope, and the entry that name would have addressed
+> is neither written nor removed; `set` raises `ValueError` for a blank value and
 > for an oversized one built directly as a bare `SecretStr`, storing nothing in
 > either case; and the subject satisfies `SecretStore` by `isinstance`.
 
@@ -949,6 +946,23 @@ than support tickets.
 > raises `SecretStoreUnavailableError` and that `get` does not return `None` — as a
 > test marked `@pytest.mark.optional_obligation`, so an implementation that cannot
 > be driven into that state skips it and the canonical fake, which can, does not.
+
+> **Normative.** **Every** argument-refusal obligation in either suite — §4's
+> revalidation and §2's scope binding, on every method that has one, over every
+> malformed and out-of-scope argument those clauses name — is run twice: with the
+> subject available, and with it driven unavailable. `ValueError` is required in
+> both, which is §7's argument-step precedence proved rather than asserted.
+
+**The precedence obligation is bound to the refusal cases rather than listed
+against some of them**, and that is the fourth time this ADR replaces an
+enumeration with the rule behind it. Review found the gap three times running,
+each time one method or one malformed argument further out — `get` covered and
+`set` not, scope mismatches covered and blank values not — because a hand-written
+list of "which refusals are also tested while unavailable" is a second enumeration
+beside the refusals themselves, and the shorter one is the floor. Doubling every
+refusal case is a mechanical rule with no edge for a later variant to arrive
+through, and it costs the triad lane a parametrisation rather than a set of new
+tests.
 
 > **Normative.** The suite proves §6's redaction against a **failing** backend, on
 > the same optional marking: a subject driven to fail with a backend error whose
