@@ -145,6 +145,17 @@ ai-assistant-device = "ai_assistant.service.device:main"
 # forecloses the subcommand independently of any lock.
 ai-assistant-backup = "ai_assistant.service.backup:main"
 ai-assistant-restore = "ai_assistant.service.restore:main"
+# The owner's whole-installation delete (ADR-0126 §2), the sixth entry point and
+# the first whose separate script is forced twice over. Once by the family's rule:
+# it takes the instance lock, the lock is in `service`, and nothing may import
+# `service`. And once by ADR-0124 §6, which the other five never met —
+# `wire/surface.py` derives the wire's method set from `AssistantEngine`, so an
+# engine method would be automatically reachable from an enrolled device across
+# the remote transport, and "no connection to the remote listener may create,
+# extend or modify an enrolment" is exactly what a delete revoking every enrolment
+# there is would do. §2 states the separate script normatively: "It is not an
+# `assistant` subcommand."
+ai-assistant-purge = "ai_assistant.service.purge:main"
 
 [dependency-groups]
 dev = [

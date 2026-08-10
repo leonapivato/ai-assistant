@@ -248,6 +248,33 @@ class EnrolmentStore:
         rows = self._conn.execute("SELECT DISTINCT overlay_identity FROM enrolments").fetchall()
         return {row["overlay_identity"] for row in rows}
 
+    def live_enrolments(self) -> list[Enrolment]:
+        """Every live enrolment, complete and unbounded (ADR-0126 §7).
+
+        Its own query rather than a walk over :meth:`recent_enrolments`, for the
+        reason :meth:`known_identities` has one: that method is bounded, and this
+        answer may not be. ADR-0126 §7 requires the whole-store delete's report to
+        enumerate "every live enrolment with no bound, no page and no omission
+        count", because "a report that named the first two hundred devices and
+        counted the rest would be a delete presenting itself as complete for every
+        device it did not name".
+
+        Rather than :meth:`live_verifiers`, which is the same set, because that one
+        carries the verifier and this answer is *printed*. ADR-0124 §7 keeps the
+        verifier out of anything rendered to an operator, and :class:`Enrolment`
+        exists so that "the surest way to keep a value out of a message is for the
+        value not to be in the object the message is rendered from".
+
+        Returns:
+            The live enrolments, ordered by the device's overlay identity so two
+            runs over one record read the same way.
+        """
+        rows = self._conn.execute(
+            "SELECT id, overlay_identity, enrolled_at, revoked_at FROM enrolments "
+            "WHERE revoked_at IS NULL ORDER BY overlay_identity"
+        ).fetchall()
+        return [_as_enrolment(row) for row in rows]
+
     def live_verifiers(self) -> dict[str, tuple[int, str]]:
         """The live enrolments, as the admission path needs them.
 
