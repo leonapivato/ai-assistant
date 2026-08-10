@@ -125,6 +125,41 @@ class _Fingerprint:
 
 
 @dataclass(frozen=True, slots=True)
+class _SourceFile:
+    """One copyable file, named the way a descriptor-relative open needs it."""
+
+    relative: str
+    directory: str
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Tree:
+    """The data directory's shape, held open.
+
+    **The descriptors are the point, not an optimisation.** ADR-0123 §1's "It
+    never follows a symbolic link" cannot be delivered by re-resolving a path: a
+    directory that was a directory when it was listed can be a symlink by the time
+    the file inside it is opened, and every check on the file itself then passes
+    while the bytes come from somewhere else entirely. Holding a descriptor for
+    each directory as it is verified removes the second lookup, so the copy reads
+    the tree that was checked.
+
+    They stay open for the whole run because both passes need them — the scan and
+    the copy — and there are as many as there are directories in the data
+    directory, which is one today.
+    """
+
+    directories: dict[str, int]
+    files: tuple[_SourceFile, ...]
+
+    def close(self) -> None:
+        """Release every descriptor. Idempotent by construction: called once, in a `finally`."""
+        for fd in self.directories.values():
+            os.close(fd)
+
+
+@dataclass(frozen=True, slots=True)
 class _Source:
     """The result of the pre-copy scan: what will be copied, and its fingerprints."""
 
@@ -244,7 +279,18 @@ def _run_locked(settings: Settings, *, destination: Path, secret: str) -> int:
     """Everything that must happen with the instance lock held."""
     data_dir = settings.data_dir
     excluded = _excluded_paths(settings)
-    source = _scan(data_dir, excluded=excluded)
+    _refuse_sidecars(data_dir)
+    tree = _open_tree(data_dir, excluded=excluded)
+    try:
+        return _copy(tree, settings, destination=destination, secret=secret)
+    finally:
+        tree.close()
+
+
+def _copy(tree: _Tree, settings: Settings, *, destination: Path, secret: str) -> int:
+    """Measure the tree, write the artifact, check nothing moved, verify, publish."""
+    data_dir = settings.data_dir
+    source = _scan(tree, data_dir)
     manifest = Manifest(
         format_version=artifact.FORMAT_VERSION,
         taken_at=datetime.now(UTC),
@@ -253,9 +299,11 @@ def _run_locked(settings: Settings, *, destination: Path, secret: str) -> int:
     )
     print(f"copying {len(source.entries)} file(s), {manifest.total_length} bytes")
 
-    temporary = _write_temporary(destination, data_dir=data_dir, manifest=manifest, secret=secret)
+    temporary = _write_temporary(
+        destination, tree=tree, data_dir=data_dir, manifest=manifest, secret=secret
+    )
     try:
-        _refuse_if_source_moved(data_dir, source=source)
+        _refuse_if_source_moved(tree, data_dir, source=source)
         verified = _verify(temporary, data_dir=data_dir, secret=secret)
         _publish(temporary, destination)
     except BaseException:
@@ -269,7 +317,9 @@ def _run_locked(settings: Settings, *, destination: Path, secret: str) -> int:
     return EXIT_OK
 
 
-def _write_temporary(destination: Path, *, data_dir: Path, manifest: Manifest, secret: str) -> Path:
+def _write_temporary(
+    destination: Path, *, tree: _Tree, data_dir: Path, manifest: Manifest, secret: str
+) -> Path:
     """Build the artifact beside its destination, under a name nothing mistakes for one.
 
     §2 requires the same-directory placement for ADR-0104 §1's reason: an atomic
@@ -288,7 +338,7 @@ def _write_temporary(destination: Path, *, data_dir: Path, manifest: Manifest, s
         with os.fdopen(handle, "wb") as out:
             artifact.write_artifact(
                 out,
-                data_dir=data_dir,
+                opener=lambda relative: _open_source(tree, data_dir, relative),
                 manifest=manifest,
                 passphrase=secret,
                 work_factor=DEFAULT_WORK_FACTOR,
@@ -413,51 +463,80 @@ def _excluded_paths(settings: Settings) -> frozenset[str]:
     return frozenset(excluded)
 
 
-def _scan(data_dir: Path, *, excluded: frozenset[str]) -> _Source:
-    """Walk the directory, refuse what §1 and §2 refuse, and fingerprint the rest."""
-    _refuse_sidecars(data_dir)
+def _scan(tree: _Tree, data_dir: Path) -> _Source:
+    """Fingerprint and digest every file the tree holds open."""
     entries: list[ManifestEntry] = []
     fingerprints: dict[str, _Fingerprint] = {}
-    for relative in _walk(data_dir, excluded=excluded):
-        fingerprint, sha256, length = _measure(data_dir / relative)
-        fingerprints[relative] = fingerprint
-        entries.append(ManifestEntry(path=relative, length=length, sha256=sha256))
+    for source in tree.files:
+        fingerprint, sha256, length = _measure(tree, data_dir, source)
+        fingerprints[source.relative] = fingerprint
+        entries.append(ManifestEntry(path=source.relative, length=length, sha256=sha256))
     return _Source(entries=tuple(entries), fingerprints=fingerprints)
 
 
-def _walk(data_dir: Path, *, excluded: frozenset[str]) -> Iterator[str]:
-    """Yield every copyable file's data-directory-relative path, following no link.
+def _open_tree(data_dir: Path, *, excluded: frozenset[str]) -> _Tree:
+    """Walk the directory holding a descriptor for every directory in it.
+
+    Refuses what §1 refuses — an entry that is "neither a regular file, nor a
+    directory, nor one §3 excludes by name — a symbolic link included" — and
+    refuses it against the descriptor of the directory it was listed in, so the
+    check and the later open are about the same object.
+
+    Args:
+        data_dir: The directory to walk.
+        excluded: §3's exclusion set, as data-directory-relative paths.
+
+    Returns:
+        The tree, with every descriptor open. The caller closes it.
 
     Raises:
-        RefusalError: On an entry that is "neither a regular file, nor a directory, nor
-            one §3 excludes by name — a symbolic link included" (§1).
+        RefusalError: On a symbolic link or an entry of any other kind.
     """
-    stack = [(data_dir, "")]
-    while stack:
-        directory, prefix = stack.pop()
-        with os.scandir(directory) as scan:
-            for entry in sorted(scan, key=lambda item: item.name):
-                relative = prefix + entry.name
-                if relative in excluded:
-                    continue
-                if entry.is_symlink():
-                    msg = (
-                        f"{data_dir / relative} is a symbolic link; this tool never follows "
-                        f"one and never copies one, so remove it or move it out of the data "
-                        f"directory"
-                    )
-                    raise RefusalError(msg)
-                if entry.is_dir(follow_symlinks=False):
-                    stack.append((Path(entry.path), f"{relative}/"))
-                elif entry.is_file(follow_symlinks=False):
-                    yield relative
-                else:
-                    msg = (
-                        f"{data_dir / relative} is neither a regular file nor a directory, "
-                        f"so it cannot be copied byte for byte; move it out of the data "
-                        f"directory"
-                    )
-                    raise RefusalError(msg)
+    directories = {"": artifact.open_directory_at(None, str(data_dir), shown=data_dir)}
+    files: list[_SourceFile] = []
+    try:
+        pending = [""]
+        while pending:
+            prefix = pending.pop()
+            fd = directories[prefix]
+            with os.scandir(fd) as scan:
+                for entry in sorted(scan, key=lambda item: item.name):
+                    relative = prefix + entry.name
+                    if relative in excluded:
+                        continue
+                    shown = data_dir / relative
+                    if entry.is_symlink():
+                        msg = (
+                            f"{shown} is a symbolic link; this tool never follows one and "
+                            f"never copies one, so remove it or move it out of the data "
+                            f"directory"
+                        )
+                        raise RefusalError(msg)
+                    if entry.is_dir(follow_symlinks=False):
+                        key = f"{relative}/"
+                        directories[key] = artifact.open_directory_at(fd, entry.name, shown=shown)
+                        pending.append(key)
+                    elif entry.is_file(follow_symlinks=False):
+                        files.append(_SourceFile(relative, prefix, entry.name))
+                    else:
+                        msg = (
+                            f"{shown} is neither a regular file nor a directory, so it cannot "
+                            f"be copied byte for byte; move it out of the data directory"
+                        )
+                        raise RefusalError(msg)
+    except BaseException:
+        for fd in directories.values():
+            os.close(fd)
+        raise
+    return _Tree(directories=directories, files=tuple(files))
+
+
+def _open_source(tree: _Tree, data_dir: Path, relative: str) -> BinaryIO:
+    """Open one copied file against the descriptor of the directory holding it."""
+    source = next(item for item in tree.files if item.relative == relative)
+    return artifact.open_regular_at(
+        tree.directories[source.directory], source.name, shown=data_dir / relative
+    )
 
 
 def _refuse_sidecars(data_dir: Path) -> None:
@@ -501,20 +580,22 @@ def _sidecars(data_dir: Path) -> Iterator[str]:
                 stack.append((Path(entry.path), f"{relative}/"))
 
 
-def _measure(path: Path) -> tuple[_Fingerprint, str, int]:
+def _measure(tree: _Tree, data_dir: Path, source: _SourceFile) -> tuple[_Fingerprint, str, int]:
     """Fingerprint and digest one file, both against a single open descriptor.
 
     **One open, not three, and that is the fix for a real hole rather than a
-    tidy-up.** Fingerprinting by ``lstat`` and then digesting by a fresh ``open``
-    left a window in which a regular file could become a symbolic link: the
-    ``lstat`` recorded the link, the ``open`` followed it, and because the
-    after-fingerprint was the link's too, the two agreed and the artifact was
-    published carrying a file from outside the data directory. Everything is now
-    read from the descriptor :func:`~ai_assistant.service.artifact.open_regular`
-    returns, which refuses a link at that component outright (ADR-0123 §1).
+    tidy-up.** Fingerprinting by ``lstat`` and then digesting by a fresh open left
+    a window in which a regular file could become a symbolic link: the ``lstat``
+    recorded the link, the open followed it, and because the after-fingerprint was
+    the link's too, the two agreed and the artifact was published carrying a file
+    from outside the data directory. Everything is now read from the one
+    descriptor :func:`~ai_assistant.service.artifact.open_regular_at` returns,
+    taken against the directory descriptor the walk already holds.
 
     Args:
-        path: The file about to be copied.
+        tree: The open tree.
+        data_dir: The data directory, for diagnostics only.
+        source: The file to measure.
 
     Returns:
         Its fingerprint, its SHA-256 and its byte length.
@@ -522,7 +603,9 @@ def _measure(path: Path) -> tuple[_Fingerprint, str, int]:
     Raises:
         RefusalError: If it is a symbolic link or is not a regular file.
     """
-    with artifact.open_regular(path) as handle:
+    with artifact.open_regular_at(
+        tree.directories[source.directory], source.name, shown=data_dir / source.relative
+    ) as handle:
         info = os.fstat(handle.fileno())
         counter = _change_counter(handle)
         sha256, length = artifact.digest_and_length_of(handle)
@@ -537,12 +620,6 @@ def _measure(path: Path) -> tuple[_Fingerprint, str, int]:
         sha256,
         length,
     )
-
-
-def _fingerprint(path: Path) -> _Fingerprint:
-    """Record what §2 compares across the copy, re-reading it the same no-follow way."""
-    fingerprint, _sha256, _length = _measure(path)
-    return fingerprint
 
 
 def _change_counter(handle: BinaryIO) -> int | None:
@@ -561,7 +638,7 @@ def _change_counter(handle: BinaryIO) -> int | None:
     return int.from_bytes(header[_CHANGE_COUNTER_OFFSET:], "big")
 
 
-def _refuse_if_source_moved(data_dir: Path, *, source: _Source) -> None:
+def _refuse_if_source_moved(tree: _Tree, data_dir: Path, *, source: _Source) -> None:
     """Re-read every fingerprint and re-scan for sidecars, after the copy (§2).
 
     Both, because neither sees what the other does. The fingerprints catch a
@@ -572,9 +649,10 @@ def _refuse_if_source_moved(data_dir: Path, *, source: _Source) -> None:
 
     This narrows the window and does not close it, and §2 does not claim it does.
     """
+    by_relative = {item.relative: item for item in tree.files}
     for relative, before in source.fingerprints.items():
         try:
-            after = _fingerprint(data_dir / relative)
+            after, _sha256, _length = _measure(tree, data_dir, by_relative[relative])
         except OSError as exc:
             msg = f"{data_dir / relative} could not be re-read after the copy: {exc}"
             raise RefusalError(msg) from exc

@@ -57,7 +57,7 @@ from ai_assistant.service.agev1 import DEFAULT_WORK_FACTOR, DecryptingReader, En
 from ai_assistant.service.refusal import RefusalError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
     from typing import BinaryIO, Self
 
 #: The artifact layout this build writes and the highest it reads (ADR-0123 §8).
@@ -237,8 +237,17 @@ class ManifestEntry(BaseModel):
         if not value or value != posixpath.normpath(value):
             msg = f"manifest path {value!r} is empty or not normalised"
             raise ValueError(msg)
-        if posixpath.isabs(value) or value.startswith("../") or "\\" in value or "\x00" in value:
-            msg = f"manifest path {value!r} is absolute, escapes the store, or is not portable"
+        if posixpath.isabs(value) or "\\" in value or "\x00" in value:
+            msg = f"manifest path {value!r} is absolute or is not portable"
+            raise ValueError(msg)
+        # Every component must name something, which `normpath` alone does not
+        # give: `normpath(".") == "."` and `normpath("..") == ".."`, so both
+        # survive it. `"."` is the dangerous one — it resolves to the staging
+        # root itself, and an exclusive create there is a `FileExistsError` out
+        # of a *malformed artifact*, which `classify` reads as "try again" and an
+        # operator would.
+        if any(part in {".", ".."} for part in value.split("/")):
+            msg = f"manifest path {value!r} does not name a file inside the store"
             raise ValueError(msg)
         return value
 
@@ -342,10 +351,84 @@ def open_regular(path: Path) -> BinaryIO:
     return os.fdopen(fd, "rb")
 
 
-def _no_follow_descriptor(path: Path) -> int:
-    """Open ``path`` read-only without following a link at its final component."""
+def open_regular_at(directory: int, name: str, *, shown: Path) -> BinaryIO:
+    """The same, relative to a held directory descriptor.
+
+    **This is what makes "never follows a symbolic link" true of the whole path
+    rather than of its last component.** ``open_regular`` resolves every
+    directory above the file by name at the moment it is called, so a directory
+    swapped for a symlink after it was listed is walked through — and the file
+    opened at the other end is a real regular file, so ``O_NOFOLLOW`` on it says
+    nothing. Opening ``name`` against a descriptor obtained when that directory
+    was checked removes the question: the descriptor refers to the directory that
+    was verified, whatever its name points at now.
+
+    Args:
+        directory: A descriptor for the containing directory, itself opened
+            ``O_NOFOLLOW`` from its own parent's descriptor.
+        name: The entry's own name, with no separators in it.
+        shown: The path to name in a diagnostic, which a bare name cannot.
+
+    Returns:
+        A buffered binary reader positioned at the start.
+
+    Raises:
+        RefusalError: If the entry is a symbolic link or is not a regular file.
+    """
+    fd = _no_follow_descriptor(shown, name=name, directory=directory)
     try:
-        return os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            msg = (
+                f"{shown} is not a regular file, so it cannot be copied byte for byte; move "
+                f"it out of the data directory"
+            )
+            raise RefusalError(msg)
+    except BaseException:
+        os.close(fd)
+        raise
+    return os.fdopen(fd, "rb")
+
+
+def open_directory_at(directory: int | None, name: str, *, shown: Path) -> int:
+    """Open a subdirectory no-follow, relative to its parent's descriptor.
+
+    Args:
+        directory: The parent's descriptor, or ``None`` to open ``name`` as an
+            absolute path — which is only ever the walk's root.
+        name: The subdirectory's own name, or the root's path when ``directory``
+            is ``None``.
+        shown: The path to name in a diagnostic.
+
+    Returns:
+        A descriptor for the directory.
+
+    Raises:
+        RefusalError: If it is a symbolic link.
+    """
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        if directory is None:
+            return os.open(name, flags)
+        return os.open(name, flags, dir_fd=directory)
+    except OSError as exc:
+        if exc.errno in _SYMLINK_ERRNOS:
+            msg = (
+                f"{shown} is a symbolic link; this tool never follows one, so remove it or "
+                f"move it out of the data directory"
+            )
+            raise RefusalError(msg) from exc
+        raise
+
+
+def _no_follow_descriptor(
+    path: Path, *, name: str | None = None, directory: int | None = None
+) -> int:
+    """Open ``path`` read-only without following a link at its final component."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        if name is None:
+            return os.open(path, flags)
+        return os.open(name, flags, dir_fd=directory)
     except OSError as exc:
         if exc.errno in _SYMLINK_ERRNOS:
             msg = (
@@ -390,10 +473,27 @@ def digest_and_length_of(handle: BinaryIO) -> tuple[str, int]:
     return digest.hexdigest(), length
 
 
+def path_opener(data_dir: Path) -> Callable[[str], BinaryIO]:
+    """An opener that resolves a manifest path under ``data_dir`` by name.
+
+    For callers with no held descriptors — tests, and anything reading a tree
+    nothing else is writing. The backup tool does **not** use it: it opens
+    against descriptors it took while walking, which is what closes the swapped
+    intermediate directory (:func:`open_regular_at`).
+
+    Args:
+        data_dir: The directory the manifest's paths are relative to.
+
+    Returns:
+        A callable from a data-directory-relative path to an open reader.
+    """
+    return lambda relative: open_regular(data_dir / relative)
+
+
 def write_artifact(
     out: BinaryIO,
     *,
-    data_dir: Path,
+    opener: Callable[[str], BinaryIO],
     manifest: Manifest,
     passphrase: str,
     work_factor: int = DEFAULT_WORK_FACTOR,
@@ -407,7 +507,10 @@ def write_artifact(
 
     Args:
         out: Where the ciphertext goes — the temporary file ADR-0123 §2 requires.
-        data_dir: The directory the manifest's paths are relative to.
+        opener: Opens one copied file, given its data-directory-relative path.
+            An argument rather than a directory so the caller decides *how* the
+            file is reached — the backup tool reaches it through descriptors it
+            already holds.
         manifest: What is being carried.
         passphrase: The artifact's key (ADR-0123 §5).
         work_factor: Passed through to the age writer; lowered only by tests.
@@ -427,14 +530,13 @@ def write_artifact(
         info.mtime = int(manifest.taken_at.timestamp())
         archive.addfile(info, io.BytesIO(encoded))
         for entry in manifest.files:
-            source = data_dir / entry.path
             member = tarfile.TarInfo(PAYLOAD_PREFIX + entry.path)
             member.size = entry.length
             member.mode = _FILE_MODE
-            with open_regular(source) as handle:
-                # Opened no-follow here as well as in the scan: the copy is a
-                # second open of the same path, and §1's clause is about what the
-                # artifact ends up carrying rather than about what was listed.
+            # Opened no-follow here as well as in the scan: the copy is a second
+            # open, and §1's clause is about what the artifact ends up carrying
+            # rather than about what was listed.
+            with opener(entry.path) as handle:
                 archive.addfile(member, handle)
 
 

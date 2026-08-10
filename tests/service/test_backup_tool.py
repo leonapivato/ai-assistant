@@ -605,11 +605,12 @@ def test_a_file_that_becomes_a_symlink_after_the_walk_is_refused(
     outside.write_bytes(b"a file the artifact must never carry")
     original = backup._measure
 
-    def swap_then_measure(path: Path) -> object:
-        if path.name == "notes.txt" and not path.is_symlink():
-            path.unlink()
-            path.symlink_to(outside)
-        return original(path)
+    def swap_then_measure(tree: object, directory: Path, source: object) -> object:
+        target = directory / source.relative  # type: ignore[attr-defined]
+        if target.name == "notes.txt" and not target.is_symlink():
+            target.unlink()
+            target.symlink_to(outside)
+        return original(tree, directory, source)  # type: ignore[arg-type]
 
     monkeypatch.setattr(backup, "_measure", swap_then_measure)
 
@@ -645,3 +646,45 @@ def test_a_file_that_becomes_a_symlink_after_the_scan_is_refused_at_the_copy(
 
     assert _run(out_dir / "a.age", keyphrase_file) == EXIT_DEPLOYMENT
     assert _leftovers(out_dir) == []
+
+
+def test_a_directory_that_becomes_a_symlink_after_the_walk_is_not_followed(
+    settings: Settings,
+    data_dir: Path,
+    out_dir: Path,
+    keyphrase_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§1's clause covers every component of the path, not only the last one.
+
+    ``O_NOFOLLOW`` on the file says nothing here: the file at the far end of a
+    swapped directory *is* a regular file. What makes the clause true is that the
+    walk holds a descriptor for the directory it verified, so the later open goes
+    to that directory whatever its name now points at.
+
+    The swap is driven deterministically, in the window between the directory
+    being listed and the file inside it being opened.
+    """
+    (data_dir / "sub").mkdir(mode=0o700)
+    (data_dir / "sub" / "plans.db").write_bytes(b"the real plans")
+    elsewhere = out_dir.parent / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    (elsewhere / "plans.db").write_bytes(b"a file the artifact must never carry")
+    original = backup._scan
+
+    def swap_then_scan(tree: object, directory: Path) -> object:
+        # Renamed away rather than deleted, which is #889's own shape: the real
+        # directory survives and is still reachable through the held descriptor,
+        # while its *name* now points somewhere else entirely.
+        (directory / "sub").rename(elsewhere.parent / "moved-away")
+        (directory / "sub").symlink_to(elsewhere)
+        return original(tree, directory)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(backup, "_scan", swap_then_scan)
+
+    assert _run(out_dir / "a.age", keyphrase_file) == EXIT_OK
+
+    staging = out_dir.parent / "check"
+    staging.mkdir(mode=0o700)
+    carried = _contents(out_dir / "a.age", staging)
+    assert carried["sub/plans.db"] == b"the real plans"
