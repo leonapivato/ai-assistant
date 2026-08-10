@@ -1388,3 +1388,48 @@ async def test_a_configured_hub_that_cannot_ask_its_agent_stays_down(
     code = await hub.serve(configured)
 
     assert code == EXIT_DEPLOYMENT
+
+
+async def test_a_hub_whose_control_socket_will_not_bind_serves_no_remote_request(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0083 §14.2 across *several* doors: every bind first, then any accept.
+
+    A hub that opened one door and then failed to bind the next would have served a
+    request during a startup that never reached readiness — the request carried out
+    by a hub that does not exist. The failure is injected at the last bind, which is
+    the position that discriminates: an implementation opening doors as it goes
+    passes every other startup test and fails only here.
+    """
+    from ai_assistant.service import admin as admin_module  # noqa: PLC0415 - one call site
+    from ai_assistant.service import overlay as overlay_module  # noqa: PLC0415 - one call site
+    from ai_assistant.service import remote as remote_module  # noqa: PLC0415 - one call site
+
+    served: list[str] = []
+
+    async def _reported() -> Any:
+        return overlay_module.HubOverlayIdentity(
+            identity="nHUB", addresses=frozenset({"127.0.0.1"})
+        )
+
+    async def _no_bind(self: admin_module.AdminListener) -> None:
+        del self
+        raise OSError(errno.EADDRINUSE, "address already in use")
+
+    async def _note_serving(self: remote_module.RemoteListener) -> None:
+        served.append(f"{self.address}:{self.port}")
+
+    monkeypatch.setattr(overlay_module.TailscaleAgent, "hub_identity", lambda self: _reported())
+    monkeypatch.setattr(admin_module.AdminListener, "start", _no_bind)
+    monkeypatch.setattr(remote_module.RemoteListener, "begin_serving", _note_serving)
+    configured = settings.model_copy(
+        update={"hub_remote_address": "127.0.0.1", "hub_remote_port": 0}
+    )
+
+    code = await hub.serve(configured)
+
+    assert code != EXIT_OK
+    assert served == []

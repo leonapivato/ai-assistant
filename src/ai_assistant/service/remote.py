@@ -142,6 +142,14 @@ class RemoteListener:
         Args:
             build: This build's identifier, published in every connect reply.
 
+        **Bound here, serving only at :meth:`begin_serving`.** ADR-0083 §14.2 —
+        "the transport must not accept before readiness" — is about the hub not
+        answering a request it might then fail to have started for. A hub that binds
+        several doors answers that by binding *all* of them before *any* of them
+        accepts: otherwise a door opened early can serve a turn during a startup
+        that the next bind then fails, and the request was carried out by a hub that
+        never came up.
+
         Raises:
             ConfigurationError: If the agent does not report the configured address
                 as this machine's own, or cannot be asked. A stay-down deployment
@@ -171,15 +179,23 @@ class RemoteListener:
             )
             raise ConfigurationError(msg)
 
-        self._server = await asyncio.start_server(self._accept, host=self.address, port=self.port)
+        self._server = await asyncio.start_server(
+            self._accept, host=self.address, port=self.port, start_serving=False
+        )
         self._build = build
         _log.info(
-            "hub_remote_listening",
+            "hub_remote_bound",
             address=self.address,
             port=self.port,
             hub_overlay_identity=reported.identity,
             max_connections=self._budget.max_connections,
         )
+
+    async def begin_serving(self) -> None:
+        """Start accepting on the socket :meth:`start` bound (ADR-0083 §3 step 6)."""
+        if self._server is not None:
+            await self._server.start_serving()
+            _log.info("hub_remote_listening", address=self.address, port=self.port)
 
     async def stop_accepting(self) -> None:
         """Close the door, at the start of ADR-0083 §4's phase A.

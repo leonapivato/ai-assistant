@@ -130,6 +130,14 @@ class AdminListener:
         :mod:`ai_assistant.service.transport` makes for ``hub.sock``, and the same
         ordering.
 
+        **Bound here, serving only at :meth:`begin_serving`.** ADR-0083 §14.2 —
+        "the transport must not accept before readiness" — is about the hub not
+        answering a request it might then fail to have started for. A hub that binds
+        several doors answers that by binding *all* of them before *any* of them
+        accepts: otherwise a door opened early can serve a turn during a startup
+        that the next bind then fails, and the request was carried out by a hub that
+        never came up.
+
         Raises:
             ConfigurationError: If the data directory's path cannot hold this
                 socket. A stay-down deployment fault (ADR-0083 §5).
@@ -140,11 +148,19 @@ class AdminListener:
         self.path.unlink(missing_ok=True)
         previous = os.umask(_OWNER_ONLY_UMASK)
         try:
-            self._server = await asyncio.start_unix_server(self._accept, path=str(self.path))
+            self._server = await asyncio.start_unix_server(
+                self._accept, path=str(self.path), start_serving=False
+            )
         finally:
             os.umask(previous)
         self.path.chmod(SOCKET_MODE)
-        _log.info("hub_admin_listening", socket=str(self.path))
+        _log.info("hub_admin_bound", socket=str(self.path))
+
+    async def begin_serving(self) -> None:
+        """Start accepting on the socket :meth:`start` bound (ADR-0083 §3 step 6)."""
+        if self._server is not None:
+            await self._server.start_serving()
+            _log.info("hub_admin_listening", socket=str(self.path))
 
     async def stop_accepting(self) -> None:
         """Close the door and remove it, at the start of ADR-0083 §4's phase A.
