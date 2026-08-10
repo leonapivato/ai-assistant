@@ -253,19 +253,26 @@ and no longer in when they filter.
 > `list_beliefs` is untouched, no other `core` type is added, and the result
 > carries no field beyond those two.
 
-> **Normative.** `capped` is `False` exactly where the store considered every
-> record eligible under the call's filters, and `True` where the store's own
-> candidate ceiling stopped it short of that. Where `capped` is `False` and the
-> result holds fewer than `limit` records, the store holds **no** further record
-> matching the call's filters and passing its read-time eligibility axes, and a
-> caller may read that result as the whole eligible set at the read instant.
-> Where `capped` is `True`, a caller may not.
+> **Normative.** Where `capped` is `False` **and the result holds fewer than
+> `limit` records**, the store holds **no** further record matching the call's
+> filters and passing its read-time eligibility axes: the result is the whole
+> eligible set at the read instant, and a caller may act on that. Where `capped`
+> is `True`, the store's own candidate ceiling bound the read short of `limit`
+> and the store certifies nothing — a caller may not read the result as the whole
+> eligible set.
 
-> **Normative.** `capped` reports the store's ceiling and never the size of the
-> eligible set. It is `False` on every result holding `limit` records, and it is
-> `False` — never `True` — where `search` matches nothing by construction: a
-> blank query, a non-positive `limit`, or a filter selecting nothing. An empty
-> result is not a capped one.
+> **Normative.** `capped` is `False` on every result holding `limit` records, and
+> on such a result it certifies nothing: a full page never asserts that the store
+> holds no more eligible records below the cut, however large or small the
+> eligible set is and whether or not a ceiling was reached in filling the page.
+> `capped` reports the store's ceiling, never the size of the eligible set.
+
+> **Normative.** `capped` is a refusal to certify and never a claim that more
+> exists. An implementation reports `False` only where the clause above lets it
+> certify, and may report `True` wherever it cannot — including where its eligible
+> set exactly meets its ceiling. It reports `False`, never `True`, where `search`
+> matches nothing by construction: a blank query, a non-positive `limit`, or a
+> filter selecting nothing. An empty result is not a capped one.
 
 The illustrative model; the semantics above are the contract:
 
@@ -282,6 +289,32 @@ class MemorySearchResult(BaseModel):
 `tuple` and `frozen=True` are `core/types.py`'s conventions for a value that
 crosses the seam, not obligations of this decision; the ranked order is
 `search`'s existing one, best first.
+
+**The three clauses are separated because an earlier draft's two were
+unsatisfiable together, and the correction is the substance of the field.** That
+draft defined `capped` as `False` "exactly where the store considered every
+record eligible under the call's filters" and, beside it, `False` "on every
+result holding `limit` records". The adversarial lens gave the case: 5,000
+eligible records, a 4,096-candidate ceiling and `limit=10`. The store fills the
+page without having considered every eligible record, so the first clause
+demanded `True` and the second demanded `False`, and no implementation could
+satisfy both. What that draft got wrong is the thing the field is *for*: `capped`
+is not a statement about how much of the store was examined, it is a statement
+about whether a **short** result may be trusted as complete. A full page is
+outside the question entirely, because a caller that got what it asked for is not
+being under-served — and reading a full page as a completeness claim is the
+mistake ADR-0113 §5's third clause already warns consumers off in the
+band-scoped case.
+
+**And `capped` certifies in one direction, which keeps it mechanically
+decidable.** `False` is the claim and `True` is the absence of one, so an
+implementation that cannot tell reports `True` and is conforming. That is what
+makes the boundary case — an eligible set exactly meeting the ceiling, where the
+result happens to be complete and the store cannot know it — a permitted `True`
+rather than a defect to design around. The alternative, requiring exactness in
+both directions, would oblige a store to prove a negative about rows it never
+fetched, which is the second vector search ADR-0113's `excluded_band` reasoning
+already refuses on the interactive read path.
 
 **Wrapping the list is the point, not a cost of it.** #457's harm is that a
 caller "silently believes it saw everything", and every shape that leaves the
@@ -442,10 +475,14 @@ reach a change to an existing Protocol, so the obligation is stated.
 > case asserting only that no ineligible record is returned is satisfied by
 > returning nothing and does not test §1.
 
-> **Normative.** The suite asserts `capped` in both directions on every
-> implementation: `False` on a result short of `limit` over an exhausted eligible
-> set, and `True` where the implementation's own ceiling bound the read. An
-> implementation with no ceiling reports `False` and is asserted to.
+> **Normative.** The suite asserts `capped` on every implementation in three
+> cases: `False` on a result short of `limit` over an exhausted eligible set;
+> `False` on a **full page drawn from an eligible set larger than the
+> implementation's ceiling**, which is the case an earlier draft of §2 made
+> unsatisfiable and where a store that conflates "examined everything" with
+> "served the page" fails; and `True` where the implementation's own ceiling bound
+> the read short of `limit`. An implementation with no ceiling reports `False` and
+> is asserted to, and the third case is skipped on it rather than faked.
 
 1. **The contract** — `MemorySearchResult` in `core/types.py`, and
    `MemoryStore.search`'s return type in `core/protocols.py`, with §§1–2's
