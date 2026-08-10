@@ -92,6 +92,69 @@ class DeviceExpelledError(TransportError):
     """
 
 
+class OverlayIdentityUnavailableError(TransportError):
+    """The local overlay agent would not say whose device holds an address.
+
+    ADR-0124 §4's client-side clause, as a type: the client "obtains the hub's
+    overlay identity from the overlay agent on its own machine and refuses unless
+    it equals the **enrolled hub identity**". A refusal to say is not an answer, so
+    the client sends nothing — the same direction the hub's half takes for a peer
+    it cannot name, and the same direction ADR-0084 §1 fixes for a platform with no
+    peer-credential call: "silently skipping the check where the call is missing
+    would leave exactly the deployments with the weakest… guarantees running with
+    no server authentication at all."
+
+    **Not a** :class:`ProtocolError`, **because no peer broke a rule.** Nothing has
+    been sent and nothing was answered; what failed is a query to a daemon on this
+    machine. It stays a :class:`TransportError` so an adapter renders it as "the hop
+    could not be made" rather than as a fault of the hub.
+    """
+
+
+class NotEnrolledError(TransportError):
+    """This device holds no enrolment, so it has nothing to present.
+
+    ADR-0124 §7 makes a credential one of the two facts the remote listener admits
+    on, so a device with none cannot connect — and §8's unenrolment leaves exactly
+    this state deliberately: "a subsequent connect attempt has nothing to present".
+    Reported here rather than by dialling and being refused, because the hub's
+    refusal would be a worse answer to a question this device can already answer
+    about itself, and because §1 lets the client send only what it must.
+    """
+
+
+class IncompleteEnrolmentError(NotEnrolledError):
+    """This device holds one half of an enrolment and not the other.
+
+    ADR-0124 §6, in as many words: "holding the credential without the hub identity
+    is an incomplete enrolment the client refuses to connect on". ADR-0125 §4 names
+    how it arises — a device holds the credential and the enrolled hub identity as
+    two entries, and "a crash between the two ``set`` calls leaves one" — and rules
+    that closing it is the client's obligation whatever the storage does.
+
+    **A subclass of :class:`NotEnrolledError`, so a caller that only wants "this
+    device cannot connect" writes one handler**, while an owner still reads which of
+    the two states they are in: re-run the intake with both values, rather than
+    enrol the device at the hub again.
+    """
+
+
+class HubIdentityMismatchError(TransportError):
+    """The address configured is not the hub this device was enrolled at.
+
+    ADR-0124 §4's second clause refusing, which is the clause "that is easy to omit,
+    and omitting it is the whole of the attack": without it, "any node on the
+    overlay that can occupy the hub's address — or that the client can be pointed at
+    by a configuration edit — receives the utterance and everything the session
+    carries". The third clause is what makes the check non-circular, by keeping the
+    two values apart: **the address is ordinary configuration and the identity is
+    not**, so an edit that redirects this client changes the destination and leaves
+    the check that destination has to pass exactly where it was.
+
+    Raised **before anything is sent**, which is what §11's step 5 checks.
+    """
+
+
 class ProtocolError(TransportError):
     """A peer broke the protocol's own rules.
 

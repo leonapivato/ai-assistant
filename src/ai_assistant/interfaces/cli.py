@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import sys
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, assert_never
 
@@ -99,15 +100,29 @@ from ai_assistant.core.types import (
     MemoryKind,
     QuestionState,
     QueueOutcome,
+    SecretScope,
     StepStatus,
     encodable_text,
 )
-from ai_assistant.wire import HubEngineClient, TransportError
-from ai_assistant.wire.address import check_socket_path, socket_path
+from ai_assistant.secret_store import KeyringSecretStore
+from ai_assistant.wire import (
+    HubClient,
+    HubEngineClient,
+    LoopbackDestination,
+    RemoteDestination,
+    RemoteHubEngineClient,
+    TransportError,
+    destination,
+    local_agent,
+    remove_enrolment,
+    store_enrolment,
+)
+from ai_assistant.wire.address import check_socket_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import AssistantEngine
     from ai_assistant.core.types import (
         AnswerOutcome,
@@ -134,6 +149,21 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+
+#: The two acts ADR-0124 performs **at the device**, grouped so they are not
+#: mistaken for the hub's. Enrolling a device is a decision only the owner can make
+#: *at the hub* (§6) and is `ai-assistant-device enrol` on the hub's own machine;
+#: what these do is store what that printed, and remove it again (§8).
+device_app = typer.Typer(
+    name="device",
+    help=(
+        "What this device holds about a hub: store the enrolment the hub printed, "
+        "or remove it. Enrolling a device is done at the hub, with "
+        "'ai-assistant-device' on the hub's own machine."
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(device_app, name="device")
 console = Console()
 
 #: Exit codes (ADR-0042 §7: "setting a meaningful exit code").
@@ -1051,6 +1081,124 @@ def grants(
     raise typer.Exit(code)
 
 
+@device_app.command("enrol")
+def device_enrol(
+    hub_identity: str = typer.Argument(
+        ...,
+        metavar="HUB_IDENTITY",
+        help="The 'Hub:' value 'ai-assistant-device enrol' printed at the hub.",
+    ),
+    credential_stdin: bool = typer.Option(
+        False,
+        "--credential-stdin",
+        help="Read the credential from the first line of standard input instead of prompting.",
+    ),
+) -> None:
+    """Store here what the hub printed when it enrolled this device.
+
+    Run ``ai-assistant-device enrol <this device's overlay identity>`` on the hub's
+    own machine first: enrolling is a decision only you can make there, and it
+    prints two values — the hub's identity and a credential shown **once**.
+
+    Both are stored in this machine's keyring and nowhere else, and they are stored
+    **together**: holding one without the other is an incomplete enrolment this
+    device refuses to connect on. The credential is never echoed, never logged, and
+    never written to any file this program opens.
+
+    If you lose the credential it cannot be recovered — the hub keeps only a
+    verifier. Enrol the device again at the hub, which mints a new one in a single
+    act and leaves the old verifying against nothing.
+    """
+    credential = (
+        sys.stdin.readline().strip()
+        if credential_stdin
+        else typer.prompt("Credential", hide_input=True)
+    )
+    code = asyncio.run(_store_device_enrolment(hub_identity, credential))
+    raise typer.Exit(code)
+
+
+@device_app.command("unenrol")
+def device_unenrol() -> None:
+    """Remove this device's credential and hub identity from this machine.
+
+    It needs no hub and works whether or not the enrolment is still live — which is
+    the point of it, because the case you reach for it in is usually one where
+    something has already gone wrong. Running it twice is safe.
+
+    **This is the act that purges what a hub-side delete cannot reach.** A delete
+    performed at the hub cannot remove a keyring entry on another machine, so it
+    reports the devices it could not purge and this is what you run at each of them.
+
+    **It does not revoke anything.** The hub still holds this device's enrolment
+    until you revoke it there with ``ai-assistant-device revoke``, and the two are
+    independent acts: this one takes the credential off this machine, that one stops
+    it admitting anything.
+    """
+    code = asyncio.run(_remove_device_enrolment())
+    raise typer.Exit(code)
+
+
+async def _store_device_enrolment(hub_identity: str, credential: str) -> int:
+    """Load settings, store both values, and say what happened (ADR-0124 §6).
+
+    One error boundary spanning every stage that can fail, as every other command
+    here has (ADR-0042 §7): a keyring that is absent or locked, a value this device
+    will not hold, and a configuration that will not load are all rendered and
+    mapped to a non-zero exit code rather than escaping as a traceback.
+    """
+    try:
+        settings = load_settings()
+        configure_logging(settings)
+        await store_enrolment(
+            _enrolment_secrets(settings), hub_identity=hub_identity, credential=credential
+        )
+    except (AssistantError, TransportError, ValueError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    console.print(f"[green]Enrolled.[/] This device is now bound to hub {_safe(hub_identity)}.")
+    console.print(
+        "Set [bold]ASSISTANT_REMOTE_HUB_ADDRESS[/] to that hub's overlay address to reach it "
+        "from here. The address is where to dial; the identity above is what the answer has "
+        "to be, and changing one does not change the other."
+    )
+    return _EXIT_OK
+
+
+async def _remove_device_enrolment() -> int:
+    """Load settings, remove both values, and report what was there (ADR-0124 §8).
+
+    **It reports rather than asserts**, which is the standard ADR-0124 §8 sets for
+    the hub-side delete applied on this side of the device boundary: a purge that
+    says what it did is a fact the user reads, where one that claims completion is a
+    silent shortfall.
+    """
+    try:
+        settings = load_settings()
+        configure_logging(settings)
+        removed = await remove_enrolment(_enrolment_secrets(settings))
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    if not removed.removed_anything:
+        console.print("This device held no enrolment; nothing changed.")
+        return _EXIT_OK
+    gone = [
+        name
+        for name, was_there in (
+            ("the credential", removed.credential_removed),
+            ("the hub identity", removed.hub_identity_removed),
+        )
+        if was_there
+    ]
+    console.print(f"[green]Removed[/] {' and '.join(gone)} from this machine's keyring.")
+    console.print(
+        "The hub still holds this device's enrolment until you revoke it there — run "
+        "'ai-assistant-device revoke' on the hub's own machine."
+    )
+    return _EXIT_OK
+
+
 async def _open_engine() -> AssistantEngine:
     """Load settings and obtain a client of the running hub (ADR-0084 §6, §9).
 
@@ -1086,15 +1234,85 @@ async def _open_engine() -> AssistantEngine:
     """
     settings = load_settings()
     configure_logging(settings)
-    # The same condition the hub refuses to start on (#554, ADR-0084 §1), checked
-    # here so the *client* gives the same diagnosis rather than a bare
-    # ``AF_UNIX path too long`` out of ``connect``. One setting locates both the
-    # data and the door (§9), so both halves reach the same verdict about it — and
-    # the user is told to move the data directory rather than left to infer it.
-    check_socket_path(settings.data_dir)
-    client = HubEngineClient(socket_path(settings.data_dir), read_timeout=settings.hub_read_timeout)
+    client = _client_for(settings)
     await client.probe()
     return client
+
+
+def _client_for(settings: Settings) -> HubClient:
+    """Build the client this deployment's configuration names (ADR-0124 §1).
+
+    **Which transport is in use is a deployment fact, not a fallback.** ADR-0124 §1
+    has a client obtain "its destination from configuration and never from a
+    discovery mechanism, a redirect, or anything a peer tells it", and ADR-0084 §9's
+    "a closed door is an instruction, never a fallback" applies to the choice as
+    well as to the outcome: a remote hub that is down is reported, never quietly
+    replaced by the one on this machine.
+
+    **This is where the spoke's process composes its keyring store**, which is the
+    one thing here that is more than wiring an argument. ADR-0125 §8 has the
+    concrete "reach every consumer by injection from whoever composes it", and on a
+    device that is not the hub's this adapter is the only candidate: the import
+    contracts forbid ``interfaces -> app`` (ADR-0084 §6) and forbid ``wire`` from
+    naming the concrete at all. So it is constructed here, handed straight to the
+    client, and used for nothing else — no adapter reads a secret for its own
+    purposes, which is golden rule 3 and the harm §8's enumeration is about.
+
+    Args:
+        settings: The loaded configuration.
+
+    Returns:
+        A client of the hub this device is configured to reach.
+
+    Raises:
+        ConfigurationError: If the data directory cannot hold the socket, or the
+            configured remote address is not one a conforming hub could bind.
+    """
+    where = destination(
+        data_dir=settings.data_dir,
+        remote_address=settings.remote_hub_address,
+        remote_port=settings.remote_hub_port,
+    )
+    match where:
+        case LoopbackDestination():
+            # The same condition the hub refuses to start on (#554, ADR-0084 §1),
+            # checked here so the *client* gives the same diagnosis rather than a
+            # bare ``AF_UNIX path too long`` out of ``connect``. One setting locates
+            # both the data and the door (§9), so both halves reach the same verdict
+            # about it — and the user is told to move the data directory rather than
+            # left to infer it.
+            check_socket_path(settings.data_dir)
+            return HubEngineClient(where.socket_path, read_timeout=settings.hub_read_timeout)
+        case RemoteDestination():
+            return RemoteHubEngineClient(
+                where,
+                read_timeout=settings.hub_read_timeout,
+                agent=local_agent(),
+                secrets=_enrolment_secrets(settings),
+            )
+        case _:  # pragma: no cover — the union is closed
+            assert_never(where)
+
+
+def _enrolment_secrets(settings: Settings) -> KeyringSecretStore:
+    """The device's ``ENROLMENT``-scoped keyring store (ADR-0125 §1, §2).
+
+    Two facts are chosen here and a caller can name neither (ADR-0125 §2): the
+    scope, so an object handed out reaches only the entries its job needs, and the
+    installation namespace — the resolved ``data_dir``, injected rather than read
+    from a setting by the store itself. The second is what stops a second data
+    directory on one machine from sharing the first's credentials: the keyring is
+    per OS user, not per data directory, so a QA hub's enrolment would otherwise
+    overwrite the owner's real one at intake and delete it at unenrolment.
+
+    Args:
+        settings: The loaded configuration.
+
+    Returns:
+        A store bound to this installation's ``ENROLMENT`` scope. Nothing is opened
+        by building it (ADR-0125 §7).
+    """
+    return KeyringSecretStore(scope=SecretScope.ENROLMENT, installation=str(settings.data_dir))
 
 
 async def _ask(

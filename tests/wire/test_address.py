@@ -16,7 +16,11 @@ from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.wire.address import (
     SOCKET_FILENAME,
     SOCKET_MODE,
+    LoopbackDestination,
+    RemoteDestination,
+    check_remote_address,
     check_socket_path,
+    destination,
     socket_path,
     sun_path_limit,
 )
@@ -136,3 +140,94 @@ def test_the_terminator_counts(tmp_path: Path) -> None:
     with pytest.raises(ConfigurationError):
         check_socket_path(exact)
     check_socket_path(tmp_path / ("a" * (room - 1)))
+
+
+# --- naming a hub on another machine (ADR-0124 §1) --------------------------
+
+
+def test_no_remote_address_means_the_hub_on_this_machine(tmp_path: Path) -> None:
+    """The address is the switch, in the shape ADR-0124 §2 gave the hub's listener.
+
+    Unset means the loopback socket, and there is no separate boolean — "two
+    settings that can disagree about which transport is in use is one more state
+    than a deployment has".
+    """
+    where = destination(data_dir=tmp_path, remote_address=None, remote_port=50084)
+
+    assert where == LoopbackDestination(socket_path(tmp_path))
+
+
+def test_a_remote_address_names_a_hub_on_another_machine(tmp_path: Path) -> None:
+    """And carries the port with it, because a destination is both."""
+    where = destination(data_dir=tmp_path, remote_address="100.64.1.7", remote_port=50084)
+
+    assert where == RemoteDestination(host="100.64.1.7", port=50084)
+
+
+def test_the_destination_never_falls_back_between_transports(tmp_path: Path) -> None:
+    """ADR-0084 §9's rule applied to the *choice* rather than to the outcome.
+
+    A remote hub that is down is reported (:mod:`ai_assistant.wire.remote`), never
+    quietly replaced by the one on this machine — which would serve the wrong store
+    from the wrong device while looking like success.
+    """
+    where = destination(data_dir=tmp_path, remote_address="100.64.1.7", remote_port=50084)
+
+    assert not isinstance(where, LoopbackDestination)
+
+
+def test_a_name_is_refused_rather_than_resolved() -> None:
+    """ADR-0124 §1: the destination never comes "from a discovery mechanism".
+
+    ``Settings`` already applies this to the hub's own bind and says why — "a name
+    would make the bound address a fact about a resolver" — and §1's rule "is the
+    same principle on the other end of the hop".
+    """
+    with pytest.raises(ConfigurationError) as raised:
+        check_remote_address("hub.example.ts.net")
+
+    assert "discovery mechanism" in str(raised.value)
+    assert "ASSISTANT_REMOTE_HUB_ADDRESS" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("address", "reason"),
+    [
+        ("0.0.0.0", "wildcard"),  # noqa: S104 - the value under test, never bound
+        ("::", "wildcard, v6"),
+        ("127.0.0.1", "loopback"),
+        ("::1", "loopback, v6"),
+        ("224.0.0.1", "multicast"),
+        ("169.254.4.4", "link-local"),
+        ("8.8.8.8", "globally routable"),
+        ("2001:4860:4860::8888", "globally routable, v6"),
+    ],
+)
+def test_an_address_no_conforming_listener_holds_is_refused(address: str, reason: str) -> None:
+    """The same five refusals the hub applies to its own bind, from the other end.
+
+    ADR-0124 §2 forbids the listener to bind any of these, so a client pointed at
+    one is pointed at something that is not a conforming hub's remote listener.
+    Saying so costs a message; discovering it costs a connection attempt to whatever
+    *is* there.
+    """
+    del reason
+
+    with pytest.raises(ConfigurationError):
+        check_remote_address(address)
+
+
+@pytest.mark.parametrize("address", ["100.64.1.7", "fd7a:115c:a1e0::1", "10.2.0.9"])
+def test_an_overlay_address_is_accepted(address: str) -> None:
+    """The addresses an overlay actually hands out, in both families."""
+    assert check_remote_address(address) == address
+
+
+def test_surrounding_whitespace_is_stripped_and_nothing_else_is() -> None:
+    """A value pasted out of a terminal, accepted; a value rewritten, never.
+
+    ``Settings`` strips the hub's own address for the same reason, and neither end
+    normalises further: an address this client silently rewrote would be a
+    destination the owner did not configure.
+    """
+    assert check_remote_address("  100.64.1.7  ") == "100.64.1.7"

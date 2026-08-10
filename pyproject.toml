@@ -282,6 +282,21 @@ pretty = true
 module = ["sqlite_vec"]
 ignore_missing_imports = true
 
+# `keyring` ships a `py.typed` but leaves its backend constructors unannotated, so
+# building one is a `no-untyped-call` under `strict`. Narrowed to the calls rather
+# than waived at the seam: `ai_assistant.secret_store` declares its own
+# `KeyringBackend` Protocol and every value crossing into this project is annotated
+# by it, so what this permits is constructing the library's objects and nothing
+# else. It is scoped to the modules that actually do — the selection module and its
+# tests — rather than to the whole tree.
+[[tool.mypy.overrides]]
+module = [
+    "ai_assistant.secret_store.backend",
+    "tests.secret_store.test_backend_selection",
+    "test_backend_selection",
+]
+disallow_untyped_calls = false
+
 # -----------------------------------------------------------------------------
 # pytest
 # -----------------------------------------------------------------------------
@@ -336,6 +351,11 @@ forbidden_modules = [
     # a third time: `core` holds the three trace Protocols, so the inverting edge
     # is one an implementation could reach for.
     "ai_assistant.evaluation",
+    # Leg 9's leaf package holding the keyring-backed store (ADR-0125 §8), which
+    # names this contract as the one its lane owes an entry in. Same reason a
+    # fourth time: `core` holds `Secrets` and `SecretStore`, so the inverting edge
+    # is one an implementation could reach for.
+    "ai_assistant.secret_store",
 ]
 
 [[tool.importlinter.contracts]]
@@ -409,6 +429,11 @@ source_modules = [
     # rules that no trace leaves the device by any route, and a provider SDK is
     # the route.
     "ai_assistant.evaluation",
+    # The keyring store writes a value to an operating-system service and asks a
+    # model nothing (ADR-0125 §8). Listed for the reason every package here is: a
+    # package that exists and is absent from this list is one golden rule 4 is
+    # asserted about and not checked on.
+    "ai_assistant.secret_store",
 ]
 # `huggingface_hub` is here for ADR-0024 §4: the model-artifact acquisition seam
 # stays owned by `models/`, and this makes that mechanically enforced rather than
@@ -457,6 +482,10 @@ source_modules = [
     # And so is the trace store (ADR-0119 §6): the three canonical trace fakes
     # stand in *for* it and must not reach it.
     "ai_assistant.evaluation",
+    # And so is the keyring store (ADR-0125 §8): `FakeSecretStore` stands in *for*
+    # it, and ADR-0125 §11 is explicit that the fake "is test-only, and no
+    # composition root wires it".
+    "ai_assistant.secret_store",
 ]
 forbidden_modules = ["ai_assistant.testing"]
 
@@ -530,6 +559,10 @@ source_modules = [
     # *`service`* hold a `TraceSink` to stamp the configuration trace, which is a
     # `core` Protocol — the store never reaches back up at it.
     "ai_assistant.evaluation",
+    # `secret_store` is leg 9's, and the direction matters a fourth time: ADR-0125
+    # §5 rules this seam is "not the hub's enrolment-verifier store", so `service`
+    # holds neither face and this package has nothing to reach back up for.
+    "ai_assistant.secret_store",
 ]
 forbidden_modules = ["ai_assistant.service"]
 
@@ -568,6 +601,14 @@ forbidden_modules = [
     "ai_assistant.service",
     "ai_assistant.readers",
     "ai_assistant.evaluation",
+    # **The entry a reader of ADR-0124 will look for**, because the wire client is
+    # the consumer that holds both faces of ADR-0125's seam. It holds them by
+    # *injection*: `Secrets` and `SecretStore` are `core` Protocols, which this
+    # contract has always permitted, and the concrete keyring-backed store is a
+    # leaf package `wire` may not name. That is what keeps ADR-0084 §6's "depends
+    # on `core` and nothing else" true of the half of the hop ADR-0124 §1 puts
+    # here.
+    "ai_assistant.secret_store",
 ]
 
 [[tool.importlinter.contracts]]
@@ -601,6 +642,9 @@ forbidden_modules = [
     "ai_assistant.service",
     "ai_assistant.wire",
     "ai_assistant.evaluation",
+    # One leaf may not reach another: a reader that wanted a credential would be
+    # `tools/`'s case (ADR-0125 §8), reached by injection at the tool.
+    "ai_assistant.secret_store",
 ]
 
 [[tool.importlinter.contracts]]
@@ -668,6 +712,8 @@ source_modules = [
     # And `evaluation`, for the reason its own contract below states: it is a
     # leaf that may import `core` and nothing else.
     "ai_assistant.evaluation",
+    # And `secret_store`, for the same reason: another leaf (ADR-0125 §8).
+    "ai_assistant.secret_store",
 ]
 forbidden_modules = ["ai_assistant.readers"]
 
@@ -728,6 +774,9 @@ forbidden_modules = [
     "ai_assistant.service",
     "ai_assistant.wire",
     "ai_assistant.readers",
+    # One leaf may not reach another, and ADR-0125 §8 lists `evaluation` among the
+    # packages that hold neither face of the keyring seam.
+    "ai_assistant.secret_store",
 ]
 
 [[tool.importlinter.contracts]]
@@ -782,5 +831,152 @@ source_modules = [
     # may not do is name the concrete.
     "ai_assistant.service",
     "ai_assistant.readers",
+    # Another leaf, added by leg 9 (ADR-0125 §8).
+    "ai_assistant.secret_store",
 ]
 forbidden_modules = ["ai_assistant.evaluation"]
+
+[[tool.importlinter.contracts]]
+# ADR-0125 §8: "One concrete keyring-backed implementation exists, in a leaf
+# package that no subsystem imports, and it reaches every consumer by injection
+# from whoever composes it." This is the first half — the leaf half — in the shape
+# `readers` and `evaluation` established and for the reason recorded for both:
+# `core` holds the Protocols, so the edge that would invert the dependency is one
+# an implementation could plausibly reach for, and a package outside every
+# subsystem is what makes the inversion impossible rather than discouraged.
+#
+# **The package and its three contracts land together**, which is the discipline
+# the two earlier leaf lanes recorded: every package is enumerated by name in the
+# contracts above, so a package that exists without its own is the silent escape
+# those comments warn about — it inherits nothing and is checked by nothing.
+name = "the secret store depends on core and nothing else"
+type = "forbidden"
+source_modules = ["ai_assistant.secret_store"]
+forbidden_modules = [
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    "ai_assistant.orchestration",
+    "ai_assistant.interfaces",
+    "ai_assistant.app",
+    "ai_assistant.service",
+    "ai_assistant.wire",
+    "ai_assistant.readers",
+    "ai_assistant.evaluation",
+]
+
+[[tool.importlinter.contracts]]
+# ADR-0125 §8's second half: the leaf package is one "**no subsystem** imports",
+# so a consumer receives an instance rather than building one — which is what makes
+# §8's four "who holds which face" clauses mechanical. `models/` and a `tools/` tool
+# hold `Secrets`; the wire client holds `SecretStore` on its enrolment and
+# unenrolment paths and `Secrets` on its connect path; every other subsystem holds
+# neither. A subsystem that cannot import the concrete cannot construct one behind
+# the seam it was handed.
+#
+# **`ai_assistant.interfaces` and `ai_assistant.app` are deliberately absent, and
+# the absence is this lane's one deviation from ADR-0125 §8's prose rather than an
+# oversight.** For `app` it is the carve-out the `readers` and `evaluation`
+# contracts already state at length: the composition root is not a subsystem, it is
+# the one place golden rule 1 puts the injection, and listing it would make the
+# store unreachable in production for good.
+#
+# For `interfaces` the reason is specific to the client half of ADR-0124's hop and
+# it is worth stating in full, because the enumeration in ADR-0125 §8 names
+# `interfaces` among the packages that "hold neither" face. **In the spoke's process
+# there is no other composition point.** The `interface adapters do not build an
+# engine` contract above forbids `interfaces -> app` outright (ADR-0084 §6,
+# ADR-0083 ruling 4), and the `wire` contract above forbids `wire -> app` and
+# `wire -> ai_assistant.secret_store`; so on a device that is not the hub's, the CLI
+# is the only thing that can build an `ENROLMENT`-scoped store and hand it to the
+# wire client. §8's own clause on placement is permissive about exactly this — the
+# concrete "reaches every consumer by injection from **whoever composes it**" — and
+# "the composition root" appears only in that section's unmarked prose, which under
+# ADR-0089 §3 supplies no obligation. Every other placement breaks a contract that
+# is mechanically enforced rather than a sentence.
+#
+# What the CLI may therefore do is construct one and pass it straight to `wire`.
+# What it may not do, and what review rather than this contract has to hold it to,
+# is *use* one: no adapter reads a secret for its own purposes, which is golden
+# rule 3 and is the harm §8's enumeration is about.
+#
+# **Direct imports only**, for the reason the two sibling contracts state: the
+# chain `interfaces -> wire -> core` is untouched and the `app` carve-out is only
+# real if an indirect chain through it is permitted.
+name = "no subsystem imports the secret store"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "ai_assistant.core",
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    "ai_assistant.orchestration",
+    # The canonical `FakeSecretStore` stands in *for* the keyring-backed one and
+    # must never reach it (ADR-0125 §11).
+    "ai_assistant.testing",
+    # The wire client holds both faces and holds them by injection (ADR-0125 §8),
+    # which is what keeps ADR-0084 §6's "depends on `core` and nothing else" true.
+    "ai_assistant.wire",
+    # ADR-0125 §5: this seam "is not the hub's enrolment-verifier store". The hub
+    # keeps a verifier in `data_dir` and "holds neither face of this seam for
+    # enrolment purposes".
+    "ai_assistant.service",
+    "ai_assistant.readers",
+    "ai_assistant.evaluation",
+]
+forbidden_modules = ["ai_assistant.secret_store"]
+
+[[tool.importlinter.contracts]]
+# ADR-0125 §8's marked clause, in the form it asks for: "The lane that lands the
+# concrete implementation adds an import-linter contract confining the keyring
+# library's import to that one package, so ADR-0004 §3's single-path rule is
+# mechanically enforced rather than review-checked."
+#
+# This is golden rule 4's shape applied to a second external dependency, and issue
+# #66's shape applied inside the machine rather than at the egress boundary.
+# Without it, "read credentials through `SecretStore`" is a convention — and the
+# history of this particular convention is that it stayed unimplemented from
+# ADR-0004's ratification until a third consumer made it blocking.
+#
+# Every package is enumerated rather than relying on `ai_assistant` wholesale, in
+# the shape the `service` and `wire` contracts established: a new top-level package
+# is a deliberate addition here rather than something that silently escapes.
+# `ai_assistant.secret_store` is the one absence, and it is the whole point.
+#
+# **Direct imports only**, which is the provider-SDK contract's own idiom and means
+# the same thing here: the ban is "do not `import keyring`; reach the keyring
+# through the seam". Whoever composes the concrete legitimately imports the package
+# that holds it, and so reaches the library *indirectly, through that package* —
+# exactly the chain ADR-0125 §8 describes. Without the flag this contract would
+# forbid the composition it exists to make the only available one.
+name = "the keyring library is confined to the secret store"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "ai_assistant.core",
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    "ai_assistant.orchestration",
+    "ai_assistant.interfaces",
+    "ai_assistant.app",
+    "ai_assistant.service",
+    "ai_assistant.wire",
+    "ai_assistant.readers",
+    "ai_assistant.evaluation",
+    "ai_assistant.testing",
+]
+forbidden_modules = ["keyring"]
