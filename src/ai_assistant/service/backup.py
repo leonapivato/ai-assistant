@@ -365,6 +365,19 @@ def _excluded_paths(settings: Settings) -> frozenset[str]:
     socket's from :mod:`ai_assistant.wire.address`, because those modules define
     them — restating either at the composition root would rebuild the stale-name
     seam §3 rejects, and ``lint-imports`` would not even allow it.
+
+    **If you are adding a file to the data directory, read this.** ADR-0123 §3
+    binds the lane that creates the problem rather than asking this list to
+    anticipate it: "A later lane that places in the data directory a file subject
+    to a clause forbidding it to leave the device returns to this decision, adds it
+    to the exclusions above, and makes its path reachable from the module that owns
+    it in the same change. Until it does, this ADR authorises no such file to be
+    written there." The clause is repeated here because this is the declaration the
+    tool actually reads, and §3 is explicit that a sentence in an ADR nobody
+    re-reads while renaming a file is not where the binding takes effect. A lane
+    that forgets entirely fails in the safe direction for durability — the file is
+    backed up, which costs size — and in the unsafe one for privacy, which is why
+    the reminder is here rather than only there.
     """
     data_dir = settings.data_dir
     names = {LOCK_FILENAME, socket_path(data_dir).name}
