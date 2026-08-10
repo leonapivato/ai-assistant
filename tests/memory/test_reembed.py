@@ -60,7 +60,9 @@ _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
 #: Every column of ``records``, for the case that asserts the migration changes
 #: none of them. A module-level literal, never caller data.
-_ALL_COLUMNS = "SELECT rowid, id, kind, data, expires_at, valid_until, about_person FROM records"
+_ALL_COLUMNS = (
+    "SELECT rowid, id, kind, data, expires_at, valid_until, valid_from, about_person FROM records"
+)
 
 #: The two embedding spaces every case migrates between. Different widths, so the
 #: ``vec0`` column is rebuilt too and a copied vector could not accidentally pass.
@@ -293,6 +295,51 @@ async def test_a_legacy_store_without_the_later_columns_migrates(tmp_path: Path)
     opened = SqliteMemoryStore(traces_sink=FakeTraceSink(), path=store, embedder=target)
     try:
         assert [record.id for record in await opened.export()] == ["a"]
+    finally:
+        opened.close()
+
+
+async def test_a_not_yet_live_record_stays_hidden_across_a_re_embed(tmp_path: Path) -> None:
+    """The derived window column survives the rebuild, or the read comes out wrong.
+
+    ADR-0128 §1 binds both ends of the validity window before ``search``'s ranking
+    cut, which it can only do from a column — and ``NULL`` in that column is an
+    *open* window. So a rebuild that carried every blob faithfully and dropped this
+    one derived value would round-trip every record intact, pass a count check, and
+    still hand back a record ADR-0045 §6 requires the read path to hide. Nothing
+    above the store could tell.
+
+    Asserted through ``search`` and through the column, because the two fail
+    differently: ``get`` and ``export`` decode the blob and would answer correctly
+    on a store whose column was never written at all.
+    """
+    store = tmp_path / "memory.db"
+    await _seed(
+        store,
+        [
+            _record("live", "espresso"),
+            _record(
+                "future",
+                "espresso later",
+                validity=Validity(valid_from=_WHEN + timedelta(days=365)),
+            ),
+        ],
+    )
+
+    target = HashingEmbedder(dimensions=_NEW)
+    outcome = await Reembedder(store=store, embedder=target).run()
+
+    assert outcome.swapped
+    columns = {row[0]: row[1] for row in _read(store, "SELECT id, valid_from FROM records")}
+    assert columns["live"] is None
+    assert columns["future"] is not None, (
+        "the re-embedded store lost the derived window column, so a not-yet-live "
+        "record reads as open and search returns it (ADR-0128 §1, ADR-0045 §6)"
+    )
+    opened = SqliteMemoryStore(traces_sink=FakeTraceSink(), path=store, embedder=target)
+    try:
+        found = await opened.search("espresso", limit=10)
+        assert [record.id for record in found.records] == ["live"]
     finally:
         opened.close()
 
