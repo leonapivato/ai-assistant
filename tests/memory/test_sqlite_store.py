@@ -314,8 +314,10 @@ async def test_non_positive_limit_matches_nothing(
 @pytest.mark.parametrize(
     "limit",
     [
-        # Just over the real ceiling: limit * _RESULT_OVERFETCH (8) = 8000 > 4096,
-        # the sqlite-vec KNN ``k`` cap. A plausible misconfiguration, not absurd.
+        # Under the sqlite-vec KNN ``k`` cap of 4096 today, and over the
+        # *effective* ceiling this case was written against, when the store still
+        # multiplied it by an over-fetch of 8 (ADR-0128 §1 removed that). Kept as
+        # the plausible-misconfiguration end of the range.
         1_000,
         # The value the issue theorised the crash against (signed 64-bit bind
         # range); the same clamp covers it.
@@ -326,10 +328,12 @@ async def test_over_large_limit_serves_instead_of_overflowing_knn(
     make_store: Callable[..., SqliteMemoryStore],
     limit: int,
 ) -> None:
-    # Unclamped, ``limit * _RESULT_OVERFETCH`` exceeds sqlite-vec's KNN ``k`` cap
-    # of 4096 and the query raises an opaque ``sqlite3.OperationalError`` on the
-    # binding rather than returning (issue #115). The clamp turns it into a clean
-    # result — no allocation the size of the limit, and no crash.
+    # Unclamped, a ``limit`` past sqlite-vec's KNN ``k`` cap of 4096 raises an
+    # opaque ``sqlite3.OperationalError`` on the binding rather than returning
+    # (issue #115). The clamp turns it into a clean result — no allocation the size
+    # of the limit, and no crash. Since ADR-0128 §2 that clamp is also reportable:
+    # where it shortens a result below ``limit`` the store says so through
+    # ``capped``, which both limits here are far too sparse a store to reach.
     store = make_store()
     await store.add(_semantic("c1", "coffee tea"))
     await store.add(_semantic("c2", "coffee milk"))

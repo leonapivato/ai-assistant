@@ -230,6 +230,74 @@ async def test_a_completed_read_carries_every_count_section_8_names(
     assert trace.records[TraceRecordSet.RETURNED].total == 1
 
 
+@pytest.mark.parametrize(
+    ("limit", "kinds"),
+    [
+        pytest.param(5, None, id="short-result"),
+        pytest.param(1, None, id="full-page"),
+        pytest.param(5, [MemoryKind.SEMANTIC], id="kind-filtered"),
+    ],
+)
+async def test_the_counts_still_satisfy_the_offline_partition_rule(
+    make_store: Callable[..., SqliteMemoryStore],
+    sink: FakeTraceSink,
+    limit: int,
+    kinds: list[MemoryKind] | None,
+) -> None:
+    """ADR-0120 §2's joint condition, which #829's window is read through.
+
+    §2 rules the eight counts jointly rather than individually, and the offline
+    reader drops any trace that fails it out of §7's population. Its partition
+    equality — ``returned + the four exclusions == candidates`` — is asserted only
+    where ``returned < limit``, because a read that filled its page describes the
+    prefix it examined rather than a partition.
+
+    ADR-0128 §1 changes both sides of that equality at once: the exclusions go to
+    zero and ``candidates`` stops counting rows the read was about to drop. This
+    pins that they still agree, because if they did not, every trace after this
+    change would leave §7's population as *counter-inconsistent* — the before/after
+    #829 exists to read would compare a full population against an empty one, and
+    the reason would be invisible in the report. The rule is restated here rather
+    than imported: ``evaluation`` is a subsystem no other may reach into, and one
+    line of arithmetic is cheaper to duplicate than a seam is to open.
+    """
+    store = make_store()
+    await store.add(_semantic("live", "the weekly planning meeting"))
+    await store.add(
+        _semantic(
+            "closed",
+            "the weekly planning meeting",
+            validity=Validity(valid_until=_NOW - timedelta(days=1)),
+        )
+    )
+    await store.add(
+        PreferenceMemory(
+            id="pref",
+            content="the weekly planning meeting",
+            preference="the weekly planning meeting",
+            provenance=Provenance(source=MemorySource.INFERRED, confidence=0.6, last_updated=_WHEN),
+        )
+    )
+
+    await store.search("weekly planning meeting", limit=limit, kinds=kinds)
+
+    metrics = _only(sink, TraceKind.RETRIEVAL).metrics
+    assert metrics[traces.LIMIT] > 0
+    assert metrics[traces.FETCH_K] > 0
+    assert metrics[traces.RETURNED] <= metrics[traces.CANDIDATES] <= metrics[traces.FETCH_K]
+    if metrics[traces.RETURNED] < metrics[traces.LIMIT]:
+        exclusions = sum(
+            metrics[key]
+            for key in (
+                traces.EXCLUDED_KIND,
+                traces.EXCLUDED_RETENTION,
+                traces.EXCLUDED_WINDOW,
+                traces.EXCLUDED_BAND,
+            )
+        )
+        assert metrics[traces.RETURNED] + exclusions == metrics[traces.CANDIDATES]
+
+
 async def test_the_kind_predicate_also_keeps_its_key_at_a_structural_zero(
     make_store: Callable[..., SqliteMemoryStore], sink: FakeTraceSink
 ) -> None:

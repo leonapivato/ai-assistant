@@ -1535,11 +1535,13 @@ class MemoryStoreContract:
         any plausible candidate budget and then asks for the small band.
 
         The arithmetic, stated because the fixture size is load-bearing rather than
-        arbitrary: ``SqliteMemoryStore`` over-fetches ``limit * 8`` candidates, so
-        at ``limit=2`` a post-KNN filter sees 16 and every one of them is a flood
-        record. The flood is 40 — an order of magnitude past the cut — so the margin
-        survives a store whose over-fetch differs, without the suite reaching for a
-        constant that belongs to one implementation.
+        arbitrary: a post-cut filter at ``limit=2`` sees whatever candidate margin
+        its store keeps, and every one of them here is a flood record. The flood is
+        40 — an order of magnitude past the cut — so the margin survives a store
+        that keeps one, without the suite reaching for a constant that belongs to
+        one implementation. (``SqliteMemoryStore`` kept ``limit * 8`` when this was
+        written and keeps none now, which is exactly the drift the fixture is sized
+        against.)
 
         Note what is asserted and what deliberately is not. Asserting only that
         every returned record is in the selected band is **satisfied by returning
@@ -1837,11 +1839,13 @@ class MemoryStoreContract:
     async def test_list_beliefs_page_is_full_under_the_window_and_expiry_axes(
         self, store: MemoryStore
     ) -> None:
-        # The case a suite naturally omits, and the one that separates this read
-        # from ``search``: the records sorting *ahead* of the cut are unreadable
-        # (expired, retired, not yet open), so an implementation that mirrors
-        # search's ratified post-filter (ADR-0045 §6) applies them after LIMIT and
-        # returns a short page — losing rows no later page returns.
+        # The case a suite naturally omits: the records sorting *ahead* of the cut
+        # are unreadable (expired, retired, not yet open), so an implementation
+        # applying them after LIMIT returns a short page — losing rows no later page
+        # returns. ADR-0073 §2 has always bound this read that way and ADR-0128 §1
+        # has since bound ``search`` the same, so the two reads no longer differ in
+        # *when* they filter; the loss here is still the worse one, because a paged
+        # enumeration drops a row no later page returns.
         newest = _REVISED
         await store.add(_semantic("x0", "expired", last_updated=newest, expires_at=_LONG_AGO))
         await store.add(

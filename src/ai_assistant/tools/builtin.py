@@ -53,8 +53,9 @@ _DEFAULT_RECALL_LIMIT = 5
 #: the default of 5 — because a recall exists to fold into a turn a person reads,
 #: not to page a corpus; a plan naming a larger ``limit`` is refused rather than
 #: forwarded. The cap also keeps the argument well inside SQLite's integer range
-#: once a store multiplies it by an overfetch factor (#298), so a huge ``limit``
-#: cannot reach a backend as an out-of-range bind.
+#: (#298), so a huge ``limit`` cannot reach a backend as an out-of-range bind —
+#: which no longer needs headroom for an over-fetch multiplier, since ADR-0128 §1
+#: removed it, but is still the cheaper of the two guards to keep.
 _MAX_RECALL_LIMIT = 25
 
 
