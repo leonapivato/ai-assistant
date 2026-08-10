@@ -132,9 +132,43 @@ answer, and both available answers are wrong.
 > composition root builds one implementation and hands each consumer the face its
 > job needs.
 
-> **Normative.** A consumer that only reads is given `Secrets` and never
-> `SecretStore`. Holding the wider face is confined to the code that provisions or
-> removes an entry (§8).
+> **Normative.** Every method on both Protocols is `async`.
+
+> **Normative.** The two Protocols are declared with exactly the signatures below.
+> A lane that changes one of them is changing this decision and owes an ADR.
+
+```python
+@runtime_checkable
+class Secrets(Protocol):
+    async def get(self, name: SecretName) -> SecretValue | None: ...
+
+
+@runtime_checkable
+class SecretStore(Secrets, Protocol):
+    async def set(self, name: SecretName, value: SecretValue) -> None: ...
+
+    async def delete(self, name: SecretName) -> bool: ...
+```
+
+Docstrings are elided there and are not optional: §§2–7 are what they have to
+say, and `core/protocols.py`'s existing Protocols are the standard for how much
+of it belongs on the method.
+
+**`async` is this corpus's convention and here it is also the stronger answer.**
+`CLAUDE.md` puts I/O-bound methods on `async` so the system composes on one event
+loop, and `core/protocols.py`'s own guidance repeats it. A keyring call is a round
+trip to an operating-system service, which would be reason enough; what makes it
+decisive is that a *locked* store prompts the owner, so the call's duration is
+bounded by a human rather than by I/O. ADR-0083 puts the hub on one event loop, and
+a synchronous read there would stall every other connection for as long as the
+owner takes to type a passphrase. Running the synchronous backing library in a
+worker thread is the implementation's business, and it is precisely the shape
+ADR-0054 ruled on — a cancelled call must not release what a worker thread still
+holds — so that rule is inherited rather than restated.
+
+Getting this wrong in either direction is a real failure and not a stylistic one:
+a synchronous `get` returns a value to a consumer that wrote `await`, and an
+asynchronous one returns an un-awaited coroutine to a consumer that did not.
 
 The shape is `SourceGrants` and `SourceGrantStore`'s, taken deliberately rather
 than by resemblance: the same problem produced it, which is that a seam with one
@@ -237,9 +271,25 @@ deployment asking for it.
 > normalise what it accepts — and additionally refuses a plaintext whose UTF-8
 > encoding exceeds **1024 bytes**. A violation raises `ValueError` at construction.
 
-> **Normative.** `SecretValue`'s `repr` and `str` disclose no part of the
-> plaintext, and reading the plaintext is an explicit call. No implementation may
-> define a `SecretValue` whose default rendering is the secret.
+> **Normative.** `SecretValue` is built on `pydantic.SecretStr`, so its `repr` and
+> its `str` disclose no part of the plaintext and the plaintext is reached only
+> through that class's own accessor, `get_secret_value`. No implementation may
+> define a `SecretValue` whose default rendering is the secret, and no lane may
+> reimplement the redaction or the accessor under another name.
+
+```python
+type SecretValue = Annotated[SecretStr, AfterValidator(_secret_value)]
+```
+
+Building on the library's type rather than writing one is the decision, not a
+detail: the redaction and the accessor are then the ones every reader of this
+codebase already knows, and `_secret_value` adds only the three refusals §3
+requires. It is also what makes the accessor nameable here, which the client half
+needs — ADR-0124 §7 requires the connect frame's credential member to be a JSON
+string, so the client unwraps with `get_secret_value` immediately before encoding
+and nowhere else. `Annotated` with an `AfterValidator` is `core/types.py`'s
+existing idiom for a refined scalar, as `Identifier` and `NonBlankEncodableText`
+both are.
 
 **The redacting type is the mechanism, not a convenience.** `core/logging.py`
 redacts by key name — ADR-0124 §6 relies on exactly that, requiring that no
@@ -576,24 +626,53 @@ discharged, and the arm would sit closed-looking and open.
 
 ### 11. What the triad must prove
 
-The conformance suite is the contract's enforcement, and the obligations below are
-its floor rather than a wish list. The triad lane adds tests it judges necessary;
+The conformance suites are the contract's enforcement, and the obligations below
+are their floor rather than a wish list. The triad lane adds tests it judges necessary;
 it may not omit these. Naming them here is what stops the next lane from inventing
 a weaker set (`CONTRIBUTING.md` → "Adding a Protocol").
 
-> **Normative.** The shared conformance suite proves, against every subject: a
-> round trip returns the value verbatim, including a value with leading and
-> trailing whitespace, embedded newlines and non-ASCII characters; `get` of an
-> unset name returns `None`; `delete` of an unset name returns `False` and raises
-> nothing; `set` over an occupied name replaces and leaves one entry; `delete`
-> returns `True` once and `False` thereafter, and `get` then returns `None`; two
-> names differing only in `scope` are distinct entries, and two differing only in
-> `key` are distinct; a `SecretValue` of exactly 1024 UTF-8 bytes stores and one of
-> 1025 raises `ValueError` at construction; `SecretName` refuses uppercase,
-> whitespace, `:`, `/`, an empty key and a 65-character key; the subject satisfies
-> `Secrets` and, where it writes, `SecretStore`, by `isinstance`; and no secret
-> value appears in the `repr` of the subject, of a `SecretValue`, or of any error
-> the subject raises.
+**There are two suites, because there are two Protocols and they have different
+subjects.** `SecretsContract` binds anything satisfying the reading face —
+including the gating implementation §9 permits, which has no `set` to call — and
+`SecretStoreContract` inherits it and adds the write obligations. A single suite
+asserting `set` "against every subject" would be unrunnable against exactly the
+implementation §9 exists to make possible. The narrow suite arranges the state it
+asserts about through an abstract `given` hook the subject implements, which is
+`SourceGrantsContract`'s solution to the identical problem — a query-only seam has
+no contract-level way to write, and adding one to the Protocol would destroy the
+property being tested.
+
+> **Normative.** `SecretsContract` proves, against every subject: an entry
+> arranged through `given` is returned verbatim, including a value with leading
+> and trailing whitespace, embedded newlines and non-ASCII characters; `get` of an
+> unset name returns `None`; two names differing only in `scope` are distinct
+> entries, and two differing only in `key` are distinct; two subjects bound to
+> different installations share no entry, so an entry arranged in one is `None` in
+> the other; the subject satisfies `Secrets` by `isinstance`; and no secret value
+> appears in the `repr` of the subject, of a `SecretValue`, or of any error the
+> subject raises.
+
+> **Normative.** `SecretStoreContract` inherits every obligation above, binding
+> the same subject through the narrow face rather than a second object, and adds:
+> a `set` then `get` round trip returns the value verbatim; `set` over an occupied
+> name replaces and leaves one entry; `delete` of an unset name returns `False` and
+> raises nothing; `delete` returns `True` once and `False` thereafter, and `get`
+> then returns `None`; and the subject satisfies `SecretStore` by `isinstance`.
+
+> **Normative.** The type obligations are proved beside the suites, over the types
+> themselves: a `SecretValue` of exactly 1024 UTF-8 bytes constructs and one of
+> 1025 raises `ValueError`; a blank one raises; a `SecretValue` is not normalised
+> between construction and `get_secret_value`; and `SecretName` refuses uppercase,
+> whitespace, `:`, `/`, an empty key and a 65-character key.
+
+**The installation obligation is in the suite rather than left to the adapter,
+and that placement is the point of it.** Every other test on this list passes
+against a subject that ignores its installation namespace entirely, because one
+subject cannot observe another's entries by accident. Two subjects can, and the
+failure it catches is the one §2 exists to prevent: a concrete adapter that
+composes backend coordinates from the scope and key alone, whose second
+installation then overwrites the first's credential and whose unenrolment deletes
+it. Requiring two subjects makes that a red test rather than a support ticket.
 
 > **Normative.** The suite proves the unavailable state too — that every method
 > raises `SecretStoreUnavailableError` and that `get` does not return `None` — as a
@@ -606,16 +685,40 @@ standing example. It is used here rather than dropping the obligation because th
 unavailable path is the one §7 argues hardest about, and a suite that could not
 test it at all would leave the argument unenforced.
 
+> **Normative.** Two obligations are the landing lane's rather than the triad's,
+> because a shared suite running against a fake cannot reach them, and the lane
+> that lands the keyring-backed implementation owes both: that a backend selection
+> which finds nothing usable **raises rather than falling back** (§7), and that no
+> backend storing a value without the operating system's own access control is
+> ever selected.
+
+**Naming them here is what stops them from evaporating between two lanes.** Every
+obligation the shared suite carries can be satisfied by the canonical fake, which
+has no backend to select and cannot fall back — so a triad that goes green proves
+nothing about the property §7 spends its longest argument on. The adapter is where
+that property lives and the adapter's own tests are where it has to be pinned;
+recorded as a debt on a lane that does not exist yet, it would be discovered by
+whoever first ran the system on a headless box.
+
 > **Normative.** The canonical fake in `ai_assistant.testing` is an in-memory
-> implementation of `SecretStore`, with an explicit switch that puts it into the
-> unavailable state. It is test-only, and no composition root wires it.
+> implementation of `SecretStore`, bound to an installation namespace it takes at
+> construction so two of them can be built, and carrying an explicit switch that
+> puts it into the unavailable state. It is test-only, and no composition root
+> wires it.
+
+> **Normative.** Both Protocols get a concrete `Test…Contract` subclass running
+> the fake through its suite — through the narrow suite as a `Secrets`, and through
+> the wide one as itself.
 
 The suite module and the fake follow the corpus's placement: two Protocols may
 share one suite module and one fake, as `SourceGrants` and `SourceGrantStore` do,
 and a contract with no owning subsystem package sits under `tests/core/`, as
-`tests/core/reader_contract.py` does. The concrete `Test…Contract` subclass that
-runs the fake through the suite is not optional — without it the suite collects
-nothing and `tests/core/test_protocol_triad.py` fails, which is the check working.
+`tests/core/reader_contract.py` does. The `Test…Contract` subclasses are not
+optional — an abstract suite collects nothing on its own, so without them the fake
+is unverified however many files exist, and `tests/core/test_protocol_triad.py`
+fails naming what is missing. That check wants evidence the contract *ran*, which
+is why it is two subclasses and not one: `Secrets` is a Protocol in
+`core/protocols.py` and the check enumerates every one of them.
 
 > **Normative.** The triad lane declares no `EXEMPTIONS` entry. That list may name
 > only Protocols predating the check, it is currently empty, and this contract is
@@ -731,6 +834,13 @@ which ADR-0082 §1 places in this ADR and nowhere else.
 - **ADR-0016 — no record owed.** §7's three constraints on the invocation ADR are
   ADR-0029's and are not reopened; §5's "a contract whose author expects it to
   break" is used as the standard §9 above is measured against.
+- **ADR-0054 — no record owed, and it is inherited rather than restated.** Its
+  ruling is that a cancelled store call must not release its connection while a
+  worker thread still holds it, and §1 above puts an implementation in exactly that
+  shape: a synchronous backing library driven from a worker thread behind an
+  `async` method. Nothing here weakens it and nothing here needs to repeat it. Its
+  premise amendment by ADR-0083 §4 — that the cancellation path is live rather than
+  dormant — makes it apply here from the first line rather than eventually.
 - **ADR-0060 and ADR-0065**, the two clauses `core/protocols.py` binds on every
   Protocol. Cancellation **has bite**: a keyring call is I/O and may be in flight,
   so ADR-0060's rule that "a cancelled write may or may not have committed" governs
