@@ -207,7 +207,7 @@ async def test_every_proposal_reaches_memory_through_the_ratified_gate() -> None
     assert report.stored == 3
     assert report.deferred == 0
     assert report.rejected == 0
-    stored = await harness.memory.search("reported thing", limit=10)
+    stored = (await harness.memory.search("reported thing", limit=10)).records
     assert len(stored) == 3
 
 
@@ -287,7 +287,7 @@ async def test_a_source_failure_propagates_rather_than_becoming_an_empty_report(
         await harness.stage.ingest()
 
     assert harness.policy.calls == []
-    assert await harness.memory.search("reported", limit=10) == []
+    assert (await harness.memory.search("reported", limit=10)).records == ()
 
 
 async def test_a_cancelled_read_is_never_converted_into_a_source_fault() -> None:
@@ -443,7 +443,7 @@ async def test_a_writer_failure_leaves_the_earlier_proposals_applied() -> None:
         await stage.ingest()
 
     assert failing.calls == 2
-    assert len(await harness.memory.search("reported thing 0", limit=10)) == 1
+    assert len((await harness.memory.search("reported thing 0", limit=10)).records) == 1
 
 
 async def test_a_second_pass_re_reads_and_destroys_nothing_the_first_stored() -> None:
@@ -463,7 +463,7 @@ async def test_a_second_pass_re_reads_and_destroys_nothing_the_first_stored() ->
 
     assert first.stored == 1
     assert second.stored == 1
-    assert len(await harness.memory.search("reported one thing", limit=10)) == 2
+    assert len((await harness.memory.search("reported one thing", limit=10)).records) == 2
 
 
 # --- the gate: all five cases ADR-0097 §5 and §5a distinguish ---------------
@@ -552,7 +552,7 @@ async def test_a_revocation_between_the_check_and_the_return_discards_the_readin
 
     assert reader.call_count == 1  # the read really did happen
     assert harness.policy.calls == []  # and nothing was proposed from it
-    assert await harness.memory.search("reported thing", limit=10) == []
+    assert (await harness.memory.search("reported thing", limit=10)).records == ()
 
 
 async def test_an_unanswerable_re_check_discards_the_reading_too() -> None:

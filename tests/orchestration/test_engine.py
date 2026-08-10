@@ -129,6 +129,7 @@ if TYPE_CHECKING:
         EvaluationTrace,
         Goal,
         MemoryRecord,
+        MemorySearchResult,
         MemoryWrite,
     )
 
@@ -251,7 +252,7 @@ class RaisingMemoryStore(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-    ) -> list[MemoryRecord]:
+    ) -> MemorySearchResult:
         msg = "retrieval is down"
         raise MemoryStoreError(msg)
 
@@ -1834,7 +1835,7 @@ async def test_ingest_reads_the_configured_source_and_reports_what_it_proposed()
     assert report.source == reader.name
     assert report.proposed == 1
     assert report.stored == 1
-    assert len(await harness.memory.search("reported one thing", limit=10)) == 1
+    assert len((await harness.memory.search("reported one thing", limit=10)).records) == 1
 
 
 async def test_ingest_takes_no_argument_so_the_scheduler_can_bind_it() -> None:
@@ -2887,7 +2888,7 @@ class RecordingSearchStore(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-    ) -> list[MemoryRecord]:
+    ) -> MemorySearchResult:
         self.kinds.append(kinds)
         self.bands.append(bands)
         return await super().search(query, limit=limit, kinds=kinds, bands=bands)

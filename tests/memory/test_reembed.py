@@ -169,7 +169,7 @@ async def test_a_store_built_by_another_embedder_is_re_embedded_and_opens(tmp_pa
     opened = SqliteMemoryStore(traces_sink=FakeTraceSink(), path=store, embedder=target)
     try:
         assert {record.id for record in await opened.export()} == {"a", "b"}
-        assert [record.id for record in await opened.search("espresso", limit=1)] == ["a"]
+        assert [record.id for record in (await opened.search("espresso", limit=1)).records] == ["a"]
     finally:
         opened.close()
 

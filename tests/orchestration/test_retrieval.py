@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
     MemoryKind,
+    MemorySearchResult,
     MemorySource,
     Provenance,
     SemanticMemory,
@@ -99,13 +100,13 @@ class _ScriptedStore(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-    ) -> list[MemoryRecord]:
+    ) -> MemorySearchResult:
         self.calls.append((bands, limit))
         assert bands is not None, "the assembler always scopes its reads to one band"
         assert len(bands) == 1, "one call per band, so a short band cannot hide behind another"
         answers = self._script.get(bands[0], [])
         found = answers.pop(0) if answers else []
-        return found[:limit]
+        return MemorySearchResult(records=tuple(found[:limit]))
 
 
 async def test_it_reads_one_call_per_band_in_precedence_order() -> None:
@@ -339,7 +340,7 @@ async def test_the_kinds_filter_reaches_every_band_call() -> None:
             limit: int = 10,
             kinds: Sequence[MemoryKind] | None = None,
             bands: Sequence[BeliefBand] | None = None,
-        ) -> list[MemoryRecord]:
+        ) -> MemorySearchResult:
             seen.append(kinds)
             return await super().search(query, limit=limit, kinds=kinds, bands=bands)
 
@@ -378,7 +379,7 @@ async def test_the_kinds_filter_is_observed_once_for_the_whole_composition() -> 
             limit: int = 10,
             kinds: Sequence[MemoryKind] | None = None,
             bands: Sequence[BeliefBand] | None = None,
-        ) -> list[MemoryRecord]:
+        ) -> MemorySearchResult:
             seen.append(tuple(kinds or ()))
             caller_kinds.append(MemoryKind.PREFERENCE)  # the caller grows its own list
             return await super().search(query, limit=limit, kinds=kinds, bands=bands)
@@ -411,7 +412,7 @@ async def test_a_failing_band_read_propagates_rather_than_composing_a_partial_re
             limit: int = 10,
             kinds: Sequence[MemoryKind] | None = None,
             bands: Sequence[BeliefBand] | None = None,
-        ) -> list[MemoryRecord]:
+        ) -> MemorySearchResult:
             assert bands is not None
             if bands[0] is BeliefBand.DERIVED:
                 msg = "derived read is down"

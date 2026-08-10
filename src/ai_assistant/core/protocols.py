@@ -145,6 +145,7 @@ if TYPE_CHECKING:
         MemoryIngestResult,
         MemoryKind,
         MemoryRecord,
+        MemorySearchResult,
         MemoryUpdateProposal,
         MemoryWrite,
         Message,
@@ -485,12 +486,67 @@ class MemoryStore(Protocol):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-    ) -> list[MemoryRecord]:
+    ) -> MemorySearchResult:
         """Return the records most relevant to ``query``, best first.
 
         Expired records are never returned, nor are records not live at now — a
         record whose window is closed or not yet open is omitted, both ends
         enforced, exactly as an expired one is (ADR-0045 §6).
+
+        **Every read-time eligibility predicate binds before the ranking cut**
+        (ADR-0128 §1): the ``kinds`` filter, ADR-0007 §2's ``expires_at`` retention
+        deadline, and **both** ends of ADR-0045 §6's validity window, alongside the
+        band predicate ADR-0113 §2 already binds there. An implementation may not
+        let a record failing any of them consume the candidate budget the cut is
+        taken from, and the records it ranks are the records eligible on every one
+        of those axes. A store that cannot bind one of them before its cut does not
+        conform — the implementing lane stops and brings back an ADR rather than
+        shipping the weaker form.
+
+        That rules **where a predicate binds, not how large a page a caller gets**.
+        ``limit`` still cuts, and a result holding ``limit`` records asserts nothing
+        about whether the store holds further eligible records below it; the
+        completeness a caller *does* get is ``capped``'s, below, and nowhere else.
+        It also moves only *where* the axes bind and nothing about what they mean or
+        which instant they are read against: no axis is added, removed or relaxed,
+        ``search`` gains no ``include_retired`` axis and no as-of axis, and the
+        liveness it applies stays read-time-relative (ADR-0128 §1).
+
+        **``capped`` says whether the store's own candidate ceiling bound the read**
+        (ADR-0128 §2), and it is the only under-service signal on this contract:
+        ``search`` does not raise or otherwise refuse because a read was capped, no
+        parameter selects a refusing or completeness-requiring mode, and no second
+        member reports on a ``search`` that has already returned. Four clauses fix
+        it, and they are what an implementation is judged against:
+
+        * Where ``capped`` is ``False`` **and the result holds fewer than ``limit``
+          records**, the store holds **no** further record matching the call's
+          filters and passing its read-time eligibility axes. The result is the
+          whole eligible set at the read instant and a caller may act on that.
+        * Where ``capped`` is ``True``, the store's own candidate ceiling bound the
+          read short of ``limit`` and the store certifies nothing — a caller may not
+          read the result as the whole eligible set.
+        * ``capped`` is ``False`` on **every** result holding ``limit`` records, and
+          on such a result it certifies nothing: a full page never asserts that the
+          store holds no more eligible records below the cut, however large or small
+          the eligible set is and whether or not a ceiling was reached in filling
+          the page. ``capped`` reports the store's ceiling, never the size of the
+          eligible set.
+        * ``True`` is available on a result **shorter than ``limit``** and nowhere
+          else. There it is a refusal to certify and never a claim that more exists:
+          an implementation reports ``False`` only where the first clause lets it
+          certify and ``True`` wherever it cannot, including where its eligible set
+          exactly meets its ceiling. It reports ``False``, never ``True``, where
+          ``search`` matches nothing by construction — a blank query, a non-positive
+          ``limit``, or a filter selecting nothing. An empty result is not a capped
+          one.
+
+        So ``capped`` certifies in one direction only, which is what keeps it
+        mechanically decidable: ``False`` is the claim and ``True`` is the absence of
+        one, so a store that cannot tell reports ``True`` and conforms. Requiring
+        exactness in both directions would oblige it to prove a negative about rows
+        it never fetched. **What a consumer does with the signal is not decided
+        here** (ADR-0128 §6) — no caller is obliged to act on it.
 
         **The band filter binds before the ranking cut** (ADR-0113 §2). An
         implementation may not let a record outside the selected bands consume the
@@ -505,14 +561,6 @@ class MemoryStore(Protocol):
         inferences can displace an assertion *below the cut*". At a realistic band
         skew that is not a degradation but a total one — asking for the user's own
         assertions returns none of them while every one is live.
-
-        **That binds the band axis alone and promises no full page.** ``kind``,
-        ``expires_at`` and both window ends keep the post-cut placement ADR-0045 §6
-        and ADR-0007 ratified for them, so an in-band record failing one of those
-        may still consume the candidate budget, and a call may return fewer than
-        ``limit`` records while eligible ones exist. What is ruled here is *where a
-        predicate binds*, not how much of a page a caller gets; the remaining
-        shortfall is issue #457's and is neither closed nor widened (ADR-0113 §8).
 
         **The band is an eligibility axis, never an ordering one** (ADR-0113 §4).
         It decides which records are ranked and contributes nothing to how ranked
@@ -581,10 +629,12 @@ class MemoryStore(Protocol):
                 its kind is.
 
         Returns:
-            Matching records, most relevant first, each carrying its relevance
-            ``score`` — **populated**, because this is a retrieval, the opposite of
-            ``list_beliefs``' clearing rule (ADR-0073 §2). Each is a detached
-            snapshot, as with every ``MemoryStore`` read.
+            A :class:`~ai_assistant.core.types.MemorySearchResult`: the matching
+            records, most relevant first, each carrying its relevance ``score`` —
+            **populated**, because this is a retrieval, the opposite of
+            ``list_beliefs``' clearing rule (ADR-0073 §2) — and ``capped``, under
+            the four clauses above. Each record is a detached snapshot, as with
+            every ``MemoryStore`` read.
         """
         ...
 

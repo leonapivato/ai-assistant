@@ -73,6 +73,7 @@ if TYPE_CHECKING:
         Goal,
         MemoryIngestResult,
         MemoryRecord,
+        MemorySearchResult,
         MemoryWrite,
         SourceReading,
     )
@@ -100,7 +101,7 @@ class _FailingSearchStore(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-    ) -> list[MemoryRecord]:
+    ) -> MemorySearchResult:
         """Fail the way a real store fails, whichever band was asked for."""
         msg = "fake: retrieval is unavailable"
         raise MemoryStoreError(msg)
@@ -776,7 +777,7 @@ class _JournallingStore(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-    ) -> list[MemoryRecord]:
+    ) -> MemorySearchResult:
         """Record the call as asked for, then answer it as the fake does."""
         self._journal.append(
             _SearchCall(
@@ -819,37 +820,10 @@ class _RefusingSearchStore(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-    ) -> list[MemoryRecord]:
+    ) -> MemorySearchResult:
         """Refuse: this store must not be read."""
         msg = f"the resolution must issue no search here, and it searched for {query!r}"
         raise AssertionError(msg)
-
-
-class _PostCutKindFilterStore(FakeMemoryStore):
-    """A conforming store whose ``kind`` predicate binds **after** the ranking cut.
-
-    ``FakeMemoryStore`` filters by kind before it truncates, which is one permitted
-    placement but not the only one: ADR-0113 §2 moves the *band* ahead of the cut and
-    is explicit that ``kind`` keeps "the post-cut placement ADR-0045 §6 and ADR-0007
-    ratified for them", so "a call may return fewer than ``limit`` records while
-    eligible ones exist". Both are conforming, and the residue ADR-0122 §3 records —
-    a target crowded out by higher-ranked records the resolution cannot mint — is
-    only expressible against this one. Modelled here rather than asserted of the
-    canonical fake, which cannot exhibit it.
-    """
-
-    async def search(
-        self,
-        query: str,
-        *,
-        limit: int = 10,
-        kinds: Sequence[MemoryKind] | None = None,
-        bands: Sequence[BeliefBand] | None = None,
-    ) -> list[MemoryRecord]:
-        """Rank and cut band-neutrally and kind-neutrally, then drop what is out."""
-        wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
-        page = await super().search(query, limit=limit, bands=bands)
-        return [record for record in page if wanted is None or record.kind in wanted]
 
 
 async def test_the_resolution_reads_once_before_the_processor_and_in_the_shape_ruled() -> None:
@@ -1081,25 +1055,32 @@ async def test_a_correction_with_no_live_target_lands_as_semantic() -> None:
 async def test_a_correction_crowded_out_by_records_it_cannot_mint_lands_as_semantic() -> None:
     """The residue §3 records, asserted as the **known** outcome rather than hidden.
 
-    Against a store whose ``kind`` predicate binds after the ranking cut — a placement
-    ADR-0113 §2 explicitly leaves to ``kind`` — three higher-ranked episodes fill a
-    resolution page of three, and the preference sitting just below is never seen. The
-    correction resolves by §5 and lands as ``SEMANTIC``, exactly as it does today.
+    Three higher-ranked semantic records fill a resolution page of three, and the
+    preference sitting just below is never seen. The correction resolves by §5 and
+    lands as ``SEMANTIC``, exactly as it does today.
 
-    This is issue #457's known non-exhaustiveness of retrieval, which ADR-0122 §3
-    states rather than papers over: ``_detect_conflicts`` stands on the same limit for
-    the same reason — "what it never surfaced is invisible here". Closing it means
-    closing #457, for the conflict probe and this read together; a second retrieval
-    operation invented in this lane would be a ``MemoryStore`` contract decision taken
-    where ``MemoryStore`` is not being decided.
+    **The crowd is eligible, and that is the whole of what is left.** This case used
+    to be built against a store whose ``kind`` predicate bound after the ranking cut,
+    where three *episodes* — a kind this read does not even ask for — could empty the
+    page. ADR-0128 §1 makes that placement non-conforming: every eligibility
+    predicate now binds before the cut, so an out-of-kind record can no longer spend
+    a slot. What survives is the cut itself, which ADR-0128 §1's second clause keeps
+    in terms — it rules where a predicate binds, "not how large a page a caller
+    gets" — so a live target ranked below ``resolution_limit`` eligible records is
+    still a target this read does not see.
+
+    ADR-0122 §3 states that rather than papering over it, and ``_detect_conflicts``
+    stands on the same limit for the same reason: "what it never surfaced is
+    invisible here". Closing #457 removed the *ineligible* crowd from both; a page
+    is still a page.
     """
-    memory = _PostCutKindFilterStore(now=_clock)
+    memory = FakeMemoryStore(now=_clock)
     for index in range(3):
         await memory.add(
-            EpisodicMemory(
-                id=f"ep-{index}",
+            SemanticMemory(
+                id=f"sem-{index}",
                 content="ordered espresso this morning again",
-                occurred_at=_NOW,
+                fact="ordered espresso this morning again",
                 provenance=_observed(),
             )
         )

@@ -45,7 +45,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     GrantScope,
     MemoryKind,
-    MemoryRecord,
+    MemorySearchResult,
     MemorySource,
     MemoryUpdateProposal,
     Provenance,
@@ -2073,7 +2073,7 @@ class _LimitSpy(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-    ) -> list[MemoryRecord]:
+    ) -> MemorySearchResult:
         """Record ``limit``, then answer exactly as the canonical store would.
 
         Args:

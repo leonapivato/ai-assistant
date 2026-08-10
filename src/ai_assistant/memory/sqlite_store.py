@@ -47,6 +47,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     MemoryRecord,
+    MemorySearchResult,
     MemorySource,
     MemoryWriteMode,
     RecordChunk,
@@ -79,32 +80,34 @@ if TYPE_CHECKING:
     )
 
 _ADAPTER: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
-# ``search`` applies the kind, expiry and window filters *after* the vector KNN, so
-# it over-fetches candidates to leave room for filtered-out rows. A tracked
-# limitation: a caller can still be under-served if more than this multiple of
-# ``limit`` nearer neighbours are all filtered out — and for a ``limit`` past
-# ``_VEC_KNN_MAX_K / _RESULT_OVERFETCH`` the effective multiple shrinks below this,
-# since the fetch is then clamped to the KNN ceiling (see ``_VEC_KNN_MAX_K``).
+# **There is no candidate over-fetch, because there is nothing left to over-fetch
+# for.** ``search`` used to multiply ``limit`` by 8 to leave room for rows a
+# post-KNN pass would drop for kind, expiry or validity window; ADR-0128 §1 binds
+# every one of those before the cut, so each candidate the KNN returns is a record
+# the caller can be served and a margin would buy candidates nothing can spend.
 #
-# **That placement is ratified, not a capability limit.** This comment used to
-# explain it as "sqlite-vec cannot cleanly pre-filter joined columns within a KNN",
-# which ADR-0113's spike and ``_search_sync``'s own band restriction below falsify:
-# the pinned sqlite-vec *does* bind a ``rowid`` restriction ahead of the cut. The
-# three post-KNN predicates keep their placement because ADR-0045 §6 and ADR-0007
-# ratified it for them and moving them is issue #457's ADR to write, not because
-# the engine forbids it (ADR-0113 §8). The band is bound before the cut because
-# ADR-0113 §2 requires it — the axis whose skew is unbounded and grows by design.
-_RESULT_OVERFETCH = 8
+# Removing the multiple is **not** a headroom change and ADR-0112 §7's gate is not
+# engaged: §7's second clause gates a change buying a *larger* candidate budget,
+# and this buys none (ADR-0128 §1's fourth clause, which says so in terms). What
+# may not come back is the post-cut eligibility pass itself, on that ground or any
+# other.
+#
 # The KNN ``k`` in ``search``'s query is capped by sqlite-vec itself: a ``k`` above
 # this raises ``sqlite3.OperationalError("k value in knn query too large ... the
 # limit is 4096")`` instead of running (observed on sqlite-vec 0.1.9). So the
-# over-fetch ``limit * _RESULT_OVERFETCH`` is clamped to it, turning an opaque
-# crash into a served result. The clamp is semantically safe: a KNN can return no
-# more rows than exist, so requesting more candidates than the cap only forgoes
-# over-fetch headroom the store already documents it may run short of (issue #115).
-# This subsumes the wider signed-64-bit bind range the crash was first theorised
-# against — 4096 is the lower, operative ceiling, reached at ``limit > 512``.
+# caller's ``limit`` is clamped to it, turning an opaque crash into a served
+# result. The clamp is semantically safe — a KNN can return no more rows than
+# exist — but it is no longer *free*: it is now this store's whole candidate
+# ceiling, and **the only thing ``capped`` reports** (ADR-0128 §2). A caller asking
+# for more than this many records gets at most this many and is told so, where
+# before the same arithmetic silently shortened an over-fetch (issue #115). It
+# subsumes the wider signed-64-bit bind range the crash was first theorised
+# against, and its value stays coupled to the pinned dependency (#411 part 2).
 _VEC_KNN_MAX_K = 4096
+#: Rows one pass of a column backfill reads and rewrites (:meth:`_backfill_valid_from`).
+#: Large enough that a migration is a handful of statements per thousand records,
+#: small enough that a store of any size is never materialised at once.
+_BACKFILL_CHUNK = 500
 #: Bound parameters ``get_many``'s statement spends on something other than an id
 #: — the two read-time comparisons against ``now`` — and therefore the headroom
 #: its chunk size must leave under ``SQLITE_MAX_VARIABLE_NUMBER``.
@@ -264,18 +267,23 @@ def _to_micros(instant: datetime) -> int:
 class _Retrieved:
     """One relevance read's records together with what only the read can count.
 
-    The public :meth:`SqliteMemoryStore.search` unwraps this and returns the
-    records; it exists so the counts ADR-0119 §8 requires travel out of the read
-    without widening the ``MemoryStore`` contract, which §4 forbids in terms.
+    The public :meth:`SqliteMemoryStore.search` turns this into a
+    :class:`~ai_assistant.core.types.MemorySearchResult`; it exists so the counts
+    ADR-0119 §8 requires travel out of the read without widening the
+    ``MemoryStore`` contract, which §4 forbids in terms.
 
     Attributes:
         records: What the read returned, in relevance order.
+        capped: Whether ``_VEC_KNN_MAX_K`` bound the read short of ``limit``
+            (ADR-0128 §2). Decided inside the read, because only there are the
+            candidate count and the ceiling both in scope.
         observed: The counts, already keyed by ``memory.traces``' literal metric
             keys. Empty where the read short-circuited before fetching anything —
             an absent key is §3's "not observed", which is what that is.
     """
 
     records: list[MemoryRecord]
+    capped: bool
     observed: Mapping[str, int]
 
 
@@ -429,7 +437,7 @@ class SqliteMemoryStore:
                 "CREATE TABLE IF NOT EXISTS records("
                 "rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, "
                 "kind TEXT NOT NULL, data TEXT NOT NULL, "
-                "expires_at INTEGER, valid_until INTEGER, about_person TEXT)"
+                "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, about_person TEXT)"
             )
             conn.execute(
                 # A table of its own rather than a row in ``meta``: ``meta`` is
@@ -465,10 +473,32 @@ class SqliteMemoryStore:
         return conn
 
     def _migrate_records(self, conn: sqlite3.Connection) -> None:
-        """Bring the lifecycle columns to epochs, and add the subject column.
+        """Bring the lifecycle columns to epochs, and add the subject and window columns.
 
-        Two migrations, applied in that order because the first rebuilds the table
-        the second would otherwise alter.
+        Three migrations, applied in that order because the first rebuilds the
+        table the others would otherwise alter.
+
+        **The open-window column** (ADR-0128 §1, mechanism left to this lane by §6)
+        is a nullable ``valid_from INTEGER`` holding the exact microsecond epoch of
+        each record's ``validity.valid_from``, so ``search`` can bind that end of
+        the window *before* its ranking cut. It is the one eligibility axis with no
+        column of its own: ADR-0045 §9 left the rare end in the JSON blob because
+        the post-cut pass could afford to decode it, and §1 removes that pass.
+        Comparing it as stored is not an option — pydantic emits ISO text of
+        **variable precision** (``...T00:00:00Z`` for a whole second and
+        ``...T00:00:00.123456Z`` otherwise) and ``'.' < 'Z'``, so a SQL text
+        comparison orders a sub-second instant *before* a whole-second one at the
+        same second and would hide a record that is live or admit one that is not.
+        The column makes every predicate in the pre-filter exact integer
+        arithmetic, beside the two lifecycle columns doing the same job.
+
+        Unlike ``about_person`` it is **backfilled from each blob** rather than left
+        ``NULL``, and the difference is not cosmetic: ``NULL`` reads as *open*, so
+        an un-backfilled column would make every not-yet-live record eligible on a
+        migrated store — a record ADR-0045 §6 requires the read path to hide. The
+        backfill is chunked by ``rowid`` and each chunk is fetched whole before any
+        ``UPDATE`` runs, so no read cursor is open over ``records`` while it is
+        being written and a large store is still not materialised at once.
 
         **The subject column** (ADR-0100 §8) is a nullable ``about_person TEXT``
         added to an existing table and backfilled ``NULL`` — which is what
@@ -489,7 +519,7 @@ class SqliteMemoryStore:
         Every legacy table shape is handled by one rebuild: a pre-ADR-0007 table
         (neither column), a post-ADR-0007 table (``expires_at REAL`` only), and
         the current-but-``REAL`` table (both columns ``REAL``) all become a table
-        whose lifecycle columns are ``INTEGER`` microsecond epochs. Both are
+        whose lifecycle columns are ``INTEGER`` microsecond epochs. All three are
         backfilled from each record's *exact* ISO instant in its JSON blob
         (ADR-0045 §9), so a value a prior ``REAL`` column had already rounded is
         restored to full precision, and a pre-column table does not resurrect an
@@ -528,6 +558,9 @@ class SqliteMemoryStore:
                 # than changing an existing column's affinity, and the value every
                 # existing row takes is the one ``ADD COLUMN`` supplies.
                 conn.execute("ALTER TABLE records ADD COLUMN about_person TEXT")
+            if "valid_from" not in info:
+                conn.execute("ALTER TABLE records ADD COLUMN valid_from INTEGER")
+                self._backfill_valid_from(conn)
             return
         conn.execute(
             # Carries ``AUTOINCREMENT`` so a store on the legacy epoch schema pays
@@ -536,7 +569,7 @@ class SqliteMemoryStore:
             "CREATE TABLE records_migrated("
             "rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, "
             "kind TEXT NOT NULL, data TEXT NOT NULL, "
-            "expires_at INTEGER, valid_until INTEGER, about_person TEXT)"
+            "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, about_person TEXT)"
         )
         # Stream the source rows through a dedicated read cursor rather than
         # ``fetchall()``, so migrating a large legacy store does not
@@ -547,16 +580,53 @@ class SqliteMemoryStore:
         for rowid, id_, kind, data in read:
             expires = self._micros_from_json(data, "expires_at")
             valid_until = self._micros_from_json(data, "valid_until", nested="validity")
+            # Recovered from the blob like the two beside it, and for the reason
+            # this migration recovers them at all: an un-backfilled ``valid_from``
+            # is ``NULL``, which reads as an *open* window, so a not-yet-live
+            # record would become eligible for every pre-filtered read.
+            valid_from = self._micros_from_json(data, "valid_from", nested="validity")
             # ``about_person`` is left NULL rather than read out of ``data``: a
             # table this old predates the field, so its blobs carry no subject to
             # recover, and ADR-0100 §8 forbids deriving one from anything else.
             conn.execute(
                 "INSERT INTO records_migrated"
-                "(rowid, id, kind, data, expires_at, valid_until) VALUES (?, ?, ?, ?, ?, ?)",
-                (rowid, id_, kind, data, expires, valid_until),
+                "(rowid, id, kind, data, expires_at, valid_until, valid_from) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (rowid, id_, kind, data, expires, valid_until, valid_from),
             )
         conn.execute("DROP TABLE records")
         conn.execute("ALTER TABLE records_migrated RENAME TO records")
+
+    def _backfill_valid_from(self, conn: sqlite3.Connection) -> None:
+        """Fill a freshly-added ``valid_from`` column from each record's blob.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, like every other
+        migration here, so the ``ADD COLUMN`` and the values it needs commit
+        together or not at all — a half-backfilled column would leave every
+        unvisited row reading as an open window, which is the state ADR-0045 §6
+        forbids the read path to be in.
+
+        **Chunked, and each chunk is read whole before anything is written.** The
+        sibling rebuilds stream a cursor because their reads and writes are on
+        different tables; here both are ``records``, and SQLite leaves the
+        behaviour of a scan undefined when the table under it is modified. Paging
+        by ``rowid`` keeps the memory bound of a streamed read without opening a
+        cursor across an ``UPDATE``.
+        """
+        after = 0
+        while True:
+            chunk = conn.execute(
+                "SELECT rowid, data FROM records WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                (after, _BACKFILL_CHUNK),
+            ).fetchall()
+            if not chunk:
+                return
+            for rowid, data in chunk:
+                conn.execute(
+                    "UPDATE records SET valid_from = ? WHERE rowid = ?",
+                    (self._micros_from_json(data, "valid_from", nested="validity"), rowid),
+                )
+            after = chunk[-1][0]
 
     def _migrate_walk_key(self, conn: sqlite3.Connection) -> None:
         """Adopt the never-reissued walk key over an existing table (ADR-0114 §1).
@@ -602,20 +672,21 @@ class SqliteMemoryStore:
             "CREATE TABLE records_walkable("
             "rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, "
             "kind TEXT NOT NULL, data TEXT NOT NULL, "
-            "expires_at INTEGER, valid_until INTEGER, about_person TEXT)"
+            "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, about_person TEXT)"
         )
         # Streamed through a dedicated read cursor rather than ``fetchall()``, as
         # the sibling rebuild is, so migrating a large store does not materialise
         # ``records`` whole. Reads and writes are on different tables, so the scan
         # cursor stays valid across the inserts.
         read = conn.execute(
-            "SELECT rowid, id, kind, data, expires_at, valid_until, about_person FROM records"
+            "SELECT rowid, id, kind, data, expires_at, valid_until, valid_from, about_person "
+            "FROM records"
         )
         for source in read:
             conn.execute(
                 "INSERT INTO records_walkable"
-                "(rowid, id, kind, data, expires_at, valid_until, about_person) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(rowid, id, kind, data, expires_at, valid_until, valid_from, about_person) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 source,
             )
         conn.execute("DROP TABLE records")
@@ -859,6 +930,15 @@ class SqliteMemoryStore:
             if record.validity.valid_until is not None
             else None
         )
+        # Both window ends are columns now, not just the hot one: ``search`` binds
+        # them before its ranking cut (ADR-0128 §1) and cannot reach into the blob
+        # to do it. The blob is still the truth — every read decodes from ``data``
+        # — and this is a derived index exactly as ``expires_at`` is.
+        valid_from = (
+            _to_micros(record.validity.valid_from)
+            if record.validity.valid_from is not None
+            else None
+        )
         row = conn.execute("SELECT rowid, kind FROM records WHERE id = ?", (record.id,)).fetchone()
         if row is not None and row[1] != record.kind:
             msg = (
@@ -868,17 +948,34 @@ class SqliteMemoryStore:
             raise MemoryStoreError(msg)
         if row is None:
             cursor = conn.execute(
-                "INSERT INTO records(id, kind, data, expires_at, valid_until, about_person) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (record.id, record.kind, data, expires, valid_until, record.about_person),
+                "INSERT INTO records"
+                "(id, kind, data, expires_at, valid_until, valid_from, about_person) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    record.id,
+                    record.kind,
+                    data,
+                    expires,
+                    valid_until,
+                    valid_from,
+                    record.about_person,
+                ),
             )
             rowid = cursor.lastrowid
         else:
             rowid = row[0]
             conn.execute(
                 "UPDATE records SET kind = ?, data = ?, expires_at = ?, valid_until = ?, "
-                "about_person = ? WHERE rowid = ?",
-                (record.kind, data, expires, valid_until, record.about_person, rowid),
+                "valid_from = ?, about_person = ? WHERE rowid = ?",
+                (
+                    record.kind,
+                    data,
+                    expires,
+                    valid_until,
+                    valid_from,
+                    record.about_person,
+                    rowid,
+                ),
             )
             conn.execute("DELETE FROM vec_records WHERE rowid = ?", (rowid,))
         conn.execute("INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)", (rowid, blob))
@@ -1123,24 +1220,30 @@ class SqliteMemoryStore:
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-    ) -> list[MemoryRecord]:
+    ) -> MemorySearchResult:
         """Return the records most relevant to ``query`` by vector similarity.
 
-        **The band binds before the KNN cut and the other axes do not** (ADR-0113
-        §2). ``bands`` becomes a ``rowid`` restriction carried into the KNN itself,
-        so out-of-band rows never enter the candidate set and never spend the
-        over-fetch budget; ``kind``, ``expires_at`` and both window ends keep their
-        post-KNN pass. See :meth:`_search_sync` for why that asymmetry is the
-        ratified one rather than an accident of what SQL was convenient.
+        **Every eligibility predicate binds before the KNN cut** (ADR-0128 §1).
+        ``kinds``, the retention deadline, both ends of the validity window and the
+        band all become one ``rowid`` restriction carried into the KNN itself, so an
+        ineligible row never enters the candidate set and never spends a candidate
+        slot the cut is taken from. There is no post-KNN eligibility pass and no
+        over-fetch: what the KNN returns is servable, and the cut is a prefix of it.
+
+        **``capped`` reports one thing: whether ``_VEC_KNN_MAX_K`` bound the read.**
+        That is this store's only candidate ceiling, so a short result is the whole
+        eligible set unless the KNN returned exactly the ceiling — which it can only
+        do for a ``limit`` above it (ADR-0128 §2).
 
         Args:
             query: The search text; whitespace-only queries match nothing.
             limit: Maximum number of records to return; ``<= 0`` matches nothing.
-            kinds: If given, restrict results to these memory kinds (applied
-                after the vector search, so results are over-fetched first).
+                A ``limit`` above ``_VEC_KNN_MAX_K`` is clamped, and a result it
+                shortens is reported ``capped``.
+            kinds: If given, restrict results to these memory kinds; applied
+                *before* the vector search, like every other eligibility axis.
             bands: If given, restrict results to these belief bands; ``None`` is
-                every band and ``()`` none, conjunctive with ``kinds``. Applied
-                *before* the vector search, unlike ``kinds``.
+                every band and ``()`` none, conjunctive with ``kinds``.
 
         **One ``RETRIEVAL`` trace per call, emitted here because nowhere else can
         see the numbers** (ADR-0119 §8). The per-predicate exclusion counts exist
@@ -1152,8 +1255,9 @@ class SqliteMemoryStore:
         counts it never reached (§3's observation rule).
 
         Returns:
-            Matching records, most relevant first, each carrying a ``score``
-            that is the cosine similarity to the query, in ``[0, 1]``. Expired
+            A :class:`~ai_assistant.core.types.MemorySearchResult`: matching
+            records, most relevant first, each carrying a ``score`` that is the
+            cosine similarity to the query, in ``[0, 1]``; and ``capped``. Expired
             records, and records not live at now (a closed or not-yet-open
             validity window, both ends — ADR-0045 §6), are never returned.
 
@@ -1203,7 +1307,7 @@ class SqliteMemoryStore:
             _retrieval_reading,
             entry=entry,
         )
-        return retrieved.records
+        return MemorySearchResult(records=tuple(retrieved.records), capped=retrieved.capped)
 
     async def _searched(
         self,
@@ -1227,26 +1331,29 @@ class SqliteMemoryStore:
                 materialised; ``None`` for every band.
 
         Returns:
-            The records, and the counts ADR-0119 §8 requires of the trace. A
-            short circuit observes none of the counts, which is the honest answer:
-            the read never fetched a candidate, and §3 forbids a zero standing in.
+            The records, whether the ceiling bound them, and the counts ADR-0119 §8
+            requires of the trace. A short circuit observes none of the counts,
+            which is the honest answer: the read never fetched a candidate, and §3
+            forbids a zero standing in. It reports ``capped=False`` — a read that
+            matches nothing by construction is not a capped one (ADR-0128 §2).
         """
         if limit <= 0 or not query.strip():
-            return _Retrieved(records=[], observed={})
+            return _Retrieved(records=[], capped=False, observed={})
         # An empty ``bands`` selects nothing (ADR-0113 §3), and so does a selection
         # no source maps into — the same answer by the same reasoning, and taken
         # before the embedder is paid for a query whose result is already known.
         if wanted_sources is not None and not wanted_sources:
-            return _Retrieved(records=[], observed={})
+            return _Retrieved(records=[], capped=False, observed={})
         vector = await self._embed_one(query)
         async with self._lock:
-            rows, observed = await _run_to_completion(
+            rows, capped, observed = await _run_to_completion(
                 self._search_sync, vector, limit, wanted, wanted_sources, self._now_micros()
             )
         return _Retrieved(
             records=[
                 self._decode(data).model_copy(update={"score": score}) for data, score in rows
             ],
+            capped=capped,
             observed=observed,
         )
 
@@ -1257,160 +1364,149 @@ class SqliteMemoryStore:
         wanted: frozenset[str] | None,
         wanted_sources: frozenset[str] | None,
         now: int,
-    ) -> tuple[list[tuple[str, float]], dict[str, int]]:
-        """Run the KNN with the band bound into it, then the post-cut predicates.
+    ) -> tuple[list[tuple[str, float]], bool, dict[str, int]]:
+        """Run the KNN with every eligibility predicate bound into it.
 
-        **Why the band is in the SQL and the other three are not.** ADR-0113 §2
-        requires the band predicate to bind before the ranking cut, and ADR-0045 §6
-        and ADR-0007 ratified the post-cut placement of the rest. The asymmetry is
-        the ADR's, and the reason is the skew: the ``DERIVED`` band grows without
-        bound by design — leg 3's observer and ADR-0106's consolidation are both
-        machines for growing it — so a post-KNN band filter loses *all* of a small
-        band's records once the derived band is an order of magnitude larger, which
-        is ADR-0072 §5's flood failure. ADR-0113's spike measured zero assertions
-        returned out of four live ones at a 49x skew, and the shared suite's
-        skewed-fixture case pins it here.
+        **One restriction carries all five axes** (ADR-0128 §1): ``kind``, the
+        retention deadline, both ends of the validity window and the band. The
+        pinned sqlite-vec binds ``v.rowid IN (SELECT ...)`` ahead of the cut — ``k``
+        applies *after* the restriction, so asking for more candidates than the
+        eligible set holds returns the eligible set rather than the nearest
+        neighbours overall. There is no post-KNN pass left to write: what the KNN
+        returns is exactly what the caller may be served, and ``limit`` takes a
+        prefix of it.
 
-        **The restriction is a subquery over ``records`` rather than a new column.**
-        The band lives only inside each record's JSON blob, and the pinned
-        sqlite-vec binds ``v.rowid IN (SELECT ...)`` ahead of the cut — ``k`` applies
-        *after* the restriction, so asking for more candidates than the band holds
-        returns the band rather than the nearest neighbours overall. That makes a
-        schema migration unnecessary, which is why none is taken: ADR-0113 §10
-        leaves the mechanism to this lane under an observable obligation, and the
-        cheaper mechanism meets it. If profiling ever makes the per-search scan of
-        ``records`` matter, an indexed source column is a drop-in replacement that
-        changes no behaviour this method promises.
+        **Why that matters and is not a refactor.** A post-cut pass lets a nearer
+        *ineligible* row spend a candidate slot, which is ADR-0072 §5's flood
+        failure reached by a different axis — ADR-0113's spike returned zero of four
+        live assertions at a 49x band skew, and #799 established the same threshold
+        on the window axis. The window axis is the one the system manufactures for
+        itself: every ``SUPERSEDE`` leaves a window-closed record beside the live
+        one that replaced it (ADR-0045 §4/§6) and ADR-0110 §3 adds a second
+        producer, both topically concentrated by construction, so the topic the user
+        has corrected most is the topic whose retrieval failed first (#457).
+
+        **Where each predicate reads from.** ``kind``, ``expires_at`` and both
+        window ends are columns on ``records`` and are compared as exact integer
+        microsecond epochs; the band is still ``json_extract`` over the stored blob,
+        because a source is not a column and ADR-0113 §10 left that mechanism here.
+        ``valid_from`` **became** a column for this method (see
+        :meth:`_migrate_records`): as ISO text of variable precision it cannot be
+        compared correctly in SQL at all, and it is the only axis the old post-cut
+        pass had to decode a blob to apply.
 
         **What the subquery costs on a corrupt store, stated rather than hidden.**
-        Because the restriction reads *every* row's JSON, a single malformed
-        ``data`` blob makes every band-scoped search raise, whichever band was
+        Where a band is selected the restriction reads *every* row's JSON, so a
+        single malformed ``data`` blob makes that search raise whichever band was
         asked for — where an unfiltered search raises only when the corrupt row is
         actually among the KNN's hits. That is a real amplification and it is
         accepted: the store is corrupt either way, the failure is a conforming
         ``MemoryStoreError`` that ``LoopEngine._retrieve`` degrades on, and the
         alternative — a ``json_valid`` guard that skips unreadable rows — would
         silently drop a live belief out of a band-scoped answer, which is worse than
-        failing loudly. An indexed column would also remove the amplification, and
-        is the other reason to reach for one.
+        failing loudly. An indexed source column would remove it, and is the reason
+        to reach for one.
 
-        **The three exclusion counts ADR-0119 §8 requires are taken here**, one per
-        predicate rather than one total, because #824's trigger "is about *window*
-        closure specifically, and a single filtered count cannot distinguish it
-        from an expiry sweep or a band filter". Both window ends count into one
-        figure: they are one predicate — ADR-0045 §6's ``live_at``, read from two
-        places for storage reasons alone.
+        **All four exclusion counts are structural zeros, written as literals**
+        (ADR-0128 §3). Each predicate binds before the cut, so this method has no
+        candidate to reject on any of them — the rows that would have been counted
+        are never fetched. They are literals rather than counters that can only stay
+        at zero, so nobody later "fixes" a dead increment back into a post-cut pass
+        and reintroduces the failure. The keys stay because they must: ADR-0119 §8
+        requires a count per read-time predicate, ADR-0120 §7's population is
+        *defined* as the traces carrying them, and dropping three of them would put
+        every trace before this change and every trace after it in different
+        populations — making #829's before/after unreadable at exactly the moment it
+        matters. Held at zero, the counters going to zero on a date **is** the
+        observation. All four are still absent together on the fault and
+        short-circuit paths, where no candidate set exists at all (§3's rule that an
+        absent key means *not observed* and never zero).
 
-        **The fourth count, the band's, is structurally zero here and is emitted
-        anyway.** The band binds *before* the cut (above), so no out-of-band row is
-        ever a candidate and this pass has none to drop — exactly as it drops none
-        for ``kind`` on an unfiltered read, which also reports zero. All four
-        decompose *the candidate set this same trace reports*, so they stand or
-        fall together: emitting only the non-zero ones would make "the band dropped
-        nothing" and "no candidate set existed" the same record, and ADR-0119 §3's
-        prohibition on a zero placeholder is about the latter — which is why all
-        four are absent on the fault and short-circuit paths, where no pass ran.
-
-        What the zero is **not** is a count of what the band kept out of the
-        store's answer. That population is filtered inside the KNN and could only
-        be counted by running a second vector search on the interactive read path.
-        The caller records how many bands were *asked for* beside it, which is the
-        figure that says a restriction was in force at all.
-
-        **The counts do not sum to the candidates.** The pass stops at ``limit``,
-        so candidates it never examined are neither returned nor excluded, and a
-        measure that assumed an accounting identity would read the shortfall as an
-        exclusion. That is deliberate: ``candidates`` is what was fetched, and each
-        exclusion count is what this pass actually rejected.
+        **``capped`` is the only thing left that can shorten a result** (ADR-0128
+        §2). Every candidate is eligible, so a result short of ``limit`` means the
+        KNN gave back everything it had — unless it gave back exactly ``fetch_k``,
+        which it can only do when the ceiling clamped ``limit`` below what was
+        asked. ``False`` is therefore the certification that the result is the whole
+        eligible set, ``True`` the refusal to certify, and the boundary case where
+        the eligible set exactly meets the ceiling is a permitted ``True``: the
+        store cannot tell it apart from a truncation without fetching a row it
+        deliberately did not.
 
         Returns:
-            The surviving ``(data, score)`` rows, and the counts keyed by
-            ``memory.traces``' literal metric keys.
+            The surviving ``(data, score)`` rows, whether the ceiling bound them,
+            and the counts keyed by ``memory.traces``' literal metric keys.
         """
-        # Over-fetch to leave room for kind-, expiry-, and window-filtered rows,
-        # clamped to sqlite-vec's KNN ``k`` ceiling so an over-large ``limit``
-        # serves a (possibly short) result instead of raising (see _VEC_KNN_MAX_K).
-        # The band is *not* among the filters this budget is padding for: it is
-        # bound below, so no out-of-band row is ever a candidate to be discarded.
-        fetch_k = min(limit * _RESULT_OVERFETCH, _VEC_KNN_MAX_K)
+        # No over-fetch, only the clamp: sqlite-vec raises above ``_VEC_KNN_MAX_K``,
+        # so an over-large ``limit`` serves a short result instead of crashing — and
+        # that shortening is what ``capped`` reports.
+        fetch_k = min(limit, _VEC_KNN_MAX_K)
         blob = sqlite_vec.serialize_float32(list(vector))
-        sql = (
-            "SELECT r.data, r.kind, r.expires_at, r.valid_until, v.distance FROM vec_records v "
-            "JOIN records r ON r.rowid = v.rowid "
-            "WHERE v.embedding MATCH ? AND k = ?"
-        )
-        params: list[object] = [blob, fetch_k]
+        # Only *placeholder counts* are interpolated; every value is bound, so the
+        # assembled text carries no caller data — the same construction
+        # ``_list_beliefs_sync`` uses, and the reason the S608 heuristic is
+        # suppressed here rather than satisfied.
+        eligible = [
+            "(expires_at IS NULL OR expires_at > ?)",
+            "(valid_until IS NULL OR valid_until > ?)",
+            "(valid_from IS NULL OR valid_from <= ?)",
+        ]
+        restriction: list[object] = [now, now, now]
+        if wanted is not None:
+            # Non-empty is not guaranteed here as it is for the band: ``kinds=()``
+            # is a selection this store answers with an empty ``IN ()``, which SQL
+            # evaluates false for every row — nothing selected, which is the
+            # conjunctive reading ``bands=()`` gets by short circuit.
+            eligible.append(f"kind IN ({', '.join('?' * len(wanted))})")
+            restriction.extend(sorted(wanted))
         if wanted_sources is not None:
-            # Non-empty: ``search`` short-circuits an empty selection. Only the
-            # *placeholder count* is interpolated; every value is bound, so the
-            # assembled text carries no caller data — the same construction
-            # ``_list_beliefs_sync`` uses, and the reason the S608 heuristic is
-            # suppressed here rather than satisfied.
-            # This is where the band predicate lives, and why ADR-0119 §8's
-            # ``excluded_band`` is structurally zero below: a row this subquery
-            # excludes never reaches the KNN's ``k``, so it is never a candidate the
-            # post-cut pass could drop. Counting what it removed would take a
-            # second, unrestricted vector search. See the docstring.
-            placeholders = ", ".join("?" * len(wanted_sources))
-            sql += (
-                " AND v.rowid IN (SELECT rowid FROM records "  # noqa: S608 — bound below
-                f"WHERE json_extract(data, '$.provenance.source') IN ({placeholders}))"
+            # Non-empty: ``search`` short-circuits an empty band selection before
+            # the embedder is paid for it.
+            eligible.append(
+                f"json_extract(data, '$.provenance.source') "
+                f"IN ({', '.join('?' * len(wanted_sources))})"
             )
-            params.extend(sorted(wanted_sources))
-        sql += " ORDER BY v.distance"
-        # Wrapped as ``_list_beliefs_sync`` wraps its own, because the band
-        # restriction genuinely *does* add a failure mode the plain KNN lacked.
-        # ``json_extract`` raises ``malformed JSON`` on a corrupt ``data`` blob, and
-        # it raises during the subquery — before the decode path that used to
-        # translate that same corruption. Unfiltered, a corrupt row surfaces as
-        # ``MemoryStoreError`` out of ``_micros_from_json``/``_decode``; band-scoped
-        # and unwrapped it surfaced as a raw ``sqlite3.OperationalError``, which
-        # ``LoopEngine._retrieve`` does not catch, so a corrupt store aborted the
-        # turn instead of degrading it. An earlier revision of this comment asserted
-        # the opposite and was wrong; the case is now pinned by test.
+            restriction.extend(sorted(wanted_sources))
+        sql = (
+            "SELECT r.data, v.distance FROM vec_records v "  # noqa: S608 — bound above
+            "JOIN records r ON r.rowid = v.rowid "
+            "WHERE v.embedding MATCH ? AND k = ? "
+            f"AND v.rowid IN (SELECT rowid FROM records WHERE {' AND '.join(eligible)}) "
+            "ORDER BY v.distance"
+        )
+        # Wrapped as ``_list_beliefs_sync`` wraps its own, because the restriction
+        # genuinely *does* add a failure mode the plain KNN lacked. ``json_extract``
+        # raises ``malformed JSON`` on a corrupt ``data`` blob, and it raises during
+        # the subquery — before the decode path that used to translate that same
+        # corruption. Unfiltered, a corrupt row surfaces as ``MemoryStoreError`` out
+        # of ``_decode``; band-scoped and unwrapped it surfaced as a raw
+        # ``sqlite3.OperationalError``, which ``LoopEngine._retrieve`` does not
+        # catch, so a corrupt store aborted the turn instead of degrading it. An
+        # earlier revision of this comment asserted the opposite and was wrong; the
+        # case is pinned by test.
         try:
-            rows = self._conn.execute(sql, params).fetchall()
+            rows = self._conn.execute(sql, [blob, fetch_k, *restriction]).fetchall()
         except sqlite3.Error as exc:
             msg = f"failed to search: {exc}"
             raise MemoryStoreError(msg) from exc
-        results: list[tuple[str, float]] = []
-        excluded_kind = 0
-        excluded_retention = 0
-        excluded_window = 0
-        for data, kind, expires_at, valid_until, distance in rows:
-            if wanted is not None and kind not in wanted:
-                excluded_kind += 1
-                continue
-            if expires_at is not None and expires_at <= now:
-                excluded_retention += 1
-                continue
-            # Window, both ends: the hot ``valid_until`` from its column, and the
-            # rare ``valid_from`` from the JSON blob (ADR-0045 §9). Applied in this
-            # same post-KNN pass so a filtered row still counts against over-fetch.
-            if valid_until is not None and valid_until <= now:
-                excluded_window += 1
-                continue
-            valid_from = self._micros_from_json(data, "valid_from", nested="validity")
-            if valid_from is not None and valid_from > now:
-                excluded_window += 1
-                continue
-            # vec0 uses cosine distance; similarity is 1 - distance, floored at 0.
-            results.append((data, max(0.0, 1.0 - distance)))
-            if len(results) >= limit:
-                break
-        return results, {
-            traces.FETCH_K: fetch_k,
-            traces.CANDIDATES: len(rows),
-            traces.EXCLUDED_KIND: excluded_kind,
-            traces.EXCLUDED_RETENTION: excluded_retention,
-            traces.EXCLUDED_WINDOW: excluded_window,
-            # Zero by construction, not by counting: the band bound above the cut,
-            # so this pass saw no out-of-band candidate to reject. Written as a
-            # literal rather than as a counter that can only stay at zero, so
-            # nobody later "fixes" a dead increment into a post-cut band filter and
-            # reintroduces ADR-0113 §2's flood failure.
-            traces.EXCLUDED_BAND: 0,
-        }
+        # vec0 uses cosine distance; similarity is 1 - distance, floored at 0.
+        results = [(data, max(0.0, 1.0 - distance)) for data, distance in rows[:limit]]
+        # The ceiling bound this read only if the KNN filled its whole budget *and*
+        # still came up short of what the caller asked for — which requires
+        # ``fetch_k < limit``, i.e. the clamp. Anywhere else a short result is the
+        # exhausted eligible set and is certified as such.
+        capped = len(rows) >= fetch_k and len(results) < limit
+        return (
+            results,
+            capped,
+            {
+                traces.FETCH_K: fetch_k,
+                traces.CANDIDATES: len(rows),
+                traces.EXCLUDED_KIND: 0,
+                traces.EXCLUDED_RETENTION: 0,
+                traces.EXCLUDED_WINDOW: 0,
+                traces.EXCLUDED_BAND: 0,
+            },
+        )
 
     async def list_beliefs(
         self,

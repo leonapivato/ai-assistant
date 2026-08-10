@@ -148,7 +148,12 @@ async def assemble_by_band(
         if remaining <= 0:
             break
         found = await store.search(query, limit=remaining, kinds=wanted_kinds, bands=[band])
-        for record in found:
+        # Unwrapped and nothing more: ADR-0128 §6 leaves what a consumer does with
+        # ``capped`` to that consumer's own lane, and this assembler takes no policy
+        # from it here. The band-scoped read it composes is already forbidden from
+        # being read as evidence that a band holds nothing more (ADR-0113 §5), which
+        # is a different rule about a different race and is unaffected either way.
+        for record in found.records:
             if record.id in seen:
                 # ADR-0113 §5's cross-call rule. Arriving here means a fold moved
                 # this record between two of these calls; the copy already held is

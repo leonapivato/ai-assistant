@@ -185,10 +185,19 @@ async def test_a_completed_read_carries_every_count_section_8_names(
 ) -> None:
     """ADR-0119 §8's retrieval clause, over a read that reached all of it.
 
-    One record of each shape the post-KNN pass rejects, so the counts are
-    different from one another: a measure reading this trace can tell a window
-    closure from an expiry sweep, which is the distinction #824's trigger is
-    entirely about and which a single filtered total destroys.
+    One record of each shape an eligibility predicate rejects. **Every one of the
+    four counts is zero, and every one of the four keys is present** — which is
+    ADR-0128 §3's first clause exactly: since §1 the predicates bind before the
+    ranking cut, so none of these rows is ever a candidate and there is nothing for
+    the read to drop. The candidate count says the same thing from the other side:
+    three records were stored and one was a candidate.
+
+    **The keys stay because #829's window depends on them.** ADR-0120 §7's
+    population is defined as the traces carrying these keys, so dropping the three
+    that went to zero would split every trace before this change from every trace
+    after it — and the before/after would be unreadable at the moment it matters.
+    Held at zero, the same population spans the intervention and the counters going
+    to zero on a date *is* the observation.
     """
     store = make_store()
     await store.add(_semantic("live", "the weekly planning meeting"))
@@ -203,7 +212,7 @@ async def test_a_completed_read_carries_every_count_section_8_names(
         )
     )
 
-    found = await store.search("weekly planning meeting", limit=5)
+    found = (await store.search("weekly planning meeting", limit=5)).records
 
     assert [record.id for record in found] == ["live"]
     trace = _only(sink, TraceKind.RETRIEVAL)
@@ -211,20 +220,25 @@ async def test_a_completed_read_carries_every_count_section_8_names(
     assert trace.outcome is TraceOutcome.OK
     assert trace.fault_class is None
     assert trace.metrics[traces.LIMIT] == 5
-    assert trace.metrics[traces.CANDIDATES] == 3
+    assert trace.metrics[traces.CANDIDATES] == 1, "an ineligible row was never a candidate"
     assert trace.metrics[traces.RETURNED] == 1
-    assert trace.metrics[traces.EXCLUDED_RETENTION] == 1
-    assert trace.metrics[traces.EXCLUDED_WINDOW] == 1
+    assert trace.metrics[traces.EXCLUDED_RETENTION] == 0
+    assert trace.metrics[traces.EXCLUDED_WINDOW] == 0
     assert trace.metrics[traces.EXCLUDED_KIND] == 0
     assert trace.metrics[traces.EXCLUDED_BAND] == 0
     assert trace.records[TraceRecordSet.RETURNED].ids == ("live",)
     assert trace.records[TraceRecordSet.RETURNED].total == 1
 
 
-async def test_the_kind_predicate_is_counted_apart_from_the_other_two(
+async def test_the_kind_predicate_also_keeps_its_key_at_a_structural_zero(
     make_store: Callable[..., SqliteMemoryStore], sink: FakeTraceSink
 ) -> None:
-    """The third of §8's countable predicates, isolated so it cannot borrow a total."""
+    """The third of §8's countable predicates, isolated so it cannot borrow a total.
+
+    It used to be the one count this fixture could make non-zero. ADR-0128 §1 binds
+    ``kinds`` before the cut like the rest, so the preference below is not a
+    candidate the read rejected — it is a row the read never fetched.
+    """
     store = make_store()
     await store.add(_semantic("fact", "the weekly planning meeting"))
     await store.add(
@@ -239,7 +253,8 @@ async def test_the_kind_predicate_is_counted_apart_from_the_other_two(
     await store.search("weekly planning meeting", limit=5, kinds=[MemoryKind.SEMANTIC])
 
     trace = _only(sink, TraceKind.RETRIEVAL)
-    assert trace.metrics[traces.EXCLUDED_KIND] == 1
+    assert trace.metrics[traces.CANDIDATES] == 1, "the out-of-kind row was never a candidate"
+    assert trace.metrics[traces.EXCLUDED_KIND] == 0
     assert trace.metrics[traces.EXCLUDED_RETENTION] == 0
     assert trace.metrics[traces.EXCLUDED_WINDOW] == 0
     assert trace.metrics[traces.EXCLUDED_BAND] == 0
@@ -250,12 +265,13 @@ async def test_a_band_scoped_read_reports_a_structurally_zero_band_exclusion(
 ) -> None:
     """§8's fourth predicate, and the reason its count is zero rather than large.
 
-    ADR-0113 §2 binds the band *before* the ranking cut, so the out-of-band record
-    below never becomes a candidate — which the candidate count says outright — and
-    the post-KNN pass has none to drop. The zero is therefore a true statement
-    about the set the same trace reports, and not a count of what the band kept out
-    of the store's answer; that population is filtered inside the KNN and could
-    only be counted by a second vector search.
+    ADR-0113 §2 bound the band *before* the ranking cut three ADRs before ADR-0128
+    §1 joined the other three to it, so the out-of-band record below never becomes a
+    candidate — which the candidate count says outright — and the read has none to
+    drop. The zero is therefore a true statement about the set the same trace
+    reports, and not a count of what the band kept out of the store's answer; that
+    population is filtered inside the KNN and could only be counted by a second
+    vector search.
 
     ``bands`` beside it is what carries the information the zero cannot: whether a
     band predicate was bound at all.
@@ -266,7 +282,9 @@ async def test_a_band_scoped_read_reports_a_structurally_zero_band_exclusion(
         _semantic("asserted", "the weekly planning meeting", source=MemorySource.USER_ASSERTED)
     )
 
-    found = await store.search("weekly planning meeting", limit=5, bands=[BeliefBand.ASSERTED])
+    found = (
+        await store.search("weekly planning meeting", limit=5, bands=[BeliefBand.ASSERTED])
+    ).records
 
     assert [record.id for record in found] == ["asserted"]
     trace = _only(sink, TraceKind.RETRIEVAL)
@@ -338,7 +356,7 @@ async def test_the_trace_reports_the_band_selection_the_search_actually_used(
     # case is about rather than being spent on a precondition.
     embedder.armed = True
 
-    found = await store.search("weekly planning meeting", limit=5, bands=bands)
+    found = (await store.search("weekly planning meeting", limit=5, bands=bands)).records
 
     assert [record.id for record in found] == ["asserted"], "the pre-mutation selection"
     assert _only(sink, TraceKind.RETRIEVAL).metrics[traces.BANDS] == 1, (
@@ -351,8 +369,9 @@ async def test_an_unscoped_read_reports_no_band_restriction(
 ) -> None:
     """``bands=None`` restricted nothing, so there is no restriction to report.
 
-    The exclusion count still appears, because the pass still ran — the same
-    reading that gives ``excluded_kind`` a zero on a read that named no kinds.
+    The exclusion count still appears, because the read still reached a candidate
+    set — which is what decides whether the four counts are written at all, and is
+    now the only thing that does (ADR-0128 §3).
     """
     store = make_store()
     await store.add(_semantic("live", "the weekly planning meeting"))
@@ -377,16 +396,16 @@ async def test_a_short_circuited_read_still_traces_and_counts_no_candidates(
     store = make_store()
     await store.add(_semantic("live", "the weekly planning meeting"))
 
-    assert await store.search("   ", limit=5) == []
+    assert (await store.search("   ", limit=5)).records == ()
 
     trace = _only(sink, TraceKind.RETRIEVAL)
     assert trace.outcome is TraceOutcome.OK
     assert trace.metrics[traces.LIMIT] == 5
     assert trace.metrics[traces.RETURNED] == 0
     assert traces.CANDIDATES not in trace.metrics
-    # All four exclusion counts stand or fall together with the pass that
-    # produces them, which is what keeps the band's structural zero from meaning
-    # "no candidate set existed" (ADR-0119 §3).
+    # All four exclusion counts stand or fall together with the candidate set they
+    # decompose, which is what keeps their structural zeros from meaning "no
+    # candidate set existed" (ADR-0119 §3, ADR-0128 §3).
     for key in (
         traces.EXCLUDED_KIND,
         traces.EXCLUDED_RETENTION,
@@ -471,7 +490,7 @@ async def test_a_sink_that_raises_costs_the_trace_and_never_the_read(
     await store.add(_semantic("live", "the weekly planning meeting"))
 
     with structlog.testing.capture_logs() as captured:
-        found = await store.search("weekly planning meeting")
+        found = (await store.search("weekly planning meeting")).records
 
     assert [record.id for record in found] == ["live"]
     assert [record["event"] for record in captured] == [traces.TRACE_NOT_RECORDED]
@@ -506,7 +525,7 @@ async def test_a_clock_that_will_not_read_costs_the_trace_and_never_the_read(
     )
     try:
         with structlog.testing.capture_logs() as captured:
-            assert await store.search("   ") == []
+            assert (await store.search("   ")).records == ()
     finally:
         store.close()
 

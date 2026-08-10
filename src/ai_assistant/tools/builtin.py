@@ -230,8 +230,11 @@ class RecallMemory:
         ):
             msg = f"recall_memory 'limit' must be an integer in [1, {_MAX_RECALL_LIMIT}]"
             raise ValueError(msg)
-        records = await self._memory.search(query, limit=limit)
-        return [record.model_dump(mode="json") for record in records]
+        # ``capped`` is unwrapped and not acted on (ADR-0128 §6): this lookup wants
+        # what there is, and a served prefix is a usable answer to "recall what you
+        # know about X". Whether it should degrade on the signal is its own lane.
+        found = await self._memory.search(query, limit=limit)
+        return [record.model_dump(mode="json") for record in found.records]
 
 
 # --- the factory --------------------------------------------------------

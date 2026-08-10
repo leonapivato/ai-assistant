@@ -19,7 +19,12 @@ from typing import TYPE_CHECKING
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
-from ai_assistant.core.types import MemoryWriteMode, RecordChunk, band_of
+from ai_assistant.core.types import (
+    MemorySearchResult,
+    MemoryWriteMode,
+    RecordChunk,
+    band_of,
+)
 from ai_assistant.memory._walk import (
     check_walk_limit,
     check_walk_name,
@@ -316,7 +321,7 @@ class InMemoryMemoryStore:
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-    ) -> list[MemoryRecord]:
+    ) -> MemorySearchResult:
         """Return the records most relevant to ``query``, best first.
 
         Relevance is naive lexical overlap: the fraction of query terms that
@@ -325,14 +330,21 @@ class InMemoryMemoryStore:
         not-yet-open validity window, both ends — ADR-0045 §6) are omitted. An
         empty or whitespace-only query matches nothing.
 
-        **The band binds before the cut** (ADR-0113 §2), which here is free rather
-        than earned: this store scores every live record and truncates once at the
-        end, so a band predicate in the same comprehension is *already* upstream of
-        the ``[:limit]`` and no candidate budget exists for an out-of-band record to
-        consume. It is written down anyway, because the reason it holds is a
-        property of this implementation rather than of the contract — the SQL store
-        pays for it (``SqliteMemoryStore._search_sync``), and a later revision that
-        introduced a candidate cut here would owe it.
+        **Every eligibility predicate binds before the cut** (ADR-0128 §1), which
+        here is free rather than earned: this store scores every live record and
+        truncates once at the end, so each predicate in the comprehension below is
+        *already* upstream of the ``[:limit]`` and no candidate budget exists for an
+        ineligible record to consume. It is written down anyway, because the reason
+        it holds is a property of this implementation rather than of the contract —
+        the SQL store pays for it (``SqliteMemoryStore._search_sync``), and a later
+        revision that introduced a candidate cut here would owe it.
+
+        **``capped`` is therefore always ``False``** (ADR-0128 §2). This store has
+        no KNN and so no candidate ceiling: nothing but ``limit`` can shorten a
+        result, so a short result is always the whole eligible set and always
+        certifiable. ``True`` is not a state this implementation can reach, which is
+        why the shared suite skips the two ceiling cases here rather than faking an
+        input that cannot be constructed against it.
 
         Args:
             query: The search text.
@@ -342,8 +354,9 @@ class InMemoryMemoryStore:
                 every band and ``()`` none, conjunctive with ``kinds``.
 
         Returns:
-            Matching records, highest score first, each carrying its relevance
-            ``score``, truncated to ``limit``.
+            A :class:`~ai_assistant.core.types.MemorySearchResult` holding the
+            matching records, highest score first, each carrying its relevance
+            ``score``, truncated to ``limit`` — and ``capped=False``.
 
         Note:
             ``kinds`` and ``bands`` are materialised on the coroutine's **first
@@ -357,7 +370,7 @@ class InMemoryMemoryStore:
         wanted_bands = None if bands is None else frozenset(bands)
         query_terms = {term for term in query.lower().split() if term}
         if limit <= 0 or not query_terms:
-            return []
+            return MemorySearchResult(records=())
 
         now = self._now_utc()  # one reading for the whole search, not one per record
         scored = [
@@ -369,7 +382,7 @@ class InMemoryMemoryStore:
             and (score := _relevance(query_terms, record.content)) > 0.0
         ]
         scored.sort(key=lambda record: record.score or 0.0, reverse=True)
-        return scored[:limit]
+        return MemorySearchResult(records=tuple(scored[:limit]))
 
     async def list_beliefs(
         self,

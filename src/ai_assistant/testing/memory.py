@@ -38,6 +38,7 @@ from pydantic import TypeAdapter, ValidationError
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
 from ai_assistant.core.types import (
+    MemorySearchResult,
     MemoryWriteMode,
     NonBlankEncodableText,
     RecordChunk,
@@ -471,7 +472,7 @@ class FakeMemoryStore:
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-    ) -> list[MemoryRecord]:
+    ) -> MemorySearchResult:
         """Return live records matching ``query`` by lexical overlap, best first.
 
         Relevance is the fraction of query terms that appear as substrings of a
@@ -479,11 +480,20 @@ class FakeMemoryStore:
         at now (a closed or not-yet-open validity window, both ends — ADR-0045
         §6), an empty query, and a non-positive ``limit`` all yield nothing.
 
-        **The band binds before the cut** (ADR-0113 §2), which this store gets for
-        free: it scores every live record and truncates once, at the end, so the
-        band predicate below is already upstream of the ``[:limit]`` and there is no
-        candidate budget an out-of-band record could spend. ``SqliteMemoryStore`` is
-        where the clause costs something, and the shared suite proves it of both.
+        **Every eligibility predicate binds before the cut** (ADR-0128 §1), which
+        this store gets for free: it scores every live record and truncates once, at
+        the end, so every predicate below is already upstream of the ``[:limit]``
+        and there is no candidate budget an ineligible record could spend.
+        ``SqliteMemoryStore`` is where the clause costs something, and the shared
+        suite proves it of both.
+
+        **``capped`` is always ``False``** (ADR-0128 §2). The fake has no KNN and so
+        no candidate ceiling — nothing but ``limit`` can shorten a result, so every
+        short result is the whole eligible set and is certified as such. That is not
+        a simplification the fake takes: ``True`` is unreachable here because the
+        input that produces it is unconstructable, which is why the shared suite
+        **skips** the two ceiling cases against it rather than faking them. The case
+        that bites lives in ``tests/memory/test_sqlite_store.py``.
 
         ``kinds`` and ``bands`` are materialised on the coroutine's **first executed
         line**, as in ``list_beliefs`` below and for the same reason: it is the
@@ -497,7 +507,7 @@ class FakeMemoryStore:
         wanted_bands = None if bands is None else frozenset(bands)
         query_terms = {term for term in query.lower().split() if term}
         if limit <= 0 or not query_terms:
-            return []
+            return MemorySearchResult(records=())
         async with self._resource.held():
             now = self._now_utc()  # one reading for the whole search, not one per record
             scored: list[MemoryRecord] = []
@@ -518,7 +528,7 @@ class FakeMemoryStore:
                         record.model_copy(update={"score": hits / len(query_terms)}, deep=True)
                     )
         scored.sort(key=lambda record: record.score or 0.0, reverse=True)
-        return scored[:limit]
+        return MemorySearchResult(records=tuple(scored[:limit]))
 
     async def list_beliefs(
         self,

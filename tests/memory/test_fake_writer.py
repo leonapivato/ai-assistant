@@ -550,12 +550,12 @@ async def test_supersede_hiding_is_read_time_relative() -> None:
 
     # Read behind the close (2026-01-01 < the writer's 2026-06-01 close): still visible.
     assert await store.get("existing") is not None
-    assert any(r.id == "existing" for r in await store.search("prefers concise emails"))
+    assert any(r.id == "existing" for r in (await store.search("prefers concise emails")).records)
 
     # Advance the store's read clock to the close instant: now hidden.
     read_at[0] = datetime(2026, 6, 1, tzinfo=UTC)
     assert await store.get("existing") is None
-    assert all(r.id != "existing" for r in await store.search("prefers concise emails"))
+    assert all(r.id != "existing" for r in (await store.search("prefers concise emails")).records)
 
     # export keeps the retired target regardless of its validity window (both
     # records here are non-expired, so both appear).

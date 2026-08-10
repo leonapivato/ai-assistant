@@ -132,7 +132,7 @@ async def test_search_orders_by_overlap_and_populates_scores() -> None:
     await store.add(_semantic("both", "alpha beta gamma"))
     await store.add(_semantic("one", "alpha delta"))
 
-    results = await store.search("alpha beta")
+    results = (await store.search("alpha beta")).records
 
     assert [r.id for r in results] == ["both", "one"]  # higher overlap first
     assert results[0].score == 1.0  # both query terms matched
@@ -167,7 +167,7 @@ async def test_search_results_cannot_be_mutated_to_reach_stored_state() -> None:
     store = FakeMemoryStore(now=_fixed_now)
     await store.add(_semantic("1", "coffee note"))
 
-    results = await store.search("coffee")
+    results = (await store.search("coffee")).records
     assert results
     with pytest.raises(ValidationError):
         results[0].provenance.confidence = 0.1  # nested model of a result is frozen

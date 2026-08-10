@@ -26,7 +26,7 @@ from ai_assistant.core.types import (
     ExecutionState,
     Goal,
     MemoryKind,
-    MemoryRecord,
+    MemorySearchResult,
     MemorySource,
     PlanStep,
     Provenance,
@@ -174,7 +174,7 @@ class _SearchRecordingStore(FakeMemoryStore):
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
-    ) -> list[MemoryRecord]:
+    ) -> MemorySearchResult:
         self.search_limits.append(limit)
         return await super().search(query, limit=limit, kinds=kinds, bands=bands)
 
