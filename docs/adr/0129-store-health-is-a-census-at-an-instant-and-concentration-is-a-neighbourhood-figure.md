@@ -213,9 +213,12 @@ single fact from which §5's placement follows, and it is inherited rather than 
 > **undefined** when the population it is taken over is empty, and the report states
 > that it is undefined rather than stating a figure or a zero.
 
-> **Normative.** The report states `T`, and states every parameter §3 makes a
-> parameter, on its own output. A figure reported without them is not one of these
-> figures.
+> **Normative.** `T` is an input to the run, not a fact the mechanism discovers
+> about itself: it is either given by the operator or defaulted to the tool's own
+> start instant, and it is fixed for the whole run so every figure in one report is
+> taken at the same instant. The report states `T`, and states every parameter §3
+> makes a parameter, on its own output. A figure reported without them is not one
+> of these figures.
 
 **The category matters because the two reports will be read side by side.** ADR-0120
 §1's measures answer "did the user model get more accurate over this window" from a
@@ -227,6 +230,17 @@ has nothing to bind. What it has instead is a hazard ADR-0120 does not have — 
 present state of a store is the accumulated residue of every event since it was
 created, including events before any retained trace — and that is why a census can
 answer a question about accumulation that no window over the stream can.
+
+**`T` being an input is not the as-of retrieval axis ADR-0045 §1 deferred and
+ADR-0128 §1's second clause refuses.** Those are about `MemoryStore.search` gaining a
+parameter that moves the instant its read-time predicates are evaluated against, and
+this ADR adds no parameter to any contract (§5) and does not go through `search` at
+all (§2). The census evaluates `Validity.live_at` itself, over records it walked, at
+an instant it states — which is what any reader of `export`'s output would have to do
+to say anything about liveness, since ADR-0045 §6's read semantics are that `get` and
+`search` hide a record on either end of the window while `export` keeps it — the
+window-closed records are visible to a walk by design. A diagnostic choosing which
+instant to describe is not a read path acquiring an axis.
 
 **The undefined clause is ADR-0120 §1's second clause restated for this family, and
 it is restated rather than cited because ADR-0120 §1 binds "every measure defined by
@@ -300,7 +314,8 @@ stand alone; either is sufficient.
 > **Normative.** The sample and `k` are parameters of the run, stated on the report.
 > `k` is a **positive integer** and is the same for every sampled record in a run.
 > The sample is a deterministic function of the store's contents and the stated
-> parameters: two runs over an unchanged store produce identical figures.
+> parameters, and does not depend on `T`. Two runs over an unchanged store, with
+> the same parameters and the same `T`, produce identical figures.
 
 > **Normative.** The density figure is **undefined** where the store holds fewer
 > than `k + 1` records with a vector, and the report states that it is undefined
@@ -365,10 +380,22 @@ density per record is one KNN over the whole vector table, and `vec0` scans it; 
 about `m × n × 1.2 µs`, which is seconds for a thousand samples over a hundred
 thousand records and hours for the exhaustive figure. Sampling is the honest way to
 buy the figure, and the determinism clause is what keeps it a figure rather than a
-draw: two operators running the same tool on the same store must not get two answers,
-and neither must the same operator on two days. The mechanism — a stable order over
-ids, a stride, a hash cut — is the implementing lane's, and any of them satisfies the
-clause.
+draw: two operators running the same tool on the same store at the same `T` must not
+get two answers. The mechanism — a stable order over ids, a stride, a hash cut — is
+the implementing lane's, and any of them satisfies the clause.
+
+**The clause binds the sample and not the figure's value, and the distinction is the
+one an implementation gets wrong.** Determinism here means *which records are looked
+at*, which is why the sample is required not to depend on `T`: a sampler that drew
+from the live records would change its draw as the day moved, and two censuses of an
+unchanged store would then differ for two reasons at once — the records whose windows
+lapsed, and the records the sampler happened to pick. What a figure is *worth* is
+allowed to move with `T`, and must: a record whose `valid_until` falls between two
+runs is live in the first census and retired in the second, and a rule promising
+identical figures across that would be promising a census that is not of an instant.
+`T` is an input (§1) precisely so the two effects are separable — an operator who
+wants the same answer twice passes the same `T`, and one who wants to see what a day
+did passes two.
 
 **Closure age is what the store can honestly say about churn, and the limit is
 stated.** There is no supersession lineage in the store (Context), so "how many times
@@ -594,9 +621,15 @@ that reads as numbers. Naming it separately costs a sentence and closes a door t
 > zero or negative is refused rather than run.
 
 > **Normative.** The tests assert §3's determinism clause directly — two runs of the
-> concentration figure over an unchanged store, with the same parameters, produce
-> identical figures — and assert the density figure over a store built with a known
-> concentration, in the shape `tests/memory/aged_store.py` already builds.
+> concentration figure over an unchanged store, with the same parameters and the
+> same `T`, produce identical figures — and assert the density figure over a store
+> built with a known concentration, in the shape `tests/memory/aged_store.py`
+> already builds.
+
+> **Normative.** The tests assert that `T` moves the figures and the sample: over
+> an unchanged store, two runs whose `T` falls either side of a record's
+> `valid_until` reclassify that record between live and retired in the census, the
+> band fill and the density population, while selecting the same sample.
 
 **The determinism test is named because it is the clause an implementation can pass in
 name and fail in substance.** A sampler seeded from the system RNG, or one that walks a
