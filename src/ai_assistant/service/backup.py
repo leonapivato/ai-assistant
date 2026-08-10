@@ -53,12 +53,7 @@ from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import AssistantError, ConfigurationError
 from ai_assistant.service import artifact, datadir, passphrase
 from ai_assistant.service.agev1 import DEFAULT_WORK_FACTOR
-from ai_assistant.service.artifact import (
-    SQLITE_MAGIC,
-    Manifest,
-    ManifestEntry,
-    digest_and_length,
-)
+from ai_assistant.service.artifact import SQLITE_MAGIC, Manifest, ManifestEntry
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART, classify
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.service.refusal import RefusalError
@@ -66,6 +61,7 @@ from ai_assistant.wire.address import socket_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
+    from typing import BinaryIO
 
     from ai_assistant.core.config import Settings
 
@@ -423,9 +419,8 @@ def _scan(data_dir: Path, *, excluded: frozenset[str]) -> _Source:
     entries: list[ManifestEntry] = []
     fingerprints: dict[str, _Fingerprint] = {}
     for relative in _walk(data_dir, excluded=excluded):
-        path = data_dir / relative
-        fingerprints[relative] = _fingerprint(path)
-        sha256, length = digest_and_length(path)
+        fingerprint, sha256, length = _measure(data_dir / relative)
+        fingerprints[relative] = fingerprint
         entries.append(ManifestEntry(path=relative, length=length, sha256=sha256))
     return _Source(entries=tuple(entries), fingerprints=fingerprints)
 
@@ -506,35 +501,61 @@ def _sidecars(data_dir: Path) -> Iterator[str]:
                 stack.append((Path(entry.path), f"{relative}/"))
 
 
-def _fingerprint(path: Path) -> _Fingerprint:
-    """Record what §2 compares across the copy.
+def _measure(path: Path) -> tuple[_Fingerprint, str, int]:
+    """Fingerprint and digest one file, both against a single open descriptor.
+
+    **One open, not three, and that is the fix for a real hole rather than a
+    tidy-up.** Fingerprinting by ``lstat`` and then digesting by a fresh ``open``
+    left a window in which a regular file could become a symbolic link: the
+    ``lstat`` recorded the link, the ``open`` followed it, and because the
+    after-fingerprint was the link's too, the two agreed and the artifact was
+    published carrying a file from outside the data directory. Everything is now
+    read from the descriptor :func:`~ai_assistant.service.artifact.open_regular`
+    returns, which refuses a link at that component outright (ADR-0123 §1).
 
     Args:
         path: The file about to be copied.
 
     Returns:
-        Its device, inode, length, modification time and — for a SQLite database
-        — SQLite's own file change counter.
+        Its fingerprint, its SHA-256 and its byte length.
+
+    Raises:
+        RefusalError: If it is a symbolic link or is not a regular file.
     """
-    info = path.lstat()
-    return _Fingerprint(
-        device=info.st_dev,
-        inode=info.st_ino,
-        length=info.st_size,
-        mtime_ns=info.st_mtime_ns,
-        change_counter=_change_counter(path),
+    with artifact.open_regular(path) as handle:
+        info = os.fstat(handle.fileno())
+        counter = _change_counter(handle)
+        sha256, length = artifact.digest_and_length_of(handle)
+    return (
+        _Fingerprint(
+            device=info.st_dev,
+            inode=info.st_ino,
+            length=info.st_size,
+            mtime_ns=info.st_mtime_ns,
+            change_counter=counter,
+        ),
+        sha256,
+        length,
     )
 
 
-def _change_counter(path: Path) -> int | None:
+def _fingerprint(path: Path) -> _Fingerprint:
+    """Record what §2 compares across the copy, re-reading it the same no-follow way."""
+    fingerprint, _sha256, _length = _measure(path)
+    return fingerprint
+
+
+def _change_counter(handle: BinaryIO) -> int | None:
     """SQLite's file change counter, or ``None`` when the file is not a database.
 
     §2 reads it beside the stat fields for the reason ADR-0104 gives about its own
     equivalent: the stat fields "are insufficient … a same-sized write inside one
     timestamp tick moves none of them".
+
+    Read through ``pread`` so the descriptor's own offset is left where the caller
+    put it — the digest reads the same descriptor from the start straight after.
     """
-    with path.open("rb") as handle:
-        header = handle.read(_CHANGE_COUNTER_OFFSET + _CHANGE_COUNTER_BYTES)
+    header = os.pread(handle.fileno(), _CHANGE_COUNTER_OFFSET + _CHANGE_COUNTER_BYTES, 0)
     if not header.startswith(SQLITE_MAGIC) or len(header) < _CHANGE_COUNTER_OFFSET + 4:
         return None
     return int.from_bytes(header[_CHANGE_COUNTER_OFFSET:], "big")

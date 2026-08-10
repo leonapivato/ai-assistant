@@ -38,6 +38,7 @@ the one machine the operator is depending on.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import os
@@ -291,6 +292,70 @@ class Manifest(BaseModel):
         return {entry.path: entry for entry in self.files}
 
 
+#: What a platform reports when ``O_NOFOLLOW`` meets a symbolic link. Linux says
+#: ``ELOOP``; the BSDs and macOS say ``EMLINK``, and treating only the first as
+#: the symlink case would turn a refusal into a raw errno on half the platforms
+#: this could run on.
+_SYMLINK_ERRNOS: Final = frozenset({errno.ELOOP, errno.EMLINK})
+
+
+def open_regular(path: Path) -> BinaryIO:
+    """Open a file for reading, refusing to follow a symbolic link into it.
+
+    **This is where ADR-0123 §1's "It never follows a symbolic link" is actually
+    enforced, and a check on the directory listing is not enough to do it.** The
+    walk refuses a symlink it *sees*, but between seeing an entry and opening it
+    there is a window, and a regular file replaced by a symlink inside that window
+    is opened through: the fingerprint, the digest and the copy would all read the
+    link's target, the before-and-after fingerprints would agree because both are
+    the link's, and the artifact would be published carrying a file from outside
+    the data directory under a data-directory-relative path. Verified: an artifact
+    written that way carried ``/`` -relative content under ``notes.txt``.
+
+    ``O_NOFOLLOW`` closes it at the final component, which is the component §1's
+    clause is about. **What it does not close is a swapped intermediate
+    directory** — that needs the whole walk performed against held directory
+    descriptors, which is #889's shared-mechanism change rather than this
+    decision's, and ADR-0123 §7 already discloses the residual in those terms.
+
+    Args:
+        path: The file to open.
+
+    Returns:
+        A buffered binary reader positioned at the start.
+
+    Raises:
+        RefusalError: If the path is a symbolic link, or is not a regular file.
+        OSError: For anything else, which the entry points classify.
+    """
+    fd = _no_follow_descriptor(path)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            msg = (
+                f"{path} is not a regular file, so it cannot be copied byte for byte; move "
+                f"it out of the data directory"
+            )
+            raise RefusalError(msg)
+    except BaseException:
+        os.close(fd)
+        raise
+    return os.fdopen(fd, "rb")
+
+
+def _no_follow_descriptor(path: Path) -> int:
+    """Open ``path`` read-only without following a link at its final component."""
+    try:
+        return os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        if exc.errno in _SYMLINK_ERRNOS:
+            msg = (
+                f"{path} is a symbolic link; this tool never follows one and never copies "
+                f"one, so remove it or move it out of the data directory"
+            )
+            raise RefusalError(msg) from exc
+        raise
+
+
 def digest_and_length(path: Path) -> tuple[str, int]:
     """Read a file once, returning its SHA-256 and its byte length.
 
@@ -300,12 +365,28 @@ def digest_and_length(path: Path) -> tuple[str, int]:
     Returns:
         The lowercase hex digest and the length in bytes.
     """
+    with open_regular(path) as handle:
+        return digest_and_length_of(handle)
+
+
+def digest_and_length_of(handle: BinaryIO) -> tuple[str, int]:
+    """The same, over an already-open descriptor.
+
+    Separate so a caller that has to fingerprint *and* digest one file can do both
+    against a single open object, rather than against two opens that a swap can
+    land between.
+
+    Args:
+        handle: An open binary reader, positioned where reading should start.
+
+    Returns:
+        The lowercase hex digest and the length in bytes.
+    """
     digest = hashlib.sha256()
     length = 0
-    with path.open("rb") as handle:
-        while block := handle.read(_COPY_BYTES):
-            digest.update(block)
-            length += len(block)
+    while block := handle.read(_COPY_BYTES):
+        digest.update(block)
+        length += len(block)
     return digest.hexdigest(), length
 
 
@@ -350,7 +431,10 @@ def write_artifact(
             member = tarfile.TarInfo(PAYLOAD_PREFIX + entry.path)
             member.size = entry.length
             member.mode = _FILE_MODE
-            with source.open("rb") as handle:
+            with open_regular(source) as handle:
+                # Opened no-follow here as well as in the scan: the copy is a
+                # second open of the same path, and §1's clause is about what the
+                # artifact ends up carrying rather than about what was listed.
                 archive.addfile(member, handle)
 
 
@@ -634,7 +718,7 @@ def _regular_files(root: Path) -> Iterator[Path]:
 
 def _is_sqlite(path: Path) -> bool:
     """Whether a file's first bytes are SQLite's magic."""
-    with path.open("rb") as handle:
+    with open_regular(path) as handle:
         return handle.read(len(SQLITE_MAGIC)) == SQLITE_MAGIC
 
 
