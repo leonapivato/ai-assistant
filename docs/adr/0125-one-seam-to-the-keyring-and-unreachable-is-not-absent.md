@@ -875,15 +875,32 @@ property being tested.
 > **Normative.** `SecretsContract` proves, against every subject: an entry
 > arranged through `given` is returned verbatim, including a value with leading
 > and trailing whitespace, embedded newlines and non-ASCII characters; `get` of an
-> unset name returns `None`; two names differing only in `scope` are distinct
-> entries, and two differing only in `key` are distinct; two subjects bound to
-> different installations share no entry, so an entry arranged in one is `None` in
-> the other; two subjects **over one backing** differing only in installation, and
-> two differing only in scope, each keep their entries isolated under the same
-> `key`; a name outside the subject's bound scope raises `ValueError` and the
+> unset name returns `None`; two names differing only in `key` are distinct
+> entries; a name outside the subject's bound scope raises `ValueError`, and the
 > subject's own scope still answers afterwards; the subject satisfies `Secrets` by
 > `isinstance`; and no secret value appears in the `repr` of the subject, of a
 > `SecretValue`, or of any error the subject raises.
+
+> **Normative.** Isolation is proved with **two subjects over one backing**, twice:
+> a pair differing only in installation, and a pair differing only in scope. Under
+> the same `key`, neither pair's entries reach the other.
+
+**A single subject cannot be asked to tell two scopes apart, and an earlier draft
+asked it to.** That case was written before §2 bound an instance to one scope, and
+after it the subject is required to *refuse* the scope it is not bound to — so the
+assertion contradicted the boundary it sat beside. The distinction it was reaching
+for is real and is now where it belongs: two scope-bound subjects over one
+backing, which is also the only arrangement that catches an adapter serialising
+`key` alone.
+
+**The shared backing is what gives both pairs teeth.** Two subjects holding
+separate maps cannot observe each other's entries however the adapter composes its
+coordinates, so the pairing alone proves nothing. Over one backing they can, and
+that is the real deployment: one OS keyring holding every scope of every
+installation on the machine. The failures it catches are the two §2 exists to
+prevent — `api-key` under `PROVIDER` and under `INTEGRATION` collapsing into one
+entry, and a second data directory overwriting the first's credential and deleting
+it at unenrolment.
 
 > **Normative.** `SecretStoreContract` inherits every obligation above, binding
 > the same subject through the narrow face rather than a second object, and adds:
@@ -928,19 +945,6 @@ for the same reason and `core/types.py`'s `encodable_text` is the predicate; ADR
 §2b is where the corpus first named this `str`. Requiring it at both entry points
 is deliberate: the callable is where a hand-built value is caught and `set` is
 where a bare `SecretStr` is (§4).
-
-**The isolation obligations are in the suite rather than left to the adapter, and
-the shared backing is what gives them teeth.** Every other test on this list passes
-against a subject that ignores both its installation and its scope, because one
-subject cannot observe another's entries by accident — and two subjects holding
-*separate* maps cannot either, which is why "two subjects" alone is not enough.
-Over one backing they can, and that is the real deployment: one OS keyring holding
-every scope of every installation on the machine. The failures it catches are the
-two §2 exists to prevent — an adapter composing backend coordinates from the key
-alone, so `api-key` under `PROVIDER` and under `INTEGRATION` are one entry; and one
-composing them without the installation, so a second data directory overwrites the
-first's credential and its unenrolment deletes it. Both become red tests rather
-than support tickets.
 
 > **Normative.** The suite proves the unavailable state too — that every method
 > raises `SecretStoreUnavailableError` and that `get` does not return `None` — as a
