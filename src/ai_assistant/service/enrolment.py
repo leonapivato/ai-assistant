@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
 from ai_assistant.wire.credential import mint_credential, verifier_for, verifies
 
 if TYPE_CHECKING:
@@ -275,7 +276,17 @@ class EnrolmentStore:
 
         Returns:
             The new enrolment, and whether it displaced a live one.
+
+        Raises:
+            ValueError: If the identity is over
+                :data:`~ai_assistant.service.overlay.MAX_OVERLAY_IDENTITY_BYTES`.
+                **Checked here, before the transaction**, because that ordering is
+                the whole of the guarantee: ADR-0124 §6 requires an enrolment to
+                disclose its credential once, and an act that committed a row and
+                then failed to render its answer would have minted a credential
+                nobody ever read and left the device enrolled under it.
         """
+        _bounded_identity(identity)
         stamp = _stamp(now)
         with self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -500,6 +511,25 @@ class DeviceRegistry:
         """Close whatever connections a device holds, now that it holds none by right."""
         for callback in self._on_expelled:
             callback(identity, reason)
+
+
+def _bounded_identity(identity: str) -> None:
+    """Refuse an overlay identity too large to travel in an answer about it.
+
+    Args:
+        identity: The candidate.
+
+    Raises:
+        ValueError: If it exceeds the bound.
+    """
+    size = len(identity.encode("utf-8"))
+    if size > MAX_OVERLAY_IDENTITY_BYTES:
+        msg = (
+            f"an overlay identity of {size} bytes is over the "
+            f"{MAX_OVERLAY_IDENTITY_BYTES}-byte bound; no overlay this hub accepts "
+            f"produces one, and an enrolment recorded under it could not be reported"
+        )
+        raise ValueError(msg)
 
 
 def _as_enrolment(row: sqlite3.Row) -> Enrolment:

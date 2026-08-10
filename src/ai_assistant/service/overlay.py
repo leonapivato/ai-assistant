@@ -50,6 +50,20 @@ TAILSCALE_SOCKETS: Final[tuple[str, ...]] = (
     "/run/tailscale/tailscaled.sock",
 )
 
+#: What an overlay identity may occupy, encoded. Every overlay §2 could accept
+#: names a node with a short stable identifier — Tailscale's are a dozen or so
+#: characters — so this is generous by an order of magnitude and exists to make the
+#: identity a *bounded* value rather than to fit any real one.
+#:
+#: **Bounding it is load-bearing rather than defensive**, and two things rest on
+#: it. The enrolment reply repeats the identity beside the credential ADR-0124 §6
+#: discloses "once at enrolment and never again", so an identity large enough to
+#: overflow that reply would leave an enrolment committed whose credential nobody
+#: ever read — the clause defeated by a value nothing bounded. And a listing
+#: carries one identity per row, so a bound on rows is a bound on the answer only
+#: if a row is bounded too.
+MAX_OVERLAY_IDENTITY_BYTES: Final[int] = 128
+
 #: The ``Host`` header the local API requires. It is not a name that resolves and
 #: is never looked up; the connection is already open to the Unix socket by the
 #: time it is written.
@@ -328,6 +342,16 @@ def _stable_id(node: dict[str, Any]) -> str:
         msg = (
             "the overlay agent reported a node with no stable identity; an enrolment "
             "recorded against a name or an address would follow a rename or a reassignment"
+        )
+        raise OverlayIdentityUnavailableError(msg)
+    if len(identity.encode("utf-8")) > MAX_OVERLAY_IDENTITY_BYTES:
+        # Refused at the seam that *produces* an identity, so nothing downstream has
+        # to re-derive the bound. §4's answer to an identity it cannot use is the
+        # same as its answer to one it cannot obtain: the connection is refused.
+        msg = (
+            f"the overlay agent reported a stable identity over "
+            f"{MAX_OVERLAY_IDENTITY_BYTES} bytes, which no overlay this hub accepts "
+            f"produces; the peer is refused rather than recorded under it"
         )
         raise OverlayIdentityUnavailableError(msg)
     return identity

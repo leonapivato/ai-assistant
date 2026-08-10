@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from ai_assistant.core.clock import checked_clock
+from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
 from ai_assistant.wire.address import SOCKET_MODE, admin_socket_path, check_admin_socket_path
 from ai_assistant.wire.errors import TransportError
 from ai_assistant.wire.framing import read_frame, write_frame
@@ -234,6 +235,19 @@ class AdminListener:
         if not isinstance(identity, str) or not identity.strip():
             return _failed("a device act must name the device's overlay identity")
         identity = identity.strip()
+        # **Before the act, not after it**, and the ordering is the guarantee rather
+        # than tidiness. An enrolment's reply repeats the identity beside the
+        # credential ADR-0124 §6 discloses "once at enrolment and never again", so an
+        # identity large enough to overflow that reply would commit a row and then
+        # fail to render the one answer the act exists to produce — leaving the
+        # device enrolled under a credential nobody read. The store refuses it too
+        # (:func:`~ai_assistant.service.enrolment._bounded_identity`); that refusal
+        # is the invariant and this one is the sentence an owner gets.
+        if len(identity.encode("utf-8")) > MAX_OVERLAY_IDENTITY_BYTES:
+            return _failed(
+                f"an overlay identity is at most {MAX_OVERLAY_IDENTITY_BYTES} bytes; "
+                f"use the stable identifier your overlay agent reports for the device"
+            )
         if act == ENROL:
             minted = self._registry.enrol(identity, now=self._now())
             return {
