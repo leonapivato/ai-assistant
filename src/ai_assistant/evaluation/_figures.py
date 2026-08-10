@@ -113,10 +113,11 @@ class Rate:
 class Distribution:
     """A summary of a sample the report states rather than a rate.
 
-    Used for the two §7 diagnostics that are per-event figures: an ``OPERATION``
-    trace's ``elapsed``, and the window share of each shortfall read. Summarised
-    rather than listed because the per-read figures run to thousands of lines on
-    a real stream and none of them is a measure.
+    Used for the §7 diagnostic that is a per-event figure: an ``OPERATION``
+    trace's ``elapsed``. Summarised rather than listed because the per-operation
+    figures run to thousands of lines on a real stream and none of them is a
+    measure. (It summarised the window share of each shortfall read as well until
+    ADR-0128 §3 retired that watch.)
 
     Attributes:
         count: How many observations the summary is over.
@@ -298,23 +299,6 @@ class SeamLatency:
 
 
 @dataclass(frozen=True, slots=True)
-class Shortfall:
-    """#824's watch, defined inside the bound the emitter imposes (§7).
-
-    Attributes:
-        incidence: Saturated shortfall reads over every retrieval in the window
-            carrying the eight counts — "the population the question is about".
-        shares: ``excluded_window ÷ (candidates - returned)`` for each shortfall
-            read where the two differ. A shortfall that excluded nothing is one
-            the KNN ceiling alone bound; it is counted in the incidence and left
-            out of the share.
-    """
-
-    incidence: Rate
-    shares: Distribution
-
-
-@dataclass(frozen=True, slots=True)
 class StreamHealth:
     """The counts that let a reader distrust the rest (§7).
 
@@ -331,7 +315,12 @@ class StreamHealth:
         by_kind: Those traces by kind.
         malformed: Excluded from every population under §2.
         truncated: Excluded from a population joining on a truncated set.
-        counter_inconsistent: Excluded from §7's population and no other.
+        counter_inconsistent: A retrieval trace whose eight counts cannot all be
+            true of one read (§2). It excluded such a trace from §7's shortfall
+            population, which ADR-0128 §3 has since retired; §2's rule "stands
+            unchanged" there, so the count is still taken and still stated — it
+            now excludes a trace from nothing and reports only that the stream
+            carries one.
         unattributed: Writes whose causing operation could not be identified.
         unclassified: Writes attributed to a seam on neither of §3's lists.
         unclassified_seams: Each such seam, named so it can be classified.
@@ -373,7 +362,6 @@ class MeasureReport:
         whole: Every measure over the window entire, or ``None``.
         parts: The window's parts, one per configuration change inside it.
             Empty when the configuration never moved.
-        shortfall: §7's #824 watch, or ``None``.
         latency: §7's per-seam operation latency, in seam order.
         health: §7's stream-health counts, or ``None``.
     """
@@ -384,7 +372,6 @@ class MeasureReport:
     settling: timedelta | None = None
     whole: Part | None = None
     parts: tuple[Part, ...] = ()
-    shortfall: Shortfall | None = None
     latency: tuple[SeamLatency, ...] = ()
     health: StreamHealth | None = None
 
@@ -423,11 +410,15 @@ class MeasureReport:
         ]
 
     def _diagnostic_lines(self) -> list[str]:
-        """§7's shortfall watch and latency summary, over the whole window."""
+        """§7's latency summary, over the whole window.
+
+        §7's #824 shortfall watch stood here until ADR-0128 §3 retired it: after
+        the eligibility pre-filter its window share is identically zero and its
+        incidence "stops measuring the store", so "the offline report states no
+        shortfall incidence and no window share". The question it stood in for is
+        answered over the store instead, by the census ADR-0129 defines.
+        """
         lines = ["diagnostics over the window entire — none of these is a measure"]
-        if self.shortfall is not None:
-            lines.append(f"  shortfall incidence (#824)     {self.shortfall.incidence.rendered()}")
-            lines.append(f"  window share of a shortfall    {self.shortfall.shares.rendered()}")
         lines.append("  operation latency, seconds")
         if not self.latency:
             lines.append("    no operation trace in the window")

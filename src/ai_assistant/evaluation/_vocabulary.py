@@ -31,7 +31,12 @@ from typing import Final
 #: The ``limit`` the caller asked for.
 LIMIT: Final = "limit"
 
-#: The ceiling the KNN was asked for, after the over-fetch multiplier and clamp.
+#: The ceiling the KNN was asked for: the caller's ``limit``, clamped to
+#: sqlite-vec's own ``k`` ceiling and nothing else. There is no over-fetch
+#: multiplier to apply — ADR-0128 §1 binds every eligibility predicate before the
+#: ranking cut, so every candidate the KNN returns is already eligible and an
+#: over-fetch could buy nothing. This comment described the multiplier for a while
+#: after the emitter stopped applying one (#926).
 FETCH_K: Final = "fetch_k"
 
 #: The pre-filter candidate count the store fetched.
@@ -56,8 +61,9 @@ EXCLUDED_BAND: Final = "excluded_band"
 #: The four exclusion counters, in the order the partition test sums them.
 EXCLUSION_KEYS: Final = (EXCLUDED_KIND, EXCLUDED_RETENTION, EXCLUDED_WINDOW, EXCLUDED_BAND)
 
-#: The eight counts ADR-0120 §7's shortfall watch reads, and the set §2's
-#: counter-consistency rule is stated over.
+#: The eight counts ADR-0120 §2's counter-consistency rule is stated over. They
+#: were also what §7's #824 shortfall watch read; ADR-0128 §3 retired that watch
+#: and left §2's rule standing unchanged, so the set outlives its second reader.
 RETRIEVAL_COUNT_KEYS: Final = (LIMIT, FETCH_K, CANDIDATES, RETURNED, *EXCLUSION_KEYS)
 
 # --- write metric keys (`memory/traces.py`) -----------------------------------

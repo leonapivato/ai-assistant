@@ -450,34 +450,30 @@ class TestAttribution:
         assert result.whole.correction.defined is False
 
 
-class TestShortfallWatch:
-    """§7 — #824's trigger, defined inside the bound the emitter imposes."""
+class TestRetrievalDiagnostics:
+    """§7's surviving diagnostics, after ADR-0128 §3 retired #824's watch."""
 
-    async def test_incidence_counts_saturated_shortfall_reads(self) -> None:
-        """A read that filled its page is in the population and is not a shortfall."""
-        shortfall = read_counts(
+    async def test_no_shortfall_figure_is_stated_at_all(self) -> None:
+        """ADR-0128 §3: "``MeasureReport`` carries no shortfall figure".
+
+        Asserted over the read that used to *be* the watch's whole subject — a
+        saturated shortfall, ``returned < limit`` with ``candidates >= fetch_k``
+        and a window exclusion to take a share of. The old suite read two
+        figures off exactly this stream; the report now states neither, and the
+        rendered text names neither.
+        """
+        saturated = read_counts(
             candidates=40, returned=3, excluded_kind=10, excluded_retention=7, excluded_window=20
         )
         result = await report(
             retrieval(when=at(days=1), returned=None, counts=read_counts()),
-            retrieval(when=at(days=2), returned=None, counts=shortfall),
+            retrieval(when=at(days=2), returned=None, counts=saturated),
         )
-        assert result.shortfall is not None
-        assert result.shortfall.incidence.numerator == 1
-        assert result.shortfall.incidence.denominator == 2
-        assert result.shortfall.shares.count == 1
-        assert result.shortfall.shares.maximum == 20 / 37
+        assert not hasattr(result, "shortfall")
+        assert "shortfall" not in result.render()
 
-    async def test_a_shortfall_bound_only_by_the_knn_ceiling_has_no_share(self) -> None:
-        """ "Counted in the incidence and left out of the share"."""
-        bound = read_counts(candidates=3, returned=3, limit=10, fetch_k=3)
-        result = await report(retrieval(when=at(days=1), returned=None, counts=bound))
-        assert result.shortfall is not None
-        assert result.shortfall.incidence.numerator == 1
-        assert result.shortfall.shares.count == 0
-
-    async def test_counter_inconsistency_leaves_this_population_and_no_other(self) -> None:
-        """The trace "can still tell §4 exactly which ids came back"."""
+    async def test_counter_inconsistency_is_counted_and_excludes_nothing(self) -> None:
+        """ADR-0128 §3 leaves §2's rule standing; §4 still gets the ids that came back."""
         impossible = read_counts(candidates=0, returned=1)
         result = await report(
             retrieval(when=at(days=1), returned=("r1",), counts=impossible, correlation="c1"),
@@ -487,8 +483,6 @@ class TestShortfallWatch:
         assert result.health is not None
         assert result.health.counter_inconsistent == 1
         assert result.health.malformed == 0
-        assert result.shortfall is not None
-        assert result.shortfall.incidence.denominator == 0
         assert result.whole is not None
         assert result.whole.user.non_ambiguous == 1
 
