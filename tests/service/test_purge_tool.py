@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import errno
 import os
+import shutil
 import sqlite3
 import stat
 from datetime import UTC, datetime
@@ -773,3 +774,55 @@ def test_a_data_directory_other_users_may_write_to_is_refused(data_dir: Path) ->
         assert (data_dir / "memory.db").exists()
     finally:
         data_dir.chmod(0o700)
+
+
+# ---------------------------------------------------------------------------
+# The boundary holds where the act's own machinery writes, and where a directory
+# moves under it
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("settings")
+def test_a_symbolic_link_at_the_lock_path_is_refused_before_it_is_written_through(
+    tmp_path: Path, data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§1: the act "destroys nothing whose path is outside the resolved ``data_dir``".
+
+    Taking the lock truncates the file and writes a pid into it, so following a
+    link here destroys a file outside the boundary — before the owner has confirmed
+    anything — and then exempts the link from destruction and reports success.
+    """
+    outside = tmp_path / "precious.txt"
+    outside.write_text("the owner never named this")
+    (data_dir / LOCK_FILENAME).unlink()
+    (data_dir / LOCK_FILENAME).symlink_to(outside)
+
+    before = _remaining(data_dir)
+    assert _run(data_dir) == EXIT_DEPLOYMENT
+    assert outside.read_text() == "the owner never named this"
+    assert _remaining(data_dir) == before
+    assert str(data_dir / LOCK_FILENAME) in capsys.readouterr().err
+
+
+@pytest.mark.usefixtures("settings")
+def test_a_directory_removed_between_listing_and_descent_is_not_a_survivor(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§1 asks for "every path that remains", and one that has gone does not remain.
+
+    The instance lock excludes a second hub, not an unrelated process in the
+    owner's own directory, so the window between listing an entry and entering it
+    is real rather than theoretical.
+    """
+    real_open = purge._open_directory
+    vanished = data_dir / "vectors" / "shards"
+
+    def vanishing(directory: int | None, name: str) -> int:
+        if name == vanished.name and vanished.exists():
+            shutil.rmtree(vanished)
+        return real_open(directory, name)
+
+    monkeypatch.setattr(purge, "_open_directory", vanishing)
+    assert _run(data_dir) == EXIT_OK
+    assert _remaining(data_dir) == {LOCK_FILENAME}
+    assert "did not complete" not in capsys.readouterr().out

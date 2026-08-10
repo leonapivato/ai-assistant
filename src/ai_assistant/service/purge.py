@@ -44,6 +44,7 @@ claims to have purged everything.
 from __future__ import annotations
 
 import argparse
+import errno
 import os
 import re
 import sqlite3
@@ -277,13 +278,56 @@ def _purge(data_dir: Path, *, confirmation: Path | None) -> int:
     datadir.prepare(data_dir)
     _refuse_descendant_mounts(data_dir)
 
-    lock = InstanceLock(data_dir / LOCK_FILENAME)
-    if not lock.acquire():
+    lock = InstanceLock(data_dir / LOCK_FILENAME, follow_symlinks=False)
+    if not _acquire(lock):
         return _report_contention(lock)
     try:
         return _run_locked(data_dir, confirmation=confirmation)
     finally:
         lock.release()
+
+
+def _acquire(lock: InstanceLock) -> bool:
+    """Take the lock, refusing rather than writing through a link at its path (§1).
+
+    **Acquiring the lock is a write**, and that is the whole of why this is here:
+    :meth:`~ai_assistant.service.lock.InstanceLock.acquire` truncates the lock file
+    and writes a pid into it, so a ``hub.lock`` that is a symbolic link means the
+    act destroys the contents of a file *outside* the data directory — before the
+    owner has confirmed anything, and then exempts the link from destruction and
+    reports a complete purge. §1 forbids both halves: "the act destroys nothing
+    whose path is outside the resolved ``data_dir``", and it "never follows a
+    symbolic link".
+
+    **The no-follow flag rather than an ``lstat`` first**, because a check before
+    the open is not the check: the entry can be replaced between the two, and this
+    package's whole discipline is that "a name is not an object" (ADR-0123 §1).
+    The kernel decides it in the same call that takes the lock.
+
+    Args:
+        lock: The lock to take, built no-follow.
+
+    Returns:
+        Whether it is now held.
+
+    Raises:
+        RefusalError: If the lock path is a symbolic link. A refusal rather than
+            the raw ``ELOOP``, which is not a filesystem *access* fault and would
+            classify as restartable (ADR-0083 §5) — a condition that never clears
+            on its own, mapped to "come back and try again".
+    """
+    try:
+        return lock.acquire()
+    except OSError as exc:
+        if exc.errno != errno.ELOOP:
+            raise
+        msg = (
+            f"{lock.path} is a symbolic link. Taking the instance lock writes to that path, "
+            f"so this act would destroy the contents of whatever the link names — which is "
+            f"outside the data directory and not this act's to touch. Nothing was destroyed; "
+            f"remove the link and run this again"
+        )
+        raise RefusalError(msg) from exc
 
 
 def _run_locked(data_dir: Path, *, confirmation: Path | None) -> int:
@@ -460,9 +504,19 @@ def _refuse_unremovable(data_dir: Path) -> None:
     """
     failures: list[str] = []
     for directory in _directories(data_dir, failures):
-        for mode, word in _REQUIRED_ACCESS:
-            if not os.access(directory, mode, effective_ids=_EFFECTIVE_IDS):
-                failures.append(f"{directory} is not {word} by this process")
+        lacking = [
+            word
+            for mode, word in _REQUIRED_ACCESS
+            if not os.access(directory, mode, effective_ids=_EFFECTIVE_IDS)
+        ]
+        # A directory that went away between being listed and being checked is not
+        # one that would stop the act — there is nothing left to descend into — and
+        # refusing over it would deny the delete right for a path that no longer
+        # exists. Checked only when something failed, so the ordinary walk pays
+        # nothing for it.
+        if not lacking or not directory.is_dir():
+            continue
+        failures.extend(f"{directory} is not {word} by this process" for word in lacking)
     if not failures:
         return
     listed = "\n  ".join(failures)
@@ -497,6 +551,8 @@ def _directories(data_dir: Path, failures: list[str]) -> Iterator[Path]:
         try:
             with os.scandir(directory) as scan:
                 entries = sorted(scan, key=lambda item: item.name)
+        except FileNotFoundError:
+            continue
         except OSError as exc:
             failures.append(f"{directory} could not be listed: {exc}")
             continue
@@ -745,12 +801,22 @@ def _destroy_tree(root: int, *, data_dir: Path, reserved: frozenset[str]) -> lis
 
 
 def _descend(levels: list[_Level], *, data_dir: Path, survivors: list[_Survivor]) -> None:
-    """Enter the next subdirectory of the innermost level, or record why not."""
+    """Enter the next subdirectory of the innermost level, or record why not.
+
+    **A directory that has already gone is not a survivor**, and reporting one as
+    such would breach the clause the report exists for: §1 asks for "every path
+    that remains and why", and a path that does not remain is neither. The instance
+    lock excludes a second hub, not an unrelated process in the owner's own
+    directory, so the window between listing an entry and entering it is real. It
+    is the same answer :func:`_fill` already gives an unlink that finds nothing.
+    """
     level = levels[-1]
     name = level.children.popleft()
     relative = f"{level.relative}/{name}" if level.relative else name
     try:
         descriptor = _open_directory(level.descriptor, name)
+    except FileNotFoundError:
+        return
     except OSError as exc:
         survivors.append(_Survivor(path=data_dir / relative, error=exc, opaque=True))
         return

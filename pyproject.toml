@@ -145,8 +145,10 @@ ai-assistant-device = "ai_assistant.service.device:main"
 # forecloses the subcommand independently of any lock.
 ai-assistant-backup = "ai_assistant.service.backup:main"
 ai-assistant-restore = "ai_assistant.service.restore:main"
-# The owner's whole-installation delete (ADR-0126 §2), the sixth entry point and
-# the first whose separate script is forced twice over. Once by the family's rule:
+# The owner's whole-installation delete (ADR-0126 §2), the eighth console script
+# and the offline family's fifth member — ADR-0126's Context counts the seven that
+# shipped before it and its Consequences name this one "a fifth member". It is the
+# first whose separate script is forced twice over. Once by the family's rule:
 # it takes the instance lock, the lock is in `service`, and nothing may import
 # `service`. And once by ADR-0124 §6, which the other five never met —
 # `wire/surface.py` derives the wire's method set from `AssistantEngine`, so an
