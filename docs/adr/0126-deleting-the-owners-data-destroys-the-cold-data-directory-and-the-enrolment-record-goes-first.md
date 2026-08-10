@@ -1,7 +1,8 @@
 # 126. Deleting the owner's data destroys the cold data directory, and the enrolment record goes first
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-10
+- Accepted: 2026-08-10
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-10**,
   the durability form ADR-0100 established and ADR-0125 followed. Four of the ADRs
   this decision rests on — ADR-0004, ADR-0007, ADR-0017 and ADR-0124 — carry
@@ -35,7 +36,14 @@
   seam a filed issue expected to exist, and it partially supersedes a clause
   ratified the day before — the edge cases are answerable from prose, before an
   implementation commits to an answer (`CONTRIBUTING.md` → "Contract ADRs land
-  before their implementation").
+  before their implementation"). **Both ran against this decision while it was
+  `Proposed`, and both changed it.** Adversarial produced §1's symbolic-link and
+  mount-point clauses, §5's ordering *inside* the enrolment group, and §4's and
+  §7's treatment of an installation that never configured a remote listener;
+  architecture produced §6's whole shape — an earlier draft had the act holding a
+  `SecretStore`, which ADR-0125 §8 forbids `service` — and §11, which an earlier
+  draft did not have at all. Each is recorded at the clause it changed rather than
+  only here.
 
 ## Context
 
