@@ -130,9 +130,11 @@ actually holds, so this is the inventory it was checked against at `origin/main`
   yielded** … An expired record is never yielded and neither is one whose window is
   closed or not yet open", because "the walk sides with `get`/`search` rather than
   with `export`". So a store holding nothing but retired records produces an empty
-  walk. The one contract member that returns them is `export`, which returns the
-  whole store in one list. Neither returns an embedding, and `MemoryRecord` has no
-  field for one.
+  walk. `export` does return the window-closed records — "a superseded belief is data
+  the store holds" — and excludes the expired ones, since "retention still wins over
+  history"; it returns the whole store in one list. **So no member returns every
+  record the store physically holds.** None of them returns an embedding, and
+  `MemoryRecord` has no field for one.
 - **The vectors are in the store and nowhere else.** `SqliteMemoryStore` creates
   `vec_records` as a `vec0` virtual table joined to `records` by `rowid` with no
   foreign key, and `search` reads `SELECT r.data, v.distance FROM vec_records v …`.
@@ -303,10 +305,12 @@ stand alone; either is sufficient.
 > **expired at `T`** when `expires_at` is set and at or before `T`. Liveness and
 > expiry are separate axes and a record may be both.
 
-> **Normative.** The **census population** is every record the memory store holds,
-> whatever its liveness or retention state — the population `export` returns, not
-> the live-and-retained subset `walk_records` yields. A retired, not-yet-live or
-> expired record is in it. The report states the population's size.
+> **Normative.** The **census population** is every record **physically present** in
+> the memory store at the read, whatever its liveness or retention state: a retired,
+> a not-yet-live and an unpurged expired record are each in it. No `MemoryStore`
+> member returns this population, and none is required to — `export` excludes
+> expired records and `walk_records` yields only the retained and live. The report
+> states the population's size.
 
 > **Normative.** The report states the **closure census**: over the census
 > population, the total and the counts live, retired, not-yet-live and expired at
@@ -343,6 +347,18 @@ stand alone; either is sufficient.
 
 > **Normative.** The report states how many records of the census population the
 > store holds no vector for, separately from every other count.
+
+**Physical presence is the population, and it is neither of the two the contract
+offers.** `export` is a data-rights snapshot and drops the expired rows on purpose —
+"Only *expired* records (past `expires_at`) are excluded: retention still wins over
+history, so a record the system promised to forget cannot resurface here" — which is
+right for an export and wrong for a census, because an unpurged expired row is still a
+row in the scan, in the backup and in a re-embed until `purge_expired` runs. That
+backlog is one of the things an operator reads this report to see. `walk_records`
+drops more still. So the population is stated as physical presence, which is the same
+notion `SqliteMemoryStore.get` already works in, and §5 records that no contract
+member supplies it — a third and independent reason the mechanism reads the store's
+storage rather than its contract.
 
 **The census is kept even though #799 ruled the proportion useless, and the job has
 changed.** #799 ruled it the wrong *tuning* statistic — it does not predict the
@@ -515,12 +531,15 @@ row after ADR-0128 §1 (§2). `walk_records` yields "only records retained *and*
 the instant it reads", so a walk cannot see one either — and that is not an oversight
 to route around but ADR-0114's ruling that "the walk sides with `get`/`search` rather
 than with `export`, because everything that *derives* new content reads the live set".
-The one member that returns the census population is `export`, which returns the whole
-store in a single `list[MemoryRecord]`, and none of the three returns an embedding. So
-a reader placed in `evaluation/` could compute the census, the closure age and the band
-fill only by holding every record in memory at once, and **could not compute the
-concentration figure at all** — the package boundary would pick the figures, which is
-backwards, and the figure it would drop is the one ADR-0128 §3 routed here.
+And `export`, which does return the window-closed records, is a data-rights snapshot
+that excludes the expired ones — "retention still wins over history" — so it cannot
+supply §3's purge backlog either, and it returns the whole store in a single
+`list[MemoryRecord]`. **No `MemoryStore` member returns the census population**, and
+none of them returns an embedding. So a reader placed in `evaluation/` could take a
+census that is short by the expired rows, only by holding every record in memory at
+once, and **could not compute the concentration figure at all** — the package boundary
+would pick the figures, which is backwards, and the figure it would drop is the one
+ADR-0128 §3 routed here.
 
 *Adding the vectors to the `MemoryStore` contract* would restore that placement and is
 declined on three grounds, none of which is the cost of writing the ADR. It is a
@@ -635,6 +654,11 @@ that reads as numbers. Naming it separately costs a sentence and closes a door t
 > absent store, an empty store, a store with no retired record, a store with no
 > vector for any record, and a contended lock. Each is a stated output and not an
 > exception.
+
+> **Normative.** The tests assert that an **unpurged expired** record — one past
+> `expires_at` that `purge_expired` has not yet removed — is in the census
+> population, counted as expired, and counted in the total, over a store where
+> `export` would not return it.
 
 > **Normative.** The tests assert §3's `k` domain at its boundaries: a store
 > holding exactly `k` vector-bearing records reports the figure undefined, a store
