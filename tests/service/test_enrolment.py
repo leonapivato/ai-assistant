@@ -169,7 +169,8 @@ def test_a_revocation_is_recorded_rather_than_erasing_the_enrolment(
     later = _MOMENT + timedelta(days=3)
     assert registry.revoke(_LAPTOP, now=later)
 
-    (recorded,) = registry.enrolments()
+    ((recorded,), total) = registry.enrolments()
+    assert total == 1
     assert recorded.overlay_identity == _LAPTOP
     assert recorded.enrolled_at == _MOMENT
     assert recorded.revoked_at == later
@@ -183,7 +184,7 @@ def test_revoking_a_device_that_holds_nothing_changes_nothing(registry: DeviceRe
     did not perform — the same honesty ADR-0124 §8 requires of the delete surface.
     """
     assert registry.revoke(_LAPTOP, now=_MOMENT) is False
-    assert registry.enrolments() == []
+    assert registry.enrolments() == ([], 0)
 
 
 def test_re_enrolling_rotates_in_one_act_and_leaves_one_live_enrolment(
@@ -204,7 +205,8 @@ def test_re_enrolling_rotates_in_one_act_and_leaves_one_live_enrolment(
     assert second.credential != first.credential
     assert registry.verify(_LAPTOP, second.credential).enrolment_id == second.enrolment.enrolment_id
     assert registry.verify(_LAPTOP, first.credential).refusal is Refusal.CREDENTIAL
-    assert [one.is_live for one in registry.enrolments()] == [False, True]
+    # Newest first, so the live replacement leads and the revoked original follows.
+    assert [one.is_live for one in registry.enrolments()[0]] == [True, False]
 
 
 def test_a_revoked_credential_is_never_reinstated(registry: DeviceRegistry) -> None:
@@ -249,8 +251,9 @@ def test_a_revoked_identity_may_be_enrolled_again(store: EnrolmentStore) -> None
     store.enrol(_LAPTOP, verifier=verifier_for(mint_credential()), now=_MOMENT)
     store.revoke(_LAPTOP, now=_MOMENT + timedelta(minutes=1))
     store.enrol(_LAPTOP, verifier=verifier_for(mint_credential()), now=_MOMENT + timedelta(hours=1))
-    assert len(store.all_enrolments()) == 2
-    assert [one.is_live for one in store.all_enrolments()] == [False, True]
+    rows, total = store.recent_enrolments(limit=10)
+    assert total == 2
+    assert [one.is_live for one in rows] == [True, False]
 
 
 def test_liveness_is_keyed_to_the_enrolment_a_connection_claimed(

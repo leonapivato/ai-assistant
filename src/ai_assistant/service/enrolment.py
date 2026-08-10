@@ -89,6 +89,13 @@ class Verdict:
 #: The record's file inside ``data_dir`` (ADR-0124 §6, ADR-0083's layout).
 ENROLMENTS_FILENAME: Final[str] = "devices.db"
 
+#: How many enrolments one listing carries, newest first. The record only ever
+#: grows (ADR-0124 §6 keeps every revocation), so the surface that reads it is
+#: bounded and says what it omitted rather than eventually failing to answer at
+#: all. Named here rather than left to the caller, following ADR-0083 §7's rule
+#: that "a 'bounded default' with no figure" is two callers disagreeing.
+LISTING_LIMIT: Final[int] = 200
+
 #: Owner-only, which is ADR-0004 §4's posture. The directory is ``0700`` and
 #: validated (:mod:`ai_assistant.service.datadir`); this states the file's own mode
 #: rather than inheriting whatever umask the process happened to hold.
@@ -195,16 +202,50 @@ class EnrolmentStore:
         """Let go of the connection."""
         self._conn.close()
 
-    def all_enrolments(self) -> Sequence[Enrolment]:
-        """Every enrolment ever recorded, revoked ones included (§6).
+    def recent_enrolments(self, *, limit: int) -> tuple[Sequence[Enrolment], int]:
+        """The newest enrolments the record holds, revoked ones included (§6).
+
+        **Bounded in the query rather than after it, because the record only ever
+        grows.** ADR-0124 §6 keeps every revocation — "a revocation is recorded
+        rather than erasing the enrolment it revokes" — so a deployment that
+        re-enrols a device on a schedule accumulates rows without end. An unbounded
+        read would eventually build a reply too large for the frame it has to
+        travel in, and the surface an owner uses to *check* the record would be the
+        first thing the record's own growth broke.
+
+        The total is returned beside the rows so a caller can say what it did not
+        show. A listing that silently stopped at a limit would be the shortfall
+        ADR-0083's ruling 4 exists to prevent, in the one place an owner goes to
+        find out what they decided.
+
+        Args:
+            limit: How many rows to return, newest first.
 
         Returns:
-            The rows, oldest first.
+            The rows, **newest first**, and how many the record holds in total.
         """
         rows = self._conn.execute(
-            "SELECT id, overlay_identity, enrolled_at, revoked_at FROM enrolments ORDER BY id"
+            "SELECT id, overlay_identity, enrolled_at, revoked_at FROM enrolments "
+            "ORDER BY id DESC LIMIT ?",
+            (limit,),
         ).fetchall()
-        return [_as_enrolment(row) for row in rows]
+        (total,) = self._conn.execute("SELECT count(*) FROM enrolments").fetchone()
+        return [_as_enrolment(row) for row in rows], int(total)
+
+    def known_identities(self) -> set[str]:
+        """Every device the record has ever held an enrolment for.
+
+        Its own query rather than a walk over
+        :meth:`recent_enrolments`, for the reason that method is bounded: the set is
+        what ADR-0124 §7's unenrolled/revoked distinction is decided from, and it
+        has to be complete however long the history is. ``DISTINCT`` keeps it
+        proportional to the number of *devices* rather than to the number of acts.
+
+        Returns:
+            The identities.
+        """
+        rows = self._conn.execute("SELECT DISTINCT overlay_identity FROM enrolments").fetchall()
+        return {row["overlay_identity"] for row in rows}
 
     def live_verifiers(self) -> dict[str, tuple[int, str]]:
         """The live enrolments, as the admission path needs them.
@@ -318,7 +359,7 @@ class DeviceRegistry:
         # matters beyond speed: a synchronous verdict is what lets §8's checks be
         # synchronous, and a database read on the admission path would be one more
         # place an ``await`` could be introduced later without anyone noticing.
-        self._known = {one.overlay_identity for one in store.all_enrolments()}
+        self._known = store.known_identities()
         self._on_expelled: list[ExpelCallback] = []
 
     @property
@@ -444,13 +485,16 @@ class DeviceRegistry:
             _log.info("device_revoked", overlay_identity=identity)
         return revoked
 
-    def enrolments(self) -> Sequence[Enrolment]:
-        """Every enrolment the record holds, revoked ones included.
+    def enrolments(self, *, limit: int = LISTING_LIMIT) -> tuple[Sequence[Enrolment], int]:
+        """The newest enrolments the record holds, and how many it holds in all.
+
+        Args:
+            limit: How many to return, newest first.
 
         Returns:
-            The rows, oldest first.
+            The rows and the total, so a surface can say what it did not show.
         """
-        return self._store.all_enrolments()
+        return self._store.recent_enrolments(limit=limit)
 
     def _expel(self, identity: str, *, reason: str) -> None:
         """Close whatever connections a device holds, now that it holds none by right."""

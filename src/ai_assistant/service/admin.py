@@ -49,6 +49,7 @@ import structlog
 
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.wire.address import SOCKET_MODE, admin_socket_path, check_admin_socket_path
+from ai_assistant.wire.errors import TransportError
 from ai_assistant.wire.framing import read_frame, write_frame
 
 if TYPE_CHECKING:
@@ -185,7 +186,13 @@ class AdminListener:
                     json.dumps(reply).encode("utf-8"),
                     max_frame_bytes=ADMIN_FRAME_BYTES,
                 )
-        except (TimeoutError, OSError, ValueError) as exc:
+        except (TimeoutError, OSError, ValueError, TransportError) as exc:
+            # ``TransportError`` is the project's own hierarchy and is neither an
+            # ``OSError`` nor a ``ValueError``: ``read_frame`` raises
+            # ``ConnectionClosedError`` when a device command is interrupted between
+            # frames, which is the ordinary ending rather than a fault. Without this
+            # clause it would fall to the ``except Exception`` below and print a
+            # traceback for somebody pressing Ctrl-C.
             _log.info("hub_admin_act_abandoned", reason=str(exc), error_class=type(exc).__name__)
         except asyncio.CancelledError:
             raise
@@ -241,16 +248,26 @@ class AdminListener:
         return _failed(f"no such device act: {act!r}")
 
     def _listing(self) -> dict[str, Any]:
-        """Every enrolment the record holds, and this hub's own overlay identity.
+        """The newest enrolments the record holds, and this hub's own identity.
 
         Revoked enrolments are listed rather than hidden, because ADR-0124 §6 keeps
         them — "a revocation is recorded rather than erasing the enrolment it
         revokes, so the record says what the owner actually decided and when" — and
         a surface that dropped them would make the record's own point unreadable.
 
+        **Bounded, and it says what it omitted.** The record only ever grows, so an
+        unbounded listing would eventually build a reply larger than
+        :data:`ADMIN_FRAME_BYTES` — and the surface an owner uses to *check* the
+        record would be the first thing the record's own growth broke, failing as a
+        closed connection rather than as an answer. ``omitted`` is what keeps the
+        bound honest: a listing that quietly stopped at a limit would be ADR-0083's
+        ruling 4 failure in the one place an owner goes to find out what they
+        decided.
+
         Returns:
             The reply's members. No verifier appears in it (§7).
         """
+        devices, total = self._registry.enrolments()
         return {
             "ok": True,
             "hub_identity": self._registry.hub_identity,
@@ -261,8 +278,9 @@ class AdminListener:
                     "revoked_at": None if one.revoked_at is None else one.revoked_at.isoformat(),
                     "live": one.is_live,
                 }
-                for one in self._registry.enrolments()
+                for one in devices
             ],
+            "omitted": total - len(devices),
         }
 
 
