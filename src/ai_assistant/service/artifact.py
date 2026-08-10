@@ -53,7 +53,12 @@ from typing import TYPE_CHECKING, Final
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ai_assistant.service.agev1 import DEFAULT_WORK_FACTOR, DecryptingReader, EncryptingWriter
+from ai_assistant.service.agev1 import (
+    CHUNK_BYTES,
+    DEFAULT_WORK_FACTOR,
+    DecryptingReader,
+    EncryptingWriter,
+)
 from ai_assistant.service.refusal import RefusalError
 
 if TYPE_CHECKING:
@@ -289,6 +294,22 @@ class Manifest(BaseModel):
         if len(seen) != len(self.files):
             msg = "the manifest lists a path more than once"
             raise ValueError(msg)
+        # A path that is an *ancestor* of another is a conflict the filesystem
+        # settles rather than this model: `a` and `a/b` are both well-formed and
+        # both unique, and extracting them in that order makes the second one's
+        # `mkdir` raise `FileExistsError` — an `OSError` out of a malformed
+        # artifact, which the exit-code classifier reads as "restarting might
+        # work". Refused here, once, before anything is written.
+        for path in seen:
+            parts = path.split("/")
+            for depth in range(1, len(parts)):
+                ancestor = "/".join(parts[:depth])
+                if ancestor in seen:
+                    msg = (
+                        f"the manifest lists {ancestor!r} as a file and {path!r} beneath it; "
+                        f"one path cannot be both a file and a directory"
+                    )
+                    raise ValueError(msg)
         return self
 
     @property
@@ -589,6 +610,7 @@ def materialise(artifact: Path, *, passphrase: str, staging: Path) -> Manifest:
                 members = iter(archive)
                 manifest = _read_manifest(archive, members)
                 _materialise_payload(archive, members, manifest=manifest, staging=staging)
+            _authenticate_to_the_end(reader)
     except (tarfile.TarError, ValueError, IndexError, EOFError, struct.error) as exc:
         # An artifact that decrypts is not thereby an artifact that unpacks: the
         # age layer authenticates the bytes against the passphrase, and says
@@ -611,6 +633,32 @@ def materialise(artifact: Path, *, passphrase: str, staging: Path) -> Manifest:
         msg = f"the artifact decrypts but its archive cannot be read: {exc}"
         raise ArtifactError(msg) from exc
     return manifest
+
+
+def _authenticate_to_the_end(reader: DecryptingReader) -> None:
+    """Read whatever follows the archive, so every chunk passes its AEAD tag.
+
+    **Without this, ADR-0123 §4's central promise is false past tar's end
+    markers.** ``tarfile`` stops reading at them, so an artifact carrying a valid
+    archive followed by further age chunks leaves those chunks unread — and unread
+    means unauthenticated. Verified: flipping a byte in a chunk after tar EOF left
+    every materialised file, the manifest and all of §8's checks intact, and the
+    restore *succeeded*, while reading the same artifact whole raises ``AgeError``
+    at that chunk. §4 says "a truncated artifact, a flipped byte and a spliced-in
+    chunk all fail to decrypt", and this is what makes that true of the whole
+    file rather than of the part tar happened to want.
+
+    It costs almost nothing on an honest artifact, where what follows the archive
+    is tar's own zero padding.
+
+    Args:
+        reader: The stream the archive was read from.
+
+    Raises:
+        AgeError: If any remaining chunk fails authentication.
+    """
+    while reader.read(CHUNK_BYTES):
+        pass
 
 
 def _read_manifest(archive: tarfile.TarFile, members: Iterator[tarfile.TarInfo]) -> Manifest:
