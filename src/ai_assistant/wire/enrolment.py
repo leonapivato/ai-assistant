@@ -172,10 +172,7 @@ def _record(plaintext: str) -> Enrolment:
         IncompleteEnrolmentError: If the record is not an object carrying both
             members as non-blank strings.
     """
-    try:
-        decoded: Any = json.loads(plaintext)
-    except ValueError as exc:
-        raise IncompleteEnrolmentError(_UNREADABLE) from exc
+    decoded = _decoded(plaintext)
     if not isinstance(decoded, dict):
         raise IncompleteEnrolmentError(_UNREADABLE)
     identity, credential = decoded.get(_HUB_MEMBER), decoded.get(_CREDENTIAL_MEMBER)
@@ -184,6 +181,38 @@ def _record(plaintext: str) -> Enrolment:
     if not isinstance(credential, str) or not credential.strip():
         raise IncompleteEnrolmentError(_UNREADABLE)
     return Enrolment(hub_identity=identity, credential=SecretStr(credential))
+
+
+def _decoded(plaintext: str) -> Any:
+    """Decode one stored record, refusing it without letting the decoder's error out.
+
+    **The decoder's exception is caught and dropped rather than chained**, and that
+    is the point of this function existing at all. ``json.JSONDecodeError`` carries
+    the text it failed on in its ``doc`` attribute, so the whole record — the
+    credential included — hangs off any exception that keeps it as a ``__cause__``
+    or a ``__context__``. It reaches no message, no argument and no traceback, but
+    it is a live reference to a Tier 0 value on an object a handler may render
+    attribute by attribute, and ``core/logging.py`` redacts by *key name*, which
+    ``doc`` is not one of. Raising after the ``try`` statement rather than inside the
+    ``except`` clause is what leaves the new exception with neither link set.
+
+    Args:
+        plaintext: The stored record.
+
+    Returns:
+        Whatever the record decodes to.
+
+    Raises:
+        IncompleteEnrolmentError: If it is not JSON at all.
+    """
+    undecodable = False
+    try:
+        decoded: Any = json.loads(plaintext)
+    except ValueError:
+        undecodable = True
+    if undecodable:
+        raise IncompleteEnrolmentError(_UNREADABLE)
+    return decoded
 
 
 #: What an unreadable record is reported as. One sentence for every way of failing

@@ -12,6 +12,7 @@ import json
 
 import pytest
 from pydantic import SecretStr
+from secret_contract import assert_discloses_nothing
 
 from ai_assistant.core.errors import SecretStoreError, SecretStoreUnavailableError
 from ai_assistant.core.logging import _SENSITIVE_KEY_PARTS
@@ -146,6 +147,32 @@ async def test_a_refused_record_is_never_quoted(store: FakeSecretStore) -> None:
 
     assert credential not in str(raised.value)
     assert credential[:8] not in str(raised.value)
+
+
+async def test_a_refused_record_discloses_nothing_through_a_chained_cause(
+    store: FakeSecretStore,
+) -> None:
+    """The leak a message check cannot see (ADR-0125 §6).
+
+    ``json.JSONDecodeError`` carries the text it failed on in its ``doc`` attribute,
+    so a refusal written as the obvious ``raise IncompleteEnrolmentError(...) from
+    exc`` keeps a live reference to the whole record — the credential included — on
+    an object a handler may render attribute by attribute, and ``core/logging.py``
+    redacts by *key name*, which ``doc`` is not one of.
+
+    Asserted with the conformance suites' own helper, which walks the chain and the
+    formatted traceback rather than the message alone, and over every derivation
+    ADR-0125 §6 forbids rather than the value verbatim.
+    """
+    credential = mint_credential()
+    await put(store, f'{{"hub": "{HUB}", "credential": "{credential}"')
+
+    with pytest.raises(IncompleteEnrolmentError) as raised:
+        await read_enrolment(store)
+
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert_discloses_nothing(raised.value, credential, context="an undecodable record")
 
 
 async def test_an_unreachable_keyring_is_not_an_unenrolled_device(
