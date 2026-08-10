@@ -163,14 +163,24 @@ and the second in what it must do to the data.
 > discharges ADR-0004 §6's delete right on the hub's own machine.
 
 > **Normative.** The act destroys every entry in the resolved `data_dir`, to any
-> depth and whatever its type, with exactly one exception: the instance lock file
-> the act itself is holding (§5). It carries no inclusion list and no exclusion
-> list beyond that one entry, and it opens no store to empty it.
+> depth, with exactly one exception: the instance lock file the act itself is
+> holding (§5). It carries no inclusion list and no exclusion list beyond that one
+> entry, and it opens no store to empty it.
 
-> **Normative.** The data directory itself survives as an empty directory, with
-> the permissions ADR-0083 §3's preparation gives it. A hub started afterwards
-> finds an installation with no data in it, which is the state a first start
-> already handles, and not a missing or malformed directory.
+> **Normative.** The act never follows a symbolic link. A symbolic link found
+> anywhere under `data_dir` is destroyed as the link it is, and what it names is
+> not read, not descended into and not destroyed. Every decision about an entry's
+> type is made on the entry itself and never on what it resolves to.
+
+> **Normative.** The act destroys nothing outside the filesystem `data_dir` is on.
+> It refuses, before destroying anything, if any directory under `data_dir` is a
+> mount point for another filesystem, with a diagnostic naming that path.
+
+> **Normative.** The data directory itself survives, holding nothing but the
+> instance lock file the act is holding (§5), with the permissions ADR-0083 §3's
+> preparation gives it. A hub started afterwards finds an installation with no data
+> in it, which is the state a first start already handles, and not a missing or
+> malformed directory.
 
 **The unit is forced by the same argument ADR-0123 §1 made, pointed the other
 way.** A backup assembled from per-store exports is incomplete the moment a lane
@@ -190,6 +200,29 @@ store: `hub.sock` is gone at shutdown but a killed hub leaves it, and the trace
 store, the audit trail and the enrolment record are each governed by their own
 rules about what may be removed. Destroying the directory's contents is the only
 form of the act with one meaning.
+
+**A rule stated over a directory has to say what a directory can contain, and the
+destructive form of the rule cannot borrow ADR-0123 §1's answer unchanged.** That
+section refuses to copy a data directory holding "an entry that is neither a
+regular file, nor a directory, nor one §3 excludes by name — a symbolic link
+included", and "never follows a symbolic link". Refusing is the right answer for a
+*copy*, which can simply not be taken; refusing every unexpected entry here would
+let one stray link block the exercise of a data right indefinitely. So the two
+clauses above split what ADR-0123 §1 joined: a link is destroyed rather than
+refused, because it is an entry in the directory the owner asked to empty, and it
+is destroyed **as a link**, because what it names is not.
+
+**Following one is the failure that would be unrecoverable, and it is not
+hypothetical.** `data_dir/x -> /home/owner/photos` turns "destroy every entry, to
+any depth" into the destruction of a directory the owner never named and this act
+has no claim on. The same reasoning extends one step further than symbolic links,
+which is why the mount-point clause is separate: a filesystem mounted under
+`data_dir` is storage the directory names rather than holds, its contents were not
+put there by this installation, and unlinking through it is the same error with no
+link to notice. Refusal is right *there* — unlike a stray link, a mount point is a
+deliberate deployment arrangement, so the operator can unmount and rerun, and the
+diagnostic tells them which path to deal with. Refusing before destroying anything
+is the strictly safer direction and is ADR-0123 §2's own posture.
 
 **The one thing per-store `clear` does that this does not is run without stopping
 the hub, and §2 is where that is paid for rather than avoided.**
@@ -355,8 +388,10 @@ every clause of §8. This decision removes one sentence's reach over one act.
 
 ### 5. The instance lock is the atomicity, and the enrolment record goes first
 
-> **Normative.** The act destroys `devices.db` and its SQLite sidecars **before**
-> it destroys anything else in the data directory.
+> **Normative.** `devices.db` itself is the **first** entry the act destroys. Its
+> SQLite sidecars — its `-journal`, `-wal` and `-shm`, each matched exactly as that
+> path's name followed by the suffix — are destroyed immediately after it, before
+> any other entry in the data directory.
 
 > **Normative.** The act holds the instance lock from before the first destruction
 > until after the last. It does not destroy the lock file it holds, and the lock
@@ -393,6 +428,16 @@ them contradicts a ratified clause.
 pages" of the store it belongs to. For a backup that meant an exclusion had to
 reach them; here it means the destruction has to, and for the same reason —
 `devices.db-wal` can hold a live verifier after `devices.db` is gone.
+
+**Which is also why the order inside that group is fixed rather than left as a
+set.** "Destroy the record and its sidecars before anything else" is satisfied by
+an implementation that unlinks `devices.db-wal` first and crashes, leaving
+`devices.db` — a readable database holding live verifiers — and the guarantee above
+false at the one instant it exists to cover. The main file is what a hub opens and
+what `live_verifiers` reads, so it is what has to go first; a `-wal` left without
+it is pages no process in this system can open as a database, and the rerun removes
+it. The group is ordered by which file makes an enrolment live, not by which file
+is largest or listed first.
 
 ### 6. Tier 0 is composed from the names its holders know, and today that set is empty
 
