@@ -33,11 +33,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Protocol
 
 import structlog
+
+from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.service.custody import first_ancestor_fault
+from ai_assistant.wire.address import sun_path_limit
 
 _log = structlog.get_logger(__name__)
 
@@ -371,19 +377,129 @@ def _stable_id(node: dict[str, Any]) -> str:
     return identity
 
 
+def check_configured_socket(socket_path: Path) -> None:
+    """A configured agent socket keeps the custody the two defaults have.
+
+    **This is what makes the setting safe to expose, and without it the setting
+    would be a different decision.** The comment on :data:`TAILSCALE_SOCKETS` gives
+    the reason the two packaged paths can be trusted at all: they are "the daemon's
+    own socket, protected by the operating system's own access control — which is
+    the custody ADR-0004 §3 leans on everywhere else, applied to a socket rather
+    than a keyring". ADR-0124 §4 then makes that socket's answer the identity of
+    every device that connects, and forbids taking that identity "from anything the
+    peer asserts". A path an operator can name is not in itself a breach of that
+    clause — a Unix socket is a local interface, and §4's third clause governs the
+    client's *enrolled hub identity*, not the agent's location. But a path with no
+    conditions on it would let a socket any local user owns answer for the overlay,
+    which reaches the same end by another route.
+
+    So the conditions are the ones ADR-0084 §1 already imposes on the data
+    directory, and for the same reason: nothing here is authenticated at the moment
+    it is opened, so the filesystem has to carry the trust. The ancestry walk is
+    literally shared (:mod:`ai_assistant.service.custody`) rather than restated.
+
+    **The leaf takes root-or-us, not exactly-us**, which is where this departs from
+    the data directory. The daemon runs as root in the ordinary deployment, so its
+    socket is root-owned and a hub demanding its own uid would reject every real
+    installation. What both cases exclude is the same: a *third* user owning the
+    thing the hub is about to trust.
+
+    Args:
+        socket_path: The path an operator configured.
+
+    **It asks who could answer, never whether anybody currently does.** An absent
+    socket is accepted, because refusing one would both contradict
+    :func:`local_agent`'s contract and turn "the hub started a moment before its
+    agent" into a stay-down fault. What bounds who may place a socket there later
+    is the ancestry walk, which is the same thing that bounds it for a path that
+    exists.
+
+    Raises:
+        ConfigurationError: If the path is too long to connect to, if any ancestor
+            lets an untrusted user replace what sits beneath it, or if a socket is
+            present and is not a socket or belongs to a third user. Every one is a
+            stay-down deployment fault in ADR-0083 §5's sense — none is fixed by
+            restarting.
+    """
+    setting = "ASSISTANT_HUB_OVERLAY_AGENT_SOCKET"
+    limit = sun_path_limit()
+    encoded = len(str(socket_path).encode("utf-8")) + 1  # the NUL terminator counts
+    if encoded > limit:
+        msg = (
+            f"the overlay agent socket {socket_path} encodes to {encoded} bytes including "
+            f"its terminator, over this platform's {limit}-byte sun_path budget, so no "
+            f"connection can be made to it; set {setting} to a shorter path"
+        )
+        raise ConfigurationError(msg)
+
+    fault = first_ancestor_fault(socket_path)
+    if fault is not None and fault.kind == "replaceable":
+        msg = (
+            f"{fault.ancestor} is mode {fault.mode:04o}, writable by other users and not "
+            f"sticky, so another user could replace the overlay agent socket beneath it "
+            f"and answer for the overlay — which is the identity ADR-0124 §4 admits every "
+            f"device by; chmod it, set its sticky bit, or set {setting} to a path under a "
+            f"directory you own"
+        )
+        raise ConfigurationError(msg)
+    if fault is not None:
+        msg = (
+            f"{fault.ancestor} is owned by uid {fault.uid}, neither root nor the "
+            f"uid {os.geteuid()} the hub runs as, so that user controls the path to the "
+            f"overlay agent socket and could answer for the overlay; set {setting} to a "
+            f"path under a directory you own"
+        )
+        raise ConfigurationError(msg)
+
+    try:
+        info = socket_path.stat()
+    except FileNotFoundError:
+        # **Absence is not refused here, and that is deliberate.** `local_agent`'s
+        # contract is that "whether the daemon is actually there is answered by the
+        # first query, which is where a refusal belongs", and ADR-0124 §3 forbids
+        # launching one — so a hub that started a moment before its agent gets the
+        # same answer for a configured path as for a packaged one. Nothing is
+        # given up by allowing it: an absent socket answers for nobody, and the
+        # ancestry walk above is what bounds who can place one here later.
+        return
+    if not stat.S_ISSOCK(info.st_mode):
+        msg = (
+            f"{socket_path}, which {setting} names, is not a socket; the overlay agent's "
+            f"local API is a Unix socket, so nothing can be asked of this path"
+        )
+        raise ConfigurationError(msg)
+    if info.st_uid not in (0, os.geteuid()):
+        msg = (
+            f"the overlay agent socket {socket_path} is owned by uid {info.st_uid}, "
+            f"neither root nor the uid {os.geteuid()} the hub runs as, so that user "
+            f"answers for the overlay and decides which device the hub admits "
+            f"(ADR-0124 §4); point {setting} at your own overlay agent's socket"
+        )
+        raise ConfigurationError(msg)
+
+
 def local_agent(socket_path: str | None = None) -> TailscaleAgent:
     """The agent this machine runs, at whichever path it listens on.
 
     Args:
         socket_path: An explicit socket path, or ``None`` to look at the two
-            places the daemon is packaged to use.
+            places the daemon is packaged to use. An explicit path is held to
+            :func:`check_configured_socket`'s custody conditions first; the two
+            packaged defaults are used exactly as before.
 
     Returns:
         An agent pointed at a socket. Whether the daemon is actually there is
         answered by the first query, which is where a refusal belongs — a
         constructor that probed would ask the question at a moment nothing chose.
+        That holds for a configured path too: the custody check asks who *could*
+        answer, never whether anybody currently does.
+
+    Raises:
+        ConfigurationError: If an explicit ``socket_path`` fails the custody
+            conditions the two defaults hold by construction.
     """
     if socket_path is not None:
+        check_configured_socket(Path(socket_path))
         return TailscaleAgent(socket_path)
     for candidate in TAILSCALE_SOCKETS:
         if Path(candidate).exists():

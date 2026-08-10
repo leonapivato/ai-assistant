@@ -691,15 +691,17 @@ async def _build_remote(
         The apparatus, or ``None`` on a hub with no remote-listener configuration.
 
     Raises:
-        ConfigurationError: If the overlay agent cannot say what this machine is.
-            A stay-down deployment fault: an operator who configured a remote
+        ConfigurationError: If the overlay agent cannot say what this machine is,
+            or if ``hub_overlay_agent_socket`` names a path that fails the custody
+            conditions ``local_agent`` holds a configured socket to. Both are
+            stay-down deployment faults: an operator who configured a remote
             listener and has no agent running has a deployment to fix, and a hub
             that came up serving loopback alone would be silently ignoring the
             configuration they set (ADR-0083 §5, ruling 4).
     """
     if settings.hub_remote_address is None:
         return None
-    agent = local_agent()
+    agent = local_agent(settings.hub_overlay_agent_socket)
     try:
         identity = (await agent.hub_identity()).identity
     except OverlayIdentityUnavailableError as exc:
