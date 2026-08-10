@@ -119,6 +119,7 @@ class AdminListener:
         self._now = checked_clock(now, owner="AdminListener")
         self.path = admin_socket_path(data_dir)
         self._server: asyncio.Server | None = None
+        self._closing = False
         self._connections: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
@@ -158,6 +159,10 @@ class AdminListener:
         :meth:`aclose` is what converges the handlers, after the drain, where §4 puts
         it.
         """
+        # The same barrier the remote listener sets, for the same reason: a callback
+        # ``asyncio`` queued before the close still runs afterwards, and an act
+        # performed then would touch a record the release has already closed.
+        self._closing = True
         if self._server is not None:
             self._server.close()
             self._server = None
@@ -183,6 +188,9 @@ class AdminListener:
         if task is not None:
             self._connections.add(task)
         try:
+            if self._closing:
+                _log.info("hub_admin_act_refused", reason="the hub has stopped accepting")
+                return
             async with asyncio.timeout(ADMIN_TIMEOUT.total_seconds()):
                 body = await read_frame(
                     reader,

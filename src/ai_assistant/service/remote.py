@@ -125,6 +125,7 @@ class RemoteListener:
         self.address = settings.hub_remote_address
         self.port = settings.hub_remote_port
         self._server: asyncio.Server | None = None
+        self._closing = False
         self._tasks: set[asyncio.Task[None]] = set()
         self._writers: dict[str, set[asyncio.StreamWriter]] = {}
         self._build = ""
@@ -193,6 +194,14 @@ class RemoteListener:
         :meth:`aclose` is what converges the handlers, after the drain, where §4 puts
         it.
         """
+        # Set **before** the close and synchronously, which is what makes it a
+        # barrier rather than a hint. ``Server.close()`` stops future accepts but
+        # says nothing about a callback ``asyncio`` has already queued for a
+        # connection it accepted a moment ago; that callback runs on some later turn
+        # of the loop, which may be after ADR-0083 §4's release has finished and the
+        # engine and the record have been let go. A connection arriving then is one
+        # this hub can no longer serve, so it is closed rather than identified.
+        self._closing = True
         if self._server is not None:
             self._server.close()
             self._server = None
@@ -272,6 +281,12 @@ class RemoteListener:
         if task is not None:
             self._tasks.add(task)
         try:
+            if self._closing:
+                # Registered first and refused second, in that order: a callback that
+                # runs during the release must be something :meth:`aclose` can still
+                # cancel, as well as something that never reaches the engine.
+                await refuse(writer, "hub_remote_closing", "the hub has stopped accepting")
+                return
             await self._accepted(reader, writer)
         except asyncio.CancelledError:
             raise
