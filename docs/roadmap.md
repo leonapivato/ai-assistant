@@ -417,42 +417,94 @@ duty cycle, or a reason to open the assistant tomorrow, and the arc is ordered s
 the cheapest of those comes first.
 
 9. **Reach and daily use.** The leg that makes the hub something the owner lives
-   in rather than something they drive. Four things, and the ruling fixes which
-   of them goes first:
+   in rather than something they drive. **Built and QA'd; the exit test stands
+   unruled.** All four of the things the ruling named shipped, in the order it
+   fixed them; the batch record is #883.
 
-   - **Backup and restore — encrypted, as the entry this leg replaces named it —
-     as the first slice and not a mid-leg one.** Daily
-     accumulation is about to happen on one laptop holding the only copy of the
-     store; that is the plan's single fragile spot, and it is fragile from the
-     day accumulation starts rather than from the day the leg ends. It is also
-     the honest test of VISION.md's portable context-graph claim, which nothing
-     has yet had to satisfy.
-   - **The hop decision.** A spoke off the device moves user data off the
-     device, which ADR-0017 §1 governs and which no wire format can
-     pre-authorise (ADR-0084 §1, §11). The leading candidate is an **overlay
-     network** keeping the API off the public internet — Tailscale specifically,
-     whose device identity is also a candidate first occupant of the credential
-     slot ADR-0084 reserved and the loopback transport carries nothing in. A
-     leading candidate is not the decision: the ADR is this leg's first contract
-     question.
-   - **A remote listener beside the loopback socket**, not instead of it. The
-     three expensive retrofits ADR-0084 bought in advance and leg 5 shipped — a
-     versioned connect handshake, a defined place for a credential, a client
-     stateless by decision — are what make this additive rather than a rewrite.
-   - **A live calendar.** Leg 6's `Reader` gets a source kept fresh by a
-     co-located `vdirsyncer` — the stronger of the two source patterns ADR-0095
-     names, and one where the network is the fetcher's and never the seam's, so
-     ADR-0017 §3 stays unspent here for exactly the reason it did in leg 6.
+   **Backup and restore came first, as ruled** — daily accumulation happens on
+   one laptop holding the only copy of the store, which is fragile from the day
+   accumulation starts rather than from the day the leg ends. **ADR-0123 decides
+   the artifact**: the *cold* data directory copied whole with no store opened,
+   encrypted as one **age v1** file to a passphrase the operator holds off the
+   machine — a cache in the OS keyring makes a later run unattended but is never
+   the passphrase's custodian (§5) — and proved by restoring it rather than by
+   having been written (§9). `ai-assistant-backup` and `ai-assistant-restore`
+   land it as offline console entry points beside `ai-assistant-reembed` and
+   `ai-assistant-measures` (#901).
+
+   **ADR-0124 decides the hop** — this leg's first contract question, and the
+   **third egress boundary** ADR-0084 §1 and §11 said it owed. The hub's remote
+   transport, in both directions, joins `models/` and the designated `tools/`
+   seam as a place user data may leave the device (§1). The transport is an
+   **overlay network** meeting three stated properties, with **Tailscale accepted
+   in writing as the first implementation** — an acceptance of an overlay, not of
+   a vendor (§2). Admission takes **two independent facts**, neither sufficient
+   on its own: the overlay identity the hub obtains from its own agent names a
+   live enrolment, and the connect frame's credential verifies against that
+   device's verifier (§4, §7). The hub still never dials a spoke (§10), so this
+   supplies a prerequisite for proactivity's delivery seam and decides no part
+   of it.
+
+   **The listener landed beside the loopback socket, not instead of it**, in two
+   halves. The server half is the listener, the enrolment record, and
+   `ai-assistant-device` over the admin socket (#902); the client half is the
+   `secret_store` package, enrolment intake and unenrolment at the device, and
+   the mutual authentication §4 requires in place of a peer-credential check
+   (#910). The three expensive retrofits ADR-0084 bought in advance and leg 5
+   shipped are what made this additive rather than a rewrite. The client
+   addresses the hub by IP literal and refuses a MagicDNS name; #912 records that
+   posture and what widening it would take.
+
+   **The live calendar was a verification lane, not a build one** (#886). Leg 6's
+   `Reader` reads a collection a co-located `vdirsyncer` keeps fresh through its
+   `singlefile` storage, and contact with a real fetcher revealed **no code
+   gap** — grant, ingestion, folding, demotion and prospective revocation all
+   behaved as ratified through a running hub. #649 stays deferred, with a new
+   argument in its favour: `singlefile` writes atomically, so the mid-read
+   mutation #649 objects to in a *directory* source has no counterpart in this
+   arrangement.
+
+   **Two contract decisions the leg forced that its list did not name.**
+   **ADR-0125** mints the keyring seam ADR-0004 §3 provisioned and ADR-0124 §6
+   made a prerequisite of the client half while declining to mint it — as two
+   Protocols rather than one, `Secrets` reading and `SecretStore` extending it to
+   write; the triad is #907 and its keyring-backed concrete landed with the
+   client half. **ADR-0126** rules the whole-store delete act, and
+   `ai-assistant-purge` builds it (#915) — the **first surface ADR-0004 §6's
+   delete right has ever had**, forced by ADR-0124 §8's two delete-side clauses
+   by way of #903. ADR-0004 and ADR-0017 both carry narrow partial supersessions
+   out of this leg; their status lines are where those are read, not this
+   document (ADR-0019).
+
+   **The QA run is #919** (2026-08-10), a single-machine subset. Every ruled
+   mechanism reachable without a second device behaved as ruled, bar one
+   refusal-code classification: **#917**, a JSON `null` credential refused as
+   absent where ADR-0124 §7 rules a present non-string a credential that did not
+   verify. **#918** is the other finding, and it is about reach rather than
+   correctness — the overlay-agent seam has no injection point in the composition
+   root, so the remote surface has no locally reachable producer and the run
+   drove it through a stand-in. Neither touches the exit test's substance.
 
    *Exit: the assistant is in daily use — ordinary conversations on ordinary
    days, reachable from somewhere other than the hub's own machine, and losing
    the laptop does not lose the model.*
 
-   **What the hop feeds once it lands**, inherited from the later-arc entry this
-   leg replaces: a context facet (device is a VISION §Principle-4 input), a
-   permission input (which devices may approve consequential actions —
-   ADR-0004's deferred catalogue gains a sibling), and the audit trail's
-   "approved from where".
+   **That test stands unruled, and what it awaits is named rather than assumed.**
+   ADR-0124 §11 makes a **two-device validation** normative: the remote listener
+   is not ruled validated until its checks run with the hub on one physical
+   machine and the client on a second commodity device the owner already has
+   (#882 fixes that shape), and #919 reached none of it. ADR-0123 §9 carries its
+   own discharge clause — the decision is not discharged until an artifact has
+   been restored on a machine other than the one that wrote it, by an operator
+   supplying the passphrase from their own custody, and a hub has served the
+   restored directory. And the test opens on daily use, which no lane delivers.
+   The ruling is the operator's.
+
+   **What the hop feeds** — a device as a context facet (a VISION §Principle-4
+   input), a device-scoped permission input (ADR-0004's deferred catalogue gains
+   a sibling), and the audit trail's "approved from where" — is filed as **#920**,
+   inherited from the later-arc entry this leg replaced. Each is contract-shaped
+   and none is scheduled.
 
    **What is portable across a process — and would be across a device — is the
    durable execution and audit state, not the handle.** ADR-0052 §1 enumerates
@@ -609,10 +661,10 @@ ledger rather than into this document.
 | VISION promise | What closes the gap |
 | --- | --- |
 | Understood — a persistent user model | Legs 1–3 (the bands, capture, the observer) |
-| In Control — inspect, correct, restrict, delete | Leg 1 (inspection surface over ADR-0007's contract); *restrict* waits on leg 11's grant model (#629); `export` still has no interface (ADR-0073 §10) |
+| In Control — inspect, correct, restrict, delete | Leg 1 (inspection surface over ADR-0007's contract, where per-belief *delete* first met one); the whole-installation delete ADR-0004 §6 grants got its first surface in leg 9 (ADR-0126, `ai-assistant-purge`); *restrict* waits on leg 11's grant model (#629); `export` still has no interface (ADR-0073 §10, #692) |
 | More Capable Over Time | Explicit correction: ADR-0009/0022; legs 3–4 and 7 extend it to observation; leg 8 is what measures whether it is working, and the arc gate before leg 11 is what acts on the answer |
-| Context determines usefulness | Leg 6 feeds facets ADR-0008 anticipated; device context waits on leg 9's hop |
+| Context determines usefulness | Leg 6 feeds facets ADR-0008 anticipated; device context waits on #920, filed once leg 9's hop landed |
 | Supported — acts across tools | Leg 12 (actuators, in bulk); deliberately last |
-| Proactivity that earns its place | Leg 10; the hub it required is leg 5 and the delivery channel is leg 9's push seam, so what remains is the interruption policy |
+| Proactivity that earns its place | Leg 10; the hub it required is leg 5 and leg 9's hop supplies the delivery channel's prerequisite but not the channel — ADR-0124 §10 leaves that to the wire decision ADR-0094 §2 and ADR-0084 §3 govern — so what remains is that seam and the interruption policy |
 | Free to choose models | ADR-0002/0011/0013/0061/0062; no leg needed |
 | Observability and evaluation | Leg 8 (ADR-0119/0120), ruled met 2026-08-09; the full harness stays in the later arc |
