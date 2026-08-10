@@ -488,14 +488,15 @@ reach a change to an existing Protocol, so the obligation is stated.
 > case asserting only that no ineligible record is returned is satisfied by
 > returning nothing and does not test §1.
 
-> **Normative.** The suite asserts `capped` on every implementation in three
-> cases: `False` on a result short of `limit` over an exhausted eligible set;
-> `False` on a **full page drawn from an eligible set larger than the
-> implementation's ceiling**, which is the case an earlier draft of §2 made
-> unsatisfiable and where a store that conflates "examined everything" with
-> "served the page" fails; and `True` where the implementation's own ceiling bound
-> the read short of `limit`. An implementation with no ceiling reports `False` and
-> is asserted to, and the third case is skipped on it rather than faked.
+> **Normative.** The suite asserts `capped` on **every** implementation in two
+> cases: `False` on a result short of `limit` over an exhausted eligible set, and
+> `False` on an ordinary full page. On an implementation that **has** a candidate
+> ceiling it asserts two more: `False` on a full page drawn from an eligible set
+> larger than that ceiling — the case an earlier draft of §2 made unsatisfiable,
+> and the one a store conflating "examined everything" with "served the page"
+> fails — and `True` where the ceiling bound the read short of `limit`. On an
+> implementation with no ceiling those two are skipped rather than faked, because
+> neither input is constructible against it, and it reports `False` throughout.
 
 1. **The contract** — `MemorySearchResult` in `core/types.py`, and
    `MemoryStore.search`'s return type in `core/protocols.py`, with §§1–2's
