@@ -1,8 +1,7 @@
 # 127. Withdrawing a proposal that was never ratified
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-10
-- Accepted: 2026-08-10
 - Partially supersedes: ADR-0070 — §1's enumeration of permitted in-place header
   edits and §4's canonical status vocabulary, each only as it reaches an ADR that
   stands `Proposed` and is withdrawn. Everything else of both sections stands:
@@ -171,8 +170,13 @@ into the new document.
 
 > **Normative.** The edit of §1 is made together with an appended dated header
 > note, in the same change, stating the date of the withdrawal, the authority that
-> ruled it, and the ground. A `Status` of `Withdrawn` carrying no such note is not
-> a withdrawal this ADR permits.
+> ruled it, and the ground.
+
+> **Normative.** A `Status` of `Withdrawn` carrying no such note is a defective
+> record and not a withdrawal: §1 is unsatisfied, the ADR is not withdrawn, and §2
+> does not bind it. It is corrected in place — by appending the note the
+> withdrawal owed, or by restoring `Proposed` — under ADR-0070 §1's third
+> permitted edit, correcting a `Status` line to match what actually landed.
 
 **A bare `Withdrawn` would be a state claim with no record behind it**, which is
 the shape ADR-0019 refuses and ADR-0070 §1 already avoids for every other status
@@ -188,14 +192,37 @@ later: when, on whose authority, and on what ground. The note is an appended dat
 header note, which is ADR-0070 §1's fourth permitted edit, so §3 adds a
 requirement to an edit already permitted rather than a new kind of edit.
 
+**§3's two clauses bind an author; §4's binds a consumer; and they key on
+different things deliberately.** The author is obliged to write the note. The
+consumer is not obliged — and must not be asked — to check that it is there,
+because ADR-0088 §6 forbids a checker to read prose or infer document structure,
+and "is there a dated note below this line, and does it name an authority" is
+exactly that inference. So §4 keys on the token alone and §3's second clause
+governs the record, not the read. **A note-less `Withdrawn` is an authoring
+defect, corrected by an edit rather than detected by a consumer**, and the
+consequence of leaving it uncorrected is bounded: a consumer reads it as holding
+no live rule, which is the same answer it would have reached while the ADR stood
+`Proposed`, since a proposal holds no live rule either. Nothing becomes live, and
+nothing live becomes dead — only the record is poorer, which is what §3's second
+clause makes correctable.
+
+**Whether any tool reports the defect is left open, as ADR-0089 §7 left the
+equivalent question open** for a malformed mark: no tier, no gate step, no hook is
+decided here. That an author could reach a restored `Proposed` by first writing a
+defective withdrawal and then correcting it is not a loophole worth armouring
+against — it is two visible edits to a floor path in the history of a document
+whose whole purpose is to be read, and the corpus armours nowhere against an
+author acting in bad faith.
+
 ### 4. `Withdrawn` in the vocabulary, and what a consumer does with it
 
 > **Normative.** `Withdrawn` is a canonical status form under ADR-0070 §4. Its
 > whole value is the bare token: it carries no `ADR-NNNN`, no scope parenthesis
 > and no qualifier, so it names no supersession target and enters no supersession
-> read. A consumer that classifies liveness reads a withdrawn ADR as holding no
-> live rule and as naming no ADR to defer to; ADR-0070 §4's transitive walk
-> neither begins nor continues at it.
+> read. A consumer that classifies liveness reads a `Withdrawn` ADR as holding no
+> live rule and as naming no ADR to defer to, keying on the token alone and never
+> on the presence of §3's note; ADR-0070 §4's transitive walk neither begins nor
+> continues at it.
 
 **The bare token is ADR-0082 §2's reasoning applied to a new leading token.** §2
 keeps a leading-token status line clean and puts the record four lines lower in
