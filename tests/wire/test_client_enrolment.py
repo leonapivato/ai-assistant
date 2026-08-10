@@ -144,6 +144,9 @@ async def test_a_device_holding_nothing_is_not_enrolled(store: FakeSecretStore) 
         ('{"hub": "h", "credential": ""}', "a blank credential"),
         ('{"hub": 7, "credential": "x"}', "a hub that is not a string"),
         ('{"hub": "h", "credential": null}', "a credential that is not a string"),
+        ('{"hub": "h", "credential": "x"}', "a credential of no scheme this build mints"),
+        ('{"hub": "h", "credential": "' + "c" * 300 + '"}', "a credential over the frame bound"),
+        ('{"hub": "' + "h" * 300 + '", "credential": "x"}', "an identity over the bound"),
     ],
 )
 async def test_a_record_that_is_not_a_whole_pair_is_refused(
@@ -156,6 +159,14 @@ async def test_a_record_that_is_not_a_whole_pair_is_refused(
 
     One sentence for all of them, because the owner's act is the same and a taxonomy
     would only invite a branch that tried to use half a record.
+
+    **The last three are the ones a shape check alone would let through**, and they
+    are what ADR-0085 §9's "refused locally, before any I/O" is for: a credential no
+    scheme mints, one over ADR-0085 §8d's connect bound, and an identity over the
+    overlay bound are all whole-looking pairs that a socket would be opened for and
+    that the frame builder would then refuse with a ``ValueError`` no adapter's
+    error boundary declares — a traceback where ADR-0083's ruling 4 asks for a
+    sentence.
     """
     del shape
     await put(store, record)

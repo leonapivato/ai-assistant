@@ -176,9 +176,17 @@ def _record(plaintext: str) -> Enrolment:
     if not isinstance(decoded, dict):
         raise IncompleteEnrolmentError(_UNREADABLE)
     identity, credential = decoded.get(_HUB_MEMBER), decoded.get(_CREDENTIAL_MEMBER)
-    if not isinstance(identity, str) or not identity.strip():
+    if not isinstance(identity, str) or _identity_fault(identity) is not None:
         raise IncompleteEnrolmentError(_UNREADABLE)
-    if not isinstance(credential, str) or not credential.strip():
+    # **Held to the same rules intake applies, and that is not belt-and-braces.**
+    # ADR-0085 §9's "refused locally, before any I/O" is the principle: a record this
+    # build cannot present is refused here, before a socket is opened, rather than
+    # by :func:`~ai_assistant.wire.envelope.connect_payload` after one is — where a
+    # value over ADR-0085 §8d's bound raises a ``ValueError`` no adapter's error
+    # boundary declares, and an owner reads a traceback instead of a sentence
+    # (ADR-0042 §7, ADR-0083's ruling 4). Intake is where this is *diagnosed*, with
+    # the value in hand; this is where it is refused for a record intake never wrote.
+    if not isinstance(credential, str) or not is_well_formed(credential):
         raise IncompleteEnrolmentError(_UNREADABLE)
     return Enrolment(hub_identity=identity, credential=SecretStr(credential))
 
@@ -311,6 +319,43 @@ async def remove_enrolment(store: SecretStore) -> bool:
     return await store.delete(enrolment_name())
 
 
+def _identity_fault(identity: str) -> str | None:
+    """Why this is not a hub identity any overlay produced, or ``None`` if it is.
+
+    A predicate rather than a raiser, because the same three rules are wanted in two
+    places that answer differently: intake refuses with a ``ValueError`` naming what
+    the owner typed, and :func:`_record` refuses a stored record as unreadable
+    without quoting any of it.
+
+    Args:
+        identity: The candidate.
+
+    Returns:
+        A sentence for the owner, or ``None``.
+    """
+    if not identity.strip():
+        return (
+            "a hub identity is required beside the credential: it is what this device "
+            "checks a destination against, and holding one without the other is an "
+            "incomplete enrolment (ADR-0124 §6). It is the 'Hub:' line "
+            "'ai-assistant-device enrol' printed"
+        )
+    try:
+        size = len(identity.encode("utf-8"))
+    except UnicodeEncodeError:
+        # A lone surrogate is non-blank, is one character, and has no byte length at
+        # all — measuring it *is* encoding it — so it survives every other check and
+        # would reach a backend as a string with no wire form (ADR-0087 §2b).
+        return "a hub identity must have a UTF-8 encoding; no overlay produces one that has none"
+    if size > MAX_OVERLAY_IDENTITY_BYTES:
+        return (
+            f"a hub identity of {size} bytes is over the {MAX_OVERLAY_IDENTITY_BYTES}-byte "
+            f"bound, which no overlay this client accepts produces; check that the value "
+            f"was copied rather than the whole line: {identity!r}"
+        )
+    return None
+
+
 def _check_hub_identity(identity: str) -> None:
     """Refuse a hub identity no overlay could have produced.
 
@@ -324,26 +369,6 @@ def _check_hub_identity(identity: str) -> None:
             ADR-0124 §6 states that "the hub identity is not a secret", and an owner
             who mistyped it needs to see what this device read.
     """
-    if not identity.strip():
-        msg = (
-            "a hub identity is required beside the credential: it is what this device "
-            "checks a destination against, and holding one without the other is an "
-            "incomplete enrolment (ADR-0124 §6). It is the 'Hub:' line "
-            "'ai-assistant-device enrol' printed"
-        )
-        raise ValueError(msg)
-    try:
-        size = len(identity.encode("utf-8"))
-    except UnicodeEncodeError as exc:
-        # A lone surrogate is non-blank, is one character, and has no byte length at
-        # all — measuring it *is* encoding it — so it survives every other check and
-        # would reach a backend as a string with no wire form (ADR-0087 §2b).
-        msg = "a hub identity must have a UTF-8 encoding; no overlay produces one that has none"
-        raise ValueError(msg) from exc
-    if size > MAX_OVERLAY_IDENTITY_BYTES:
-        msg = (
-            f"a hub identity of {size} bytes is over the {MAX_OVERLAY_IDENTITY_BYTES}-byte "
-            f"bound, which no overlay this client accepts produces; check that the value "
-            f"was copied rather than the whole line: {identity!r}"
-        )
-        raise ValueError(msg)
+    fault = _identity_fault(identity)
+    if fault is not None:
+        raise ValueError(fault)

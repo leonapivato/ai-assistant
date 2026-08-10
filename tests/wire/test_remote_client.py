@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -307,6 +308,28 @@ async def test_a_device_with_no_enrolment_sends_nothing(hub: RecordingHub) -> No
     """
     await hub.start()
     store = FakeSecretStore(scope=SecretScope.ENROLMENT)
+
+    with pytest.raises(NotEnrolledError):
+        await client_of(hub.port, store, FakeOverlayAgent()).probe()
+
+    assert hub.connects == []
+
+
+async def test_a_record_this_build_could_not_present_sends_nothing(hub: RecordingHub) -> None:
+    """A whole-looking record whose credential no scheme mints opens no socket.
+
+    Refused where ADR-0085 §9 puts a local refusal — "before any I/O" — rather than
+    by the frame builder after a connection exists, where it would surface as a
+    ``ValueError`` no adapter's error boundary declares (ADR-0042 §7). That the hub
+    recorded no connect is the assertion; so is that the failure is the one a caller
+    can catch.
+    """
+    await hub.start()
+    store, _ = await enrolled()
+    await store.set(
+        enrolment_name(),
+        SecretStr(json.dumps({"hub": HUB, "credential": "c" * 300})),
+    )
 
     with pytest.raises(NotEnrolledError):
         await client_of(hub.port, store, FakeOverlayAgent()).probe()
