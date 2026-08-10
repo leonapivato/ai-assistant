@@ -18,6 +18,7 @@ alone can see.
 from __future__ import annotations
 
 import os
+import resource
 import socket
 import sqlite3
 import stat
@@ -605,12 +606,12 @@ def test_a_file_that_becomes_a_symlink_after_the_walk_is_refused(
     outside.write_bytes(b"a file the artifact must never carry")
     original = backup._measure
 
-    def swap_then_measure(tree: object, directory: Path, source: object) -> object:
+    def swap_then_measure(directory: Path, source: object) -> object:
         target = directory / source.relative  # type: ignore[attr-defined]
         if target.name == "notes.txt" and not target.is_symlink():
             target.unlink()
             target.symlink_to(outside)
-        return original(tree, directory, source)  # type: ignore[arg-type]
+        return original(directory, source)  # type: ignore[arg-type]
 
     monkeypatch.setattr(backup, "_measure", swap_then_measure)
 
@@ -648,7 +649,7 @@ def test_a_file_that_becomes_a_symlink_after_the_scan_is_refused_at_the_copy(
     assert _leftovers(out_dir) == []
 
 
-def test_a_directory_that_becomes_a_symlink_after_the_walk_is_not_followed(
+def test_a_directory_swapped_for_a_symlink_is_refused_rather_than_followed(
     settings: Settings,
     data_dir: Path,
     out_dir: Path,
@@ -657,13 +658,10 @@ def test_a_directory_that_becomes_a_symlink_after_the_walk_is_not_followed(
 ) -> None:
     """§1's clause covers every component of the path, not only the last one.
 
-    ``O_NOFOLLOW`` on the file says nothing here: the file at the far end of a
-    swapped directory *is* a regular file. What makes the clause true is that the
-    walk holds a descriptor for the directory it verified, so the later open goes
-    to that directory whatever its name now points at.
-
-    The swap is driven deterministically, in the window between the directory
-    being listed and the file inside it being opened.
+    ``O_NOFOLLOW`` on the *file* says nothing here: the file at the far end of a
+    swapped directory is a real regular file, and every check on it passes. The
+    swap is driven deterministically, in the window between the directory being
+    listed and the files under it being read.
     """
     (data_dir / "sub").mkdir(mode=0o700)
     (data_dir / "sub" / "plans.db").write_bytes(b"the real plans")
@@ -672,19 +670,77 @@ def test_a_directory_that_becomes_a_symlink_after_the_walk_is_not_followed(
     (elsewhere / "plans.db").write_bytes(b"a file the artifact must never carry")
     original = backup._scan
 
-    def swap_then_scan(tree: object, directory: Path) -> object:
+    def swap_then_scan(directory: Path, *, excluded: frozenset[str]) -> object:
         # Renamed away rather than deleted, which is #889's own shape: the real
-        # directory survives and is still reachable through the held descriptor,
-        # while its *name* now points somewhere else entirely.
+        # directory survives and its *name* now points somewhere else entirely.
         (directory / "sub").rename(elsewhere.parent / "moved-away")
         (directory / "sub").symlink_to(elsewhere)
-        return original(tree, directory)  # type: ignore[arg-type]
+        return original(directory, excluded=excluded)
 
     monkeypatch.setattr(backup, "_scan", swap_then_scan)
 
-    assert _run(out_dir / "a.age", keyphrase_file) == EXIT_OK
+    assert _run(out_dir / "a.age", keyphrase_file) == EXIT_DEPLOYMENT
+    assert _leftovers(out_dir) == []
 
-    staging = out_dir.parent / "check"
+
+def test_a_file_is_read_through_the_directory_descriptor_that_was_verified(
+    data_dir: Path, tmp_path: Path
+) -> None:
+    """The mechanism itself, without the entry point around it.
+
+    A directory renamed away and replaced by a symlink *after* the walk has opened
+    it is still reached through the descriptor the walk holds — so the bytes read
+    are the ones that were checked, not the ones the name now points at. This is
+    what makes the refusal above a consequence rather than a coincidence.
+    """
+    (data_dir / "sub").mkdir(mode=0o700)
+    (data_dir / "sub" / "plans.db").write_bytes(b"the real plans")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    (elsewhere / "plans.db").write_bytes(b"a file the artifact must never carry")
+
+    # Closing the generator is what runs the `finally` releasing its descriptors.
+    walker = backup._walk(data_dir, excluded=frozenset())
+    try:
+        measured = None
+        for source in walker:
+            if source.relative != "sub/plans.db":
+                continue
+            (data_dir / "sub").rename(tmp_path / "moved-away")
+            (data_dir / "sub").symlink_to(elsewhere)
+            _fingerprint, sha256, length = backup._measure(data_dir, source)
+            measured = (sha256, length)
+            break
+    finally:
+        walker.close()
+
+    assert measured is not None
+    expected, _ = artifact.digest_and_length(tmp_path / "moved-away" / "plans.db")
+    assert measured == (expected, len(b"the real plans"))
+
+
+def test_a_wide_tree_costs_descriptors_by_depth_not_by_directory_count(
+    settings: Settings, data_dir: Path, out_dir: Path, keyphrase_file: Path, tmp_path: Path
+) -> None:
+    """§1 copies "at any depth", which a descriptor-per-directory walk cannot do.
+
+    Retaining one descriptor per directory makes the backup's cost a function of
+    how many directories exist, and past ``RLIMIT_NOFILE`` an ordinary wide tree
+    produces no artifact at all. The limit is lowered for the call rather than
+    trusted to be low, so this fails against a tree-retaining walk and passes
+    against a depth-bounded one.
+    """
+    for index in range(200):
+        directory = data_dir / f"shard-{index:03d}"
+        directory.mkdir(mode=0o700)
+        (directory / "part.db").write_bytes(b"x" * 16)
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (128, hard))
+    try:
+        assert _run(out_dir / "a.age", keyphrase_file) == EXIT_OK
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+    staging = tmp_path / "check"
     staging.mkdir(mode=0o700)
-    carried = _contents(out_dir / "a.age", staging)
-    assert carried["sub/plans.db"] == b"the real plans"
+    assert len(_contents(out_dir / "a.age", staging)) == 202

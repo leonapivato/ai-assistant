@@ -57,7 +57,7 @@ from ai_assistant.service.agev1 import DEFAULT_WORK_FACTOR, DecryptingReader, En
 from ai_assistant.service.refusal import RefusalError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Iterator, Sequence
     from typing import BinaryIO, Self
 
 #: The artifact layout this build writes and the highest it reads (ADR-0123 §8).
@@ -473,27 +473,29 @@ def digest_and_length_of(handle: BinaryIO) -> tuple[str, int]:
     return digest.hexdigest(), length
 
 
-def path_opener(data_dir: Path) -> Callable[[str], BinaryIO]:
-    """An opener that resolves a manifest path under ``data_dir`` by name.
+def path_sources(data_dir: Path, manifest: Manifest) -> Iterator[tuple[str, BinaryIO]]:
+    """The manifest's files, opened by name under ``data_dir``.
 
     For callers with no held descriptors — tests, and anything reading a tree
-    nothing else is writing. The backup tool does **not** use it: it opens
-    against descriptors it took while walking, which is what closes the swapped
-    intermediate directory (:func:`open_regular_at`).
+    nothing else is writing. The backup tool does **not** use it: it produces its
+    stream from a walk that opens every component against a descriptor, which is
+    what closes the swapped intermediate directory.
 
     Args:
         data_dir: The directory the manifest's paths are relative to.
+        manifest: What is being carried, in order.
 
-    Returns:
-        A callable from a data-directory-relative path to an open reader.
+    Yields:
+        Each file's data-directory-relative path and an open reader.
     """
-    return lambda relative: open_regular(data_dir / relative)
+    for entry in manifest.files:
+        yield entry.path, open_regular(data_dir / entry.path)
 
 
 def write_artifact(
     out: BinaryIO,
     *,
-    opener: Callable[[str], BinaryIO],
+    sources: Iterator[tuple[str, BinaryIO]],
     manifest: Manifest,
     passphrase: str,
     work_factor: int = DEFAULT_WORK_FACTOR,
@@ -507,10 +509,12 @@ def write_artifact(
 
     Args:
         out: Where the ciphertext goes — the temporary file ADR-0123 §2 requires.
-        opener: Opens one copied file, given its data-directory-relative path.
-            An argument rather than a directory so the caller decides *how* the
-            file is reached — the backup tool reaches it through descriptors it
-            already holds.
+        sources: The copied files in the manifest's own order, each as its
+            data-directory-relative path and an open reader. A stream rather than
+            a directory plus an opener, because the backup tool produces it from a
+            walk that holds a descriptor per *level* and closes each as it leaves
+            — so a file's reader exists only while its directory is still open,
+            and cannot be asked for out of order.
         manifest: What is being carried.
         passphrase: The artifact's key (ADR-0123 §5).
         work_factor: Passed through to the age writer; lowered only by tests.
@@ -530,14 +534,31 @@ def write_artifact(
         info.mtime = int(manifest.taken_at.timestamp())
         archive.addfile(info, io.BytesIO(encoded))
         for entry in manifest.files:
+            # The copy is a second walk, so it can disagree with the first — and
+            # a disagreement is a data directory that changed shape underneath
+            # the backup, which §2 refuses rather than papers over. Checked in
+            # order, because both walks are sorted and deterministic.
+            offered = next(sources, None)
+            if offered is None or offered[0] != entry.path:
+                found = "nothing" if offered is None else repr(offered[0])
+                msg = (
+                    f"the data directory changed while it was being copied: the manifest "
+                    f"expected {entry.path!r} next and the copy found {found}"
+                )
+                raise RefusalError(msg)
             member = tarfile.TarInfo(PAYLOAD_PREFIX + entry.path)
             member.size = entry.length
             member.mode = _FILE_MODE
-            # Opened no-follow here as well as in the scan: the copy is a second
-            # open, and §1's clause is about what the artifact ends up carrying
-            # rather than about what was listed.
-            with opener(entry.path) as handle:
+            with offered[1] as handle:
                 archive.addfile(member, handle)
+        trailing = next(sources, None)
+        if trailing is not None:
+            trailing[1].close()
+            msg = (
+                f"the data directory grew while it was being copied: {trailing[0]!r} appeared "
+                f"after the manifest was taken"
+            )
+            raise RefusalError(msg)
 
 
 def materialise(artifact: Path, *, passphrase: str, staging: Path) -> Manifest:
