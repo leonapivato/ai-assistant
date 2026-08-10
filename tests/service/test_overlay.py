@@ -377,3 +377,72 @@ def test_the_packaged_defaults_are_not_held_to_the_configured_conditions() -> No
     installed — including this test run.
     """
     assert local_agent().socket_path in TAILSCALE_SOCKETS
+
+
+def test_an_absent_configured_socket_in_a_sticky_world_writable_directory_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Adversarial review, round 1: the sticky exception does not extend to a name
+    nobody has taken.
+
+    ``/tmp`` is mode ``1777``, and the ancestry walk accepts it — rightly, because
+    the sticky bit stops a user renaming or removing an entry they do not own. An
+    entry that does not exist yet is neither owned nor removable, so any local user
+    can be the first to create ``/tmp/tailscaled.sock``, and whoever creates it
+    answers ``whois`` for every device the hub admits (ADR-0124 §4). The window is
+    between this check and the first query, and nothing later closes it: the
+    connection is a Unix socket with no peer credential check on the hub's side.
+    """
+    sticky = tmp_path / "shared"
+    sticky.mkdir()
+    absent = sticky / "tailscaled.sock"
+    sticky.chmod(0o1777)
+
+    try:
+        with pytest.raises(ConfigurationError, match="could create that socket first"):
+            local_agent(str(absent))
+    finally:
+        sticky.chmod(0o755)
+
+
+def test_a_socket_that_already_exists_under_a_sticky_directory_is_accepted(
+    tmp_path: Path,
+) -> None:
+    """The discriminating half, and the reason the rule is not simply "no sticky".
+
+    Once the socket exists, the sticky bit is doing exactly the job the ancestry
+    walk credits it with: no other user can rename it away and put their own there.
+    A rule that refused this too would reject a real deployment for no gain.
+    """
+    sticky = tmp_path / "shared"
+    sticky.mkdir()
+    path = sticky / "tailscaled.sock"
+    with contextlib.closing(_bind(path)):
+        sticky.chmod(0o1777)
+        try:
+            assert local_agent(str(path)).socket_path == str(path)
+        finally:
+            sticky.chmod(0o755)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root traverses every directory")
+def test_a_configured_socket_in_a_non_traversable_directory_is_a_configuration_fault(
+    tmp_path: Path,
+) -> None:
+    """Adversarial review, round 1: the leaf ``stat`` leaked ``PermissionError``.
+
+    A directory the hub's own uid owns but cannot traverse (mode ``0600``) is
+    stat-able as a directory, so the ancestry walk passes; the ``stat`` of the
+    socket inside it is what fails. Only ``FileNotFoundError`` was caught, so this
+    arrived as an unexpected fault — the hub reporting a defect for what is an
+    operator's mistyped mode, and skipping ADR-0083 §5's stay-down mapping.
+    """
+    private = tmp_path / "private"
+    private.mkdir()
+    private.chmod(0o600)
+
+    try:
+        with pytest.raises(ConfigurationError, match="cannot be read"):
+            local_agent(str(private / "tailscaled.sock"))
+    finally:
+        private.chmod(0o755)
