@@ -1,6 +1,6 @@
 # NNNN. <short title of the decision>
 
-- Status: Proposed | Accepted | Superseded by ADR-XXXX | Partially superseded by ADR-AAAA (<scope>) [and ADR-BBBB (<scope>)]…
+- Status: Proposed | Accepted | Withdrawn | Superseded by ADR-XXXX | Partially superseded by ADR-AAAA (<scope>) [and ADR-BBBB (<scope>)]…
 - Date: YYYY-MM-DD
 
 <!-- Use "Partially superseded by ADR-XXXX (<scope>)" when a later ADR replaces
@@ -10,7 +10,16 @@ parenthesis names exactly what was replaced. The remainder stays accepted. If a
 further ADR later replaces a different part, add its pair on the same line —
 "Partially superseded by ADR-A (<scope-a>) and ADR-B (<scope-b>)" — without
 dropping the first. See ADR-0070 for the amend-vs-supersede test and ADR-0001 for
-the append-only rule. -->
+the append-only rule.
+
+Use "Withdrawn" — the bare token, nothing after it — for a proposal that was
+merged "Proposed" and then ruled against rather than ratified. It is available
+from "Proposed" alone, it is terminal, and the same change appends a dated header
+note giving the date, the authority and the ground; a bare "Withdrawn" with no
+such note is not a withdrawal. The document, its number and its text stay in the
+corpus and stay citable for what they say. Withdrawing an ADR that is already
+"Accepted" is not permitted — that is a change to what was decided, so it takes a
+superseding ADR. See ADR-0127. -->
 
 
 ## Context
