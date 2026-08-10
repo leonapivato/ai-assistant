@@ -432,7 +432,22 @@ def check_configured_socket(socket_path: Path) -> None:
         )
         raise ConfigurationError(msg)
 
-    fault = first_ancestor_fault(socket_path)
+    try:
+        fault = first_ancestor_fault(socket_path)
+    except OSError as exc:
+        # A directory that is missing or cannot be traversed is the ordinary typo,
+        # and it has to arrive as a `ConfigurationError` like every other startup
+        # misconfiguration — ADR-0083 §5 maps this class to a stay-down exit, and a
+        # raw `FileNotFoundError` out of the composition root would instead be an
+        # unexpected fault, reported as though the hub had a defect.
+        msg = (
+            f"the path to the overlay agent socket {socket_path}, which {setting} names, "
+            f"cannot be read ({exc.strerror} at {exc.filename}), so whether an untrusted "
+            f"user could answer for the overlay there cannot be established; correct "
+            f"{setting}, or unset it to look at the two paths the daemon is packaged to "
+            f"use ({', '.join(TAILSCALE_SOCKETS)})"
+        )
+        raise ConfigurationError(msg) from exc
     if fault is not None and fault.kind == "replaceable":
         msg = (
             f"{fault.ancestor} is mode {fault.mode:04o}, writable by other users and not "
