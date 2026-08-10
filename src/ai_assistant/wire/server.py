@@ -296,6 +296,12 @@ async def _handshake(
         return False
 
     if version != env.PROTOCOL_VERSION:
+        # Recorded like every other refusal on this listener (ADR-0124 §6). It is
+        # reached *after* the credential verified, which is what makes it a use of
+        # the credential and not merely a rejected frame — an operator otherwise
+        # reads a connection that presented a good credential and then vanished.
+        if admission is not None:
+            admission.record_refusal(env.VERSION_MISMATCH)
         await _refuse(
             writer,
             frame.id,
