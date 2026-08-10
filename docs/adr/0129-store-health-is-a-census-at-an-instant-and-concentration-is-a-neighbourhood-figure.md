@@ -335,27 +335,31 @@ stand alone; either is sufficient.
 > `T`, each as a count and as a proportion of the total, store-wide and decomposed
 > by `kind`.
 
+> **Normative.** The **candidate set** is every record of the census population for
+> which the store holds a vector. It is defined without reference to `T`. The
+> **sample** is a subset of the candidate set, and the **evaluated sample** is those
+> of its members that are live at `T`.
+
 > **Normative.** The report states the **neighbourhood closure density
-> distribution**: over a sample of records live at `T` for which the store holds a
-> vector, each record's density is the count of its `k` nearest neighbours — by the
-> store's own distance metric, among every record for which the store holds a
-> vector, excluding the record itself, live or not — that are **not** live at `T`,
-> divided by `k`. The report states the distribution of that density over the
-> sample, the sample size, `k`, and, beside it, the store-wide proportion of
-> vector-bearing records that are not live at `T`.
+> distribution**: over the evaluated sample, each record's density is the count of
+> its `k` nearest neighbours — by the store's own distance metric, among the whole
+> candidate set, excluding the record itself, live or not — that are **not** live at
+> `T`, divided by `k`. The report states the distribution of that density over the
+> evaluated sample, the sample's size, the evaluated sample's size, `k`, and, beside
+> it, the proportion of the candidate set that is not live at `T`.
 
 > **Normative.** The sample and `k` are parameters of the run, stated on the report.
 > `k` is a **positive integer** and is the same for every sampled record in a run.
-> The sample is a deterministic function of the census population and the stated
+> The sample is a deterministic function of the candidate set and the stated
 > parameters, and does not depend on `T`: two runs over an unchanged store with the
-> same parameters select the same sample. Where `T` is also held fixed, the two runs
-> produce identical figures.
+> same parameters select the same sample. Where the clock's reading is also held
+> fixed, the two runs produce identical figures.
 
-> **Normative.** The density figure is **undefined** where the store holds fewer
-> than `k + 1` records with a vector, and the report states that it is undefined
-> and names both counts. Where the store holds at least `k + 1` such records, every
-> sampled record has `k` neighbours available: no sampled record is dropped for
-> want of a full neighbourhood, and no density is taken over fewer than `k`.
+> **Normative.** The density figure is **undefined** where the candidate set holds
+> fewer than `k + 1` records, and the report states that it is undefined and names
+> both counts. Where it holds at least `k + 1`, every sampled record has `k`
+> neighbours available: no sampled record is dropped for want of a full
+> neighbourhood, and no density is taken over fewer than `k`.
 
 > **Normative.** The report states the **closure-age distribution**: over every
 > record retired at `T`, the interval from its `valid_until` to `T`.
@@ -406,16 +410,20 @@ crowded topics can be identical, which is the whole of what #799 found.
 
 **The `k + 1` clause is a domain rule, not a restatement of §1's empty-population
 rule, and the two do not overlap.** §1 makes a figure undefined where its
-population is empty; the density figure's population is the *sample*, and a store
-holding one live vector-bearing record supplies a sample of one — non-empty — whose
-single neighbourhood is empty, because the record itself is excluded. Every
+population is empty; the density figure's population is the *evaluated sample*, and a
+store holding one live vector-bearing record supplies an evaluated sample of one —
+non-empty — whose single neighbourhood is empty, because the record itself is
+excluded. Every
 available reading of that case is wrong: a density of `0 ÷ k` reports "no closure
 nearby" from a store with no neighbourhood at all, a division by a count of
 available neighbours reports `0 ÷ 0`, and dropping the record silently shrinks a
 sample the report has already stated the size of. The condition is uniform across
-records — with `k + 1` vector-bearing records in the store, *every* record has `k`
-others — so one store-wide test settles it, and the figure is either taken over full
-neighbourhoods or not taken. `k` is required positive for the same reason from the
+records — with `k + 1` records in the candidate set, *every* record has `k` others —
+so one store-wide test settles it, and the figure is either taken over full
+neighbourhoods or not taken. It is stated over the *candidate* set rather than the
+evaluated sample because a neighbourhood is drawn from the candidate set: a store with
+one live record and a thousand retired ones has full neighbourhoods, and the figure it
+yields is the interesting one. `k` is required positive for the same reason from the
 other end: a `k` of zero makes the denominator zero on every record in every store.
 
 The null is approximate, and the approximation is named: a neighbourhood excludes the
@@ -423,6 +431,18 @@ sampled record itself and is drawn from `k` nearest rather than uniformly, so th
 expected density under even spread is near the store-wide proportion rather than
 exactly it. The figure is read as a comparison, not as a test statistic, which is what
 §6's no-threshold clause requires of it in any case.
+
+**The sample and the evaluated sample are separated because the sample must not move
+with the clock and the figure must.** Drawing the sample from the records live at `T`
+would make the draw itself time-dependent: a record whose window closes between two
+runs would leave the sample, and the two reports would then differ for two reasons at
+once — the record's reclassification, and every downstream shift in which other
+records were picked. Drawing from the candidate set instead fixes the draw on the
+store's contents alone, and the record's closure shows up where it belongs, as one
+member moving out of the evaluated sample. Both sizes are reported because their ratio
+is itself informative: an evaluated sample much smaller than the sample is a store
+whose vector-bearing records are mostly retired, which is the census's finding arriving
+a second time.
 
 **The sample exists because the cost is quadratic and the backend has no index.** A
 density per record is one KNN over the whole vector table, and `vec0` scans it; at
@@ -691,16 +711,16 @@ that reads as numbers. Naming it separately costs a sentence and closes a door t
 
 > **Normative.** The tests assert §3's determinism clause directly — two runs of the
 > concentration figure over an unchanged store, with the same parameters and the
-> clock held at one reading, produce identical figures — and assert the density
+> clock held at one reading, select the same sample and produce identical figures — and assert the density
 > figure over a store built with a known concentration, in the shape
 > `tests/memory/aged_store.py` already builds.
 
 > **Normative.** The tests assert that `T` moves the figures and not the sample:
 > over an unchanged store, two runs against **injected** clock readings falling
 > either side of a record's `valid_until` reclassify that record between live and
-> retired in the census, the band fill and the density population, while selecting
-> the same sample. The clock is injected because §1 gives the tool no `T` option to
-> pass.
+> retired in the census, the band fill and the evaluated sample, while selecting the
+> same sample from the same candidate set. The clock is injected because §1 gives the
+> tool no `T` option to pass.
 
 **The determinism test is named because it is the clause an implementation can pass in
 name and fail in substance.** A sampler seeded from the system RNG, or one that walks a
