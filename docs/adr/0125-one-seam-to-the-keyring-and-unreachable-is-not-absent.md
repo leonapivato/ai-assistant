@@ -892,8 +892,10 @@ property being tested.
 > name replaces and leaves one entry; `delete` of an unset name returns `False` and
 > raises nothing; `delete` returns `True` once and `False` thereafter, and `get`
 > then returns `None`; `set` and `delete` each raise `ValueError` for a name
-> outside the subject's bound scope, and the entry that name would have addressed
-> is neither written nor removed; `set` raises `ValueError` for a blank value and
+> outside the subject's bound scope — with the subject driven unavailable as well
+> as available, so §7's argument-step precedence is proved on the writing methods
+> and not only on `get` — and the entry that name would have addressed is neither
+> written nor removed; `set` raises `ValueError` for a blank value and
 > for an oversized one built directly as a bare `SecretStr`, storing nothing in
 > either case; and the subject satisfies `SecretStore` by `isinstance`.
 
