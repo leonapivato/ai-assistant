@@ -17,6 +17,7 @@ alone can see.
 
 from __future__ import annotations
 
+import inspect
 import os
 import resource
 import socket
@@ -744,3 +745,65 @@ def test_a_wide_tree_costs_descriptors_by_depth_not_by_directory_count(
     staging = tmp_path / "check"
     staging.mkdir(mode=0o700)
     assert len(_contents(out_dir / "a.age", staging)) == 202
+
+
+def test_a_deep_tree_costs_no_interpreter_stack(
+    settings: Settings,
+    data_dir: Path,
+    out_dir: Path,
+    keyphrase_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The traversal is iterative, so depth is a descriptor question and not a frame one.
+
+    Asserted by measuring the call stack at each level rather than by provoking a
+    ``RecursionError``: lowering the recursion limit far enough to catch a
+    recursive descent also breaks unrelated library code, so the failure it
+    produces would not be evidence about this walk. A recursive descent grows the
+    stack by a frame per level; this one does not grow it at all.
+    """
+    directory = data_dir
+    for level in range(40):
+        directory = directory / f"d{level}"
+        directory.mkdir(mode=0o700)
+    (directory / "deep.db").write_bytes(b"the deepest file")
+    depths: list[int] = []
+    original = backup._level
+
+    def record_depth(*args: object, **kwargs: object) -> object:
+        depths.append(len(inspect.stack(0)))
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(backup, "_level", record_depth)
+
+    assert _run(out_dir / "a.age", keyphrase_file) == EXIT_OK
+
+    assert len(depths) >= 41  # the root and every level below it, on each walk
+    # The small spread is the difference between `_walk`'s two call sites, not
+    # growth with nesting: a recursive descent over 40 levels would span 40.
+    assert max(depths) - min(depths) <= 4
+    staging = out_dir.parent / "check"
+    staging.mkdir(mode=0o700)
+    carried = _contents(out_dir / "a.age", staging)
+    nested = "/".join(f"d{level}" for level in range(40))
+    assert carried[f"{nested}/deep.db"] == b"the deepest file"
+
+
+def test_a_tree_deeper_than_the_bound_is_a_refusal_that_names_it(
+    settings: Settings, data_dir: Path, out_dir: Path, keyphrase_file: Path
+) -> None:
+    """One descriptor per level is not removable, so the limit is stated rather than hit.
+
+    Dropping an ancestor's descriptor means re-finding it by name to reach its
+    later children, which is the re-resolution the descriptors exist to avoid. So
+    the walk refuses past its bound with a sentence, instead of failing with an
+    ``EMFILE`` an operator has to decode.
+    """
+    directory = data_dir
+    for level in range(backup._MAX_DEPTH + 2):
+        directory = directory / f"d{level}"
+        directory.mkdir(mode=0o700)
+    (directory / "deep.db").write_bytes(b"too far in")
+
+    assert _run(out_dir / "a.age", keyphrase_file) == EXIT_DEPLOYMENT
+    assert _leftovers(out_dir) == []
