@@ -789,21 +789,48 @@ def test_a_deep_tree_costs_no_interpreter_stack(
     assert carried[f"{nested}/deep.db"] == b"the deepest file"
 
 
-def test_a_tree_deeper_than_the_bound_is_a_refusal_that_names_it(
+def test_running_out_of_descriptors_names_the_limit_and_stays_restartable(
     settings: Settings, data_dir: Path, out_dir: Path, keyphrase_file: Path
 ) -> None:
-    """One descriptor per level is not removable, so the limit is stated rather than hit.
+    """§1 says "at any depth" and authorises no depth policy, so this is not a refusal.
 
-    Dropping an ancestor's descriptor means re-finding it by name to reach its
-    later children, which is the re-resolution the descriptors exist to avoid. So
-    the walk refuses past its bound with a sentence, instead of failing with an
-    ``EMFILE`` an operator has to decode.
+    One descriptor is held per level of nesting and that is not removable —
+    dropping an ancestor's means re-finding it by name, which is the
+    re-resolution the descriptors exist to avoid. So a tree deep enough to
+    exhaust the limit fails, and the only questions left are *how*: with the
+    remedy named, and as a restartable fault (``1``) rather than a refusal
+    (``78``), because unlike a refusal a later run with a higher ``ulimit -n``
+    really does succeed.
     """
     directory = data_dir
-    for level in range(backup._MAX_DEPTH + 2):
+    for level in range(200):
         directory = directory / f"d{level}"
         directory.mkdir(mode=0o700)
-    (directory / "deep.db").write_bytes(b"too far in")
+    (directory / "deep.db").write_bytes(b"too far in for this limit")
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (96, hard))
+    try:
+        code = _run(out_dir / "a.age", keyphrase_file)
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 
-    assert _run(out_dir / "a.age", keyphrase_file) == EXIT_DEPLOYMENT
+    assert code == EXIT_RESTART
     assert _leftovers(out_dir) == []
+
+
+def test_a_tree_deeper_than_the_descriptor_budget_still_backs_up_when_it_fits(
+    settings: Settings, data_dir: Path, out_dir: Path, keyphrase_file: Path
+) -> None:
+    """No depth policy means depth is bounded by the environment and nothing else."""
+    directory = data_dir
+    for level in range(80):
+        directory = directory / f"d{level}"
+        directory.mkdir(mode=0o700)
+    (directory / "deep.db").write_bytes(b"eighty levels down")
+
+    assert _run(out_dir / "a.age", keyphrase_file) == EXIT_OK
+
+    staging = out_dir.parent / "check"
+    staging.mkdir(mode=0o700)
+    nested = "/".join(f"d{level}" for level in range(80))
+    assert _contents(out_dir / "a.age", staging)[f"{nested}/deep.db"] == b"eighty levels down"
