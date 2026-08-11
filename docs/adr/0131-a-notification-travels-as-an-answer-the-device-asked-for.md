@@ -397,10 +397,12 @@ obligation is to have an unambiguous answer for the producer to act on.
 > **Normative.** An entry is keyed by its candidate's own `candidate_key` (ADR-0130
 > §8). The enqueue takes no key from its caller and no entry is ever unkeyed.
 
-> **Normative.** An entry whose record has been dismissed is **departing** (§3b): it
-> is no longer eligible to match an offer's key, under either clause below, and an
-> offer sees the outbox as not holding it. It remains an entry in every other
-> respect until it is removed.
+> **Normative.** An entry whose record has been dismissed is **departing** (§3b). A
+> departing entry **participates in no transition except its own removal**: it does
+> not match an offer's key under either clause below, it is not selected for a poll
+> (§2a), a lease expiry does not make it available, and an acknowledgement naming it
+> takes the no-op arm. It counts toward both bounds until it is removed, and eviction
+> may remove it — which is simply completing the removal already owed.
 
 > **Normative.** An offer whose key equals that of an entry the outbox currently
 > holds and is not departing, **and whose candidate is identical to that entry's**,
@@ -424,6 +426,24 @@ would never repair it: a notification ruled `INTERRUPT`, its budget spent, deliv
 never. Making a departing entry ineligible closes it at the only point where the two
 facts are both visible — the offer — and the new candidate simply gets its own entry,
 which is what it is.
+
+**The rule is stated over every transition rather than over the offer alone, because
+stating it over the offer alone lasted exactly one round.** A draft excluded departing
+entries from key matching and added that one "remains an entry in every other
+respect"; adversarial review returned on the fortieth round with the complement — a
+poll can still *select* and deliver an entry that eviction or withdrawal has decided
+to give up, and, with a re-noticed candidate having meanwhile been given its own
+entry, the hub delivers both. So the property is written the way this ADR has had to
+write every other property it got wrong twice: as a statement about the state rather
+than a list of the cases it was noticed in. A departing entry is one the hub has
+decided is gone; the only thing left to do to it is the removal, and that is now what
+the clause says.
+
+**Two things are deliberately still true of it.** It counts toward both bounds, because
+it still occupies the bytes and the slot until it is removed and a bound that ignored
+it would be a bound that lies. And eviction may take it, because "evicting" a
+departing entry is not a second decision to give it up — it is the removal already
+owed, arriving through the path that was going to run anyway.
 
 **The key is the candidate's own, and a caller-supplied one was the defect.** A draft
 took an optional `origin_key` argument, so a producer could offer a candidate under
