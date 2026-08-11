@@ -806,6 +806,18 @@ class SqliteNotificationStore:
         record's own predicate, because §7 fixes that boundary half-open and
         re-spelling it here is how two conforming stores come to disagree about
         whether a record is still actionable.
+
+        **The expired-but-retained tail is therefore decoded on every admission,
+        and that is accepted rather than overlooked.** It could be narrowed away
+        by stamping the candidate's expiry into a column of its own, at the cost
+        of a denormalised value that has to keep agreeing with the record it was
+        copied from. It is not worth that here: the actionable set is bounded by
+        the cap, the tail is bounded by retention, and ADR-0130 §7 answers the
+        remaining case in terms — under ``retention is None`` "the storage the
+        non-actionable tail occupies is bounded by retention and emptied by §9's
+        delete surface", which is the user's own choice and the user's own
+        remedy. ``SqliteDeferralStore._answerable_count`` reads its population
+        the same way.
         """
         rows = self._fetch(
             conn,
@@ -959,7 +971,20 @@ class SqliteNotificationStore:
             )
 
     def _write(self, conn: sqlite3.Connection, record: HeldNotification) -> None:
-        """Insert or replace one record, in the one column order this store uses."""
+        """Insert or replace one record, in the one column order this store uses.
+
+        **One write path for both callers**, so the column list and
+        :data:`_COLUMNS` cannot drift apart — which is the same argument
+        :func:`_notification_from` makes from the reading side.
+
+        ``OR REPLACE`` is the *reconsideration's* clause and never the
+        admission's: an admission has already drawn a
+        :meth:`_fresh_id` inside this very transaction, which **raises** on an id
+        a stored record holds rather than letting a dict-backed store overwrite
+        while a SQL one raised. So there is no admission this can silently absorb
+        — a collision has already failed the call and rolled the transaction back
+        before reaching here.
+        """
         conn.execute(
             "INSERT OR REPLACE INTO notifications(id, candidate_key, candidate, kind, reason, "
             "failed, ruled_at, reconsider_at, admitted_at, retention, dismissed_at, dropped_at) "
