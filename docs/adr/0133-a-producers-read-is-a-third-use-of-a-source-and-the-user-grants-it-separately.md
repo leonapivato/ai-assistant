@@ -1,6 +1,6 @@
 # 133. A producer's read is a third use of a source, and the user grants it separately
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-11
 - **Note (2026-08-11, UTC): ratified.** `Proposed` → `Accepted` on the content this
   ADR merges with, after both required reviews returned green: adversarial
@@ -74,11 +74,15 @@ ADR-0130 §1 mints the proposal artifact for proactive contact:
 > they did not ask for.
 
 and rules that **any component may produce one**. §7 and §9 make what a producer
-concludes durable: a held record is "retained until retention removes it", stays
-enumerable after it expires, and reaches `NotificationStore`'s export, which
-ADR-0130 §9 puts there to carry the user's export right. A producer therefore
-writes a durable, exportable record, in free text it wrote to be shown to a
-person, about whatever it read.
+concludes durable *when it is kept*: a held record is "retained until retention
+removes it", stays enumerable after it expires, and reaches `NotificationStore`'s
+export, which ADR-0130 §9 puts there to carry the user's export right. Not every
+candidate is kept — §8 rules that "A `DROP` writes no durable record. `HOLD` and
+`INTERRUPT` do" — and the exposure is the **possibility**, which is what a consent
+question is always about: a producer that reads a source may put a durable,
+exportable record into the store, in free text it wrote to be shown to a person,
+about whatever it read, and neither it nor the user can know in advance which
+candidates will be dropped.
 
 The first such producer reads the user's calendar (ADR-0132). Nothing in the
 corpus authorises that read.
