@@ -871,6 +871,12 @@ disposition until it is confirmed rather than deciding anything about it.
 > only after the withdrawal has committed. No lane may delete a record whose entry it
 > has not already withdrawn.
 
+> **Normative.** **Selection is irrevocable.** A delete reaches every entry that has
+> not been selected for a poll; an entry already selected and leased (§2a) may still
+> reach its device, and the delete neither waits for it nor recalls it. What the
+> delete guarantees is that no *later* poll can select it and that the record and the
+> entry are gone.
+
 **The delete right reaches the outbox, and an earlier draft let it stop at the record
 store.** ADR-0130 §9 gives `NotificationStore` an unconditional per-record delete and
 a clear, distinct from dismissal, because "the delete surface is what ADR-0004 §6's
@@ -887,8 +893,27 @@ undetectably stale, and delivered. Withdrawing first cannot produce that — the
 is gone before the record can be — and the one state a crash between them leaves is an
 actionable record with no entry, which is precisely the incomplete-handoff case §3b's
 invariant already names and its reconciliation already repairs. What the user then
-sees is a delete that did not complete, which they can repeat; what they never see is
-a notification about something they deleted.
+sees is a delete that did not complete, which they can repeat.
+
+**Selection is the line, and an earlier draft claimed a stronger one than the seam can
+keep.** It said the user "never sees a notification about something they deleted",
+which adversarial review falsified on the forty-fifth round: a poll can select and
+lease an entry, and the delete can withdraw and remove it in the window before
+`_serve_requests` writes the reply it has already built — so the bytes go out after
+the delete completed. Closing *that* would take a revalidation between the delete and
+the write, which is the prepare/commit boundary architecture review refused on the
+seventeenth and twenty-ninth rounds and which §2a's whole design is built around not
+having. So the guarantee is narrowed to the true one rather than the machinery being
+invented to defend a sentence.
+
+**The narrowed line is the one the corpus already draws in two other places, which is
+why it is defensible rather than convenient.** ADR-0124 §8 accepts the same shape for
+revocation — its answer is a liveness check immediately before the write, not a
+promise that nothing in flight lands — and §3a above accepts it for recall, because
+the hub never dials the device. A delete is a third instance: it stops the next poll
+and every one after it, and it does not chase a delivery already under way. The window
+is bounded by a single poll's selection-to-write, which is milliseconds rather than a
+lease.
 
 **An already-written delivery is out of reach here as it is in §3a, and for the same
 reason.** The bytes are on a device the hub never dials. The delete removes the record
