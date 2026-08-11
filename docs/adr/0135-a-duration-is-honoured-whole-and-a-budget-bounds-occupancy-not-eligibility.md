@@ -286,10 +286,11 @@ elapsed but not strictly past — and that is precisely the rule round 18 propos
 which is why its remedy asked to preserve "the required zero-budget immediate-read
 behavior" as a carve-out. So the finding was not self-refuting on the text, and
 saying it was would be this ADR committing the error `docs/review/guide.md`
-warns about, in the other direction. What defeats it is the paragraph below: the
-carve-out is unprincipled, and the rule it protects buys nothing. The textual
-point is the weaker one and is stated as such — ADR-0131 decided this question
-once, and decided it the other way.
+warns about, in the reviewer's direction rather than the lane's. What defeats it
+is the substantive argument two paragraphs below: the carve-out is unprincipled,
+and the rule it protects buys nothing. The textual point is the weaker of the two
+and is stated as the weaker — ADR-0131 decided this question once, and decided it
+the other way.
 
 **§5a's figure bullet says the same thing and is not what decides it.** The bullet
 reads: "**`hub_max_notification_budget` at 300 s.** The ceiling on how long one
