@@ -1,6 +1,6 @@
 # 132. The upcoming-event producer notices a start instant and concludes nothing about it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-11
 - **Durability clause.** Every reference below to ADR-NNNN is to its text as it
   stood at this ADR's base, `9714787c`, not to its status on any later day. Every
@@ -663,6 +663,18 @@ differently, or read one of its clauses more widely than it now holds?
   no-migration rule and §4's two-axes ruling are each applied above as ratified
   and none is narrowed. Its §7 reserves "which producers exist, and what any of
   them notices" to this ADR, so nothing here trespasses on it either.
+- **This ADR's `Status`.** It decides no Protocol and no `core/types.py` value —
+  the surface it names is two `Settings` fields and one concrete `orchestration`
+  operation — so the required review set is adversarial alone (ADR-0015 §1,
+  `CONTRIBUTING.md` → "Stop when the required reviews are green"), and the
+  architecture lens ADR-0130 §12 and ADR-0133 §8 each owed is not owed here.
+  ADR-0015 §5's ratify-after-review sequencing is taken as those two took it: it
+  was drafted, reviewed and revised as `Proposed`, three blockers on the candidate
+  it concludes were folded and two more answered in the text, and the status
+  flipped only once the required review returned clean on one tree. The PR carries
+  the round record; nothing implements against this ADR until it has merged, and
+  its implementation is sequenced behind `GrantScope.NOTIFY`'s own lane
+  (ADR-0133 §6).
 
 ## Consequences
 
