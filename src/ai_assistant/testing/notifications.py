@@ -47,6 +47,7 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
     describe_untrusted,
+    minute_of_day,
 )
 
 if TYPE_CHECKING:
@@ -240,12 +241,11 @@ class FakeNotificationPolicy:
         ends: datetime | None = None
         for _ in range(_QUIET_CHAIN_BUDGET):
             local = moment.astimezone(self._zone)
-            covering = [
-                window for window in preferences.quiet_windows if window.covers(local.time())
-            ]
+            here = minute_of_day(local.time().replace(tzinfo=None))
+            covering = [window for window in preferences.quiet_windows if window.covers(here)]
             if not covering:
                 return ends
-            ends = max(self._instant_of(local, window.end) for window in covering)
+            ends = max(self._instant_of(local, window.end_time) for window in covering)
             moment = ends
         return ends
 

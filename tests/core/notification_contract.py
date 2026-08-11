@@ -333,7 +333,7 @@ class NotificationPolicyContract(ABC):
         """
         preferences = NotificationPreferences(
             reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
-            quiet_windows=(QuietWindow(start=time(11, 0), end=time(13, 0)),),
+            quiet_windows=(QuietWindow.between(time(11, 0), time(13, 0)),),
             interruption_budget=1,
         )
 
@@ -403,7 +403,7 @@ class NotificationPolicyContract(ABC):
         frees_at = NOW + timedelta(hours=4)
         preferences = NotificationPreferences(
             reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
-            quiet_windows=(QuietWindow(start=time(11, 0), end=time(13, 0)),),
+            quiet_windows=(QuietWindow.between(time(11, 0), time(13, 0)),),
             interruption_budget=1,
         )
 
@@ -452,7 +452,7 @@ class NotificationPolicyContract(ABC):
         """
         preferences = NotificationPreferences(
             reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
-            quiet_windows=(QuietWindow(start=time(20, 0), end=time(23, 0)),),
+            quiet_windows=(QuietWindow.between(time(20, 0), time(23, 0)),),
         )
         subject = candidate(expires_at=NOW + timedelta(hours=8))
 
@@ -676,7 +676,7 @@ class NotificationStoreContract(ABC):
         await store.set_preferences(
             NotificationPreferences(
                 reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
-                quiet_windows=(QuietWindow(start=time(11, 0), end=time(13, 0)),),
+                quiet_windows=(QuietWindow.between(time(11, 0), time(13, 0)),),
             )
         )
         held = await store.admit(candidate(expires_at=NOW + timedelta(days=1)), policy=policy)
@@ -746,7 +746,7 @@ class NotificationStoreContract(ABC):
         await store.set_preferences(
             NotificationPreferences(
                 reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
-                quiet_windows=(QuietWindow(start=time(11, 0), end=time(13, 0)),),
+                quiet_windows=(QuietWindow.between(time(11, 0), time(13, 0)),),
             )
         )
         held = await store.admit(candidate(expires_at=NOW + timedelta(days=1)), policy=policy)
@@ -799,7 +799,7 @@ class NotificationStoreContract(ABC):
         store = factory(now=clock)
         settings = NotificationPreferences(
             reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
-            quiet_windows=(QuietWindow(start=time(12, 0), end=time(14, 0)),),
+            quiet_windows=(QuietWindow.between(time(12, 0), time(14, 0)),),
             interruption_budget=1,
             budget_window=timedelta(hours=6),
         )
