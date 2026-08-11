@@ -17,7 +17,7 @@ import pytest
 from notification_contract import CLASS, candidate
 from outbox_contract import NOW, NotificationOutboxContract
 
-from ai_assistant.core.errors import NotificationOutboxError
+from ai_assistant.core.errors import NotificationOutboxError, NotificationStoreError
 from ai_assistant.core.types import (
     ClassReach,
     NotificationCandidate,
@@ -699,3 +699,70 @@ class TestWithdrawalReportsItsDismissal:
         await outbox.withdraw(record_id)
 
         assert await outbox.withdraw(record_id) is False
+
+
+class TestAFailureAfterTheInsertDoesNotUnsayCustody:
+    """ADR-0131 §3: an errored offer means nothing was enqueued — so an offer that
+    *did* enqueue may not error."""
+
+    async def test_a_failing_eviction_dismissal_still_reports_enqueued(
+        self, tmp_path: Path
+    ) -> None:
+        """§4's shape at the other end of an entry's life, applied to eviction.
+
+        The entry is durably committed before the victims' records are dismissed, so
+        raising there would tell a producer it still owned a candidate the outbox
+        will deliver — and its retry would come back ``ALREADY_HELD``, contradicting
+        the error it was just given. §4 rules the same case for the acknowledgement:
+        "a failure of the entry's subsequent removal does **not** fail the call".
+        """
+        records = _RefusingStore()
+        outbox = build(tmp_path / "outbox.db", records=records, max_entries=1)
+        assert await outbox.offer(candidate(key="old")) is NotificationEnqueue.ENQUEUED
+        records.refuse = True
+
+        assert await outbox.offer(candidate(key="k1")) is NotificationEnqueue.ENQUEUED
+
+        # And the entry the producer was told about is the one a poll finds.
+        records.refuse = False
+        delivery = await outbox.claim()
+        assert delivery is not None
+        assert delivery.notification.candidate_key == "k1"
+
+    async def test_a_deferred_eviction_is_finished_by_the_next_settle(self, tmp_path: Path) -> None:
+        """The victim is left departing, so it reaches nobody and is cleared later."""
+        records = _RefusingStore()
+        outbox = build(tmp_path / "outbox.db", records=records, max_entries=1)
+        await outbox.offer(candidate(key="old"))
+        records.refuse = True
+        await outbox.offer(candidate(key="k1"))
+        records.refuse = False
+
+        await outbox.reconcile()
+
+        delivered = []
+        while (delivery := await outbox.claim()) is not None:
+            delivered.append(delivery.notification.candidate_key)
+            await outbox.acknowledge(delivery.delivery_id)
+        assert delivered == ["k1"]
+
+
+class _RefusingStore(FakeNotificationStore):
+    """The canonical store, with a ``dismiss`` a test can make fail on demand.
+
+    A subclass rather than a wrapper, so it *is* the contract-correct fake in every
+    respect but the one method under test — nothing is reimplemented and nothing is
+    asserted past the type checker.
+    """
+
+    def __init__(self) -> None:
+        """Start refusing nothing."""
+        super().__init__()
+        self.refuse = False
+
+    async def dismiss(self, notification_id: str) -> bool:
+        """Refuse when armed, so a caller's post-commit path can be exercised."""
+        if self.refuse:
+            msg = "the notification store is unavailable"
+            raise NotificationStoreError(msg)
+        return await super().dismiss(notification_id)
