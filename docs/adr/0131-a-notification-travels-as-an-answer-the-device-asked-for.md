@@ -1359,6 +1359,35 @@ is not an approximation, it is the fact.
 > message names the requested budget and the permitted range, and it contributes no
 > `details` object to an error payload.
 
+> **Normative.** `next_notification` also declares `NotificationOutboxError` (§3b),
+> because applying an `acknowledging` value writes to both stores. It is raised when
+> the acknowledgement's **dismissal** cannot commit; nothing is retired then, and the
+> caller may send the same `acknowledging` value again.
+
+> **Normative.** Once that dismissal has committed the acknowledgement has taken
+> effect, and a failure of the entry's subsequent removal does **not** fail the call:
+> the entry is departing (§3), it is deliverable to nobody, and §3b's reconciliation
+> completes the removal. The call never reports success on an acknowledgement whose
+> dismissal did not commit, and never reports failure on one whose dismissal did.
+
+**The declaration follows from `next_notification` being the only method that both
+reads and writes, and the split follows from dismiss-first.** ADR-0085 §9 requires a
+method's failures to be declared — "a Protocol whose methods raise unnamed exceptions
+is not a contract a conformance suite can hold anyone to" — and a draft declared
+`NotificationOutboxError` on `offer` alone, leaving the acknowledgement path to
+propagate an undeclared store failure or, worse, to swallow it and report an
+acknowledgement that did not happen. Adversarial review found it on the forty-second
+round.
+
+**Where the line falls is decided by §3b's ordering rather than chosen here.** Because
+the dismissal commits first, it is the transition that decides whether the
+acknowledgement happened: before it, nothing has changed and a retry of the same value
+is exactly right, which is what the idempotent no-op arm already provides; after it,
+the entry can never be delivered again whatever becomes of the removal, so failing the
+call would tell the caller to retry something already done. That is the same
+custody-at-a-single-commit reasoning §3 applies to the enqueue, applied to the other
+end of an entry's life.
+
 **One type for both limbs, and the name says the range rather than one end of it.**
 It was `NotificationBudgetTooLongError` until the fifteenth round established that
 the lower end needed ruling too, and a "too long" error reporting a negative duration
