@@ -1509,17 +1509,34 @@ class FakeNotificationOutbox:
         Returns:
             Whether an arrival may have happened; ``False`` where the wait ran out.
         """
-        limit = timeout
+        remaining = timeout
         horizon = self._next_lease_expiry()
-        if horizon is not None and horizon < limit:
-            limit = horizon
+        if horizon is not None and horizon < remaining:
+            try:
+                await asyncio.wait_for(self._arrivals.wait(), horizon.total_seconds())
+            except TimeoutError:
+                remaining -= horizon
+                # Only a hint that is true is reported: under an injected clock the
+                # entry never becomes claimable, and an unconditional expiry wake
+                # would spin the caller's loop an horizon at a time. See the durable
+                # outbox's own note.
+                if self._has_available():
+                    return True
+            else:
+                return True
         try:
-            await asyncio.wait_for(self._arrivals.wait(), limit.total_seconds())
+            await asyncio.wait_for(self._arrivals.wait(), remaining.total_seconds())
         except TimeoutError:
-            # ``False`` only where the *caller's* budget ran out; stopping early at a
-            # lease expiry reports an availability hint and the caller re-reads.
-            return limit < timeout
+            return False
         return True
+
+    def _has_available(self) -> bool:
+        """Whether any entry could be claimed right now (ADR-0131 §3)."""
+        now = self._now()
+        return any(
+            not self._is_leased(entry, now) and not self._is_departing(entry, now)
+            for entry in self._entries.values()
+        )
 
     def _next_lease_expiry(self) -> timedelta | None:
         """How long until the earliest live lease expires, or ``None`` if none is.

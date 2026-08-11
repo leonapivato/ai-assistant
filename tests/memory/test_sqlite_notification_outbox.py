@@ -10,6 +10,7 @@ which an in-memory fake has an honest answer for.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -548,13 +549,30 @@ async def test_the_durable_wait_stops_at_the_next_lease_expiry(tmp_path: Path) -
     alone as "how long a *dead* device withholds a notification from a live one".
     """
     # A short lease: the horizon is spent in *real* time while this clock is injected.
-    outbox = build(tmp_path / "outbox.db", lease=timedelta(milliseconds=50))
+    clock = MovingClock()
+    outbox = build(tmp_path / "outbox.db", now=clock, lease=timedelta(milliseconds=50))
     await outbox.offer(candidate(key="k1"))
     assert await outbox.claim() is not None
     # Clears the arrival event, which is the state a parked poll is really in.
     assert await outbox.claim() is None
 
-    assert await outbox.wait_for_arrival(timedelta(seconds=1)) is True
+    async def expire() -> None:
+        await asyncio.sleep(0.01)
+        clock.advance(timedelta(seconds=1))
+
+    woke, _ = await asyncio.gather(outbox.wait_for_arrival(timedelta(seconds=5)), expire())
+
+    assert woke is True
+
+
+async def test_the_durable_wait_reports_no_expiry_it_cannot_honour(tmp_path: Path) -> None:
+    """Parity: a hint the caller cannot act on is what spins its loop."""
+    outbox = build(tmp_path / "outbox.db", lease=timedelta(milliseconds=20))
+    await outbox.offer(candidate(key="k1"))
+    assert await outbox.claim() is not None
+    assert await outbox.claim() is None
+
+    assert await outbox.wait_for_arrival(timedelta(milliseconds=80)) is False
 
 
 class TestATerminalRefusalIsTerminalForTheRecord:
