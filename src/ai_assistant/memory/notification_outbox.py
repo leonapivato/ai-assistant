@@ -1295,23 +1295,27 @@ class SqliteNotificationOutbox:
             Whether an arrival may have happened; ``False`` where the wait ran out.
         """
         remaining = timeout
-        horizon = await self._next_lease_expiry()
-        if horizon is not None and horizon < remaining:
+        while True:
+            horizon = await self._next_lease_expiry()
+            if horizon is None or horizon >= remaining or horizon <= timedelta(0):
+                break
             try:
                 await asyncio.wait_for(self._arrivals.wait(), horizon.total_seconds())
             except TimeoutError:
                 remaining -= horizon
                 # **Only a hint that is true is reported**, and this re-read is what
-                # makes it so. Reporting the expiry unconditionally spins the caller:
-                # its own clock may be injected and frozen, in which case the entry
-                # never becomes claimable, its remaining budget never falls, and the
-                # loop runs forever an horizon at a time. Where nothing did become
-                # available, the rest of the caller's timeout is spent here instead,
-                # so the call still terminates on the one answer the poll ends on.
+                # makes it so. Reporting an expiry unconditionally spins the caller:
+                # its clock may be injected and frozen, so the entry never becomes
+                # claimable, its remaining budget never falls, and its loop runs
+                # forever an horizon at a time. Where nothing became available the
+                # search continues here — a *later* lease may still expire inside the
+                # caller's timeout, and the first horizon may have belonged to a
+                # departing entry that could never have satisfied anybody. The loop is
+                # bounded by ``remaining``, which falls whatever the clock does.
                 if await self._has_available():
                     return True
-            else:
-                return True
+                continue
+            return True
         try:
             await asyncio.wait_for(self._arrivals.wait(), remaining.total_seconds())
         except TimeoutError:
@@ -1358,7 +1362,9 @@ class SqliteNotificationOutbox:
         remaining = [
             self._lease - (now - _from_micros(entry.leased_at))
             for entry in entries
-            if entry.leased_at is not None and entry.is_leased_at(now, self._lease)
+            if entry.leased_at is not None
+            and entry.is_leased_at(now, self._lease)
+            and not entry.is_departing_at(now)
         ]
         if not remaining:
             return None

@@ -655,6 +655,48 @@ class TestAPollTerminatesAndWakesThroughTheEngine:
         assert delivery is not None
         assert delivery.notification.candidate_key == "k1"
 
+    async def test_a_departing_lease_does_not_consume_the_only_expiry_wake(self) -> None:
+        """Two leases, and the earlier one belongs to an entry nobody can be given.
+
+        A departing entry's lease expiring makes *nothing* available, so waking for it
+        and then settling down for the rest of the budget loses the live entry behind
+        it: the second lease expires with no event and the poll answers ``None``
+        although the hub had a notification — §1's "the moment it has one" again. The
+        horizon must skip a departing entry, and a wake that finds nothing must keep
+        looking rather than give up for the remainder.
+        """
+        clock = _Advancing()
+        outbox = FakeNotificationOutbox(now=clock, lease=timedelta(milliseconds=50))
+        # A perishes at +40 ms, *before* its own lease runs out at +50 ms, so its
+        # expiry frees nobody. B is leased later and runs to +80 ms.
+        await outbox.offer(
+            _candidate().model_copy(update={"expires_at": NOW + timedelta(milliseconds=40)})
+        )
+        await outbox.offer(_candidate("k2"))
+        assert await outbox.claim() is not None  # A, leased at +0
+        clock.advance(timedelta(milliseconds=30))
+        assert await outbox.claim() is not None  # B, leased at +30
+        clock.advance(timedelta(milliseconds=15))  # +45: A departing, both still leased
+        assert await outbox.claim() is None  # and this clears the arrival event
+        engine = _wired(Harness(), outbox)
+
+        async def run_the_clock() -> None:
+            # Roughly one-to-one with real time, so a horizon spent in real seconds
+            # lands where the outbox's own clock says it should.
+            for _ in range(200):
+                await asyncio.sleep(0.005)
+                clock.advance(timedelta(milliseconds=5))
+
+        poll = asyncio.ensure_future(
+            asyncio.wait_for(engine.next_notification(budget=timedelta(seconds=5)), 2)
+        )
+        ticking = asyncio.ensure_future(run_the_clock())
+        delivery = await poll
+        ticking.cancel()
+
+        assert delivery is not None
+        assert delivery.notification.candidate_key == "k2"
+
     async def test_an_arrival_under_a_parked_poll_is_answered_promptly(self) -> None:
         """The enqueue wake, held at the loop level too — the case that always worked."""
         outbox = FakeNotificationOutbox(now=lambda: NOW)

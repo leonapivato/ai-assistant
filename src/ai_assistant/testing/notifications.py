@@ -1510,20 +1510,22 @@ class FakeNotificationOutbox:
             Whether an arrival may have happened; ``False`` where the wait ran out.
         """
         remaining = timeout
-        horizon = self._next_lease_expiry()
-        if horizon is not None and horizon < remaining:
+        while True:
+            horizon = self._next_lease_expiry()
+            if horizon is None or horizon >= remaining or horizon <= timedelta(0):
+                break
             try:
                 await asyncio.wait_for(self._arrivals.wait(), horizon.total_seconds())
             except TimeoutError:
                 remaining -= horizon
-                # Only a hint that is true is reported: under an injected clock the
-                # entry never becomes claimable, and an unconditional expiry wake
-                # would spin the caller's loop an horizon at a time. See the durable
-                # outbox's own note.
+                # Only a hint that is true is reported, and the search continues where
+                # nothing became available — a later lease may still expire inside the
+                # caller's timeout. Bounded by ``remaining``, which falls whatever the
+                # clock does. See the durable outbox's own note.
                 if self._has_available():
                     return True
-            else:
-                return True
+                continue
+            return True
         try:
             await asyncio.wait_for(self._arrivals.wait(), remaining.total_seconds())
         except TimeoutError:
@@ -1554,7 +1556,9 @@ class FakeNotificationOutbox:
         remaining = [
             self._lease - (now - entry.leased_at)
             for entry in self._entries.values()
-            if entry.leased_at is not None and self._is_leased(entry, now)
+            if entry.leased_at is not None
+            and self._is_leased(entry, now)
+            and not self._is_departing(entry, now)
         ]
         if not remaining:
             return None
