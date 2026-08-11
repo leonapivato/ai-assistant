@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 
 from ai_assistant.core.errors import (
     InvalidGrantError,
+    NotificationBudgetError,
     UngrantableSourceError,
     UnknownContinuationError,
     UnknownConversationError,
@@ -89,6 +90,7 @@ from ai_assistant.orchestration.payloads import (
     positive_page_argument,
 )
 from ai_assistant.testing.notifications import (
+    FakeNotificationOutbox,
     FakeNotificationPolicy,
     FakeNotificationStore,
 )
@@ -102,6 +104,7 @@ if TYPE_CHECKING:
         HeldNotification,
         Identifier,
         NonBlankEncodableText,
+        NotificationDelivery,
         NotificationPreferences,
     )
 
@@ -200,6 +203,14 @@ class FakeAssistantEngine:
         #: which is exactly where ``recent``'s ``id`` tie-break stops being
         #: exercised.
         self.grant_clock: Callable[[], datetime] = lambda: _AT
+        #: The delivery outbox this engine polls (ADR-0131 §3), so a client's
+        #: tests can drive the long poll against a contract-correct queue rather
+        #: than a stub that answers whatever they wanted.
+        self.notification_outbox = FakeNotificationOutbox(records=self.notification_store)
+        #: ADR-0131 §5a's ``hub_max_notification_budget``, as the ceiling this
+        #: engine refuses a poll above. §5a's own default, so a fake is not looser
+        #: than the contract it stands in for.
+        self.max_notification_budget = timedelta(seconds=300)
         #: Every call, in order, as ``(method, arguments)`` — so a test can assert
         #: what reached the engine without reaching into its state.
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -468,6 +479,41 @@ class FakeAssistantEngine:
         self.calls.append(("dismiss_notification", {"notification_id": named}))
         dismissed = await self.notification_store.dismiss(named)
         return self._checked(dismissed, "dismiss_notification")
+
+    async def next_notification(
+        self, *, acknowledging: Identifier | None = None, budget: timedelta
+    ) -> NotificationDelivery | None:
+        """Answer ADR-0131 §1's long poll from the fake outbox.
+
+        **It does not sleep, and that is deliberate.** A fake that waited out a
+        five-minute budget would make every client's delivery test slow or flaky;
+        what a caller needs held is the *contract* — validate before any effect,
+        acknowledge, then select — so this takes one pass and answers ``None``
+        where nothing is available. A test that wants the waiting drives
+        :attr:`notification_outbox` directly.
+        """
+        named = None if acknowledging is None else identifier(acknowledging, name="acknowledging")
+        # ADR-0131 §4's ordering: a refused request retires nothing, leases nothing
+        # and mints nothing, so the budget is judged before the acknowledgement is
+        # applied. A fake that acknowledged first would certify a client against a
+        # hub that does not exist.
+        if budget < timedelta(0) or budget > self.max_notification_budget:
+            msg = (
+                f"budget must be between 0 and {self.max_notification_budget} inclusive, "
+                f"got {budget} (ADR-0131 §4)"
+            )
+            raise NotificationBudgetError(msg)
+        check_arguments(
+            "next_notification",
+            max_bytes=self._max_payload_bytes,
+            acknowledging=named,
+            budget=budget,
+        )
+        self.calls.append(("next_notification", {"acknowledging": named, "budget": budget}))
+        if named is not None:
+            await self.notification_outbox.acknowledge(named)
+        delivery = await self.notification_outbox.claim()
+        return None if delivery is None else self._checked(delivery, "next_notification")
 
     async def forget_notification(self, notification_id: Identifier) -> bool:
         """Destroy one notification, reporting whether there was one to destroy."""

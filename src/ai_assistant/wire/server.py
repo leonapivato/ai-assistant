@@ -148,6 +148,19 @@ class Admission(Protocol):
             Whether a frame may still be written to this device.
         """
 
+    def device(self) -> str:
+        """The identity ADR-0124 §4 established for this connection at admission.
+
+        **Never read from a payload**, which ADR-0124 §4 forbids in terms — the hub
+        "may not take that identity from anything the peer asserts" — and which is
+        why ADR-0131 §4 gives ``next_notification`` no device argument and forbids
+        a lane adding one. It is held per connection by the listener, and this is
+        how the delivery rules that *are* per-device reach it.
+
+        Returns:
+            The overlay identity, stable for this connection's life.
+        """
+
     def record_refusal(self, code: str) -> None:
         """Record a refusal this connection took, against the device it named.
 
@@ -167,6 +180,75 @@ class Admission(Protocol):
         """
 
 
+#: The ``AssistantEngine`` method a delivery connection exists to carry
+#: (ADR-0131 §1). Named here rather than derived because §2's two closes are rules
+#: about *this* method and no other, and a predicate over the whole method set
+#: would be a rule with no subject.
+DELIVERY_METHOD: Final[str] = "next_notification"
+
+
+class DeliveryRegistry(Protocol):
+    """The hub's per-device delivery slot and its global capacity (ADR-0131 §3).
+
+    **One registry per hub, constructed once and shared by every listener**, which
+    is ADR-0131 §3's clause and the mistake it exists to forbid: "Give each its own
+    registry and eight loopback polls and eight remote polls each pass a local
+    ``hub_max_delivery_connections`` of 8, yielding sixteen delivery connections."
+    That is ADR-0124 §7's warning — "a second listener is the natural place to
+    double a budget by accident" — arriving one layer up, and the instrument is the
+    one the tree already uses for the ceilings this sits beside,
+    :class:`ai_assistant.service.transport.ConnectionBudget`.
+
+    **``wire`` declares the seam and the hub implements it**, exactly as
+    :class:`Admission` is: the registry is deployment state (ADR-0083 §8) and
+    ``wire`` depends on ``core`` alone. It is a local ``Protocol``, not
+    ``core/protocols.py`` surface — a listener's own collaborator is not a
+    contract between subsystems.
+
+    **Both methods are synchronous, and that is the mechanism rather than a
+    style.** ADR-0131 §5 requires the global capacity check and its claim to
+    happen "in the **same step** as §2's per-device check and claim, over both
+    parts of the connection registry at once", because a bound checked separately
+    is a bound that can be passed twice: with seven of eight slots held, two
+    devices polling concurrently can each pass the capacity check and each claim
+    its own per-device slot, leaving nine. A synchronous check-and-claim has no
+    suspension point inside it, on a system that composes on one event loop, so
+    there is no gap for a second claimant to land in.
+    """
+
+    def claim(self, device: str | None) -> bool:
+        """Take this device's delivery slot and one unit of global capacity.
+
+        Both or neither: "A poll dispatches only if it obtains both; one that
+        obtains neither or only one claims nothing and its connection closes under
+        §2" (ADR-0131 §5).
+
+        Args:
+            device: ADR-0124 §4's identity for this connection, or ``None`` on the
+                loopback listener. ``None`` is an identity rather than a missing
+                one: ADR-0131 §4 rules that "all loopback connections count as a
+                single local device", which is not an approximation but the fact —
+                ADR-0084 §1's ``0600`` bit means every loopback peer is the owner
+                on the owner's own machine.
+
+        Returns:
+            Whether both claims were obtained.
+        """
+
+    def release(self, device: str | None) -> None:
+        """Give back this connection's slot and its capacity unit, in one step.
+
+        ADR-0131 §2a: "Neither is released without the other, and a closed
+        connection holds neither." Stating the release over *any* cause of a close
+        rather than over the detected-close path alone is what keeps a third way of
+        closing from needing a fourth clause — so this is called from one place,
+        the connection's own teardown.
+
+        Args:
+            device: The identity the claim was taken under.
+        """
+
+
 async def serve_connection(  # noqa: PLR0913 — the engine, the two stream halves, and one keyword per policy the listener supplies
     engine: AssistantEngine,
     reader: asyncio.StreamReader,
@@ -175,6 +257,7 @@ async def serve_connection(  # noqa: PLR0913 — the engine, the two stream halv
     limits: ConnectionLimits,
     on_handshake: Callable[[], None] | None = None,
     admission: Admission | None = None,
+    delivery: DeliveryRegistry | None = None,
 ) -> None:
     """Drive one accepted connection to its end.
 
@@ -201,13 +284,25 @@ async def serve_connection(  # noqa: PLR0913 — the engine, the two stream halv
             and the handshake happens here, so one of the two has to tell the other.
         admission: The remote listener's two-fact rule, or ``None`` on the loopback
             listener, where ADR-0084 §2's opposite rule stands unchanged.
+        delivery: The hub's one delivery registry (ADR-0131 §3), or ``None`` where
+            a caller serves no delivery — which makes every ``next_notification``
+            close the connection under §2 rather than silently claiming nothing.
     """
+    claimed: list[str | None] = []
     try:
         if not await _handshake(reader, writer, limits=limits, admission=admission):
             return
         if on_handshake is not None:
             on_handshake()
-        await _serve_requests(engine, reader, writer, limits=limits, admission=admission)
+        await _serve_requests(
+            engine,
+            reader,
+            writer,
+            limits=limits,
+            admission=admission,
+            delivery=delivery,
+            claimed=claimed,
+        )
     except DeviceExpelledError as exc:
         # Its own clause, above the protocol faults, because it is not one: the
         # owner revoked the device and §8's finality is being honoured. Logged at
@@ -227,6 +322,16 @@ async def serve_connection(  # noqa: PLR0913 — the engine, the two stream halv
         # the socket.
         _log.exception("hub_connection_failed")
     finally:
+        # **Released here and nowhere else**, which is ADR-0131 §2a's clause taken
+        # literally: the claims track the *connection* and not the poll, and the
+        # release is stated "over any other cause" of a close so that a third way
+        # of closing does not need a fourth clause. A release keyed on the poll
+        # completing would let eight devices each take a zero-budget poll, keep the
+        # now-idle socket, and fill `hub_max_connections` while holding no delivery
+        # slot the sub-bound could see.
+        if delivery is not None:
+            for device in claimed:
+                delivery.release(device)
         await _hang_up(writer)
 
 
@@ -428,13 +533,15 @@ def _check_live(admission: Admission | None) -> None:
         raise DeviceExpelledError(msg)
 
 
-async def _serve_requests(
+async def _serve_requests(  # noqa: PLR0913 — the engine, the two stream halves, and one keyword per policy the connection carries
     engine: AssistantEngine,
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     *,
     limits: ConnectionLimits,
     admission: Admission | None,
+    delivery: DeliveryRegistry | None = None,
+    claimed: list[str | None] | None = None,
 ) -> None:
     """Read requests one at a time, and refuse a second one that overlaps.
 
@@ -464,7 +571,21 @@ async def _serve_requests(
 
     Both are also on the loopback listener's path and both are no-ops there
     (``admission is None``), which is what keeps this one code path rather than two.
+
+    **ADR-0131 §2 adds a second connection-level rule and it is enforced in both
+    directions**, which is the clause a draft of that ADR stated only about the
+    client. A poll on a connection that has carried anything else closes, and
+    anything else on a delivery connection closes — because the serial server
+    accepts *sequential* frames happily, so a socket that completed a ``converse``
+    and then polled would claim a delivery slot out of the capacity §5 reserves for
+    isolated pollers, with §2's "carrying no other request for its lifetime"
+    contradicted and nothing to contradict it. Both are closes rather than typed
+    errors for the reason ADR-0084 §3 gives: a decoded frame gets a typed error
+    "provided it is not itself a violation of the connection's own rules", and this
+    is such a violation. ADR-0131 §9 records the partial supersession that costs.
     """
+    is_delivery = False
+    carried_other = False
     while True:
         try:
             frame = await _read_request(reader, limits=limits, idle=limits.read_timeout)
@@ -472,23 +593,162 @@ async def _serve_requests(
             return
 
         _check_live(admission)
-        watcher = asyncio.ensure_future(_read_request(reader, limits=limits, idle=None))
-        try:
-            reply = await _dispatch(engine, frame, limit=limits.payload_limit)
-        finally:
-            overlapped = await _settle(watcher)
-        if overlapped:
+        polling = frame.method == DELIVERY_METHOD
+        if polling and carried_other:
             msg = (
-                "a peer wrote a second frame while a request was outstanding; this "
-                "connection is serial, and a correlated error would carry an id the client "
-                "must itself reject, so the connection is closed instead — with no reply to "
-                "either, since a peer that has broken the rule is not one to write more "
-                "framed bytes at"
+                "a next_notification arrived on a connection that has already carried "
+                "another request; ADR-0131 §2 gives a delivery connection to that alone, "
+                "because a poll outstanding for a minute makes the owner's next request a "
+                "violation of the serial rule — so this claims nothing and closes"
             )
             raise ProtocolError(msg)
+        if is_delivery and not polling:
+            msg = (
+                f"a {frame.method!r} arrived on a delivery connection; ADR-0131 §2 gives "
+                f"that connection to next_notification for its lifetime, and a client "
+                f"wanting an ordinary session while polling opens a second connection"
+            )
+            raise ProtocolError(msg)
+        if polling and not is_delivery:
+            _claim_delivery(delivery, admission, claimed)
+            is_delivery = True
+
+        watcher = asyncio.ensure_future(_read_request(reader, limits=limits, idle=None))
+        if polling:
+            reply = await _dispatch_poll(engine, frame, watcher, limit=limits.payload_limit)
+            if reply is None:
+                return
+        else:
+            try:
+                reply = await _dispatch(engine, frame, limit=limits.payload_limit)
+            finally:
+                overlapped = await _settle(watcher)
+            if overlapped:
+                msg = (
+                    "a peer wrote a second frame while a request was outstanding; this "
+                    "connection is serial, and a correlated error would carry an id the "
+                    "client must itself reject, so the connection is closed instead — with "
+                    "no reply to either, since a peer that has broken the rule is not one "
+                    "to write more framed bytes at"
+                )
+                raise ProtocolError(msg)
+            carried_other = True
         body = env.encode_envelope(reply)
         _check_live(admission)
         await write_frame(writer, body, max_frame_bytes=limits.max_frame_bytes)
+
+
+def _claim_delivery(
+    delivery: DeliveryRegistry | None,
+    admission: Admission | None,
+    claimed: list[str | None] | None,
+) -> None:
+    """Take this connection's device slot and capacity unit, or close (§2, §5).
+
+    **The check and the claim are one step, taken before the request is
+    dispatched** (ADR-0131 §2). "Already has one outstanding" is a read, so a claim
+    that depended on it without being the same step would let two delivery
+    connections opened at once both observe no outstanding slot before either
+    recorded one: both dispatch, the device holds two, neither is the second, and
+    §2's rule fails without any implementation disobeying a word of it. Taking the
+    claim *before* dispatch is also what makes "exactly one wins" decidable — after
+    dispatch the losing poll would already be running and the rule would have to
+    unwind it.
+
+    **The offender closes and the incumbent does not**, which is the direction that
+    cannot be used as a weapon: newest-poll-wins would let any process that can
+    reach the listener evict the owner's real notifier by polling, and the eviction
+    would look to the notifier exactly like an ordinary transport failure. Closing
+    the second connection costs its caller nothing it can complain about — the
+    client is stateless (ADR-0084 §7), so reconnecting is free, and the entry it was
+    after is still in the outbox.
+
+    Raises:
+        ProtocolError: If no registry is wired, or either claim is unavailable.
+    """
+    if delivery is None or claimed is None:
+        msg = (
+            "a next_notification arrived on a listener that serves no delivery registry, "
+            "so no slot could be claimed for it and ADR-0131 §2's one-connection rule "
+            "could not be enforced; the connection is closed rather than served"
+        )
+        raise ProtocolError(msg)
+    device = None if admission is None else admission.device()
+    if not delivery.claim(device):
+        msg = (
+            "this device already holds a delivery connection, or the hub is at "
+            "hub_max_delivery_connections; ADR-0131 §2 closes the connection that asked "
+            "second and leaves the one already polling untouched, so a poller cannot "
+            "evict the owner's notifier"
+        )
+        raise ProtocolError(msg)
+    claimed.append(device)
+
+
+async def _dispatch_poll(
+    engine: AssistantEngine,
+    frame: env.Envelope,
+    watcher: asyncio.Future[env.Envelope],
+    *,
+    limit: int,
+) -> env.Envelope | None:
+    """Run a long poll, watching for the connection going away underneath it.
+
+    **The existing path does not detect the close, and that is the one place this
+    seam genuinely reaches into the request loop** (ADR-0131 §2a).
+    :func:`_serve_requests` reads the next frame concurrently with the dispatch —
+    which is how it catches an overlapping request — but settles that watcher only
+    *after* ``_dispatch`` returns. For every request the hub has ever served that
+    ordering is correct and invisible, because the dispatch is short. A long poll is
+    the first for which it is not: the watcher observes the peer's clean close
+    within milliseconds and nothing acts on it until the poll's budget has run out,
+    so the device's slot stays held by a poll nobody is listening to, and the
+    reconnect §2 calls free is closed as a second poll — the claim and the rule
+    contradicting each other on the most ordinary failure a mobile device has.
+
+    **Cancelling the dispatch is what "the poll ends without an answer" means**, and
+    ADR-0131 §2a already prices both outcomes: "A close detected before that step
+    runs cancels the poll and takes no entry. A close detected after it leaves the
+    lease standing, and the entry returns to the outbox when the lease expires." The
+    engine's selection is one indivisible durable step, so a cancellation either
+    lands before it commits or after — never inside it — and both are conforming.
+
+    Returns:
+        The reply to write, or ``None`` where the connection went away and this
+        connection is over.
+
+    Raises:
+        ProtocolError: If the peer wrote a frame while the poll was outstanding.
+    """
+    dispatch = asyncio.ensure_future(_dispatch(engine, frame, limit=limit))
+    await asyncio.wait({dispatch, watcher}, return_when=asyncio.FIRST_COMPLETED)
+    if not dispatch.done():
+        # The watcher settled first, so the peer either hung up or wrote a frame.
+        # Either way this poll has no future, and the dispatch is cancelled before
+        # the distinction is drawn so that the engine is not left running for a
+        # connection that has already ended.
+        dispatch.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await dispatch
+        if await _settle(watcher):
+            msg = (
+                "a peer wrote a second frame while a next_notification was outstanding; a "
+                "delivery connection carries that request alone (ADR-0131 §2), and the "
+                "serial rule is unchanged besides — so the connection is closed with no "
+                "reply to either"
+            )
+            raise ProtocolError(msg)
+        _log.debug("hub_delivery_poll_abandoned")
+        return None
+    reply = dispatch.result()
+    if await _settle(watcher):
+        msg = (
+            "a peer wrote a second frame while a next_notification was outstanding; a "
+            "delivery connection carries that request alone (ADR-0131 §2), and the serial "
+            "rule is unchanged besides — so the connection is closed with no reply to either"
+        )
+        raise ProtocolError(msg)
+    return reply
 
 
 async def _settle(watcher: asyncio.Future[env.Envelope]) -> bool:

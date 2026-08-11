@@ -23,7 +23,7 @@ from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.service.enrolment import ENROLMENTS_FILENAME, DeviceRegistry, EnrolmentStore
 from ai_assistant.service.overlay import HubOverlayIdentity, OverlayIdentityUnavailableError
 from ai_assistant.service.remote import RemoteListener
-from ai_assistant.service.transport import ConnectionBudget, Listener
+from ai_assistant.service.transport import ConnectionBudget, DeliverySlots, Listener
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import HubEngineClient
 from ai_assistant.wire import envelope as env
@@ -172,7 +172,12 @@ async def _remote(
         max_pending_handshakes=settings.hub_max_pending_handshakes,
     )
     listener = RemoteListener(
-        the_engine, settings, registry=registry, agent=the_agent, budget=the_budget
+        the_engine,
+        settings,
+        registry=registry,
+        agent=the_agent,
+        budget=the_budget,
+        delivery=DeliverySlots(max_delivery_connections=settings.hub_max_delivery_connections),
     )
     await listener.start(build="test")
     await listener.begin_serving()
@@ -277,6 +282,7 @@ async def test_the_hub_refuses_to_bind_an_address_the_agent_does_not_report(
             registry=DeviceRegistry(store, hub_identity=_HUB_ID),
             agent=_FakeAgent(addresses=frozenset({"100.64.0.9"})),
             budget=ConnectionBudget(max_connections=8, max_pending_handshakes=4),
+            delivery=DeliverySlots(max_delivery_connections=4),
         )
         with pytest.raises(ConfigurationError, match="does not report"):
             await listener.start(build="test")
@@ -298,6 +304,7 @@ async def test_the_hub_refuses_to_bind_when_the_agent_cannot_be_asked(tmp_path: 
             registry=DeviceRegistry(store, hub_identity=_HUB_ID),
             agent=_FakeAgent(available=False),
             budget=ConnectionBudget(max_connections=8, max_pending_handshakes=4),
+            delivery=DeliverySlots(max_delivery_connections=4),
         )
         with pytest.raises(ConfigurationError, match="could not be asked"):
             await listener.start(build="test")
@@ -320,6 +327,7 @@ def test_a_listener_is_not_built_without_an_address(tmp_path: Path) -> None:
                 registry=DeviceRegistry(store, hub_identity=_HUB_ID),
                 agent=_FakeAgent(),
                 budget=ConnectionBudget(max_connections=8, max_pending_handshakes=4),
+                delivery=DeliverySlots(max_delivery_connections=4),
             )
     finally:
         store.close()
@@ -727,6 +735,7 @@ async def test_a_connection_stalled_in_the_identity_query_converges_on_shutdown(
         registry=DeviceRegistry(store, hub_identity=_HUB_ID),
         agent=_StalledAgent(),
         budget=budget,
+        delivery=DeliverySlots(max_delivery_connections=4),
     )
     await listener.start(build="test")
     await listener.begin_serving()
@@ -939,6 +948,7 @@ async def test_a_bound_listener_answers_nothing_until_it_is_told_to_serve(
         registry=registry,
         agent=agent,
         budget=ConnectionBudget(max_connections=8, max_pending_handshakes=4),
+        delivery=DeliverySlots(max_delivery_connections=4),
     )
     await listener.start(build="test")
     try:

@@ -548,6 +548,69 @@ class NotificationStoreError(AssistantError):
     """
 
 
+class NotificationOutboxError(AssistantError):
+    """The delivery outbox could not commit what it was asked to (ADR-0131 §3b).
+
+    Its own class in the shape :class:`MemoryStoreError`, :class:`DeferralStoreError`
+    and :class:`TraceStoreError` already take, and for the reason §3b gives: the
+    four members of :class:`~ai_assistant.core.types.NotificationEnqueue` are
+    outcomes an offer *reached*, and a store that could not reach one at all is a
+    fault rather than a fifth outcome. Without this type a disk-full or a
+    transaction failure would fall outside every outcome, and a producer would
+    receive an implementation exception with no contract telling it whether the
+    notification had been taken.
+
+    **No custody transfers when it is raised** (§3b). ADR-0131 §3 puts the
+    transfer at the enqueue's single durable commit "and not before", so a caller
+    that sees this error still holds the candidate, nothing was enqueued, the
+    ADR-0130 record stays actionable, and the path may retry it — or leave it to
+    §3b's startup reconciliation, which offers it again.
+
+    ``next_notification`` declares it too, because applying an ``acknowledging``
+    value writes to both stores (ADR-0131 §4). There it means the
+    acknowledgement's **dismissal** did not commit: nothing is retired, and the
+    caller may send the same value again. Once that dismissal has committed the
+    acknowledgement has taken effect, and a failure of the entry's subsequent
+    removal does not fail the call — the entry is departing, deliverable to
+    nobody, and reconciliation completes the removal.
+    """
+
+
+class NotificationBudgetError(AssistantError):
+    """A poll's ``budget`` is outside the range the hub honours (ADR-0131 §4).
+
+    Negative, or above ``hub_max_notification_budget``. **Both ends need a
+    refusal and only one is obvious**: ``timedelta`` admits zero and negative
+    values and exceeds no maximum, so without this one implementation would
+    return an empty result for ``timedelta(seconds=-1)`` and another would hand
+    it to a timeout primitive and raise something undeclared. Zero is *not* an
+    error — it is the immediate poll, the one out-of-range-looking value that
+    means something (§4).
+
+    **The hub does not silently clamp in either direction.** A client whose
+    ninety-minute budget were honoured as ninety seconds would have been told, by
+    acceptance, that its budget was accepted — which is ADR-0084 §2's argument
+    against accepting-and-ignoring, transferred unchanged.
+
+    **It carries no structured state, and that is a decision rather than an
+    omission** (§4). ADR-0085 §10a requires an oversized error payload to travel
+    with ``details: null`` and the client to reconstruct the declared exception
+    with its structured state absent — a discipline
+    :class:`OversizedValueError` pays because ADR-0084 §4 obliges it to carry the
+    limit and the field. Nothing obliges this one: its two numbers are what a
+    caller reads, not what a caller branches on, so they belong in the message,
+    where §10a's reduction cannot strand them. An error with no ``details``
+    object is one there is no reduced form of.
+
+    It is an ordinary engine refusal, raised from an *argument*, so an in-process
+    engine has everything it needs to raise it and a wire client's hub raises it
+    from the same value — which is the substitutability ADR-0084 §5 promoted the
+    façade to a Protocol for. ADR-0131 §2's poll conflict is the condition that
+    could *not* meet that test, and it is a connection close rather than a second
+    type here.
+    """
+
+
 class DeferralIdConflictError(DeferralStoreError):
     """A ``defer`` supplied an id a stored row already carries (ADR-0078 §2).
 

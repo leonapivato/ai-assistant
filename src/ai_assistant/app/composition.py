@@ -29,6 +29,7 @@ from ai_assistant.context import (
 )
 from ai_assistant.core.config import EmbedderKind
 from ai_assistant.core.errors import ConfigurationError, ModelError
+from ai_assistant.core.types import DELIVERY_RESERVE_BYTES
 from ai_assistant.evaluation import MeasureReader, SqliteTraceStore
 from ai_assistant.learning import ModelBackedObserver, RuleBasedFeedbackProcessor
 from ai_assistant.memory import (
@@ -37,6 +38,7 @@ from ai_assistant.memory import (
     MemoryIngestor,
     SqliteDeferralStore,
     SqliteMemoryStore,
+    SqliteNotificationOutbox,
     SqliteNotificationStore,
 )
 from ai_assistant.memory.conversation_store import SqliteConversationStore
@@ -530,6 +532,39 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
             cap=settings.notification_queue_limit,
         )
         opened.append(notifications.close)
+        # ADR-0131 §3's delivery outbox: the **ninth** connection-owning store and
+        # the eighth that is Tier 1, for the notification store's reason exactly —
+        # an entry holds the same candidate, so it holds the same free text a
+        # producer wrote to be shown to a person.
+        #
+        # **It is handed the notification store rather than reaching into one**
+        # (ADR-0131 §3b). Every way an entry leaves the outbox dismisses its
+        # ADR-0130 record "through the dismissal ``NotificationStore`` carries", and
+        # the two commits are ordered rather than atomic — dismiss first, remove
+        # after — which is what makes §3b's invariant true: an actionable record
+        # with no entry means its enqueue never committed, and nothing else. That
+        # ordering is the outbox's to keep, so it needs the seam, and this is where
+        # golden rule 1 puts the pairing.
+        #
+        # **The delivery ceiling is computed here because only here knows it**
+        # (ADR-0131 §4): it is ADR-0085 §8's contract limit — the frame ceiling less
+        # §8b's 512-byte envelope reserve, which this root already subtracts for the
+        # engine — less §4's 256-byte delivery reserve, which covers wrapping a
+        # candidate as ``{"delivery_id": …, "notification": …}``. §4 forbids the
+        # bound living on ``NotificationCandidate``'s own validation, because a
+        # frozen `core` model has no ``Settings`` input and the same candidate would
+        # then be valid on one hub and invalid on another.
+        outbox = SqliteNotificationOutbox(
+            path=directory / "outbox.db",
+            records=notifications,
+            lease=settings.hub_notification_lease,
+            max_entries=settings.hub_notification_outbox_entries,
+            max_bytes=settings.hub_notification_outbox_bytes,
+            candidate_ceiling=(
+                settings.hub_max_frame_bytes - ENVELOPE_RESERVE_BYTES - DELIVERY_RESERVE_BYTES
+            ),
+        )
+        opened.append(outbox.close)
 
         # The context provider, assembled now that the grant seam exists. Its
         # calendar facet is registered only when a source is configured — a source
@@ -792,6 +827,20 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
             # requires and as the trace store's sweep already does.
             notifications=notifications,
             notification_policy=DefaultNotificationPolicy(timezone=settings.timezone),
+            # ADR-0131's delivery seam. The outbox reaches the engine as
+            # ``orchestration``'s own ``DeliveryOutbox`` rather than as ``core``'s
+            # ``NotificationOutbox``, because §3b gives the latter "exactly one
+            # method" and that one is the *producer's*; the engine needs three more
+            # to serve a poll, and this root is where one object takes both roles.
+            #
+            # **Its startup reconciliation is not run here**, and that is ADR-0131
+            # §3b's clause rather than an omission: it must run "to completion
+            # before it serves any poll", and this function builds an engine for a
+            # CLI as well as for a hub. The hub runs it as part of coming up
+            # (``service/hub.py``), where "before any poll" is a fact about the
+            # listener rather than about a constructor.
+            notification_outbox=outbox,
+            max_notification_budget=settings.hub_max_notification_budget,
             # The four grant operations (ADR-0102 §1, §7), over the *same* store
             # passed to the drivers above — a second store would let a user grant a
             # source the gate then read a different answer about.
@@ -847,6 +896,13 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
                 # the drain of the reconsideration job, which the façade has
                 # already waited on by the time any of these run.
                 _as_async(notifications.close),
+                # And the outbox immediately after it, which is the one ordering
+                # constraint between the two: a departure dismisses the record
+                # *before* it removes the entry (ADR-0131 §3b), so an outbox still
+                # able to run one after the record store had closed would be an
+                # outbox able to remove an entry whose dismissal could not commit —
+                # the one order §3b rules unsafe.
+                _as_async(outbox.close),
                 # And the trace store as the seventh (ADR-0119 §6). Closed **last
                 # although it is now opened first**, which is the one place this
                 # list deliberately departs from open order: the memory store and

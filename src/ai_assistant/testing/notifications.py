@@ -31,11 +31,12 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, time, timedelta
 from itertools import count
+from secrets import token_hex
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import NotificationStoreError
+from ai_assistant.core.errors import NotificationOutboxError, NotificationStoreError
 from ai_assistant.core.types import (
     DROP_CONDITIONS,
     INTERRUPT_CONDITIONS,
@@ -43,8 +44,10 @@ from ai_assistant.core.types import (
     TIME_RESOLVED_CONDITIONS,
     HeldNotification,
     NotificationCondition,
+    NotificationDelivery,
     NotificationDisposition,
     NotificationDispositionKind,
+    NotificationEnqueue,
     NotificationPreferences,
     NotificationReach,
     describe_untrusted,
@@ -956,4 +959,264 @@ class FakeNotificationWriter:
         return await self._store.admit(candidate, policy=self._policy)
 
 
-__all__ = ["FakeNotificationPolicy", "FakeNotificationStore", "FakeNotificationWriter"]
+class _OutboxEntry:
+    """One entry of :class:`FakeNotificationOutbox`."""
+
+    __slots__ = ("candidate", "delivery_id", "departing", "leased_until", "record_id", "sequence")
+
+    def __init__(
+        self, *, candidate: NotificationCandidate, record_id: str | None, sequence: int
+    ) -> None:
+        """Hold one enqueued candidate."""
+        self.candidate = candidate
+        self.record_id = record_id
+        self.sequence = sequence
+        self.delivery_id: str | None = None
+        self.leased_until: datetime | None = None
+        self.departing = False
+
+
+class FakeNotificationOutbox:
+    """The canonical :class:`~ai_assistant.core.protocols.NotificationOutbox`.
+
+    ADR-0131 §3b's triad fake: a durable-shaped delivery queue in memory, so a
+    subsystem that depends on proactive contact can test against a real,
+    contract-correct outbox without importing another subsystem's internals
+    (CLAUDE.md golden rule 1).
+
+    **Its critical sections really suspend**, for the reason
+    :class:`FakeNotificationStore`'s do: without a yield inside the exclusion a
+    fake backed by a dict would satisfy ADR-0131 §3's linearizability clause by
+    accident — nothing in it ever awaits, so nothing can interleave — and a shared
+    suite's concurrency cases would be vacuous against exactly the implementation
+    they most need to hold for.
+
+    **It defaults to ADR-0131 §5a's own figures**, not to whatever was convenient:
+    a 120-second lease and 256 entries. A fake looser than the contract would
+    certify consumers a real outbox rejects. The byte bound is deliberately *not*
+    modelled — an in-memory fake persists nothing, so it has no honest byte cost to
+    count, and asserting one would be inventing a number rather than keeping a
+    contract. Consumers that need the byte bound exercised drive a durable outbox.
+    """
+
+    def __init__(
+        self,
+        *,
+        records: NotificationStore | None = None,
+        now: Clock = _utcnow,
+        lease: timedelta = timedelta(seconds=120),
+        max_entries: int = 256,
+        candidate_ceiling: int | None = None,
+    ) -> None:
+        """Build an empty outbox.
+
+        Args:
+            records: The ADR-0130 record store this dismisses through when an
+                entry departs (ADR-0131 §3b), or ``None`` where a consumer is
+                testing the outbox alone. ``None`` makes every dismissal a no-op,
+                which is §3b's "where the act that removed the entry has already
+                ended the record's actionability, nothing further is owed" reached
+                by there being no record at all.
+            now: The hub's clock. No value a caller supplies influences a lease.
+            lease: ADR-0131 §5a's ``hub_notification_lease``.
+            max_entries: ADR-0131 §5a's ``hub_notification_outbox_entries``.
+            candidate_ceiling: ADR-0131 §4's delivery ceiling in bytes, or ``None``
+                to enforce none. ``None`` is right for a fake with no frame behind
+                it: the ceiling is settings-derived (§4), so a fake inventing one
+                would refuse candidates a real deployment accepts.
+        """
+        self._clock = checked_clock(now, owner="FakeNotificationOutbox")
+        self._records = records
+        self._lease = lease
+        self._max_entries = max_entries
+        self._candidate_ceiling = candidate_ceiling
+        self._entries: dict[str, _OutboxEntry] = {}
+        self._sequence = count(1)
+        self._deliveries = count(1)
+        self._lock = asyncio.Lock()
+
+    def _now(self) -> datetime:
+        """The guarded clock's reading, as this seam's own error."""
+        try:
+            return self._clock()
+        except ClockReadingError as exc:
+            raise NotificationOutboxError(str(exc)) from exc
+
+    def _is_departing(self, entry: _OutboxEntry, now: datetime) -> bool:
+        """ADR-0131 §3's departing predicate, spelled once."""
+        expiry = entry.candidate.expires_at
+        return entry.departing or (expiry is not None and expiry <= now)
+
+    def _is_leased(self, entry: _OutboxEntry, now: datetime) -> bool:
+        """Whether a live lease holds this entry — half-open at the expiry."""
+        return entry.leased_until is not None and now < entry.leased_until
+
+    async def _dismiss(self, record_id: str | None) -> None:
+        """Dismiss the ADR-0130 record an entry carried, where there is one."""
+        if record_id is None or self._records is None:
+            return
+        await self._records.dismiss(record_id)
+
+    async def _resolve(self, candidate_key: str) -> str | None:
+        """The actionable record this candidate belongs to, where one is readable."""
+        if self._records is None:
+            return None
+        now = self._now()
+        for record in await self._records.held(limit=1000, offset=0):
+            if record.candidate.candidate_key == candidate_key and record.is_actionable_at(now):
+                return record.id
+        return None
+
+    async def offer(self, candidate: NotificationCandidate) -> NotificationEnqueue:
+        """Take custody of one ruled interruption, or say why not (ADR-0131 §3)."""
+        record_id = await self._resolve(candidate.candidate_key)
+        async with self._lock:
+            await asyncio.sleep(0)  # a real critical section suspends; see the class docstring
+            now = self._now()
+            if (
+                self._candidate_ceiling is not None
+                and len(candidate.model_dump_json().encode("utf-8")) > self._candidate_ceiling
+            ):
+                return NotificationEnqueue.TOO_LARGE
+            held = self._entries.get(candidate.candidate_key)
+            if held is not None and not self._is_departing(held, now):
+                if held.candidate == candidate:
+                    return NotificationEnqueue.ALREADY_HELD
+                return NotificationEnqueue.KEY_COLLISION
+            victims = self._victims(candidate.candidate_key, now)
+            for victim in victims:
+                victim.departing = True
+            for victim in victims:
+                await self._dismiss(victim.record_id)
+                self._entries.pop(victim.candidate.candidate_key, None)
+            self._entries[candidate.candidate_key] = _OutboxEntry(
+                candidate=candidate, record_id=record_id, sequence=next(self._sequence)
+            )
+            return NotificationEnqueue.ENQUEUED
+
+    def _victims(self, incoming: str, now: datetime) -> list[_OutboxEntry]:
+        """Which entries this enqueue drops, in ADR-0131 §3's order.
+
+        Oldest first, preferring an entry that is not leased and, among those, one
+        already departing — because evicting a departing entry is the removal
+        already owed rather than a second decision. When every remaining entry is
+        leased the oldest is taken and its lease broken, which is the *total* rule
+        §3 states so that the all-leased case has a defined outcome.
+        """
+        remaining = [
+            entry for entry in self._entries.values() if entry.candidate.candidate_key != incoming
+        ]
+        victims: list[_OutboxEntry] = []
+        while remaining and len(remaining) + 1 > self._max_entries:
+            available = [entry for entry in remaining if not self._is_leased(entry, now)]
+            departing = [entry for entry in available if self._is_departing(entry, now)]
+            pool = departing or available or remaining
+            victim = min(pool, key=lambda entry: entry.sequence)
+            remaining.remove(victim)
+            victims.append(victim)
+        return victims
+
+    async def claim(self) -> NotificationDelivery | None:
+        """Select, mint and lease in one step (ADR-0131 §2a)."""
+        async with self._lock:
+            await asyncio.sleep(0)
+            now = self._now()
+            available = [
+                entry
+                for entry in self._entries.values()
+                if not self._is_leased(entry, now) and not self._is_departing(entry, now)
+            ]
+            if not available:
+                return None
+            entry = min(available, key=lambda candidate_entry: candidate_entry.sequence)
+            # Two halves, as §4 requires: a counter for uniqueness, and an
+            # unguessable half so the identifier is a capability rather than a
+            # number a device can increment to retire someone else's delivery.
+            entry.delivery_id = f"{next(self._deliveries)}.{token_hex(16)}"
+            entry.leased_until = now + self._lease
+            return NotificationDelivery(delivery_id=entry.delivery_id, notification=entry.candidate)
+
+    async def acknowledge(self, delivery_id: str) -> None:
+        """Retire the entry this is the current outstanding delivery of (§3)."""
+        async with self._lock:
+            await asyncio.sleep(0)
+            now = self._now()
+            entry = next(
+                (
+                    candidate_entry
+                    for candidate_entry in self._entries.values()
+                    if candidate_entry.delivery_id == delivery_id
+                ),
+                None,
+            )
+            if entry is None or self._is_departing(entry, now):
+                return
+            entry.departing = True
+            try:
+                await self._dismiss(entry.record_id)
+            except NotificationStoreError as exc:
+                entry.departing = False
+                msg = f"failed to dismiss the notification record an outbox entry carried: {exc}"
+                raise NotificationOutboxError(msg) from exc
+            self._entries.pop(entry.candidate.candidate_key, None)
+
+    async def withdraw(self, record_id: str) -> bool:
+        """Give up the entry carrying one record, as an eviction does (§3a)."""
+        async with self._lock:
+            await asyncio.sleep(0)
+            entry = next(
+                (
+                    candidate_entry
+                    for candidate_entry in self._entries.values()
+                    if candidate_entry.record_id == record_id
+                ),
+                None,
+            )
+            if entry is None:
+                return False
+            entry.departing = True
+            await self._dismiss(record_id)
+            self._entries.pop(entry.candidate.candidate_key, None)
+            return True
+
+    async def reconcile(self) -> None:
+        """Make the outbox and the records agree, in both directions (§3b)."""
+        async with self._lock:
+            await asyncio.sleep(0)
+            now = self._now()
+            for entry in list(self._entries.values()):
+                entry.delivery_id = None
+                entry.leased_until = None
+                if self._is_departing(entry, now):
+                    await self._dismiss(entry.record_id)
+                    self._entries.pop(entry.candidate.candidate_key, None)
+            keys = set(self._entries)
+        if self._records is None:
+            return
+        for record in await self._records.held(limit=1000, offset=0):
+            if record.kind is not NotificationDispositionKind.INTERRUPT:
+                continue
+            if not record.is_actionable_at(now) or record.candidate.candidate_key in keys:
+                continue
+            await self.offer(record.candidate)
+
+    async def wait_for_arrival(
+        self,
+        timeout: timedelta,  # noqa: ASYNC109, ARG002 — the caller's own poll budget (ADR-0029 §4), honoured by returning at once
+    ) -> None:
+        """Return at once rather than waiting out ``timeout``.
+
+        **The wait is a latency hint and never a guarantee** (ADR-0131 §3), so
+        returning immediately is conforming: a caller re-reads the outbox after it
+        and decides from what it finds. A fake that slept would make every
+        consumer's long-poll test as slow as the budget it passed.
+        """
+        return
+
+
+__all__ = [
+    "FakeNotificationOutbox",
+    "FakeNotificationPolicy",
+    "FakeNotificationStore",
+    "FakeNotificationWriter",
+]

@@ -1,0 +1,287 @@
+"""ADR-0131 §4's ordering and refusals on the engine's own delivery surface.
+
+What is here is the half the transport cannot decide: the closed budget range and
+both of its ends, the ordering that puts validation before every effect, the
+refusal when no outbox is composed, and the reconciliation that runs at
+:meth:`~ai_assistant.orchestration.Engine.start` rather than at the first poll.
+The connection rules are ``tests/wire/test_server_delivery.py``'s, and the
+outbox's own transitions are tested where each implementation lives.
+
+The engine is built from the same canonical fakes ``test_engine.py``'s harness
+uses, so nothing here imports a subsystem (CLAUDE.md golden rule 1).
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
+
+import pytest
+from test_engine import AT, Harness, _grant_operations
+
+from ai_assistant.core.errors import ConfigurationError, NotificationBudgetError
+from ai_assistant.core.types import DataTier, NotificationCandidate
+from ai_assistant.orchestration.engine import Engine
+from ai_assistant.testing import FakeAssistantEngine, FakeNotificationOutbox
+
+if TYPE_CHECKING:
+    from ai_assistant.core.types import NotificationDelivery
+    from ai_assistant.orchestration.delivery import DeliveryOutbox
+
+NOW = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
+
+
+def _candidate(key: str = "k1") -> NotificationCandidate:
+    """One candidate, with everything a case is not about held constant."""
+    return NotificationCandidate(
+        candidate_key=key,
+        producer="a-producer",
+        notification_class="calendar",
+        summary="something the user did not ask for",
+        noticed_at=NOW,
+        confidence=0.5,
+        sensitivity=DataTier.PERSONAL,
+    )
+
+
+def _wired(harness: Harness, outbox: DeliveryOutbox | None = None, **kwargs: object) -> Engine:
+    """A façade over ``harness``'s durable state, holding a delivery outbox."""
+    return Engine(
+        grant_operations=_grant_operations(),
+        loop=harness.engine._loop,
+        runner=harness.engine._runner,
+        plans=harness.plans,
+        trail=harness.trail,
+        memory=harness.memory,
+        deferrals=harness.deferrals,
+        traces=harness.traces,
+        trace_sink=harness.trace_sink,
+        trace_retention=harness.trace_retention,
+        conversations=harness.conversations,
+        observation=harness.observation,
+        questions=harness.questions,
+        notification_outbox=outbox,
+        now=lambda: AT,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+class RecordingOutbox:
+    """A :class:`DeliveryOutbox` that records the order it was driven in.
+
+    The subject of the ordering cases, because ADR-0131 §4's rule is about *which
+    call happened first* rather than about either call's answer — an assertion on
+    the outcome would pass whichever way round they ran.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing to give and nothing recorded."""
+        self.calls: list[str] = []
+        self.reconciled = 0
+
+    async def claim(self) -> NotificationDelivery | None:
+        """Answer that nothing is available."""
+        self.calls.append("claim")
+        return None
+
+    async def acknowledge(self, delivery_id: str) -> None:
+        """Record that an acknowledgement reached the outbox."""
+        self.calls.append(f"acknowledge:{delivery_id}")
+
+    async def reconcile(self) -> None:
+        """Record that the startup repair ran."""
+        self.calls.append("reconcile")
+        self.reconciled += 1
+
+    async def wait_for_arrival(
+        self,
+        timeout: timedelta,  # noqa: ASYNC109 — the caller's own poll budget (ADR-0029 §4)
+    ) -> None:
+        """Return at once, so a budget costs a case nothing to exercise."""
+        del timeout
+        self.calls.append("wait")
+
+
+class TestTheBudgetRange:
+    """ADR-0131 §4: honoured over the closed range from zero to the ceiling."""
+
+    @pytest.mark.parametrize("budget", [timedelta(seconds=-1), timedelta(days=-1)])
+    async def test_a_negative_budget_is_refused(self, budget: timedelta) -> None:
+        """§4: ``timedelta`` admits negatives and nothing else would refuse one.
+
+        "One implementation would return an empty result while another handed it to
+        a timeout primitive and raised something undeclared — no common conforming
+        behaviour", which is the fifteenth round's finding.
+        """
+        engine = FakeAssistantEngine()
+
+        with pytest.raises(NotificationBudgetError):
+            await engine.next_notification(budget=budget)
+
+    async def test_a_budget_above_the_ceiling_is_refused_not_clamped(self) -> None:
+        """§4: "The hub does not silently clamp it in either direction."
+
+        Clamping is accepting-and-ignoring in a second costume: a client whose
+        ninety-minute budget were honoured as ninety seconds has been told, by
+        acceptance, that its budget was accepted.
+        """
+        engine = FakeAssistantEngine()
+
+        with pytest.raises(NotificationBudgetError):
+            await engine.next_notification(budget=timedelta(hours=2))
+
+    async def test_zero_is_an_immediate_poll_and_not_an_error(self) -> None:
+        """§4: "the one out-of-range value that means something".
+
+        "A device that has just been opened by the owner wants to know what is
+        waiting *now*", and refusing zero would push every client into faking it
+        with a one-second budget — the same behaviour with worse latency and an
+        arbitrary constant in it.
+        """
+        engine = FakeAssistantEngine()
+
+        assert await engine.next_notification(budget=timedelta(0)) is None
+
+    async def test_the_ceiling_itself_is_inside_the_range(self) -> None:
+        """§4: the range is *closed*, so the ceiling is honoured rather than refused."""
+        engine = FakeAssistantEngine()
+
+        assert await engine.next_notification(budget=engine.max_notification_budget) is None
+
+    async def test_the_concrete_engine_refuses_the_same_range(self) -> None:
+        """The refusal is the *engine's* and not the fake's, so both are held to it."""
+        engine = _wired(Harness(), FakeNotificationOutbox())
+
+        with pytest.raises(NotificationBudgetError, match="ADR-0131 §4"):
+            await engine.next_notification(budget=timedelta(seconds=-1))
+
+    async def test_a_non_positive_ceiling_is_refused_at_construction(self) -> None:
+        """§5a: "'off' is not an available value" for any of the five figures."""
+        with pytest.raises(ConfigurationError, match="max_notification_budget"):
+            _wired(Harness(), FakeNotificationOutbox(), max_notification_budget=timedelta(0))
+
+
+class TestValidationPrecedesEveryEffect:
+    """§4: "a refused request retires nothing, leases nothing and mints nothing"."""
+
+    async def test_a_refused_budget_does_not_apply_the_acknowledgement(self) -> None:
+        """§4, the nineteenth round's finding.
+
+        "A device holding delivery ``D`` can send
+        ``next_notification(acknowledging=D, budget=timedelta(seconds=-1))``.
+        Without an ordering rule, one implementation acknowledges and then refuses —
+        reporting a failed request while having permanently retired ``D``, so the
+        device's retry with a valid budget finds the notification gone." Two
+        conforming hubs, one lost notification.
+        """
+        outbox = FakeNotificationOutbox()
+        await outbox.offer(_candidate())
+        held = await outbox.claim()
+        assert held is not None
+        engine = _wired(Harness(), outbox)
+
+        with pytest.raises(NotificationBudgetError):
+            await engine.next_notification(
+                acknowledging=held.delivery_id, budget=timedelta(seconds=-1)
+            )
+
+        # Still the entry's current outstanding delivery, so the device's retry
+        # with a valid budget still retires it.
+        await outbox.acknowledge(held.delivery_id)
+        assert await outbox.claim() is None
+
+    async def test_a_blank_acknowledgement_is_refused(self) -> None:
+        """A malformed argument "of any kind, not only an out-of-range duration"."""
+        engine = _wired(Harness(), FakeNotificationOutbox())
+
+        with pytest.raises(ValueError, match="acknowledging"):
+            await engine.next_notification(acknowledging="   ", budget=timedelta(0))
+
+
+class TestThePollLoop:
+    """The acknowledge-then-select order, and what the budget buys."""
+
+    async def test_the_acknowledgement_precedes_the_selection(self) -> None:
+        """§4: "**validate, then acknowledge, then select**"."""
+        outbox = RecordingOutbox()
+        engine = _wired(Harness(), outbox)
+
+        await engine.next_notification(acknowledging="1.abc", budget=timedelta(0))
+
+        assert outbox.calls[:2] == ["acknowledge:1.abc", "claim"]
+
+    async def test_a_zero_budget_reads_once_and_never_waits(self) -> None:
+        """§4: an immediate poll is "the same request with the waiting removed"."""
+        outbox = RecordingOutbox()
+        engine = _wired(Harness(), outbox)
+
+        await engine.next_notification(budget=timedelta(0))
+
+        assert outbox.calls == ["claim"]
+
+    async def test_an_available_entry_answers_without_waiting(self) -> None:
+        """A poll with something waiting returns at once, whatever its budget."""
+        outbox = FakeNotificationOutbox()
+        await outbox.offer(_candidate())
+        engine = _wired(Harness(), outbox)
+
+        delivery = await engine.next_notification(budget=timedelta(seconds=30))
+
+        assert delivery is not None
+        assert delivery.notification.candidate_key == "k1"
+
+    async def test_a_leased_entry_is_not_handed_to_a_second_poll(self) -> None:
+        """§3, through the engine: the lease is what makes "one at a time" true."""
+        outbox = FakeNotificationOutbox()
+        await outbox.offer(_candidate())
+        engine = _wired(Harness(), outbox)
+
+        first = await engine.next_notification(budget=timedelta(0))
+        second = await engine.next_notification(budget=timedelta(0))
+
+        assert first is not None
+        assert second is None
+
+
+class TestTheStartupReconciliation:
+    """§3b: "running to completion before it serves any poll"."""
+
+    async def test_start_runs_the_reconciliation(self) -> None:
+        """The hub calls ``start`` at step 4 and accepts at step 6, so "before any
+        poll" is a fact about the listener rather than a promise a constructor
+        makes."""
+        outbox = RecordingOutbox()
+        engine = _wired(Harness(), outbox)
+
+        await engine.start()
+
+        assert outbox.reconciled == 1
+
+    async def test_start_without_an_outbox_is_unchanged(self) -> None:
+        """The CLI's in-process engine serves no poll, so it has nothing to repair."""
+        engine = _wired(Harness())
+
+        await engine.start()  # must not raise
+
+
+class TestAnUnwiredOutboxRefusesLegibly:
+    """A deployment that composed none delivers nothing, and says so."""
+
+    async def test_a_poll_with_no_outbox_is_a_configuration_error(self) -> None:
+        """ "No outbox is composed" and "nothing is waiting" are different facts.
+
+        The shape ``notifications`` already takes when no notification store is
+        wired: an empty answer would tell a device the outbox is empty when in
+        truth the hub cannot deliver at all.
+        """
+        engine = _wired(Harness())
+
+        with pytest.raises(ConfigurationError, match="no notification outbox is wired"):
+            await engine.next_notification(budget=timedelta(0))
+
+    async def test_the_refusal_precedes_no_state_change(self) -> None:
+        """The budget is still judged first, so the two refusals cannot disagree."""
+        engine = _wired(Harness())
+
+        with pytest.raises(NotificationBudgetError):
+            await engine.next_notification(budget=timedelta(seconds=-1))

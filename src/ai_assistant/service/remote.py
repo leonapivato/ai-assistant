@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import AssistantEngine
     from ai_assistant.service.enrolment import DeviceRegistry
     from ai_assistant.service.overlay import OverlayAgent
-    from ai_assistant.service.transport import ConnectionBudget
+    from ai_assistant.service.transport import ConnectionBudget, DeliverySlots
 
 _log = structlog.get_logger(__name__)
 
@@ -90,7 +90,7 @@ class RemoteListener:
         port: The port it binds.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — the engine, the settings, and one keyword per shared piece of hub state
         self,
         engine: AssistantEngine,
         settings: Settings,
@@ -98,6 +98,7 @@ class RemoteListener:
         registry: DeviceRegistry,
         agent: OverlayAgent,
         budget: ConnectionBudget,
+        delivery: DeliverySlots,
     ) -> None:
         """Prepare the listener; nothing is bound and nothing is asked until :meth:`start`.
 
@@ -107,6 +108,10 @@ class RemoteListener:
             registry: The enrolment record's live view (ADR-0124 §6, §8).
             agent: The overlay agent on this machine (§4).
             budget: The hub's shared ceilings (§7).
+            delivery: The hub's one delivery registry (ADR-0131 §3). Shared with
+                the loopback listener for §7's own reason, restated there: two
+                listeners each honouring the sub-bound independently would mean the
+                hub honours neither.
 
         Raises:
             ValueError: If ``hub_remote_address`` is unset. A hub with no remote
@@ -122,6 +127,7 @@ class RemoteListener:
         self._registry = registry
         self._agent = agent
         self._budget = budget
+        self._delivery = delivery
         self.address = settings.hub_remote_address
         self.port = settings.hub_remote_port
         self._server: asyncio.Server | None = None
@@ -484,3 +490,14 @@ class _DeviceAdmission:
         if self._enrolment_id is None:
             return False
         return self._registry.is_live(self._identity, self._enrolment_id)
+
+    def device(self) -> str:
+        """The overlay identity ADR-0124 §4 established for this connection.
+
+        The value ADR-0131 §2's per-device rules key on, taken from the agent's
+        answer at admission and never from anything the peer asserts (§4).
+
+        Returns:
+            The identity, stable for this connection's life.
+        """
+        return self._identity

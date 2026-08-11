@@ -30,6 +30,7 @@ from ai_assistant.testing.learning import FakeFeedbackProcessor
 from ai_assistant.testing.memory import FakeMemoryStore
 from ai_assistant.testing.models import FakeModelProvider, ModelCall
 from ai_assistant.testing.notifications import (
+    FakeNotificationOutbox,
     FakeNotificationPolicy,
     FakeNotificationStore,
     FakeNotificationWriter,
@@ -93,6 +94,7 @@ __all__ = [
     "FakeMemoryStore",
     "FakeMemoryWriter",
     "FakeModelProvider",
+    "FakeNotificationOutbox",
     "FakeNotificationPolicy",
     "FakeNotificationStore",
     "FakeNotificationWriter",

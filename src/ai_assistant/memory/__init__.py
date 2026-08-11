@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from ai_assistant.memory.deferral_store import SqliteDeferralStore
 from ai_assistant.memory.ingest import MemoryIngestor
+from ai_assistant.memory.notification_outbox import SqliteNotificationOutbox
 from ai_assistant.memory.notification_policy import DefaultNotificationPolicy
 from ai_assistant.memory.notification_store import SqliteNotificationStore
 from ai_assistant.memory.policy import DefaultMemoryPolicy
@@ -39,5 +40,6 @@ __all__ = [
     "MemoryIngestor",
     "SqliteDeferralStore",
     "SqliteMemoryStore",
+    "SqliteNotificationOutbox",
     "SqliteNotificationStore",
 ]

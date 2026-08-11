@@ -123,19 +123,32 @@ async def test_beyond_the_connection_ceiling_the_listener_refuses(tmp_path: Path
     exhausts descriptors and reader tasks while every individual connection is still
     inside its deadline".
     """
-    async with _listening(tmp_path, hub_max_connections=1, hub_max_pending_handshakes=1) as hub:
-        held_reader, held_writer = await asyncio.open_unix_connection(str(hub.path))
+    # **A ceiling of one is no longer expressible**, and that is ADR-0131 §5a's
+    # consequence rather than this case drifting: `hub_max_delivery_connections`
+    # is refused at load unless it is at least 1 *and* strictly below
+    # `hub_max_connections`, so a hub serving delivery needs at least two slots —
+    # which is the sub-bound's whole point, a slot for a poller and a slot for the
+    # owner's CLI. The ceiling is therefore two here and two connections are held.
+    async with _listening(
+        tmp_path,
+        hub_max_connections=2,
+        hub_max_pending_handshakes=2,
+        hub_max_delivery_connections=1,
+    ) as hub:
+        first_reader, first_writer = await asyncio.open_unix_connection(str(hub.path))
+        second_reader, second_writer = await asyncio.open_unix_connection(str(hub.path))
         try:
-            # The held connection has not handshaken, so it occupies the slot.
+            # Neither held connection has handshaken, so both occupy slots.
             await asyncio.sleep(0)
-            second = HubEngineClient(hub.path, read_timeout=_PATIENT)
+            third = HubEngineClient(hub.path, read_timeout=_PATIENT)
             with pytest.raises(HubUnavailableError):
-                await second.probe()
+                await third.probe()
         finally:
-            held_writer.close()
-            with contextlib.suppress(Exception):
-                await held_writer.wait_closed()
-            del held_reader
+            for writer in (first_writer, second_writer):
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+            del first_reader, second_reader
 
 
 async def test_inside_the_ceiling_a_client_is_served(tmp_path: Path) -> None:
@@ -144,10 +157,26 @@ async def test_inside_the_ceiling_a_client_is_served(tmp_path: Path) -> None:
     Driven at the ceiling rather than well inside it, so an off-by-one that refused
     the last permitted connection would fail here.
     """
-    async with _listening(tmp_path, hub_max_connections=1, hub_max_pending_handshakes=1) as hub:
-        client = HubEngineClient(hub.path, read_timeout=_PATIENT)
-        assert await client.beliefs() == ()
-        assert await client.forget("nothing") is False
+    async with _listening(
+        tmp_path,
+        hub_max_connections=2,
+        hub_max_pending_handshakes=2,
+        hub_max_delivery_connections=1,
+    ) as hub:
+        # One slot held, so the client below takes the *last* one — which is what
+        # keeps this "at the ceiling" now that ADR-0131 §5a makes a ceiling of one
+        # unexpressible for a hub that serves delivery.
+        held_reader, held_writer = await asyncio.open_unix_connection(str(hub.path))
+        try:
+            await asyncio.sleep(0)
+            client = HubEngineClient(hub.path, read_timeout=_PATIENT)
+            assert await client.beliefs() == ()
+            assert await client.forget("nothing") is False
+        finally:
+            held_writer.close()
+            with contextlib.suppress(Exception):
+                await held_writer.wait_closed()
+            del held_reader
 
 
 async def test_a_handshaken_connection_frees_the_pending_slot(tmp_path: Path) -> None:
@@ -166,7 +195,12 @@ async def test_a_handshaken_connection_frees_the_pending_slot(tmp_path: Path) ->
     Same ceiling, same held connection, opposite answers, and the handshake is the
     only difference.
     """
-    async with _listening(tmp_path, hub_max_connections=8, hub_max_pending_handshakes=1) as hub:
+    async with _listening(
+        tmp_path,
+        hub_max_connections=8,
+        hub_max_pending_handshakes=1,
+        hub_max_delivery_connections=4,
+    ) as hub:
         reader, writer = await asyncio.open_unix_connection(str(hub.path))
         try:
             await write_frame(

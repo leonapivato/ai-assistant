@@ -77,7 +77,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final, TypeVar, assert_never
 
@@ -87,6 +87,7 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     ConfigurationError,
     ConversationStoreError,
+    NotificationBudgetError,
     PlanningError,
     TraceStoreError,
     UnknownContinuationError,
@@ -130,7 +131,6 @@ from ai_assistant.orchestration.traces import Observation, OperationTraces
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
-    from datetime import timedelta
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -158,6 +158,7 @@ if TYPE_CHECKING:
         Identifier,
         MemoryRecord,
         NonBlankEncodableText,
+        NotificationDelivery,
         NotificationPreferences,
         ObservationReport,
         PermissionDecision,
@@ -170,6 +171,7 @@ if TYPE_CHECKING:
         ConsolidationStage,
     )
     from ai_assistant.orchestration.conversations import ConversationLifecycle
+    from ai_assistant.orchestration.delivery import DeliveryOutbox
     from ai_assistant.orchestration.grants import GrantOperations
     from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
     from ai_assistant.orchestration.loop import LearningLoop
@@ -186,6 +188,13 @@ _T = TypeVar("_T")
 #: :class:`Engine`). Generous enough that a real interactive session never reaches
 #: it, low enough that an abandoning client cannot exhaust memory.
 _DEFAULT_MAX_OUTSTANDING = 1024
+
+#: ADR-0131 §5a's ``hub_max_notification_budget``, as the figure this engine
+#: refuses a poll above. Carried as a default so an engine built without the hub's
+#: ``Settings`` still refuses the same range rather than none: §5a is explicit that
+#: none of its five figures is nullable, because "a hub serving delivery with… no
+#: budget bound… has the failure the clause naming it exists to prevent".
+_DEFAULT_MAX_NOTIFICATION_BUDGET = timedelta(seconds=300)
 
 #: The page size every enumeration on this surface returns by saying nothing is
 #: :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`, and the three private
@@ -850,6 +859,8 @@ class Engine:
         consolidation: ConsolidationStage | None = None,
         notifications: NotificationStore | None = None,
         notification_policy: NotificationPolicy | None = None,
+        notification_outbox: DeliveryOutbox | None = None,
+        max_notification_budget: timedelta = _DEFAULT_MAX_NOTIFICATION_BUDGET,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
         now: Clock = _utcnow,
@@ -1058,6 +1069,18 @@ class Engine:
                 state, on ``ingest``'s shape: "no store is wired" and "no
                 notifications are held" are different facts, and answering an
                 empty page would report the second while the first is true.
+            notification_outbox: ADR-0131 §3's durable delivery queue, or ``None``
+                where a deployment composes none — the CLI's in-process engine
+                serves no poll, so it needs no outbox, and ``next_notification``
+                refuses legibly rather than answering "nothing is waiting". It is
+                held as ``orchestration``'s own
+                :class:`~ai_assistant.orchestration.delivery.DeliveryOutbox`
+                rather than as ``core``'s ``NotificationOutbox``, because §3b
+                gives the latter "exactly one method" and that one is the
+                *producer's*; see that module for why the seam is local.
+            max_notification_budget: ADR-0131 §5a's
+                ``hub_max_notification_budget``, the ceiling a poll's ``budget``
+                is refused above. Not nullable, for §5a's reason.
             notification_policy: The deterministic ruling of ADR-0130 §4 and §5,
                 wired **together with** ``notifications`` or not at all. §3 puts
                 the ruling inside the store's critical section, so this façade
@@ -1178,6 +1201,15 @@ class Engine:
             raise ConfigurationError(msg)
         self._notifications = notifications
         self._notification_policy = notification_policy
+        self._notification_outbox = notification_outbox
+        if max_notification_budget <= timedelta(0):
+            msg = (
+                f"max_notification_budget must be positive, got {max_notification_budget!r}: a "
+                f"hub serving delivery with no budget bound has the failure the clause naming "
+                f"it exists to prevent, so 'off' is not an available value (ADR-0131 §5a)"
+            )
+            raise ConfigurationError(msg)
+        self._max_notification_budget = max_notification_budget
         self._closers = tuple(closers)
         self._id_factory = id_factory
         self._max_outstanding = max_outstanding_confirmations
@@ -1221,9 +1253,21 @@ class Engine:
         because it carries out something the user already asked for; then the
         **retention reclaim**, which asks for nothing and destroys nothing.
 
+        **Then ADR-0131 §3b's reconciliation, and this is the position that clause
+        requires**: it "reconciles at startup, running to completion before it
+        serves any poll". The hub calls this at step 4 of its startup and begins
+        accepting at step 6, so "before any poll" is a fact about the listener
+        rather than a promise this method makes. It runs last of the three because
+        it is the only one that reaches a second store, and because a hub whose
+        conversation sweeps failed has a larger problem than an unreconciled
+        outbox. Skipped where no outbox is wired, which is the CLI's in-process
+        engine: it serves no poll, so there is nothing to reconcile before.
+
         Idempotent, and safe to call more than once: both sweeps are re-runnable by
-        construction, and every drop is re-checked under the store's own
-        per-conversation exclusion.
+        construction, every drop is re-checked under the store's own
+        per-conversation exclusion, and the reconciliation is idempotent by
+        ADR-0131 §3's key rule, every path keying on the candidate's own
+        ``candidate_key``.
 
         Raises:
             RuntimeError: If the engine is shutting down.
@@ -1232,14 +1276,18 @@ class Engine:
                 report success over work it never did, so it aborts loudly — an id
                 that is merely *gone* is a no-op and does not abort it.
             MemoryStoreError: If an episode a deletion must destroy could not be.
+            NotificationOutboxError: If the outbox or the records it reconciles
+                against cannot be read or written.
         """
         self._reject_if_closing()
         return await self._tracked(self._start(), "start")
 
     async def _start(self) -> None:
-        """Finish pending deletions, then reclaim what retention has emptied."""
+        """Finish pending deletions, reclaim, then reconcile the delivery outbox."""
         await self._conversations.sweep_deletions()
         await self._conversations.reclaim()
+        if self._notification_outbox is not None:
+            await self._notification_outbox.reconcile()
 
     async def purge_expired(self) -> PurgeReport:
         """Physically reclaim what the two Tier 1 stores and the trace store owe.
@@ -2623,6 +2671,128 @@ class Engine:
             )
             if pending is None:
                 self._parked.pop(handle, None)
+
+    # --- the delivery surface (ADR-0131 §1, §4) ----------------------------
+
+    async def next_notification(
+        self, *, acknowledging: Identifier | None = None, budget: timedelta
+    ) -> NotificationDelivery | None:
+        """Wait up to ``budget`` for a notification, acknowledging the last one.
+
+        ADR-0131 §1's long poll, from the engine's side. The three steps are
+        ordered by §4 rather than by taste — **validate, then acknowledge, then
+        select** — and the ordering is what stops two conforming hubs disagreeing
+        about a device that sends a valid ``acknowledging`` with an invalid
+        ``budget``: one would acknowledge and then refuse, permanently retiring a
+        delivery while reporting a failed request, so the device's retry would find
+        the notification gone. "Arguments are validated before the acknowledgement
+        is applied, before any entry is selected, and before any other outbox state
+        changes; a refused request retires nothing, leases nothing and mints
+        nothing."
+
+        **The wait is a re-read loop and not a subscription**, which is what keeps
+        it correct without durable per-poll state: the outbox's arrival hint saves
+        latency and decides nothing, because every answer comes from asking the
+        outbox again. A budget of zero therefore does exactly one read, which is
+        §4's immediate poll — "the same request with the waiting removed" — rather
+        than a case of its own.
+
+        Args:
+            acknowledging: The ``delivery_id`` being confirmed, or ``None``.
+            budget: How long the hub may hold this request before answering with
+                nothing.
+
+        Returns:
+            The delivery to show, or ``None`` where the budget elapsed with
+            nothing available.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``acknowledging`` is blank.
+            NotificationBudgetError: If ``budget`` is negative or above the
+                configured ceiling.
+            ConfigurationError: If no delivery outbox is wired.
+            NotificationOutboxError: If the outbox cannot be read or written, or
+                an acknowledgement's dismissal could not commit.
+        """
+        self._reject_if_closing()
+        named = None if acknowledging is None else identifier(acknowledging, name="acknowledging")
+        self._check_budget(budget)
+        check_arguments(
+            "next_notification",
+            max_bytes=self._max_payload_bytes,
+            acknowledging=named,
+            budget=budget,
+        )
+        outbox = self._delivery_surface()
+        return await self._tracked(
+            self._poll(outbox, named, budget), "next_notification", checked=True
+        )
+
+    def _check_budget(self, budget: timedelta) -> None:
+        """Refuse a budget outside ADR-0131 §4's closed range, before any effect.
+
+        **Both ends, and the hub does not silently clamp either.** ``timedelta``
+        admits zero and negative values and exceeds no maximum, so without this one
+        implementation would return an empty result for a negative budget while
+        another handed it to a timeout primitive and raised something undeclared —
+        no common conforming behaviour. Zero is admitted rather than refused
+        because it is the one out-of-range-looking value that means something: a
+        device just opened by the owner wants to know what is waiting *now*.
+
+        Raises:
+            NotificationBudgetError: If ``budget`` is outside the range.
+        """
+        if budget < timedelta(0) or budget > self._max_notification_budget:
+            msg = (
+                f"budget must be between 0 and {self._max_notification_budget} inclusive, "
+                f"got {budget}: the hub does not clamp a budget it cannot honour, because "
+                f"accepting one and honouring a shorter one tells the client, by "
+                f"acceptance, that its budget was accepted (ADR-0131 §4)"
+            )
+            raise NotificationBudgetError(msg)
+
+    def _delivery_surface(self) -> DeliveryOutbox:
+        """The wired delivery outbox, or a legible refusal.
+
+        Returns:
+            The outbox.
+
+        Raises:
+            ConfigurationError: If none is wired, in
+                :meth:`_notification_surface`'s shape — a deployment that has
+                composed no outbox can deliver nothing, and saying so is different
+                from answering "nothing is waiting for you".
+        """
+        if self._notification_outbox is None:
+            msg = (
+                "no notification outbox is wired, so no notification can be delivered "
+                "(ADR-0131 §3). The contract surface exists ahead of the outbox the "
+                "composition root will build for it"
+            )
+            raise ConfigurationError(msg)
+        return self._notification_outbox
+
+    async def _poll(
+        self, outbox: DeliveryOutbox, acknowledging: Identifier | None, budget: timedelta
+    ) -> NotificationDelivery | None:
+        """Apply the acknowledgement, then wait out the budget for an entry.
+
+        The deadline is computed **once**, from this engine's guarded clock, so a
+        poll's length is fixed at its start rather than recomputed against a clock
+        that may move under it.
+        """
+        if acknowledging is not None:
+            await outbox.acknowledge(acknowledging)
+        deadline = self._now() + budget
+        while True:
+            delivery = await outbox.claim()
+            if delivery is not None:
+                return delivery
+            remaining = deadline - self._now()
+            if remaining <= timedelta(0):
+                return None
+            await outbox.wait_for_arrival(remaining)
 
     # --- the grant surface (ADR-0102 §1) -----------------------------------
 

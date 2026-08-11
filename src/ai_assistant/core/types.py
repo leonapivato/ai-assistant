@@ -8605,3 +8605,115 @@ class HeldNotification(BaseModel):
         if self.retention is None or ceased is None or self.is_actionable_at(moment):
             return False
         return moment > ceased + self.retention
+
+
+class NotificationEnqueue(StrEnum):
+    """What became of one offer to the delivery outbox (ADR-0131 §3, §3b).
+
+    **Four members, because §3 gives the enqueue four outcomes and each has its
+    own producer remedy.** A committed enqueue, a no-op retry, a key collision
+    and an outright refusal are what a producer branches on; a store that could
+    not commit at all is not among them, because reaching no decision is an
+    exception rather than a result. §3b draws that line in as many words — "a
+    store's inability to commit is a ``*StoreError``, not a result value" — and
+    :class:`~ai_assistant.core.errors.NotificationOutboxError` is where it lands.
+
+    **An enumeration rather than a model, because none of the four carries
+    anything** (§3b). An entry has no identity this seam exposes — ADR-0131 §4's
+    identifier is per *delivery* and not per entry — and the byte figures a
+    refusal turns on are the hub's own settings rather than news. The bare return
+    is the shape ``forget``'s ``bool`` already takes on the promoted surface.
+
+    **The values are contract values and are spelled out in §3b**, not left to an
+    implementation: ADR-0085 §3 spells out every signature because "this block is
+    what an implementation is generated from", and a ``StrEnum``'s values cross
+    the same boundary. §3b's conformance clause requires a suite to branch on
+    these exact members.
+    """
+
+    ENQUEUED = "enqueued"
+    """The entry was made and the seam has taken custody of the candidate."""
+
+    ALREADY_HELD = "already_held"
+    """An identical entry was already held under this key, and none was made.
+    The offer is a **retry** rather than a coincidence: §3 matches on the key
+    *and* the candidate, so a differing candidate takes ``KEY_COLLISION``."""
+
+    KEY_COLLISION = "key_collision"
+    """The key matched a held entry carrying a different candidate. The offer is
+    refused, the held entry is not replaced, and the offered candidate is not
+    enqueued under another key (§3)."""
+
+    TOO_LARGE = "too_large"
+    """The candidate exceeds one of the hub's size ceilings — ADR-0131 §4's
+    delivery ceiling, or the entry's own byte cost against
+    ``hub_notification_outbox_bytes`` (§3). The offer is refused, and it is never
+    satisfied by evicting other entries."""
+
+
+#: ADR-0131 §4's delivery reserve: how many bytes a ``NotificationDelivery``
+#: wrapper is allowed to add around the candidate inside it. **The reserve exists
+#: because what ADR-0085 §8 measures is the result, and the result is the
+#: wrapper** — a candidate sized at exactly the contract limit is one the hub could
+#: accept and could never deliver, since wrapping it puts the *result* over the
+#: limit and the hub must then either refuse what it took or write a frame the
+#: client is obliged to reject. §8b's 512-byte reserve does not cover this: it is
+#: reserved for the **envelope**, outside the payload, and these members are inside
+#: it.
+#:
+#: **256 is a reserve rather than an exact figure, in §8b's own shape.** The exact
+#: overhead is at most 130 bytes — 34 structural, being the braces, the two quoted
+#: member names, the two colons and the comma in ADR-0087 §2's canonical form, plus
+#: at most 96 for the identifier. The margin is what stops a later member on this
+#: model from being a silent overflow instead of a recomputation.
+DELIVERY_RESERVE_BYTES: Final[int] = 256
+
+
+class NotificationDelivery(BaseModel):
+    """One notification handed to one device, with the token that retires it (§4).
+
+    The result payload of ``next_notification`` and the only shape in which a
+    notification crosses the wire (ADR-0131 §1). It carries the artifact ADR-0130
+    decides and one value this seam mints: the identifier of *this delivery
+    attempt*, which the device names on its next poll to acknowledge it.
+
+    **The identifier is per delivery and not per entry**, which is what stops a
+    stale holder retiring someone else's notification (§4). An entry redelivered
+    after a lease expiry carries a *new* one, and minting it makes the previous
+    one no longer that entry's current outstanding delivery — so an
+    acknowledgement arriving from a device whose lease has lapsed lands on the
+    no-op arm rather than retiring the delivery a second device is holding.
+
+    **It is also a capability, and that is why half of it is random** (§4). The
+    engine honours an acknowledgement without knowing who is asking, because the
+    token went to exactly one device; possession stands in for the
+    connection-scoped identity §4 deliberately keeps out of the engine. A bare
+    counter would let a device that has seen ``41`` retire ``42``.
+
+    **``extra="forbid"`` is load-bearing here rather than the house default**
+    (§4). ``core/types.py`` carries both shapes, and this one must forbid:
+    :mod:`ai_assistant.wire.client` validates and *then* measures (ADR-0087 §7's
+    order, correctly applied), so under pydantic's default an unknown member
+    would be dropped by the validation before the measurement ever saw it — and a
+    peer could send a conforming delivery plus a large unknown member, under the
+    frame ceiling and over the contract limit. Forbidding extras makes the frame
+    refuse at validation instead.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    delivery_id: Identifier = Field(
+        description=(
+            "This delivery attempt's identifier, minted once in the indivisible step "
+            "ADR-0131 §2a fixes and unique over the outbox's whole life. A strictly "
+            "increasing decimal counter joined by '.' to 128 bits of lowercase hex from a "
+            "cryptographically secure source; at most 96 bytes in UTF-8. The value a "
+            "device names as ``acknowledging`` on its next poll (ADR-0131 §4)."
+        ),
+    )
+    notification: NotificationCandidate = Field(
+        description=(
+            "The candidate whose disposition ADR-0130 §5 ruled INTERRUPT. This seam "
+            "decides nothing about its meaning (ADR-0131 §8)."
+        ),
+    )

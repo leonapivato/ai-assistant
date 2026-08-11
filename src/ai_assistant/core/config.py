@@ -928,6 +928,135 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return self
 
+    # --- The delivery seam (ADR-0131 §5a) --------------------------------
+    # **Named here because naming them elsewhere is what ADR-0093 §5 forbids.**
+    # That section's figures "are therefore named in §7a rather than left to its
+    # lane — *that rule cannot be invoked here and satisfied elsewhere*", and
+    # ADR-0074 §9.3's reason stands behind it: "a 'bounded default' with no figure
+    # is two conforming stores handing the same continuation different history."
+    # Two conforming hubs with different lease, capacity and availability is the
+    # same failure with the nouns changed, so ADR-0131 §5a fixes all five and this
+    # block transcribes them.
+    #
+    # **None is nullable**, for the reason the hub's own ceilings above are not: a
+    # hub serving delivery with no lease, no outbox bound, no budget bound or no
+    # connection sub-bound has exactly the failure the clause naming it exists to
+    # prevent, so "off" is not an available value.
+    hub_notification_lease: _DurationSetting = Field(
+        default=timedelta(seconds=120),
+        gt=timedelta(0),
+        description=(
+            "How long a delivery taken by a device stays unavailable to any other "
+            "poll before returning to the outbox (ADR-0131 §3, §5a). Positive. It "
+            "binds only a device that took a delivery and did not acknowledge it, so "
+            "it is not a latency budget for the ordinary case — it is how long a "
+            "*dead* device withholds a notification from a live one."
+        ),
+    )
+    hub_notification_outbox_entries: _IntegerSetting = Field(
+        default=256,
+        ge=1,
+        description=(
+            "How many entries the delivery outbox holds, leased or not, before an "
+            "enqueue drops the oldest to make room (ADR-0131 §3, §5a). A ceiling on "
+            "how many unheard notifications survive an absence."
+        ),
+    )
+    hub_notification_outbox_bytes: _IntegerSetting = Field(
+        default=_DEFAULT_MAX_FRAME_BYTES,
+        ge=1,
+        description=(
+            "How many bytes the delivery outbox holds across every entry, counting "
+            "everything it persists for each (ADR-0131 §3, §5a). Never below "
+            "hub_max_frame_bytes. What stops a few large notifications defeating the "
+            "count bound."
+        ),
+    )
+    # **The default is §5a's 1 MiB raised to §5a's own floor, and the two columns
+    # of that table genuinely contradict each other here.** §5a gives this a
+    # default of 1 MiB *and* a range of `>= hub_max_frame_bytes`, while ADR-0084
+    # §3's shipped frame ceiling is 16 MiB — so a hub with no configuration at all
+    # would be refused at load by the ADR's own figures. Only one column can give
+    # way, and it is not the range: what that clause protects is a safety property
+    # argued at length — an outbox below one frame "could hold no entry a device
+    # could receive, and would evict every notification the instant it arrived — a
+    # hub that silently delivers nothing, which is this leg's whole failure produced
+    # by a config typo". Relaxing it would ship exactly the failure it exists to
+    # prevent. The default is the weaker claim, being the figure an operator
+    # overrides, so the shipped value is the smallest one that satisfies the range.
+    # What that costs is an operator who lowers `hub_max_frame_bytes` and takes the
+    # default: they get an outbox looser than §5a's 1 MiB rather than tighter, which
+    # is the safe direction and is one setting away from §5a's figure.
+    hub_max_notification_budget: _DurationSetting = Field(
+        default=timedelta(seconds=300),
+        gt=timedelta(0),
+        description=(
+            "The longest a single next_notification poll may occupy a connection "
+            "(ADR-0131 §4, §5a). Positive. A budget above it is refused rather than "
+            "clamped, since accepting a budget and honouring a shorter one tells the "
+            "client, by acceptance, that its budget was accepted."
+        ),
+    )
+    hub_max_delivery_connections: _IntegerSetting = Field(
+        default=8,
+        ge=1,
+        description=(
+            "How many delivery connections the hub holds at once, across every "
+            "listener (ADR-0131 §5, §5a). Strictly below hub_max_connections, so a "
+            "slot for an ordinary session always remains."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _the_delivery_bounds_can_hold(self) -> Settings:
+        """Order ADR-0131 §5a's two dependent figures against what they rest on.
+
+        Both are checked here rather than as field constraints because both are
+        *relations* between two settings, which is the shape
+        :meth:`_the_pending_ceiling_can_bind` already handles and the place
+        ADR-0131 §5a names: "Both are checked at load, in the model validator that
+        already orders ``hub_max_pending_handshakes`` against
+        ``hub_max_connections``."
+
+        **The outbox floor is the constraint that makes the byte bound a bound
+        rather than a trap.** An outbox smaller than one frame could hold no entry
+        a device could receive and would evict every notification the instant it
+        arrived — a hub that silently delivers nothing, which is this leg's whole
+        failure produced by a config typo.
+
+        **The connection sub-bound is strict, and the strictness is the
+        load-bearing half.** Delivery connections are long-lived and ordinary
+        sessions are not, so without a sub-bound a handful of pollers occupy every
+        slot indefinitely and the owner's CLI cannot connect at all — a hub that is
+        unreachable for a reason that is not legible, which is ADR-0083's ruling 4
+        failure. Equality would leave zero slots for an ordinary session, so it is
+        refused along with anything above it.
+
+        Returns:
+            ``self``, once both relations hold.
+
+        Raises:
+            ValueError: If the outbox byte bound is below the frame ceiling, or the
+                delivery sub-bound is not strictly below the connection ceiling.
+        """
+        if self.hub_notification_outbox_bytes < self.hub_max_frame_bytes:
+            msg = (
+                f"hub_notification_outbox_bytes={self.hub_notification_outbox_bytes} is below "
+                f"hub_max_frame_bytes={self.hub_max_frame_bytes}, so the outbox could hold no "
+                f"entry a device could receive and would evict every notification the instant "
+                f"it arrived; raise it to at least the frame ceiling (ADR-0131 §5a)"
+            )
+            raise ValueError(msg)
+        if self.hub_max_delivery_connections >= self.hub_max_connections:
+            msg = (
+                f"hub_max_delivery_connections={self.hub_max_delivery_connections} is not below "
+                f"hub_max_connections={self.hub_max_connections}, so pollers could take every "
+                f"slot and leave none for an ordinary session; lower it below the connection "
+                f"ceiling (ADR-0131 §5, §5a)"
+            )
+            raise ValueError(msg)
+        return self
+
     # --- The remote listener (ADR-0124 §2) -------------------------------
     # **Off unless configured on, and the loopback socket is bound either way.**
     # ADR-0124 §2: "A hub with no remote-listener configuration binds only ADR-0084
