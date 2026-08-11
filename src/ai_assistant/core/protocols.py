@@ -4277,6 +4277,16 @@ class NotificationStore(Protocol):
     itself, and a validator that only checks the fields agree with each other
     cannot catch it.
 
+    **An id it mints is fresh, and a collision is a fault rather than an
+    overwrite.** Because ids are this store's own, a repeat is its own defect and
+    not a caller's — but the consequence of absorbing one is the same one
+    ``DeferralStore.defer`` refuses: a record lost silently, and two dispositions
+    naming it. So an admission at an id a record already holds **raises**,
+    committing nothing, where a dict would otherwise overwrite while a SQL
+    backend raised on its primary key. Nothing is committed by a failed
+    admission either — no record, and **no unit of budget** — so a candidate the
+    record type refuses leaves the store exactly as it found it.
+
     **The cap and the retention are constructor parameters, validated at
     construction**, the ``_check_tuning`` arrangement ADR-0022 §4a ratified and
     for its reason: a bad value here disables a stage while the system reports

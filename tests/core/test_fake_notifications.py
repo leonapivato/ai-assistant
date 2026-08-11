@@ -25,9 +25,16 @@ from notification_contract import (
     NotificationStoreContract,
     NotificationWriterContract,
     StoreFactory,
+    candidate,
 )
 
 from ai_assistant.core.errors import NotificationStoreError
+from ai_assistant.core.types import (
+    ClassReach,
+    NotificationDispositionKind,
+    NotificationPreferences,
+    NotificationReach,
+)
 from ai_assistant.testing import (
     FakeNotificationPolicy,
     FakeNotificationStore,
@@ -42,10 +49,16 @@ if TYPE_CHECKING:
         NotificationStore,
         NotificationWriter,
     )
+    from ai_assistant.core.types import NotificationCandidate
 
 
 def _fixed_now() -> datetime:
     return NOW
+
+
+def _perishable(key: str) -> NotificationCandidate:
+    """A candidate that would interrupt, so a case can spend a unit of budget."""
+    return candidate(key=key, expires_at=NOW + timedelta(days=1))
 
 
 class TestFakeNotificationPolicyContract(NotificationPolicyContract):
@@ -136,6 +149,54 @@ def test_the_fake_refuses_a_retention_the_store_cannot_work_under(retention: obj
         FakeNotificationStore(now=_fixed_now, retention=retention)  # type: ignore[arg-type]
 
 
+async def test_the_fake_refuses_an_id_source_that_repeats_itself() -> None:
+    """An admission never overwrites a record, and never half-commits one.
+
+    `DeferralStore.defer` already argues this for the queue — a present id is "a
+    hard error, not an overwrite", because otherwise "a dict-backed store
+    silently overwrites someone else's pending question while a SQL one raises".
+    A store injected with a constant id source is how that reaches this fake.
+
+    The second half is the one a reader misses: nothing may be committed by a
+    failed admission, **including a unit of budget** (ADR-0130 §5). A store that
+    noted the spend before building the record would leave one behind after an
+    operation that stored nothing.
+    """
+    store = FakeNotificationStore(now=_fixed_now, new_id=lambda: "ntf-1")
+    policy = FakeNotificationPolicy()
+    await store.set_preferences(
+        NotificationPreferences(
+            reaches=(ClassReach(notification_class="calendar", reach=NotificationReach.INTERRUPT),),
+        )
+    )
+    first = await store.admit(_perishable("k1"), policy=policy)
+    assert first.kind is NotificationDispositionKind.INTERRUPT
+
+    with pytest.raises(NotificationStoreError, match="already holds"):
+        await store.admit(_perishable("k2"), policy=policy)
+
+    held = await store.held()
+    assert [record.candidate.candidate_key for record in held] == ["k1"]
+    assert store._spent == [NOW], "a refused admission spends nothing"
+
+
+@pytest.mark.parametrize("minted", ["", "   ", None], ids=["blank", "whitespace", "not-a-string"])
+async def test_the_fake_refuses_an_id_source_that_mints_a_non_identifier(minted: object) -> None:
+    """The store's own fault, so it carries the store's error and not a ValueError.
+
+    A caller supplies no id here, so there is no argument for a ``ValueError`` to
+    be about — and a blank one reaching
+    :class:`~ai_assistant.core.types.HeldNotification` would raise from inside a
+    half-finished admission rather than before it started.
+    """
+    store = FakeNotificationStore(now=_fixed_now, new_id=lambda: minted)  # type: ignore[arg-type,return-value]
+
+    with pytest.raises(NotificationStoreError, match="not an identifier"):
+        await store.admit(_perishable("k1"), policy=FakeNotificationPolicy())
+
+    assert await store.export() == []
+
+
 async def test_the_fake_reports_an_unusable_clock_as_the_stores_own_error() -> None:
     """Not the raw ``ValueError`` ``core`` raises (ADR-0026 §4, §7).
 
@@ -151,8 +212,6 @@ async def test_the_fake_reports_an_unusable_clock_as_the_stores_own_error() -> N
 
 async def test_a_fresh_fake_holds_nothing_from_a_prior_instance() -> None:
     """Two fakes are two stores: a consumer's test must not inherit another's."""
-    from notification_contract import candidate  # noqa: PLC0415 — a helper, not a fixture
-
     policy = FakeNotificationPolicy()
     await FakeNotificationStore(now=_fixed_now).admit(candidate(), policy=policy)
 
