@@ -263,14 +263,17 @@ a precedent about a different field.
 
 ### 3. `hub_max_notification_budget` bounds a poll's occupancy of its connection, not an entry's eligibility for selection
 
-> **Normative.** A poll's `budget` bounds how long the hub may hold that request
-> before answering. It is **not** a deadline after which an outbox entry becomes
-> ineligible for selection. A `next_notification` request that reaches its
-> selection step performs that first selection **whatever the state of its
-> budget** — after applying any acknowledgement, and including where the budget
-> has already elapsed, whether because it was zero or because an earlier step of
-> the same request consumed it — and an elapsed budget is no ground for
-> withholding a delivery that selection produced.
+> **Normative.** A poll's `budget` bounds **how long the hub may wait for an entry
+> to become available**, and bounds nothing else about the request. It does not
+> bound how long the request's own work may take: validating its arguments,
+> applying its acknowledgement and performing its first selection each run to
+> completion whatever the state of the budget, and a request whose own work outruns
+> its budget has broken no rule. Nor is the budget a deadline after which an outbox
+> entry becomes ineligible for selection. A `next_notification` request that
+> reaches its selection step performs that first selection **whatever the state of
+> its budget** — including where the budget has already elapsed, whether because it
+> was zero or because an earlier step of the same request consumed it — and an
+> elapsed budget is no ground for withholding a delivery that selection produced.
 
 > **Normative.** An elapsed budget is what ends a poll's **waiting**, not what
 > forbids its selecting. A poll whose selection found nothing and whose budget has
@@ -285,19 +288,32 @@ a precedent about a different field.
 > detected after it "leaves the lease standing" while the poll, under §2a's first
 > clause, "ends without an answer". Both outcomes stand unaltered here.
 
-**The order is stated once, here, because this is where two of this ADR's marked
-clauses meet.** ADR-0131 §4 fixes the upstream sequence — arguments are validated,
-then the acknowledgement is applied, then an entry is selected — and this section
-adds only that the budget governs the step *after* those: the waiting. So a
-request runs its acknowledgement and its first selection however long they take,
-and the budget then bounds how long the hub may wait for an entry that the first
-selection did not find. A one-second budget whose acknowledgement takes two
-seconds therefore reaches selection at two seconds, answers with whatever is
-there, and waits no further: the budget was overrun by work the request itself
-required, not by waiting the hub chose to do. **That reading is what makes §1 and
-this section jointly satisfiable**, and stating it is what the architecture lens
-asked for when it blocked on the pair — with §1 no longer claiming to say when a
-poll ends, the two clauses govern different things and no case forces both.
+**The budget bounds the waiting and not the request, and that scope is inside the
+clause because ADR-0089 §3 requires it there.** ADR-0131 §4 fixes the upstream
+sequence — arguments are validated, then the acknowledgement is applied, then an
+entry is selected — and this section adds only that the budget governs the step
+*after* those. A one-second budget whose acknowledgement takes two seconds
+therefore reaches selection at two seconds, answers with whatever is there, and
+waits no further: the budget was overrun by work the request itself required, not
+by waiting the hub chose to do.
+
+**An earlier draft put exactly that reconciliation in this paragraph and left the
+marked clause saying the budget bounds "how long the hub may hold that request
+before answering".** Architecture review blocked it on the second round and was
+right: read alone, the marked clause both bounded the whole request at one second
+and required a selection at two, and ADR-0089 §3 is explicit that "A marked clause
+states its own scope, its conditions and its exceptions" and that where the
+surrounding argument establishes how far an obligation reaches, "the marking is not
+finished". The scope now lives in the clause and this paragraph only illustrates
+it — which is the division of labour §3 of that ADR sets.
+
+**What that costs is a small correction to how §5a's figure is usually read, and
+it is a correction rather than a change.** A poll's occupancy was never exactly its
+budget: ADR-0131 §4's own ordering puts argument validation and the acknowledgement
+inside the request and outside any waiting, and the result frame still has to be
+written. So the budget bounded the discretionary part of a poll's life before this
+ADR and bounds the same part after it. What this section adds is only that the
+part is named.
 
 **§4's zero-budget clause is the ground, and what it decides is the boundary
 case.** ADR-0131 §4 states, normatively: "A `budget` of zero is an **immediate
@@ -416,8 +432,14 @@ act differently, or read one of its clauses more widely than it now holds?
   clause, and this is the clause that carries it.
 - **§5a's marked clause and its table.** Untouched, and §2's second clause above
   defends them: no range is narrowed, no upper bound is added, no default moves.
-- **§5a's occupancy bullet.** Read, not moved. §3 above takes it as evidence of
-  §4's meaning under ADR-0089 §3 and states its own obligation from §4.
+- **§5a's occupancy bullet** — "The ceiling on how long one poll may occupy a
+  connection." Read, not moved. §3 above takes it as evidence of §4's meaning under
+  ADR-0089 §3 and states its own obligation from §4. §3's marked clause names the
+  waiting as what the budget bounds, which is narrower than the bullet's phrasing
+  and was already narrower under ADR-0131 alone: §4's own ordering puts validation
+  and the acknowledgement inside the request and outside any wait, so no reading of
+  ADR-0131 ever made a poll's total occupancy equal to its budget. Naming the
+  bounded part changes no outcome a reader of §5a could have relied on.
 
 **So no sentence of ADR-0131 becomes false under this ADR, and no reader acts
 contrary to one.** ADR-0131 §9 puts the distinction in its own words, judging why
