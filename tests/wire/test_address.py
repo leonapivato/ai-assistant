@@ -8,7 +8,7 @@ change. The three that landed with the hub protect the seven databases; this one
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
@@ -24,9 +24,6 @@ from ai_assistant.wire.address import (
     socket_path,
     sun_path_limit,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def test_the_socket_sits_inside_the_data_directory(tmp_path: Path) -> None:
@@ -231,3 +228,52 @@ def test_surrounding_whitespace_is_stripped_and_nothing_else_is() -> None:
     destination the owner did not configure.
     """
     assert check_remote_address("  100.64.1.7  ") == "100.64.1.7"
+
+
+def test_a_non_utf8_data_directory_is_measured_and_not_crashed_on(tmp_path: Path) -> None:
+    """#940: a valid pathname need not be valid UTF-8, and this one is valid.
+
+    A non-UTF-8 byte in ``ASSISTANT_DATA_DIR`` reaches Python as a PEP 383
+    surrogate. Measuring the budget with ``str.encode("utf-8")`` refused those, so
+    a directory the kernel is perfectly happy with produced a ``UnicodeEncodeError``
+    — and because that is a ``ValueError``, nothing watching for
+    ``ConfigurationError`` or ``OSError`` caught it. A stay-down configuration
+    fault (ADR-0083 §5) arrived as a crash. ``os.fsencode`` round-trips the
+    surrogate back to the byte the kernel is handed, which is what ``sun_path``
+    bounds.
+    """
+    check_socket_path(Path(f"{tmp_path}/\udcffdata"))
+
+
+def test_a_non_utf8_data_directory_over_the_budget_is_still_refused(tmp_path: Path) -> None:
+    """The discriminating half: measured, not merely tolerated (#940).
+
+    One surrogate stands for one byte, so a name that fits as characters can still
+    overrun the budget as bytes — the case a UTF-8 measurement would have got wrong
+    in the other direction wherever it did not raise outright.
+    """
+    long_name = "\udcff" * sun_path_limit()
+
+    with pytest.raises(ConfigurationError, match="sun_path budget"):
+        check_socket_path(Path(f"{tmp_path}/{long_name}"))
+
+
+def test_the_refusal_for_a_non_utf8_path_can_itself_be_built(tmp_path: Path) -> None:
+    """The second half of #940, and the one that is easy to miss.
+
+    ``core/types.py``'s text validator names the hazard exactly: "interpolating it
+    raw would build an error message that is itself unencodable, so reporting the
+    fault would fail the same way the fault does". The message embedded ``{path}``
+    directly, so the refusal for an over-budget non-UTF-8 directory could not be
+    constructed even once the measurement was fixed. The path is rendered through
+    the shared ``displayable`` instead, so the operator still sees which directory
+    was meant.
+    """
+    long_name = "\udcff" * sun_path_limit()
+
+    with pytest.raises(ConfigurationError) as caught:
+        check_socket_path(Path(f"{tmp_path}/{long_name}"))
+
+    message = str(caught.value)
+    assert R"\xff" in message
+    message.encode("utf-8")  # the refusal is reportable, which is the whole point
