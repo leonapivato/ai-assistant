@@ -22,6 +22,14 @@ same machine over a local interface, in the class ADR-0084 §1 already reasoned
 about: 'a loopback listener moves bytes between two processes on one machine; it
 engages neither clause.'"
 
+**Whoever answers that socket is authenticated from the kernel** (ADR-0131 §7,
+#939), by :func:`ai_assistant.wire.overlay.check_agent_peer`, which both ends of
+the hop call — this one is the end that supplies the overlay identity behind every
+remote admission, so a rule applied only to the client half would leave the
+attack it closes wide open. The filesystem custody checks stay as
+``service/datadir.py`` describes them, defence in depth; the kernel check is what
+makes the posture closed rather than merely deep.
+
 **The seam is a Protocol here and not in ``core``.** ADR-0124 §10 decides no
 ``core/protocols.py`` surface, and an overlay agent is a deployment fact the hub
 holds — the shape :mod:`ai_assistant.service.scheduler` already uses for a
@@ -39,7 +47,7 @@ from typing import Any, Final, Protocol
 
 import structlog
 
-from ai_assistant.wire.overlay import AgentSocketTerms, check_configured_socket
+from ai_assistant.wire.overlay import AgentSocketTerms, check_agent_peer, check_configured_socket
 
 _log = structlog.get_logger(__name__)
 
@@ -267,10 +275,18 @@ class TailscaleAgent:
 
         Raises:
             OSError: If the socket cannot be opened or the daemon goes away.
-            OverlayIdentityUnavailableError: If the status line is not a success.
+            OverlayIdentityUnavailableError: If the peer answering on the socket is
+                neither root nor this process (ADR-0131 §7), or if the status line is
+                not a success.
         """
         reader, writer = await asyncio.open_unix_connection(self.socket_path)
         try:
+            # Before anything is written: ADR-0131 §7 binds this to every agent
+            # request path, and this is the hub's — the one that supplies the overlay
+            # identity behind every remote admission. The class named here is *this*
+            # module's, which is the one `service/remote.py` catches; the wire half's
+            # class of the same name would escape that handler entirely.
+            check_agent_peer(writer, self.socket_path, refusal=OverlayIdentityUnavailableError)
             request = (
                 f"GET {path} HTTP/1.1\r\n"
                 f"Host: {_LOCAL_API_HOST}\r\n"

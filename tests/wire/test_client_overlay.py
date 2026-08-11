@@ -16,15 +16,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from typing import TYPE_CHECKING
+import os
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from ai_assistant.wire.errors import OverlayIdentityUnavailableError
+from ai_assistant.wire.errors import OverlayIdentityUnavailableError, ProtocolError
 from ai_assistant.wire.overlay import (
     MAX_OVERLAY_IDENTITY_BYTES,
     TAILSCALE_SOCKETS,
     TailscaleAgent,
+    check_agent_peer,
     local_agent,
 )
 
@@ -50,7 +52,14 @@ class FakeLocalApi:
         self._respond = respond
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        head = await reader.readuntil(b"\r\n\r\n")
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+        except asyncio.IncompleteReadError:
+            # A client that refuses its peer (ADR-0131 §7) closes without writing,
+            # which is the property those cases assert. Swallowed so the refusal
+            # reads as a refusal rather than as an unretrieved task exception.
+            writer.close()
+            return
         line = head.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
         self.requested.append(line)
         writer.write(self._respond(line))
@@ -259,3 +268,87 @@ async def test_an_identity_with_no_utf8_form_is_refused(tmp_path: Path) -> None:
         with pytest.raises(OverlayIdentityUnavailableError) as raised:
             await agent.identify("100.64.1.7", 50084)
         assert "UTF-8" in str(raised.value)
+
+
+def _answers(_line: str) -> bytes:
+    """A daemon that would answer, so a refusal below is the check's and not the body's."""
+    return _ok({"Node": {"StableID": HUB}})
+
+
+async def test_an_agent_socket_a_third_user_answers_is_refused_before_anything_is_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0131 §7, on the client's request path.
+
+    The daemon here answers perfectly well; what is wrong is *who* is answering, and
+    no filesystem check can see it — a POSIX ACL through a conforming ``0700``
+    directory lets an untrusted user replace the socket after every mode has been
+    inspected. Two properties, and the second is half the clause: the query is
+    refused, and nothing was written to that socket first, so the peer never saw
+    which address this client was about to dial.
+    """
+    monkeypatch.setattr("ai_assistant.wire.overlay.peer_uid", lambda _sock: os.geteuid() + 1)
+    async with _agent(tmp_path / "d.sock", _answers) as agent:
+        with pytest.raises(OverlayIdentityUnavailableError) as raised:
+            await agent.identify("100.64.1.7", 50084)
+        assert agent.api.requested == []  # type: ignore[attr-defined]
+    assert "runs as uid" in str(raised.value)
+
+
+async def test_the_agent_the_daemon_runs_as_root_is_admitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Root or us", not root alone and not us alone (ADR-0131 §7).
+
+    ``tailscaled`` runs as root in the ordinary deployment, so a rule demanding our
+    own uid would refuse every real installation. Our own euid is the other half and
+    is what every other case in this file exercises, since the fake daemon runs here.
+    """
+    monkeypatch.setattr("ai_assistant.wire.overlay.peer_uid", lambda _sock: 0)
+    async with _agent(tmp_path / "d.sock", _answers) as agent:
+        assert await agent.identify("100.64.1.7", 50084) == HUB
+
+
+async def test_a_platform_with_no_peer_credential_call_refuses_rather_than_proceeding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fail-closed direction, and the *type* is the point (ADR-0131 §7).
+
+    :func:`ai_assistant.wire.peer.peer_uid` fails closed with a ``ProtocolError``,
+    which is right for its own caller and wrong here: §7 requires a refusal to
+    arrive as ``OverlayIdentityUnavailableError``, "the failure the agent query
+    already raises when it cannot answer". The two are siblings under
+    ``TransportError``, so a lane reusing ``peer_uid`` as-is would leave the check
+    firing and the refusal it was written for never happening.
+    """
+
+    def _unavailable(_sock: object) -> int:
+        raise ProtocolError("this platform exposes no peer-credential call")
+
+    monkeypatch.setattr("ai_assistant.wire.overlay.peer_uid", _unavailable)
+    async with _agent(tmp_path / "d.sock", _answers) as agent:
+        with pytest.raises(OverlayIdentityUnavailableError) as raised:
+            await agent.identify("100.64.1.7", 50084)
+    assert "peer-credential" in str(raised.value)
+
+
+def test_a_connection_exposing_no_socket_is_refused_rather_than_trusted() -> None:
+    """The last way not to know, and it must not be an ``AttributeError``.
+
+    ``get_extra_info("socket")`` is not promised to answer, and a ``None`` handed to
+    the credential read would leave the seam raising something no caller catches —
+    the same escape as the wrong exception type, by another route. Not knowing who
+    answers is one condition however it arises, and §7's direction for it is refusal.
+    """
+
+    class _NoSocket:
+        def get_extra_info(self, name: str, default: object = None) -> object:
+            return None
+
+    with pytest.raises(OverlayIdentityUnavailableError) as raised:
+        check_agent_peer(
+            cast("asyncio.StreamWriter", _NoSocket()),
+            "/run/tailscale/tailscaled.sock",
+            refusal=OverlayIdentityUnavailableError,
+        )
+    assert "exposes no socket" in str(raised.value)
