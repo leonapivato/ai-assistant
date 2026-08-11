@@ -105,9 +105,11 @@ this ADR does for that question is state the general rule the special case alrea
 entails, so the next reader does not have to derive it.
 
 **Not in scope at all:** the same lower-bounded-only shape across the tree's other
-duration settings, which #971 also records. Only this seam relates a configured
-duration to the hub's clock, which is why only this seam meets the boundary. §5
-below declines the general question deliberately.
+duration settings, which #971 also records. On that issue's survey this is the
+only seam that adds such a duration to the hub's clock, which is why it is the
+only one that has met the boundary — but the survey is a snapshot and this ADR
+does not rest on it. §5 below declines the general question deliberately, and it
+would be declined even if a second seam already existed.
 
 ## Decision
 
@@ -383,10 +385,12 @@ signature, no error type and no `PROTOCOL_VERSION`.
 ## Alternatives considered
 
 **Crash with a raw `OverflowError`.** Refused, and this was round 11's adversarial
-finding on PR #959. `next_notification` declares `NotificationBudgetError` and
-`NotificationOutboxError`; the wire dispatcher maps this project's error types and
-nothing else, so an overflow crossing that seam costs a valid request its
-connection rather than an answer.
+finding on PR #959. ADR-0085 §10a fixes the wire's error vocabulary as "exactly
+the `AssistantError` subtree", and `next_notification` declares
+`NotificationBudgetError` and `NotificationOutboxError` within it. An
+`OverflowError` is outside that subtree, so it does not become an error frame: it
+escapes the dispatch, and a valid request loses its connection instead of getting
+an answer.
 
 **Refuse the in-range value.** Refused by ADR-0131 §4's honour clause, and this
 was round 15's architecture finding. §4 honours every budget in the closed range
@@ -428,14 +432,21 @@ ratified against by §3. §4's zero-budget clause requires selection at the budg
 own boundary, and the remedy shortens no occupancy while costing a held
 notification and a round trip.
 
-**A dated amendment on ADR-0131 rather than a new ADR.** Not available. ADR-0131
-is marked, so under ADR-0089 §5 "No mark is added to a ratified ADR, by a dated
-note or otherwise", and under ADR-0089 §3 unmarked text "never supplies an
-obligation" — a dated note would be either illegal or inert. ADR-0134 §"Why this
-is an ADR and not a dated note on ADR-0131" reasons this out at length for the
-same target document and reached the same wall; the difference is that ADR-0134
-had to supersede a figure and this ADR replaces nothing, so it takes the stacked
-addition rather than the partial supersession.
+**A dated amendment on ADR-0131 rather than a new ADR.** Not available, and this
+ADR needs it to be unavailable for a reason ADR-0134 did not. ADR-0131 is marked,
+so under ADR-0089 §5 "No mark is added to a ratified ADR, by a dated note or
+otherwise", and under ADR-0089 §3 unmarked text "never supplies an obligation" —
+a dated note carrying the three clauses above would be either illegal or inert,
+with no third state. ADR-0134's Context reasons this out at length for the same
+target document, under the heading "Why this is an ADR and not a dated note on
+ADR-0131", and records the honest weakness in the pincer: §5a's table "is itself
+unmarked, which makes the pincer arguable rather than airtight". That caveat does
+not reach this ADR, and the difference is worth naming. ADR-0134's correction had
+to change a *figure*, which is why the unmarked table mattered to it; the clauses
+above impose new obligations, and §3 of ADR-0089 forecloses unmarked text
+supplying one no matter which table it sits beside. So where ADR-0134 had an
+arguable route it declined, this ADR has none — and it replaces nothing, so it
+takes the stacked addition rather than the partial supersession ADR-0134 owed.
 
 **Say nothing and leave the overrule comments as the record.** Not adopted, and it
 is the alternative with the best short-term economics — the behaviour is
