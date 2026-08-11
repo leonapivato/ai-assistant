@@ -466,26 +466,26 @@ class NotificationPolicyContract(ABC):
     async def test_a_window_ending_inside_a_dst_gap_wakes_late_and_never_early(
         self, policy_in: Callable[[str], NotificationPolicy]
     ) -> None:
-        """The spring-forward case, and why "late" is the answer §5 asks for.
+        """The spring-forward case: the window ends when the clock passes it.
 
         In ``America/New_York`` on 2026-03-08 the clock jumps 02:00 to 03:00, so a
-        window ending at 02:30 names a local time that does not occur. The instant
-        this returns is 07:30Z, where the clock first leaves the window at 07:00Z —
-        **half an hour late, and §5 says so is not a fault**: ``reconsider_at`` is
-        "the instant before which a record may not be reconsidered, never a
-        deadline by which it must have been".
+        window ending at 02:30 names a local time that never occurs. §5 asks for
+        "the earliest instant at which every condition that failed could next
+        hold", and that is the transition itself — 07:00Z. Naive construction
+        gives 07:30Z instead, which is half an hour of quiet the user did not ask
+        for, and §5's tolerance of a late *run* does not licence a late
+        *computation*: a tick that slips is the scheduler's, a due instant that is
+        wrong is the policy's.
 
-        **Early would be the unsafe direction, and that is the assertion that
-        matters.** The obvious "normalise to the first valid instant" reading maps
-        the endpoint to 06:30Z, whose local time is 01:30 — still inside the
-        window. A record woken there re-rules, re-holds, and computes 06:30Z
-        again, so the maintenance drain would rule it forever without progress.
-        Any implementation is therefore free to be later than the true end and
-        must not be earlier than the ruling instant.
+        The exact instant is asserted rather than a tolerance, because a tolerance
+        is what let the naive answer look acceptable. It is also the one instant
+        that makes progress: 06:30Z, the other ``fold`` reading, is 01:30 local
+        and still inside the window, so a record woken there would re-hold to the
+        same instant forever.
 
-        ADR-0093 §7b's ``fold=0`` rule covers the *ambiguous* instant of the
-        autumn transition, which is a different hazard and the one the ADR names;
-        this is the gap the same transition leaves in spring.
+        ADR-0093 §7b's ``fold=0`` rule covers the *ambiguous* instant the autumn
+        transition leaves, which is the hazard that ADR names; this is the gap the
+        same transition leaves in spring.
         """
         preferences = NotificationPreferences(
             reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
@@ -502,10 +502,7 @@ class NotificationPolicyContract(ABC):
         )
 
         assert ruling.reason is NotificationCondition.QUIET_WINDOW
-        assert ruling.reconsider_at is not None
-        assert ruling.reconsider_at > inside, "an instant at or before the ruling never progresses"
-        assert ruling.reconsider_at >= leaves_the_window, "waking inside the gap re-holds forever"
-        assert ruling.reconsider_at <= leaves_the_window + timedelta(hours=1), "at most one gap"
+        assert ruling.reconsider_at == leaves_the_window
 
     async def test_a_producers_confidence_settles_nothing(self, policy: NotificationPolicy) -> None:
         """§4: the confidence is **evidence on the proposal**, not authority.
