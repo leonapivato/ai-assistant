@@ -896,11 +896,13 @@ merged and made it checkable.
 > `ai_assistant.testing` — in one change (golden rule 5, ADR-0015 §5,
 > `CONTRIBUTING.md` → "Adding a Protocol").
 
-> **Normative.** The seam **reconciles at startup**, before it serves any poll: for
-> every ADR-0130 record that is ruled `INTERRUPT` and still **actionable** and for
-> which the outbox holds no entry, it offers that record's candidate. The
-> reconciliation is idempotent by §3's key rule — every path keys on the candidate's
-> own `candidate_key` — and requires no state of its own.
+> **Normative.** The seam **reconciles at startup**, running to completion before it
+> serves any poll, and it makes the two stores agree in **both** directions: every
+> ADR-0130 record ruled `INTERRUPT` and still **actionable** for which the outbox
+> holds no entry has its candidate offered, and every **departing** entry (§3) — one
+> whose record is dismissed — is removed. The reconciliation is idempotent by §3's key
+> rule, since every path keys on the candidate's own `candidate_key`, and it requires
+> no state of its own: both directions are read off the two stores as they stand.
 
 > **Normative.** **Every** way an entry leaves the outbox **dismisses** its ADR-0130
 > record, through the dismissal `NotificationStore` carries — an acknowledgement (§3),
@@ -966,6 +968,18 @@ own commit. Crash between them and the budget is spent, the record exists, no en
 exists, and nothing brings the two back into agreement — with §3 of this ADR still
 promising that a disposed, undelivered notification survives a restart. Adversarial
 review found it on the thirty-fourth round.
+
+**Both directions, because a repair that runs one way leaves the other way
+accumulating.** A draft reconciled only the missing-entry direction. Adversarial
+review pointed out on the forty-first round that a removal failing — a crashed hub, a
+store error — leaves a *departing* entry, which §3 says may participate in nothing but
+its own removal and which the one-way reconciliation never looks at: it has a record,
+so the missing-entry sweep skips it, and it is undeliverable while still counting
+against both bounds. Repeat that a few times and the outbox fills with entries nothing
+can clear. Stating the reconciliation as "make the two stores agree" rather than as
+one of the two ways they can disagree is what covers it, and it is the same correction
+the linearizability rule, the byte cost and the departing state each needed: name the
+property, not the case you noticed.
 
 **Reconciliation rather than one transaction, because one transaction is not
 available and is not needed.** Committing both in one act would mean two subsystems'
