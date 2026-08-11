@@ -369,6 +369,18 @@ class RemoteListener:
                     ),
                     on_handshake=_handshaken,
                     admission=admission,
+                    # **The shared registry, and forgetting it made the seam
+                    # unreachable for the devices it exists for.** `_claim_delivery`
+                    # treats a missing registry as a violation and closes before
+                    # dispatch — the safe direction, since a listener that answered
+                    # polls while enforcing no one-connection rule would hand out
+                    # slots the sub-bound cannot see. Without this argument every
+                    # enrolled remote device completed its handshake and had every
+                    # `next_notification` closed, so only loopback could ever be
+                    # told anything. It is the *same* object the loopback listener
+                    # holds, which is ADR-0131 §3's "one connection registry per
+                    # hub… shared by every listener".
+                    delivery=self._delivery,
                 )
             finally:
                 held = self._writers.get(identity, set())
