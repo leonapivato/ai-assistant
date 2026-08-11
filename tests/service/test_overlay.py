@@ -505,3 +505,35 @@ def test_a_configured_path_that_is_not_a_usable_pathname_is_a_configuration_faul
     """
     with pytest.raises(ConfigurationError, match="not a usable pathname"):
         local_agent(f"{tmp_path}/\0agent.sock")
+
+
+def test_a_pathname_with_non_utf8_bytes_is_measured_and_not_crashed_on(
+    tmp_path: Path,
+) -> None:
+    """Adversarial review, round 3: a valid filename need not be UTF-8.
+
+    A non-UTF-8 byte in the environment reaches Python as a surrogate (PEP 383).
+    Measuring the ``sun_path`` budget with ``str.encode("utf-8")`` refuses those,
+    so a perfectly valid pathname became a ``UnicodeEncodeError`` that no handler
+    caught — a crash instead of a verdict. ``os.fsencode`` round-trips the
+    surrogates back to the bytes the kernel is actually handed, which is what the
+    budget is about in the first place.
+    """
+    surrogate = f"{tmp_path}/\udcff.sock"
+
+    agent = local_agent(surrogate)
+
+    assert agent.socket_path == surrogate
+
+
+def test_a_non_utf8_pathname_over_the_budget_is_still_refused(tmp_path: Path) -> None:
+    """The discriminating half: measured, not merely tolerated.
+
+    Two bytes per surrogate is the point — a name that fits as characters can
+    still overrun ``sun_path`` as bytes, which is the case a UTF-8 measurement
+    would have got wrong even where it did not raise.
+    """
+    long_name = "\udcff" * sun_path_limit()
+
+    with pytest.raises(ConfigurationError, match="sun_path budget"):
+        local_agent(f"{tmp_path}/{long_name}.sock")
