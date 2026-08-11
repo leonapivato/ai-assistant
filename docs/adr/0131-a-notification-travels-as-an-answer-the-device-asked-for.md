@@ -1386,11 +1386,16 @@ It was 128 until the twelfth round widened the identifier from 36 bytes to 96 to
 carry a capability; recomputing rather than rounding is what the margin exists to
 make survivable, and this is it being used.
 
-**Stating the bound here and having ADR-0130 carry it is the division the two lanes
-already have.** The carrying capacity is the seam's fact — it falls out of
-ADR-0085 §8 and this model's shape, neither of which ADR-0130 decides — and the
-type it constrains is ADR-0130's. So this ADR computes it and ADR-0130 states it on
-the type, in the same relationship as the prerequisite clause above.
+**The division the two lanes have is that ADR-0130 supplies the type and this ADR
+owns the capacity.** The carrying capacity is the seam's fact — it falls out of
+ADR-0085 §8 and this model's shape, neither of which ADR-0130 decides — so this ADR
+computes it *and* enforces it, at `NotificationOutbox.offer` and nowhere else.
+ADR-0130's type is unchanged and carries no size rule; §4's clauses and §9's record
+both say so. A draft of this paragraph had ADR-0130 stating the bound on the type and
+survived into the fifty-fourth round after the clauses around it were corrected —
+architecture review caught the remnant, which would have led a lane to put
+configuration-derived validation back into a dependency-free `core` model, the exact
+boundary §4 exists to keep.
 
 **Naming the fields is not fussiness at this altitude, it is the whole reason a
 surface ADR exists.** ADR-0085 §3 spells out every signature rather than
