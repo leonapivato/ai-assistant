@@ -791,6 +791,23 @@ lanes were split on.
 > refused as an ordinary correlated error naming the range. The hub does not
 > silently clamp it in either direction.
 
+> **Normative.** A `next_notification` request whose arguments are refused has **no
+> effect on the outbox**. Arguments are validated before the acknowledgement is
+> applied, before any entry is selected, and before any other outbox state changes;
+> a refused request retires nothing, leases nothing and mints nothing.
+
+**Validation has to precede the acknowledgement because this is the one method on
+the surface that both refuses an argument and mutates state as a side effect of
+another.** A device holding delivery `D` can send
+`next_notification(acknowledging=D, budget=timedelta(seconds=-1))`. Without an
+ordering rule, one implementation acknowledges and then refuses — reporting a failed
+request while having permanently retired `D`, so the device's retry with a valid
+budget finds the notification gone — and another validates first and leaves it
+available. Two conforming hubs, one lost notification. Adversarial review found it
+on the nineteenth round. The rule is ADR-0087 §7's "decode, then validate, then
+measure" carried one step further into effects, and it covers a malformed argument
+of any kind, not only an out-of-range duration.
+
 **Both ends of the range needed stating and only one had it.** `timedelta` admits
 zero and negative values and neither exceeds a maximum, so a caller could send
 `timedelta(seconds=-1)` and one implementation would return an empty result while
