@@ -709,6 +709,26 @@ class SqliteNotificationStore:
         The block's own failure is re-raised after the rollback, unchanged unless
         it is a backend fault, which becomes this seam's error.
 
+        **The ``BEGIN`` is inside the cleanup, not above it, and that placement
+        is the decision.** :func:`_run_to_completion` re-raises a cancellation
+        only once the worker has *physically finished*, so a cancellation landing
+        on the acquiring hop leaves the transaction genuinely open and then
+        raises. Begun above a ``try``, that raise leaves ``__aenter__`` without
+        ever entering the block, so no rollback runs, the lock is released, and
+        the connection stays in-transaction — the next ``BEGIN`` fails with
+        "cannot start a transaction within a transaction" and the store is
+        poisoned for every later caller. That is the unconditional resource
+        clause of ADR-0060 and the failure ``memory/_transactions.py`` records in
+        as many words; the sibling stores are not exposed to it because their
+        whole transaction runs inside **one** worker hop, where the cancellation
+        cannot land part-way. This one spans three hops by construction, so it
+        has to close the window itself.
+
+        Rolling back a ``BEGIN`` that never opened is harmless and deliberate:
+        :meth:`_rollback_sync` suppresses the backend's "no transaction is
+        active", and where a *previous* caller poisoned the connection this
+        clears it rather than inheriting it.
+
         Args:
             what: What the caller is doing, read as the tail of ``failed to {what}``.
 
@@ -719,8 +739,8 @@ class SqliteNotificationStore:
             NotificationStoreError: If the backend fails opening, running or
                 committing the transaction.
         """
-        await _run_to_completion(self._begin_sync, what)
         try:
+            await _run_to_completion(self._begin_sync, what)
             yield
         except BaseException as exc:
             await _run_to_completion(self._rollback_sync)
