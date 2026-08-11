@@ -50,8 +50,8 @@ import stat
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.errors import ConfigurationError
-from ai_assistant.service.custody import first_ancestor_fault
 from ai_assistant.wire.address import check_socket_path
+from ai_assistant.wire.custody import first_ancestor_fault
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -137,7 +137,7 @@ def _check_leaf(data_dir: Path) -> None:
 def _check_ancestors(data_dir: Path) -> None:
     """No ancestor lets an untrusted user replace the entry beneath it.
 
-    The condition itself lives in :mod:`ai_assistant.service.custody`, shared with
+    The condition itself lives in :mod:`ai_assistant.wire.custody`, shared with
     the overlay agent's socket, which depends on the same property for the same
     reason (ADR-0124 §4). Only the wording is chosen here — what an operator should
     do about an untrustworthy ancestor is different for a data directory than for a

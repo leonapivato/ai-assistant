@@ -33,17 +33,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import os
-import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Protocol
 
 import structlog
 
-from ai_assistant.core.errors import ConfigurationError
-from ai_assistant.service.custody import first_ancestor_fault, others_can_create_in
-from ai_assistant.wire.address import sun_path_limit
+from ai_assistant.wire.overlay import AgentSocketTerms, check_configured_socket
 
 _log = structlog.get_logger(__name__)
 
@@ -377,250 +373,17 @@ def _stable_id(node: dict[str, Any]) -> str:
     return identity
 
 
-def _refuse_an_unclaimed_name(socket_path: Path, setting: str) -> None:
-    """A configured socket that does not exist yet must not be anybody's to create.
-
-    Split out because the condition is the opposite way round from the ancestry
-    walk's: there the sticky bit *earns* an other-writable directory its place, and
-    here it buys nothing at all.
-    """
-    parent = socket_path.parent
-    shown = _displayable(socket_path)
-    here = _displayable(parent)
-    try:
-        plantable = others_can_create_in(parent)
-    except OSError as exc:
-        why = _displayable(exc.strerror)
-        msg = (
-            f"the directory {here} holding the overlay agent socket {setting} names "
-            f"cannot be read ({why}), so whether an untrusted user could create "
-            f"that socket cannot be established; correct {setting}, or unset it"
-        )
-        raise ConfigurationError(msg) from exc
-    if plantable:
-        msg = (
-            f"no socket exists yet at {shown}, and {here} is mode "
-            f"{stat.S_IMODE(parent.stat().st_mode):04o} — writable by other users, so any "
-            f"of them could create that socket first and answer for the overlay, which is "
-            f"the identity ADR-0124 §4 admits every device by. A sticky bit does not help "
-            f"here: it stops a user renaming an entry they do not own, and this name is "
-            f"not owned by anyone yet. Set {setting} to a path under a directory only you "
-            f"can write, or start the overlay agent so its socket exists"
-        )
-        raise ConfigurationError(msg)
-
-
-def _displayable(path: Path | str | bytes | None) -> str:
-    """An OS-supplied value rendered so a refusal naming it can itself be built.
-
-    :mod:`ai_assistant.core.types` requires message text to have a UTF-8 encoding,
-    and gives the reason this function exists: "interpolating it raw would build an
-    error message that is itself unencodable, so reporting the fault would fail the
-    same way the fault does". A pathname is exactly such a value — on Unix it is
-    bytes, and a non-UTF-8 one reaches Python as PEP 383 surrogates — so it is
-    escaped for display rather than echoed, and the operator still sees which path
-    was meant.
-
-    **Everything the OS hands back goes through here, not only the argument.**
-    ``OSError.filename`` is the one that is easy to miss — it is as much a pathname
-    as the argument, it is ``None`` when the platform supplied none, and
-    interpolating it raw reintroduces the identical fault one line from where it
-    was fixed. ``OSError.strerror`` is decoded with the locale encoding and can
-    carry surrogates for the same reason, so it takes the same treatment; escaping
-    a string that never needed it costs nothing, and the failure it prevents is a
-    refusal that cannot be reported.
-    """
-    if path is None:
-        return "an unnamed path"
-    return os.fsencode(path).decode("utf-8", "backslashreplace")
-
-
-def _check_path_to(socket_path: Path, setting: str) -> None:
-    """The budget, and the ancestry that decides who could put something here."""
-    shown = _displayable(socket_path)
-    limit = sun_path_limit()
-    # `os.fsencode`, not a UTF-8 encode: these are the bytes the kernel is handed,
-    # and a filename need not be UTF-8 at all. A non-UTF-8 byte in the environment
-    # reaches Python as a surrogate (PEP 383), which `str.encode("utf-8")` refuses
-    # — so measuring the budget that way turned a perfectly valid pathname into a
-    # `UnicodeEncodeError` no handler catches, which is a crash rather than a
-    # verdict. `fsencode` round-trips the surrogates back to the original bytes.
-    encoded = len(os.fsencode(socket_path)) + 1  # the NUL terminator counts
-    if encoded > limit:
-        msg = (
-            f"the overlay agent socket {shown} encodes to {encoded} bytes including "
-            f"its terminator, over this platform's {limit}-byte sun_path budget, so no "
-            f"connection can be made to it; set {setting} to a shorter path"
-        )
-        raise ConfigurationError(msg)
-
-    try:
-        fault = first_ancestor_fault(socket_path)
-    except OSError as exc:
-        # A directory that is missing or cannot be traversed is the ordinary typo,
-        # and it has to arrive as a `ConfigurationError` like every other startup
-        # misconfiguration — ADR-0083 §5 maps this class to a stay-down exit, and a
-        # raw `FileNotFoundError` out of the composition root would instead be an
-        # unexpected fault, reported as though the hub had a defect.
-        why = _displayable(exc.strerror)
-        where = _displayable(exc.filename)
-        msg = (
-            f"the path to the overlay agent socket {shown}, which {setting} names, "
-            f"cannot be read ({why} at {where}), so whether an untrusted "
-            f"user could answer for the overlay there cannot be established; correct "
-            f"{setting}, or unset it to look at the two paths the daemon is packaged to "
-            f"use ({', '.join(TAILSCALE_SOCKETS)})"
-        )
-        raise ConfigurationError(msg) from exc
-    if fault is None:
-        return
-    culprit = _displayable(fault.ancestor)
-    if fault.kind == "replaceable":
-        msg = (
-            f"{culprit} is mode {fault.mode:04o}, writable by other users and not "
-            f"sticky, so another user could replace the overlay agent socket beneath it "
-            f"and answer for the overlay — which is the identity ADR-0124 §4 admits every "
-            f"device by; chmod it, set its sticky bit, or set {setting} to a path under a "
-            f"directory you own"
-        )
-        raise ConfigurationError(msg)
-    msg = (
-        f"{culprit} is owned by uid {fault.uid}, neither root nor the "
-        f"uid {os.geteuid()} the hub runs as, so that user controls the path to the "
-        f"overlay agent socket and could answer for the overlay; set {setting} to a "
-        f"path under a directory you own"
-    )
-    raise ConfigurationError(msg)
-
-
-def _check_socket_at(socket_path: Path, setting: str) -> None:
-    """What occupies the path is the daemon's, and an unclaimed name is nobody's."""
-    shown = _displayable(socket_path)
-    try:
-        info = socket_path.stat()
-    except FileNotFoundError:
-        # **Absence itself is not refused; an unclaimed name others can take is.**
-        # `local_agent`'s contract is that "whether the daemon is actually there is
-        # answered by the first query", and ADR-0124 §3 forbids launching one, so a
-        # hub that started a moment before its agent must still come up. What
-        # cannot be allowed is that gap being usable by somebody else: the sticky
-        # bit protects entries that *exist* from being renamed away and says
-        # nothing about a name nobody has taken, so `/tmp/tailscaled.sock` is a
-        # socket any local user may be the first to create — and whoever creates it
-        # answers for the overlay, which is the identity §4 admits every device by.
-        _refuse_an_unclaimed_name(socket_path, setting)
-        return
-    except OSError as exc:
-        # The same reasoning as the ancestry walk's own `OSError`: a path the hub
-        # cannot read is a configuration fault, not a defect. Reached when a parent
-        # is owned by the hub's uid but not traversable, which the walk's `stat` of
-        # the directory itself does not detect.
-        why = _displayable(exc.strerror)
-        msg = (
-            f"the overlay agent socket {shown}, which {setting} names, cannot be "
-            f"read ({why}), so whether an untrusted user could answer for the "
-            f"overlay there cannot be established; correct {setting}, or unset it to look "
-            f"at the two paths the daemon is packaged to use ({', '.join(TAILSCALE_SOCKETS)})"
-        )
-        raise ConfigurationError(msg) from exc
-    if not stat.S_ISSOCK(info.st_mode):
-        msg = (
-            f"{shown}, which {setting} names, is not a socket; the overlay agent's "
-            f"local API is a Unix socket, so nothing can be asked of this path"
-        )
-        raise ConfigurationError(msg)
-    if info.st_uid not in (0, os.geteuid()):
-        msg = (
-            f"the overlay agent socket {shown} is owned by uid {info.st_uid}, "
-            f"neither root nor the uid {os.geteuid()} the hub runs as, so that user "
-            f"answers for the overlay and decides which device the hub admits "
-            f"(ADR-0124 §4); point {setting} at your own overlay agent's socket"
-        )
-        raise ConfigurationError(msg)
-
-
-def check_configured_socket(socket_path: Path) -> Path:
-    """A configured agent socket keeps the custody the two defaults have.
-
-    **This is what makes the setting safe to expose, and without it the setting
-    would be a different decision.** The comment on :data:`TAILSCALE_SOCKETS` gives
-    the reason the two packaged paths can be trusted at all: they are "the daemon's
-    own socket, protected by the operating system's own access control — which is
-    the custody ADR-0004 §3 leans on everywhere else, applied to a socket rather
-    than a keyring". ADR-0124 §4 then makes that socket's answer the identity of
-    every device that connects, and forbids taking that identity "from anything the
-    peer asserts". A path an operator can name is not in itself a breach of that
-    clause — a Unix socket is a local interface, and §4's third clause governs the
-    client's *enrolled hub identity*, not the agent's location. But a path with no
-    conditions on it would let a socket any local user owns answer for the overlay,
-    which reaches the same end by another route.
-
-    So the conditions are the ones ADR-0084 §1 already imposes on the data
-    directory, and for the same reason: nothing here is authenticated at the moment
-    it is opened, so the filesystem has to carry the trust. The ancestry walk is
-    literally shared (:mod:`ai_assistant.service.custody`) rather than restated.
-
-    **The path is canonicalised, and the checks are run against what will actually
-    be opened.** This is ``data_dir``'s rule (ADR-0084 §1) for ``data_dir``'s
-    reason: two readers that disagree about which file a name means is the whole
-    hazard. A symlink whose target is validated but whose *name* is connected to
-    leaves a gap between the two, and a dangling symlink under a trusted directory
-    would otherwise pass every check while pointing at a name any local user could
-    claim. So the ancestry of the name is checked — nobody untrusted may re-point
-    the link — and everything else is decided about the resolved path.
-
-    **The leaf takes root-or-us, not exactly-us**, which is where this departs from
-    the data directory. The daemon runs as root in the ordinary deployment, so its
-    socket is root-owned and a hub demanding its own uid would reject every real
-    installation. What both cases exclude is the same: a *third* user owning the
-    thing the hub is about to trust.
-
-    **It asks who could answer, never whether anybody currently does.** An absent
-    socket is accepted, because refusing one would both contradict
-    :func:`local_agent`'s contract and turn "the hub started a moment before its
-    agent" into a stay-down fault. But an absent socket is held to one condition a
-    present one is not: its directory must be one only its owner can write. The
-    ancestry walk lets a sticky ``/tmp`` through, correctly, because sticky stops a
-    user renaming an entry they do not own — and a name nobody has taken yet is not
-    such an entry, so it would leave the socket for whoever creates it first.
-
-    Args:
-        socket_path: The path an operator configured.
-
-    Returns:
-        The canonical path, which is the one to connect to.
-
-    Raises:
-        ConfigurationError: If the path is not a usable pathname, is too long to
-            connect to, has an ancestor that lets an untrusted user replace what
-            sits beneath it, names nothing in a directory others can write, or
-            holds something that is not a socket or belongs to a third user. Every
-            one is a stay-down deployment fault in ADR-0083 §5's sense — none is
-            fixed by restarting.
-    """
-    setting = "ASSISTANT_HUB_OVERLAY_AGENT_SOCKET"
-    try:
-        resolved = Path(os.path.realpath(socket_path))
-    except ValueError as exc:
-        # An embedded NUL is the case that reaches here: it survives every string
-        # operation and fails inside the first syscall, as a `ValueError` no
-        # `OSError` handler catches. A pathname the OS will not accept is a
-        # configuration fault like any other, not a defect in the hub.
-        msg = (
-            f"{setting} is not a usable pathname ({exc}); set it to the path of your "
-            f"overlay agent's Unix socket, or unset it to look at the two paths the "
-            f"daemon is packaged to use ({', '.join(TAILSCALE_SOCKETS)})"
-        )
-        raise ConfigurationError(msg) from exc
-
-    # The name's own ancestry still matters when it differs from the target's: it is
-    # what stops an untrusted user re-pointing the link between this check and the
-    # connection. Everything else is decided about the path that will be opened.
-    if resolved != socket_path:
-        _check_path_to(socket_path, setting)
-    _check_path_to(resolved, setting)
-    _check_socket_at(resolved, setting)
-    return resolved
+#: What a *hub* refusal says about its own overlay agent socket (ADR-0124 §4).
+#: The check itself is :func:`ai_assistant.wire.overlay.check_configured_socket`,
+#: shared with the client half; only this vocabulary is the hub's, because what an
+#: operator should correct differs between the two ends of the hop even though the
+#: custody condition does not.
+HUB_AGENT_SOCKET: Final = AgentSocketTerms(
+    setting="ASSISTANT_HUB_OVERLAY_AGENT_SOCKET",
+    runner="the hub",
+    stakes="the identity ADR-0124 §4 admits every device by",
+    decides="which device the hub admits",
+)
 
 
 def local_agent(socket_path: str | None = None) -> TailscaleAgent:
@@ -629,8 +392,10 @@ def local_agent(socket_path: str | None = None) -> TailscaleAgent:
     Args:
         socket_path: An explicit socket path, or ``None`` to look at the two
             places the daemon is packaged to use. An explicit path is held to
-            :func:`check_configured_socket`'s custody conditions first; the two
-            packaged defaults are used exactly as before.
+            :func:`~ai_assistant.wire.overlay.check_configured_socket`'s custody
+            conditions first — the same function the client half runs, phrased
+            with :data:`HUB_AGENT_SOCKET`'s wording — and the two packaged
+            defaults are used exactly as before.
 
     Returns:
         An agent pointed at a socket — the *canonical* path when one was
@@ -648,7 +413,7 @@ def local_agent(socket_path: str | None = None) -> TailscaleAgent:
         # The *canonical* path, not the one written: connecting to the name a
         # symlink carries would reopen the gap between what was checked and what is
         # opened, which is the hazard ADR-0084 §1 canonicalises `data_dir` to close.
-        return TailscaleAgent(check_configured_socket(Path(socket_path)))
+        return TailscaleAgent(check_configured_socket(Path(socket_path), terms=HUB_AGENT_SOCKET))
     for candidate in TAILSCALE_SOCKETS:
         if Path(candidate).exists():
             return TailscaleAgent(candidate)
