@@ -525,6 +525,29 @@ class DeferralStoreError(AssistantError):
     """
 
 
+class NotificationStoreError(AssistantError):
+    """Reading from or writing to the notification store failed (ADR-0130 §9).
+
+    Its own class in the :class:`AssistantError` hierarchy for the reason
+    :class:`DeferralStoreError` is one: a held notification is none of the things
+    the existing errors name. It is a *proposal to volunteer something*, ruled by
+    a deterministic policy and held in a store of its own, and a caller that
+    wanted to catch a notification fault without also catching a memory one has
+    no other way to say so.
+
+    It covers a store fault and nothing else. A malformed *argument* is not this
+    error: a paging value out of range is a ``ValueError``, inherited from
+    ADR-0073 §2 unchanged rather than restated, and a candidate that the type
+    itself refuses — a ``DataTier.SECRET`` sensitivity, an expiry that has
+    already passed — raises from
+    :class:`~ai_assistant.core.types.NotificationCandidate`'s own validator
+    before any store is reached (ADR-0130 §2). Where a method has a spelling for
+    absence or refusal — the ``None`` from a reconsideration that found nothing
+    due, the ``bool`` of ``dismiss`` and ``delete`` — that spelling is used and
+    nothing is raised.
+    """
+
+
 class DeferralIdConflictError(DeferralStoreError):
     """A ``defer`` supplied an id a stored row already carries (ADR-0078 §2).
 

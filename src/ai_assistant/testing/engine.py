@@ -88,6 +88,10 @@ from ai_assistant.orchestration.payloads import (
     page_argument,
     positive_page_argument,
 )
+from ai_assistant.testing.notifications import (
+    FakeNotificationPolicy,
+    FakeNotificationStore,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -95,8 +99,10 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         EncodableText,
         FeedbackEvent,
+        HeldNotification,
         Identifier,
         NonBlankEncodableText,
+        NotificationPreferences,
     )
 
 #: A fixed instant, so a fake engine's output is deterministic without a clock.
@@ -143,6 +149,12 @@ class FakeAssistantEngine:
                 envelope reserve, which is what a deployment gets by saying nothing.
         """
         self._max_payload_bytes = max_payload_bytes
+        #: The notification surface's whole state, public so a consumer can
+        #: seed it: ``await engine.notification_store.admit(candidate,
+        #: policy=engine.notification_policy)`` is how a held record gets
+        #: here, there being no producer on this surface (ADR-0130 §1).
+        self.notification_store = FakeNotificationStore()
+        self.notification_policy = FakeNotificationPolicy()
         self.beliefs_held: dict[str, Belief] = {}
         self.questions_open: dict[str, Question] = {}
         self.questions_interrupted: dict[str, Question] = {}
@@ -428,6 +440,67 @@ class FakeAssistantEngine:
             or self.questions_settled.pop(named, None)
         )
         return self._checked(gone is not None, "forget_question")
+
+    # --- the notification surface (ADR-0130 §7, §9) -----------------------
+    # Backed by the canonical :class:`FakeNotificationStore` and
+    # :class:`FakeNotificationPolicy` rather than by a dict of its own, so a
+    # consumer testing against this engine meets the *contract's* behaviour —
+    # the cap counting actionable records, a dismissal freeing a slot, an
+    # expired record still enumerable — instead of whatever a second stand-in
+    # happened to do. Seed it through :attr:`notification_store`.
+
+    async def notifications(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[HeldNotification, ...]:
+        """List the notifications being held, oldest first."""
+        self._check_page("notifications", limit=limit, offset=offset)
+        held = await self.notification_store.held(limit=limit, offset=offset)
+        return self._checked(tuple(held), "notifications")
+
+    async def dismiss_notification(self, notification_id: Identifier) -> bool:
+        """Dispose of one notification without destroying it."""
+        named = identifier(notification_id, name="notification_id")
+        check_arguments(
+            "dismiss_notification",
+            max_bytes=self._max_payload_bytes,
+            notification_id=named,
+        )
+        self.calls.append(("dismiss_notification", {"notification_id": named}))
+        dismissed = await self.notification_store.dismiss(named)
+        return self._checked(dismissed, "dismiss_notification")
+
+    async def forget_notification(self, notification_id: Identifier) -> bool:
+        """Destroy one notification, reporting whether there was one to destroy."""
+        named = identifier(notification_id, name="notification_id")
+        check_arguments(
+            "forget_notification",
+            max_bytes=self._max_payload_bytes,
+            notification_id=named,
+        )
+        self.calls.append(("forget_notification", {"notification_id": named}))
+        destroyed = await self.notification_store.delete(named)
+        return self._checked(destroyed, "forget_notification")
+
+    async def notification_preferences(self) -> NotificationPreferences:
+        """Read the three standing settings that tune proactive contact."""
+        check_arguments("notification_preferences", max_bytes=self._max_payload_bytes)
+        self.calls.append(("notification_preferences", {}))
+        held = await self.notification_store.preferences()
+        return self._checked(held, "notification_preferences")
+
+    async def set_notification_preferences(
+        self, preferences: NotificationPreferences
+    ) -> NotificationPreferences:
+        """Write the standing settings and re-arm what the change reaches."""
+        check_arguments(
+            "set_notification_preferences",
+            max_bytes=self._max_payload_bytes,
+            preferences=preferences,
+        )
+        self.calls.append(("set_notification_preferences", {"preferences": preferences}))
+        await self.notification_store.set_preferences(preferences)
+        held = await self.notification_store.preferences()
+        return self._checked(held, "set_notification_preferences")
 
     # --- the conversation surface -----------------------------------------
 

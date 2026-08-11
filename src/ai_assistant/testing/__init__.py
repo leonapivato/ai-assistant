@@ -29,6 +29,11 @@ from ai_assistant.testing.invoker import FakeToolImplementation, FakeToolInvoker
 from ai_assistant.testing.learning import FakeFeedbackProcessor
 from ai_assistant.testing.memory import FakeMemoryStore
 from ai_assistant.testing.models import FakeModelProvider, ModelCall
+from ai_assistant.testing.notifications import (
+    FakeNotificationPolicy,
+    FakeNotificationStore,
+    FakeNotificationWriter,
+)
 from ai_assistant.testing.observation import (
     DEFAULT_MAX_BATCH_SIZE,
     DEFAULT_MAX_PROPOSALS,
@@ -88,6 +93,9 @@ __all__ = [
     "FakeMemoryStore",
     "FakeMemoryWriter",
     "FakeModelProvider",
+    "FakeNotificationPolicy",
+    "FakeNotificationStore",
+    "FakeNotificationWriter",
     "FakeObserver",
     "FakePlanStore",
     "FakePlanner",

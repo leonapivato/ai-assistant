@@ -1476,6 +1476,76 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Proactive notification (ADR-0130 §5, §7, §9) ---------------------
+    # Three deployment tunings, and **only** three: §9 is explicit that no
+    # standing setting of §6 becomes a `Settings` field. Reach levels, quiet
+    # windows and the interruption budget are the *user's* durable state, written
+    # through the engine surface and held in the notification store, because the
+    # tuning surface has to work on the first day from an empty store — and a
+    # value the user edits in a config file is not that.
+    #
+    # `notification_queue_limit` and `notification_retention` are the pair
+    # ADR-0078 §7 already decided for the deferral queue, taking its shapes and
+    # its reasons: a cap that "refuses new questions and keeps old ones", strictly
+    # positive because "a cap of `0` is at capacity before its first admission",
+    # with no "unlimited" spelling because the duration axis is where the
+    # deliberate escape lives. `lt=2**63` keeps a configured value inside the
+    # domain a store's own count can hold, as `deferral_queue_limit`'s does.
+    #
+    # **The figures differ from the deferral queue's, and both differences are
+    # decisions ADR-0130 §7 argues.** The cap is 100 rather than 50 because it
+    # bounds a *reading list* rather than a queue of questions blocking each
+    # other. Seven days is shorter than the deferral queue's thirty on purpose: a
+    # question keeps its value until it is answered, a notification about a thing
+    # that already happened does not, and the whole of this ADR is that proactive
+    # contact is about a moment rather than a backlog. `None` is the user's
+    # deliberate "keep them", in the same words `deferral_ttl` uses.
+    #
+    # The cap counts **actionable** records only, so dismissing one frees capacity
+    # at once and an expired one holds none; and the retention is stamped onto
+    # each record at admission and runs from the instant that record *ceased* to
+    # be actionable, never from the live setting and never from admission (§7).
+    notification_queue_limit: _IntegerSetting = Field(
+        default=100,
+        gt=0,
+        lt=2**63,
+        description=(
+            "The most actionable held notifications the store keeps; beyond it a new "
+            "candidate is dropped rather than an old one evicted (ADR-0130 §7). Positive, "
+            "with no unlimited spelling."
+        ),
+    )
+    notification_retention: _OptionalDuration = Field(
+        default=timedelta(days=7),
+        gt=timedelta(0),
+        description=(
+            "How long a notification is kept after it stops being actionable, stamped onto "
+            "each record at admission (ADR-0130 §7). Set it to 'none' to keep them, which "
+            "also stops them ever being purged."
+        ),
+    )
+    # The reconsideration job's interval, on ADR-0083 §7's convention and in
+    # `retention_purge_interval`'s shape: finite and strictly positive, or `None`
+    # for disabled and never `0`.
+    #
+    # **It ships enabled, and at minutes rather than hours.** With no producers it
+    # rules nothing, and a held record whose quiet window has passed is the one
+    # thing ADR-0130 cannot leave to a later act — a user who raises a class's
+    # reach has agreed to be interrupted, and nothing else in the design would
+    # reach the record they were agreeing about. It is also the one job on §7's
+    # table whose latency is user-visible: a candidate held behind a window
+    # closing at 08:00 is contacted at the first run after that, so by 08:05 here.
+    # The remedy available to a deployment is a shorter interval rather than a
+    # different guarantee, `reconsider_at` being a floor and not a deadline.
+    notification_reconsider_interval: _OptionalDuration = Field(
+        default=timedelta(minutes=5),
+        gt=timedelta(0),
+        description=(
+            "How often the hub re-rules held notifications whose reconsideration instant "
+            "has arrived (ADR-0130 §5). Set it to 'none' to disable the job; never 0."
+        ),
+    )
+
     # --- Evaluation traces (ADR-0119 §10) ---------------------------------
     # The one setting the trace store takes, parsed from an ISO-8601 duration or
     # `HH:MM:SS` string (`ASSISTANT_TRACE_RETENTION=P365D`). A trace is deleted

@@ -17,7 +17,7 @@ import json
 import re
 import unicodedata
 from collections.abc import Hashable, Iterator, Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
@@ -7675,3 +7675,848 @@ field annotated with this alias validates through pydantic; a hand-built value
 validates through the callable. That is :data:`EncodableText`'s arrangement with
 :func:`encodable_text`, taken deliberately.
 """
+
+
+# ---------------------------------------------------------------------------
+# Proactive notification (ADR-0130)
+# ---------------------------------------------------------------------------
+# The propose/dispose chassis reaches the other end of the system here. Every
+# artifact below is a *proposal* or a *ruling on one*: producing a candidate
+# reaches nobody (§1), and holding one confers no authority to contact anyone.
+#
+# **No type here carries delivery state.** ADR-0078 §8 refused to put "was it
+# sent? seen?" on a memory decision, and §2 keeps that refusal rather than
+# reversing it: whether contact was attempted, reached a device, or was seen is
+# not a field of a candidate, a disposition or a held record, and no clause may
+# be read as placing one there. What this block mints is the record a delivery
+# seam attaches to.
+
+
+class NotificationReach(StrEnum):
+    """How far a notification class may reach the user (ADR-0130 §6).
+
+    The one standing setting that is *per class*, and the only one whose lowest
+    value stops a candidate before any other condition is weighed.
+    """
+
+    OFF = "off"
+    """Never tell me this. A candidate of this class is dropped (§5)."""
+
+    HOLD = "hold"
+    """Hold it for the user's next arrival. **The shipped default for every
+    class**, including one no preference names (§6), which is why a producer
+    cannot interrupt on the day it ships."""
+
+    INTERRUPT = "interrupt"
+    """Reach me at the earliest instant a channel permits, if the candidate also
+    satisfies every other condition of §5."""
+
+
+class NotificationDispositionKind(StrEnum):
+    """What a ruling decided (ADR-0130 §5).
+
+    Exactly three, and there is deliberately no fourth for "tell them later at
+    instant X": ``HOLD`` with a ``reconsider_at`` covers it with one field and
+    keeps every disposition a statement about *now* (§11).
+    """
+
+    INTERRUPT = "interrupt"
+    """Reach the user at the earliest instant a channel permits. **It is not an
+    assertion that a channel exists, and it binds no transport** (§5)."""
+
+    HOLD = "hold"
+    """Withhold the interruption, not the notification: a held record is
+    readable through §7's enumeration. The outcome whenever no clause of §5
+    selects another."""
+
+    DROP = "drop"
+    """Rule it out. On an offer this writes no durable record (§8); on a
+    reconsideration it is recorded and the record ceases to be actionable."""
+
+
+class NotificationCondition(StrEnum):
+    """One condition §5 weighs, named so a ruling can be explained (ADR-0130 §5).
+
+    **Every disposition names one of these**, which is what makes "why did you
+    tell me that?" and "why didn't you?" answerable without a model in the loop.
+    The members fall into two groups that never mix: :data:`DROP_CONDITIONS` are
+    the four evaluated first, each yielding ``DROP`` naming itself, and
+    :data:`INTERRUPT_CONDITIONS` are the four that must **all** hold for
+    ``INTERRUPT``.
+    """
+
+    EXPIRED = "expired"
+    """The candidate declares an expiry not later than the ruling instant. A
+    candidate that has already perished is not a proposal (§2, §5)."""
+
+    REACH_OFF = "reach_off"
+    """The reach level for its class is :attr:`NotificationReach.OFF`."""
+
+    DUPLICATE = "duplicate"
+    """Its key matches an actionable record (§8). Re-noticing is expected, and
+    this is what makes it safe."""
+
+    AT_CAP = "at_cap"
+    """The store holds its cap of actionable records (§7). The cap **refuses**;
+    it never displaces an existing record."""
+
+    PERISHABLE = "perishable"
+    """The candidate declares an expiry later than the ruling instant.
+
+    **This is the whole of the escalation test** (§5). A producer that declares
+    "this expires at 14:00" has committed to something falsifiable; one that
+    declares "this is urgent" has committed to nothing. A candidate declaring no
+    expiry at all fails *this* condition, which is why it is held rather than
+    dropped, and why no setting can make it due.
+    """
+
+    REACH_INTERRUPT = "reach_interrupt"
+    """The reach level for its class is :attr:`NotificationReach.INTERRUPT`."""
+
+    QUIET_WINDOW = "quiet_window"
+    """No quiet window covers the ruling instant."""
+
+    BUDGET = "budget"
+    """§6's interruption budget for the window containing the ruling instant is
+    not exhausted."""
+
+
+#: The four conditions §5 evaluates first, **in this order**, each yielding
+#: ``DROP`` naming itself as the reason. The order is normative: a candidate that
+#: has perished and also duplicates an actionable record is dropped as expired,
+#: and a conformance suite can only check "the ordering selects the reason it
+#: names" against a stated sequence.
+DROP_CONDITIONS: Final[tuple[NotificationCondition, ...]] = (
+    NotificationCondition.EXPIRED,
+    NotificationCondition.REACH_OFF,
+    NotificationCondition.DUPLICATE,
+    NotificationCondition.AT_CAP,
+)
+
+#: The four that must **all** hold for ``INTERRUPT``, in the order §5 states
+#: them. A ``HOLD`` names the first of these it fails and carries the whole set.
+INTERRUPT_CONDITIONS: Final[tuple[NotificationCondition, ...]] = (
+    NotificationCondition.PERISHABLE,
+    NotificationCondition.REACH_INTERRUPT,
+    NotificationCondition.QUIET_WINDOW,
+    NotificationCondition.BUDGET,
+)
+
+#: The two failing conditions **time alone resolves** (§5): a quiet window ends,
+#: and a rolling budget window frees a unit. The reach level and an absent expiry
+#: are each a condition time does not resolve, so a ``HOLD`` whose failed set
+#: holds either carries no ``reconsider_at`` from its ruling.
+TIME_RESOLVED_CONDITIONS: Final[frozenset[NotificationCondition]] = frozenset(
+    {NotificationCondition.QUIET_WINDOW, NotificationCondition.BUDGET}
+)
+
+#: The reach a class takes when no preference names it (ADR-0130 §6). **Hold,
+#: deliberately**: out of the box nothing interrupts, and raising a class is an
+#: act the user performs.
+DEFAULT_NOTIFICATION_REACH: Final[NotificationReach] = NotificationReach.HOLD
+
+#: The shipped interruption budget: three per rolling window (ADR-0130 §6).
+DEFAULT_INTERRUPTION_BUDGET: Final[int] = 3
+
+#: The window that budget is counted over: a rolling twenty-four hours (§6).
+DEFAULT_INTERRUPTION_WINDOW: Final[timedelta] = timedelta(hours=24)
+
+
+class QuietWindow(BaseModel):
+    """A local time-of-day interval during which nothing may interrupt (§6).
+
+    **Half-open, and it may cross midnight.** ``[start, end)`` when ``start <
+    end``; when ``start > end`` the window wraps, so ``22:00`` to ``07:00`` is the
+    ordinary overnight case and is expressed directly rather than as two rows.
+    ``start == end`` is refused: it is unreadable as either "nothing" or
+    "everything", and a setting whose meaning a reader has to guess is one that
+    silently stops the assistant interrupting at all.
+
+    **The times are naive, and that is the decision.** A quiet window is a
+    statement about the user's day, read in ``Settings.timezone`` — the same
+    value ADR-0008 §5 gives the temporal context and ADR-0093 §7b binds the
+    calendar reader to, and no second timezone source is introduced (§6). A
+    ``time`` carrying its own ``tzinfo`` would be exactly that second source, so
+    it is refused here rather than silently ignored downstream.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    start: time = Field(description="When quiet begins, local time-of-day, inclusive.")
+    end: time = Field(description="When quiet ends, local time-of-day, exclusive.")
+
+    @model_validator(mode="after")
+    def _is_a_readable_window(self) -> QuietWindow:
+        """Refuse a window carrying a zone, or one with no readable extent.
+
+        Raises:
+            ValueError: If either endpoint is timezone-aware, or the two are equal.
+        """
+        for name, value in (("start", self.start), ("end", self.end)):
+            if value.tzinfo is not None:
+                msg = (
+                    f"{name} must be a naive local time-of-day: quiet windows are read in "
+                    f"Settings.timezone and no second timezone source is introduced "
+                    f"(ADR-0130 §6)"
+                )
+                raise ValueError(msg)
+        if self.start == self.end:
+            msg = (
+                "start and end must differ: an empty window and an all-day one are not "
+                "distinguishable, and a setting a reader has to guess at silently stops "
+                "every interruption (ADR-0130 §6)"
+            )
+            raise ValueError(msg)
+        return self
+
+    def covers(self, moment: time) -> bool:
+        """Report whether a local time-of-day falls inside this window.
+
+        Args:
+            moment: The local time-of-day to test, naive.
+
+        Returns:
+            ``True`` while ``start <= moment < end``, and for a window that
+            crosses midnight, while ``moment >= start`` or ``moment < end``.
+        """
+        if self.start < self.end:
+            return self.start <= moment < self.end
+        return moment >= self.start or moment < self.end
+
+
+class ClassReach(BaseModel):
+    """One class's reach level, as a standing preference holds it (§6).
+
+    A row rather than a mapping entry, because a notification class is **not a
+    closed enumeration** (§6): adding a producer is not a contract change, so the
+    preference value has to carry whatever names the deployment's producers
+    declare, and a row serialises over the wire without a mapping key's encoding
+    questions.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    notification_class: NonBlankEncodableText = Field(
+        description="The producer-declared class this reach applies to (ADR-0130 §6)."
+    )
+    reach: NotificationReach = Field(description="How far this class may reach the user.")
+
+
+class NotificationPreferences(BaseModel):
+    """The three standing settings that tune what reaches the user (ADR-0130 §6).
+
+    **Durable user state, not ``Settings``.** These are the user's own choices,
+    written through the engine surface, and §9 is explicit that no standing
+    setting of §6 becomes a ``Settings`` field. The three ``Settings`` fields this
+    ADR does add — the cap, the retention duration and the reconsideration
+    interval — are deployment tunings and are not here.
+
+    **Every field has a shipped default, so an empty store is a working policy**
+    and no setting is a precondition of the system running (§6). The defaults are
+    exactly the ADR's: reach ``hold`` for every class including one no preference
+    names, no quiet windows, and three interruptions per rolling twenty-four
+    hours.
+
+    **Nothing here is derived from observed behaviour.** §6 forbids inferring a
+    reach level from what a user ignored; VISION §5's feedback-based adaptation
+    stays a promise and is not this type's mechanism.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reaches: tuple[ClassReach, ...] = Field(
+        default=(),
+        description=(
+            "The classes whose reach the user has set. A class absent from this tuple "
+            "takes DEFAULT_NOTIFICATION_REACH (ADR-0130 §6)."
+        ),
+    )
+    quiet_windows: tuple[QuietWindow, ...] = Field(
+        default=(),
+        description="Local time-of-day intervals during which nothing interrupts.",
+    )
+    interruption_budget: int = Field(
+        default=DEFAULT_INTERRUPTION_BUDGET,
+        ge=0,
+        lt=2**63,
+        description=(
+            "How many INTERRUPT rulings may be recorded per rolling window. Zero is a "
+            "legible 'never interrupt' rather than a defect (ADR-0130 §6)."
+        ),
+    )
+    budget_window: timedelta = Field(
+        default=DEFAULT_INTERRUPTION_WINDOW,
+        gt=timedelta(0),
+        description="The rolling window the budget is counted over (ADR-0130 §6).",
+    )
+
+    @model_validator(mode="after")
+    def _names_each_class_once(self) -> NotificationPreferences:
+        """Refuse two reach levels for one class.
+
+        Two rows for one class make the setting's meaning depend on which the
+        reader looks at first, and a class whose reach is ambiguous is one whose
+        ``off`` may silently not hold.
+
+        Raises:
+            ValueError: If a notification class appears more than once.
+        """
+        names = [row.notification_class for row in self.reaches]
+        if len(set(names)) != len(names):
+            duplicated = sorted({name for name in names if names.count(name) > 1})
+            msg = f"each notification class may carry one reach level, got two for {duplicated}"
+            raise ValueError(msg)
+        return self
+
+    def reach_for(self, notification_class: str) -> NotificationReach:
+        """The reach level in force for one class.
+
+        Args:
+            notification_class: The producer-declared class.
+
+        Returns:
+            The user's setting, or :data:`DEFAULT_NOTIFICATION_REACH` where no
+            preference names the class (§6).
+        """
+        for row in self.reaches:
+            if row.notification_class == notification_class:
+                return row.reach
+        return DEFAULT_NOTIFICATION_REACH
+
+    def is_quiet_at(self, moment: time) -> bool:
+        """Report whether any quiet window covers a local time-of-day.
+
+        Args:
+            moment: The local time-of-day, naive.
+
+        Returns:
+            Whether the instant it stands for is inside a quiet window.
+        """
+        return any(window.covers(moment) for window in self.quiet_windows)
+
+
+class NotificationCandidate(BaseModel):
+    """A producer's assertion that the user may be worth telling something (§1, §2).
+
+    **It is a proposal, not a decision to tell them.** Producing one reaches
+    nobody: a producer holds no channel, no delivery seam and no client
+    connection, and its only outcome is the :class:`NotificationDisposition` the
+    seam of §3 hands back. It may not select its own disposition, exempt itself
+    from §5, or write to the store other than through that seam (§1).
+
+    **It references what it is about and does not contain it** (§2). A reference
+    is an identifier resolved through an existing ratified read; ``summary`` and
+    ``detail`` are the only free text, and they are what the *user* would be
+    shown rather than a copy of a record.
+
+    **Two refusals live on the type rather than in a store's care**, both in the
+    shape :class:`DeferredProposal`'s coherence validator takes:
+
+    * a ``DataTier.SECRET`` candidate is refused outright rather than gated, so
+      Tier 0 never reaches the notification store **in any disposition and under
+      any setting** (§2). ADR-0004 §3 is unconditional that a Tier 0 value lives
+      in the OS keyring, "never in the memory database, never in a committed
+      file", and this store is a database holding free text a producer wrote to
+      be shown to a person. A rule that only stopped Tier 0 *interrupting* would
+      still have written it down;
+    * a candidate whose expiry is not later than the instant it was noticed is
+      refused, because a candidate that has already perished is not a proposal,
+      it is a defect (§2).
+
+    **Sensitivity is chosen by the producer and never defaulted**, on ADR-0093
+    §4's rule for an attested proposal — which is why the field carries no
+    default and a producer that wants to notify about a credential learns so at
+    the point it proposes.
+
+    **The confidence, the summary and the class are evidence, not authority**
+    (§4). The policy may read them; no clause of §5 is satisfied by a producer
+    asserting that it should be.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    candidate_key: NonBlankEncodableText = Field(
+        description=(
+            "A digest over the producer's declared name and a canonical projection of "
+            "what was noticed. It holds no clock reading, no random value and nothing "
+            "derived from the run that produced it, so the same observation yields the "
+            "same key across ticks and across process lives (ADR-0130 §8)."
+        ),
+    )
+    producer: NonBlankEncodableText = Field(
+        description=(
+            "The producer's declared name — a stable Tier 2 name, on ADR-0093 §7's rule "
+            "for a reader's identity."
+        ),
+    )
+    notification_class: NonBlankEncodableText = Field(
+        description=(
+            "The class §6 tunes, declared by the producer and not a configurable value. "
+            "Not a closed enumeration: adding a producer is not a contract change, and a "
+            "class no preference names takes the default reach (ADR-0130 §6)."
+        ),
+    )
+    summary: NonBlankEncodableText = Field(
+        description="The one line the user would be told. Free text a producer wrote."
+    )
+    detail: EncodableText | None = Field(
+        default=None,
+        description="What the user would be told beyond the summary, or None.",
+    )
+    noticed_at: UtcInstant = Field(description="When the producer noticed it (tz-aware).")
+    expires_at: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "When the opportunity perishes, or None where the producer will not commit to "
+            "one. **Declaring one is the whole of the escalation test** (ADR-0130 §5): a "
+            "candidate with no expiry is held, never interrupted."
+        ),
+    )
+    goal_id: Identifier | None = Field(
+        default=None,
+        description="The Goal this is relevant to, by identifier, or None (ADR-0130 §2).",
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="How strongly the producer proposes that this is worth telling.",
+    )
+    sensitivity: DataTier = Field(
+        description=(
+            "The producer's chosen sensitivity, never defaulted (ADR-0093 §4). "
+            "DataTier.SECRET is refused at validation (ADR-0130 §2)."
+        ),
+    )
+    references: tuple[Identifier, ...] = Field(
+        default=(),
+        description=(
+            "The records this is about, by identifier. A candidate references and does "
+            "not contain (ADR-0130 §2)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _is_a_coherent_candidate(self) -> NotificationCandidate:
+        """Enforce the two refusals §2 puts on the type.
+
+        Raises:
+            ValueError: If the sensitivity is Tier 0, or the expiry is not later
+                than the instant it was noticed.
+        """
+        if self.sensitivity is DataTier.SECRET:
+            msg = (
+                "a DataTier.SECRET candidate may not be proposed: Tier 0 secrets live in "
+                "the OS keyring, never in a database or a committed file, and this refusal "
+                "is at validation so it holds in every disposition (ADR-0004 §3, "
+                "ADR-0130 §2)"
+            )
+            raise ValueError(msg)
+        if self.expires_at is not None and self.expires_at <= self.noticed_at:
+            msg = (
+                f"expires_at must be later than noticed_at, got {self.expires_at} for "
+                f"{self.noticed_at}: a candidate that has already perished is not a "
+                f"proposal, it is a defect (ADR-0130 §2)"
+            )
+            raise ValueError(msg)
+        return self
+
+    def is_perishable_at(self, moment: datetime) -> bool:
+        """Report whether this still declares an expiry ahead of an instant.
+
+        The :attr:`NotificationCondition.PERISHABLE` test, spelled once so that a
+        policy, a store and a suite cannot disagree about the boundary. Half-open
+        in the direction §5 fixes: **at** ``expires_at`` the candidate has
+        perished.
+
+        Args:
+            moment: The ruling instant, tz-aware.
+
+        Returns:
+            Whether an expiry is declared and is strictly later than ``moment``.
+        """
+        return self.expires_at is not None and moment < self.expires_at
+
+
+class NotificationDisposition(BaseModel):
+    """What §5 ruled about one candidate, and why (ADR-0130 §5).
+
+    **The ruling is mechanical and no model makes it** (§4). Every field here is
+    a function of the candidate, the standing preferences, the durable record and
+    the instant — which is what makes an interruption explainable after the fact,
+    testable before it, and cheap enough to run on every scheduler tick with no
+    provider reachable.
+
+    **A ``HOLD`` carries the whole failed set, not the first alone** (§5). The
+    ``reason`` names the first for rendering; ``failed`` is what §6 reads when a
+    setting changes, and a rule that read the reason instead would miss a record
+    whose *second* failure is the one a setting change removes.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: NotificationDispositionKind = Field(description="What was decided (ADR-0130 §5).")
+    notification_id: Identifier | None = Field(
+        default=None,
+        description=(
+            "The durable record this ruling produced or updated. Always set for HOLD and "
+            "INTERRUPT; set on a DROP only where a reconsideration recorded it against an "
+            "existing record, since an offer ruled DROP writes none (ADR-0130 §8)."
+        ),
+    )
+    notification_class: NonBlankEncodableText = Field(
+        description=(
+            "The candidate's class, carried on every disposition so a surface rendering an "
+            "interruption can offer the two acts that tune it in one step — dismissing it, "
+            "and lowering that class's reach (ADR-0130 §6)."
+        ),
+    )
+    ruled_at: UtcInstant = Field(description="The instant the ruling was made (tz-aware).")
+    reason: NotificationCondition = Field(
+        description="The condition that decided it, named so the ruling can be explained."
+    )
+    failed: tuple[NotificationCondition, ...] = Field(
+        default=(),
+        description=(
+            "Every condition of INTERRUPT_CONDITIONS that failed, in that tuple's order. "
+            "Non-empty exactly for HOLD; the reason is its first member (ADR-0130 §5)."
+        ),
+    )
+    reconsider_at: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "The earliest instant at which every failing condition could next hold, or "
+            "None where any of them is not one time alone resolves. A floor, never a "
+            "deadline: a late reconsideration is not a fault (ADR-0130 §5)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _is_a_coherent_ruling(self) -> NotificationDisposition:
+        """Refuse a ruling whose parts do not agree, in the shape §5 fixes.
+
+        Three groups, each admitting a well-typed ruling that defeats something
+        §5 or §6 promises: an ``INTERRUPT`` carrying failures would spend a unit
+        of budget it did not earn; a ``HOLD`` with an empty set gives §6's
+        setting-change rule nothing to read, so a record the user's act should
+        have freed sits until it expires; and a ``reconsider_at`` on a set
+        holding a condition time does not resolve promises a re-ruling that will
+        change nothing.
+
+        Raises:
+            ValueError: If any group is violated.
+        """
+        self._check_failed_set()
+        self._check_reconsideration()
+        self._check_reason()
+        return self
+
+    def _check_failed_set(self) -> None:
+        """Refuse a failed set that does not belong to the kind that carries it.
+
+        Raises:
+            ValueError: If a HOLD names no failures or names a first one that is
+                not its reason, if any other kind names failures at all, or if
+                the set holds a condition outside INTERRUPT_CONDITIONS or repeats
+                one.
+        """
+        if self.kind is NotificationDispositionKind.HOLD:
+            if not self.failed:
+                msg = (
+                    "a HOLD must name every condition that failed at its ruling: §6 reads "
+                    "the set, and an empty one leaves a record no setting change can free "
+                    "(ADR-0130 §5)"
+                )
+                raise ValueError(msg)
+            if self.reason is not self.failed[0]:
+                msg = (
+                    f"a HOLD's reason names the first unsatisfied condition, got "
+                    f"{self.reason} for a failed set beginning {self.failed[0]} "
+                    f"(ADR-0130 §5)"
+                )
+                raise ValueError(msg)
+        elif self.failed:
+            msg = f"only a HOLD carries a failed set, got {self.failed} on {self.kind}"
+            raise ValueError(msg)
+        if any(condition not in INTERRUPT_CONDITIONS for condition in self.failed):
+            msg = (
+                f"a failed set holds only the four conditions of INTERRUPT_CONDITIONS, got "
+                f"{self.failed}: the four DROP conditions are evaluated first and each "
+                f"yields DROP naming itself (ADR-0130 §5)"
+            )
+            raise ValueError(msg)
+        if len(set(self.failed)) != len(self.failed):
+            msg = f"a failed set names each condition once, got {self.failed}"
+            raise ValueError(msg)
+
+    def _check_reconsideration(self) -> None:
+        """Refuse a due instant on a ruling that cannot fall due.
+
+        Raises:
+            ValueError: If a kind other than HOLD carries a ``reconsider_at``, or
+                a HOLD carries one while some failing condition is not one time
+                alone resolves.
+        """
+        if self.kind is not NotificationDispositionKind.HOLD and self.reconsider_at is not None:
+            msg = (
+                f"only a HOLD falls due for reconsideration, got a reconsider_at on "
+                f"{self.kind}: no setting change reaches a record already ruled INTERRUPT "
+                f"(ADR-0130 §6)"
+            )
+            raise ValueError(msg)
+        if self.reconsider_at is not None and not set(self.failed) <= TIME_RESOLVED_CONDITIONS:
+            msg = (
+                f"a reconsider_at is set only where time alone resolves every failing "
+                f"condition, got {self.failed}: the reach level and an absent expiry are "
+                f"each a condition it does not resolve (ADR-0130 §5)"
+            )
+            raise ValueError(msg)
+
+    def _check_reason(self) -> None:
+        """Refuse a reason drawn from the wrong group, or a record left unnamed.
+
+        Raises:
+            ValueError: If a DROP names a condition outside DROP_CONDITIONS, an
+                INTERRUPT names one outside INTERRUPT_CONDITIONS, or a HOLD or an
+                INTERRUPT names no durable record.
+        """
+        if self.kind is NotificationDispositionKind.DROP and self.reason not in DROP_CONDITIONS:
+            msg = (
+                f"a DROP names one of the four conditions of DROP_CONDITIONS, got "
+                f"{self.reason} (ADR-0130 §5)"
+            )
+            raise ValueError(msg)
+        if (
+            self.kind is NotificationDispositionKind.INTERRUPT
+            and self.reason not in INTERRUPT_CONDITIONS
+        ):
+            msg = (
+                f"an INTERRUPT names one of the four conditions of INTERRUPT_CONDITIONS, "
+                f"got {self.reason} (ADR-0130 §5)"
+            )
+            raise ValueError(msg)
+        if self.kind is not NotificationDispositionKind.DROP and self.notification_id is None:
+            msg = f"a {self.kind} names the durable record it produced (ADR-0130 §8)"
+            raise ValueError(msg)
+
+
+class HeldNotification(BaseModel):
+    """The durable record a ``HOLD`` or an ``INTERRUPT`` writes (ADR-0130 §7, §8).
+
+    **This is the bookkeeping ADR-0078 §8 refused to put on a memory decision.**
+    Delivery state — "was it sent? seen?" — is still not here: it differs per
+    spoke and belongs to the delivery seam. What this record is, is the thing
+    that seam attaches to.
+
+    **Actionable and retained are different states, and the difference is the
+    whole of §7.** A record is *actionable* while it is neither dismissed, nor
+    expired, nor ruled ``DROP`` by a reconsideration; it is *retained* until
+    retention removes it. Expiry ends interruptibility and actionability and
+    **deletes nothing** — an expired record stays enumerable and renders as
+    expired. The cap counts the actionable set and §8's duplicate rule reads the
+    same population, so a fact that recurs after its notification expired or was
+    dismissed is a new candidate and not a duplicate.
+
+    **Retention runs from the instant the record ceased to be actionable, not
+    from admission** (§7), and that is a correction to the obvious form. Measured
+    from admission, a record whose expiry sits beyond the horizon is purged while
+    still actionable — at which point its key suppresses nothing, a cursorless
+    producer re-notices the same fact, and the same observation interrupts again
+    on a schedule set by the retention figure. §8's guarantee is stated
+    unconditionally, so retention is the clause that yields.
+
+    **The duration rides on the record and is never consulted from the setting
+    afterwards** (§7), which is :class:`DeferredProposal`'s arrangement and for
+    its reason: live configuration governs records admitted from now on and never
+    reaches back.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier = Field(description="The record's own id, minted by the store.")
+    candidate: NotificationCandidate = Field(
+        description="The proposal verbatim — what the user would be told, and what it is about."
+    )
+    kind: NotificationDispositionKind = Field(
+        description=(
+            "The record's current ruling: INTERRUPT or HOLD as admitted, or DROP once a "
+            "reconsideration ruled it so (ADR-0130 §5)."
+        ),
+    )
+    reason: NotificationCondition = Field(description="The condition that decided the ruling.")
+    failed: tuple[NotificationCondition, ...] = Field(
+        default=(),
+        description="The whole set §6 reads when a standing setting changes (ADR-0130 §5).",
+    )
+    ruled_at: UtcInstant = Field(description="When the current ruling was made (tz-aware).")
+    reconsider_at: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "The floor before which this may not be reconsidered, or None where no "
+            "condition it failed is one time resolves. Two writers: the ruling that "
+            "produced the record, and a standing-setting write (ADR-0130 §5, §6)."
+        ),
+    )
+    admitted_at: UtcInstant = Field(description="When the record was first written (tz-aware).")
+    retention: timedelta | None = Field(
+        description=(
+            "The retention in force *at admission*, stamped once and never recomputed; "
+            "None means this record is never purged (ADR-0130 §7)."
+        ),
+    )
+    dismissed_at: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "When the user dismissed it. **A dismissal is not a deletion** (ADR-0130 §9): "
+            "it ends actionability and leaves the record readable."
+        ),
+    )
+    dropped_at: UtcInstant | None = Field(
+        default=None,
+        description="When a reconsideration ruled it DROP, if one did (ADR-0130 §5).",
+    )
+
+    @model_validator(mode="after")
+    def _is_a_coherent_record(self) -> HeldNotification:
+        """Enforce the record's ruling, its stamps and its retention.
+
+        The ruling half is :class:`NotificationDisposition`'s, restated on the
+        record because the record is what a store hands back on every read and a
+        type may not rely on its one honest caller.
+
+        **The record's ``reconsider_at`` is checked more loosely than a
+        ruling's, and the difference is §6's second writer.** A *ruling* sets one
+        only where time alone resolves every failing condition; a
+        *standing-setting write* stamps one onto a record whose failed set holds
+        the reach condition, which time never resolves — that is exactly what
+        makes "the user raises the class and is then actually interrupted" work
+        (§6). So the ruling-shaped constraint is asserted on the disposition and
+        not here, and what is asserted here is the half that holds for both
+        writers: only a held record falls due at all.
+
+        Raises:
+            ValueError: If the ruling is incoherent, a stamp does not belong to
+                the state, or the retention is not positive.
+        """
+        self._check_ruling()
+        if self.retention is not None and self.retention <= timedelta(0):
+            msg = f"retention must be a strictly positive duration or None, got {self.retention}"
+            raise ValueError(msg)
+        if (self.kind is NotificationDispositionKind.DROP) != (self.dropped_at is not None):
+            msg = (
+                "dropped_at is stamped exactly where a reconsideration ruled DROP: a DROP "
+                "without one has no cessation instant for retention to run from, and one "
+                "without a DROP claims a cessation that never happened (ADR-0130 §5, §7)"
+            )
+            raise ValueError(msg)
+        if self.admitted_at > self.ruled_at:
+            msg = (
+                f"ruled_at must not precede admitted_at, got {self.ruled_at} for a record "
+                f"admitted {self.admitted_at}"
+            )
+            raise ValueError(msg)
+        return self
+
+    def _check_ruling(self) -> None:
+        """Refuse a ruling whose kind, reason and failed set do not agree.
+
+        Raises:
+            ValueError: If the three disagree, in the shape §5 fixes.
+        """
+        NotificationDisposition(
+            kind=self.kind,
+            notification_id=self.id,
+            notification_class=self.candidate.notification_class,
+            ruled_at=self.ruled_at,
+            reason=self.reason,
+            failed=self.failed,
+            reconsider_at=None,
+        )
+        if self.kind is not NotificationDispositionKind.HOLD and self.reconsider_at is not None:
+            msg = (
+                f"only a held record falls due for reconsideration, got a reconsider_at on "
+                f"{self.kind}: no setting change reaches a record already ruled INTERRUPT "
+                f"(ADR-0130 §6)"
+            )
+            raise ValueError(msg)
+
+    def ceased_at(self) -> datetime | None:
+        """The instant this record ceases — or ceased — to be actionable (§7).
+
+        The earliest of the three ways actionability ends: a dismissal, the
+        candidate's own expiry, and a reconsideration's ``DROP``. It may lie in
+        the future, in which case the record is actionable now and this is when
+        it stops being so.
+
+        Returns:
+            The cessation instant, or ``None`` where the record has no expiry and
+            was neither dismissed nor dropped.
+        """
+        instants = [
+            instant
+            for instant in (self.dismissed_at, self.candidate.expires_at, self.dropped_at)
+            if instant is not None
+        ]
+        return min(instants) if instants else None
+
+    def is_actionable_at(self, moment: datetime) -> bool:
+        """Report whether this record is actionable at an instant (§7).
+
+        Args:
+            moment: The instant to judge at, tz-aware.
+
+        Returns:
+            Whether it is neither dismissed, nor expired, nor dropped, as of
+            ``moment``. Half-open in the same direction §5's expiry test is: at
+            the cessation instant the record is no longer actionable.
+        """
+        ceased = self.ceased_at()
+        return ceased is None or moment < ceased
+
+    def is_due_at(self, moment: datetime) -> bool:
+        """Report whether this record falls due for reconsideration (§5).
+
+        Args:
+            moment: The instant to judge at, tz-aware.
+
+        Returns:
+            Whether it is neither dismissed nor already dropped, carries a
+            ``reconsider_at``, and that instant has arrived. ``reconsider_at`` is
+            the instant **before** which a record may not be reconsidered, so the
+            boundary is inclusive and a late run is not a fault.
+
+        **Expiry is deliberately not part of this test, where it is part of
+        :meth:`is_actionable_at`.** §5 lists expiry as one of the two ways a
+        reconsideration reaches ``DROP``, and a due record that perished before
+        its run is precisely that case: excluding it here would make the clause
+        unreachable and leave the record's ruling reading ``HOLD`` forever.
+        Recording the ``DROP`` moves nothing a retention horizon depends on —
+        :meth:`ceased_at` takes the *earliest* cessation, which for such a record
+        is the expiry that already happened.
+        """
+        return (
+            self.dismissed_at is None
+            and self.dropped_at is None
+            and self.reconsider_at is not None
+            and self.reconsider_at <= moment
+        )
+
+    def is_purgeable_at(self, moment: datetime) -> bool:
+        """Report whether retention has removed this record (§7).
+
+        **No record is purged while it is still actionable, whatever its
+        retention**, so a record's key suppresses duplicates for the whole time
+        §8 says it does. ``retention is None`` is a complete answer rather than
+        an undefined expression: such a record is never purged.
+
+        Args:
+            moment: The instant to judge at, tz-aware.
+
+        Returns:
+            Whether the record has ceased to be actionable and its retention has
+            elapsed **strictly** — at the horizon it is still held, and past it
+            it is not, which is the boundary §9's conformance clause states.
+        """
+        ceased = self.ceased_at()
+        if self.retention is None or ceased is None or self.is_actionable_at(moment):
+            return False
+        return moment > ceased + self.retention
