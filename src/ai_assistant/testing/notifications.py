@@ -1244,12 +1244,46 @@ class FakeNotificationOutbox:
                 self._arrivals.clear()
                 return None
             entry = min(available, key=lambda candidate_entry: candidate_entry.sequence)
+            # **The expiry before the mint, so a refusal spends no identifier.** The
+            # durable outbox gets that from its transaction rolling back; here the
+            # order is the whole of it, and getting it backwards would leave the fake
+            # advancing its counter on a call that raised.
+            leased_until = self._leased_until(now)
             # Two halves, as §4 requires: a counter for uniqueness, and an
             # unguessable half so the identifier is a capability rather than a
             # number a device can increment to retire someone else's delivery.
             entry.delivery_id = f"{next(self._deliveries)}.{token_hex(16)}"
-            entry.leased_until = now + self._lease
+            entry.leased_until = leased_until
             return NotificationDelivery(delivery_id=entry.delivery_id, notification=entry.candidate)
+
+    def _leased_until(self, now: datetime) -> datetime:
+        """When a lease taken now expires, or this seam's failure if that is nowhere.
+
+        Parity with the durable outbox, and the reason is the usual one: a lease near
+        ``timedelta.max`` is constructible here too — ADR-0131 §5a bounds the figure
+        below and not above — and ``now + lease`` then raises a bare
+        ``OverflowError``. A canonical fake that crashed where the shipped outbox
+        reports :class:`~ai_assistant.core.errors.NotificationOutboxError` would
+        certify consumers against a contract nothing implements.
+
+        Args:
+            now: The reading at the moment the lease is taken.
+
+        Returns:
+            The instant the lease runs out.
+
+        Raises:
+            NotificationOutboxError: If that instant is not representable.
+        """
+        try:
+            return now + self._lease
+        except OverflowError as exc:
+            msg = (
+                f"the configured lease {self._lease} cannot be taken: added to the hub's "
+                f"clock it leaves the range a datetime can represent, so no lease has an "
+                f"expiry (ADR-0131 §3, §5a)"
+            )
+            raise NotificationOutboxError(msg) from exc
 
     async def acknowledge(self, delivery_id: str) -> None:
         """Retire the entry this is the current outstanding delivery of (§3)."""
