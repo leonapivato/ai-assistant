@@ -1235,6 +1235,10 @@ is ADR-0070 §1's second limb.
 > alike — the packaged defaults in `TAILSCALE_SOCKETS` and any path an operator
 > configures. No lane may apply it to a configured path and not to a default one.
 
+> **Normative.** A refusal under this rule is reported as
+> `OverlayIdentityUnavailableError`, the failure the agent query already raises when
+> it cannot answer. It never reaches a caller as any other exception type.
+
 **This closes a gap the filesystem checks were never able to close, and the corpus
 has already said so twice.** ADR-0084 §1 is quoted verbatim in `wire/peer.py`:
 filesystem checks are "a walk over topology the operator controls, and a walk can
@@ -1274,6 +1278,19 @@ implementation site — the `_request` connect path in `wire/overlay.py` — rea
 both ends, and `wire/peer.py`'s `peer_uid` already supplies the read and already
 fails closed where the platform cannot answer. There is nothing to design; there was
 only a rule to ratify.
+
+**The failure type is a clause because the obvious implementation gets it wrong, and
+the tree shows exactly how.** `wire/peer.py`'s `peer_uid` fails closed with a
+`ProtocolError` — correct for its own caller, the CLI authenticating the hub — while
+the agent query promises `OverlayIdentityUnavailableError` and `service/remote.py`
+catches only that: `except OverlayIdentityUnavailableError` at its two admission
+sites. A lane reusing `peer_uid` as-is on the agent path would therefore turn a
+replaced socket, or a platform with no peer-credential call, into an unhandled
+transport exception that escapes the refusal path entirely — the check firing and the
+refusal it was written for never happening. Adversarial review found it on the
+twenty-seventh round. Translating at the seam keeps ADR-0124 §4's "A connection whose
+overlay identity cannot be obtained is refused" true of this cause as it already is
+of the others.
 
 **This does not weaken the filesystem checks and does not replace them.** They stay
 as `service/datadir.py` describes them — defence in depth — and this clause is the
