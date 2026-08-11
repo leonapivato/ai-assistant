@@ -540,6 +540,100 @@ class NotificationPolicyContract(ABC):
         assert ruling.reconsider_at == datetime(2026, 11, 1, 6, 45, tzinfo=UTC)
         assert ruling.reconsider_at > second_pass
 
+    async def test_every_endpoint_in_a_dst_gap_resolves_to_the_transition_exactly(
+        self, policy_in: Callable[[str], NotificationPolicy]
+    ) -> None:
+        """The gap case at every endpoint, not the one an example picks.
+
+        The two cases above assert a single endpoint each, and a single endpoint
+        is where this clause was needed: 02:30 is the *coincidence*, because a
+        one-hour bracket's first midpoint is the transition, so an implementation
+        bisecting only to the second exits exact there and stops short everywhere
+        else. The canonical fake did exactly that and passed the suite for a whole
+        release, answering ``07:00:00.234375Z`` for a window ending at 02:01 and
+        landing late at 56 of these 60 endpoints (#955).
+
+        **Lateness here is not rounding.** §5 makes ``reconsider_at`` a floor —
+        the instant *before* which a record may not be reconsidered, checked with
+        ``reconsider_at <= moment`` — so a due instant a fraction of a second past
+        the transition means a drain ticking exactly at the transition finds the
+        record not due and leaves it a whole reconsideration interval. That is the
+        ordinary path of a held record reaching the user, wrong for a reason no
+        reading of the ADR would reveal.
+
+        So the assertion is exact equality, swept over the whole gap: 02:00
+        through 02:59 all name a local time 2026-03-08 never has in
+        ``America/New_York``, and every one of them must answer 07:00:00Z, the
+        transition itself. Sixty rulings, because the property is what holds two
+        implementations of §5 to one boundary, and an example is what let them
+        diverge.
+        """
+        inside = datetime(2026, 3, 8, 5, 0, tzinfo=UTC)  # 00:00 local, inside every window below
+        transition = datetime(2026, 3, 8, 7, 0, tzinfo=UTC)  # 03:00 local, the clock's first pass
+        policy = policy_in("America/New_York")
+
+        for minute in range(2 * 60, 3 * 60):  # 02:00 .. 02:59, none of which occurs
+            ends_at = time(minute // 60, minute % 60)
+            ruling = await _rule(
+                policy,
+                candidate(noticed_at=inside, expires_at=inside + timedelta(days=1)),
+                preferences=NotificationPreferences(
+                    reaches=(
+                        ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),
+                    ),
+                    quiet_windows=(QuietWindow.between(time(22, 0), ends_at),),
+                ),
+                now=inside,
+            )
+
+            assert ruling.reason is NotificationCondition.QUIET_WINDOW
+            assert ruling.reconsider_at == transition, (
+                f"a window ending at {ends_at} resolved to {ruling.reconsider_at}, "
+                f"not the transition {transition}"
+            )
+
+    async def test_every_endpoint_in_a_repeated_hour_resolves_to_the_second_pass(
+        self, policy_in: Callable[[str], NotificationPolicy]
+    ) -> None:
+        """The fall-back case at every endpoint the second pass has still to reach.
+
+        The companion to the sweep above, and the other half of the same boundary:
+        where spring deletes a local time, autumn serves it twice, and §5's "the
+        earliest instant at which every condition that failed could next hold"
+        has to pick between two real readings rather than construct a missing one.
+
+        Ruling during the **second** 01:35 on 2026-11-01 in ``America/New_York``,
+        every endpoint from 01:36 to 01:59 is still ahead exactly once — its
+        ``fold=0`` reading is already spent — so each must answer that second
+        reading, on the minute. An implementation that reached for a transition
+        here, or that let a bisection's imprecision leak into a case that needs
+        none, would answer near it rather than at it; exact equality is what
+        separates the two.
+        """
+        second_pass = datetime(2026, 11, 1, 6, 35, tzinfo=UTC)  # the second 01:35 local, EST
+        policy = policy_in("America/New_York")
+
+        for minute in range(1 * 60 + 36, 2 * 60):  # 01:36 .. 01:59, each still ahead
+            ends_at = time(minute // 60, minute % 60)
+            ruling = await _rule(
+                policy,
+                candidate(noticed_at=second_pass, expires_at=second_pass + timedelta(days=1)),
+                preferences=NotificationPreferences(
+                    reaches=(
+                        ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),
+                    ),
+                    quiet_windows=(QuietWindow.between(time(1, 30), ends_at),),
+                ),
+                now=second_pass,
+            )
+            expected = datetime(2026, 11, 1, 5, 0, tzinfo=UTC) + timedelta(minutes=minute)
+
+            assert ruling.reason is NotificationCondition.QUIET_WINDOW
+            assert ruling.reconsider_at == expected, (
+                f"a window ending at {ends_at} resolved to {ruling.reconsider_at}, "
+                f"not the second pass {expected}"
+            )
+
     async def test_no_due_instant_is_ever_at_or_before_the_ruling(
         self, policy_in: Callable[[str], NotificationPolicy]
     ) -> None:

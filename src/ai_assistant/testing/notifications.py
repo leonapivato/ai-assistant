@@ -324,6 +324,27 @@ class FakeNotificationPolicy:
         earlier reading still carries the old offset and the later one already
         carries the new.
 
+        **It bisects to the microsecond — datetime's own resolution — and that is
+        not fastidiousness.** ADR-0130 §5 asks for "the earliest instant at which
+        every condition that failed could next hold", and stopping a second short
+        answers with an instant up to a second *after* the transition. That is a
+        floor, not a hint: §5 makes ``reconsider_at`` the instant before which a
+        record may not be reconsidered, so a fraction of a second late means a
+        drain ticking exactly at the transition finds the record not yet due and
+        leaves it a whole ``notification_reconsider_interval``.
+
+        **The error hides at exactly one endpoint**, which is why this fake looked
+        right for a whole release. A one-hour bracket's first midpoint *is* the
+        transition when the window ends at the half hour, so 02:30 exits exact
+        before a second-wide floor can bite; every other endpoint converges from
+        one side and stops short. For ``America/New_York`` on 2026-03-08 a window
+        ending at 02:01 answered ``07:00:00.234375Z`` where the transition is
+        ``07:00:00Z``, and 56 of the gap's 60 minute-endpoints were late (#955).
+        The shared suite now pins all sixty, so this cannot drift back.
+
+        Microsecond bisection costs about twenty more halvings of a one-hour
+        bracket, once per held record behind a window ending inside a gap.
+
         Args:
             before: An instant at the old offset.
             after: An instant at the new one.
@@ -332,7 +353,7 @@ class FakeNotificationPolicy:
             The first instant carrying the new offset, in UTC.
         """
         old = before.astimezone(self._zone).utcoffset()
-        while after - before > timedelta(seconds=1):
+        while after - before > timedelta(microseconds=1):
             middle = before + (after - before) / 2
             if middle.astimezone(self._zone).utcoffset() == old:
                 before = middle
