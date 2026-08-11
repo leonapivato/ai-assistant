@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     DataTier,
     NotificationCandidate,
     NotificationCondition,
+    NotificationDisposition,
     NotificationDispositionKind,
     NotificationPreferences,
     NotificationReach,
@@ -260,6 +261,44 @@ async def test_a_drained_run_leaves_each_record_ruled_afresh() -> None:
     reached = await store.get(perishes.notification_id)
     assert reached is not None
     assert reached.kind is NotificationDispositionKind.INTERRUPT
+
+
+async def test_a_policy_that_never_advances_cannot_hang_the_drain() -> None:
+    """The scheduler thread does not take the policy's word for progress.
+
+    The drain's termination argument rests on a re-ruling writing an instant
+    strictly later than the one it ruled at — a property of an *implementation*
+    of the policy contract, not of this loop. A policy handing back an instant
+    already past would spin the hub's scheduler forever, which is a whole
+    assistant hung by a clause nothing enforces, so the run also stops once a
+    page brings back only records it has already ruled.
+    """
+
+    class _Stuck:
+        """Rules HOLD with a due instant in the past, every time."""
+
+        async def rule(
+            self, candidate: NotificationCandidate, *, notification_id: str, **_facts: object
+        ) -> NotificationDisposition:
+            return NotificationDisposition(
+                kind=NotificationDispositionKind.HOLD,
+                notification_id=notification_id,
+                notification_class=candidate.notification_class,
+                ruled_at=AT,
+                reason=NotificationCondition.QUIET_WINDOW,
+                failed=(NotificationCondition.QUIET_WINDOW,),
+                reconsider_at=AT - timedelta(days=1),
+            )
+
+    store = FakeNotificationStore(now=lambda: AT)
+    policy = _Stuck()
+    engine = _wired(Harness(), store, policy)  # type: ignore[arg-type]
+    await store.admit(_candidate("k1", expires=AT + timedelta(days=1)), policy=policy)
+
+    ruled = await engine.reconsider_notifications(page=10)
+
+    assert ruled == 1, "each record is ruled once, and the run then ends"
+    assert len(await store.due()) == 1, "the record is still due, which is the policy's fault"
 
 
 async def test_a_run_with_nothing_due_rules_nothing_and_terminates() -> None:
