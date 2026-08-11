@@ -2232,6 +2232,10 @@ class Engine:
             ValueError: If ``notification_id`` is blank.
             ConfigurationError: If no notification store is wired.
             NotificationStoreError: If the store cannot be written.
+            NotificationOutboxError: If the record's outbox entry could not be
+                withdrawn. Nothing is deleted then, which is ADR-0131 §3a's
+                ordering holding rather than failing: a record whose entry could
+                not be given up may not be destroyed.
         """
         self._reject_if_closing()
         named = identifier(notification_id, name="notification_id")
@@ -2241,7 +2245,33 @@ class Engine:
             notification_id=named,
         )
         store = self._notification_surface()
-        return await self._tracked(store.delete(named), "forget_notification", checked=True)
+        return await self._tracked(self._forget(store, named), "forget_notification", checked=True)
+
+    async def _forget(self, store: NotificationStore, notification_id: str) -> bool:
+        """Withdraw the record's outbox entry, then destroy the record (§3a).
+
+        **The order is forced and only one of the two is safe.** ADR-0131 §3a: an
+        act that deletes an ADR-0130 record "withdraws the record's outbox entry
+        **first**, and deletes the record only after the withdrawal has committed.
+        No lane may delete a record whose entry it has not already withdrawn."
+        Deleting first leaves an entry whose record is gone — not departing, not
+        expired, undetectably stale, and delivered on the next poll, after the user
+        had deleted the thing it was about. Withdrawing first cannot produce that,
+        and the one state a crash between them leaves is an actionable record with
+        no entry, which is the incomplete-handoff case §3b's reconciliation repairs.
+
+        **What it does not promise is that a delivery already staged will not
+        land** (§3a). A poll can have selected and leased the entry, and the write
+        happens after ``next_notification`` returned; closing that window would take
+        the prepare/commit boundary this seam is built around not having. The
+        guarantee is that no *later* poll selects it.
+
+        An engine with no outbox wired withdraws nothing, which is the CLI's case:
+        it serves no poll, so no entry can exist to be delivered.
+        """
+        if self._notification_outbox is not None:
+            await self._notification_outbox.withdraw(notification_id)
+        return await store.delete(notification_id)
 
     async def notification_preferences(self) -> NotificationPreferences:
         """Read the three standing settings that tune proactive contact (§6).
@@ -2792,7 +2822,16 @@ class Engine:
             remaining = deadline - self._now()
             if remaining <= timedelta(0):
                 return None
-            await outbox.wait_for_arrival(remaining)
+            if not await outbox.wait_for_arrival(remaining):
+                # **The wait running out ends the poll, and the deadline alone is
+                # not enough to make that true.** A wait is free to return early on
+                # an arrival and free to return at once, so a loop that trusted only
+                # the clock would re-read, find nothing and ask to wait again — a
+                # spin against any positive budget, and an unbounded one wherever
+                # the injected clock does not move. The timeout is the one answer
+                # the wait can be trusted for, so it is what ends the poll; a wake
+                # sends us back for the re-read that correctness actually rests on.
+                return None
 
     # --- the grant surface (ADR-0102 §1) -----------------------------------
 

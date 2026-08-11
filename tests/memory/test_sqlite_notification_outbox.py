@@ -476,3 +476,25 @@ def test_the_default_clock_reads_utc(tmp_path: Path) -> None:
     )
 
     assert outbox._now().tzinfo is UTC
+
+
+async def test_the_durable_wait_reports_its_timeout(tmp_path: Path) -> None:
+    """The same contract the canonical fake is held to, from the durable side."""
+    outbox = build(tmp_path / "outbox.db")
+
+    assert await outbox.wait_for_arrival(timedelta(milliseconds=20)) is False
+
+
+async def test_the_durable_wait_returns_early_on_an_offer(tmp_path: Path) -> None:
+    """An enqueue wakes a parked poll rather than making it wait out its budget."""
+    import asyncio  # noqa: PLC0415 — the scheduling is the subject
+
+    outbox = build(tmp_path / "outbox.db")
+
+    async def enqueue() -> None:
+        await asyncio.sleep(0.01)
+        await outbox.offer(candidate(key="k1"))
+
+    woke, _ = await asyncio.gather(outbox.wait_for_arrival(timedelta(seconds=5)), enqueue())
+
+    assert woke is True

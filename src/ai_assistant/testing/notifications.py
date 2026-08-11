@@ -1031,6 +1031,9 @@ class FakeNotificationOutbox:
         self._max_entries = max_entries
         self._candidate_ceiling = candidate_ceiling
         self._entries: dict[str, _OutboxEntry] = {}
+        #: Set by an ``offer``, so a parked poll wakes on an enqueue instead of
+        #: waiting out its whole budget. In-process only, and never load-bearing.
+        self._arrivals = asyncio.Event()
         self._sequence = count(1)
         self._deliveries = count(1)
         self._lock = asyncio.Lock()
@@ -1092,6 +1095,7 @@ class FakeNotificationOutbox:
             self._entries[candidate.candidate_key] = _OutboxEntry(
                 candidate=candidate, record_id=record_id, sequence=next(self._sequence)
             )
+            self._arrivals.set()
             return NotificationEnqueue.ENQUEUED
 
     def _victims(self, incoming: str, now: datetime) -> list[_OutboxEntry]:
@@ -1202,16 +1206,37 @@ class FakeNotificationOutbox:
 
     async def wait_for_arrival(
         self,
-        timeout: timedelta,  # noqa: ASYNC109, ARG002 — the caller's own poll budget (ADR-0029 §4), honoured by returning at once
-    ) -> None:
-        """Return at once rather than waiting out ``timeout``.
+        timeout: timedelta,  # noqa: ASYNC109 — the caller's own poll budget (ADR-0029 §4)
+    ) -> bool:
+        """Park until an :meth:`offer` lands, or until ``timeout`` elapses.
 
-        **The wait is a latency hint and never a guarantee** (ADR-0131 §3), so
-        returning immediately is conforming: a caller re-reads the outbox after it
-        and decides from what it finds. A fake that slept would make every
-        consumer's long-poll test as slow as the budget it passed.
+        **A fake that returned at once was the defect, not the shortcut**, and the
+        appealing version is worth recording because it reads as conforming.
+        A wake is only ever a hint (ADR-0131 §3), so returning immediately looks
+        free: the caller re-reads the outbox and decides from what it finds. But
+        the caller then finds nothing and asks to wait again — a spin against any
+        positive budget, and an *unbounded* one against the injected fixed clock
+        this tree tests with almost everywhere, because the deadline it is counting
+        down to never arrives. A canonical fake that hangs its consumers is worse
+        than a slow one.
+
+        So this waits as the durable outbox does, on an event an ``offer`` sets,
+        and reports which of the two ways it ended. A consumer that wants no
+        waiting passes a budget of zero, which ADR-0131 §4 makes an immediate poll
+        and which never reaches here.
+
+        Args:
+            timeout: How long to wait at most.
+
+        Returns:
+            Whether an arrival may have happened; ``False`` where the wait ran out.
         """
-        return
+        self._arrivals.clear()
+        try:
+            await asyncio.wait_for(self._arrivals.wait(), timeout.total_seconds())
+        except TimeoutError:
+            return False
+        return True
 
 
 __all__ = [

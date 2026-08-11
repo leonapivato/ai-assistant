@@ -20,9 +20,20 @@ import pytest
 from test_engine import AT, Harness, _grant_operations
 
 from ai_assistant.core.errors import ConfigurationError, NotificationBudgetError
-from ai_assistant.core.types import DataTier, NotificationCandidate
+from ai_assistant.core.types import (
+    ClassReach,
+    DataTier,
+    NotificationCandidate,
+    NotificationPreferences,
+    NotificationReach,
+)
 from ai_assistant.orchestration.engine import Engine
-from ai_assistant.testing import FakeAssistantEngine, FakeNotificationOutbox
+from ai_assistant.testing import (
+    FakeAssistantEngine,
+    FakeNotificationOutbox,
+    FakeNotificationPolicy,
+    FakeNotificationStore,
+)
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import NotificationDelivery
@@ -78,6 +89,7 @@ class RecordingOutbox:
         """Start with nothing to give and nothing recorded."""
         self.calls: list[str] = []
         self.reconciled = 0
+        self.withdrew = True
 
     async def claim(self) -> NotificationDelivery | None:
         """Answer that nothing is available."""
@@ -93,13 +105,24 @@ class RecordingOutbox:
         self.calls.append("reconcile")
         self.reconciled += 1
 
+    async def withdraw(self, record_id: str) -> bool:
+        """Record that a withdrawal reached the outbox (ADR-0131 §3a)."""
+        self.calls.append(f"withdraw:{record_id}")
+        return self.withdrew
+
     async def wait_for_arrival(
         self,
         timeout: timedelta,  # noqa: ASYNC109 — the caller's own poll budget (ADR-0029 §4)
-    ) -> None:
-        """Return at once, so a budget costs a case nothing to exercise."""
+    ) -> bool:
+        """Report the timeout, so a budget costs a case nothing to exercise.
+
+        Returning ``False`` is the conforming spelling of "the wait ran out", and
+        it is what a caller ends its poll on — a fake that reported an arrival it
+        had not waited for would spin the caller instead.
+        """
         del timeout
         self.calls.append("wait")
+        return False
 
 
 class TestTheBudgetRange:
@@ -285,3 +308,117 @@ class TestAnUnwiredOutboxRefusesLegibly:
 
         with pytest.raises(NotificationBudgetError):
             await engine.next_notification(budget=timedelta(seconds=-1))
+
+
+class TestThePollTerminates:
+    """The wait's timeout is what ends a poll, not the clock alone."""
+
+    async def test_an_empty_poll_with_a_budget_ends_on_the_waits_timeout(self) -> None:
+        """A wait that ran out ends the poll rather than sending it round again.
+
+        **Trusting the clock alone is what made this a spin.** The engine's
+        deadline is read from an injected clock, and the tree's dominant test idiom
+        freezes one — so a loop that re-read, found nothing and asked to wait again
+        would never reach its deadline at all. The timeout is the one answer a wait
+        can be trusted for, so it is what ends the poll.
+        """
+        outbox = RecordingOutbox()
+        engine = _wired(Harness(), outbox)
+
+        assert await engine.next_notification(budget=timedelta(seconds=30)) is None
+
+        assert outbox.calls == ["claim", "wait"]
+
+    async def test_an_empty_poll_against_the_canonical_fake_ends(self) -> None:
+        """The same, through the fake a consumer actually holds.
+
+        Bounded by the budget rather than by the clock, so it terminates on a
+        frozen one — which is what a canonical fake owes its consumers.
+        """
+        engine = _wired(Harness(), FakeNotificationOutbox(now=lambda: NOW))
+
+        assert await engine.next_notification(budget=timedelta(milliseconds=20)) is None
+
+    async def test_an_arrival_during_the_wait_is_delivered(self) -> None:
+        """The discriminating half: a wake sends the poll back for the re-read.
+
+        A loop that ended on *every* wait would answer nothing to a notification
+        that arrived one millisecond into a five-minute budget.
+        """
+        import asyncio  # noqa: PLC0415 — the scheduling is the subject
+
+        outbox = FakeNotificationOutbox(now=lambda: NOW)
+        engine = _wired(Harness(), outbox)
+
+        async def enqueue() -> None:
+            await asyncio.sleep(0.01)
+            await outbox.offer(_candidate())
+
+        delivery, _ = await asyncio.gather(
+            engine.next_notification(budget=timedelta(seconds=5)), enqueue()
+        )
+
+        assert delivery is not None
+        assert delivery.notification.candidate_key == "k1"
+
+
+class TestForgettingWithdrawsBeforeItDeletes:
+    """ADR-0131 §3a: the delete right reaches the outbox, and the order is forced."""
+
+    async def test_forget_notification_withdraws_the_entry_first(self) -> None:
+        """§3a: "No lane may delete a record whose entry it has not already
+        withdrawn."
+
+        Deleting first would leave an entry whose record is gone — not departing,
+        not expired, undetectably stale — and the next poll would deliver a
+        notification about something the user had deleted.
+        """
+        outbox = RecordingOutbox()
+        harness = Harness()
+        store = FakeNotificationStore()
+        engine = _wired(
+            harness, outbox, notifications=store, notification_policy=FakeNotificationPolicy()
+        )
+
+        await engine.forget_notification("a-record")
+
+        assert outbox.calls == ["withdraw:a-record"]
+
+    async def test_a_forgotten_notification_is_no_longer_delivered(self) -> None:
+        """The end-to-end property, through a real outbox rather than a recorder.
+
+        This is the case the ordering exists for: an entry already enqueued for an
+        `INTERRUPT` record, deleted by the user, and then not delivered.
+        """
+        store = FakeNotificationStore()
+        await store.set_preferences(
+            NotificationPreferences(
+                reaches=(
+                    ClassReach(notification_class="calendar", reach=NotificationReach.INTERRUPT),
+                )
+            )
+        )
+        subject = _candidate()
+        ruled = await store.admit(
+            subject.model_copy(update={"expires_at": NOW + timedelta(hours=2)}),
+            policy=FakeNotificationPolicy(),
+        )
+        assert ruled.notification_id is not None
+        outbox = FakeNotificationOutbox(records=store, now=lambda: NOW)
+        await outbox.offer(subject.model_copy(update={"expires_at": NOW + timedelta(hours=2)}))
+        engine = _wired(
+            Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
+        )
+
+        assert await engine.forget_notification(ruled.notification_id) is True
+
+        assert await engine.next_notification(budget=timedelta(0)) is None
+
+    async def test_forgetting_without_an_outbox_still_deletes(self) -> None:
+        """The CLI's engine serves no poll, so it has no entry to withdraw."""
+        store = FakeNotificationStore()
+        engine = _wired(
+            Harness(), None, notifications=store, notification_policy=FakeNotificationPolicy()
+        )
+
+        assert await engine.forget_notification("nothing") is False

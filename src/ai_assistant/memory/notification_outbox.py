@@ -985,22 +985,36 @@ class SqliteNotificationOutbox:
         """Report that an entry may have become available."""
         self._arrivals.set()
 
-    async def wait_for_arrival(self, timeout: timedelta) -> None:  # noqa: ASYNC109 — the caller's own poll budget, not a deadline this seam owns (ADR-0029 §4)
+    async def wait_for_arrival(
+        self,
+        timeout: timedelta,  # noqa: ASYNC109 — the caller's own poll budget, not a deadline this seam owns (ADR-0029 §4)
+    ) -> bool:
         """Park until an entry may be available, or until ``timeout`` elapses.
 
-        **A hint and never a guarantee**, which is what keeps a poll correct
-        without a durable subscription: a caller that misses a wake falls back on
-        its own deadline and re-reads the outbox, and a caller woken spuriously
+        **A wake is a hint and never a guarantee**, which is what keeps a poll
+        correct without a durable subscription: a caller that misses one falls back
+        on its own deadline and re-reads the outbox, and a caller woken spuriously
         finds nothing and parks again. Correctness rests on the re-read, so a
         notification enqueued by another process — which this event cannot see —
         costs latency rather than delivery.
 
+        **The timeout, by contrast, is a fact the caller may act on**, and saying
+        so is what stops the caller's loop becoming a spin: a wait that returned
+        without waiting would have it re-read, find nothing and ask to wait again,
+        forever wherever the caller's clock is injected and does not move.
+
         Args:
             timeout: How long to wait at most.
+
+        Returns:
+            Whether an arrival may have happened; ``False`` where the wait ran out.
         """
         self._arrivals.clear()
-        with contextlib.suppress(TimeoutError):
+        try:
             await asyncio.wait_for(self._arrivals.wait(), timeout.total_seconds())
+        except TimeoutError:
+            return False
+        return True
 
     async def _resolve_record(self, candidate_key: str) -> str | None:
         """The id of the actionable ADR-0130 record this candidate belongs to.
