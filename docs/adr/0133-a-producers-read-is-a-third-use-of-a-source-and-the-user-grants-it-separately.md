@@ -392,10 +392,23 @@ claims about the tree are stated as of this ADR's base, `2e2c838f`.
 > **Normative.** The implementing lane also owes, in the same change: the
 > `GrantScope` docstring's "exactly two members" rationale rewritten to three and
 > citing this ADR; a phrase for the new member in `interfaces/cli.py`'s scope
-> rendering, which `assert_never` already fails the type check without; and a case
-> in the shared source-grant conformance suite asserting that a grant naming
-> `NOTIFY` does not answer `live` for `FACET` or `INGEST`, nor either of them for
-> `NOTIFY` — §2's independence, held on every implementation.
+> rendering, which `assert_never` already fails the type check without; a case in
+> the shared source-grant conformance suite asserting that a grant naming `NOTIFY`
+> does not answer `live` for `FACET` or `INGEST`, nor either of them for `NOTIFY`
+> — §2's independence, held on every implementation; and a test that a
+> **`NOTIFY`-only live grant is revoked** by the grant operation, so ADR-0102 §5's
+> sweep is held total over the member that was added rather than over the two that
+> were there when it was written.
+
+**The revocation test is asked for by name because the wrong implementation passes
+every test that exists**, which is ADR-0102 §5's own stated reason for marking the
+sweep at all. The concrete regression is small and silent: a `_live` helper written
+over `(FACET, INGEST)` instead of over `GrantScope` finds no `NOTIFY`-only grant,
+so `revoke` returns `None`, the caller is told there was nothing to withdraw, and
+the grant stays live. The independence case above would not catch it — it calls
+`live` directly — and the existing revocation coverage exercises `INGEST`. The
+tree's current `_live` is already written over the enum and says so in its own
+docstring; what is missing is the test that keeps it that way.
 
 > **Normative.** No enforcement site lands with the member. The gate of §5 lands
 > with the producer that needs it (ADR-0132), and until then no lane may read a
@@ -421,17 +434,35 @@ perform. The last clause above
 is what keeps it benign — the hazard is not the idle member, it is a producer
 landing that reads without the gate.
 
-**Whether the client's grant *flow* offers the new member as a choice is
-`interfaces/` shaping and is not decided here.** The rendering is forced (the
-`assert_never` above); the offer is a surface question that belongs with #629's
-grant-management surface in leg 11, and a lane that wants to offer it earlier may,
-under ADR-0102's existing operations, without asking this ADR.
+> **Normative.** The member is **offered from the moment it exists**, and the
+> client's existing grant surface carries it with no gate. Its `--scope` option is
+> typed over `GrantScope`, so it accepts the new value by construction; the option's
+> help text, which today enumerates the two uses in words, names all three; and the
+> confirmation the user is shown before the grant is recorded renders it through
+> the scope phrasing above. No lane may suppress the member from that surface while
+> it is in the enum: an option that silently refuses a member of its own type, or
+> a help string enumerating two of three uses, is a surface disagreeing with the
+> vocabulary — which is the failure ADR-0097 §8 names when it forbids anything
+> deciding what the user permitted on their behalf.
+
+**This is decided here rather than deferred, because the tree leaves no third
+option.** An earlier draft left the offer to `interfaces/` shaping; that was wrong
+on the facts. `assistant grant --scope` is annotated `list[GrantScope]`, so the
+member is accepted the instant it is declared, and the only way *not* to offer it
+would be to add a refusal that does not exist today. Deferring the question would
+therefore have deferred nothing and left a help string quietly incomplete instead.
+What stays leg 11's is the grant-management **surface** — how sources are
+presented, how a grant is amended, what a user is shown about their standing
+grants — which #629 holds and which this member joins rather than reshapes.
 
 ### 7. What this ADR does not decide
 
 - **The grant-management surface.** #629 and leg 11 hold it. This adds a member to
-  a vocabulary; it decides no grant model, no source registry, no client flow, and
-  nothing about how a user is asked.
+  a vocabulary; it decides no grant model, no source registry, and nothing about
+  how sources are presented, how a grant is amended, or what a user is shown about
+  the grants they hold. §6 decides only that the existing client surface carries
+  the new member rather than hiding it — which the option's own type already
+  settles — and nothing beyond that.
 - **Content-level scope.** ADR-0097 §12's first deferral is unchanged and
   unnarrowed: which entries, which fields, which calendar is still deferred with
   the condition that fires it, and a third *use* is not a step toward a sub-source
