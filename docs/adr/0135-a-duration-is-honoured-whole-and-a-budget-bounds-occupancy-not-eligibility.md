@@ -367,10 +367,9 @@ act differently, or read one of its clauses more widely than it now holds?
 - **§3's lease clauses** — "The lease runs for `hub_notification_lease` (§5a). It
   starts in the indivisible step §2a fixes, measured on the hub's clock, and no
   value a device sends influences it." All three facts survive §2 above exactly:
-  the span is the configured one, the start
-  is §2a's step, the clock is the hub's. This is the clause the round-17
-  correction showed saturation *did* falsify, and the shape §2 ratifies is the one
-  that restores it.
+  the span is the configured one, the start is §2a's step, the clock is the hub's.
+  This is the clause the round-17 correction showed saturation *did* falsify, and
+  the shape §2 ratifies is the one that restores it.
 - **§2a's indivisible-step clause.** Untouched. §3 above says the budget does not
   forbid a selection; it says nothing about how selection, minting and leasing
   relate to each other, which stays one indivisible step.
