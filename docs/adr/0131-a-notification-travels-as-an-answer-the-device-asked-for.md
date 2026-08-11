@@ -982,10 +982,25 @@ merged and made it checkable.
 > `async def offer(self, candidate: NotificationCandidate) -> NotificationEnqueue: ...`
 
 > **Normative.** `core/types.py` gains `NotificationEnqueue`, a `StrEnum` with
-> exactly four members, one per outcome §3 defines: the entry was enqueued; an
-> identical entry was already held under this key and none was made; the key matched
-> a held entry carrying a different candidate and the offer was refused; the entry's
-> own byte cost exceeds `hub_notification_outbox_bytes` and the offer was refused.
+> exactly four members and these exact values, one per outcome §3 defines:
+>
+> `class NotificationEnqueue(StrEnum):`
+> `    ENQUEUED = "enqueued"` — the entry was made.
+> `    ALREADY_HELD = "already_held"` — an identical entry was already held under this key and none was made.
+> `    KEY_COLLISION = "key_collision"` — the key matched a held entry carrying a different candidate; the offer was refused.
+> `    TOO_LARGE = "too_large"` — the entry's own byte cost exceeds `hub_notification_outbox_bytes`; the offer was refused.
+
+> **Normative.** The conformance suite of §3b's triad branches on these exact
+> members, so a second implementation is held to them rather than to a description.
+
+**Spelling the members out is ADR-0085 §3's rule applied where it plainly reaches.**
+That section spells out every signature because "this block is what an implementation
+is generated from", and a `StrEnum`'s values are observable contract values in this
+tree, not an implementation detail. A draft described the four outcomes in prose and
+left the lane to name them, which would have made the implementing lane the unreviewed
+author of a `core` API — `DUPLICATE` or `ALREADY_HELD`, `"oversize"` or `"too_large"`
+— each choice breaking on change and none of them reviewed here. Adversarial review
+found it on the forty-eighth round.
 
 > **Normative.** `core/errors.py` gains `NotificationOutboxError(AssistantError)`,
 > in the shape `MemoryStoreError`, `DeferralStoreError` and `TraceStoreError` already
