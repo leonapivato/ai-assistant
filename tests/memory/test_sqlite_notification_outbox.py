@@ -457,44 +457,23 @@ class TestTheTwoStoreOrdering:
 class TestTheSeamsFailures:
     """What this seam raises, and that it is always its own error."""
 
-    async def test_a_lease_the_clock_cannot_express_is_the_seams_own_error(
+    async def test_a_lease_the_clock_cannot_add_is_honoured_not_refused(
         self, tmp_path: Path
     ) -> None:
-        """A configured lease near ``timedelta.max`` refuses, and does not crash.
+        """ADR-0131 §5a bounds the lease below and not above, so this one is valid.
 
-        ADR-0131 §5a bounds ``hub_notification_lease`` below and **not** above — it
-        states the figure and its range, and a ceiling it does not state is not an
-        implementing lane's to invent — so this lease is configurable. Adding it to
-        the hub's clock then leaves the range a ``datetime`` can represent, and
-        Python's bare ``OverflowError`` would cross a seam that promises
-        ``NotificationOutboxError`` for every fault: the wire dispatcher maps this
-        project's error types and nothing else, so the raw one drops a *valid*
-        request's connection instead of answering it.
+        §3 gives a claim no refusal for a configured lease, so the expiry is carried
+        to the last representable instant rather than the claim being turned away.
         """
         outbox = build(tmp_path / "outbox.db", lease=timedelta.max)
         await outbox.offer(candidate(key="k1"))
 
-        with pytest.raises(NotificationOutboxError, match="datetime can represent"):
-            await outbox.claim()
+        delivery = await outbox.claim()
 
-    async def test_a_refused_lease_leaves_the_entry_claimable(self, tmp_path: Path) -> None:
-        """The rollback half: §2a's step is indivisible, so a refusal spends nothing.
-
-        No identifier is minted and no entry is left leased to a poll that never
-        happened, so an outbox reopened under a usable lease still has the entry.
-        """
-        path = tmp_path / "outbox.db"
-        refusing = build(path, lease=timedelta.max)
-        await refusing.offer(candidate(key="k1"))
-        with pytest.raises(NotificationOutboxError):
-            await refusing.claim()
-        refusing.close()
-
-        usable = build(path)
-
-        delivery = await usable.claim()
         assert delivery is not None
         assert delivery.notification.candidate_key == "k1"
+        # And it really is leased: no second poll may take it.
+        assert await outbox.claim() is None
 
     def test_an_unopenable_database_is_the_seams_own_error(self, tmp_path: Path) -> None:
         """A backend fault is a ``NotificationOutboxError`` and never a raw

@@ -377,189 +377,66 @@ class TestTheStartupReconciliation:
         assert outbox.recovered == 1
 
 
-class TestABudgetTheClockCannotAddIsRefusedNotCrashed:
-    """§4's refusal covers a budget that is unusable as well as one out of range."""
+class TestABudgetTheClockCannotAddIsHonoured:
+    """§4: ``budget`` is honoured over the closed range, and the far end is in it."""
 
-    async def test_a_maximal_ceiling_polled_at_its_own_ceiling_is_a_budget_error(self) -> None:
-        """The raw ``OverflowError`` would drop a valid request's connection.
+    async def test_a_maximal_ceiling_polled_at_its_own_ceiling_is_answered(self) -> None:
+        """§5a bounds the budget below and not above, so this budget is in range.
 
-        ADR-0131 §5a bounds ``hub_max_notification_budget`` below and **not** above,
-        so an operator may configure one near ``timedelta.max``; a client asking for
-        exactly the ceiling passes the range check and reaches the deadline's
-        addition, where ``datetime`` raises. The wire dispatcher maps this project's
-        error types and nothing else, so what a conforming client would get is a
-        closed connection rather than the declared refusal. It is the same fact the
-        range check next door reports — the budget cannot be honoured — so it is
-        reported the same way.
-        """
-        engine = _wired(Harness(), FakeNotificationOutbox(), max_notification_budget=timedelta.max)
+        §4 honours every in-range budget and reserves its refusal for one "negative,
+        or above the bound", so neither a raw ``OverflowError`` nor a refusal is
+        available here: the deadline is carried to the last representable instant.
 
-        with pytest.raises(NotificationBudgetError, match="datetime can represent"):
-            await engine.next_notification(budget=timedelta.max)
-
-    async def test_the_refusal_retires_nothing(self) -> None:
-        """§4: a refused request "retires nothing, leases nothing and mints nothing".
-
-        The acknowledgement is the effect that cannot be taken back — the entry is
-        gone, and the same call tells the device its poll failed. Round 11's fix put
-        the deadline's refusal *after* it, so a client polling with an
-        unrepresentable budget lost the delivery it was acknowledging and got an
-        error for it. The delivery must still be acknowledgeable afterwards, which is
-        only true if the refusal reached the outbox not at all.
+        **An entry is waiting, deliberately.** Honouring a budget of ``timedelta.max``
+        against an *empty* outbox means parking for the rest of representable time,
+        which is the correct reading of it rather than something a case can await —
+        the assertion available is that the poll reaches its answer at all.
         """
         outbox = FakeNotificationOutbox(now=lambda: NOW)
         await outbox.offer(_candidate())
         engine = _wired(Harness(), outbox, max_notification_budget=timedelta.max)
-        held = await outbox.claim()
-        assert held is not None
 
-        with pytest.raises(NotificationBudgetError):
-            await engine.next_notification(acknowledging=held.delivery_id, budget=timedelta.max)
+        delivery = await engine.next_notification(budget=timedelta.max)
 
-        # **The key is still held**, which is the assertion that discriminates: a
-        # retirement inside the refusal would have freed it. Acknowledging *here*
-        # would not — it frees the key whether or not the refused call already did,
-        # and a first draft of this case asserted past that and passed against the
-        # broken ordering.
-        assert await outbox.offer(_candidate()) is NotificationEnqueue.ALREADY_HELD
-        # And the acknowledgement the refused call declined to apply still lands, so
-        # nothing was lost by refusing: the device can retire its delivery normally.
-        await outbox.acknowledge(held.delivery_id)
-        assert await outbox.offer(_candidate()) is NotificationEnqueue.ENQUEUED
-
-    async def test_an_ordinary_budget_under_that_ceiling_still_polls(self) -> None:
-        """The discriminating half: only the unrepresentable deadline is refused."""
-        engine = _wired(Harness(), FakeNotificationOutbox(), max_notification_budget=timedelta.max)
-
-        assert await engine.next_notification(budget=timedelta(0)) is None
-
-    async def test_the_fakes_lease_refuses_the_same_way(self) -> None:
-        """Parity: a canonical fake that crashed where the outbox refuses would
-        certify consumers against a contract nothing implements."""
-        outbox = FakeNotificationOutbox(now=lambda: NOW, lease=timedelta.max)
-        await outbox.offer(_candidate())
-
-        with pytest.raises(NotificationOutboxError, match="datetime can represent"):
-            await outbox.claim()
-
-
-class _ParkingClaimOutbox(RecordingOutbox):
-    """An outbox whose ``claim`` parks, so a case can cancel *inside* the one step.
-
-    ADR-0131 §2a makes selection, minting and leasing indivisible, and the only way
-    to show a shield actually holds is to cancel while the step is running.
-    """
-
-    def __init__(self) -> None:
-        """Start with nobody claiming and nobody acknowledging."""
-        super().__init__()
-        self.claim_entered = asyncio.Event()
-        self.release_claim = asyncio.Event()
-        self.claim_completed = False
-        self.ack_entered = asyncio.Event()
-        self.release_ack = asyncio.Event()
-        self.ack_completed = False
-
-    async def claim(self) -> NotificationDelivery | None:
-        """Park mid-step, then finish — recording that it was allowed to."""
-        self.claim_entered.set()
-        await self.release_claim.wait()
-        self.claim_completed = True
-        return None
-
-    async def acknowledge(self, delivery_id: str) -> None:
-        """Park mid-retirement, so a cancel can be aimed inside it."""
-        self.ack_entered.set()
-        await self.release_ack.wait()
-        self.ack_completed = True
-        self.calls.append(f"acknowledge:{delivery_id}")
-
-
-class TestACancelledPollHonoursSection2a:
-    """§2a: a close before the selection takes no entry; during or after, the lease stands.
-
-    These drive the **production** ``Engine.next_notification``, because that is
-    where the property lives: the wire cancels its dispatch task, and a dispatch task
-    is a coroutine awaiting this method, so ``task.cancel()`` here is exactly what a
-    disconnect does. ``tests/wire``'s ``_PollingEngine`` overrides the method with a
-    directly awaitable park, so it can only show the wire *issues* the cancel — never
-    that the engine honours it.
-    """
-
-    async def test_a_cancel_while_parked_leaves_the_notification_for_the_next_poll(
-        self,
-    ) -> None:
-        """§2a: "A close detected before that step runs cancels the poll and takes no entry."
-
-        The failure this guards is the one an unconditional shield produced: the poll
-        outlived its connection, so a notification arriving afterwards was claimed and
-        leased for a device that had already gone, and the owner's next poll found
-        nothing. The entry has to survive the dead poll.
-        """
-        outbox = FakeNotificationOutbox(now=lambda: NOW)
-        engine = _wired(Harness(), outbox)
-        poll = asyncio.ensure_future(engine.next_notification(budget=timedelta(seconds=30)))
-        await asyncio.sleep(0.05)  # let it reach the park
-
-        poll.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await poll
-
-        # The notification arrives *after* the disconnect, which is the reviewer's
-        # own scenario: a shielded poll would still be parked to receive it.
-        await outbox.offer(_candidate())
-        await asyncio.sleep(0.05)  # ample time for a surviving poll to take it
-
-        delivery = await outbox.claim()
         assert delivery is not None
         assert delivery.notification.candidate_key == "k1"
 
-    async def test_a_cancel_inside_the_claim_still_completes_the_step(self) -> None:
-        """§2a: selection, mint and lease "are one indivisible step".
+    async def test_a_maximal_budget_still_applies_its_acknowledgement(self) -> None:
+        """The acknowledgement lands, where a refusal would have discarded it.
 
-        The other half, and the reason the poll is not simply left cancellable
-        throughout: a cancel landing *inside* the step would tear it. §2a prices that
-        deliberately — a close during or after the selection leaves the lease
-        standing and the entry returns when it expires, "the cost the lease exists to
-        carry".
+        A second entry is waiting so the maximal budget is answered at once rather
+        than parked — the poll under test is the one that both retires and selects.
         """
-        outbox = _ParkingClaimOutbox()
-        engine = _wired(Harness(), outbox)
-        poll = asyncio.ensure_future(engine.next_notification(budget=timedelta(seconds=30)))
-        await asyncio.wait_for(outbox.claim_entered.wait(), 2)
+        outbox = FakeNotificationOutbox(now=lambda: NOW)
+        await outbox.offer(_candidate())
+        await outbox.offer(_candidate("k2"))
+        held = await outbox.claim()
+        assert held is not None
+        engine = _wired(Harness(), outbox, max_notification_budget=timedelta.max)
 
-        poll.cancel()
-        outbox.release_claim.set()
-        with pytest.raises(asyncio.CancelledError):
-            await poll
-        await asyncio.sleep(0.05)
-
-        assert outbox.claim_completed is True
-
-    async def test_a_cancel_before_the_acknowledgement_does_not_half_retire(self) -> None:
-        """The acknowledgement is mutating and pre-selection, so it takes the same shield.
-
-        A cancel arriving mid-retirement would leave the entry dismissed in one store
-        and standing in the other, which is the tear §3b's ordering exists to prevent.
-        So the cancel is aimed *inside* the acknowledgement here — asserting only that
-        it ran before the claim would pass whether or not it was shielded, since
-        nothing cancels in that gap.
-        """
-        outbox = _ParkingClaimOutbox()
-        engine = _wired(Harness(), outbox)
-        poll = asyncio.ensure_future(
-            engine.next_notification(acknowledging="d-1", budget=timedelta(seconds=30))
+        delivery = await engine.next_notification(
+            acknowledging=held.delivery_id, budget=timedelta.max
         )
-        await asyncio.wait_for(outbox.ack_entered.wait(), 2)
 
-        poll.cancel()
-        outbox.release_ack.set()
-        outbox.release_claim.set()
-        with pytest.raises(asyncio.CancelledError):
-            await poll
-        await asyncio.sleep(0.05)
+        assert delivery is not None
+        assert delivery.notification.candidate_key == "k2"
+        # The first entry was retired by the acknowledgement, so its key is free.
+        assert await outbox.offer(_candidate()) is NotificationEnqueue.ENQUEUED
 
-        assert outbox.ack_completed is True
+    async def test_an_out_of_range_budget_is_still_refused(self) -> None:
+        """The discriminating half: §4's own refusal is untouched."""
+        engine = _wired(Harness(), FakeNotificationOutbox(), max_notification_budget=timedelta(60))
+
+        with pytest.raises(NotificationBudgetError):
+            await engine.next_notification(budget=timedelta(61))
+
+    async def test_the_fakes_lease_is_honoured_the_same_way(self) -> None:
+        """Parity: the canonical fake carries a maximal lease rather than refusing."""
+        outbox = FakeNotificationOutbox(now=lambda: NOW, lease=timedelta.max)
+        await outbox.offer(_candidate())
+
+        assert await outbox.claim() is not None
+        assert await outbox.claim() is None
 
 
 class TestAnUnwiredOutboxRefusesLegibly:

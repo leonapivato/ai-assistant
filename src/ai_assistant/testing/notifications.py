@@ -87,6 +87,9 @@ _DEFAULT_PAGE_LIMIT = 50
 #: and treating its size as a total.
 _RECORD_PAGE = 200
 
+#: The furthest instant a ``datetime`` can name, on the hub's own timezone.
+_END_OF_TIME = datetime.max.replace(tzinfo=UTC)
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -1384,33 +1387,22 @@ class FakeNotificationOutbox:
             return NotificationDelivery(delivery_id=entry.delivery_id, notification=entry.candidate)
 
     def _leased_until(self, now: datetime) -> datetime:
-        """When a lease taken now expires, or this seam's failure if that is nowhere.
+        """When a lease taken now expires, held at the last representable instant.
 
-        Parity with the durable outbox, and the reason is the usual one: a lease near
-        ``timedelta.max`` is constructible here too — ADR-0131 §5a bounds the figure
-        below and not above — and ``now + lease`` then raises a bare
-        ``OverflowError``. A canonical fake that crashed where the shipped outbox
-        reports :class:`~ai_assistant.core.errors.NotificationOutboxError` would
-        certify consumers against a contract nothing implements.
+        Parity with the durable outbox: ADR-0131 §5a bounds the lease below and not
+        above, so one the clock cannot add to is carried to the end of representable
+        time rather than refusing the claim.
 
         Args:
             now: The reading at the moment the lease is taken.
 
         Returns:
             The instant the lease runs out.
-
-        Raises:
-            NotificationOutboxError: If that instant is not representable.
         """
         try:
             return now + self._lease
-        except OverflowError as exc:
-            msg = (
-                f"the configured lease {self._lease} cannot be taken: added to the hub's "
-                f"clock it leaves the range a datetime can represent, so no lease has an "
-                f"expiry (ADR-0131 §3, §5a)"
-            )
-            raise NotificationOutboxError(msg) from exc
+        except OverflowError:
+            return _END_OF_TIME
 
     async def acknowledge(self, delivery_id: str) -> None:
         """Retire the entry this is the current outstanding delivery of (§3)."""

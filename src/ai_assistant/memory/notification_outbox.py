@@ -107,6 +107,9 @@ _DELIVERY_COUNTER_CEILING = 10**63
 #: whatever an operator sets it to.
 _RECORD_PAGE = 200
 
+#: The furthest instant a ``datetime`` can name, on the hub's own timezone.
+_END_OF_TIME = datetime.max.replace(tzinfo=UTC)
+
 
 #: The per-entry cost of the fixed-width columns an implementation persists
 #: beside the candidate — the lease instant, the enqueue sequence, the departing
@@ -917,41 +920,22 @@ class SqliteNotificationOutbox:
             return NotificationDelivery(delivery_id=delivery_id, notification=entry.candidate)
 
     def _leased_until(self, now: datetime) -> datetime:
-        """When a lease taken now expires, or this seam's failure if that is nowhere.
+        """When a lease taken now expires, held at the last representable instant.
 
-        **A lease the clock cannot express is a store failure, not a crash.**
-        ADR-0131 §5a bounds ``hub_notification_lease`` below and not above — it
-        states the figure and its range, and a ceiling it does not state is not an
-        implementing lane's to invent — so an operator may configure one near
-        ``timedelta.max``, and adding it to the hub's clock then leaves the range a
-        ``datetime`` can represent. Python raises a bare ``OverflowError`` there,
-        which crosses this seam undeclared: every caller of :meth:`claim` is promised
-        :class:`~ai_assistant.core.errors.NotificationOutboxError` for a fault, and
-        the wire dispatcher maps this project's error types and nothing else, so the
-        raw one would drop a valid request's connection instead of answering it.
-        Raising inside the transaction also rolls it back, which is the outcome that
-        keeps §2a's indivisibility: no identifier is spent and no entry is left
-        leased to a poll that never happened. Adversarial review found it on the
-        eleventh round.
+        ADR-0131 §5a bounds ``hub_notification_lease`` below and not above, so a
+        configured lease the clock cannot add to is carried to the end of
+        representable time rather than refusing a claim §3 does not let it refuse.
 
         Args:
             now: The hub's reading at the moment the lease is taken.
 
         Returns:
             The instant the lease runs out.
-
-        Raises:
-            NotificationOutboxError: If that instant is not representable.
         """
         try:
             return now + self._lease
-        except OverflowError as exc:
-            msg = (
-                f"the configured lease {self._lease} cannot be taken: added to the hub's "
-                f"clock it leaves the range a datetime can represent, so no lease has an "
-                f"expiry (ADR-0131 §3, §5a)"
-            )
-            raise NotificationOutboxError(msg) from exc
+        except OverflowError:
+            return _END_OF_TIME
 
     def _take_delivery_id(self, conn: sqlite3.Connection) -> str | None:
         """Mint one delivery identifier, advancing the durable counter.
