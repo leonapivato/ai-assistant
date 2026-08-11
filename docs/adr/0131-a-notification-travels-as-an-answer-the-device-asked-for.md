@@ -238,10 +238,11 @@ to do something about a failure. **What the producer then does is ADR-0130's** �
 retry, drop, record — and this ADR neither decides it nor needs to; the seam's
 obligation is to have an unambiguous answer for the producer to act on.
 
-> **Normative.** The enqueue accepts an optional caller-supplied **origin key**. An
-> enqueue whose origin key equals that of an entry the outbox currently holds
-> makes no new entry and returns the held one. Retired keys are not remembered, and
-> an entry carrying no origin key is never matched against anything.
+> **Normative.** The enqueue accepts an optional caller-supplied **origin key**, an
+> `Identifier` whose UTF-8 encoding is at most 128 bytes; a longer one is refused at
+> the enqueue. An enqueue whose origin key equals that of an entry the outbox
+> currently holds makes no new entry and returns the held one. Retired keys are not
+> remembered, and an entry carrying no origin key is never matched against anything.
 
 **A commit the caller never learns the outcome of is the case this exists for, and
 it is a narrower case than it first looks.** The hub can commit the entry and then
@@ -354,10 +355,17 @@ deliberately given up, and gives the reason there.
 > and `hub_notification_outbox_bytes` (§5a). Both bounds count **every** entry the
 > outbox holds, leased or not.
 
+> **Normative.** An entry's byte cost is everything the outbox persists for it —
+> the notification, the `delivery_id`, and the origin key where one was supplied.
+
 > **Normative.** When an enqueue would exceed either bound, the hub drops the
 > **oldest entry that is not leased**; when every entry is leased, it drops the
 > oldest entry and breaks its lease. Every drop is recorded in the hub's log naming
 > the entry, and the enqueue then proceeds.
+
+> **Normative.** An entry whose own byte cost exceeds `hub_notification_outbox_bytes`
+> is refused at the enqueue, and the refusal is the enqueue's reported outcome. It is
+> never satisfied by evicting other entries.
 
 **An unbounded queue behind an offline owner is a disk-filling bug with a product
 name.** Dropping the oldest rather than refusing the newest is the choice a
@@ -373,6 +381,18 @@ no subject when every entry is leased, and an implementation reaching that state
 two illegal moves available — retain the new entry over the bound, or drop a leased
 one against the rule — with nothing to choose between them. So the leased case is
 named: leases are preferred *last*, and the tie-break is the same age order.
+
+**The refusal clause is what keeps the eviction rule from emptying the outbox for a
+single entry that could never fit**, and it is unreachable in a conforming
+deployment rather than merely rare. The notification is bounded by ADR-0085 §8's
+contract limit, which is `hub_max_frame_bytes` less §8b's 512-byte envelope reserve
+— it has to fit a result frame or it could not be delivered at all. The entry's own
+overhead is a `delivery_id` of at most 36 bytes (ADR-0085 §8a bounds a correlation
+id there and this ADR takes the same shape) and an origin key of at most 128, so
+164 bytes, comfortably inside that 512-byte reserve. An outbox at §5a's floor of
+`hub_max_frame_bytes` therefore holds any notification the wire can carry, and the
+clause exists for the deployment that is not conforming rather than for the one
+that is.
 
 **Breaking a lease is the cheapest thing available to break, and saying what it
 costs is the point of ruling it rather than leaving it.** A leased entry has already
@@ -408,10 +428,27 @@ modifiers, in the shape `observe(*, conversation_id=…)` and `questions(*, limi
 offset)` already have.
 
 > **Normative.** `core/types.py` gains one frozen pydantic model for this seam,
-> `NotificationDelivery`, carrying the outbox entry's identifier and the disposed
-> notification ADR-0130 promotes. Its identifier is minted by the seam when the
-> entry is enqueued, is stable across redeliveries of that entry, and is the value
-> `acknowledging` names.
+> declared exactly as below, where `DisposedNotification` stands for the type
+> ADR-0130 promotes for a disposed notification and is the only part of this
+> declaration ADR-0130 supplies:
+>
+> `class NotificationDelivery(BaseModel):`
+> `    model_config = ConfigDict(frozen=True)`
+> `    delivery_id: Identifier`
+> `    notification: DisposedNotification`
+
+> **Normative.** `delivery_id` is minted by the seam when the entry is enqueued, is
+> stable across redeliveries of that entry, and is the value `acknowledging` names.
+
+**Naming the fields is not fussiness at this altitude, it is the whole reason a
+surface ADR exists.** ADR-0085 §3 spells out every signature rather than
+abbreviating because "this block is what an implementation is generated from", and
+§4 gives twenty-four promoted types "and their normative fields" for the same
+reason. A clause saying the model "carries an identifier and a notification" leaves
+one implementation free to emit `{"id": …}` and another to require
+`{"entry_id": …}`, both conforming and mutually unintelligible — which is exactly
+the interoperability failure ADR-0084 §3 made framing and codec normative to
+prevent, arriving one layer up. Adversarial review found it on the third round.
 
 > **Normative.** ADR-0130 is a **prerequisite of the implementing lane**, not
 > merely context for it. `NotificationDelivery` has no complete field layout until
@@ -450,6 +487,50 @@ Clamping is the tempting answer and it is the one the corpus keeps refusing — 
 is accepting-and-ignoring in a second costume, and ADR-0084 §2's argument against
 that transfers exactly: a client whose ninety-minute budget is honoured as ninety
 seconds has been told, by acceptance, that its budget was accepted.
+
+> **Normative.** No argument of `next_notification` carries a device identity, and
+> no lane may add one. Where this ADR's rules are per-device, the identity is the
+> one ADR-0124 §4 established at admission, held per connection by the hub's
+> listener, and it is never read from a payload.
+
+> **Normative.** A loopback connection has no device identity and is not given a
+> synthetic one. For §2's one-connection-per-device rule, all loopback connections
+> count as a single local device.
+
+**This is the finding that most nearly broke the seam, and answering it exactly is
+worth more than answering it quickly.** Adversarial review observed on the third
+round that `_dispatch` (`wire/server.py`) calls an engine method with nothing but
+the decoded request arguments — `await getattr(engine, method)(**arguments)` — while
+`Admission`, which holds ADR-0124 §4's identity, is connection-local in
+`_serve_requests` and never reaches the engine. So a method declared as above cannot
+tell two remote devices apart, and an identity *argument* would be a value taken
+from the peer, which ADR-0124 §4 forbids in terms: the hub "may not take that
+identity from anything the peer asserts."
+
+**The resolution is that the rules needing identity are connection rules and the
+rules on the method are not, and separating them is what makes the signature
+right.** Take them one at a time:
+
+- **§2's one delivery connection per device, and §5's sub-bound**, need the
+  identity — and they are properties of *connections*, enforced where the
+  connections and the `Admission` already are. Nothing has to travel to the engine.
+- **§3's offer rule needs no identity at all**, which is easy to miss because it is
+  phrased about devices. "An entry is offered to one device at a time" is delivered
+  by the *lease*: an entry written to any caller is unavailable to every other
+  caller until it is acknowledged or expires. One outbox, one lease per entry, and
+  "one at a time" holds without the outbox ever knowing who asked.
+- **§3's acknowledgement needs no identity either**, because `acknowledging` names
+  an entry the hub minted and holds, not a claim about who the caller is. A device
+  naming another device's entry acknowledges a delivery the owner has in fact
+  received, which is the truth; and the idempotent no-op means a wrong id costs
+  nothing.
+
+**The loopback clause is stated because silence there would be read as a gap rather
+than as an answer.** `admission is None` on that listener and ADR-0084 §2 declined
+`SO_PEERCRED` as authorisation on it, so there is no identity to be had and none
+should be invented. Nor is one needed: ADR-0084 §1's `0600` bit means every loopback
+peer is the owner on the owner's own machine, so treating them as one local device
+is not an approximation, it is the fact.
 
 > **Normative.** Landing this seam bumps `PROTOCOL_VERSION`, and the obligation
 > falls on the change that adds the method, in that same change (ADR-0124 §9).
