@@ -220,7 +220,8 @@ word of it. Adversarial review found it on the twenty-second round, and §3's
 linearizability clause is stated over the seam's shared state — the slot registry
 included — for exactly this reason. Taking the claim *before* dispatch is what makes
 "exactly one wins" decidable: after dispatch the losing poll would already be
-running and the rule would have to unwind it.
+running and the rule would have to unwind it. §5's global capacity is claimed in the
+same step, for the reason given there.
 
 **Closing the offender and not the incumbent is the direction that cannot be used
 as a weapon.** The opposite rule — newest poll wins — lets any process that can
@@ -454,18 +455,23 @@ entry, which is latency bought for nothing.
 > acknowledgement naming anything else — an unknown identifier, a retired entry, or
 > a delivery the entry has since superseded — is accepted and does nothing.
 
-> **Normative.** **Every** transition of the seam's shared state is linearizable
-> with respect to every other: each observes the state some serial order of them
-> would produce, and none may act on an observation another has since invalidated.
-> The seam's shared state is the outbox (§3) and the per-device delivery-slot
-> registry (§2), and this rule reaches any other a later decision adds.
+> **Normative.** The seam's **shared state** is *every* piece of state this seam
+> keeps that more than one request, poll or producer can observe or change. It is
+> defined by that property and not by a list.
 
-> **Normative.** This ADR defines six such transitions — an enqueue's origin-key
-> decision, bound check, eviction and insertion (§3); a selection with its mint and
-> lease (§2a); an acknowledgement's match and retirement (§3); a lease expiry (§3);
-> an eviction's classification and drop (§3); and a delivery slot's check-and-claim
-> and its release (§2, §2a). **The list illustrates the rule rather than bounding
-> it**: a transition a later decision adds is inside it by being one.
+> **Normative.** **Every** transition of that state is linearizable with respect to
+> every other: each observes the state some serial order of them would produce, and
+> none may act on an observation another has since invalidated. Where a transition
+> must read two parts of the shared state and act on both, the reads and the act are
+> one step over both.
+
+> **Normative.** Seven transitions are named here **as illustration and not as a
+> bound** — an enqueue's origin-key decision, bound check, eviction and insertion
+> (§3); a selection with its mint and lease (§2a); an acknowledgement's match and
+> retirement (§3); a lease expiry (§3); an eviction's classification and drop (§3); a
+> delivery slot's check-and-claim and its release (§2, §2a); and the global
+> delivery-capacity check, claim and release (§5). Anything meeting the definition
+> above is inside the rule whether or not it appears here.
 
 **One rule over the whole class, because closing these pairwise closed none of
 them.** Adversarial review found the same shape four times against four different
@@ -1014,6 +1020,11 @@ until #891 lands and is not a substitute for it.
 > less than** `hub_max_connections`, so that a slot for an ordinary session always
 > remains.
 
+> **Normative.** The global capacity check and its claim happen in the **same step**
+> as §2's per-device check and claim, over both parts of the shared state at once. A
+> poll dispatches only if it obtains both; one that obtains neither or only one
+> claims nothing and its connection closes under §2.
+
 **Both clauses restate a mistake the corpus has already made once and caught
 once.** ADR-0124 §7 required the remote listener to share the hub's ceilings and
 said why: "a second listener is the natural place to double a budget by accident…
@@ -1022,6 +1033,14 @@ neither." A long-lived poll is the same trap wearing different clothes — it is
 connection that is *supposed* to sit idle, so the reflex is to exempt it from a
 ceiling written against peers that connect and stop sending. The exemption would be
 wrong for exactly the reason the ceiling exists.
+
+**The two claims are one step because a bound checked separately is a bound that can
+be passed twice.** With seven of eight slots held, two devices polling concurrently
+can each pass the capacity check and each claim its own per-device slot, leaving
+nine — adversarial review's twenty-third round, and the sixth finding of the shape
+§3's linearizability rule exists for. It is also why that rule's subject is now
+*defined* rather than listed: each earlier statement of it named the state it knew
+about, and each time the next round found shared state the naming had left out.
 
 The second clause is the half a shared budget alone does not buy. Delivery
 connections are long-lived and ordinary sessions are not, so without a sub-bound a
