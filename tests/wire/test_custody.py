@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ai_assistant.service.custody import first_ancestor_fault
+from ai_assistant.wire.custody import first_ancestor_fault
 
 if TYPE_CHECKING:
     from pathlib import Path

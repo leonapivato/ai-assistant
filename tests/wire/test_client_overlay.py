@@ -202,7 +202,7 @@ def test_the_agent_is_pointed_at_a_path_without_probing(tmp_path: Path) -> None:
     same reason, and here it also keeps a device with no overlay from failing at
     import time.
     """
-    chosen = local_agent([str(tmp_path / "absent.sock")])
+    chosen = local_agent(candidates=[str(tmp_path / "absent.sock")])
 
     assert chosen.socket_path == str(tmp_path / "absent.sock")
 
@@ -212,7 +212,7 @@ def test_the_first_existing_socket_wins(tmp_path: Path) -> None:
     second = tmp_path / "second.sock"
     second.touch()
 
-    chosen = local_agent([str(tmp_path / "first.sock"), str(second)])
+    chosen = local_agent(candidates=[str(tmp_path / "first.sock"), str(second)])
 
     assert chosen.socket_path == str(second)
 
@@ -221,7 +221,7 @@ def test_where_none_exists_the_first_candidate_names_the_refusal(tmp_path: Path)
     """So the message names a path rather than an absence."""
     first = str(tmp_path / "first.sock")
 
-    chosen = local_agent([first, str(tmp_path / "second.sock")])
+    chosen = local_agent(candidates=[first, str(tmp_path / "second.sock")])
 
     assert chosen.socket_path == first
 
