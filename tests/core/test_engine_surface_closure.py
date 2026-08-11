@@ -264,7 +264,9 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     a read and a write of the standing preferences. **Reconsideration is not among
     them and may not become one**: ADR-0130 §5 puts it on the concrete
     ``orchestration`` engine, where ADR-0083 §8 puts a maintenance surface, and
-    states that "no client asks for it and no interface adapter may drive it". ADR-0085 §11b recorded fifteen as
+    states that "no client asks for it and no interface adapter may drive it".
+
+    ADR-0085 §11b recorded fifteen as
     a correction of ADR-0084 §5's "around nineteen" — a count, not a decision, and
     §5's argument did not rest on the figure. It does not rest on this one either;
     what the number is for is making a *complete* suite something a reader can
