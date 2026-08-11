@@ -561,6 +561,23 @@ ratify-after-review sequencing reaches it: it was drafted and reviewed as
 one tree. The record of that flip is the appended dated note, per ADR-0070 §1.
 Nothing implements against §6 until this has merged.
 
+**ADR-0097's record lands in this change rather than at this ADR's ratification,
+and the corpus has adjudicated that question twice already.** The reading that a
+`Proposed` ADR may not carry a supersession record cites ADR-0070 §1's "a
+supersession that has landed", and ADR-0082 §7 names it by number: "**#458 — the
+recurring misreading of ADR-0070 §1's 'a supersession that has landed' clause.**
+Not a governance gap but a reviewer failure mode … §1's condition is that the
+superseding ADR **exists**, not that it is ratified — the hazard §1 names is a
+`Status` line pointing at nothing, and an atomic pair makes that unreachable."
+`CONTRIBUTING.md` carries the same sentence — "Recording a supersession likewise
+presupposes the superseding ADR exists" — and ADR-0131 records the argument
+deadlocking PR #478 and recurring on PR #945, where the two lenses took opposite
+positions in consecutive rounds. The pair here is atomic: ADR-0097's `Status` and
+this file land in one merge, so at no instant does that line point at nothing. The
+citation is repeated here because ADR-0131 asked that a further recurrence "cost
+the next author a citation rather than a round"; it cost this one a round, which
+is why **#957** files the rubric fix.
+
 ## Alternatives considered
 
 - **Rule the producer's read an `INGEST` read** (option B on PR #953). Rejected in
