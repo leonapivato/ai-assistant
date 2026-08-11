@@ -519,13 +519,16 @@ class SqliteNotificationOutbox:
                 return gathered
             offset += len(page)
 
-    async def _dismiss(self, record_id: str | None) -> None:
+    async def _dismiss(self, record_id: str | None) -> bool:
         """Dismiss one ADR-0130 record, translating the other store's failure.
 
         A ``None`` id is the case where no record could be resolved for an entry,
         and ADR-0131 §3b's "where the act that removed the entry has already ended
         the record's actionability, nothing further is owed" covers it: there is
         nothing to dismiss.
+
+        Returns:
+            Whether an actionable record was dismissed by this call.
 
         Raises:
             NotificationOutboxError: If the dismissal could not commit. **Nothing
@@ -534,9 +537,9 @@ class SqliteNotificationOutbox:
                 committed.
         """
         if record_id is None:
-            return
+            return False
         try:
-            await self._records.dismiss(record_id)
+            return await self._records.dismiss(record_id)
         except Exception as exc:  # re-raised as this seam's declared failure (ADR-0131 §3b)
             msg = f"failed to dismiss the notification record an outbox entry carried: {exc}"
             raise NotificationOutboxError(msg) from exc
@@ -574,22 +577,29 @@ class SqliteNotificationOutbox:
             if cost > self._max_bytes:
                 await self._refuse(NotificationEnqueue.TOO_LARGE, candidate, record_id)
                 return NotificationEnqueue.TOO_LARGE
-            decided = await _run_to_completion(self._decide_offer_sync, candidate, cost, now)
-            outcome, victims = decided
+            outcome, victims, held_record = await _run_to_completion(
+                self._enqueue_sync, candidate, encoded, record_id, cost, now
+            )
             if outcome is NotificationEnqueue.KEY_COLLISION:
                 await self._refuse(
-                    NotificationEnqueue.KEY_COLLISION,
-                    candidate,
-                    record_id,
-                    held_by=await _run_to_completion(
-                        self._held_record_id_sync, candidate.candidate_key
-                    ),
+                    NotificationEnqueue.KEY_COLLISION, candidate, record_id, held_by=held_record
                 )
                 return outcome
             if outcome is not NotificationEnqueue.ENQUEUED:
                 return outcome
-            # Dismiss first, remove after (§3b). The victims are already marked,
-            # so no poll can select one while the dismissals run.
+            # **The key is durably reserved before a single victim is touched**, and
+            # that ordering is the whole of the fix. Evicting first meant an offer
+            # that then lost the key to another writer had already dismissed and
+            # removed an unrelated entry — an outcome no serial order of the two
+            # offers produces, which is exactly what ADR-0131 §3's linearizability
+            # rule forbids. With the insert committed, the outcome can no longer
+            # change, so the eviction it authorised is the eviction that happens.
+            #
+            # Dismiss first, remove after (§3b). The victims are already marked
+            # departing by the same transaction that inserted, so no poll can select
+            # one while the dismissals run, and the bounds they still count toward
+            # are restored by the removal below — or by the next `_settle_departing`
+            # if this call dies in between.
             for victim in victims:
                 await self._dismiss(victim.record_id)
                 _log.info(
@@ -597,21 +607,10 @@ class SqliteNotificationOutbox:
                     candidate_key=victim.key,
                     notification_id=victim.record_id,
                 )
-            inserted = await _run_to_completion(
-                self._insert_sync, candidate, encoded, record_id, cost, victims, now
-            )
-            if inserted is NotificationEnqueue.KEY_COLLISION:
-                await self._refuse(
-                    NotificationEnqueue.KEY_COLLISION,
-                    candidate,
-                    record_id,
-                    held_by=await _run_to_completion(
-                        self._held_record_id_sync, candidate.candidate_key
-                    ),
-                )
-            elif inserted is NotificationEnqueue.ENQUEUED:
-                self._wake()
-            return inserted
+            if victims:
+                await _run_to_completion(self._remove_many_sync, [victim.key for victim in victims])
+            self._wake()
+            return NotificationEnqueue.ENQUEUED
 
     async def _refuse(
         self,
@@ -670,61 +669,70 @@ class SqliteNotificationOutbox:
             record_dismissed=dismissed,
         )
 
-    def _held_record_id_sync(self, key: str) -> str | None:
-        """The record of the entry a collision matched.
+    def _enqueue_sync(
+        self,
+        candidate: NotificationCandidate,
+        encoded: str,
+        record_id: str | None,
+        cost: int,
+        now: datetime,
+    ) -> tuple[NotificationEnqueue, list[_Entry], str | None]:
+        """Decide the offer, mark what it evicts and insert it — one transaction.
 
-        Run on a worker thread like every other statement here, because the
-        connection is serialised behind this store's lock and a read taken on the
-        event loop would use it from the wrong side of that discipline.
+        **One transaction and not two, which is what makes the enqueue a single
+        linearizable transition** (ADR-0131 §3). Splitting the decision from the act
+        left two gaps and both were real: another writer could take the key between
+        them, so two callers were told ``ENQUEUED`` and one entry silently replaced
+        the other; and the victims were dismissed on the strength of a decision that
+        could still change, so an offer refused as a collision had already evicted an
+        unrelated entry. §3 records four separate findings of that one shape — "a
+        predicate stated over outbox state binds nothing unless the read and the act
+        that depends on it are one step" — and this is that step.
+
+        **The victims are marked here and removed later, and that split is forced.**
+        Their ADR-0130 records must be dismissed before their entries are removed
+        (§3b), and that dismissal reaches the *other* store, so it cannot run inside
+        a transaction on this one. Marking inside this transaction is what makes the
+        split safe: a marked entry is departing, so it "participates in no transition
+        except its own removal" — not selected, not matched, not made available by a
+        lease expiry — and it still counts toward both bounds until it goes, which is
+        what §3 requires of it.
+
+        Returns:
+            The outcome, the entries this enqueue gave up, and — on a collision — the
+            record of the entry the key matched, so the refusal can tell that record
+            from the offered candidate's.
         """
-        with self._transaction("read the entry a collision matched", immediate=False) as conn:
-            rows = self._rows(
-                conn,
-                "read the entry a collision matched",
-                "SELECT record_id FROM outbox WHERE candidate_key = ?",
-                (key,),
-            )
-        if not rows or rows[0][0] is None:
-            return None
-        return str(rows[0][0])
-
-    def _decide_offer_sync(
-        self, candidate: NotificationCandidate, cost: int, now: datetime
-    ) -> tuple[NotificationEnqueue, list[_Entry]]:
-        """Decide the offer's outcome and mark whatever it evicts, in one step.
-
-        The key decision, the bound check, the eviction choice and the marking are
-        one transaction, which is ADR-0131 §3's linearizability rule applied to the
-        transition that mutates most: two producers can otherwise each observe room
-        below the bound and each commit, and two concurrent offers carrying one key
-        can each observe no held entry and both insert — so the deduplication §3
-        spends a clause on and the collision refusal beside it both silently fail.
-        """
-        with self._transaction("decide a notification offer") as conn:
+        with self._transaction("enqueue a notification") as conn:
             entries = self._all(conn)
             held = next((entry for entry in entries if entry.key == candidate.candidate_key), None)
             if held is not None and not held.is_departing_at(now):
                 # Matching on the key *and* the candidate is what makes the no-op a
-                # **retry** rather than a coincidence (§3): matching on the key
-                # alone would turn a producer's bug into a silent loss, a differing
+                # **retry** rather than a coincidence (§3): matching on the key alone
+                # would turn a producer's bug into a silent loss, a differing
                 # candidate receiving what looks like a successful enqueue. Model
                 # equality is ADR-0087 §2's canonical comparison for a frozen model
                 # that forbids extras — two candidates whose encodings agree are
                 # exactly the two that compare equal.
                 if held.candidate == candidate:
-                    return NotificationEnqueue.ALREADY_HELD, []
-                _log.info(
-                    "notification_outbox_refused",
-                    reason="key_collision",
-                    candidate_key=candidate.candidate_key,
-                )
-                return NotificationEnqueue.KEY_COLLISION, []
-            victims = self._victims_for(entries, held, cost, now)
+                    return NotificationEnqueue.ALREADY_HELD, [], held.record_id
+                return NotificationEnqueue.KEY_COLLISION, [], held.record_id
+            if held is not None:
+                # Departing, so it matches nothing and its removal was already owed.
+                conn.execute("DELETE FROM outbox WHERE candidate_key = ?", (held.key,))
+                entries = [entry for entry in entries if entry.key != held.key]
+            victims = self._victims_for(entries, None, cost, now)
             for victim in victims:
                 conn.execute(
                     "UPDATE outbox SET departing = 1 WHERE candidate_key = ?", (victim.key,)
                 )
-            return NotificationEnqueue.ENQUEUED, victims
+            sequence = self._take_sequence(conn)
+            conn.execute(
+                "INSERT INTO outbox(candidate_key, candidate, record_id, sequence, "
+                "delivery_id, leased_until, departing, cost) VALUES (?, ?, ?, ?, NULL, NULL, 0, ?)",
+                (candidate.candidate_key, encoded, record_id, sequence, cost),
+            )
+            return NotificationEnqueue.ENQUEUED, victims, None
 
     def _victims_for(
         self, entries: list[_Entry], held: _Entry | None, cost: int, now: datetime
@@ -771,64 +779,6 @@ class SqliteNotificationOutbox:
             count -= 1
             total -= victim.cost
         return victims
-
-    def _insert_sync(  # noqa: PLR0913 — one parameter per persisted column, plus what it evicted and the instant
-        self,
-        candidate: NotificationCandidate,
-        encoded: str,
-        record_id: str | None,
-        cost: int,
-        victims: list[_Entry],
-        now: datetime,
-    ) -> NotificationEnqueue:
-        """Re-check the key, remove the dismissed victims and insert, in one step.
-
-        **The re-check is what makes the enqueue one linearizable transition**, and
-        without it the decision and the act were two. The victims' dismissals reach
-        the *other* store, so they cannot run inside a transaction on this one — the
-        deciding transaction therefore has to end before this one begins, and across
-        processes another writer may commit an entry under this key in the gap. Both
-        callers would then have been told ``ENQUEUED`` and one entry would have
-        silently replaced the other, losing the custody ADR-0131 §3 says transfers
-        at that commit.
-
-        ADR-0131 §3 names this discharge in terms: an implementation may hold
-        transitions against one another *or* re-read "immediately before acting and
-        falling through to the rule the fresh state implies". This is the second, so
-        the fresh state decides the outcome and the insert never replaces a row.
-
-        Returns:
-            What the fresh state implies — ``ENQUEUED`` ordinarily, or the duplicate
-            or collision answer where another writer reached the key first.
-        """
-        with self._transaction("enqueue a notification") as conn:
-            rows = self._rows(
-                conn,
-                "re-read the key before inserting",
-                "SELECT candidate_key, candidate, record_id, sequence, delivery_id, "
-                "leased_until, departing, cost FROM outbox WHERE candidate_key = ?",
-                (candidate.candidate_key,),
-            )
-            if rows:
-                held = _entry_from(rows[0])
-                if not held.is_departing_at(now):
-                    return (
-                        NotificationEnqueue.ALREADY_HELD
-                        if held.candidate == candidate
-                        else NotificationEnqueue.KEY_COLLISION
-                    )
-                conn.execute(
-                    "DELETE FROM outbox WHERE candidate_key = ?", (candidate.candidate_key,)
-                )
-            for victim in victims:
-                conn.execute("DELETE FROM outbox WHERE candidate_key = ?", (victim.key,))
-            sequence = self._take_sequence(conn)
-            conn.execute(
-                "INSERT INTO outbox(candidate_key, candidate, record_id, sequence, "
-                "delivery_id, leased_until, departing, cost) VALUES (?, ?, ?, ?, NULL, NULL, 0, ?)",
-                (candidate.candidate_key, encoded, record_id, sequence, cost),
-            )
-            return NotificationEnqueue.ENQUEUED
 
     def _take_sequence(self, conn: sqlite3.Connection) -> int:
         """The next enqueue order, advanced durably in the same transaction."""
@@ -989,6 +939,16 @@ class SqliteNotificationOutbox:
         with self._transaction("remove an outbox entry") as conn:
             conn.execute("DELETE FROM outbox WHERE candidate_key = ?", (key,))
 
+    def _remove_many_sync(self, keys: list[str]) -> None:
+        """Remove every dismissed victim in one transaction.
+
+        One transaction rather than one each, so an enqueue's eviction either frees
+        the room it decided to free or frees none of it.
+        """
+        with self._transaction("remove the evicted outbox entries") as conn:
+            for key in keys:
+                conn.execute("DELETE FROM outbox WHERE candidate_key = ?", (key,))
+
     async def withdraw(self, record_id: str) -> bool:
         """Give up the entry carrying one ADR-0130 record, as an eviction does (§3a).
 
@@ -1012,18 +972,27 @@ class SqliteNotificationOutbox:
             record_id: The ADR-0130 record whose entry is given up.
 
         Returns:
-            Whether an entry was withdrawn.
+            Whether the withdrawal **dismissed an actionable record**. That, rather
+            than "an entry was found", is what a caller can act on: a dismissal
+            surface has to report whether it ended anything, and the withdrawal is
+            what performs that dismissal once the entry is marked. ``False`` covers
+            both "no entry" and "its record had already ceased to be actionable".
 
         Raises:
-            NotificationOutboxError: If the outbox cannot be read or written.
+            NotificationOutboxError: If the outbox cannot be read or written, or the
+                record's dismissal cannot commit. **The entry is left marked
+                departing then, which is the safe direction**: a marked entry
+                participates in no transition but its own removal, so no later poll
+                can select it, and §3b's reconciliation completes what this call
+                could not.
         """
         async with self._lock:
             key = await _run_to_completion(self._mark_withdrawn_sync, record_id)
             if key is None:
                 return False
-            await self._dismiss(record_id)
+            dismissed = await self._dismiss(record_id)
             await _run_to_completion(self._remove_sync, key)
-            return True
+            return dismissed
 
     def _mark_withdrawn_sync(self, record_id: str) -> str | None:
         with self._transaction("withdraw an outbox entry") as conn:

@@ -477,7 +477,14 @@ class FakeAssistantEngine:
             notification_id=named,
         )
         self.calls.append(("dismiss_notification", {"notification_id": named}))
-        dismissed = await self.notification_store.dismiss(named)
+        # **The withdrawal goes first and performs the dismissal** (ADR-0131 §3,
+        # §3a). A fake that updated only the record store would still deliver what
+        # it had dismissed on the next poll — certifying a consumer against a
+        # contract the shipped engine does not have, which is the one thing a
+        # canonical fake may not do.
+        dismissed = await self.notification_outbox.withdraw(named) or (
+            await self.notification_store.dismiss(named)
+        )
         return self._checked(dismissed, "dismiss_notification")
 
     async def next_notification(
@@ -524,6 +531,11 @@ class FakeAssistantEngine:
             notification_id=named,
         )
         self.calls.append(("forget_notification", {"notification_id": named}))
+        # Withdraw before deleting, which ADR-0131 §3a makes a rule with no
+        # exception: no lane deletes a record whose entry it has not already
+        # withdrawn. Deleting first leaves an entry whose record is gone — not
+        # departing, not expired, undetectably stale, and delivered.
+        await self.notification_outbox.withdraw(named)
         destroyed = await self.notification_store.delete(named)
         return self._checked(destroyed, "forget_notification")
 

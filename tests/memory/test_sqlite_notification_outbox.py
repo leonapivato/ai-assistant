@@ -627,3 +627,75 @@ async def test_an_arrival_before_the_wait_is_not_lost(tmp_path: Path) -> None:
     await outbox.offer(candidate(key="k1"))
 
     assert await outbox.wait_for_arrival(timedelta(seconds=5)) is True
+
+
+class TestARefusedOfferEvictsNothing:
+    """ADR-0131 §3: an eviction an offer did not earn is not a serial outcome."""
+
+    async def test_a_collision_leaves_the_bound_alone(self, tmp_path: Path) -> None:
+        """A refused offer may not have spent another entry's slot.
+
+        The eviction used to be finalised on the strength of a decision that could
+        still change: another writer taking the key between the decision and the
+        insert left the offer refused as a collision and an unrelated entry already
+        dismissed and removed. No serial order of the two offers produces "A was
+        refused *and* A's eviction happened", which is what §3's linearizability
+        rule forbids. Reserving the key before touching a victim closes it.
+        """
+        path = tmp_path / "outbox.db"
+        first = build(path, max_entries=2)
+        second = build(path, max_entries=2)
+        await first.offer(candidate(key="old"))
+        await second.offer(candidate(key="k1"))
+
+        # `k1` is held by the other instance, so this offer is refused — and the
+        # bound it would have needed to satisfy must not have cost `old` its slot.
+        assert await first.offer(candidate(key="k1", confidence=0.9)) is (
+            NotificationEnqueue.KEY_COLLISION
+        )
+
+        delivered = []
+        while (delivery := await first.claim()) is not None:
+            delivered.append(delivery.notification.candidate_key)
+            await first.acknowledge(delivery.delivery_id)
+        assert "old" in delivered
+
+    async def test_an_already_held_offer_evicts_nothing(self, tmp_path: Path) -> None:
+        """The same for the duplicate arm: a retry spends nobody's slot."""
+        outbox = build(tmp_path / "outbox.db", max_entries=2)
+        await outbox.offer(candidate(key="old"))
+        subject = candidate(key="k1")
+        await outbox.offer(subject)
+
+        assert await outbox.offer(subject) is NotificationEnqueue.ALREADY_HELD
+
+        delivered = []
+        while (delivery := await outbox.claim()) is not None:
+            delivered.append(delivery.notification.candidate_key)
+            await outbox.acknowledge(delivery.delivery_id)
+        assert sorted(delivered) == ["k1", "old"]
+
+
+class TestWithdrawalReportsItsDismissal:
+    """The answer a dismissal surface needs, from the act that performs it."""
+
+    async def test_a_withdrawal_reports_the_actionable_record_it_ended(
+        self, tmp_path: Path
+    ) -> None:
+        """``True`` means "an actionable record was dismissed by this withdrawal"."""
+        records = FakeNotificationStore()
+        record_id, subject = await interrupting(records)
+        outbox = build(tmp_path / "outbox.db", records=records)
+        await outbox.offer(subject)
+
+        assert await outbox.withdraw(record_id) is True
+
+    async def test_a_second_withdrawal_reports_nothing(self, tmp_path: Path) -> None:
+        """The discriminating half: nothing left to end is ``False``."""
+        records = FakeNotificationStore()
+        record_id, subject = await interrupting(records)
+        outbox = build(tmp_path / "outbox.db", records=records)
+        await outbox.offer(subject)
+        await outbox.withdraw(record_id)
+
+        assert await outbox.withdraw(record_id) is False

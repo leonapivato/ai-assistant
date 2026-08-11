@@ -19,7 +19,11 @@ from typing import TYPE_CHECKING
 import pytest
 from test_engine import AT, Harness, _grant_operations
 
-from ai_assistant.core.errors import ConfigurationError, NotificationBudgetError
+from ai_assistant.core.errors import (
+    ConfigurationError,
+    NotificationBudgetError,
+    NotificationOutboxError,
+)
 from ai_assistant.core.types import (
     ClassReach,
     DataTier,
@@ -91,6 +95,7 @@ class RecordingOutbox:
         self.calls: list[str] = []
         self.reconciled = 0
         self.withdrew = True
+        self.withdrawal_fails = False
 
     async def offer(self, candidate: NotificationCandidate) -> NotificationEnqueue:
         """Record that a candidate was handed off (ADR-0131 §3b)."""
@@ -114,6 +119,9 @@ class RecordingOutbox:
     async def withdraw(self, record_id: str) -> bool:
         """Record that a withdrawal reached the outbox (ADR-0131 §3a)."""
         self.calls.append(f"withdraw:{record_id}")
+        if self.withdrawal_fails:
+            msg = "the outbox could not begin the withdrawal"
+            raise NotificationOutboxError(msg)
         return self.withdrew
 
     async def wait_for_arrival(
@@ -541,3 +549,97 @@ class TestReconsiderationHandsOffAtOnce:
         await engine.reconsider_notifications()
 
         assert not [call for call in outbox.calls if call.startswith("offer:")]
+
+
+class TestADisposalWithdrawsBeforeItCommits:
+    """ADR-0131 §3, §3a: the ordering, and what each failure leaves behind."""
+
+    async def test_dismissal_withdraws_before_the_record_is_dismissed(self) -> None:
+        """The withdrawal performs the dismissal, so nothing can land between them.
+
+        Dismissing first and withdrawing afterwards committed the record's
+        dismissal and only then reached the outbox — so a withdrawal that failed
+        left a non-actionable record beside an unmarked, still selectable entry,
+        and the next poll delivered a notification the owner had dismissed.
+        """
+        outbox = RecordingOutbox()
+        store = FakeNotificationStore()
+        engine = _wired(
+            Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
+        )
+
+        assert await engine.dismiss_notification("a-record") is True
+
+        assert outbox.calls == ["withdraw:a-record"]
+
+    async def test_a_failing_withdrawal_dismisses_nothing(self) -> None:
+        """§3a: the record is not reported dismissed when the outbox refused.
+
+        The engine declares ``NotificationOutboxError`` on this method for exactly
+        this path (ADR-0085 §9), and the store is never asked — so a retry is safe
+        and nothing is half-done.
+        """
+        outbox = RecordingOutbox()
+        outbox.withdrawal_fails = True
+        store = FakeNotificationStore()
+        engine = _wired(
+            Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
+        )
+
+        with pytest.raises(NotificationOutboxError):
+            await engine.dismiss_notification("a-record")
+
+    async def test_a_record_with_no_entry_falls_through_to_the_store(self) -> None:
+        """The ordinary case: never offered, so there is nothing to withdraw."""
+        outbox = RecordingOutbox()
+        outbox.withdrew = False
+        store = FakeNotificationStore()
+        engine = _wired(
+            Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
+        )
+
+        assert await engine.dismiss_notification("never-offered") is False
+
+        assert outbox.calls == ["withdraw:never-offered"]
+
+    async def test_a_failing_withdrawal_destroys_nothing(self) -> None:
+        """§3a: "No lane may delete a record whose entry it has not already
+        withdrawn." """
+        outbox = RecordingOutbox()
+        outbox.withdrawal_fails = True
+        store = FakeNotificationStore()
+        engine = _wired(
+            Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
+        )
+
+        with pytest.raises(NotificationOutboxError):
+            await engine.forget_notification("a-record")
+
+
+class TestTheFakeEngineDisposesLikeTheRealOne:
+    """The canonical fake may not deliver what it has dismissed or deleted."""
+
+    async def test_the_fake_does_not_deliver_a_dismissed_notification(self) -> None:
+        """A fake that updated only the record store would certify consumers
+        against a contract the shipped engine does not have."""
+        engine = FakeAssistantEngine()
+        subject = _candidate().model_copy(update={"expires_at": NOW + timedelta(hours=2)})
+        ruled = await engine.notification_store.admit(subject, policy=FakeNotificationPolicy())
+        assert ruled.notification_id is not None
+        await engine.notification_outbox.offer(subject)
+
+        await engine.dismiss_notification(ruled.notification_id)
+
+        assert await engine.next_notification(budget=timedelta(0)) is None
+
+    async def test_the_fake_does_not_deliver_a_forgotten_notification(self) -> None:
+        """The same for the delete right (ADR-0004 §6, ADR-0131 §3a)."""
+        engine = FakeAssistantEngine()
+        subject = _candidate().model_copy(update={"expires_at": NOW + timedelta(hours=2)})
+        ruled = await engine.notification_store.admit(subject, policy=FakeNotificationPolicy())
+        assert ruled.notification_id is not None
+        await engine.notification_outbox.offer(subject)
+
+        await engine.forget_notification(ruled.notification_id)
+
+        assert await engine.next_notification(budget=timedelta(0)) is None
