@@ -721,6 +721,44 @@ async def _dispatch_poll(
         ProtocolError: If the peer wrote a frame while the poll was outstanding.
     """
     dispatch = asyncio.ensure_future(_dispatch(engine, frame, limit=limit))
+    try:
+        return await _await_poll(dispatch, watcher)
+    finally:
+        # **Every exit, including a cancellation from outside.** ``asyncio.wait``
+        # cancels nothing it waits on, so a ``serve_connection`` task cancelled here
+        # — which is what shutdown does — unwound past both and left the dispatch
+        # running: the slot was released and the socket closed while an orphaned
+        # ``next_notification`` could still claim and lease for a connection that no
+        # longer existed. ADR-0131 §2a ends a poll on *any* close and takes no entry.
+        # The non-poll branch of `_serve_requests` has had this shape all along; this
+        # is the same guarantee on the branch that owns a second task.
+        #
+        # Reaching here with either still pending means an abnormal unwind — the
+        # ordinary paths below have already settled both — so whatever they raise on
+        # the way out is dropped rather than allowed to mask the original.
+        for task in (dispatch, watcher):
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+
+
+async def _await_poll(
+    dispatch: asyncio.Future[env.Envelope],
+    watcher: asyncio.Future[env.Envelope],
+) -> env.Envelope | None:
+    """Wait out one poll, returning its reply or ``None`` where the connection went.
+
+    Args:
+        dispatch: The engine call this poll is running.
+        watcher: The read that notices the peer writing or hanging up.
+
+    Returns:
+        The reply to write, or ``None`` where the connection went away.
+
+    Raises:
+        ProtocolError: If the peer wrote a frame while the poll was outstanding.
+    """
     await asyncio.wait({dispatch, watcher}, return_when=asyncio.FIRST_COMPLETED)
     if not dispatch.done():
         # The watcher settled first, so the peer either hung up or wrote a frame.
