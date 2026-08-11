@@ -407,6 +407,36 @@ async def test_an_unusable_clock_is_reported_as_this_stores_error(tmp_path: Path
         store.close()
 
 
+async def test_a_bad_clock_reaching_a_ruling_rolls_back_and_leaves_the_store_usable(
+    tmp_path: Path,
+) -> None:
+    """The ruling instant is read **inside** the exclusion, so its fault is too.
+
+    Every comparison ADR-0130 §5 makes is against that instant, so it is read
+    after the write lock is taken rather than before the call queued — otherwise a
+    candidate that perished while waiting could still be ruled perishable and
+    spend a unit of budget on an opportunity that had already gone.
+
+    Reading it there puts a clock fault *inside* an open transaction, which is
+    what this pins: a transaction left open on a shared connection is a resource
+    held with nothing running that will release it, and the next ``BEGIN`` would
+    fail with "cannot start a transaction within a transaction" for every later
+    caller. The second admission succeeding is the observable that it rolled back.
+    """
+    readings = [NOW.replace(tzinfo=None), NOW, NOW]
+    store = SqliteNotificationStore(path=tmp_path / "n.db", now=lambda: readings.pop(0))
+    try:
+        with pytest.raises(NotificationStoreError):
+            await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+
+        recovered = await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+
+        assert recovered.notification_id is not None
+        assert len(await store.export()) == 1
+    finally:
+        store.close()
+
+
 async def test_an_id_source_returning_a_present_id_raises_and_commits_nothing(
     tmp_path: Path,
 ) -> None:
