@@ -1337,10 +1337,24 @@ what it meant. The harm is bounded to one entry and the acknowledgement is
 idempotent, and the general question — what a restore does to state a peer is
 holding — is ADR-0123's and is not reopened here.
 
-> **Normative.** `NotificationCandidate`'s canonical encoding is bounded by ADR-0085
-> §8's contract limit **less a 256-byte delivery reserve**. ADR-0130 states that
-> bound as a constraint on its own type; a notification exceeding it never reaches
-> the outbox.
+> **Normative.** **This ADR imposes a new bound on `NotificationCandidate`**, which
+> ADR-0130 does not carry: its canonical encoding is bounded by ADR-0085 §8's
+> contract limit **less a 256-byte delivery reserve**. A candidate exceeding it is
+> refused at validation and never reaches the outbox.
+
+> **Normative.** The implementing lane adds that bound to `NotificationCandidate`'s
+> own validation and to the conformance coverage ADR-0130 §9 establishes for it, so
+> the type and its suite carry the constraint rather than the delivery path checking
+> it late. §9 records the partial supersession this creates.
+
+**Saying whose bound it is matters, and a draft got it backwards.** That draft read
+"ADR-0130 states that bound as a constraint on its own type", which architecture
+review checked on the fifty-second round and found false: ADR-0130 §2 defines the
+type's fields and validators and says nothing about payload size, and its conformance
+requirements carry no such rule. Presenting a *new* rejection condition as an existing
+obligation of another ADR is worse than adding one openly — it leaves the ratified
+type and its triad quietly inconsistent with this seam, and it puts the correction on
+whoever next reads both. So the clause now says plainly that this ADR is the source.
 
 **The reserve exists because what ADR-0085 §8 measures is the result, and the
 result is the wrapper.** A `NotificationCandidate` sized at exactly the contract
@@ -1957,6 +1971,26 @@ rules, the correlation id and its unspent reserve, the frame ceiling and the ver
 freeze. ADR-0084's Status line and a dated header note carry the record in this
 change, on the same reasoning as ADR-0124's above; not one word of its Decision text is
 edited.
+
+**ADR-0130 §2's validation rules for `NotificationCandidate` are partially
+superseded**, in one scope: §4 above adds a bound on the type's canonical encoding
+that ADR-0130 does not carry. A reader holding only ADR-0130 builds the type — and its
+conformance suite — accepting candidates this ADR refuses, which is ADR-0070 §1's
+first limb. It is **partial** and the scope is narrow: every field §2 names, the
+reference-not-content rule, the producer-chosen sensitivity, the `DataTier.SECRET`
+refusal and the already-perished refusal are untouched and stay accepted, as is the
+whole of §3's chassis and §9's surface list. ADR-0130's Status line and a dated header
+note carry the record in this change, on the same ADR-0082 §7 reasoning as the two
+above; not one word of its Decision text is edited.
+
+**Why a supersession rather than a stacked addition, since ADR-0130 was silent on
+size.** Silence is what made §7's agent-authentication clause a stacked addition
+above: a reader of ADR-0124 §4 was led to act *incompletely*, never contrary. Here a
+reader of ADR-0130 §2 builds a validator that **accepts values this ADR refuses**, so
+the type admits a different set after this decision than before it. That is a change
+to what was decided rather than an addition beside it, and ADR-0070 §1 puts it on the
+supersession side. Architecture review's fifty-second round is what surfaced it, by
+checking a sentence that claimed ADR-0130 already carried the bound.
 
 **No record is owed on ADR-0124 §1, and that is the substantive finding rather
 than a formality.** §1's accountability bullet — "There is no path by which either
