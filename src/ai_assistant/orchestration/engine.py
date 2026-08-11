@@ -187,6 +187,30 @@ _log = structlog.get_logger(__name__)
 
 _T = TypeVar("_T")
 
+#: The furthest instant a ``datetime`` can name, on the hub's own timezone.
+_END_OF_TIME: Final = datetime.max.replace(tzinfo=UTC)
+
+
+def _saturating(now: datetime, span: timedelta) -> datetime:
+    """``now + span``, held at the last representable instant instead of overflowing.
+
+    ADR-0131 §5a bounds the delivery durations below and not above, and §4 honours
+    every budget inside the configured range — so a range whose far end the clock
+    cannot add to is honoured to the end of representable time rather than refused.
+
+    Args:
+        now: The hub's reading.
+        span: How far past it to reach.
+
+    Returns:
+        The instant, or :data:`_END_OF_TIME`.
+    """
+    try:
+        return now + span
+    except OverflowError:
+        return _END_OF_TIME
+
+
 #: Default ceiling on unanswered parked confirmations held in memory (see
 #: :class:`Engine`). Generous enough that a real interactive session never reaches
 #: it, low enough that an abandoning client cannot exhaust memory.
@@ -2952,16 +2976,9 @@ class Engine:
         poll's length is fixed at its start rather than recomputed against a clock
         that may move under it.
 
-        **And before the acknowledgement is applied, because computing it can still
-        refuse.** ADR-0131 §4 is unconditional that a refused request "retires
-        nothing, leases nothing and mints nothing", and an acknowledgement is a
-        retirement that cannot be taken back: the entry is gone, and the device is
-        told by the same call that its poll failed. Round 11's fix for the
-        unrepresentable deadline put that refusal *after* the acknowledgement and so
-        reintroduced the very ordering the range check next door exists to keep —
-        adversarial review found it on the twelfth round. Computing it first also
-        makes "fixed at its start" literally true, the acknowledgement now falling
-        inside the budget rather than ahead of it.
+        **And before the acknowledgement is applied**, which ADR-0131 §4 requires of
+        anything that can still refuse and which also makes "fixed at its start"
+        literally true, the acknowledgement falling inside the budget.
 
         **This runs unshielded, and each mutating step is shielded on its own**
         (ADR-0131 §2a). A poll spends most of its life parked in
@@ -2973,30 +2990,8 @@ class Engine:
         the split §2a draws: a close before the selection takes no entry, a close
         during or after it leaves the lease standing.
 
-        Raises:
-            NotificationBudgetError: If the deadline is not representable, which is
-                the budget being unusable rather than merely large.
         """
-        try:
-            deadline = self._now() + budget
-        except OverflowError as exc:
-            # **A budget the clock cannot add is a budget refusal, not a crash.**
-            # `hub_max_notification_budget` is bounded below and not above (§5a
-            # states the figure and its range, and a ceiling it does not state is
-            # not this lane's to invent), so an operator may configure one near
-            # `timedelta.max`; a client then asking for exactly the ceiling reaches
-            # this addition and `datetime` raises a raw `OverflowError`. The wire
-            # dispatcher maps this project's error types and nothing else, so the
-            # raw one would drop a *valid* request's connection instead of answering
-            # it. This is the same fact the range check next door reports —  the
-            # budget cannot be honoured — so it is reported the same way.
-            # Adversarial review found it on the eleventh round.
-            msg = (
-                f"budget {budget} cannot be honoured: added to the hub's clock it leaves "
-                f"the range a datetime can represent, so no deadline exists for this poll "
-                f"(ADR-0131 §4)"
-            )
-            raise NotificationBudgetError(msg) from exc
+        deadline = _saturating(self._now(), budget)
         if acknowledging is not None:
             # Mutating and *pre-selection*, so it takes the same scoped shield the
             # claim does: a cancel arriving mid-retirement would leave the entry
