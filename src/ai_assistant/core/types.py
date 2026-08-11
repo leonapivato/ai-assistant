@@ -5302,26 +5302,46 @@ class PermissionDecision(BaseModel):
 
 
 class GrantScope(StrEnum):
-    """A use of a source that a grant authorises (ADR-0097 §2).
+    """A use of a source that a grant authorises (ADR-0097 §2, ADR-0133 §1).
 
-    Exactly two members, and neither is speculative. The axis is ADR-0093 §3's,
-    promoted to something the user can answer: a reading has "two legitimate
-    consumers … at their own cadence", and they differ in the one way a user
-    would care about. ``FACET`` is transient, advisory and never stored (ADR-0008
-    §4, ADR-0096 §4); ``INGEST`` writes durable beliefs that outlive the turn and
-    reach ``export``. "You may look at my calendar to answer what I am asking now,
-    but do not remember it" is a coherent sentence, it is one a person actually
-    means, and it is the only scope distinction the ratified surfaces can honour
-    today.
+    **Three members, and none is speculative.** The axis is ADR-0093 §3's,
+    promoted to something the user can answer — one scope per consumer of a
+    reading — and each member is a sentence a person actually means. ``FACET`` is
+    transient, advisory and never stored (ADR-0008 §4, ADR-0096 §4); ``INGEST``
+    writes durable beliefs that outlive the turn and reach ``export``; ``NOTIFY``
+    is reading the source so that a producer may conclude a
+    :class:`NotificationCandidate` about what it read (ADR-0133 §1), which for a
+    kept candidate is a durable, exportable record proposing to tell the user
+    something they did not ask for (ADR-0130 §1, §7, §8).
+
+    **ADR-0133 partially supersedes ADR-0097 §2 — its enumeration of the uses,
+    and nothing else of it.** This docstring used to say "exactly two members",
+    justifying the pair as "the only scope distinction the ratified surfaces can
+    honour today"; a notification surface exists now, so that rationale's own
+    condition has fired. Everything §2 keeps governs every member alike: a use a
+    grant does not name is not authorised by it, a scope is non-empty, and a
+    revocation revokes a grant whole.
+
+    **No member implies, ranks or subsumes another** (ADR-0133 §2). A scope names
+    any non-empty subset of the three and authorises exactly the uses it names;
+    nothing may infer one from another. ``NOTIFY`` in particular authorises a
+    **read** and no contact, disposition, delivery or channel — it names the use
+    a reading is put to, exactly as ``INGEST`` authorises *proposing* beliefs
+    that a memory policy may still reject. A source grant is not an action
+    authorisation (ADR-0097 §7), and a third member does not make it one.
 
     **Not ordered**, and that is a decision rather than an omission (ADR-0097
     §10). :class:`PermissionOutcome` is a :class:`_SeverityScale` because outcomes
-    are *ranked* by severity and that scale combines them; two uses of a source
-    are not comparable, and an order would invite a ``max()`` that means nothing.
-    So this is a plain ``StrEnum``, :class:`DataTier`'s shape. Where a canonical
-    order over the members is needed — :attr:`SourceGrant.scope`, so two
-    implementations serialise one grant identically — it is **declaration**
-    order, read off the declaration rather than off the member values.
+    are *ranked* by severity and that scale combines them; uses of a source are
+    not comparable, and an order would invite a ``max()`` that means nothing —
+    which ADR-0133 §2 holds at three, since "a third use is not more comparable
+    than the second was". So this is a plain ``StrEnum``, :class:`DataTier`'s
+    shape. Where a canonical order over the members is needed —
+    :attr:`SourceGrant.scope`, so two implementations serialise one grant
+    identically — it is **declaration** order, read off the declaration rather
+    than off the member values. That order is a serialisation convention and
+    **not a rank**: nothing may read a precedence, a severity or an authority
+    relation off it (ADR-0133 §2).
 
     **Content-level scope is deliberately absent** — which entries, which fields,
     which of several calendars. Nothing today can express a sub-source selector:
@@ -5329,11 +5349,13 @@ class GrantScope(StrEnum):
     gives the calendar facet three scalars. A member enumerating entry kinds would
     be a schema with no reader on either side of it, so ADR-0097 §12 defers it
     with the condition that fires it, to land as an optional field under ADR-0008
-    §1's additive pattern.
+    §1's additive pattern. ADR-0133 §7 leaves that deferral unnarrowed: a third
+    *use* is not a step toward a sub-source selector.
     """
 
     FACET = "facet"
     INGEST = "ingest"
+    NOTIFY = "notify"
 
 
 #: Grant scopes ranked by declaration, for the reason ``_TIER_ORDER`` exists on
