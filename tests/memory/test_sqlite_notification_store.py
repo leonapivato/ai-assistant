@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import stat
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -44,6 +45,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory.notification_policy import DefaultNotificationPolicy
 from ai_assistant.memory.notification_store import SqliteNotificationStore
+from ai_assistant.testing.cancellation import ThreadSuspension
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -535,6 +537,60 @@ async def test_a_policy_that_raises_leaves_the_store_untouched(tmp_path: Path) -
             await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
         ).notification_id is not None
     finally:
+        store.close()
+
+
+async def test_a_cancellation_landing_on_the_begin_leaves_no_transaction_open(
+    tmp_path: Path,
+) -> None:
+    """ADR-0060's resource clause, at the one hop that can lose the connection.
+
+    ``_run_to_completion`` re-raises a cancellation only once the worker has
+    **physically finished** — that is the whole point of it, because a thread
+    cannot be interrupted and releasing the lock under a running worker would let
+    a second caller onto the same connection. The consequence is that a
+    cancellation landing on the acquiring hop leaves ``BEGIN IMMEDIATE`` genuinely
+    executed and *then* raises. Acquired above the ``try``, that raise leaves the
+    context manager's entry without ever running its cleanup: no rollback, the
+    lock released, and the connection still in a transaction — after which every
+    later caller fails with "cannot start a transaction within a transaction" and
+    the store is poisoned for the life of the process.
+
+    This is the case the sibling SQLite stores are structurally immune to, since
+    their whole transaction runs inside one worker hop. This store's spans three,
+    with the policy's ruling between them (ADR-0130 §3), so it has to close the
+    window itself — and the second admission succeeding is the observable that it
+    does.
+    """
+    store = SqliteNotificationStore(path=tmp_path / "n.db", now=_fixed_now)
+    suspension = ThreadSuspension()
+    original = store._begin_sync
+    armed = threading.Event()
+
+    def blocking(what: str) -> None:
+        original(what)  # the transaction really opens before the cancel lands
+        if not armed.is_set():  # the first caller only; later ones run free
+            armed.set()
+            suspension.hold()
+
+    store._begin_sync = blocking  # type: ignore[method-assign]
+    try:
+        parked = asyncio.create_task(
+            store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+        )
+        await suspension.reached()
+        parked.cancel()
+        suspension.release()
+        with pytest.raises(asyncio.CancelledError):
+            await parked
+
+        assert store._conn.in_transaction is False
+        recovered = await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+
+        assert recovered.notification_id is not None
+        assert len(await store.export()) == 1
+    finally:
+        suspension.release()
         store.close()
 
 
