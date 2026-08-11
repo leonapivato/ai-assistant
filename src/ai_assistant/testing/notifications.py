@@ -1020,6 +1020,15 @@ class FakeNotificationOutbox:
     suite's concurrency cases would be vacuous against exactly the implementation
     they most need to hold for.
 
+    **Two clauses are deliberately not modelled, and both are recorded rather than
+    left to be discovered.** The **byte** bound: an in-memory fake persists nothing,
+    so it has no honest byte cost to count, and asserting one would be inventing a
+    number rather than keeping a contract. And §4's **delivery-counter exhaustion**
+    clause, which the durable outbox reaches at ``10**63`` deliveries: a fake that
+    invented a smaller ceiling would refuse deliveries a real deployment serves, and
+    the real one is unreachable by any test. Consumers that need either exercised
+    drive a durable outbox.
+
     **It defaults to ADR-0131 §5a's own figures**, not to whatever was convenient:
     a 120-second lease and 256 entries. A fake looser than the contract would
     certify consumers a real outbox rejects. The byte bound is deliberately *not*
@@ -1100,7 +1109,39 @@ class FakeNotificationOutbox:
         """
         if record_id is None or self._records is None:
             return False
-        return await self._records.dismiss(record_id)
+        try:
+            return await self._records.dismiss(record_id)
+        except Exception as exc:  # re-raised as this seam's declared failure (ADR-0131 §3b)
+            # **The translation belongs here and not at each call site**, which is
+            # how the durable outbox does it. Two of the three callers used to let
+            # the record store's own `NotificationStoreError` straight through, and
+            # `NotificationOutbox` declares `NotificationOutboxError` as its
+            # store-failure surface — so a consumer testing against this fake caught
+            # a different exception type from the one the shipped hub raises.
+            msg = f"failed to dismiss the notification record an outbox entry carried: {exc}"
+            raise NotificationOutboxError(msg) from exc
+
+    async def _settle_departing(self) -> None:
+        """Finish every departure a previous call left half-done (ADR-0131 §3b).
+
+        **Dismisses before it removes**, which is what keeps §3b's invariant true
+        whichever point a previous attempt died at: an entry whose record is still
+        actionable has it dismissed here and is then removed, and one whose record
+        was already dismissed simply has the removal completed. A dismissal that
+        fails again leaves the entry marked and removes nothing, so the next settle
+        retries it rather than losing the record.
+
+        The caller holds the lock.
+        """
+        now = self._now()
+        for entry in list(self._entries.values()):
+            if not self._is_departing(entry, now):
+                continue
+            try:
+                await self._dismiss(entry.record_id)
+            except NotificationOutboxError:
+                continue
+            self._entries.pop(entry.candidate.candidate_key, None)
 
     async def _all_records(self) -> list[HeldNotification]:
         """Every record the store retains, walked a page at a time.
@@ -1120,7 +1161,16 @@ class FakeNotificationOutbox:
         gathered: list[HeldNotification] = []
         offset = 0
         while True:
-            page = await self._records.held(limit=_RECORD_PAGE, offset=offset)
+            try:
+                page = await self._records.held(limit=_RECORD_PAGE, offset=offset)
+            except Exception as exc:  # re-raised as this seam's declared failure (§3b)
+                # Reached from `_resolve`, so **every** `offer` can arrive here, and
+                # from `reconcile` directly. Both Protocols declare
+                # `NotificationOutboxError` for a store fault and nothing else.
+                msg = (
+                    f"failed to read the notification records the outbox reconciles against: {exc}"
+                )
+                raise NotificationOutboxError(msg) from exc
             gathered.extend(page)
             if len(page) < _RECORD_PAGE:
                 return gathered
@@ -1164,46 +1214,106 @@ class FakeNotificationOutbox:
         """
         async with self._lock:
             await asyncio.sleep(0)  # a real critical section suspends; see the class docstring
-            record_id = await self._resolve(candidate.candidate_key)
-            if reconciled and record_id is None:
-                # The record this repair was reading has ceased to be actionable
-                # since the snapshot — dismissed, deleted or expired. There is
-                # nothing to re-offer, and `ALREADY_HELD` is the outcome that means
-                # "no entry was made and none was owed".
+            # At the head of every offer, as the durable outbox does it: a departure
+            # a previous call left half-done is finished here rather than only at the
+            # next reconciliation, so the repair is routine rather than restart-only
+            # and a deferred eviction cannot pin the bounds indefinitely. It is a
+            # store-wide sweep, so an offer under one key also clears departures
+            # under others and frees the bounds they were still counting toward.
+            await self._settle_departing()
+            outcome = await self._attempt(candidate, reconciled=reconciled)
+            if outcome is None:
+                # **One retry, after the departure has been finished dismissal-first**
+                # — the durable outbox's own bounded shape. A second decline means
+                # another writer is re-opening departures under this key as fast as
+                # they are cleared, and looping on that would spin rather than answer.
+                await self._settle_departing()
+                outcome = await self._attempt(candidate, reconciled=reconciled)
+            if outcome is None:
+                msg = (
+                    "the outbox key this offer needs is held by an entry whose departure "
+                    "another writer keeps re-opening, so no custody transferred"
+                )
+                raise NotificationOutboxError(msg)
+            return outcome
+
+    async def _attempt(
+        self, candidate: NotificationCandidate, *, reconciled: bool
+    ) -> NotificationEnqueue | None:
+        """One enqueue attempt, or ``None`` where the key is held by a departure.
+
+        **Declining is not the same as evicting**, and that distinction is ADR-0131
+        §3b's. A departing row's record may not yet have been dismissed — the
+        dismissal is exactly what can have failed — so overwriting it would remove an
+        entry whose record nobody disposed of, breaking the invariant reconciliation
+        rests on ("entry absent implies record dismissed") and losing the
+        notification until a restart. So this hands the decision back and the caller
+        finishes the departure through the dismiss-first path first.
+
+        The caller holds the lock and has already settled once.
+        """
+        record_id = await self._resolve(candidate.candidate_key)
+        if reconciled and record_id is None:
+            # The record this repair was reading has ceased to be actionable
+            # since the snapshot — dismissed, deleted or expired. There is
+            # nothing to re-offer, and `ALREADY_HELD` is the outcome that means
+            # "no entry was made and none was owed".
+            return NotificationEnqueue.ALREADY_HELD
+        now = self._now()
+        if (
+            self._candidate_ceiling is not None
+            and len(candidate.model_dump_json().encode("utf-8")) > self._candidate_ceiling
+        ):
+            # A terminal refusal is terminal for the *record* too (ADR-0131
+            # §3b): left actionable it is an incomplete handoff, and every
+            # reconciliation would re-offer the same undeliverable candidate.
+            await self._dismiss(record_id)
+            return NotificationEnqueue.TOO_LARGE
+        held = self._entries.get(candidate.candidate_key)
+        if held is not None and not self._is_departing(held, now):
+            if held.candidate == candidate:
                 return NotificationEnqueue.ALREADY_HELD
-            now = self._now()
-            if (
-                self._candidate_ceiling is not None
-                and len(candidate.model_dump_json().encode("utf-8")) > self._candidate_ceiling
-            ):
-                # A terminal refusal is terminal for the *record* too (ADR-0131
-                # §3b): left actionable it is an incomplete handoff, and every
-                # reconciliation would re-offer the same undeliverable candidate.
+            # Not where the record is the held entry's, which ADR-0130 §8's
+            # duplicate suppression makes the ordinary case: dismissing it
+            # would make the held entry departing and contradict §3's "The
+            # held entry is not replaced", and that record has an entry
+            # anyway, so §3b's invariant is not the one at risk.
+            if record_id is not None and record_id != held.record_id:
                 await self._dismiss(record_id)
-                return NotificationEnqueue.TOO_LARGE
-            held = self._entries.get(candidate.candidate_key)
-            if held is not None and not self._is_departing(held, now):
-                if held.candidate == candidate:
-                    return NotificationEnqueue.ALREADY_HELD
-                # Not where the record is the held entry's, which ADR-0130 §8's
-                # duplicate suppression makes the ordinary case: dismissing it
-                # would make the held entry departing and contradict §3's "The
-                # held entry is not replaced", and that record has an entry
-                # anyway, so §3b's invariant is not the one at risk.
-                if record_id is not None and record_id != held.record_id:
-                    await self._dismiss(record_id)
-                return NotificationEnqueue.KEY_COLLISION
-            victims = self._victims(candidate.candidate_key, now)
-            for victim in victims:
-                victim.departing = True
-            for victim in victims:
+            return NotificationEnqueue.KEY_COLLISION
+        if held is not None:
+            # Held by a **departing** row, whose record may not yet be dismissed —
+            # the dismissal is precisely what can have failed. Overwriting it would
+            # remove an entry nobody disposed of, so this declines and the caller
+            # settles it dismissal-first instead.
+            return None
+        victims = self._victims(candidate.candidate_key, now)
+        for victim in victims:
+            victim.departing = True
+        # **The key is taken before a single victim is dismissed**, which is the
+        # durable outbox's own ordering and the whole of round 4's fix there:
+        # evicting first meant an offer that then failed had already dismissed
+        # and removed an unrelated entry, an outcome no serial order of two
+        # offers produces. The victims are already marked departing, so no poll
+        # can select one while the dismissals run.
+        self._entries[candidate.candidate_key] = _OutboxEntry(
+            candidate=candidate, record_id=record_id, sequence=next(self._sequence)
+        )
+        self._arrivals.set()
+        # **Custody has transferred, so nothing below may report that it did
+        # not.** ADR-0131 §4 rules this shape at the other end of an entry's
+        # life, and the durable outbox defers here for the same reason: raising
+        # would tell a producer it still owned a candidate this outbox will
+        # deliver, and its retry would come back `ALREADY_HELD`, contradicting
+        # the error it was just given. The victim stays marked departing — it is
+        # deliverable to nobody — and the next settle finishes it.
+        for victim in victims:
+            try:
                 await self._dismiss(victim.record_id)
-                self._entries.pop(victim.candidate.candidate_key, None)
-            self._entries[candidate.candidate_key] = _OutboxEntry(
-                candidate=candidate, record_id=record_id, sequence=next(self._sequence)
-            )
-            self._arrivals.set()
-            return NotificationEnqueue.ENQUEUED
+            except NotificationOutboxError:
+                continue
+            self._entries.pop(victim.candidate.candidate_key, None)
+        return NotificationEnqueue.ENQUEUED
 
     def _victims(self, incoming: str, now: datetime) -> list[_OutboxEntry]:
         """Which entries this enqueue drops, in ADR-0131 §3's order.
@@ -1303,10 +1413,13 @@ class FakeNotificationOutbox:
             entry.departing = True
             try:
                 await self._dismiss(entry.record_id)
-            except NotificationStoreError as exc:
+            except NotificationOutboxError:
+                # Nothing is removed when the dismissal fails, which is what keeps
+                # §3b's ordering true: an entry is never removed before its record's
+                # dismissal has committed. The mark is reversed so the entry stays
+                # selectable rather than becoming undeliverable for good.
                 entry.departing = False
-                msg = f"failed to dismiss the notification record an outbox entry carried: {exc}"
-                raise NotificationOutboxError(msg) from exc
+                raise
             self._entries.pop(entry.candidate.candidate_key, None)
 
     async def withdraw(self, record_id: str) -> bool:
