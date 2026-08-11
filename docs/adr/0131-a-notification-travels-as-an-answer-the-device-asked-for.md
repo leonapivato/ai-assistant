@@ -230,79 +230,73 @@ in-process engine has no connections and could never raise it, so the same decla
 contract would mean two different things depending on which side of the wire the
 caller stood.
 
-### 2a. A poll whose connection has gone releases everything it held
+### 2a. A poll whose connection has gone releases the slot it held
 
 > **Normative.** While a `next_notification` request is outstanding, the hub
-> detects its connection closing. On detecting it the poll ends without an answer,
-> the device's delivery slot is released, and no entry is taken from the outbox for
-> that poll. A poll whose connection has closed never leases an entry.
+> detects its connection closing. On detecting it the poll ends without an answer
+> and the device's delivery slot is released.
 
-**The existing server path does not provide this, and saying so is the point of the
-clause.** `_serve_requests` (`wire/server.py`) reads the next frame concurrently
-with the dispatch — which is how it catches an overlapping request — but it settles
-that watcher only *after* `_dispatch` returns. For every request the hub has ever
-served that ordering is correct and invisible, because the dispatch is short. A
-long poll is the first request for which it is not: the watcher observes the peer's
-clean close within milliseconds and nothing acts on it until the poll's budget has
-run out. Adversarial review found it on the eleventh round, and it is the one place
-this seam genuinely reaches into the server's request loop.
+> **Normative.** Selecting an entry, minting its `delivery_id` and starting its
+> lease are **one indivisible step** inside `next_notification`. There is no state
+> in which an entry is chosen for a poll and not yet leased, and nothing about the
+> lease depends on the transport.
 
-**Two things go wrong without the clause, and the second is the worse one.** The
-device's delivery slot stays held by a poll nobody is listening to, so the
-reconnect §2 calls free is closed as a second poll — the claim and the rule
-contradicting each other on the most ordinary failure a mobile device has. And an
-entry disposed during that window is leased to a dead connection, so the owner
-waits out a lease for a notification that was written to nothing. §3's lease
-already bounds that harm; this clause is what keeps it from being incurred on every
-dropped connection rather than only on a crashed client.
-
-> **Normative.** Taking an entry for a poll is **two transitions**. A
-> **reservation** makes the entry unavailable to any other poll and starts no
-> clock. The **write** of the result frame commits the reservation as a lease and
-> starts the lease's clock. An entry is never both reserved and leased.
-
-> **Normative.** A reservation is **process-local and never persisted**. A hub that
-> starts holds no reservations, and every entry the outbox holds is available.
-
-> **Normative.** A close detected before the write **releases the reservation**, and
-> the entry becomes available to another poll immediately. A close detected at or
-> after the write leaves the lease standing, and it expires under §3 like any other.
+> **Normative.** A close detected before that step runs cancels the poll and takes
+> no entry. A close detected after it leaves the lease standing, and the entry
+> returns to the outbox when the lease expires under §3.
 
 > **Normative.** A poll arriving from a device whose previous poll has ended but
 > whose slot has not yet been released is closed under §2, and the device may
 > reconnect. No lane may resolve that race by evicting a live poll.
 
-**The two transitions exist because §2a's rule and §3's rule are otherwise
-unsatisfiable together.** §3 needs an entry to become unavailable the moment a poll
-selects it, or two concurrent polls select the same entry and one of them writes a
-notification the other has already been promised. §2a needs a closed poll to leave
-nothing behind. Those pull in opposite directions across the window between
-selecting an entry and writing it, and an implementation given only the two rules
-either leases to a dead connection or strands an entry nothing will ever release —
-adversarial review's second finding on the twelfth round. Splitting the transition
-is what makes both rules true at once: the reservation is the exclusivity §3 needs
-and is cheap to undo, and the lease — the thing with a clock and a redelivery
-promise — begins only once the bytes have gone.
+**The existing server path does not detect the close, and saying so is the point of
+the first clause.** `_serve_requests` (`wire/server.py`) reads the next frame
+concurrently with the dispatch — which is how it catches an overlapping request —
+but it settles that watcher only *after* `_dispatch` returns. For every request the
+hub has ever served that ordering is correct and invisible, because the dispatch is
+short. A long poll is the first request for which it is not: the watcher observes
+the peer's clean close within milliseconds and nothing acts on it until the poll's
+budget has run out, so the device's slot stays held by a poll nobody is listening
+to, and the reconnect §2 calls free is closed as a second poll — the claim and the
+rule contradicting each other on the most ordinary failure a mobile device has.
+Adversarial review found it on the eleventh round, and this is the one place the
+seam genuinely reaches into the server's request loop.
 
-**A reservation is not persisted, and that is the same argument that voids leases on
-a restart, one step shorter.** A lease is meaningful only while the connection that
-took the delivery exists; a reservation is meaningful only while the *poll* holding
-it is still running, and a poll cannot outlive its process. Persisting one would
-therefore create a state with no holder, no clock and — since §3's restart rule
-voids leases and says nothing of reservations — no rule releasing it: an entry
-stranded and never delivered. Adversarial review found that on the thirteenth round,
-against the clause it had asked for on the twelfth. Process-local closes it without
-a recovery pass, because there is nothing to recover.
+**The lease begins inside the engine call and not at the write, and getting that
+backwards cost four rounds.** A draft made the lease commit at the result frame's
+write, on the appealing reasoning that the write is where the hub commits to a
+device having been told. It is not implementable behind this Protocol.
+`_serve_requests` awaits `_dispatch`, builds the result envelope from the
+`NotificationDelivery` the engine returned, settles the overlap watcher, rechecks
+revocation and only *then* calls `write_frame` — so the identifier and everything
+in the result exist before the write is known to happen. Honouring a write-time
+commit would take a prepare/commit/abort boundary the promoted surface does not
+have, and an in-process caller has no write at all, so the same `AssistantEngine`
+would mean two different things on the two sides of the wire — the substitutability
+ADR-0084 §5 promoted the façade for. Adversarial review found it on the
+seventeenth round.
 
-**Close wins before the write and loses after it, which is the only ordering that
-composes with ADR-0124 §8.** That section already puts `_check_live` immediately
-before the write for the same structural reason, and this clause hangs the lease
-transition on the same instant: the write is where the hub commits to a device
-having been told. Before it, nothing has been promised and the entry is simply
-available again. After it, the bytes may or may not have arrived, which is precisely
-the uncertainty the lease and §3's at-least-once guarantee exist to carry.
+**What that costs is one lease, and it is the cost the lease exists to carry.** An
+entry selected just as the connection dies is leased to a device that never receives
+it, and comes back when the lease expires rather than immediately. That is precisely
+the at-least-once case §3 already describes — a device that receives a notification
+and dies before acknowledging — reached one step earlier, and `hub_notification_lease`
+is the figure that bounds it. The clause the earlier draft was reaching for is worth
+having and this one keeps it: the *slot* is released on the close, which was the
+eleventh round's actual complaint.
 
-**The residual race is stated rather than engineered away.** Detection is
+**Indivisible selection is what a two-transition split was doing badly.** An earlier
+draft separated a *reservation* from the lease, so that a closed poll could leave
+nothing behind. It bought one property and owed three clauses for it: the twelfth
+round asked what ordered a close against the commit, the thirteenth found that
+eviction could drop a reserved entry and that a persisted reservation survived a
+restart with no rule releasing it, and the fourteenth found that classifying an entry
+and dropping it could straddle the commit. Every one of those was a consequence of
+the split rather than of the problem. Collapsing it removes all four questions at
+once: with selection and leasing indivisible, an entry is available or leased and
+there is no third state for eviction, a restart or a race to have an opinion about.
+
+**The residual race is stated rather than engineered away.** Close detection is
 asynchronous, so a device fast enough to reconnect inside it meets a slot that is
 about to be free. Closing and letting it retry is correct and costs a stateless
 client one reconnect; the alternative — letting a new poll displace the incumbent —
@@ -409,13 +403,13 @@ the owner actually at", which is a context question about a device, and ADR-0124
 input (#920). §8 records the deferral rather than leaving the crudeness to be read
 as a considered view of where people are.
 
-> **Normative.** A delivery is **leased**. An outbox entry written to a device is
-> unavailable to any other device until the device acknowledges it or the lease
+> **Normative.** A delivery is **leased**. An outbox entry taken for a poll is
+> unavailable to any other poll until the device acknowledges it or the lease
 > expires, and on expiry it returns to the outbox and may be delivered again.
 
-> **Normative.** The lease runs for `hub_notification_lease` (§5a). It starts at
-> the instant the hub writes the delivery, measured on the hub's clock, and no
-> value a device sends influences it.
+> **Normative.** The lease runs for `hub_notification_lease` (§5a). It starts in the
+> indivisible step §2a fixes, measured on the hub's clock, and no value a device
+> sends influences it.
 
 > **Normative.** A hub restart voids every lease. An entry leased when the hub
 > stopped is available again when it starts, and no lease survives the process that
@@ -485,18 +479,10 @@ deliberately given up, and gives the reason there.
 > current outstanding delivery where it has one.
 
 > **Normative.** When an enqueue would exceed either bound, the hub drops entries
-> **until both bounds hold with the new entry counted**. Each drop takes the oldest
-> entry of the first non-empty class in this order: neither reserved nor leased,
-> then leased, then reserved. Dropping a leased entry breaks its lease; dropping a
-> reserved entry cancels the poll holding it, which then answers as though the
-> outbox held nothing for it. Every drop is recorded in the hub's log naming the
-> entry, and the enqueue then proceeds.
-
-> **Normative.** Observing an entry's class and dropping it are **one step with
-> respect to the reservation-to-lease transition**. Where eviction selects a
-> reserved entry it cancels the poll holding it and does not remove the entry until
-> that cancellation has taken effect; a poll that reached its write first has
-> produced a lease, and the entry is then handled under the leased rule instead.
+> **until both bounds hold with the new entry counted** — each drop taking the
+> oldest entry that is not leased, or, when every remaining entry is leased, the
+> oldest entry, breaking its lease. Every drop is recorded in the hub's log naming
+> the entry, and the enqueue then proceeds.
 
 > **Normative.** An entry whose own byte cost exceeds `hub_notification_outbox_bytes`
 > is refused at the enqueue, and the refusal is the enqueue's reported outcome. It is
@@ -515,37 +501,15 @@ the one a partial rule leaves undefined.** "Drop the oldest undelivered entry" h
 no subject when every entry is leased, and an implementation reaching that state has
 two illegal moves available — retain the new entry over the bound, or drop a leased
 one against the rule — with nothing to choose between them. So the leased case is
-named — and so, since the thirteenth round, is the reserved one. An earlier draft
-said "the oldest entry that is not leased", and a reservation is not a lease: the
-rule therefore selected an entry a poll was about to write, and that poll would then
-deliver a notification whose outbox record had been dropped, leaving nothing to
-acknowledge and nothing to redeliver. Adversarial review exhibited it.
+named: leases are preferred *last*, and the tie-break is the same age order.
 
-**The three classes are ordered by what dropping one forfeits, which is why leased
-comes before reserved and not after.** Dropping an entry that is neither reserved
-nor leased forfeits a notification nobody has seen and nobody is mid-way through
-sending — the cheapest thing available. Dropping a *leased* entry forfeits only the
-redelivery, because the notification has already been written to a device and in the
-ordinary case is on a screen. Dropping a *reserved* entry forfeits the notification
-outright, and does so while a poll is actively trying to send it — so it is last,
-and it takes the poll down with it rather than leaving that poll to write a delivery
-for a record that no longer exists.
-
-**Classifying an entry and dropping it have to be one step, and the fourteenth round
-is why the clause says so.** A three-class order fixes *which* entry is chosen and
-says nothing about the interval between choosing it and removing it — during which a
-reserved entry's poll can reach its write and commit a lease. Eviction acting on its
-earlier observation then deletes a record whose notification has just been sent: the
-device holds a delivery it can neither acknowledge nor have redelivered, which is the
-exact failure the three-class order was added to prevent, reintroduced by the race
-rather than by the rule. **This is ADR-0124 §8's instrument applied to a second
-subject.** That section required a liveness check and the write it authorises to be
-"one step with respect to a revocation", for the same reason and against the same
-shape of window; here the window is between a class observation and a removal, and
-it is closed the same way. The clause admits both discharges — cancel and join, or
-re-observe and fall through to the leased rule — because they are the same guarantee
-reached from the two sides of the race, and choosing between them is an
-implementation's business rather than this ADR's.
+**Two classes and not three, and §2a is why the third one is gone.** Drafts between
+the twelfth and sixteenth rounds carried a *reservation* — an entry chosen for a
+poll but not yet leased — and eviction then needed a third class, an ordering
+against the reservation-to-lease commit, and a restart rule of its own, each found
+by a separate round. §2a now makes selecting an entry and leasing it one indivisible
+step, so no such state exists: an entry is available or it is leased, and eviction
+has exactly two classes to order.
 
 **It drops until the bounds hold, not once, and the difference is not pedantry.**
 One drop is enough for the count bound, where every entry costs exactly one — but
@@ -630,34 +594,44 @@ already been discarded. Forbidding extras makes the frame refuse at validation
 instead. Adversarial review found it on the fifth round, with the mechanism read off
 the tree rather than assumed.
 
-> **Normative.** `delivery_id` is minted **at each write**, and is the value
-> `acknowledging` names. A redelivery of the same entry carries a new one, and
-> minting it makes the previous one no longer that entry's current outstanding
-> delivery (§3). It is a **strictly increasing counter held durably with the
-> outbox**, rendered as a decimal string, joined by `.` to a **128-bit value from a
-> cryptographically secure source**, rendered as lowercase hex. Its UTF-8 encoding
-> is at most 96 bytes.
+> **Normative.** `delivery_id` is minted **once per delivery**, in the indivisible
+> step §2a fixes, and is the value `acknowledging` names. A redelivery of the same
+> entry carries a new one, and minting it makes the previous one no longer that
+> entry's current outstanding delivery (§3). It is a **strictly increasing counter
+> held durably with the outbox**, rendered as a decimal string, joined by `.` to a
+> **128-bit value from a cryptographically secure source**, rendered as lowercase
+> hex. Its UTF-8 encoding is at most 96 bytes.
 
 > **Normative.** A `delivery_id` is unique over the outbox's whole life and is never
-> reused, for any entry. The counter advances at each write and never goes
+> reused, for any entry. The counter advances once per delivery and never goes
 > backwards, a restart included.
 
-> **Normative.** A write that would advance the counter beyond what the identifier's
-> 96-byte bound leaves room to render does not happen: the poll answers as though
-> the outbox held nothing for it, and the condition is recorded in the hub's log.
-> The counter is never wrapped, reset or reused to make room.
+> **Normative.** A delivery that would advance the counter beyond what the
+> identifier's 96-byte bound leaves room to render does not happen: the poll answers
+> as though the outbox held nothing for it, and the condition is recorded in the
+> hub's log. The counter is never wrapped, reset or reused to make room.
 
-**Per write and not per entry, and the entry-scoped version was the defect.** An
+**Per delivery and not per entry, and the entry-scoped version was the defect.** An
 earlier draft made the identifier "stable across redeliveries", reasoning that a
 device holding it across a reconnect could then acknowledge what it had received.
 That reasoning is right only while the entry has not moved on. Once a lease expires
 and the entry goes to a *second* device, a stable identifier lets the first device
 retire the second's delivery — possibly before it has been shown — which loses the
 notification and falsifies §3's at-least-once guarantee. Adversarial review found it
-on the sixteenth round. Minting at each write keeps everything stability was for: a
+on the sixteenth round. Minting per delivery keeps everything stability was for: a
 device reconnecting before any redelivery still holds the current identifier and its
 acknowledgement still lands, and one arriving after a redelivery holds a superseded
 one and lands on the no-op arm.
+
+**"Per delivery" is not "at the write", and the seventeenth round is why that
+distinction is spelled out.** A draft said the identifier was minted at the result
+frame's write, which cannot be honoured behind this Protocol: `_serve_requests`
+builds the result envelope from what the engine returned and writes afterwards, so
+the identifier necessarily exists before the write, and an in-process caller has no
+write at all. §2a puts the mint in the same indivisible step as the selection and
+the lease, which is inside the engine call on both sides of the wire. A delivery that
+is minted and then never reaches its device is exactly the at-least-once case the
+lease carries, and it costs one identifier out of `10^63`.
 
 **Uniqueness has to be a clause because `Identifier` does not supply it**, and the
 gap is reachable rather than theoretical: the alias rejects only blank text, so a
