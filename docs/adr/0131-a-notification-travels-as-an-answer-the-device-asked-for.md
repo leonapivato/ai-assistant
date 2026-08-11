@@ -238,6 +238,30 @@ to do something about a failure. **What the producer then does is ADR-0130's** �
 retry, drop, record — and this ADR neither decides it nor needs to; the seam's
 obligation is to have an unambiguous answer for the producer to act on.
 
+> **Normative.** The enqueue accepts an optional caller-supplied **origin key**. An
+> enqueue whose origin key equals that of an entry the outbox currently holds
+> makes no new entry and returns the held one. Retired keys are not remembered, and
+> an entry carrying no origin key is never matched against anything.
+
+**A commit the caller never learns the outcome of is the case this exists for, and
+it is a narrower case than it first looks.** The hub can commit the entry and then
+die before the call returns; the producer, restarting, may offer the same
+notification again. The origin key makes that retry a no-op rather than a second
+telling — the reviewer's finding on the second round, and correct.
+
+**Two things are deliberately *not* bought, and pretending otherwise would be the
+larger error.** First, **a producer with no durable identity for its own
+notifications gets no protection**, because it has no key to send. Whether
+ADR-0130's producer has such an identity — and whether its noticer re-notices after
+a restart at all — is ADR-0130's question and #632's durable cursor is adjacent to
+it; the seam supplies the slot and cannot supply the identity. Second, **retired
+keys are forgotten**, so a retry arriving after the notification has been delivered
+and acknowledged makes a second entry. Remembering them would mean a durable set of
+every key the hub has ever seen, growing forever, bounded by nothing — a worse
+failure than the one it prevents, traded for a window that only opens when a crash
+lands between a commit and a return *and* the delivery has already completed. The
+bound is where this ADR spends its durable state, and it spends it on entries.
+
 **Silence on this is the one thing the corpus forbids outright.** ADR-0094 §10a
 binds the mirror-image decision — the spoke-to-hub custody handoff — with "An ADR
 deciding the custody handoff states explicitly whether an unresolved submission
@@ -250,9 +274,18 @@ notices something at 02:00, restarts at 03:00 and has forgotten it by morning ha
 produced exactly the failure this leg exists to close, in the deployment the
 roadmap says we actually have.
 
-> **Normative.** The outbox is the owner's, not a device's. A notification is
-> delivered to **one** device — the first to ask for it — and delivering it to one
-> device retires it for all of them.
+> **Normative.** The outbox is the owner's, not a device's. An entry is offered to
+> **one** device at a time — the first to ask for it — and is retired when that
+> device acknowledges it. No entry is ever outstanding to two devices at once.
+
+**Retirement is on the acknowledgement and not on the write, and an earlier draft
+said both.** It said an entry was retired by being delivered *and* that a written
+entry stayed leased until acknowledged or expired, which cannot both hold for a
+device that receives a result and dies before acknowledging: the entry is retired
+and awaiting redelivery at once. Adversarial review found it on the second round.
+The lease clauses below are the ones that were right — retirement is the terminal
+transition and the write is not — so the routing rule is stated in terms of what
+is *outstanding*, which is the property "one telling" actually needs.
 
 **One notification, one telling.** ADR-0099 §1's single principal is one person,
 and a reminder that arrives on the laptop and the phone and the second laptop is
@@ -268,22 +301,18 @@ as a considered view of where people are.
 > unavailable to any other device until the device acknowledges it or the lease
 > expires, and on expiry it returns to the outbox and may be delivered again.
 
-> **Normative.** The lease runs for a **named setting**, refused at load unless it
-> is strictly positive, under ADR-0093 §5's discipline. It starts at the instant
-> the hub writes the delivery, measured on the hub's clock, and no value a device
-> sends influences it.
+> **Normative.** The lease runs for `hub_notification_lease` (§5a). It starts at
+> the instant the hub writes the delivery, measured on the hub's clock, and no
+> value a device sends influences it.
 
 > **Normative.** A hub restart voids every lease. An entry leased when the hub
 > stopped is available again when it starts, and no lease survives the process that
 > granted it.
 
-**The figure is deferred and the dimension is not**, which is ADR-0094 §10's rule
-for exactly this: "What is decided here is which dimensions must be bounded, not by
-how much." A lease with no stated duration is not a lease — it is the indefinite
-hold the clause was written to prevent, and the finite-terminal-outcome property
-below would be an assertion rather than a consequence. So the setting is named
-here and its value is the implementing lane's, refused at load like every other
-figure the hub carries.
+**A lease with no stated duration is not a lease** — it is the indefinite hold the
+clause was written to prevent, and the finite-terminal-outcome property below would
+be an assertion rather than a consequence. §5a carries the figure, because
+ADR-0093 §5 forbids naming a bound here and settling it elsewhere.
 
 **The hub's clock, and no device's.** A device that could choose its own lease
 could hold an entry for as long as it liked, which hands the eviction rule below to
@@ -321,9 +350,9 @@ is a small annoyance and a lost one is the whole failure — and it is stated ra
 than discovered. The bound below names the one place that guarantee is
 deliberately given up, and gives the reason there.
 
-> **Normative.** The outbox is bounded per hub by a count and by total bytes, both
-> named settings refused at load under ADR-0093 §5's discipline. Both bounds count
-> **every** entry the outbox holds, leased or not.
+> **Normative.** The outbox is bounded per hub by `hub_notification_outbox_entries`
+> and `hub_notification_outbox_bytes` (§5a). Both bounds count **every** entry the
+> outbox holds, leased or not.
 
 > **Normative.** When an enqueue would exceed either bound, the hub drops the
 > **oldest entry that is not leased**; when every entry is leased, it drops the
@@ -412,9 +441,10 @@ across a reconnect. It also keeps this ADR's surface decidable without knowing
 whether ADR-0130's artifact carries an identity at all, which is the separation
 the two lanes were split on.
 
-> **Normative.** The hub bounds the `budget` it will honour by a named setting
-> refused at load. A request whose `budget` exceeds it is refused as an ordinary
-> correlated error naming the bound; the hub does not silently clamp it.
+> **Normative.** The hub bounds the `budget` it will honour by
+> `hub_max_notification_budget` (§5a). A request whose `budget` exceeds it is
+> refused as an ordinary correlated error naming the bound; the hub does not
+> silently clamp it.
 
 Clamping is the tempting answer and it is the one the corpus keeps refusing — it
 is accepting-and-ignoring in a second costume, and ADR-0084 §2's argument against
@@ -448,9 +478,10 @@ until #891 lands and is not a substitute for it.
 > `hub_max_pending_handshakes` exactly as any other connection does. No lane may
 > give delivery its own connection budget.
 
-> **Normative.** The hub bounds concurrent delivery connections by a named setting
-> refused at load, and refused unless it is **strictly less than**
-> `hub_max_connections`, so that a slot for an ordinary session always remains.
+> **Normative.** The hub bounds concurrent delivery connections by
+> `hub_max_delivery_connections` (§5a), refused at load unless it is **strictly
+> less than** `hub_max_connections`, so that a slot for an ordinary session always
+> remains.
 
 **Both clauses restate a mistake the corpus has already made once and caught
 once.** ADR-0124 §7 required the remote listener to share the hub's ceilings and
@@ -479,6 +510,68 @@ may be awaiting a model provider for seconds; if the rule stopped at dispatch, t
 hub would finish that work and write the answer to a device the owner has
 expelled." A revoked device's outstanding poll therefore yields no notification,
 and the entry's lease expires and returns it to the outbox.
+
+### 5a. The figures, named here because naming them elsewhere is what ADR-0093 §5 forbids
+
+> **Normative.** The five figures below are `Settings` fields with these defaults
+> and these ranges, and a value outside a range is refused **at load**. None is
+> nullable: a hub serving delivery with no lease, no outbox bound, no budget bound
+> or no connection sub-bound has the failure the clause naming it exists to
+> prevent, so "off" is not an available value.
+
+| Field | Type | Default | Range |
+| --- | --- | --- | --- |
+| `hub_notification_lease` | duration | 120 s | `> 0` |
+| `hub_notification_outbox_entries` | integer | 256 | `>= 1` |
+| `hub_notification_outbox_bytes` | integer | 1 MiB | `>= hub_max_frame_bytes` |
+| `hub_max_notification_budget` | duration | 300 s | `> 0` |
+| `hub_max_delivery_connections` | integer | 8 | `>= 1`, and `< hub_max_connections` |
+
+> **Normative.** `hub_notification_outbox_bytes` is refused unless it is at least
+> `hub_max_frame_bytes`, and `hub_max_delivery_connections` is refused unless it is
+> strictly below `hub_max_connections`. Both are checked at load, in the model
+> validator that already orders `hub_max_pending_handshakes` against
+> `hub_max_connections`.
+
+**Naming them here is obligatory rather than tidy, and the first draft got it
+wrong.** That draft cited "ADR-0093 §5's discipline" at four separate clauses and
+left every figure to the implementing lane. ADR-0093 §5 forecloses exactly that
+move in its own text: its figures "are therefore named in §7a rather than left to
+its lane — **that rule cannot be invoked here and satisfied elsewhere**." Behind it
+stands ADR-0074 §9.3's reason, quoted there: "a 'bounded default' with no figure is
+two conforming stores handing the same continuation different history." Two
+conforming hubs with different retention, capacity and availability is the same
+failure with the nouns changed. Adversarial review found it on the second round.
+
+**Where each figure comes from.**
+
+- **`hub_notification_lease` at 120 s.** The lease only binds a device that took a
+  delivery and did not acknowledge it, because a live device acknowledges on its
+  very next poll. So the figure is not a latency budget for the ordinary case; it is
+  how long a *dead* device withholds a notification from a live one. Two minutes is
+  long enough that a device briefly losing its network does not cause a duplicate
+  telling, and short enough that a laptop closed mid-notification does not hide it
+  for the rest of the morning.
+- **`hub_notification_outbox_entries` at 256.** A ceiling on how many unheard
+  notifications survive an absence. At the rate a proactivity policy that "earns
+  its place" should be producing, this is days of backlog, so reaching it means
+  either a long absence or a producer misbehaving — and both are cases where the
+  oldest entries are the ones worth least.
+- **`hub_notification_outbox_bytes` at 1 MiB, floored at `hub_max_frame_bytes`.**
+  The byte bound is what stops a few large notifications defeating the count bound.
+  The floor is the constraint that makes it a bound rather than a trap: an outbox
+  smaller than one frame could hold no entry a device could receive, and would
+  evict every notification the instant it arrived — a hub that silently delivers
+  nothing, which is this leg's whole failure produced by a config typo.
+- **`hub_max_notification_budget` at 300 s.** The ceiling on how long one poll may
+  occupy a connection. Five minutes keeps a device's handshake rate negligible while
+  bounding how long a delivery connection is unreclaimable after a device goes away
+  without closing.
+- **`hub_max_delivery_connections` at 8, strictly below `hub_max_connections`.**
+  Eight is generous against a single-user deployment's device count and leaves 56 of
+  the default 64 for ordinary sessions. The strict inequality is the load-bearing
+  half: it is what guarantees a slot for the owner's CLI, so a hub saturated with
+  pollers is still a hub the owner can talk to.
 
 ### 6. ADR-0124 §7's credential-type clause binds the remote listener (#934)
 
