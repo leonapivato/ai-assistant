@@ -462,8 +462,11 @@ class TestTheSeamsFailures:
     ) -> None:
         """ADR-0131 §5a bounds the lease below and not above, so this one is valid.
 
-        §3 gives a claim no refusal for a configured lease, so the expiry is carried
-        to the last representable instant rather than the claim being turned away.
+        ADR-0135 §2 judges a lease "by comparing the time elapsed since the lease was
+        **taken** against ``hub_notification_lease``", so no expiry instant is ever
+        materialized and there is nothing for the claim to be refused over. §1 leaves
+        no other answer available: the span is neither shortened nor refused because
+        something derived from it will not fit.
         """
         outbox = build(tmp_path / "outbox.db", lease=timedelta.max)
         await outbox.offer(candidate(key="k1"))
