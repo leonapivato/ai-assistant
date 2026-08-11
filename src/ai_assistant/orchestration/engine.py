@@ -2948,12 +2948,21 @@ class Engine:
         poll's length is fixed at its start rather than recomputed against a clock
         that may move under it.
 
+        **And before the acknowledgement is applied, because computing it can still
+        refuse.** ADR-0131 §4 is unconditional that a refused request "retires
+        nothing, leases nothing and mints nothing", and an acknowledgement is a
+        retirement that cannot be taken back: the entry is gone, and the device is
+        told by the same call that its poll failed. Round 11's fix for the
+        unrepresentable deadline put that refusal *after* the acknowledgement and so
+        reintroduced the very ordering the range check next door exists to keep —
+        adversarial review found it on the twelfth round. Computing it first also
+        makes "fixed at its start" literally true, the acknowledgement now falling
+        inside the budget rather than ahead of it.
+
         Raises:
             NotificationBudgetError: If the deadline is not representable, which is
                 the budget being unusable rather than merely large.
         """
-        if acknowledging is not None:
-            await outbox.acknowledge(acknowledging)
         try:
             deadline = self._now() + budget
         except OverflowError as exc:
@@ -2974,6 +2983,8 @@ class Engine:
                 f"(ADR-0131 §4)"
             )
             raise NotificationBudgetError(msg) from exc
+        if acknowledging is not None:
+            await outbox.acknowledge(acknowledging)
         while True:
             delivery = await outbox.claim()
             if delivery is not None:
