@@ -805,11 +805,18 @@ merged and made it checkable.
 > `async def offer(self, candidate: NotificationCandidate, *, origin_key: Identifier | None = None) -> NotificationEnqueue: ...`
 
 > **Normative.** `core/types.py` gains `NotificationEnqueue`, a `StrEnum` with
-> exactly four members, one per outcome §3 defines: the entry was enqueued; an
+> exactly five members, one per outcome §3 defines: the entry was enqueued; an
 > identical entry was already held under this origin key and none was made; the
 > origin key matched a held entry carrying a different notification and the offer was
+> refused; the origin key's UTF-8 encoding exceeds 128 bytes and the offer was
 > refused; the entry's own byte cost exceeds `hub_notification_outbox_bytes` and the
 > offer was refused.
+
+> **Normative.** `core/errors.py` gains `NotificationOutboxError(AssistantError)`,
+> in the shape `MemoryStoreError`, `DeferralStoreError` and `TraceStoreError` already
+> take. `offer` declares it, raises it when the durable store cannot commit, and
+> **no custody transfers when it is raised**: the candidate is still the caller's, and
+> nothing was enqueued.
 
 > **Normative.** `NotificationOutbox` is **not** on `AssistantEngine` and nothing it
 > carries crosses the wire. Adding it therefore bumps no protocol version of its own;
@@ -831,10 +838,26 @@ yesterday, made by the ADR that was told not to decide its ground. Two Protocols
 in prose, and the composition root is where they meet, which is where golden rule 1
 already puts every other pairing of this kind.
 
-**Four outcomes because §3 has four, and an enum because none of them carries
+**Every member is an offer that reached a decision, and a failure to reach one is an
+exception rather than a sixth member.** That is the division the corpus already
+draws — a store's inability to commit is a `*StoreError`, not a result value — and it
+is what makes the enum readable: a producer switching on it is switching over things
+that happened, and a producer that must know custody did *not* transfer learns it
+where it cannot be ignored. Adversarial review found the gap on the
+thirty-third round: without the error type, a disk-full or transaction failure fell
+outside all the outcomes, and a producer would receive an implementation exception
+with no contract telling it whether the notification had been taken. §3's clause that
+"the seam takes custody at that commit and not before" is the rule this discharges;
+the error is how the producer hears it.
+
+**Five outcomes because §3 has five, and an enum because none of them carries
 anything.** A producer needs to tell a committed enqueue from a no-op retry, a key
-collision from either, and an outright refusal from all three — those are its four
-distinct remedies. None of them has an accompanying value the producer can act on:
+collision from either, and each of the two refusals from all of those — those are its
+distinct remedies. The overlong origin key was the one §3 defined and this section
+first failed to give a home, which adversarial review found in the same round: §3
+refuses a key above 128 bytes and the enum had no member for it, so the only
+conforming implementations were ones that reported some other outcome for it. None of
+the five has an accompanying value the producer can act on:
 the entry has no identity this ADR exposes (§4's identifier is per *delivery*, not per
 entry), and the byte figures a refusal turns on are the hub's settings rather than
 news. So the return is the enum, in the shape `forget`'s bare `bool` already takes on
