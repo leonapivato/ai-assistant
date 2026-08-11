@@ -1,0 +1,688 @@
+# 131. A notification travels as an answer the device asked for, on a connection it keeps for that alone
+
+- Status: Proposed
+- Date: 2026-08-10
+- **Durability clause.** Every reference below to ADR-NNNN is to its text as it
+  stood at this ADR's base, `10e63a12`, not to its status on any later day. Every
+  ADR this decision composes with reads `Accepted` there, or is partially
+  superseded in a scope this ADR does not touch. Where a later ADR *changes* one
+  of them, this ADR is read against the text quoted here and that ADR's own record
+  says what moved. The `Date` line is this ADR's authoring date in this clone's
+  `-0400` frame, the convention ADR-0112, ADR-0113 and ADR-0129 state for their
+  own; the base named here is the anchor that does not move under either frame.
+
+## Context
+
+### A hub that notices and cannot reach the user has delivered nothing
+
+`docs/roadmap.md`'s leg 10 is the propose/dispose principle's last unbuilt
+artifact: the hub decides something is worth saying and says it. Leg 9 landed the
+half that looks like the answer and is not. ADR-0124 gave the hub an overlay on
+which every enrolled device has a routable address, and then spent a marked clause
+saying that this is not permission to use it:
+
+> **Normative.** The hub still never dials a spoke. ADR-0094 §2 is unchanged: every
+> connection between the hub and a spoke is established by the spoke, and nothing
+> in this ADR — including an overlay on which the hub can address the device — is
+> permission to initiate one.
+
+and a second one refusing to decide the seam at all:
+
+> **Normative.** No lane may read this ADR as deciding any part of a delivery seam
+> for proactivity. That seam is the additive wire decision ADR-0094 §10,
+> ADR-0084 §11 and ADR-0042 §5 already defer, and it is unmoved by this one.
+
+ADR-0124 §10 then states the residual in one sentence: "What stands between that
+and a delivered notification is not networking; it is ADR-0094 §2's direction rule
+and ADR-0084 §3's serial envelope." This ADR is the decision those three deferrals
+name. It decides **how a notification travels**, and nothing about what a
+notification is.
+
+### The three texts that actually bind, read rather than remembered
+
+**ADR-0094 §2 fixes the direction and says the current protocol cannot carry the
+extension.**
+
+> **Normative.** Every connection between the hub and a spoke is established by
+> the spoke. The hub may not initiate a connection to a spoke, and a spoke may not
+> accept one. Pull is served over a connection the spoke already established.
+
+Its supporting text is unusually explicit about what it left open: "What is
+deliberately not decided here is how pull rides the connection, and the current
+protocol cannot carry it… So the mechanism is an additive wire decision owing its
+own ADR (§10), and this section decides only the direction, which that decision
+must not reverse."
+
+**ADR-0084 §3 makes a connection serial, in two rules whose reasons are as
+load-bearing as the rules.**
+
+> - **A request frame sent while another is outstanding is a protocol violation,
+>   and the connection is closed** — not queued, not run concurrently, and *not*
+>   answered with a correlated error.
+> - **A response whose correlation id does not match the outstanding request is a
+>   protocol violation**, and the connection is closed rather than resynchronised.
+
+`wire/server.py`'s `_serve_requests` enforces the first with a watcher that reads
+the next frame *concurrently* with the dispatch, precisely so that a second frame
+is refused rather than queued; `_settle` is the function that makes the
+observation deterministic. Nothing in the tree tolerates a frame the peer did not
+ask for.
+
+**ADR-0124 §1's third accountability bullet is the clause that decides between the
+two candidate shapes**, and it is easy to walk past because it reads as a summary:
+
+> **Answerable for what it sends.** The hub sends the response to the request the
+> device just made and the client sends the request the owner asked it to make,
+> both over the ratified envelope, bounded by ADR-0084 §3's frame ceiling and
+> ADR-0085 §8's contract limit. **There is no path by which either transmits
+> something nobody asked for.**
+
+That sentence is a *property of the egress boundary* ADR-0017 §1 was widened to
+admit. A hub that writes an unsolicited frame at a device makes it false. The
+naive push shape therefore does not merely need a wire extension — it needs
+ADR-0124 §1's widening re-argued, on the one axis ADR-0017 §4 says egress
+accountability is measured by.
+
+### What is genuinely open, and what only looks open
+
+Open: whether the notification rides a frame the device did not ask for, whether
+it rides the device's ordinary session connection or one of its own, whether an
+undelivered notification survives a hub restart, and what bounds the hub's
+holding of one.
+
+Only *looks* open: whether the seam bumps `PROTOCOL_VERSION`. ADR-0124 §9 already
+decided that, in terms, and this ADR does not get to weigh it:
+
+> It reaches, without limiting itself to: … and any change to the promoted
+> surface's method set or to a method's arguments or results (ADR-0085 §3).
+
+with the prose spelling out the case: "**Adding a method bumps, and that is the
+honest consequence rather than an oversight.**" So the only question left is
+whether this seam adds a method, and §4 below answers it.
+
+### Two parked questions ride here because this is the decision they were parked for
+
+**#934** asks whether ADR-0124 §7's credential-*type* clause binds the loopback
+listener. It was split out of #917's fix (PR #933) and left open because settling
+it needs a ruling rather than a patch. It arrives here because this seam
+multiplies connections on *both* transports — a notification-taking client is a
+second connect frame on loopback as well as across the hop — so "what a connect
+frame means on each listener" stops being an abstract question about §7's scope.
+
+**#939** records that the hub trusts its overlay agent socket on a filesystem walk
+alone, with no peer authentication after connect, and says why it could not be
+fixed in PR #936: "using it means deciding a new normative rule: **which peer uid
+may answer as the overlay agent**", and "it is exactly the kind of rule that
+belongs in a ratified decision rather than being introduced by an implementation
+lane, because it decides who the hub will accept as the source of every admission
+identity." It arrives here because this seam makes that identity load-bearing for
+longer: a device that keeps a delivery connection open is admitted once, on one
+answer from the agent, and then holds a channel the hub writes the owner's
+material into.
+
+## Decision
+
+### 1. Delivery is an answer to a request the device made
+
+> **Normative.** A disposed notification reaches a device only as the **result
+> payload of a request that device sent**. The hub writes no frame on a connection
+> except in answer to an outstanding request, and no lane may add a frame kind, a
+> message class or a transport path by which the hub writes to a device
+> unsolicited.
+
+> **Normative.** The request that delivery answers is a single method on the
+> promoted surface, `next_notification`, and it is the only method by which a
+> notification crosses the wire.
+
+The device asks "have you anything for me, and I will wait up to this long"; the
+hub answers with a notification the moment it has one, or with nothing when the
+device's patience runs out. That is a long poll, and naming it plainly is worth
+more than naming it cleverly.
+
+**This is the shape that costs no clause anywhere, and the alternative costs
+three.** Take them in order.
+
+- **ADR-0094 §2** is satisfied without argument: the device establishes the
+  connection and the hub answers on it. §2's own sentence — "Pull is served over a
+  connection the spoke already established" — describes this exactly, in the
+  direction §2 was written for.
+- **ADR-0084 §3** is satisfied without extension. A poll is one request frame and
+  one result frame, correlated, one at a time. The serial rule is not bent, the
+  correlation id keeps the single job §3 gave it, and `_serve_requests` needs no
+  new branch: a dispatch that takes ninety seconds is a dispatch that takes ninety
+  seconds, and §3's read deadline already exempts it — "the idle deadline applies
+  where the hub genuinely is idle — waiting for the *first* frame of the next
+  request."
+- **ADR-0124 §1** stays true word for word. The hub sends "the response to the
+  request the device just made". There is still no path by which it transmits
+  something nobody asked for.
+
+**Server push is the shape that reads as obvious and is the expensive one, and the
+expense is not the code.** A `notify` frame the hub writes when it feels like it
+requires: a new frame kind, so a client must demultiplex an unsolicited frame from
+a correlated response, which is the multiplexing ADR-0084 §3 deferred rather than
+a use of the id it kept; a rule about what happens when such a frame arrives while
+a request is outstanding, which is the one input §3 says has exactly one answer
+today; and ADR-0124 §1's accountability bullet re-argued, because the hub would
+then transmit something nobody asked for. Two of those three are contract changes
+to ratified text. The long poll needs none of them, and it needs none of them not
+by cleverness but because the corpus's serial request/response was already an
+adequate carrier for "tell me when" — the thing it could not carry was "I will
+tell you", which is the direction §2 forbids anyway.
+
+**What the seam carries is a disposed notification, and this ADR does not know
+what one is.** ADR-0130 decides the artifact, who may produce one, and what earns
+an interruption. This ADR requires only that the delivered value be a promoted
+`core` model, because ADR-0084 §3 requires it of every result payload — "a
+**result** payload is a promoted `core` model (§4)" — and §4 below fixes the one
+member the *seam* needs around it.
+
+### 2. A device that takes notifications keeps a connection for that alone
+
+> **Normative.** A `next_notification` request is sent on a connection carrying no
+> other request for its lifetime. A client that has a poll outstanding sends no
+> other request on that connection, and a client wanting an ordinary session while
+> polling opens a second connection for it.
+
+**This falls out of ADR-0084 §3 rather than being chosen against it**, and stating
+it as a rule is what stops the first implementation from discovering it in
+production. The serial rule means one outstanding request per connection. A poll
+that waits ninety seconds for something to happen is an outstanding request for
+ninety seconds. Share the connection and every `converse` the owner types is a
+protocol violation that closes the connection — §3 is explicit that a second
+request while one is outstanding is "not queued, not run concurrently", and
+`_serve_requests` implements exactly that. So a shared connection does not degrade
+under load; it is simply broken, on the first turn the owner takes while a poll is
+in flight.
+
+**Two connections is cheap here in a way it would not be elsewhere**, and the
+reason is ADR-0084 §7's: "the client is stateless (§7) — so reconnecting costs it
+nothing". A delivery connection holds no session, no continuation, no cursor. Its
+whole state is "a poll is outstanding", and §3 below puts the state that matters
+in the hub where a restart cannot lose it.
+
+> **Normative.** A device holds at most one delivery connection. A second
+> `next_notification` request from a device that already has one outstanding is
+> refused, and the refusal is an ordinary correlated error on the connection that
+> made it, not a close of the connection that was already polling.
+
+**Refusing the second rather than closing the first is the direction that cannot
+be used as a weapon.** The opposite rule — newest poll wins — lets any process
+that can reach the listener evict the owner's real notifier by polling, and the
+eviction would look to the notifier exactly like an ordinary transport failure.
+The refusal is correlated because both frames decoded and the connection carrying
+the second one has broken no framing rule; ADR-0084 §3's second bullet is the
+governing one, not its third.
+
+### 3. The outbox: one queue for the owner, durable, bounded, leased, at-least-once
+
+> **Normative.** A disposed notification is placed in a durable **outbox** in the
+> hub's data directory before it is offered to any device, and it survives a hub
+> restart. A notification the hub has disposed and not yet delivered is never held
+> only in memory.
+
+**Silence on this is the one thing the corpus forbids outright.** ADR-0094 §10a
+binds the mirror-image decision — the spoke-to-hub custody handoff — with "An ADR
+deciding the custody handoff states explicitly whether an unresolved submission
+survives a spoke restart… It may not settle that question by silence." Those
+clauses do not bind this ADR, because their subject is *submitted material*
+travelling the other way (§9 records the classification). The discipline is
+adopted anyway, and the answer is durable, for a reason particular to this
+deployment: ADR-0124 §11 records that "a laptop hub sleeps", and a hub that
+notices something at 02:00, restarts at 03:00 and has forgotten it by morning has
+produced exactly the failure this leg exists to close, in the deployment the
+roadmap says we actually have.
+
+> **Normative.** The outbox is the owner's, not a device's. A notification is
+> delivered to **one** device — the first to ask for it — and delivering it to one
+> device retires it for all of them.
+
+**One notification, one telling.** ADR-0099 §1's single principal is one person,
+and a reminder that arrives on the laptop and the phone and the second laptop is
+three interruptions bought with one decision — which is the thing ADR-0130's
+policy exists to ration, undone by the transport underneath it. First-to-ask is
+crude and it is *knowingly* crude: the question it declines is "which device is
+the owner actually at", which is a context question about a device, and ADR-0124
+§10 already defers a device as a context facet and a device-scoped permission
+input (#920). §8 records the deferral rather than leaving the crudeness to be read
+as a considered view of where people are.
+
+> **Normative.** A delivery is **leased**. An outbox entry written to a device is
+> unavailable to any other device until the device acknowledges it or the lease
+> expires, and on expiry it returns to the outbox and may be delivered again.
+
+> **Normative.** A device acknowledges a delivery by naming its identifier on its
+> **next** `next_notification` request. An acknowledgement naming an entry the hub
+> does not hold, or one already retired, is accepted and does nothing.
+
+**Piggybacking the acknowledgement is what makes the outbox one-deep per device
+rather than a second protocol.** The device that has shown a notification wants
+the next one; asking for the next one is therefore the natural moment to say it
+got the last one, and folding the two into one call means the seam needs one
+method rather than two and no state machine on the client beyond "the id I am
+holding". The idempotent no-op on an unknown id is what lets a client reconnect
+after any failure and acknowledge blindly rather than having to reason about what
+the hub remembers.
+
+**The lease is what gives every entry a terminal outcome in finite time**, which
+is the property ADR-0094 §10a demands of the mirror decision and which a
+hub-side queue loses the instant one dead client can pin an entry forever. It also
+fixes the delivery semantics honestly: this is **at-least-once**. A device that
+receives a notification, shows it, and dies before acknowledging will be shown it
+again. That is the right side to fail on for a notification — a repeated reminder
+is a small annoyance and a lost one is the whole failure — and it is stated rather
+than discovered.
+
+> **Normative.** The outbox is bounded per hub by a count and by total bytes, both
+> named settings refused at load under ADR-0093 §5's discipline. When a bound would
+> be exceeded the **oldest undelivered** entry is dropped, and the drop is recorded
+> in the hub's log naming the entry.
+
+**An unbounded queue behind an offline owner is a disk-filling bug with a product
+name.** Dropping the oldest rather than refusing the newest is the choice a
+notification's own nature makes: an outbox that is full is one whose owner has not
+been reachable, and of the notifications waiting, the stale ones are the ones worth
+least. The drop is logged because a silent drop is indistinguishable from a
+producer that never fired, and #939's own standard applies — a gap named is a gap
+someone can close.
+
+> **Normative.** The outbox holds notifications and nothing else. It is not a
+> memory, not an episode and not a trace; no lane may route it through
+> `MemoryStore` or `TraceStore`, and nothing in it is a record any retrieval path
+> reads.
+
+### 4. The surface this seam needs, and the `PROTOCOL_VERSION` bump that follows
+
+ADR-0124 §10 forbids *that* ADR from deciding `core` surface and says what a lane
+that needs it must do: "An implementing lane that finds it needs either stops and
+owes its own contract ADR, merged first (golden rule 5, ADR-0015 §5)." This ADR
+is that contract ADR for the delivery method. It decides the method and the one
+type the *seam* needs; it decides nothing about the notification inside it.
+
+> **Normative.** `AssistantEngine` (`core/protocols.py`) gains exactly one method
+> for this seam:
+>
+> `async def next_notification(self, *, acknowledging: Identifier | None = None, budget: timedelta) -> NotificationDelivery | None: ...`
+
+Both arguments are keyword-only, which is ADR-0085 §2's convention applied rather
+than chosen: "The subject of a call — the one thing it acts on — is positional.
+Every other argument is keyword-only." A poll has no subject; both arguments are
+modifiers, in the shape `observe(*, conversation_id=…)` and `questions(*, limit,
+offset)` already have.
+
+> **Normative.** `core/types.py` gains one frozen pydantic model for this seam,
+> `NotificationDelivery`, carrying the outbox entry's identifier and the disposed
+> notification ADR-0130 promotes. Its identifier is minted by the seam when the
+> entry is enqueued, is stable across redeliveries of that entry, and is the value
+> `acknowledging` names.
+
+**Why the seam mints its own identifier instead of using the notification's.**
+The acknowledgement is about *the outbox entry*, and an entry has a life the
+artifact does not: it can be delivered, leased, returned and delivered again. A
+stable per-entry id makes an acknowledgement idempotent and makes a redelivery
+after a lease expiry acknowledgeable by a device that has been holding the id
+across a reconnect. It also keeps this ADR's surface decidable without knowing
+whether ADR-0130's artifact carries an identity at all, which is the separation
+the two lanes were split on.
+
+> **Normative.** The hub bounds the `budget` it will honour by a named setting
+> refused at load. A request whose `budget` exceeds it is refused as an ordinary
+> correlated error naming the bound; the hub does not silently clamp it.
+
+Clamping is the tempting answer and it is the one the corpus keeps refusing — it
+is accepting-and-ignoring in a second costume, and ADR-0084 §2's argument against
+that transfers exactly: a client whose ninety-minute budget is honoured as ninety
+seconds has been told, by acceptance, that its budget was accepted.
+
+> **Normative.** Landing this seam bumps `PROTOCOL_VERSION`, and the obligation
+> falls on the change that adds the method, in that same change (ADR-0124 §9).
+
+**This is a consequence recorded, not a judgement made.** ADR-0124 §9's rule
+reaches "any change to the promoted surface's method set" and its prose settles the
+case in advance: "A sixteenth method on the promoted surface is a request an older
+hub answers with a failure the client did not ask for… After the hop it is the
+case ADR-0084 §3's exact-match rule exists for." Nothing in this seam gives it a
+way out — a poll from a new client to an old hub is refused by `_dispatch` as a
+method "this build's engine surface does not declare", which closes the connection
+with no reply, and the operator sees a hub that hangs up rather than §3's message
+naming both versions.
+
+**And this is a live instance of the gap #891 holds.** ADR-0124 §9 ruled that
+compliance with the bump rule "is a review obligation on any change to
+`core/types.py`, to the promoted surface's method set, or to the wire encoding"
+and that no mechanical check exists. This ADR adds to all three at once. The bump
+is stated here so that the implementing lane inherits it as a written obligation
+rather than as a rule it must remember to apply, which is the substitute available
+until #891 lands and is not a substitute for it.
+
+### 5. A delivery connection spends the hub's connection budget, and does not get a second one
+
+> **Normative.** A delivery connection counts against `hub_max_connections` and
+> `hub_max_pending_handshakes` exactly as any other connection does. No lane may
+> give delivery its own connection budget.
+
+> **Normative.** The hub bounds concurrent delivery connections by a named setting
+> refused at load, and refused unless it is **strictly less than**
+> `hub_max_connections`, so that a slot for an ordinary session always remains.
+
+**Both clauses restate a mistake the corpus has already made once and caught
+once.** ADR-0124 §7 required the remote listener to share the hub's ceilings and
+said why: "a second listener is the natural place to double a budget by accident…
+Two listeners each honouring the figure independently would mean the hub honours
+neither." A long-lived poll is the same trap wearing different clothes — it is a
+connection that is *supposed* to sit idle, so the reflex is to exempt it from a
+ceiling written against peers that connect and stop sending. The exemption would be
+wrong for exactly the reason the ceiling exists.
+
+The second clause is the half a shared budget alone does not buy. Delivery
+connections are long-lived and ordinary sessions are not, so without a sub-bound a
+handful of pollers occupy every slot indefinitely and the owner's CLI cannot
+connect at all — a hub that is unreachable for a reason that is not legible, which
+is ADR-0083's ruling 4 failure. The strictly-less-than form mirrors
+`Settings`' existing refusal of a `hub_max_pending_handshakes` above
+`hub_max_connections`, and is validated in the same place and the same way.
+
+**Revocation needs nothing new, and checking that it does not is the point of
+saying so.** ADR-0124 §8's linearization is implemented in `_serve_requests` as
+two `_check_live` calls, one at dispatch and one immediately before the write. A
+poll dispatched by a live device and answered an hour later passes the second
+check at the moment the notification is written — which is precisely the case §8's
+write-side check was added for: "a request dispatched a moment before a revocation
+may be awaiting a model provider for seconds; if the rule stopped at dispatch, the
+hub would finish that work and write the answer to a device the owner has
+expelled." A revoked device's outstanding poll therefore yields no notification,
+and the entry's lease expires and returns it to the outbox.
+
+### 6. ADR-0124 §7's credential-type clause binds the remote listener (#934)
+
+> **Normative.** ADR-0124 §7's clause "The credential member is a JSON string, or
+> it is absent" is a rule of **the remote admission rule**, and it binds the remote
+> listener alone. On the loopback listener ADR-0084 §2 governs unchanged, and a
+> present JSON `null` is a client saying it carries no credential: it is admitted,
+> as an absent member and an empty string are.
+
+**Read the section's own structure and the answer is already there, except in one
+place where it is not.** ADR-0124 §7 is titled "The remote admission rule". Its
+first two clauses open "On the remote listener"; its fourth states that "ADR-0084
+§2's rule is unchanged on the loopback transport". Only the third omits the
+qualifier, and its supporting paragraph shows the author believed loopback needed
+no rule: "`read_connect` (`wire/envelope.py`) refuses anything not in `(None, "")`,
+so on loopback an object, a boolean or a number is already refused and the question
+never arises."
+
+**That sentence is true of an object, a boolean and a number, and false of
+`null`** — `null` decodes to `None`, which is *in* that tuple. So the belief that
+made the qualifier unnecessary is wrong on exactly one value, and the clause's wide
+reading is therefore reachable by a careful reader rather than only a careless one.
+#934 is the record of noticing.
+
+**Admitting is right, and it is ADR-0124 §7's own principle that says so.** §7
+states the principle in one sentence — "**Admission never asserts a check that did
+not happen**" — and derives its two opposite rules from it. Apply it here: a
+loopback client sending `"credential": null` is stating that it carries none, and
+admitting it asserts nothing about any check. The `0600` bit is what restricts
+connection on that transport, exactly as ADR-0084 §2 said, and nothing about a
+`null` weakens it.
+
+**Refusing would cost a rule to state it in, and there is no honest one
+available.** §7 froze the only loopback code that exists: "there a non-empty
+credential is still refused with `credential_not_supported`" — and a `null` is not
+a non-empty credential. Refusing under that code would report a reason that is
+false; minting a new code would put a refusal on the loopback handshake for a value
+that asserts nothing. Both are worse than the status quo, which is what #933's fix
+lane concluded when it left the behaviour alone and pinned it by test
+(`tests/wire/test_remote_connect.py::test_a_null_credential_is_still_nothing_on_the_loopback_transport`).
+
+**No code changes and that is the intended outcome.** `read_connect` already
+carries this reading with its reasoning attached — "A present ``null`` stays on the
+'carries nothing' side here" — and `read_remote_connect` already carries the
+opposite one for the remote listener. What was missing was a ratified sentence
+saying which of the two readings of §7 the tree is implementing. §9 records this as
+a **partial supersession** of ADR-0124 §7's credential-type clause, because a reader
+holding only ADR-0124 could read that clause more widely than it now holds, which
+is ADR-0070 §1's second limb.
+
+### 7. Whoever answers the overlay agent socket is authenticated from the kernel (#939)
+
+> **Normative.** After connecting to the overlay agent's socket and before writing
+> anything to it, the querying process reads the peer's credentials from the kernel
+> and refuses unless the peer's effective uid is `0` or its own. It refuses on a
+> platform that exposes no peer-credential call, rather than proceeding
+> unauthenticated.
+
+> **Normative.** The rule binds both ends of the hop and every agent socket path
+> alike — the packaged defaults in `TAILSCALE_SOCKETS` and any path an operator
+> configures. No lane may apply it to a configured path and not to a default one.
+
+**This closes a gap the filesystem checks were never able to close, and the corpus
+has already said so twice.** ADR-0084 §1 is quoted verbatim in `wire/peer.py`:
+filesystem checks are "a walk over topology the operator controls, and a walk can
+be wrong — a bind mount, an ACL, a symlinked ancestor", and what closes the hole is
+reading the peer's credentials from the kernel after connecting, which is "free of
+the time-of-check time-of-use gap a pre-connect `stat` of the socket would have".
+`service/datadir.py`'s module docstring restates the same position for the data
+directory and assigns the fix to "the transport lane". The adversarial review on
+PR #936 then exhibited the concrete attack — a POSIX ACL granting an untrusted user
+write and search access through an otherwise-conforming `0700` directory, after
+which that user replaces the socket before `open_unix_connection()` and supplies
+overlay identities for remote admission.
+
+**Why the rule is "root or us" and not "root".** `tailscaled` runs as root in the
+ordinary deployment, so uid 0 is the answer that must be admitted. But ADR-0124
+§11's own validation plan and the namespace #919 used both run the agent as the
+invoking user, and a test seam necessarily does. Admitting our own euid costs
+nothing security can measure — a process running as us could replace our own files
+regardless — and refusing it would make the rule unimplementable in the deployment
+the ADR that needs it was validated in. This is the same shape as `wire/custody.py`'s
+ownership rule, which is why it reads as the obvious candidate in #939 too.
+
+**Why it belongs in this ADR rather than being declined to a later one.** Every
+delivery connection is admitted on one answer from the agent (ADR-0124 §4), and
+§2 above makes that connection long-lived: a device admitted on a forged identity
+does not merely get a session, it gets a standing channel into which the hub writes
+the owner's material as it is produced. The seam that raises the value of the
+identity is the right place to close the gap in how the identity is obtained.
+
+**Where it attaches, and the tree has moved since #939 was filed.** #939 says "The
+client half has the same shape — see #937", and both halves of that are now stale:
+#937 turned out to be about the client agent's *configurability* and is closed, and
+since `refactor(wire): move the agent-socket custody guard where both ends can
+reach it` the filesystem guard lives in `wire/custody.py` with the agent client in
+`wire/overlay.py`, which `service/overlay.py` imports. So the rule has **one**
+implementation site — the `_request` connect path in `wire/overlay.py` — reached by
+both ends, and `wire/peer.py`'s `peer_uid` already supplies the read and already
+fails closed where the platform cannot answer. There is nothing to design; there was
+only a rule to ratify.
+
+**This does not weaken the filesystem checks and does not replace them.** They stay
+as `service/datadir.py` describes them — defence in depth — and this clause is the
+one that makes the posture closed rather than merely deep.
+
+### 8. What this ADR does not decide
+
+- **What a notification is, who may produce one, and what earns an interruption.**
+  ADR-0130's, entirely. This seam carries a disposed notification and never
+  inspects one.
+- **Which device the owner is actually at.** §3 rules first-to-ask and says it is
+  crude. The successor is a device as a context facet and a device-scoped
+  permission input, which ADR-0124 §10 already defers and #920 holds. A later ADR
+  replacing §3's routing rule replaces one clause and leaves the outbox alone.
+- **What content a device may receive.** Every enrolled device is the owner's under
+  ADR-0099 §1's single principal and ADR-0124 §5's rule that a device "is not a
+  principal, not a spoke, and not a grant". A per-device content policy is the
+  grant model (#629), which ADR-0094 §3 and ADR-0124 §5 both decline, and no lane
+  may read this seam as supplying one.
+- **How pull rides the connection.** ADR-0094 §10 defers a *spoke-to-hub* pull —
+  the hub asking a sensor for released material. §1's clause forbids the hub
+  initiating, and nothing here supplies the request/response shape that deferral
+  needs; a poll that carries a notification outward is not a pull that reaches
+  edge state.
+- **Streaming and progress.** ADR-0042 §5 and ADR-0084 §11 defer it "until a
+  progress-emitting stage exists". A long poll is a request whose answer is late,
+  not a stream, and it consumes none of the correlation id's reserved future.
+- **The mechanical check on `PROTOCOL_VERSION`.** #891, unchanged and unmoved.
+  §4 makes this seam an instance of the gap, not a discharge of it.
+- **The custody handoff ADR-0094 §10 defers.** That is material travelling
+  *inward*, from a spoke the hub cannot see the state of. §9 records why §10a's
+  clauses do not bind here and why their discipline was adopted anyway.
+- **A second hub, and a device that is not the owner's.** ADR-0124 §10's clause is
+  untouched.
+
+### 9. Classification under ADR-0070 §1 and ADR-0082 §1
+
+ADR-0082 §1 requires the judgement in this ADR's text, naming the clause and
+applying ADR-0070 §1's test: would a reader holding only the earlier ADR now act
+differently, or read one of its clauses more widely than it now holds?
+
+**ADR-0124 §7's credential-type clause is partially superseded** — §6 above. A
+reader holding only ADR-0124 could read "The credential member is a JSON string,
+or it is absent" as a statement about the connect schema, binding both listeners,
+and the clause's own supporting paragraph does not close that reading because its
+factual premise is wrong about `null`. §6 narrows the clause to the remote
+listener. That is ADR-0070 §1's second limb — a clause read more widely than it now
+holds — so it is a supersession and not an amendment, and it is **partial**: §7's
+other four clauses, the whole of the two-fact admission rule, the distinguished
+refusals, the shared ceilings and the refusal-code form are untouched and stay
+accepted. ADR-0124's Status line and a dated header note record it; not one word of
+its Decision text is edited.
+
+**No record is owed on ADR-0124 §4, and the reason is worth stating rather than
+assumed.** §7 above *adds* a condition to the overlay-agent seam where §4 was
+silent — §4 requires the hub to obtain the identity from the agent "over a local
+interface" and says nothing about who may answer. A reader holding only §4 was not
+led to act *contrary* to anything; they were led to act incompletely. That is the
+stacked-addition category ADR-0083 §15 established and ADR-0084 §12 applied, and
+treating it as a supersession would make every later ADR that tightens an
+unaddressed corner a supersession of the ADR that did not address it.
+
+**No record is owed on ADR-0094 §2.** §1 above decides "how pull rides the
+connection" for the outward direction only, which is what §2 said it was leaving
+open — "the mechanism is an additive wire decision owing its own ADR (§10), and
+this section decides only the direction, which that decision must not reverse". The
+direction is not reversed; it is the premise §1 is built on. A deferral discharged
+by the kind of ADR it named is a stacked addition (ADR-0084 §12's treatment of
+ADR-0083).
+
+**No record is owed on ADR-0084 §3.** Examined throughout and found to need
+nothing: a long poll is one request and one response, serial, correlated, inside
+the frame ceiling. §3's deferred multiplexing stays deferred and its correlation-id
+reserve stays unspent.
+
+**No record is owed on ADR-0124 §1, and that is the substantive finding rather
+than a formality.** §1's accountability bullet — "There is no path by which either
+transmits something nobody asked for" — stays true because §1 above chose the shape
+that keeps it true. Had this ADR chosen server push, §1 would have needed
+superseding on the axis ADR-0017 §4 says egress accountability is measured by.
+
+**No record is owed on ADR-0124 §9 or §10.** §9 is applied as written (§4 above);
+§10's three clauses are honoured — the hub still does not dial, this ADR *is* the
+contract ADR §10 says an implementing lane owes, and §10's prohibition on reading
+ADR-0124 as deciding the delivery seam is satisfied by this ADR deciding it
+elsewhere.
+
+**No record is owed on ADR-0094 §10a's custody clauses.** Their subject is "a
+spoke's unresolved submissions" — material arriving at the hub from an edge whose
+state the hub cannot see. This seam runs the other way: the hub holds the material,
+the hub is the durable party, and the device is the one that may vanish. The
+clauses are not met because they are not engaged. §3 above adopts the analogous
+discipline by choice — durability stated rather than left silent, a terminal
+outcome in finite time via the lease, an aggregate bound by count and by bytes —
+and says so there, so a reader does not have to infer whether the resemblance was
+noticed.
+
+**This ADR is marked under ADR-0089.** Every obligation it imposes is a marked
+clause; unmarked text explains what a marked clause means and supplies no
+obligation of its own.
+
+## Consequences
+
+**What gets easier.** Leg 10's delivery lane has a shape it can build without
+touching the envelope: one method, one type, one durable queue, one long-lived
+connection, and no change to framing, codec, correlation or the serial rule. The
+hub's existing revocation linearization covers a poll answered an hour after it was
+dispatched, with no new check. A client is still stateless, so a notifier that
+crashes reconnects and re-polls, and at-least-once means it loses nothing by doing
+so.
+
+**What gets harder.** `PROTOCOL_VERSION` moves to 3, which means the hop's two
+halves must be upgraded together — the deployment ADR-0124 §11 validates by hand on
+two commodity devices, now with a version mismatch to notice on the next run. A
+second connection per notifying device makes the hub's connection accounting matter
+in a way one CLI never did, which is why §5 exists. And the outbox is durable state
+in the data directory, so it is state a backup must carry and a purge must destroy —
+#883's backup lane and ADR-0126's destruction of the cold data directory both
+acquire a new object to know about, and neither is changed by this ADR beyond
+having one more thing in the directory they already govern.
+
+**What would trigger revisiting this.** A second spoke profile that needs the hub
+to reach it for something other than a notification — an actuator being told to
+act, which ADR-0094 §1's capability profiles anticipate — would test whether "one
+method, one queue" generalises or whether the seam wants a verb. A device that is
+genuinely absent for days, so that the outbox's bound is reached routinely rather
+than exceptionally, would make §3's drop-oldest rule visible as a product
+behaviour rather than a safety valve. And #920's device-as-context-facet is the
+decision that replaces §3's first-to-ask routing; when it lands, that clause is the
+one to supersede.
+
+**What this does not prove.** Nothing here is validated. ADR-0124 §11's plan tests
+the hop and does not test a notification; the leg's own QA run is where "the hub
+noticed something overnight and the owner saw it in the morning" is either observed
+or not. This ADR is the shape that makes such a run possible, and a shape is not
+evidence.
+
+## Alternatives considered
+
+**A `notify` frame the hub writes unsolicited.** The shape everyone reaches for
+first, and the one that costs three ratified clauses: a new frame kind and a
+client demultiplexer (the multiplexing ADR-0084 §3 deferred), a rule for an
+unsolicited frame arriving while a request is outstanding (the one input §3 says
+has exactly one answer), and ADR-0124 §1's "no path by which either transmits
+something nobody asked for" re-argued. It buys lower latency than a long poll and
+lower latency is not the constraint — a notification that arrives within a poll
+budget is a notification that arrives.
+
+**The hub connects to the device.** ADR-0094 §2 forbids it in a marked clause and
+ADR-0124 §10 restates the prohibition specifically because the overlay makes it
+easy. Not considered further, and named here only so the record shows it was the
+first thing checked and not the thing nobody thought of.
+
+**Polling on the device's ordinary session connection.** Rejected because
+ADR-0084 §3 makes it not merely inelegant but broken: the first `converse` the
+owner types while a poll is outstanding is a protocol violation that closes the
+connection. §2 turns the constraint into a stated rule so that no implementation
+discovers it the hard way.
+
+**Short polls on a timer instead of a long poll.** A device asking every thirty
+seconds needs no budget argument and no long-lived connection, so §5's sub-bound
+would be unnecessary. It was rejected on the deployment ADR-0124 §11 describes:
+a laptop and a phone doing a connect handshake — including an overlay agent query
+per §4 — every thirty seconds, forever, to learn nothing, is a duty cycle cost paid
+continuously for a message that arrives a few times a day. The long poll pays one
+handshake per poll budget and the hub answers the instant it has something, which
+is both cheaper and faster.
+
+**Per-device fan-out instead of one outbox for the owner.** Delivering every
+notification to every enrolled device removes the routing question entirely and
+removes the lease with it. Rejected because it multiplies the interruption ADR-0130
+exists to ration by the number of devices the owner happens to own, which makes the
+policy above it weaker every time the owner enrols a laptop.
+
+**At-most-once: the hub retires an entry when it writes it.** Simpler — no lease,
+no acknowledgement, no `acknowledging` argument. Rejected because the failure it
+chooses is the one that matters: a device that dies between the hub's write and the
+notification reaching a screen loses it silently and forever, which is the exact
+failure this leg exists to close, arriving through the mechanism meant to close it.
+
+**Deciding `PROTOCOL_VERSION` differently.** Not available. ADR-0124 §9's rule is
+ratified and reaches "any change to the promoted surface's method set" explicitly,
+with prose that names the adding-a-method case and calls the bump "the honest
+consequence rather than an oversight". §4 records the consequence; it does not
+weigh it.
+
+**Declining #939 to a later ADR.** The narrower reading of this lane's scope, and
+it was the starting position. Rejected because §2's long-lived delivery connection
+is what raises the stakes on the agent's answer: an identity obtained once now
+gates a standing channel rather than a single session, so the seam that raises the
+value is the seam that owes the closure. The rule was also fully specified in #939
+and its implementation site is one function; declining would have deferred a
+ratification, not a design.
