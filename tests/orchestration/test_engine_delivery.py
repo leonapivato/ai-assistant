@@ -397,6 +397,36 @@ class TestABudgetTheClockCannotAddIsRefusedNotCrashed:
         with pytest.raises(NotificationBudgetError, match="datetime can represent"):
             await engine.next_notification(budget=timedelta.max)
 
+    async def test_the_refusal_retires_nothing(self) -> None:
+        """§4: a refused request "retires nothing, leases nothing and mints nothing".
+
+        The acknowledgement is the effect that cannot be taken back — the entry is
+        gone, and the same call tells the device its poll failed. Round 11's fix put
+        the deadline's refusal *after* it, so a client polling with an
+        unrepresentable budget lost the delivery it was acknowledging and got an
+        error for it. The delivery must still be acknowledgeable afterwards, which is
+        only true if the refusal reached the outbox not at all.
+        """
+        outbox = FakeNotificationOutbox(now=lambda: NOW)
+        await outbox.offer(_candidate())
+        engine = _wired(Harness(), outbox, max_notification_budget=timedelta.max)
+        held = await outbox.claim()
+        assert held is not None
+
+        with pytest.raises(NotificationBudgetError):
+            await engine.next_notification(acknowledging=held.delivery_id, budget=timedelta.max)
+
+        # **The key is still held**, which is the assertion that discriminates: a
+        # retirement inside the refusal would have freed it. Acknowledging *here*
+        # would not — it frees the key whether or not the refused call already did,
+        # and a first draft of this case asserted past that and passed against the
+        # broken ordering.
+        assert await outbox.offer(_candidate()) is NotificationEnqueue.ALREADY_HELD
+        # And the acknowledgement the refused call declined to apply still lands, so
+        # nothing was lost by refusing: the device can retire its delivery normally.
+        await outbox.acknowledge(held.delivery_id)
+        assert await outbox.offer(_candidate()) is NotificationEnqueue.ENQUEUED
+
     async def test_an_ordinary_budget_under_that_ceiling_still_polls(self) -> None:
         """The discriminating half: only the unrepresentable deadline is refused."""
         engine = _wired(Harness(), FakeNotificationOutbox(), max_notification_budget=timedelta.max)
