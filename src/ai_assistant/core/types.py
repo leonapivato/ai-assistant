@@ -7822,6 +7822,41 @@ DEFAULT_INTERRUPTION_BUDGET: Final[int] = 3
 DEFAULT_INTERRUPTION_WINDOW: Final[timedelta] = timedelta(hours=24)
 
 
+#: Minutes in a day, and the exclusive bound on a local time-of-day (ADR-0130 §6).
+MINUTES_IN_A_DAY: Final[int] = 24 * 60
+
+
+def minute_of_day(moment: time) -> int:
+    """A local time-of-day as minutes since midnight.
+
+    The spelling half of :class:`QuietWindow`'s decision: a caller thinks in
+    ``22:00`` and the type holds ``1320``, so this is what turns one into the
+    other rather than every call site doing the arithmetic.
+
+    **Seconds are truncated, not rounded**, which is the half-open convention the
+    window itself takes: a window ending at ``13:00`` covers ``12:59:59`` and does
+    not cover ``13:00:00``.
+
+    Args:
+        moment: The local time-of-day, naive.
+
+    Returns:
+        Minutes since local midnight, in ``[0, 1440)``.
+
+    Raises:
+        ValueError: If ``moment`` carries a timezone. Quiet windows are read in
+            ``Settings.timezone`` and no second timezone source is introduced
+            (ADR-0130 §6).
+    """
+    if moment.tzinfo is not None:
+        msg = (
+            "a local time-of-day must be naive: quiet windows are read in "
+            "Settings.timezone and no second timezone source is introduced (ADR-0130 §6)"
+        )
+        raise ValueError(msg)
+    return moment.hour * 60 + moment.minute
+
+
 class QuietWindow(BaseModel):
     """A local time-of-day interval during which nothing may interrupt (§6).
 
@@ -7832,34 +7867,62 @@ class QuietWindow(BaseModel):
     "everything", and a setting whose meaning a reader has to guess is one that
     silently stops the assistant interrupting at all.
 
-    **The times are naive, and that is the decision.** A quiet window is a
-    statement about the user's day, read in ``Settings.timezone`` — the same
-    value ADR-0008 §5 gives the temporal context and ADR-0093 §7b binds the
-    calendar reader to, and no second timezone source is introduced (§6). A
-    ``time`` carrying its own ``tzinfo`` would be exactly that second source, so
-    it is refused here rather than silently ignored downstream.
+    **Both endpoints are minutes since local midnight, and that is a spelling
+    decision this type makes rather than one the ADR made.** §9 ratifies these
+    names as "shape, not spelling", and §6 asks only for "a half-open
+    local-time-of-day interval": minutes satisfy it exactly. A
+    :class:`datetime.time` would not have travelled — ADR-0087 gives it no
+    canonical wire form, and :func:`ai_assistant.wire.codec.project` fails closed
+    on a type nobody has spelled a form for, "because guessing one would be the
+    divergence this module exists to prevent". Minting that form is ADR-0087's
+    decision and not this lane's; an integer already has one. Use
+    :func:`minute_of_day` and :meth:`between` to write one in the units a person
+    thinks in, and :attr:`start_time` / :attr:`end_time` to render one back.
+
+    **The endpoints carry no zone, and cannot.** A quiet window is a statement
+    about the user's day, read in ``Settings.timezone`` — the same value ADR-0008
+    §5 gives the temporal context and ADR-0093 §7b binds the calendar reader to,
+    and no second timezone source is introduced (§6). An integer cannot smuggle
+    one in, which is the one thing this spelling gets for free.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    start: time = Field(description="When quiet begins, local time-of-day, inclusive.")
-    end: time = Field(description="When quiet ends, local time-of-day, exclusive.")
+    start: int = Field(
+        ge=0,
+        lt=MINUTES_IN_A_DAY,
+        description="When quiet begins, local minutes since midnight, inclusive.",
+    )
+    end: int = Field(
+        ge=0,
+        lt=MINUTES_IN_A_DAY,
+        description="When quiet ends, local minutes since midnight, exclusive.",
+    )
+
+    @classmethod
+    def between(cls, start: time, end: time) -> QuietWindow:
+        """Build a window from the units a person writes it in.
+
+        Args:
+            start: When quiet begins, local and naive.
+            end: When quiet ends, local and naive.
+
+        Returns:
+            The window.
+
+        Raises:
+            ValueError: If either endpoint carries a timezone, or the two name
+                the same minute.
+        """
+        return cls(start=minute_of_day(start), end=minute_of_day(end))
 
     @model_validator(mode="after")
     def _is_a_readable_window(self) -> QuietWindow:
-        """Refuse a window carrying a zone, or one with no readable extent.
+        """Refuse a window with no readable extent.
 
         Raises:
-            ValueError: If either endpoint is timezone-aware, or the two are equal.
+            ValueError: If the two endpoints name the same minute.
         """
-        for name, value in (("start", self.start), ("end", self.end)):
-            if value.tzinfo is not None:
-                msg = (
-                    f"{name} must be a naive local time-of-day: quiet windows are read in "
-                    f"Settings.timezone and no second timezone source is introduced "
-                    f"(ADR-0130 §6)"
-                )
-                raise ValueError(msg)
         if self.start == self.end:
             msg = (
                 "start and end must differ: an empty window and an all-day one are not "
@@ -7869,19 +7932,30 @@ class QuietWindow(BaseModel):
             raise ValueError(msg)
         return self
 
-    def covers(self, moment: time) -> bool:
-        """Report whether a local time-of-day falls inside this window.
+    @property
+    def start_time(self) -> time:
+        """When quiet begins, as a naive local ``time`` a surface can render."""
+        return time(self.start // 60, self.start % 60)
+
+    @property
+    def end_time(self) -> time:
+        """When quiet ends, as a naive local ``time`` a surface can render."""
+        return time(self.end // 60, self.end % 60)
+
+    def covers(self, minute: int) -> bool:
+        """Report whether a local minute-of-day falls inside this window.
 
         Args:
-            moment: The local time-of-day to test, naive.
+            minute: Minutes since local midnight, as :func:`minute_of_day` gives
+                them.
 
         Returns:
-            ``True`` while ``start <= moment < end``, and for a window that
-            crosses midnight, while ``moment >= start`` or ``moment < end``.
+            ``True`` while ``start <= minute < end``, and for a window that
+            crosses midnight, while ``minute >= start`` or ``minute < end``.
         """
         if self.start < self.end:
-            return self.start <= moment < self.end
-        return moment >= self.start or moment < self.end
+            return self.start <= minute < self.end
+        return minute >= self.start or minute < self.end
 
 
 class ClassReach(BaseModel):
@@ -7983,16 +8057,17 @@ class NotificationPreferences(BaseModel):
                 return row.reach
         return DEFAULT_NOTIFICATION_REACH
 
-    def is_quiet_at(self, moment: time) -> bool:
-        """Report whether any quiet window covers a local time-of-day.
+    def is_quiet_at(self, minute: int) -> bool:
+        """Report whether any quiet window covers a local minute-of-day.
 
         Args:
-            moment: The local time-of-day, naive.
+            minute: Minutes since local midnight, as
+                :func:`minute_of_day` gives them.
 
         Returns:
             Whether the instant it stands for is inside a quiet window.
         """
-        return any(window.covers(moment) for window in self.quiet_windows)
+        return any(window.covers(minute) for window in self.quiet_windows)
 
 
 class NotificationCandidate(BaseModel):
