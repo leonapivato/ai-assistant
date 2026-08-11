@@ -359,6 +359,10 @@ class FakeNotificationStore:
         self._counter = count(1)
         self._new_id = new_id or (lambda: f"ntf-{next(self._counter)}")
         self._records: dict[str, HeldNotification] = {}
+        #: When each ``INTERRUPT`` disposition was **recorded** (ADR-0130 §5), kept
+        #: apart from the records themselves so that destroying a notification does
+        #: not refund the unit it spent. See :meth:`_budget`.
+        self._spent: list[datetime] = []
         self._preferences = NotificationPreferences()
         self._lock = asyncio.Lock()
 
@@ -412,6 +416,7 @@ class FakeNotificationStore:
             )
             if ruling.kind is NotificationDispositionKind.DROP:
                 return ruling.model_copy(update={"notification_id": None})
+            self._record_spend(ruling)
             self._records[record_id] = HeldNotification(
                 id=record_id,
                 candidate=candidate,
@@ -457,6 +462,7 @@ class FakeNotificationStore:
                 budget_spent=spent,
                 budget_frees_at=frees_at,
             )
+            self._record_spend(ruling)
             self._records[record.id] = HeldNotification(
                 id=record.id,
                 candidate=record.candidate,
@@ -665,13 +671,42 @@ class FakeNotificationStore:
             record.candidate.candidate_key == candidate_key for record in self._actionable(now)
         )
 
+    def _record_spend(self, ruling: NotificationDisposition) -> None:
+        """Note a unit spent, if this ruling spent one (ADR-0130 §5).
+
+        A unit is spent when an ``INTERRUPT`` disposition is **recorded**, never
+        when contact is attempted and never when it succeeds — and a
+        reconsideration ruled ``INTERRUPT`` spends one like any other ruling.
+
+        Args:
+            ruling: What was just decided.
+        """
+        if ruling.kind is NotificationDispositionKind.INTERRUPT:
+            self._spent.append(ruling.ruled_at)
+
     def _budget(self, now: datetime) -> tuple[int, datetime | None]:
         """The two budget facts §5's conjunctive clause reads (§6).
 
-        A unit is spent when an ``INTERRUPT`` disposition is **recorded**, never
-        when contact is attempted and never when it succeeds — so the count is
-        over every *retained* record ruled ``INTERRUPT`` inside the window,
-        dismissed and expired ones included. No spent unit is refunded.
+        **The spend outlives the notification, and that is the whole reason it is
+        kept apart from the records.** §5 is unconditional that "no spent unit is
+        refunded except by an act that says so", and deriving the count from the
+        retained records would have made three ordinary acts refund one silently:
+        deleting a notification, clearing them all, and a retention purge running
+        with a horizon shorter than the budget window. The last is not even a
+        user's act — it is a scheduler's — so the budget would quietly widen on a
+        timer, which is precisely the bound §5 exists to make computable.
+
+        **What is kept is a bare instant.** No key, no summary, no class, nothing
+        of the candidate: this is a rate limiter's state and not the user's
+        content, so it is neither exported nor reached by ADR-0004 §6's delete
+        right, and destroying a notification still destroys everything the
+        notification said.
+
+        **Widening the budget window does forget the older spends**, and that is
+        the "act that says so" §5 leaves room for: the user asking to be
+        interrupted more is the one party entitled to grant it. Entries outside
+        the window in force are pruned here rather than accumulating, which is
+        also what keeps this list bounded by the window rather than by uptime.
 
         Args:
             now: The ruling instant.
@@ -682,17 +717,12 @@ class FakeNotificationStore:
         """
         preferences = self._preferences
         window = preferences.budget_window
-        spent = sorted(
-            record.ruled_at
-            for record in self._records.values()
-            if record.kind is NotificationDispositionKind.INTERRUPT
-            and record.ruled_at > now - window
-        )
+        self._spent = sorted(at for at in self._spent if at > now - window)
         budget = preferences.interruption_budget
         frees_at: datetime | None = None
-        if budget > 0 and len(spent) >= budget:
-            frees_at = spent[len(spent) - budget] + window
-        return len(spent), frees_at
+        if budget > 0 and len(self._spent) >= budget:
+            frees_at = self._spent[len(self._spent) - budget] + window
+        return len(self._spent), frees_at
 
 
 def _classes_reaching(

@@ -45,7 +45,15 @@ from ai_assistant.testing import FakeAssistantEngine
 if TYPE_CHECKING:
     from pathlib import Path
 
-_AT = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
+#: Read once, at import, and every instant below is relative to it.
+#:
+#: **A fixed literal would have been a time bomb.** ``FakeAssistantEngine``
+#: builds its notification store on the *wall* clock — deliberately, so a
+#: consumer's engine behaves like a deployment's — so a candidate whose expiry is
+#: a constant stops being perishable the moment that constant passes, and every
+#: case here would start failing on a date nobody chose. Anchoring on the run's
+#: own clock keeps the candidate perishable for as long as the process lives.
+_AT = datetime.now(UTC)
 
 
 def _candidate(key: str = "k1") -> NotificationCandidate:
@@ -57,7 +65,7 @@ def _candidate(key: str = "k1") -> NotificationCandidate:
         summary="something the user did not ask for",
         detail="and a second line of it",
         noticed_at=_AT,
-        expires_at=_AT + timedelta(hours=2),
+        expires_at=_AT + timedelta(days=365),
         confidence=0.5,
         sensitivity=DataTier.PERSONAL,
         references=("rec-1", "rec-2"),
