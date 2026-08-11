@@ -251,10 +251,16 @@ caller stood.
 > **Normative.** While a `next_notification` request is outstanding, the hub
 > detects its connection closing. On detecting it the poll ends without an answer.
 
-> **Normative.** When a delivery connection ends — by that close, by a poll
-> completing, or by any other cause — its device slot and its global delivery-capacity
-> claim (§5) are **both released, in one step**. Neither is released without the
-> other, and a connection that has ended holds neither.
+> **Normative.** A connection becomes a **delivery connection** when its first
+> `next_notification` request claims the device slot and the global delivery capacity
+> (§2, §5), and it holds both for the rest of its life — **not** until a poll
+> completes. A later `next_notification` on that same connection uses the claims it
+> already holds and makes no new ones.
+
+> **Normative.** When a delivery connection **closes** — by the close above or by any
+> other cause — its device slot and its global delivery-capacity claim are **both
+> released, in one step**. Neither is released without the other, and a closed
+> connection holds neither.
 
 > **Normative.** Selecting an entry, minting its `delivery_id` and starting its
 > lease are **one indivisible step** inside `next_notification`. There is no state
@@ -288,9 +294,21 @@ per-device one and only the per-device one had a release, so an implementation c
 hold eight capacity claims after eight clients had disconnected and close every
 later poll while no delivery connection was live at all — the delivery channel dead
 with the hub reporting nothing wrong. Releasing both in one step is the mirror of
-claiming both in one step, and stating it over *any* cause of a connection ending
-rather than over the close path alone is what keeps a third way of ending from
-needing a fourth clause.
+claiming both in one step, and stating it over *any* cause of a close rather than
+over the detected-close path alone is what keeps a third way of closing from needing
+a fourth clause.
+
+**The claims track the connection and not the poll, and the twenty-fifth round is
+why that is spelled out.** A draft released them when a poll *completed*, which
+sounds harmless and is not: the hub keeps a connection open after writing a response
+(ADR-0084 §3's serial connection is reused, not closed), so eight or more devices
+could each issue a zero-budget immediate poll, release their delivery claims on
+completion, and keep the now-idle sockets — then fill `hub_max_connections` and deny
+the ordinary-session slot §5's sub-bound exists to preserve. The sub-bound is a bound
+on *connections*, so what holds a claim has to be a connection. The cost is that an
+idle delivery connection still occupies a delivery slot, which is the correct
+reading rather than a concession: it is a delivery connection, and §2 says a device
+gets one.
 
 **The lease begins inside the engine call and not at the write, and getting that
 backwards cost four rounds.** A draft made the lease commit at the result frame's
