@@ -993,9 +993,14 @@ class SqliteNotificationStore:
                 written. Nothing is committed by a failed admission — no record,
                 and **no unit of budget**.
         """
-        now = self._now()
         async with self._lock, self._ruling_transaction("admit a notification"):
-            record_id, facts = await _run_to_completion(self._admit_facts, candidate, now)
+            # **The ruling instant is read inside the exclusion**, as every
+            # comparison §5 makes is against it: a reading taken before the lock
+            # would be however old the queue ahead of this call was, so a
+            # candidate that perished while waiting could still be ruled
+            # perishable and spend a unit of budget on an opportunity that had
+            # already gone.
+            now, record_id, facts = await _run_to_completion(self._admit_facts, candidate)
             ruling = await policy.rule(
                 candidate,
                 notification_id=record_id,
@@ -1008,12 +1013,16 @@ class SqliteNotificationStore:
             )
             return await _run_to_completion(self._admit_write, candidate, ruling, record_id, now)
 
-    def _admit_facts(
-        self, candidate: NotificationCandidate, now: datetime
-    ) -> tuple[str, _StoreFacts]:
-        """Mint the id and read the four facts, inside the open transaction."""
+    def _admit_facts(self, candidate: NotificationCandidate) -> tuple[datetime, str, _StoreFacts]:
+        """Read the instant, mint the id and read the four facts, in the transaction.
+
+        Raises:
+            NotificationStoreError: If the clock's reading is unusable, or the id
+                source returns an unusable id. Nothing is committed either way.
+        """
+        now = self._now()
         record_id = self._fresh_id(self._conn)
-        return record_id, self._facts(self._conn, candidate.candidate_key, now)
+        return now, record_id, self._facts(self._conn, candidate.candidate_key, now)
 
     def _admit_write(
         self,
@@ -1064,12 +1073,11 @@ class SqliteNotificationStore:
             NotificationStoreError: If the clock's reading is unusable, or the
                 store cannot be read or written.
         """
-        now = self._now()
         async with self._lock, self._ruling_transaction("reconsider a notification"):
-            held = await _run_to_completion(self._reconsider_facts, notification_id, now)
+            held = await _run_to_completion(self._reconsider_facts, notification_id)
             if held is None:
                 return None
-            record, facts = held
+            now, record, facts = held
             ruling = await policy.rule(
                 record.candidate,
                 notification_id=record.id,
@@ -1085,13 +1093,22 @@ class SqliteNotificationStore:
             return await _run_to_completion(self._reconsider_write, record, ruling, now)
 
     def _reconsider_facts(
-        self, notification_id: str, now: datetime
-    ) -> tuple[HeldNotification, _StoreFacts] | None:
-        """The due record and the facts to re-rule it against, or ``None``."""
+        self, notification_id: str
+    ) -> tuple[datetime, HeldNotification, _StoreFacts] | None:
+        """The instant, the due record and the facts to re-rule it against.
+
+        ``None`` where the id named nothing, or named a record that is not
+        actionable or has not fallen due — which a job driving this over a page
+        of due records races other writers into by construction.
+
+        Raises:
+            NotificationStoreError: If the clock's reading is unusable.
+        """
+        now = self._now()
         record = self._row(self._conn, notification_id)
         if record is None or not record.is_due_at(now):
             return None
-        return record, self._facts(self._conn, None, now)
+        return now, record, self._facts(self._conn, None, now)
 
     def _reconsider_write(
         self, record: HeldNotification, ruling: NotificationDisposition, now: datetime
@@ -1215,12 +1232,14 @@ class SqliteNotificationStore:
         Raises:
             NotificationStoreError: If the store cannot be written.
         """
-        now = self._now()
         async with self._lock:
-            return await _run_to_completion(self._dismiss_sync, notification_id, now)
+            return await _run_to_completion(self._dismiss_sync, notification_id)
 
-    def _dismiss_sync(self, notification_id: str, now: datetime) -> bool:
+    def _dismiss_sync(self, notification_id: str) -> bool:
         with self._transaction("dismiss a notification") as conn:
+            # Read inside the exclusion: this instant is what a retention horizon
+            # is measured from, and a second call may not move it (§7).
+            now = self._now()
             record = self._row(conn, notification_id)
             if record is None or not record.is_actionable_at(now):
                 return False
@@ -1253,11 +1272,10 @@ class SqliteNotificationStore:
         Raises:
             NotificationStoreError: If the store cannot be written.
         """
-        now = self._now()
         async with self._lock:
-            return await _run_to_completion(self._set_preferences_sync, preferences, now)
+            return await _run_to_completion(self._set_preferences_sync, preferences)
 
-    def _set_preferences_sync(self, preferences: NotificationPreferences, now: datetime) -> int:
+    def _set_preferences_sync(self, preferences: NotificationPreferences) -> int:
         """The write and the re-arming, as one atomic act (§6).
 
         **Nothing here re-rules anything.** Stamping the write instant routes the
@@ -1265,6 +1283,7 @@ class SqliteNotificationStore:
         reconsideration job picks the records up on its next run.
         """
         with self._transaction("write the notification preferences") as conn:
+            now = self._now()
             previous = self._preferences_row(conn)
             removable = _conditions_a_change_removes(previous, preferences)
             raised = _classes_reaching(previous, preferences, NotificationReach.INTERRUPT)
@@ -1370,12 +1389,12 @@ class SqliteNotificationStore:
         Raises:
             NotificationStoreError: If the store cannot be written.
         """
-        now = self._now()
         async with self._lock:
-            return await _run_to_completion(self._purge_sync, now)
+            return await _run_to_completion(self._purge_sync)
 
-    def _purge_sync(self, now: datetime) -> int:
+    def _purge_sync(self) -> int:
         with self._transaction("purge the notification store") as conn:
+            now = self._now()
             # `retention IS NULL` is excluded in SQL because the exclusion is
             # about the *column* and nothing else; the horizon and the
             # actionability are then judged by the record, which is where their
