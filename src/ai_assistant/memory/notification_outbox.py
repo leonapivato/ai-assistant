@@ -560,27 +560,32 @@ class SqliteNotificationOutbox:
         async with self._lock:
             await self._settle_departing()
             now = self._now()
+            # Resolved before either ceiling is measured, because a terminal
+            # refusal has to *dismiss* this record and cannot dismiss one it never
+            # looked up (§3b).
+            record_id = await self._resolve_record(candidate.candidate_key)
             # §4's delivery ceiling is measured on the *candidate*, before any
             # bound is consulted, because it is a refusal the offer can never
             # satisfy by evicting other entries (§3).
             if len(encoded.encode("utf-8")) > self._candidate_ceiling:
-                _log.info(
-                    "notification_outbox_refused",
-                    reason="too_large",
-                    candidate_key=candidate.candidate_key,
-                )
+                await self._refuse(NotificationEnqueue.TOO_LARGE, candidate, record_id)
                 return NotificationEnqueue.TOO_LARGE
-            record_id = await self._resolve_record(candidate.candidate_key)
             cost = _cost_of(candidate.candidate_key, encoded, record_id)
             if cost > self._max_bytes:
-                _log.info(
-                    "notification_outbox_refused",
-                    reason="too_large",
-                    candidate_key=candidate.candidate_key,
-                )
+                await self._refuse(NotificationEnqueue.TOO_LARGE, candidate, record_id)
                 return NotificationEnqueue.TOO_LARGE
             decided = await _run_to_completion(self._decide_offer_sync, candidate, cost, now)
             outcome, victims = decided
+            if outcome is NotificationEnqueue.KEY_COLLISION:
+                await self._refuse(
+                    NotificationEnqueue.KEY_COLLISION,
+                    candidate,
+                    record_id,
+                    held_by=await _run_to_completion(
+                        self._held_record_id_sync, candidate.candidate_key
+                    ),
+                )
+                return outcome
             if outcome is not NotificationEnqueue.ENQUEUED:
                 return outcome
             # Dismiss first, remove after (§3b). The victims are already marked,
@@ -597,6 +602,81 @@ class SqliteNotificationOutbox:
             )
             self._wake()
             return NotificationEnqueue.ENQUEUED
+
+    async def _refuse(
+        self,
+        outcome: NotificationEnqueue,
+        candidate: NotificationCandidate,
+        record_id: str | None,
+        *,
+        held_by: str | None = None,
+    ) -> None:
+        """End a terminally refused offer's record, and log the refusal (§3b).
+
+        **A terminal refusal is terminal for the *record*, not merely for the
+        offer**, and leaving it actionable is the fifty-seventh round's defect:
+        "Returning ``TOO_LARGE`` and doing nothing else left the record actionable
+        with no entry, which is exactly the state §3b's invariant reads as an
+        incomplete handoff: every reconciliation would offer the same permanently-
+        undeliverable candidate again, until it expired, while a polling device
+        received nothing." ``KEY_COLLISION`` has the same shape and takes the same
+        answer.
+
+        **Dismissing is the terminal outcome that fits**, because the record's own
+        vocabulary already has one: a dismissal ends actionability and leaves the
+        record readable (ADR-0130 §9), so the owner can still see the notification
+        in the held surface, ADR-0130 §7's cap is freed, and nothing retries it.
+
+        **The unit is not refunded**, and that is stated because the alternative is
+        forbidden: ADR-0130 §5 rules that a delivery seam "may not refund a unit
+        implicitly on a failed attempt". So an undeliverable notification costs the
+        owner one unit of that hour's budget, and this log entry is what makes that
+        cost visible.
+
+        **A collision whose record is the held entry's dismisses nothing**, which
+        is where §3b's clause meets §3's. ADR-0130 §8 suppresses duplicates by key,
+        so a differing candidate offered under a held key ordinarily shares the
+        held entry's record — and dismissing that would make the held entry
+        departing, contradicting §3's "The held entry is not replaced". The
+        invariant §3b is protecting is not breached there either: that record still
+        *has* an entry.
+
+        Args:
+            outcome: Which terminal refusal was reached.
+            candidate: What was refused.
+            record_id: Its ADR-0130 record, or ``None`` where none was found —
+                which §3b's "nothing further is owed" covers.
+            held_by: The record of the entry a collision matched, where the outcome
+                is a collision.
+        """
+        dismissed = record_id is not None and record_id != held_by
+        if dismissed:
+            await self._dismiss(record_id)
+        _log.info(
+            "notification_outbox_refused",
+            reason=outcome.value,
+            candidate_key=candidate.candidate_key,
+            notification_id=record_id,
+            record_dismissed=dismissed,
+        )
+
+    def _held_record_id_sync(self, key: str) -> str | None:
+        """The record of the entry a collision matched.
+
+        Run on a worker thread like every other statement here, because the
+        connection is serialised behind this store's lock and a read taken on the
+        event loop would use it from the wrong side of that discipline.
+        """
+        with self._transaction("read the entry a collision matched", immediate=False) as conn:
+            rows = self._rows(
+                conn,
+                "read the entry a collision matched",
+                "SELECT record_id FROM outbox WHERE candidate_key = ?",
+                (key,),
+            )
+        if not rows or rows[0][0] is None:
+            return None
+        return str(rows[0][0])
 
     def _decide_offer_sync(
         self, candidate: NotificationCandidate, cost: int, now: datetime

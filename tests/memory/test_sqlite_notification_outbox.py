@@ -20,6 +20,7 @@ from outbox_contract import NOW, NotificationOutboxContract
 from ai_assistant.core.errors import NotificationOutboxError
 from ai_assistant.core.types import (
     ClassReach,
+    NotificationCandidate,
     NotificationEnqueue,
     NotificationPreferences,
     NotificationReach,
@@ -76,7 +77,9 @@ def build(  # noqa: PLR0913 — one keyword per figure a case may vary, each def
     )
 
 
-async def interrupting(records: FakeNotificationStore, key: str = "k1") -> tuple[str, object]:
+async def interrupting(
+    records: FakeNotificationStore, key: str = "k1"
+) -> tuple[str, NotificationCandidate]:
     """Rule one candidate to ``INTERRUPT`` and return its record id and candidate.
 
     The only path to an ``INTERRUPT`` is ADR-0130 §5's conjunctive clause with all
@@ -355,7 +358,7 @@ class TestTheTwoStoreOrdering:
         records = FakeNotificationStore()
         record_id, subject = await interrupting(records)
         outbox = build(tmp_path / "outbox.db", records=records)
-        await outbox.offer(subject)  # type: ignore[arg-type]
+        await outbox.offer(subject)
         delivery = await outbox.claim()
         assert delivery is not None
 
@@ -423,7 +426,7 @@ class TestTheTwoStoreOrdering:
         records = FakeNotificationStore()
         record_id, subject = await interrupting(records)
         outbox = build(tmp_path / "outbox.db", records=records)
-        await outbox.offer(subject)  # type: ignore[arg-type]
+        await outbox.offer(subject)
 
         assert await outbox.withdraw(record_id) is True
 
@@ -498,3 +501,80 @@ async def test_the_durable_wait_returns_early_on_an_offer(tmp_path: Path) -> Non
     woke, _ = await asyncio.gather(outbox.wait_for_arrival(timedelta(seconds=5)), enqueue())
 
     assert woke is True
+
+
+class TestATerminalRefusalIsTerminalForTheRecord:
+    """ADR-0131 §3b: a refusal that left the record actionable was the defect."""
+
+    async def test_too_large_dismisses_the_record(self, tmp_path: Path) -> None:
+        """§3b, the fifty-seventh round.
+
+        "Returning ``TOO_LARGE`` and doing nothing else left the record actionable
+        with no entry, which is exactly the state §3b's invariant reads as an
+        incomplete handoff: every reconciliation would offer the same permanently-
+        undeliverable candidate again, until it expired, while a polling device
+        received nothing."
+        """
+        records = FakeNotificationStore()
+        record_id, subject = await interrupting(records)
+        outbox = build(tmp_path / "outbox.db", records=records, candidate_ceiling=10)
+
+        assert await outbox.offer(subject) is NotificationEnqueue.TOO_LARGE
+
+        held = await records.get(record_id)
+        assert held is not None
+        assert held.dismissed_at is not None
+
+    async def test_a_dismissed_refusal_is_not_re_offered_by_reconciliation(
+        self, tmp_path: Path
+    ) -> None:
+        """The property the dismissal buys: no reconciliation retries it.
+
+        Read through the sweep rather than through the record, because "not
+        actionable" is what reconciliation turns on and asserting the flag alone
+        would not show that the loop is actually broken.
+        """
+        records = FakeNotificationStore()
+        _, subject = await interrupting(records)
+        outbox = build(tmp_path / "outbox.db", records=records, candidate_ceiling=10)
+        await outbox.offer(subject)
+
+        await outbox.reconcile()
+
+        assert await outbox.claim() is None
+
+    async def test_a_too_large_entry_over_the_byte_bound_dismisses_too(
+        self, tmp_path: Path
+    ) -> None:
+        """The second ceiling takes the same answer, being the same outcome."""
+        records = FakeNotificationStore()
+        record_id, subject = await interrupting(records)
+        outbox = build(tmp_path / "outbox.db", records=records, max_bytes=200)
+
+        assert await outbox.offer(subject) is NotificationEnqueue.TOO_LARGE
+
+        held = await records.get(record_id)
+        assert held is not None
+        assert held.dismissed_at is not None
+
+    async def test_a_collision_leaves_the_held_entrys_record_alone(self, tmp_path: Path) -> None:
+        """§3 meets §3b: "The held entry is not replaced."
+
+        ADR-0130 §8 suppresses duplicates by key, so a differing candidate offered
+        under a held key ordinarily shares the held entry's record — and dismissing
+        that would make the held entry departing. §3b's invariant is not the one at
+        risk there, because that record still *has* an entry.
+        """
+        records = FakeNotificationStore()
+        record_id, subject = await interrupting(records)
+        outbox = build(tmp_path / "outbox.db", records=records)
+        await outbox.offer(subject)
+
+        differing = subject.model_copy(update={"confidence": 0.9})
+        assert await outbox.offer(differing) is NotificationEnqueue.KEY_COLLISION
+
+        held = await records.get(record_id)
+        assert held is not None
+        assert held.dismissed_at is None
+        delivery = await outbox.claim()
+        assert delivery is not None
