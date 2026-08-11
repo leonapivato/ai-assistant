@@ -2891,8 +2891,12 @@ class Engine:
             budget=budget,
         )
         outbox = self._delivery_surface()
+        # **Unshielded, alone on this surface** (ADR-0131 §2a): a poll whose
+        # connection has gone must stop and take no entry, so the wire's cancel of
+        # its dispatch task has to reach the work. The mutating steps inside are
+        # scope-shielded instead — see :meth:`_poll`.
         return await self._tracked(
-            self._poll(outbox, named, budget), "next_notification", checked=True
+            self._poll(outbox, named, budget), "next_notification", checked=True, shielded=False
         )
 
     def _check_budget(self, budget: timedelta) -> None:
@@ -2959,6 +2963,16 @@ class Engine:
         makes "fixed at its start" literally true, the acknowledgement now falling
         inside the budget rather than ahead of it.
 
+        **This runs unshielded, and each mutating step is shielded on its own**
+        (ADR-0131 §2a). A poll spends most of its life parked in
+        ``wait_for_arrival``, which reads nothing and writes nothing, so a cancel
+        there is free — and it is the state a disconnect almost always finds, which
+        is why §2a's "cancels the poll and takes no entry" is reachable at all. The
+        two steps that *do* mutate — the acknowledgement and the claim — each run
+        through :meth:`_uninterruptibly`, so they complete or never start. That is
+        the split §2a draws: a close before the selection takes no entry, a close
+        during or after it leaves the lease standing.
+
         Raises:
             NotificationBudgetError: If the deadline is not representable, which is
                 the budget being unusable rather than merely large.
@@ -2984,9 +2998,21 @@ class Engine:
             )
             raise NotificationBudgetError(msg) from exc
         if acknowledging is not None:
-            await outbox.acknowledge(acknowledging)
+            # Mutating and *pre-selection*, so it takes the same scoped shield the
+            # claim does: a cancel arriving mid-retirement would leave the entry
+            # dismissed in one store and standing in the other.
+            await self._uninterruptibly(outbox.acknowledge(acknowledging))
         while True:
-            delivery = await outbox.claim()
+            # **The one indivisible step, and the only shield this poll needs**
+            # (ADR-0131 §2a): selecting an entry, minting its ``delivery_id`` and
+            # starting its lease "are one indivisible step… There is no state in
+            # which an entry is chosen for a poll and not yet leased." A cancel
+            # landing inside it would tear exactly that, so it runs to completion.
+            # A cancel arriving *during or after* it therefore leaves the lease
+            # standing and the entry returns on expiry — §2a's own second clause,
+            # priced there at "one lease, and it is the cost the lease exists to
+            # carry".
+            delivery = await self._uninterruptibly(outbox.claim())
             if delivery is not None:
                 return delivery
             remaining = deadline - self._now()
@@ -3264,14 +3290,32 @@ class Engine:
         observe: Callable[[_T], Observation] | None = None,
         *,
         checked: bool = False,
+        shielded: bool = True,
     ) -> _T:
-        """Run ``coro`` as a tracked, shielded, **traced** task, so shutdown can drain it.
+        """Run ``coro`` as a tracked, **traced** task, so shutdown can drain it.
 
-        The task is what :meth:`aclose` awaits, and the shield is what keeps the
-        underlying work alive when the *caller* cancels: a cancelled
-        ``converse()``/``resume()``/``pending_confirmations()`` abandons this await,
-        but the task keeps running and stays tracked until it finishes, which is
-        what lets the drain wait for work a cancelled call orphaned (ADR-0042 §2).
+        The task is what :meth:`aclose` awaits. **Tracking is what ADR-0042 §2
+        requires, and it is the whole of what it requires here**: the façade
+        "tracks the underlying work itself, not merely its public call-tasks",
+        because "cancelling the awaiting coroutine — whether by shutdown *or* by a
+        client cancelling its own ``converse()``/``resume()`` mid-call — abandons
+        the coroutine but **not** the worker thread". Shutdown then "awaits every
+        tracked underlying operation to quiescence — **including work orphaned by an
+        already-cancelled call** — before closing, shielding **that drain** from the
+        shutdown's own cancellation as needed".
+
+        **So the ADR's shield is on the drain, and a call cancelled by its caller is
+        a state it expects rather than one it forbids.** ``shielded`` defaults to
+        ``True`` because most of this surface keeps a call running to completion
+        once begun, which is this implementation's choice and not the ADR's
+        requirement — an earlier docstring here claimed ADR-0042 §2 as its ground
+        and it does not say that. The distinction stopped being academic at
+        ADR-0131 §2a, which is normative that "a close detected before that step
+        runs cancels the poll and takes no entry": under an unconditional shield a
+        disconnected long poll ran on and could still lease an entry for a
+        connection that had gone. ``next_notification`` therefore passes
+        ``shielded=False`` and scope-shields its own mutating steps instead, which
+        satisfies both texts — see :meth:`_poll`.
         Every public method that touches a connection-owning store runs through
         here, so none can be racing a store call when :meth:`aclose` closes it —
         recovery reads the plan store and the audit trail, so it is tracked too. The
@@ -3327,6 +3371,11 @@ class Engine:
                 operation whose result crosses the ``AssistantEngine`` boundary;
                 ``False`` on the four maintenance operations, whose reports are the
                 scheduler's and never a client's (ADR-0085 §1).
+            shielded: Whether a caller's cancellation is kept off the work. ``True``
+                runs it to completion regardless; ``False`` lets the cancel through,
+                for an operation that must stop when its caller goes away
+                (ADR-0131 §2a). **Tracking is unaffected either way** — the drain
+                covers the task in both cases, which is what ADR-0042 §2 binds.
 
         Returns:
             Whatever ``coro`` returned.
@@ -3335,6 +3384,32 @@ class Engine:
         task: asyncio.Task[_T] = asyncio.ensure_future(
             self._operation_traces.observing(seam, work, observe)
         )
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+        if not shielded:
+            # Awaiting the task directly propagates this caller's cancellation into
+            # it, which is the point; it stays in `_inflight` either way, so the
+            # drain still waits for whatever it orphans.
+            return await task
+        return await asyncio.shield(task)
+
+    async def _uninterruptibly(self, coro: Awaitable[_T]) -> _T:
+        """Run one step to completion even if this caller is cancelled, still tracked.
+
+        :meth:`_tracked` without the tracing or the result measurement — for a step
+        *inside* an unshielded operation that must not be torn in half. The task is
+        registered in ``_inflight`` before it is awaited, so ADR-0042 §2's actual
+        requirement holds for it: a cancel that abandons the caller leaves work that
+        the shutdown drain still knows about and waits for, rather than a worker
+        thread using a connection ``aclose`` is about to shut.
+
+        Args:
+            coro: The step to run to completion.
+
+        Returns:
+            Whatever ``coro`` returned.
+        """
+        task: asyncio.Task[_T] = asyncio.ensure_future(coro)
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
         return await asyncio.shield(task)
