@@ -249,8 +249,12 @@ caller stood.
 ### 2a. A poll whose connection has gone releases the slot it held
 
 > **Normative.** While a `next_notification` request is outstanding, the hub
-> detects its connection closing. On detecting it the poll ends without an answer
-> and the device's delivery slot is released.
+> detects its connection closing. On detecting it the poll ends without an answer.
+
+> **Normative.** When a delivery connection ends — by that close, by a poll
+> completing, or by any other cause — its device slot and its global delivery-capacity
+> claim (§5) are **both released, in one step**. Neither is released without the
+> other, and a connection that has ended holds neither.
 
 > **Normative.** Selecting an entry, minting its `delivery_id` and starting its
 > lease are **one indivisible step** inside `next_notification`. There is no state
@@ -277,6 +281,16 @@ to, and the reconnect §2 calls free is closed as a second poll — the claim an
 rule contradicting each other on the most ordinary failure a mobile device has.
 Adversarial review found it on the eleventh round, and this is the one place the
 seam genuinely reaches into the server's request loop.
+
+**The release covers both claims because §5's was added without one**, which is the
+twenty-fourth round's finding. §5 gained a global capacity claim beside §2's
+per-device one and only the per-device one had a release, so an implementation could
+hold eight capacity claims after eight clients had disconnected and close every
+later poll while no delivery connection was live at all — the delivery channel dead
+with the hub reporting nothing wrong. Releasing both in one step is the mirror of
+claiming both in one step, and stating it over *any* cause of a connection ending
+rather than over the close path alone is what keeps a third way of ending from
+needing a fourth clause.
 
 **The lease begins inside the engine call and not at the write, and getting that
 backwards cost four rounds.** A draft made the lease commit at the result frame's
