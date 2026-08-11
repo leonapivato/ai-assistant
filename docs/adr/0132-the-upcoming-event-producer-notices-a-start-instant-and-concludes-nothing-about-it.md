@@ -3,8 +3,9 @@
 - Status: Proposed
 - Date: 2026-08-11
 - **Durability clause.** Every reference below to ADR-NNNN is to its text as it
-  stood at this ADR's base, `2e2c838f`, not to its status on any later day. Every
-  ADR this decision composes with reads `Accepted` there. Where a later ADR
+  stood at this ADR's base, `9714787c`, not to its status on any later day. Every
+  ADR this decision composes with reads `Accepted` there, ADR-0133 among them —
+  that commit is its ratification, on its second flip. Where a later ADR
   *changes* one of them, this ADR is read against the text quoted here and that
   ADR's own record says what moved. The `Date` line is this ADR's authoring date
   in this clone's frame, the convention ADR-0112, ADR-0113, ADR-0129 and ADR-0131
@@ -74,43 +75,29 @@ each `MemoryUpdateProposal` carries the occurrence's rendered one-line text as t
 belief's content and its span as `Attestation.extent`. That is a start instant, an
 end instant and a sentence a person can read, per entry, from one bounded read.
 
-### One thing this lane cannot settle: which *use* of the source this is
+### Which *use* of the source this is was settled by ADR-0133, ahead of this ADR
 
-ADR-0097 §2 fixes the scopes, and it fixes them at two. Its ruling is shown in a
-fenced block rather than quoted as a block quote, because a `**Normative.**` line
-inside a fence is display and not a mark (ADR-0088 §5, ADR-0089 §2) — this ADR is
-citing that clause, not making it:
+ADR-0097 §2 fixed `GrantScope` at two members and ruled that "a use a grant does
+not name is not authorised by it". Under that section's own axis — "The axis is
+not invented; it is ADR-0093 §3's", one scope per consumer of a reading — a
+producer reading the calendar to notice something worth telling the user is a
+**third** consumer. It contributes no `ContextFacet` at assembly time and proposes
+no belief into memory; it concludes a candidate which, ruled `HOLD` or
+`INTERRUPT`, becomes a durable record ADR-0130 §7 makes enumerable and §9 makes
+exportable — about something the user did not ask for.
 
-```text
-> **Normative.** A grant names one or more **uses** from `GrantScope`, whose
-> members are `FACET` — reading the source to contribute a `ContextFacet` at
-> assembly time — and `INGEST` — reading the source to propose beliefs into
-> memory. A use a grant does not name is not authorised by it.
-```
+Both ways of authorising that would have changed ratified ground, so this ADR did
+not settle it and **ADR-0133 does**: `GrantScope` gains `NOTIFY`, "reading the
+source so that a producer may conclude a `NotificationCandidate` about what it
+read", with the partial-supersession record against ADR-0097 §2 carried there.
+Three of its rulings shape this ADR rather than merely permitting it — §1's limit
+of the member to the *read*, §2's independence of the three members, and §6's
+clause placing the enforcement site with the producer that needs it, which is this
+one.
 
-Its supporting text says where the axis came from: "The axis is not invented; it
-is ADR-0093 §3's, promoted to something the user can answer" — the axis is the
-*consumer* axis, one scope per consumer of a reading, and §2 says so again when it
-records that "Both members have a live consumer, which is what keeps this from
-being surface with no consumer".
-
-A producer that reads the calendar to notice something worth telling the user is a
-third consumer of that reading. It does not contribute a `ContextFacet` at
-assembly time and it does not propose beliefs into memory: it writes a durable,
-exportable notification record (ADR-0130 §7, §9) that reaches the user unbidden.
-Under §2's own axis that is a third use, and §2's last sentence then says a grant
-naming neither member authorises it.
-
-**Both available resolutions change ratified ground, and this lane's fence
-reaches neither.** Reading `INGEST` to cover it is ADR-0070 §1's second limb — a
-clause read more widely than it now holds — and so a partial supersession of
-ADR-0097 §2 rather than an amendment. Minting a third `GrantScope` member is a
-`core/types.py` change under golden rule 5, and also records against §2's "exactly
-two". ADR-0097 §12 defers eleven things by name and this is not among them, so
-there is no discharged deferral to make it a stacked addition (ADR-0083 §15).
-
-§2 below states the question and the resolution this ADR would take; it is
-deliberately not marked, and nothing here is ratifiable until it is ruled.
+**So the authority is settled elsewhere and this ADR decides what is done with
+it**: what the producer walks, on what schedule, within what window, and what it
+may and may not conclude.
 
 ## Decision
 
@@ -153,57 +140,49 @@ the numeric priority ADR-0130 §11 declined — "Weighed by a producer, a score 
 self-granted authority" — and the aggregate is already bounded twice, by §6's
 budget and §7's cap, in a place the user can tune and the producer cannot.
 
-### 2. The authorising grant — **open, and this lane may not close it**
+### 2. The authorising grant is `NOTIFY`, and this producer carries its gate
 
-Everything else in this ADR is decided. This is not, for the reason the Context
-gives: under ADR-0097 §2's own axis the producer's read is a third use of the
-source, and both ways of authorising it change ratified ground that this lane's
-fence does not reach.
+> **Normative.** The producer reads the calendar only where a live grant naming
+> `GrantScope.NOTIFY` covers that reader's identity at the instant the read
+> starts. Where none does, nothing is opened: the source is not resolved, not
+> opened and not parsed.
 
-**The resolution this ADR would take, if ruled on, is a third `GrantScope`
-member** — one naming the use "reading the source to notice something worth
-telling the user" — recorded as a partial supersession of ADR-0097 §2's
-two-member enumeration, with a `core/types.py` lane ahead of this one under golden
-rule 5. Three things argue for it over reading `INGEST` wider:
+ADR-0133 §1 mints the member and §2 rules the refusal, in ADR-0097 §5's own terms.
+No other member substitutes: ADR-0133 §2 rules the three independent, so a live
+`INGEST` grant on this calendar authorises this read no more than a `FACET` one
+does, and ADR-0133 §3 rules that no grant recorded before the member existed
+acquires it.
 
-- **It is the sentence a person actually means.** §2's own test for a member is
-  that "'You may look at my calendar to answer what I am asking now, but do not
-  remember it' is a coherent sentence, it is one a person actually means". "You
-  may read my calendar and remember what is in it, but do not raise it with me
-  unprompted" is that sentence again, and the two grants a user would give are
-  genuinely different.
-- **A notification is a strictly larger act than a belief.** A belief is read when
-  the user asks; a notification record is written to be shown, is enumerable
-  unbidden (ADR-0130 §7), and — once its class's reach is raised — interrupts.
-  Widening a consent clause silently is the one place the corpus is least willing
-  to be approximate, and ADR-0097 §5 says why in its own terms: "Opening the
-  user's calendar is the act the grant is about."
-- **It passes §2's live-consumer test.** A third member would have exactly one
-  consumer, this producer, so it is not surface with no consumer (ADR-0045 §1,
-  ADR-0028 §7).
+> **Normative.** This producer's driver is the enforcement site ADR-0133 §6
+> assigns, and ADR-0133 §5 binds it whole: it takes a `SourceGrants` as a required
+> constructor argument with no default, it places no `await` between the `live()`
+> answer and `Reader.read()`, it re-checks on return and discards the reading
+> entire where the grant has gone, and it fails closed on an unanswerable check.
 
-**What argues the other way, stated because it is not weak.** ADR-0130 §6 already
-gives the user a finer control than a scope: reach is per notification class,
-defaults to `hold` for every class, and nothing interrupts until the user raises
-one. A third scope therefore partly duplicates a control that exists, and it costs
-a `core` change, a grant surface change, and a re-grant by every user who has
-already granted `INGEST`.
+**Pointed at rather than restated, because a restatement is a place to diverge.**
+ADR-0133 §5's clauses already bind every driver of a `NOTIFY` read; writing them
+out again here would create a second text that can drift from the first under a
+later edit, and ADR-0133 §6's marked clause — "No enforcement site lands with the
+member. The gate of §5 lands with the producer that needs it" — is what makes this
+ADR the site rather than a second author of the rule.
 
-**Whichever is ruled, three clauses hold and are marked, because they are
-properties of the gate rather than of the scope.**
+**The discard limb is the one this producer has to place carefully.** ADR-0133 §5
+records why: ADR-0130 §3 makes offering and persisting one call, so a producer
+that concluded first and re-checked afterwards would already have written the
+durable record. The re-check therefore lands between the read returning and the
+first offer, and a reading whose grant has gone yields no candidate at all rather
+than candidates that are then withdrawn.
 
-> **Normative.** The producer is a site that drives a reader, and takes a
-> `SourceGrants` — the query seam, never `SourceGrantStore` — as a required
-> constructor argument with no default (ADR-0097 §5).
+> **Normative.** The `NOTIFY` grant and the reach level of ADR-0130 §6 are
+> separate acts and this producer derives neither from the other. It reads no
+> reach level, and a class whose reach is `off` is not a reason to skip a read.
 
-> **Normative.** No `await` occurs between the `live()` result the producer gates
-> on and its call to `Reader.read()`, and the producer re-checks the grant when
-> `read()` returns and discards the reading whole where the grant is no longer
-> live: nothing is offered from it (ADR-0097 §5a).
-
-> **Normative.** The producer fails closed on an unanswerable check. A `live()`
-> that raises `GrantError` is not a grant, and the error propagates rather than
-> being converted into a refusal about consent (ADR-0097 §5a).
+ADR-0133 §4 rules the two independent and says why in both directions: reach is
+keyed on a class rather than a source and is read only once a candidate is
+disposed — after the file was opened and parsed — so it can mute what was read
+and can never stop a read. Configuration, consent and reach are therefore three
+separate acts on this producer, and §4 below keeps the third of them out of the
+first.
 
 ### 3. The walk: the reading's proposals, at the producer's own cadence
 
@@ -267,7 +246,11 @@ ADR-0093 §7's rule for the same source, unchanged: "nothing may read a user's
 personal files because a default said so", which is why
 `calendar_reader_interval` is `None` until someone sets it. This producer reads
 the same file and gets the same default. Configuration, consent and reach are then
-three separate acts, and none stands in for another.
+three separate acts and none stands in for another — the operator arms the job,
+the user grants `NOTIFY` (ADR-0133 §3, which back-fills nothing), and the user
+raises the class's reach from `hold`. ADR-0133 §4 rules the last two independent;
+this clause keeps the first independent of both, on ADR-0097 §8's rule that
+nothing mints a grant from what is already configured.
 
 > **Normative.** The lead window defaults to **thirty minutes**.
 
@@ -426,25 +409,29 @@ of these — the bound is enforced by refusing and never by truncating (ADR-0093
 §5), and a producer offering candidates from the part that fitted would be
 noticing a subset of the day while reporting a full pass.
 
-> **Normative.** A pass over a source the producer may not read is never reported
-> as a successful pass and never as a source failure. It is logged with its own
-> class and retried at the next due instant.
+> **Normative.** A pass with no live `NOTIFY` grant is never reported as a
+> successful pass and never as a source failure. It is logged with its own class
+> and retried at the next due instant.
 
 ADR-0097 §5's reasoning taken rather than its clause, which is written about an
 ingestion pass: "An ungranted pass reported as zero proposals is
 indistinguishable from 'the source had nothing to say within the bound'". A
 deployment leaving the interval set after a revocation therefore logs a refusal
 every interval, which is configuration and consent disagreeing out loud rather
-than a defect to design around.
+than a defect to design around. Two facts stay distinguishable in the log, on
+ADR-0097 §5a's last clause: an unanswerable grant store propagates as itself and
+is never reported as a user who has not said yes.
 
 > **Normative.** A revocation reaches the producer's next read and no record it
 > has already offered. A candidate already ruled stands, and the user's remedy is
 > the dismissal and the per-record delete ADR-0130 §9 places on the store.
 
-ADR-0097 §6 is that revoking "stops the reading and does not unwrite the beliefs";
-a notification record is the same kind of thing on the same reasoning, and
-ADR-0130 §6 already rules that no setting change reaches a record ruled
-`INTERRUPT`.
+ADR-0097 §6 is that revoking "stops the reading and does not unwrite the beliefs",
+and ADR-0133 §2 restates the boundary for this member from the other side: a
+grant's reach ends at the read, so a refusal does not reach back over records an
+authorised read already produced. A notification record is the same kind of thing
+on the same reasoning, and ADR-0130 §6 already rules that no setting change
+reaches a record ruled `INTERRUPT`.
 
 > **Normative.** A stale source is not a failure and is not detectable. The
 > producer reports what the file says, computes no staleness verdict, and never
@@ -488,7 +475,16 @@ ADR neither needs the scheduler's durable cursor nor closes its deferral.
   its own class and its own figures, and §6's key holds the producer's name for
   exactly that reason.
 - **Content-level grant scope.** Which entries, which calendars — ADR-0097 §12
-  defers it with the condition that fires it, and this producer does not fire it.
+  defers it with the condition that fires it, ADR-0133 §7 leaves it unnarrowed,
+  and this producer does not fire it. A `NOTIFY` grant on this calendar is
+  all-or-nothing, and the per-class reach level is where a user expresses less
+  than all.
+- **The residual ADR-0133 §2 names.** That clause bounds the member's guarantee at
+  the read, so a producer over *memory* could conclude about calendar content with
+  no `NOTIFY` grant anywhere. This producer is not in that residual and does not
+  narrow it: §3 reads the source, so refusing `NOTIFY` forecloses it completely.
+  Closing the residual needs the provenance surfaces ADR-0097 §12 defers, and
+  those are not this lane's.
 - **Retracting a candidate whose occurrence moved or vanished.** §8 forbids
   noticing an absence, so a candidate about an entry the user has since deleted
   expires at the start instant it was offered with. Making that better needs a
@@ -521,12 +517,22 @@ differently, or read one of its clauses more widely than it now holds?
   rather than excepted.
 - **ADR-0111 — nothing owed.** §10 relies on §11 as ratified and asks nothing of
   it.
-- **ADR-0097 — unresolved, and §2 above is why.** Under §2's own consumer axis
-  this producer's read is a third use, and both available resolutions record
-  against ADR-0097 §2. This ADR does not choose between them and is not ratifiable
-  until one is ruled; whichever is chosen, the record lands on ADR-0097's `Status`
-  line and a dated header note in the change that makes it, with no word of its
-  Decision text edited.
+- **ADR-0097 — nothing owed *by this ADR*, and the reason is a sequencing fact
+  rather than a reading.** This producer's read is a third use of a source under
+  §2's consumer axis, and that is exactly what ADR-0133 decided; the
+  partial-supersession record against ADR-0097 §2's two-member enumeration is
+  **ADR-0133's and landed with it**. This ADR cites the member as ratified, adds
+  no use, widens no clause, and edits no word of ADR-0097. §5 and §5a are applied
+  through ADR-0133 §5 rather than reached across to, which is why §2 above points
+  at them instead of restating them.
+- **ADR-0133 — nothing owed, and one of its clauses is discharged.** §6's marked
+  clause places the enforcement site "with the producer that needs it
+  (ADR-0132)", and §2 above is that site; discharging a deferral by the ADR it
+  names is a stacked addition rather than an amendment (ADR-0083 §15). §1's limit
+  of the member to the read, §2's independence of the three members, §3's
+  no-migration rule and §4's two-axes ruling are each applied above as ratified
+  and none is narrowed. Its §7 reserves "which producers exist, and what any of
+  them notices" to this ADR, so nothing here trespasses on it either.
 
 ## Consequences
 
@@ -538,18 +544,26 @@ differently, or read one of its clauses more widely than it now holds?
   thing to simulate.
 - **Nothing new is invented to build it.** A row on ADR-0083 §7's table, an
   operation in the shape `Engine.ingest` already takes, a bounded read the reader
-  already performs, and ADR-0130's seam. The implementing lane adds two `Settings`
-  fields and no contract surface.
+  already performs, ADR-0130's seam and ADR-0133's member. The implementing lane
+  adds two `Settings` fields and no contract surface of its own.
 - **The producer is bounded three ways before it ever runs.** The interval is
-  `None` until an operator sets it, the read needs a live grant, and every class
-  defaults to `hold`, so the first interruption takes a deliberate user act.
+  `None` until an operator sets it, the read needs a live `NOTIFY` grant that
+  ADR-0133 §3 back-fills onto nobody, and every class defaults to `hold`. Each is
+  a separate act and none implies another.
+- **"Do not raise my calendar with me unprompted" becomes sayable, and this
+  producer is what it bites on.** ADR-0133 §2 records that the member's guarantee
+  ends at the read and that a producer over stored records escapes it; this one
+  reads the source, so refusing the grant forecloses it entirely rather than
+  partly. That is the strongest form of the sentence available in the corpus
+  today.
 
 **Harder.**
 
-- **The grant question has to be ruled before anything is built**, and one
-  resolution puts a `core/types.py` lane in front of this one. That is the price
-  of ADR-0097 §2 having fixed its enumeration at two consumers and this being the
-  third.
+- **The implementation is sequenced behind a `core` lane it does not own.**
+  `GrantScope.NOTIFY` is ADR-0133 §6's implementing lane, and ADR-0133 §6 forbids
+  any lane reading a granted source to conclude a candidate until the gate lands
+  with this producer. So the producer cannot be built first, and building it is
+  two lanes in order rather than one.
 - **Coverage is a bounded argument rather than a guarantee.** §4's load-time
   refusals close the configuration hole; a late tick can still open one, and a
   missed occurrence is silent. **Revisit if the scheduler ever gains a
