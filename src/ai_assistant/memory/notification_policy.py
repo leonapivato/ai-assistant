@@ -301,6 +301,26 @@ class DefaultNotificationPolicy:
         earlier reading still carries the old offset and the later one already
         carries the new.
 
+        **It bisects to the microsecond — datetime's own resolution — and that is
+        not fastidiousness.** ADR-0130 §5 asks for "the earliest instant at which
+        every condition that failed could next hold", and stopping a second short
+        answers with an instant up to a second *after* the transition. The error
+        is invisible at the one endpoint a symmetric bracket happens to land on
+        (02:30 of a one-hour gap, where the first midpoint is the transition) and
+        present at every other: for ``America/New_York`` on 2026-03-08 a window
+        ending at 02:01 resolved to ``07:00:00.234375Z`` where the transition is
+        ``07:00:00Z``. A due instant in the future is not merely imprecise — §5
+        makes ``reconsider_at`` the instant *before* which a record may not be
+        reconsidered, so a job ticking exactly at the transition skips the record
+        and the user waits another whole interval. Microsecond bisection costs
+        about twenty more halvings of a one-hour bracket, once per held record
+        behind a quiet window that ends inside a spring-forward gap.
+
+        The canonical fake still stops at a second and so still answers the
+        earlier way; #955 holds aligning the two and putting the clause in the
+        shared suite, which needs the ``ai_assistant.testing`` this lane's fence
+        excludes.
+
         Args:
             before: An instant at the old offset.
             after: An instant at the new one.
@@ -309,7 +329,7 @@ class DefaultNotificationPolicy:
             The first instant carrying the new offset, in UTC.
         """
         old = before.astimezone(self._zone).utcoffset()
-        while after - before > timedelta(seconds=1):
+        while after - before > timedelta(microseconds=1):
             middle = before + (after - before) / 2
             if middle.astimezone(self._zone).utcoffset() == old:
                 before = middle
