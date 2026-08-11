@@ -1268,16 +1268,35 @@ does not merely get a session, it gets a standing channel into which the hub wri
 the owner's material as it is produced. The seam that raises the value of the
 identity is the right place to close the gap in how the identity is obtained.
 
-**Where it attaches, and the tree has moved since #939 was filed.** #939 says "The
-client half has the same shape — see #937", and both halves of that are now stale:
-#937 turned out to be about the client agent's *configurability* and is closed, and
-since `refactor(wire): move the agent-socket custody guard where both ends can
-reach it` the filesystem guard lives in `wire/custody.py` with the agent client in
-`wire/overlay.py`, which `service/overlay.py` imports. So the rule has **one**
-implementation site — the `_request` connect path in `wire/overlay.py` — reached by
-both ends, and `wire/peer.py`'s `peer_uid` already supplies the read and already
-fails closed where the platform cannot answer. There is nothing to design; there was
-only a rule to ratify.
+**Where it attaches, and the topology is not what the commit message suggests.**
+#939 says "The client half has the same shape — see #937", and that pointer is stale:
+#937 turned out to be about the client agent's *configurability* and is closed. What
+replaced it is easy to misread. `refactor(wire): move the agent-socket custody guard
+where both ends can reach it` moved the **filesystem custody guard** —
+`wire/custody.py`, plus `check_configured_socket` and `AgentSocketTerms` in
+`wire/overlay.py` — and it did *not* unify the agent client. The tree holds **two**
+`TailscaleAgent` classes with two independent `_request` methods, each opening the
+socket itself: the hub's in `service/overlay.py`, which imports only
+`AgentSocketTerms` and `check_configured_socket` from `wire/overlay.py`, and the
+client's in `wire/overlay.py`.
+
+> **Normative.** The check and its translation attach to **every** agent request
+> path, the hub's in `service/overlay.py` and the client's in `wire/overlay.py`. A
+> lane may factor them into one helper first, but only if both paths then call it.
+
+**That clause exists because a draft of this section said the opposite and it
+mattered.** It claimed "one implementation site … reached by both ends", and a lane
+following it would have added the credential check to the client half alone — leaving
+the hub's agent query, the one that supplies the overlay identity behind *every*
+remote admission, exactly as unauthenticated as it is today. That is the attack this
+section exists to close, left open by the section that closes it. Adversarial review
+found the error on the twenty-eighth round, and it is a reminder that a commit
+subject line is a claim about intent and the tree is the claim about fact.
+
+What is genuinely already in place is the *reading*: `wire/peer.py`'s `peer_uid`
+supplies the kernel credential and already fails closed where the platform cannot
+answer. There is no mechanism to design here, only a rule to ratify and two call
+sites to attach it to.
 
 **The failure type is a clause because the obvious implementation gets it wrong, and
 the tree shows exactly how.** `wire/peer.py`'s `peer_uid` fails closed with a
