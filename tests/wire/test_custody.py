@@ -14,14 +14,11 @@ and ``/run`` are root-owned in every real deployment and always will be.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
-from ai_assistant.wire.custody import first_ancestor_fault
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from ai_assistant.wire.custody import displayable, first_ancestor_fault
 
 
 def test_a_trustworthy_ancestry_reports_no_fault(tmp_path: Path) -> None:
@@ -135,3 +132,39 @@ def test_a_path_that_does_not_exist_is_still_walked(tmp_path: Path) -> None:
 
     assert fault is not None
     assert fault.ancestor == loose
+
+
+def test_a_pathname_with_no_utf8_form_is_rendered_rather_than_echoed() -> None:
+    """``core/types.py``'s hazard, at the place every custody refusal meets it.
+
+    "Interpolating it raw would build an error message that is itself unencodable,
+    so reporting the fault would fail the same way the fault does." A refusal about
+    a path is the one message guaranteed to name such a value, so the renderer
+    lives beside the predicate rather than in each caller — which is how the
+    sibling measurement in ``wire/address.py`` came to be missing it (#940).
+    """
+    rendered = displayable("/var/run/tailscale/\udcffagent.sock")
+
+    assert R"\xff" in rendered
+    rendered.encode("utf-8")  # the point: a message built from this can be reported
+
+
+def test_an_ordinary_path_survives_rendering_unchanged() -> None:
+    """Escaping a value that never needed it costs nothing and must change nothing."""
+    assert displayable("/run/tailscale/tailscaled.sock") == "/run/tailscale/tailscaled.sock"
+    assert displayable(Path("/run/tailscale/tailscaled.sock")) == "/run/tailscale/tailscaled.sock"
+
+
+def test_a_value_the_platform_did_not_supply_reads_as_an_absence() -> None:
+    """``OSError.filename`` is ``None`` when the platform supplied no path at all.
+
+    Interpolating that raw would put the word "None" where a pathname belongs, and
+    an operator would look for a directory called None. It is the easy one to miss
+    because it is not a decoding problem at all.
+    """
+    assert displayable(None) == "an unnamed path"
+
+
+def test_bytes_are_rendered_from_the_bytes_themselves() -> None:
+    """A pathname is bytes on Unix, and ``OSError`` can hand one back as bytes."""
+    assert displayable(b"/var/run/agent.sock") == "/var/run/agent.sock"
