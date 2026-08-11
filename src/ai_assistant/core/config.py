@@ -16,7 +16,7 @@ from collections.abc import Set as AbstractSet
 from datetime import timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Final
+from typing import Annotated, Any, Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
@@ -561,6 +561,12 @@ _DEFAULT_DATA_DIRNAME: Final = ".ai-assistant"
 #: belief this system currently produces while #473's semantic bound is open.
 _DEFAULT_MAX_FRAME_BYTES: Final = 16 * 1024 * 1024
 
+#: ADR-0134 §1's floor for the delivery outbox's byte bound — the 1 MiB ADR-0131
+#: §5a named, kept as the lower half of the rule that replaced it. It binds only
+#: where a deployment has lowered `hub_max_frame_bytes` beneath it; everywhere
+#: else the frame ceiling is the greater of the two and the range decides.
+_MIN_OUTBOX_BYTES: Final = 1024 * 1024
+
 #: ADR-0085 §8d's floor. 512 for the envelope reserve plus 256 for either connect
 #: payload is 768, and 1024 leaves room for both handshake frames and a small
 #: request besides. Below it the hub "would pass every startup step in ADR-0083 §3
@@ -968,32 +974,28 @@ class Settings(BaseSettings):
         description=(
             "How many bytes the delivery outbox holds across every entry, counting "
             "everything it persists for each (ADR-0131 §3, §5a). Never below "
-            "hub_max_frame_bytes. What stops a few large notifications defeating the "
-            "count bound."
+            "hub_max_frame_bytes. Defaults to the greater of 1 MiB and this hub's "
+            "configured hub_max_frame_bytes (ADR-0134 §1). What stops a few large "
+            "notifications defeating the count bound."
         ),
     )
-    # **The default is §5a's 1 MiB raised to §5a's own floor, and the two columns
-    # of that table genuinely contradict each other here.** §5a gives this a
-    # default of 1 MiB *and* a range of `>= hub_max_frame_bytes`, while ADR-0084
-    # §3's shipped frame ceiling is 16 MiB — so a hub with no configuration at all
-    # would be refused at load by the ADR's own figures. Only one column can give
-    # way, and it is not the range: what that clause protects is a safety property
-    # argued at length — an outbox below one frame "could hold no entry a device
-    # could receive, and would evict every notification the instant it arrived — a
-    # hub that silently delivers nothing, which is this leg's whole failure produced
-    # by a config typo". Relaxing it would ship exactly the failure it exists to
-    # prevent. The default is the weaker claim, being the figure an operator
-    # overrides, so the shipped value is the smallest one that satisfies the range.
-    # What that costs is an operator who lowers `hub_max_frame_bytes` and takes the
-    # default: they get an outbox looser than §5a's 1 MiB rather than tighter, which
-    # is the safe direction and is one setting away from §5a's figure.
+    # **The default is ADR-0134 §1's rule, resolved from the *configured* frame
+    # ceiling rather than from ADR-0084 §3's named default for it.** ADR-0131 §5a
+    # gave this field a default of 1 MiB and a range of `>= hub_max_frame_bytes`,
+    # which contradict each other on any hub whose frame ceiling exceeds 1 MiB —
+    # the shipped one does, at 16 MiB, so an unconfigured hub was refused at load
+    # by the ADR's own two figures. ADR-0134 supersedes the Default column alone and
+    # replaces the figure with a rule: "the greater of 1 MiB and this hub's
+    # `hub_max_frame_bytes`". The range is untouched and is what the rule satisfies.
     #
-    # **The conflict itself is recorded rather than resolved here**: issue #965 holds
-    # the correction owed to §5a's Default column, because ADR-0070 §1 protects
-    # ratified decision text and `docs/adr/` was outside this lane's fence. What this
-    # line does is pick the only reading under which an unconfigured hub loads at all,
-    # which is the dispatcher's ruling on the lane's flag and not a lane's own choice
-    # between two ratified requirements.
+    # **The literal below is that rule's answer for the shipped frame ceiling, not
+    # the rule.** `_resolve_outbox_bytes` is the rule; this default is what a reader
+    # of `model_fields` sees and what an operator gets on an unmodified deployment.
+    # A field default cannot read a sibling field, which is why the resolution is a
+    # `mode="before"` validator — the shape ADR-0134 §2 points at when it says
+    # "filling an absent value before validation keeps the public field a
+    # non-nullable integer and needs no such marker".
+
     hub_max_notification_budget: _DurationSetting = Field(
         default=timedelta(seconds=300),
         gt=timedelta(0),
@@ -1013,6 +1015,51 @@ class Settings(BaseSettings):
             "slot for an ordinary session always remains."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_outbox_bytes(cls, values: Any) -> Any:
+        """Fill an absent outbox byte bound from ADR-0134 §1's rule.
+
+        > **Normative.** ``hub_notification_outbox_bytes`` defaults to the greater
+        > of 1 MiB and this hub's ``hub_max_frame_bytes`` — the configured value,
+        > not ADR-0084 §3's named default for that field.
+
+        **The configured ceiling, which is the whole point of the rule.** A static
+        default computed from ADR-0084 §3's *named* 16 MiB agrees with §1 on an
+        unmodified deployment and diverges the moment an operator lowers the frame
+        ceiling: at a 512 KiB ceiling the rule says 1 MiB and a static default says
+        16 MiB, which is looser than ratified rather than equal to it. Reading the
+        sibling's configured value is what makes this the rule instead of one of its
+        answers — and a field default cannot read a sibling, which is why this is a
+        ``before`` validator.
+
+        **Filling before validation is the shape ADR-0134 §2 points at**, and it is
+        chosen for what it keeps *out* of the surface: "a nullable field, or an
+        out-of-range marker like ``0`` or ``-1`` — would each put a value in the
+        settings surface that §5a ruled out when it said ''off' is not an available
+        value'." Absence is distinguished here, where it is still visible, so the
+        public field stays a non-nullable integer with no sentinel to misread.
+
+        A ceiling this cannot parse is left alone rather than guessed at: the field
+        validators report the real fault, and inventing a resolution from a value
+        that is not a number would bury it.
+
+        Args:
+            values: The merged raw settings, before field validation.
+
+        Returns:
+            The same mapping, with the outbox bound filled where it was absent.
+        """
+        if not isinstance(values, dict) or "hub_notification_outbox_bytes" in values:
+            return values
+        ceiling = values.get("hub_max_frame_bytes", _DEFAULT_MAX_FRAME_BYTES)
+        try:
+            configured = int(ceiling)
+        except TypeError, ValueError:
+            return values
+        values["hub_notification_outbox_bytes"] = max(_MIN_OUTBOX_BYTES, configured)
+        return values
 
     @model_validator(mode="after")
     def _the_delivery_bounds_can_hold(self) -> Settings:
@@ -1051,7 +1098,8 @@ class Settings(BaseSettings):
                 f"hub_notification_outbox_bytes={self.hub_notification_outbox_bytes} is below "
                 f"hub_max_frame_bytes={self.hub_max_frame_bytes}, so the outbox could hold no "
                 f"entry a device could receive and would evict every notification the instant "
-                f"it arrived; raise it to at least the frame ceiling (ADR-0131 §5a)"
+                f"it arrived; raise it to at least the frame ceiling (ADR-0131 §5a, "
+                f"ADR-0134 §1)"
             )
             raise ValueError(msg)
         if self.hub_max_delivery_connections >= self.hub_max_connections:
