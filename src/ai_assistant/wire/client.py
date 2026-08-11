@@ -91,10 +91,12 @@ if TYPE_CHECKING:
         FeedbackEvent,
         GrantableSource,
         GrantScope,
+        HeldNotification,
         Identifier,
         LearnOutcome,
         MemoryKind,
         NonBlankEncodableText,
+        NotificationPreferences,
         ObservationReport,
         Question,
         SourceGrant,
@@ -395,6 +397,70 @@ class HubClient:
         """
         named = identifier(question_id, name="question_id")
         return await self._call("forget_question", question_id=named)  # type: ignore[no-any-return]
+
+    async def notifications(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[HeldNotification, ...]:
+        """One page of the notifications the assistant is holding, oldest first.
+
+        Args:
+            limit: How many notifications this page holds.
+            offset: How many to skip.
+
+        Returns:
+            The page.
+        """
+        return await self._page("notifications", limit=limit, offset=offset)  # type: ignore[no-any-return]
+
+    async def dismiss_notification(self, notification_id: Identifier) -> bool:
+        """Dispose of one notification without destroying it.
+
+        Args:
+            notification_id: Which notification.
+
+        Returns:
+            Whether an actionable notification was dismissed.
+        """
+        named = identifier(notification_id, name="notification_id")
+        return await self._call("dismiss_notification", notification_id=named)  # type: ignore[no-any-return]
+
+    async def forget_notification(self, notification_id: Identifier) -> bool:
+        """Destroy one notification.
+
+        Args:
+            notification_id: Which notification.
+
+        Returns:
+            Whether anything was held to destroy.
+        """
+        named = identifier(notification_id, name="notification_id")
+        return await self._call("forget_notification", notification_id=named)  # type: ignore[no-any-return]
+
+    async def notification_preferences(self) -> NotificationPreferences:
+        """The three standing settings that tune proactive contact.
+
+        Returns:
+            The settings in force, defaulted where the user has set nothing.
+        """
+        return await self._call("notification_preferences")  # type: ignore[no-any-return]
+
+    async def set_notification_preferences(
+        self, preferences: NotificationPreferences
+    ) -> NotificationPreferences:
+        """Write the standing settings, and re-arm what the change reaches.
+
+        **The whole value goes over, not one field**, which is the contract's own
+        shape rather than this client's: a caller changing one setting reads,
+        adjusts and writes back, so two concurrent writers cannot each silently
+        drop the other's field.
+
+        Args:
+            preferences: The settings to hold from now on.
+
+        Returns:
+            The settings now in force, as the hub holds them.
+        """
+        return await self._call("set_notification_preferences", preferences=preferences)  # type: ignore[no-any-return]
 
     async def recent_conversations(
         self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
