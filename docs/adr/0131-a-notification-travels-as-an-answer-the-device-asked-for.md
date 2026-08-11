@@ -440,14 +440,32 @@ restarting, may offer the same candidate again, and the key makes that retry a n
 rather than a second telling — the reviewer's finding on the second round, and
 correct. §3b's reconciliation is the same mechanism reached from the other side.
 
-**Retired keys are forgotten, and that is a deliberate bound rather than an
-oversight.** A retry arriving after the notification has been delivered and
-acknowledged would make a second entry. Remembering keys would mean a durable set of
-every one the hub has ever seen, growing forever, bounded by nothing — a worse failure
-than the one it prevents. What actually closes that case is §3b's dismissal: an
-acknowledged entry's record stops being actionable, so neither reconciliation nor a
-re-noticing producer offers it again (ADR-0130 §8 rules a candidate matching an
-actionable record `DROP`). The bound is where this ADR spends its durable state, and
+> **Normative.** A candidate re-offered after its entry was delivered and
+> acknowledged is a **new notification**, not a duplicate of the old one. The seam
+> does not suppress it: it earns its own disposition, its own budget unit and its own
+> entry, under ADR-0130 §5 and §7.
+
+**Retired keys are forgotten, and the case that reaches past them is ADR-0130's to
+rule — and it has ruled it.** Remembering keys would mean a durable set of every one
+the hub has ever seen, growing forever, bounded by nothing: a worse failure than the
+one it prevents. What that leaves open is a producer re-noticing an unchanged fact
+after the owner has been told and has acknowledged it. §3b's dismissal handles the
+*hub's* side — a dismissed record is not actionable, so the reconciliation there does
+not re-offer it — and it deliberately does not handle the producer's, because
+ADR-0130 §7 says in terms that "a fact that recurs after its notification expired or
+was dismissed is a new candidate and not a duplicate". An earlier draft of this
+paragraph claimed dismissal stopped a re-noticing producer too; adversarial review
+found that false on the thirty-sixth round, and the clause above replaces the claim
+with the ruling it contradicted.
+
+**Permitting it is right and not a concession.** The owner was told, dealt with it,
+and the fact happened again — a deadline that recurs, a calendar entry that moved
+back. Suppressing the second telling would mean a fact could interrupt once in the
+lifetime of a `candidate_key`, which is neither what a user wants nor anything
+ADR-0130's cap and budget need: the fresh candidate faces the whole policy again,
+spends a unit, and is held or dropped exactly as any other. What §3's "one telling"
+governs is a **disposition** — one ruled interruption reaches one device once — and
+never a fact for all time. The bound is where this ADR spends its durable state, and
 it spends it on entries.
 
 **Silence on this is the one thing the corpus forbids outright.** ADR-0094 §10a
