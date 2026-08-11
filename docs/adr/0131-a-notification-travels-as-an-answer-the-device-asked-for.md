@@ -241,8 +241,24 @@ obligation is to have an unambiguous answer for the producer to act on.
 > **Normative.** The enqueue accepts an optional caller-supplied **origin key**, an
 > `Identifier` whose UTF-8 encoding is at most 128 bytes; a longer one is refused at
 > the enqueue. An enqueue whose origin key equals that of an entry the outbox
-> currently holds makes no new entry and returns the held one. Retired keys are not
-> remembered, and an entry carrying no origin key is never matched against anything.
+> currently holds, **and whose offered notification is identical to that entry's**,
+> makes no new entry and returns the held one. Retired keys are not remembered, and
+> an entry carrying no origin key is never matched against anything.
+
+> **Normative.** An enqueue whose origin key matches a held entry's while the
+> offered notification differs from it is **refused** as a key collision, with an
+> outcome distinct from a successful match. The held entry is not replaced and the
+> offered notification is not enqueued under another key.
+
+**Matching on the key alone would turn a producer's bug into a silent loss**, which
+is the third round's finding and the exact failure mode the key was added to
+prevent, arriving from the other side: a producer with a low-cardinality or simply
+mistaken key enqueues B under the key A already holds, receives what looks like a
+successful enqueue, and B is never told. Comparing the notification is what makes
+the no-op a *retry* rather than a coincidence, and refusing the collision is what
+makes the difference reach the producer instead of the floor. Equality is
+well-defined without this ADR inventing anything: ADR-0087 §2 gives every payload a
+canonical encoding, and two notifications are identical when theirs are.
 
 **A commit the caller never learns the outcome of is the case this exists for, and
 it is a narrower case than it first looks.** The hub can commit the entry and then
@@ -383,14 +399,17 @@ one against the rule — with nothing to choose between them. So the leased case
 named: leases are preferred *last*, and the tie-break is the same age order.
 
 **The refusal clause is what keeps the eviction rule from emptying the outbox for a
-single entry that could never fit**, and it is unreachable in a conforming
-deployment rather than merely rare. The notification is bounded by ADR-0085 §8's
-contract limit, which is `hub_max_frame_bytes` less §8b's 512-byte envelope reserve
-— it has to fit a result frame or it could not be delivered at all. The entry's own
-overhead is a `delivery_id` of at most 36 bytes (ADR-0085 §8a bounds a correlation
-id there and this ADR takes the same shape) and an origin key of at most 128, so
-164 bytes, comfortably inside that 512-byte reserve. An outbox at §5a's floor of
-`hub_max_frame_bytes` therefore holds any notification the wire can carry, and the
+single entry that could never fit**, and §4's delivery reserve is what makes it
+unreachable in a conforming deployment rather than merely rare. Take the arithmetic
+end to end, because an earlier draft did it wrong by one step. ADR-0085 §8's
+contract limit is `hub_max_frame_bytes` less §8b's 512-byte envelope reserve, and
+what is measured against it is the **result**, which here is a
+`NotificationDelivery` and not the notification inside it. §4 therefore bounds the
+nested notification at the contract limit less a 128-byte delivery reserve. An
+entry's byte cost is then that notification, plus a `delivery_id` of at most 36
+bytes, plus an origin key of at most 128 — so at most `hub_max_frame_bytes` less
+512, less 128, plus 164: comfortably below §5a's floor of `hub_max_frame_bytes`. An
+outbox at the floor therefore holds any notification the wire can carry, and the
 clause exists for the deployment that is not conforming rather than for the one
 that is.
 
@@ -439,6 +458,35 @@ offset)` already have.
 
 > **Normative.** `delivery_id` is minted by the seam when the entry is enqueued, is
 > stable across redeliveries of that entry, and is the value `acknowledging` names.
+> Its UTF-8 encoding is at most 36 bytes, the bound ADR-0085 §8a puts on a
+> correlation id.
+
+> **Normative.** `DisposedNotification`'s canonical encoding is bounded by ADR-0085
+> §8's contract limit **less a 128-byte delivery reserve**. ADR-0130 states that
+> bound as a constraint on its own type; a notification exceeding it never reaches
+> the outbox.
+
+**The reserve exists because what ADR-0085 §8 measures is the result, and the
+result is the wrapper.** A `DisposedNotification` sized at exactly the contract
+limit is a notification the hub could accept and could never deliver: wrapping it as
+`{"delivery_id":…,"notification":…}` puts the *result* over the limit, so the hub
+must either refuse what it took or write a frame the client is obliged to reject.
+§8b's 512-byte reserve does not cover this — it is reserved for the **envelope**,
+outside the payload, and the members added here are inside it. Adversarial review
+found the gap on the fourth round.
+
+**128 bytes is a reserve rather than an exact figure, in §8b's own shape and for
+its own reason.** The exact overhead is 70 bytes at most: 34 structural — the
+braces, the two quoted member names `"delivery_id"` and `"notification"`, the two
+colons and the comma, in ADR-0087 §2's canonical form — plus at most 36 for the
+identifier. Reserving 128 covers that with margin, and the margin is what stops a
+later member on this model from being a silent overflow instead of a recomputation.
+
+**Stating the bound here and having ADR-0130 carry it is the division the two lanes
+already have.** The carrying capacity is the seam's fact — it falls out of
+ADR-0085 §8 and this model's shape, neither of which ADR-0130 decides — and the
+type it constrains is ADR-0130's. So this ADR computes it and ADR-0130 states it on
+the type, in the same relationship as the prerequisite clause above.
 
 **Naming the fields is not fussiness at this altitude, it is the whole reason a
 surface ADR exists.** ADR-0085 §3 spells out every signature rather than
