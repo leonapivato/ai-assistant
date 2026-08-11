@@ -397,12 +397,18 @@ obligation is to have an unambiguous answer for the producer to act on.
 > **Normative.** An entry is keyed by its candidate's own `candidate_key` (ADR-0130
 > §8). The enqueue takes no key from its caller and no entry is ever unkeyed.
 
-> **Normative.** An entry whose record has been dismissed is **departing** (§3b). A
-> departing entry **participates in no transition except its own removal**: it does
-> not match an offer's key under either clause below, it is not selected for a poll
-> (§2a), a lease expiry does not make it available, and an acknowledgement naming it
-> takes the no-op arm. It counts toward both bounds until it is removed, and eviction
-> may remove it — which is simply completing the removal already owed.
+> **Normative.** An entry is **departing** when its ADR-0130 record has ceased to be
+> actionable. Two things make that so and the seam decides both without reading the
+> other store: the seam itself gave the entry up and dismissed its record (§3b), or
+> the entry's own candidate carries an expiry that has passed on the hub's clock
+> (ADR-0130 §2, §7).
+
+> **Normative.** A departing entry **participates in no transition except its own
+> removal**: it does not match an offer's key under either clause below, it is not
+> selected for a poll (§2a), a lease expiry does not make it available, and an
+> acknowledgement naming it takes the no-op arm. It counts toward both bounds until it
+> is removed, and eviction may remove it — which is simply completing the removal
+> already owed.
 
 > **Normative.** An offer whose key equals that of an entry the outbox currently
 > holds and is not departing, **and whose candidate is identical to that entry's**,
@@ -413,6 +419,24 @@ obligation is to have an unambiguous answer for the producer to act on.
 > differs from it is **refused** as a key collision, with an outcome distinct from a
 > successful match. The held entry is not replaced and the offered candidate is not
 > enqueued under another key.
+
+**Departing is defined by the record's actionability rather than by the dismissal,
+because expiry ends actionability without any dismissal at all.** ADR-0130 §7 makes an
+expired record non-actionable in its own right, so a candidate enqueued while
+actionable and never polled before its expiry leaves an entry that was not dismissed,
+is not departing under a dismissal-only reading, and would be leased and delivered
+stale — a notification arriving after the moment it said it stopped mattering, which
+is the one thing ADR-0130's perishability rule exists to prevent. Adversarial review
+found it on the forty-third round.
+
+**And the seam decides it without reading the other store.** The expiry is a field on
+the candidate (ADR-0130 §2) and the candidate is *in* the entry, so "has this expired?"
+is a question about the entry's own content and the hub's clock — no cross-domain read,
+no coordination contract, nothing that troubles §3's two-domain split. The other route
+to non-actionability that could touch a held entry is the owner dismissing it, and that
+arrives as §3a's withdrawal — the disposing act calls the seam rather than the seam
+polling for it. So both routes are pushes or local reads, and neither is a lookup
+across the boundary architecture review closed on the twenty-ninth round.
 
 **A departing entry must not answer for a record it no longer belongs to**, and the
 thirty-ninth round is the race that shows why. §3b dismisses a record before removing
@@ -899,8 +923,8 @@ merged and made it checkable.
 > **Normative.** The seam **reconciles at startup**, running to completion before it
 > serves any poll, and it makes the two stores agree in **both** directions: every
 > ADR-0130 record ruled `INTERRUPT` and still **actionable** for which the outbox
-> holds no entry has its candidate offered, and every **departing** entry (§3) — one
-> whose record is dismissed — is removed. The reconciliation is idempotent by §3's key
+> holds no entry has its candidate offered, and every **departing** entry (§3) —
+> dismissed or expired — is removed. The reconciliation is idempotent by §3's key
 > rule, since every path keys on the candidate's own `candidate_key`, and it requires
 > no state of its own: both directions are read off the two stores as they stand.
 
