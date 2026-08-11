@@ -397,14 +397,33 @@ obligation is to have an unambiguous answer for the producer to act on.
 > **Normative.** An entry is keyed by its candidate's own `candidate_key` (ADR-0130
 > §8). The enqueue takes no key from its caller and no entry is ever unkeyed.
 
-> **Normative.** An offer whose key equals that of an entry the outbox currently
-> holds, **and whose candidate is identical to that entry's**, makes no new entry and
-> reports the held one. Keys of retired entries are not remembered.
+> **Normative.** An entry whose record has been dismissed is **departing** (§3b): it
+> is no longer eligible to match an offer's key, under either clause below, and an
+> offer sees the outbox as not holding it. It remains an entry in every other
+> respect until it is removed.
 
-> **Normative.** An offer whose key matches a held entry's while the candidate
+> **Normative.** An offer whose key equals that of an entry the outbox currently
+> holds and is not departing, **and whose candidate is identical to that entry's**,
+> makes no new entry and reports the held one. Keys of removed entries are not
+> remembered.
+
+> **Normative.** An offer whose key matches such an entry's while the candidate
 > differs from it is **refused** as a key collision, with an outcome distinct from a
 > successful match. The held entry is not replaced and the offered candidate is not
 > enqueued under another key.
+
+**A departing entry must not answer for a record it no longer belongs to**, and the
+thirty-ninth round is the race that shows why. §3b dismisses a record before removing
+its entry, so there is a window in which the entry is present and its record is
+already dismissed. ADR-0130 §7 makes a fact re-noticed after a dismissal a *new*
+candidate, so a cursorless producer re-noticing during that window gets a fresh
+actionable record — whose offer would then match the entry that is on its way out,
+report "already held", insert nothing, and be left with an actionable record and no
+entry the moment the removal lands. Reconciliation runs at startup, so a running hub
+would never repair it: a notification ruled `INTERRUPT`, its budget spent, delivered
+never. Making a departing entry ineligible closes it at the only point where the two
+facts are both visible — the offer — and the new candidate simply gets its own entry,
+which is what it is.
 
 **The key is the candidate's own, and a caller-supplied one was the defect.** A draft
 took an optional `origin_key` argument, so a producer could offer a candidate under
