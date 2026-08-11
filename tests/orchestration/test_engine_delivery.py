@@ -377,6 +377,42 @@ class TestTheStartupReconciliation:
         assert outbox.recovered == 1
 
 
+class TestABudgetTheClockCannotAddIsRefusedNotCrashed:
+    """§4's refusal covers a budget that is unusable as well as one out of range."""
+
+    async def test_a_maximal_ceiling_polled_at_its_own_ceiling_is_a_budget_error(self) -> None:
+        """The raw ``OverflowError`` would drop a valid request's connection.
+
+        ADR-0131 §5a bounds ``hub_max_notification_budget`` below and **not** above,
+        so an operator may configure one near ``timedelta.max``; a client asking for
+        exactly the ceiling passes the range check and reaches the deadline's
+        addition, where ``datetime`` raises. The wire dispatcher maps this project's
+        error types and nothing else, so what a conforming client would get is a
+        closed connection rather than the declared refusal. It is the same fact the
+        range check next door reports — the budget cannot be honoured — so it is
+        reported the same way.
+        """
+        engine = _wired(Harness(), FakeNotificationOutbox(), max_notification_budget=timedelta.max)
+
+        with pytest.raises(NotificationBudgetError, match="datetime can represent"):
+            await engine.next_notification(budget=timedelta.max)
+
+    async def test_an_ordinary_budget_under_that_ceiling_still_polls(self) -> None:
+        """The discriminating half: only the unrepresentable deadline is refused."""
+        engine = _wired(Harness(), FakeNotificationOutbox(), max_notification_budget=timedelta.max)
+
+        assert await engine.next_notification(budget=timedelta(0)) is None
+
+    async def test_the_fakes_lease_refuses_the_same_way(self) -> None:
+        """Parity: a canonical fake that crashed where the outbox refuses would
+        certify consumers against a contract nothing implements."""
+        outbox = FakeNotificationOutbox(now=lambda: NOW, lease=timedelta.max)
+        await outbox.offer(_candidate())
+
+        with pytest.raises(NotificationOutboxError, match="datetime can represent"):
+            await outbox.claim()
+
+
 class TestAnUnwiredOutboxRefusesLegibly:
     """A deployment that composed none delivers nothing, and says so."""
 

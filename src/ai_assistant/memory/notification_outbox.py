@@ -912,9 +912,46 @@ class SqliteNotificationOutbox:
                 return None
             conn.execute(
                 "UPDATE outbox SET delivery_id = ?, leased_until = ? WHERE candidate_key = ?",
-                (delivery_id, _to_micros(now + self._lease), entry.key),
+                (delivery_id, _to_micros(self._leased_until(now)), entry.key),
             )
             return NotificationDelivery(delivery_id=delivery_id, notification=entry.candidate)
+
+    def _leased_until(self, now: datetime) -> datetime:
+        """When a lease taken now expires, or this seam's failure if that is nowhere.
+
+        **A lease the clock cannot express is a store failure, not a crash.**
+        ADR-0131 §5a bounds ``hub_notification_lease`` below and not above — it
+        states the figure and its range, and a ceiling it does not state is not an
+        implementing lane's to invent — so an operator may configure one near
+        ``timedelta.max``, and adding it to the hub's clock then leaves the range a
+        ``datetime`` can represent. Python raises a bare ``OverflowError`` there,
+        which crosses this seam undeclared: every caller of :meth:`claim` is promised
+        :class:`~ai_assistant.core.errors.NotificationOutboxError` for a fault, and
+        the wire dispatcher maps this project's error types and nothing else, so the
+        raw one would drop a valid request's connection instead of answering it.
+        Raising inside the transaction also rolls it back, which is the outcome that
+        keeps §2a's indivisibility: no identifier is spent and no entry is left
+        leased to a poll that never happened. Adversarial review found it on the
+        eleventh round.
+
+        Args:
+            now: The hub's reading at the moment the lease is taken.
+
+        Returns:
+            The instant the lease runs out.
+
+        Raises:
+            NotificationOutboxError: If that instant is not representable.
+        """
+        try:
+            return now + self._lease
+        except OverflowError as exc:
+            msg = (
+                f"the configured lease {self._lease} cannot be taken: added to the hub's "
+                f"clock it leaves the range a datetime can represent, so no lease has an "
+                f"expiry (ADR-0131 §3, §5a)"
+            )
+            raise NotificationOutboxError(msg) from exc
 
     def _take_delivery_id(self, conn: sqlite3.Connection) -> str | None:
         """Mint one delivery identifier, advancing the durable counter.

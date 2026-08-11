@@ -2947,10 +2947,33 @@ class Engine:
         The deadline is computed **once**, from this engine's guarded clock, so a
         poll's length is fixed at its start rather than recomputed against a clock
         that may move under it.
+
+        Raises:
+            NotificationBudgetError: If the deadline is not representable, which is
+                the budget being unusable rather than merely large.
         """
         if acknowledging is not None:
             await outbox.acknowledge(acknowledging)
-        deadline = self._now() + budget
+        try:
+            deadline = self._now() + budget
+        except OverflowError as exc:
+            # **A budget the clock cannot add is a budget refusal, not a crash.**
+            # `hub_max_notification_budget` is bounded below and not above (§5a
+            # states the figure and its range, and a ceiling it does not state is
+            # not this lane's to invent), so an operator may configure one near
+            # `timedelta.max`; a client then asking for exactly the ceiling reaches
+            # this addition and `datetime` raises a raw `OverflowError`. The wire
+            # dispatcher maps this project's error types and nothing else, so the
+            # raw one would drop a *valid* request's connection instead of answering
+            # it. This is the same fact the range check next door reports —  the
+            # budget cannot be honoured — so it is reported the same way.
+            # Adversarial review found it on the eleventh round.
+            msg = (
+                f"budget {budget} cannot be honoured: added to the hub's clock it leaves "
+                f"the range a datetime can represent, so no deadline exists for this poll "
+                f"(ADR-0131 §4)"
+            )
+            raise NotificationBudgetError(msg) from exc
         while True:
             delivery = await outbox.claim()
             if delivery is not None:
