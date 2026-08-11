@@ -1008,6 +1008,33 @@ found it on the forty-eighth round.
 > **no custody transfers when it is raised**: the candidate is still the caller's, and
 > nothing was enqueued.
 
+> **Normative.** The **live handoff is the primary path**. When a
+> `NotificationWriter` call returns an actionable `INTERRUPT` disposition, the same
+> call path calls `NotificationOutbox.offer` with that candidate before it returns to
+> the producer. §3b's startup reconciliation is a **repair** for a handoff that did
+> not happen, and never the trigger a notification relies on.
+
+> **Normative.** An `offer` that raises `NotificationOutboxError` (above) leaves the
+> record actionable and the notification undelivered. The path may retry it; if it
+> does not, the next reconciliation offers it. Neither is silent: the failure reaches
+> the producer as §3b's declared error.
+
+**Without that clause an implementation could be conforming and never deliver
+anything until a restart.** ADR-0130 rules an `INTERRUPT` a notification that has
+earned contact now, and this section had specified only the recovery path — so a hub
+that committed a disposition, spent its budget and simply never called `offer` broke
+no rule here, while a device sat on an outstanding long poll receiving nothing.
+Adversarial review found it on the forty-ninth round. The handoff belongs on the path
+that already holds both halves: it has just received the disposition and it holds the
+candidate, so nothing needs to be looked up and no scheduler needs to exist. It is
+also the reconsideration path's answer without a second clause — ADR-0130 §5 rules a
+held record to `INTERRUPT` through the same writer, so the same handoff runs.
+
+**Reconciliation stays a repair and is better for being only that.** A repair that
+is also the primary path is a design where the ordinary case waits on a restart; a
+repair that is only a repair runs at startup, finds nothing on a clean shutdown, and
+earns its keep exactly on the crash §3b's invariant is written for.
+
 > **Normative.** `NotificationOutbox` is **not** on `AssistantEngine` and nothing it
 > carries crosses the wire. Adding it therefore bumps no protocol version of its own;
 > §4's bump is for `next_notification` and is the only one this ADR incurs.
