@@ -1,7 +1,23 @@
 # 133. A producer's read is a third use of a source, and the user grants it separately
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-11
+- **Note (2026-08-11, UTC): ratified.** `Proposed` → `Accepted` on the content this
+  ADR merges with, after both required reviews returned green: adversarial
+  **APPROVE with no findings**, and architecture **APPROVE with nits** whose single
+  `minor` — a Consequences bullet that compared a two-member scope to a three-member
+  one and read as though all three had once been required — is corrected in the same
+  commit as this flip. Both lenses are re-run on this ratified tree and `just ship`
+  posts their terminal figures to PR #956; the round numbers and churn ratio are
+  taken from that comment rather than restated here, so this note cannot disagree
+  with it. This edit takes `CONTRIBUTING.md` → "Trivial ADR edits"' exemption for
+  the ratification flip and ADR-0015 §5's trivial-ADR exemption; **the correction
+  riding with it is made in place rather than appended because this ADR still stood
+  `Proposed` when it was written** (ADR-0070 §1 scopes its no-rewrite rule to
+  ratified decision text, and ADR-0095 §7 states that adjudication in full). **No
+  decision changes**, and no normative clause acquires, loses or alters an
+  obligation — ADR-0070 §1's own test applied to the ratifying edit first. From
+  here, any further correction is an appended dated note.
 - **Partially supersedes: ADR-0097 — §2's enumeration of the uses a grant may
   name.** `GrantScope` has three members, not two. Everything else of §2 stands
   and is what this decision is built on: "A use a grant does not name is not
@@ -557,8 +573,8 @@ carries one.
 **This ADR's own `Status`.** It decides `core/types.py` surface, so its required
 set is adversarial *and* architecture (header), and ADR-0015 §5's
 ratify-after-review sequencing reaches it: it was drafted and reviewed as
-`Proposed`, and its status flips only once the required reviews return clean on
-one tree. The record of that flip is the appended dated note, per ADR-0070 §1.
+`Proposed`, and its status flipped only once both required reviews had returned
+green. The record of that flip is the dated note in the header, per ADR-0070 §1.
 Nothing implements against §6 until this has merged.
 
 **ADR-0097's record lands in this change rather than at this ADR's ratification,
@@ -623,8 +639,10 @@ is why **#957** files the rubric fix.
 **Easier.**
 
 - **A sentence a person means becomes sayable.** "Read my calendar and remember
-  it, but do not raise it with me unprompted" is now a grant with two members
-  instead of three, expressible in the vocabulary the user already grants in.
+  it, but do not raise it with me unprompted" is a grant naming `INGEST` and
+  withholding `NOTIFY`, written in the vocabulary the user already grants in.
+  Before this decision its second half had no expression at all — there was no
+  member to withhold.
 - **Leg 10's exit test gets its tuning axis without borrowing another one.** The
   user tunes *what reaches them* with reach levels and *what may feed them* with
   the grant, and the two answers cannot be confused for each other.
