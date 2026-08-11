@@ -33,9 +33,11 @@ from ai_assistant.evaluation import MeasureReader, SqliteTraceStore
 from ai_assistant.learning import ModelBackedObserver, RuleBasedFeedbackProcessor
 from ai_assistant.memory import (
     DefaultMemoryPolicy,
+    DefaultNotificationPolicy,
     MemoryIngestor,
     SqliteDeferralStore,
     SqliteMemoryStore,
+    SqliteNotificationStore,
 )
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.memory.health import DEFAULT_K, DEFAULT_SAMPLE, MAX_K, StoreHealthReader
@@ -227,6 +229,14 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
       constructed at all, because ``lint-imports`` forbids ``ai_assistant.readers``
       to every subsystem and exempts only this layer (see
       :func:`_build_calendar_reader`).
+    * the **notification store and its policy are wired together** (ADR-0130 §3,
+      §9), which is the one thing the ``Engine`` refuses to be built without: it
+      takes the pair or neither, so a store nothing rules and a ruling nothing
+      keeps are both unconstructable. The policy is handed to the engine rather
+      than to the store, because §3 puts the ruling *inside* the store's critical
+      section by making it an argument to each call — and it reads
+      ``settings.timezone``, the same value ADR-0008 §5 gives the temporal
+      context, because §6 introduces no second timezone source.
 
     **Configuration is validated before any resource is opened (#372).** The
     resource-free construction — the model seam (which checks every configured
@@ -474,6 +484,35 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
         # anything done here — "what the driver cannot do is *name* ``record``".
         grants = SqliteSourceGrantStore(path=directory / "grants.db")
         opened.append(grants.close)
+        # The held notifications (ADR-0130 §7, §9). The **eighth**
+        # connection-owning store and the seventh that is Tier 1: a candidate
+        # carries free text a producer wrote to be shown to a person, so it lives
+        # under the same data directory and the same owner-only file mode as the
+        # other six Tier 1 stores. ADR-0083 ruling 4's exclusivity needs nothing
+        # new for it, on ADR-0102 §12's reasoning: it is inside the directory the
+        # instance lock already covers, opened by the same process, and closed in
+        # the same ordered shutdown.
+        #
+        # Both tunings are the *user's* configuration and both reach the
+        # constructor, where they are validated once and read once: the retention
+        # is stamped onto each record at admission and runs from the instant that
+        # record **ceased** to be actionable, so a later change to the setting
+        # never reaches back into a record already admitted (§7); and the cap is
+        # strictly positive because a cap of zero is at capacity before its first
+        # admission (§7, ADR-0022 §4a). The cap counts the **actionable** set, so
+        # what it bounds is the list a person reads rather than the storage.
+        #
+        # **The id source is deliberately not passed**, and for the opposite
+        # reason the deferral queue's claim-token source is not: a notification id
+        # authorises nothing — every read that names one hands back the record
+        # beside it — so it is an identity rather than a capability, and the
+        # default is a plain UUID rather than a ``secrets`` draw.
+        notifications = SqliteNotificationStore(
+            path=directory / "notifications.db",
+            retention=settings.notification_retention,
+            cap=settings.notification_queue_limit,
+        )
+        opened.append(notifications.close)
 
         # The context provider, assembled now that the grant seam exists. Its
         # calendar facet is registered only when a source is configured — a source
@@ -701,6 +740,41 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
                 chunk_size=settings.scheduler_chunk_size,
                 run_budget=settings.scheduler_run_budget,
             ),
+            # Leg 10's notification chassis (ADR-0130 §3, §9). **The two are wired
+            # together or not at all**, which the ``Engine`` refuses to be built
+            # without: a store with no policy could hold records nothing rules, and
+            # a policy with no store could rule nothing that lasts. Before this
+            # wiring existed all five surface methods refused with
+            # ``ConfigurationError`` — "no store is composed" and "nothing is held"
+            # being different facts — and after it a composed hub has a working
+            # seam (#948).
+            #
+            # **The policy is a collaborator of the engine rather than of the
+            # store**, and that is §3's shape: the store takes it as an *argument*
+            # to each ruling call, so the ruling happens inside the store's
+            # critical section and no window exists between reading the state and
+            # writing the record it was ruled against. Nothing here sequences those
+            # steps, and a composition that handed the store a policy to keep would
+            # be describing a different contract.
+            #
+            # **`settings.timezone` is the policy's one construction-time input**
+            # (§6): quiet windows are read in the same value ADR-0008 §5 gives the
+            # temporal context and ADR-0093 §7b binds the calendar reader to, and
+            # no second timezone source is introduced. It is passed here rather
+            # than per call because a caller free to vary it could move the user's
+            # night — and `Settings` has already refused an unknown IANA zone at
+            # load, which is what stands behind a figure that now decides when the
+            # assistant is allowed to interrupt.
+            #
+            # **No `NotificationWriter` is composed, and that is not an omission.**
+            # §3's seam exists for *producers*, and §10 rules each producer its own
+            # lane and its own decision; with none in the tree there is nothing to
+            # hold the seam. The store's `purge` needs no wiring either — the
+            # engine calls it behind ADR-0083 §7's existing retention-purge
+            # operation, as `PurgeReport.notifications`, exactly as ADR-0130 §7
+            # requires and as the trace store's sweep already does.
+            notifications=notifications,
+            notification_policy=DefaultNotificationPolicy(timezone=settings.timezone),
             # The four grant operations (ADR-0102 §1, §7), over the *same* store
             # passed to the drivers above — a second store would let a user grant a
             # source the gate then read a different answer about.
@@ -750,6 +824,12 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
                 # The grant store joins the same ordered shutdown as the other five
                 # Tier 1 stores (ADR-0083 ruling 4, ADR-0102 §7).
                 _as_async(grants.close),
+                # And the notification store, on the same ordering and for the
+                # same reason (ADR-0130 §9). It is closed **before** the trace
+                # store because it emits nothing into one; what it must outlive is
+                # the drain of the reconsideration job, which the façade has
+                # already waited on by the time any of these run.
+                _as_async(notifications.close),
                 # And the trace store as the seventh (ADR-0119 §6). Closed **last
                 # although it is now opened first**, which is the one place this
                 # list deliberately departs from open order: the memory store and

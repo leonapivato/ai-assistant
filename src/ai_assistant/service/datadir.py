@@ -39,7 +39,7 @@ three rather than in :mod:`ai_assistant.service.transport`.
 wrong — a bind mount, an ACL, a symlinked ancestor" and that what actually closes
 the hole is the client authenticating the *server* from the kernel's peer
 credentials after connecting. That belongs to the transport lane. These
-conditions stay as defence in depth, and because the seven databases in this
+conditions stay as defence in depth, and because the eight databases in this
 directory have no handshake to fall back on.
 """
 
@@ -122,7 +122,7 @@ def _check_leaf(data_dir: Path) -> None:
         msg = (
             f"the data directory {data_dir} is owned by uid {info.st_uid}, not by "
             f"uid {os.geteuid()} which the hub runs as; another user's directory holds "
-            f"the seven databases and the instance lock, so the hub will not open them"
+            f"the eight databases and the instance lock, so the hub will not open them"
         )
         raise ConfigurationError(msg)
     if info.st_mode & _WRITABLE_BY_OTHERS:

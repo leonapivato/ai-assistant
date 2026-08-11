@@ -155,7 +155,7 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
     table rather than present and skipped, and ``hub_ready`` reports the names that
     are actually armed.
 
-    Four jobs, and each is a decision an ADR argues rather than describes:
+    Five jobs, and each is a decision an ADR argues rather than describes:
 
     * **Retention purge** — ``MemoryStore.purge_expired`` *and*
       ``DeferralStore.purge``, as **one** job, because ADR-0078 §10 item 8 says the
@@ -195,6 +195,32 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       so this entry can never arm a job with nothing to read: the incoherent
       fourth state of §7a's matrix fails at load, where a scheduler that omitted
       the requested job would instead report health while running nothing.
+    * **Notification reconsideration** — ADR-0130 §5's required job, re-ruling
+      every held record whose ``reconsider_at`` has arrived. It is a **new row on
+      this table**, which ADR-0130 §12 records as an addition of the kind ADR-0093
+      §6 already made when it added the calendar reader, rather than an amendment
+      to ADR-0083. Three of §7's and §8's clauses are met rather than waived: the
+      body is a bound public engine method, it holds **no store** (the drain lives
+      on the concrete engine, where ADR-0083 §8 puts a maintenance surface — "not
+      `core` contract surface"), and §5's tolerance of a late reconsideration is
+      §7's own rule that a late tick is never a correctness bug, applied rather
+      than excepted.
+
+      **It ships enabled, and it is the only job here whose default is minutes.**
+      ADR-0130 §5 is explicit: "with no producers it rules nothing, and a held
+      record whose window has passed is the one thing this ADR cannot leave to a
+      later act". The two ways a record falls due are a quiet window ending and a
+      *user's own act* — raising a class's reach, or raising the budget — and the
+      second is why nothing else in the design would reach it: reach is not a
+      condition time resolves, so a record held because its class was at `hold`
+      carries no due instant from its ruling and would sit there until it expired
+      while the user waited to be interrupted as they had just asked.
+
+      That also makes the interval user-visible in a way no other job's is: a
+      candidate held behind a window closing at 08:00 is contacted at the first
+      run after that, so by 08:05 at the default. §5 rules ``reconsider_at`` a
+      floor rather than a deadline, so the remedy available to a deployment is a
+      shorter interval rather than a different guarantee.
 
     **Consolidation is deliberately not here, and its absence is the decision.**
     Leg 7's chunked walk (ADR-0106, ADR-0111) is built and wired —
@@ -253,6 +279,11 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
         ("conversation_sweep", settings.conversation_sweep_interval, engine.start),
         ("observation", settings.observation_interval, engine.observe),
         ("calendar_reader", settings.calendar_reader_interval, engine.ingest),
+        (
+            "notification_reconsider",
+            settings.notification_reconsider_interval,
+            engine.reconsider_notifications,
+        ),
     )
     return tuple(
         Job(name=name, interval=interval, run=run)

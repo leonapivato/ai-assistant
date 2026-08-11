@@ -271,6 +271,53 @@ async def test_a_spend_outside_the_window_is_swept_from_the_ledger(
     assert rows[0] == 1
 
 
+@pytest.mark.parametrize(
+    "window",
+    [timedelta.max, timedelta(days=999_999_998)],
+    ids=["the-widest-window-there-is", "wider-than-the-clock-can-reach-back"],
+)
+async def test_a_budget_window_at_the_edge_of_the_range_still_rules(
+    tmp_path: Path, window: timedelta
+) -> None:
+    """A user-writable duration may not reach the store as raw arithmetic.
+
+    ``budget_window`` is a standing setting written through the engine surface
+    and bounded only by ``gt=timedelta(0)`` (ADR-0130 §6), so ``timedelta.max`` is
+    one ``set_notification_preferences`` call away. Both ``now - window`` and
+    ``spent + window`` overflow there, and an ``OverflowError`` escaping a seam
+    that documents ``NotificationStoreError`` would surface as a traceback out of
+    an adapter's ``AssistantError`` boundary.
+
+    The answers are the honest ones rather than a clamp: a window the clock cannot
+    reach back across prunes nothing, and a unit whose window ends beyond the
+    representable range is one **time alone will not free** — which §5 spells as a
+    ``HOLD`` carrying no ``reconsider_at``, since a due instant there would promise
+    a re-ruling that can only re-hold on every tick for the life of the record.
+    """
+    store = SqliteNotificationStore(path=tmp_path / "n.db", now=_fixed_now)
+    policy = DefaultNotificationPolicy()
+    try:
+        await store.set_preferences(
+            NotificationPreferences(
+                reaches=(
+                    ClassReach(notification_class="calendar", reach=NotificationReach.INTERRUPT),
+                ),
+                interruption_budget=1,
+                budget_window=window,
+            )
+        )
+        first = await store.admit(_perishable("k1"), policy=policy)
+        assert first.kind is NotificationDispositionKind.INTERRUPT
+
+        second = await store.admit(_perishable("k2"), policy=policy)
+
+        assert second.kind is NotificationDispositionKind.HOLD
+        assert second.reason is NotificationCondition.BUDGET
+        assert second.reconsider_at is None
+    finally:
+        store.close()
+
+
 async def test_the_preferences_survive_a_clear(tmp_path: Path) -> None:
     """ADR-0130 §9: a sweep of the records leaves the user's settings alone.
 

@@ -22,8 +22,8 @@ deliberately.** ``ai_assistant.testing`` may not be imported by production code 
 another's module either (golden rule 1), so a shared home would have to be
 ``core``, which is contract surface rather than a place for concrete helpers.
 That is the same boundary cost ``memory/_transactions.py`` records for its own
-four copies, and #563 holds the general question. What keeps the two honest is
-that both are held to the *same* shared conformance suite
+four copies, and #952 holds this one. What keeps the two honest is that both are
+held to the *same* shared conformance suite
 (``tests/core/notification_contract.py``), which is the mechanism the duplication
 is safe under.
 """
