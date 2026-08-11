@@ -9,6 +9,8 @@ here is that the adapter wires it, renders it, and adds nothing.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import socket
 from io import StringIO
 from typing import TYPE_CHECKING
 
@@ -113,6 +115,119 @@ def test_the_two_transports_are_not_a_fallback_for_one_another(tmp_path: Path) -
     settings = Settings(data_dir=tmp_path, remote_hub_address="100.64.1.7")
 
     assert not isinstance(cli._client_for(settings), HubEngineClient)
+
+
+# --- the client's own overlay agent (ADR-0124 §4, #937) ----------------------
+
+
+def test_the_client_socket_setting_reaches_the_agent_seam(
+    tmp_path: Path, secrets: FakeSecretStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wiring the review of #941 found missing, pinned at the seam it crosses.
+
+    ``Settings`` is ``extra="ignore"``, so a setting that is declared but never
+    *read* fails exactly as one that was never declared: silently, with the
+    packaged defaults used and nothing said. Asserting the value arrives at
+    :func:`~ai_assistant.wire.overlay.local_agent` is what distinguishes "the field
+    exists" from "the field does anything".
+    """
+    del secrets
+    seen: list[str | None] = []
+
+    def record(socket_path: str | None = None) -> object:
+        seen.append(socket_path)
+        return object()
+
+    monkeypatch.setattr(cli, "local_agent", record)
+    settings = Settings(
+        data_dir=tmp_path,
+        remote_hub_address="100.64.1.7",
+        client_overlay_agent_socket="/run/qa/tailscaled.sock",
+    )
+
+    cli._client_for(settings)
+
+    assert seen == ["/run/qa/tailscaled.sock"]
+
+
+def test_an_unset_client_socket_reaches_the_seam_as_an_absence(
+    tmp_path: Path, secrets: FakeSecretStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half, and the one that keeps the field additive.
+
+    ``None`` rather than a path is what makes ``local_agent`` look at the two
+    packaged layouts, so this is the assertion that an existing deployment which
+    sets nothing is unaffected by the field's existence.
+    """
+    del secrets
+    seen: list[str | None] = []
+
+    def record(socket_path: str | None = None) -> object:
+        seen.append(socket_path)
+        return object()
+
+    monkeypatch.setattr(cli, "local_agent", record)
+
+    cli._client_for(Settings(data_dir=tmp_path, remote_hub_address="100.64.1.7"))
+
+    assert seen == [None]
+
+
+def test_a_configured_client_socket_is_held_to_the_custody_conditions(
+    tmp_path: Path, secrets: FakeSecretStore
+) -> None:
+    """The guard is really applied, and applied here — before anything is opened.
+
+    Not a duplicate of ``wire``'s own guard tests: what this asserts is that the
+    adapter reaches the shared machinery at all, so a path that would let another
+    user answer for the overlay is refused on the way to composing a client rather
+    than at the first query. ADR-0083 §5's stay-down class, in ADR-0124 §4's terms.
+    """
+    del secrets
+    not_a_socket = tmp_path / "ordinary-file"
+    not_a_socket.touch()
+    settings = Settings(
+        data_dir=tmp_path,
+        remote_hub_address="100.64.1.7",
+        client_overlay_agent_socket=str(not_a_socket),
+    )
+
+    with pytest.raises(ConfigurationError) as caught:
+        cli._client_for(settings)
+
+    # The client's own vocabulary, not the hub's: the variable named is the one the
+    # operator of *this* machine can edit.
+    message = str(caught.value)
+    assert "ASSISTANT_CLIENT_OVERLAY_AGENT_SOCKET" in message
+    assert "ASSISTANT_HUB_OVERLAY_AGENT_SOCKET" not in message
+
+
+def test_a_trustworthy_client_socket_composes_a_remote_client(
+    tmp_path: Path, secrets: FakeSecretStore
+) -> None:
+    """The case the setting exists for, end to end from configuration.
+
+    #919's QA run had to build a mount namespace to reach this half of ADR-0124 §4;
+    with the field it is a value in the environment, and this is the test that says
+    so without a Tailscale installation.
+
+    Its job is the absence of a *false refusal* — a guard that rejected the case it
+    was built for would be worse than none. The two tests above carry the
+    discrimination: remove the threading at the call site and they fail, while this
+    one would keep passing on the packaged defaults.
+    """
+    del secrets
+    path = tmp_path / "tailscaled.sock"
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(path))
+    with contextlib.closing(sock):
+        settings = Settings(
+            data_dir=tmp_path,
+            remote_hub_address="100.64.1.7",
+            client_overlay_agent_socket=str(path),
+        )
+
+        assert isinstance(cli._client_for(settings), RemoteHubEngineClient)
 
 
 # --- enrolment intake at the device (ADR-0124 §6) ----------------------------

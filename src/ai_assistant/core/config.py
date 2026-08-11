@@ -1127,6 +1127,47 @@ class Settings(BaseSettings):
         ),
     )
 
+    # **The client's own overlay agent, and the name says whose machine it is on.**
+    # ADR-0124 §4's second clause has the client obtain the hub's identity "from the
+    # overlay agent on its own machine" — so this is a fact about the *local*
+    # machine, which is why it is not `remote_hub_overlay_agent_socket`: everything
+    # else in this section (`remote_hub_address`, `remote_hub_port`) states a fact
+    # about the hub being dialled, and a socket on the far end is not something this
+    # device could open. Nor is it `hub_*`, which throughout this file means "this
+    # machine acting as a hub".
+    #
+    # **Two fields rather than one, and a two-device deployment is the reason.** The
+    # obvious economy is to let `hub_overlay_agent_socket` serve both ends, and it
+    # would work on the single machine where hub and client are the same host. It
+    # breaks precisely where ADR-0124 exists: on two devices these are two daemons on
+    # two machines, and one field would make the hub's socket path govern a client
+    # that never runs a hub — silently, since the client would read a value the hub's
+    # operator set for an entirely different process.
+    #
+    # **The custody conditions are the hub's, because they are the same conditions.**
+    # A configured path is held to ADR-0084 §1's ancestry walk and to a socket owned
+    # by root or by this process's uid, by the same function the hub runs
+    # (`wire.overlay.check_configured_socket`) — whoever owns that socket answers for
+    # the overlay, and on this end that decides which hub this device will talk to.
+    # Only the wording of a refusal is the client's own. Unset changes nothing: the
+    # two packaged defaults are looked at exactly as before.
+    #
+    # It exists for #937, the client half of the gap #918 opened and #919's QA run
+    # met: with the hub's socket configurable and the client's not, a single-machine
+    # run could drive one side of §4 from configuration and had to reach the other
+    # from outside the application. ADR-0125 §2's bar for an additive `Settings`
+    # field is "a deployment asking for it", and that run is one asking.
+    client_overlay_agent_socket: str | None = Field(
+        default=None,
+        description=(
+            "The Unix socket of the overlay agent this machine runs, used to identify "
+            "the hub before dialling it, or unset to look at the two paths the daemon "
+            "is packaged to use (ADR-0124 §4). A configured path is held to the same "
+            "custody conditions as the data directory, and the socket must be owned by "
+            "root or by this client's uid. Ignored when remote_hub_address is unset."
+        ),
+    )
+
     # --- Model layer -----------------------------------------------------
     # The assistant is model-agnostic; this names the default model the
     # orchestration layer reaches for when a caller doesn't specify one.

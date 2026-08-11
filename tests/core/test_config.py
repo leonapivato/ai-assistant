@@ -1621,3 +1621,57 @@ def test_the_overlay_agent_socket_is_a_location_and_never_an_identity() -> None:
 
     assert "hub_overlay_agent_socket" in fields
     assert not {name for name in fields if "identity" in name}
+
+
+def test_the_client_overlay_agent_socket_is_read_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#937, and the defect the review of #941 named: a field, not a bare env var.
+
+    ``Settings`` is configured ``extra="ignore"``, so a name the model does not
+    declare is dropped in silence rather than refused — an operator who set
+    ``ASSISTANT_CLIENT_OVERLAY_AGENT_SOCKET`` against a build without this field
+    would get the packaged defaults and no indication that their setting had been
+    discarded. Declaring it is what makes the value reachable at all, so it is
+    asserted through the environment rather than through the constructor.
+    """
+    monkeypatch.setenv("ASSISTANT_CLIENT_OVERLAY_AGENT_SOCKET", "/run/qa/tailscaled.sock")
+
+    assert load_settings().client_overlay_agent_socket == "/run/qa/tailscaled.sock"
+
+
+def test_the_client_overlay_agent_socket_is_unset_and_means_the_packaged_paths() -> None:
+    """Unset is the ordinary deployment, and the field is additive because of it.
+
+    The two paths ``wire.overlay.TAILSCALE_SOCKETS`` names are looked at exactly as
+    before, so no existing client changes how it finds its agent.
+    """
+    assert Settings().client_overlay_agent_socket is None
+
+
+def test_the_two_ends_of_the_hop_configure_their_agents_separately() -> None:
+    """ADR-0124 §4 puts an agent on *each* machine, so one field cannot serve both.
+
+    On a single machine the two would name the same socket and a shared field would
+    be the obvious economy. On two devices they are two daemons on two hosts, and a
+    shared field would make the hub operator's path govern a client that runs no
+    hub — which is the deployment ADR-0124 exists for.
+    """
+    fields = set(Settings.model_fields)
+
+    assert {"hub_overlay_agent_socket", "client_overlay_agent_socket"} <= fields
+
+
+def test_neither_agent_setting_is_an_identity() -> None:
+    """ADR-0124 §4's third clause survives the client field as it did the hub's.
+
+    "No configuration setting may override that identity." Both fields say where to
+    *ask*; the answer is still the agent's, and the enrolled identity a client
+    compares it against stays in the keyring. Re-asserted here rather than trusted
+    to the hub's copy of this test, because this change is the one that adds a
+    second overlay setting and so is the one that could have added a third.
+    """
+    fields = set(Settings.model_fields)
+
+    assert "client_overlay_agent_socket" in fields
+    assert not {name for name in fields if "identity" in name}
