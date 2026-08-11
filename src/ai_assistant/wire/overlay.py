@@ -34,6 +34,15 @@ decides *which* module holds it: this one, which ``service`` may import and does
 Only the wording of a refusal is per-caller (:class:`AgentSocketTerms`), because
 what an operator should correct differs even where the condition does not.
 
+**So is the kernel-side check that the custody guard cannot make** (ADR-0131 §7,
+#939). :func:`check_agent_peer` reads the peer's credentials after connecting and
+refuses a socket answered by a third user, which is the hole a filesystem walk was
+never able to close — and §7 binds it to "**every** agent request path, the hub's
+in ``service/overlay.py`` and the client's in ``wire/overlay.py``", so it lives
+here for the same reason the custody guard does: this is the module both ends can
+reach. What is per-caller is the exception the refusal arrives as, because the two
+ends raise two different classes of that name — see the function.
+
 The HTTP/1.1 transport and ``_stable_id`` below are still duplicated against the
 hub's copy; folding those together is #911's remaining half and is deliberately
 not taken here, so that a security guard's move and a refactor of the bytes on the
@@ -54,7 +63,8 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.wire.address import sun_path_limit
 from ai_assistant.wire.custody import displayable, first_ancestor_fault, others_can_create_in
-from ai_assistant.wire.errors import OverlayIdentityUnavailableError
+from ai_assistant.wire.errors import OverlayIdentityUnavailableError, ProtocolError
+from ai_assistant.wire.peer import peer_uid
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -120,6 +130,103 @@ class OverlayAgent(Protocol):
         Raises:
             OverlayIdentityUnavailableError: If the agent will not say.
         """
+
+
+def check_agent_peer(
+    writer: asyncio.StreamWriter, socket_path: str, *, refusal: type[Exception]
+) -> None:
+    """Refuse an overlay agent socket a third user is answering on (ADR-0131 §7).
+
+    > After connecting to the overlay agent's socket and before writing anything to
+    > it, the querying process reads the peer's credentials from the kernel and
+    > refuses unless the peer's effective uid is ``0`` or its own. It refuses on a
+    > platform that exposes no peer-credential call, rather than proceeding
+    > unauthenticated.
+
+    **This is what the filesystem checks were never able to close.** ADR-0084 §1,
+    quoted in :mod:`ai_assistant.wire.peer`, calls those checks "a walk over
+    topology the operator controls, and a walk can be wrong — a bind mount, an ACL,
+    a symlinked ancestor"; PR #936's review exhibited the concrete attack, a POSIX
+    ACL granting an untrusted user write and search access through an otherwise
+    conforming ``0700`` directory, after which that user replaces the socket before
+    :func:`asyncio.open_unix_connection` and supplies overlay identities for remote
+    admission. Reading the credential after connecting is free of the
+    time-of-check time-of-use gap a pre-connect ``stat`` would have, so this makes
+    the posture closed rather than merely deep. It does not replace
+    :func:`check_configured_socket`, which stays as defence in depth and is what
+    holds for the two packaged defaults as well as for a configured path — §7 binds
+    both alike, and this check runs on every connection either way.
+
+    **Root or us, not root.** ``tailscaled`` runs as root in the ordinary
+    deployment, so uid 0 is the answer that must be admitted; but ADR-0124 §11's
+    validation plan and a test seam both run the agent as the invoking user.
+    Admitting our own euid costs nothing security can measure — a process running
+    as us could replace our own files regardless — and is the same shape
+    :func:`check_configured_socket` takes for the socket's owner.
+
+    **The refusal type is a parameter, and that is not decoration.** §7 requires a
+    refusal here to arrive as ``OverlayIdentityUnavailableError``, "the failure the
+    agent query already raises when it cannot answer", and the tree holds *two*
+    classes of that name: the hub's in :mod:`ai_assistant.service.overlay` and the
+    client's in :mod:`ai_assistant.wire.errors`. ``service/remote.py`` catches only
+    the hub's at its two admission sites, so a check raising the wire one there
+    would turn a replaced socket into an unhandled exception that escapes the
+    refusal path entirely — the check firing and the refusal it was written for
+    never happening. Each caller therefore names the class its own callers catch,
+    while the condition stays in one place. This is the shape
+    :class:`AgentSocketTerms` already takes for the wording: what is per-caller
+    never selects what is checked.
+
+    Args:
+        writer: The connection to the agent, before anything has been written to it.
+        socket_path: The path that was connected to, for the refusal to name.
+        refusal: The exception class a refusal is raised as — the
+            ``OverlayIdentityUnavailableError`` this caller's own callers catch.
+
+    Raises:
+        Exception: Of the class ``refusal`` names, if the peer's effective uid is
+            neither ``0`` nor this process's, or if the credential cannot be read at
+            all — because the platform exposes no peer-credential call, because the
+            kernel refused, or because the transport exposes no socket. Every one is
+            "who answers there cannot be established", and §7's direction for that
+            is to refuse.
+    """
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        msg = (
+            f"the connection to the overlay agent socket {socket_path} exposes no socket "
+            f"to read the peer's credentials from, so who answers for the overlay there "
+            f"cannot be established; refusing rather than querying it unauthenticated "
+            f"(ADR-0131 §7)"
+        )
+        raise refusal(msg)
+    try:
+        theirs = peer_uid(sock)
+    except ProtocolError as exc:
+        msg = (
+            f"this platform exposes no peer-credential call CPython surfaces, so whoever "
+            f"answers on the overlay agent socket {socket_path} cannot be authenticated; "
+            f"refusing rather than querying it unauthenticated (ADR-0131 §7)"
+        )
+        raise refusal(msg) from exc
+    except OSError as exc:
+        msg = (
+            f"the kernel would not say which process is listening on the overlay agent "
+            f"socket {socket_path} ({exc}), so who answers for the overlay there cannot "
+            f"be established; refusing rather than querying it unauthenticated "
+            f"(ADR-0131 §7)"
+        )
+        raise refusal(msg) from exc
+    mine = os.geteuid()
+    if theirs not in (0, mine):
+        msg = (
+            f"the process listening on the overlay agent socket {socket_path} runs as "
+            f"uid {theirs}, neither root nor the uid {mine} this process runs as, so "
+            f"another user may have replaced that socket and would answer for the "
+            f"overlay from it; refusing to take an identity from it, and nothing about "
+            f"the directory's mode would have prevented this (ADR-0131 §7)"
+        )
+        raise refusal(msg)
 
 
 class TailscaleAgent:
@@ -230,11 +337,15 @@ class TailscaleAgent:
 
         Raises:
             OSError: If the socket cannot be opened or the daemon goes away.
-            OverlayIdentityUnavailableError: If the status line is not a success, or
-                the daemon closed early or ran on.
+            OverlayIdentityUnavailableError: If the peer answering on the socket is
+                neither root nor this process (ADR-0131 §7), if the status line is
+                not a success, or if the daemon closed early or ran on.
         """
         reader, writer = await asyncio.open_unix_connection(self.socket_path)
         try:
+            # Before anything is written: ADR-0131 §7 binds this to every agent
+            # request path, and this is the client's.
+            check_agent_peer(writer, self.socket_path, refusal=OverlayIdentityUnavailableError)
             request = (
                 f"GET {path} HTTP/1.1\r\n"
                 f"Host: {_LOCAL_API_HOST}\r\n"

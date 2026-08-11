@@ -26,6 +26,7 @@ from ai_assistant.service.overlay import (
     local_agent,
 )
 from ai_assistant.wire.address import sun_path_limit
+from ai_assistant.wire.errors import ProtocolError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -51,7 +52,14 @@ async def _daemon(
     asked: list[str] = []
 
     async def _serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        request = await reader.readuntil(b"\r\n\r\n")
+        try:
+            request = await reader.readuntil(b"\r\n\r\n")
+        except asyncio.IncompleteReadError:
+            # A hub that refuses its peer (ADR-0131 §7) closes without writing, which
+            # is the property those cases assert. Swallowed so the refusal reads as a
+            # refusal rather than as an unretrieved task exception.
+            writer.close()
+            return
         path = request.split(b"\r\n", 1)[0].split(b" ")[1].decode()
         asked.append(path)
         status, body = answers.get(path.split("?")[0], (404, b""))
@@ -556,3 +564,76 @@ def test_a_missing_non_utf8_ancestor_is_reported_and_not_crashed_on(tmp_path: Pa
 
     # The refusal names the path in an encodable form rather than omitting it.
     assert R"\xff" in str(caught.value)
+
+
+async def test_an_agent_socket_a_third_user_answers_is_refused_before_anything_is_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0131 §7, on the *hub's* request path — the one every admission turns on.
+
+    The custody checks above walk the filesystem, and ADR-0084 §1 says why that is
+    not enough: "a walk can be wrong — a bind mount, an ACL, a symlinked ancestor".
+    PR #936's review exhibited the attack concretely, an untrusted user replacing
+    the socket through a POSIX ACL after every mode has been inspected. So the
+    daemon here answers correctly and what is wrong is who is answering, which only
+    the kernel can say. Nothing is written to that socket first, so the peer never
+    learns which address the hub was asking about either.
+    """
+    monkeypatch.setattr("ai_assistant.wire.overlay.peer_uid", lambda _sock: os.geteuid() + 1)
+    async with _daemon(tmp_path, {"/localapi/v0/whois": _ok(_WHOIS)}) as (agent, asked):
+        with pytest.raises(OverlayIdentityUnavailableError, match="runs as uid"):
+            await agent.identify("100.64.0.11", 41234)
+        assert asked == []
+
+
+async def test_the_hubs_own_startup_query_authenticates_its_peer_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both questions the hub asks go through one request path, so both are covered.
+
+    Worth pinning separately because ``hub_identity`` is the startup query: a hub
+    that bound an address a replaced socket named would be listening where an
+    untrusted user chose, before any device had connected at all.
+    """
+    monkeypatch.setattr("ai_assistant.wire.overlay.peer_uid", lambda _sock: os.geteuid() + 1)
+    async with _daemon(tmp_path, {"/localapi/v0/status": _ok(_STATUS)}) as (agent, asked):
+        with pytest.raises(OverlayIdentityUnavailableError, match="runs as uid"):
+            await agent.hub_identity()
+        assert asked == []
+
+
+async def test_a_daemon_running_as_root_is_admitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Root or us" (ADR-0131 §7): ``tailscaled`` runs as root in the ordinary
+    deployment, so a rule demanding the hub's own uid would refuse every real
+    installation. The other half — our own euid — is what every other case in this
+    file exercises, since the fake daemon runs as the test process.
+    """
+    monkeypatch.setattr("ai_assistant.wire.overlay.peer_uid", lambda _sock: 0)
+    async with _daemon(tmp_path, {"/localapi/v0/whois": _ok(_WHOIS)}) as (agent, _):
+        assert await agent.identify("100.64.0.11", 41234) == _DEVICE
+
+
+async def test_a_platform_with_no_peer_credential_call_refuses_as_the_hub_catches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fail-closed direction, and the *class* is the property (ADR-0131 §7).
+
+    :func:`ai_assistant.wire.peer.peer_uid` fails closed with a ``ProtocolError``,
+    and ``service/remote.py`` catches only this module's
+    :class:`OverlayIdentityUnavailableError` at its two admission sites — a
+    different class from the wire package's identically named one. So a refusal
+    reaching a caller as either of those other types is the check firing and the
+    refusal it was written for never happening. ``pytest.raises`` here is that
+    assertion: neither sibling would satisfy it.
+    """
+
+    def _unavailable(_sock: object) -> int:
+        raise ProtocolError("this platform exposes no peer-credential call")
+
+    monkeypatch.setattr("ai_assistant.wire.overlay.peer_uid", _unavailable)
+    async with _daemon(tmp_path, {"/localapi/v0/whois": _ok(_WHOIS)}) as (agent, asked):
+        with pytest.raises(OverlayIdentityUnavailableError, match="peer-credential"):
+            await agent.identify("100.64.0.11", 41234)
+        assert asked == []
