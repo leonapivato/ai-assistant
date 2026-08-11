@@ -276,6 +276,29 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     assert len(_method_names()) == 24
 
 
+def test_the_surface_and_the_protocol_version_moved_together() -> None:
+    """ADR-0124 §9: changing the promoted method set bumps ``PROTOCOL_VERSION``.
+
+    The rule reaches "any change to the promoted surface's method set", and its
+    prose is explicit that this is not an oversight to be forgiven: "adding a
+    method bumps… A sixteenth method on the promoted surface is a request an
+    older hub answers with a failure the client did not ask for." ADR-0130 §9's
+    five took the surface to twenty-four and the version to 3.
+
+    **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
+    owed and leaving its shape open. This is not that check — it is a *pin*, and
+    a deliberately crude one: it fails when either number moves without the
+    other, which is the moment a lane adding a method has to look at this rule
+    rather than discover it in review. The real check is #872's and is still owed.
+    """
+    from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
+
+    assert (len(_method_names()), PROTOCOL_VERSION) == (24, 3), (
+        "the promoted method set and the protocol version move together "
+        "(ADR-0124 §9); bump one and this pin makes you consider the other"
+    )
+
+
 #: ADR-0085 §6b's twelve derived predicates. **The list is normative there** — "a
 #: triad implementation that carried a subset would leave the CLI reading an
 #: attribute that is not there" — so it is spelled out rather than derived, which
