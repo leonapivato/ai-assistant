@@ -1080,11 +1080,22 @@ class FakeNotificationOutbox:
                 self._candidate_ceiling is not None
                 and len(candidate.model_dump_json().encode("utf-8")) > self._candidate_ceiling
             ):
+                # A terminal refusal is terminal for the *record* too (ADR-0131
+                # §3b): left actionable it is an incomplete handoff, and every
+                # reconciliation would re-offer the same undeliverable candidate.
+                await self._dismiss(record_id)
                 return NotificationEnqueue.TOO_LARGE
             held = self._entries.get(candidate.candidate_key)
             if held is not None and not self._is_departing(held, now):
                 if held.candidate == candidate:
                     return NotificationEnqueue.ALREADY_HELD
+                # Not where the record is the held entry's, which ADR-0130 §8's
+                # duplicate suppression makes the ordinary case: dismissing it
+                # would make the held entry departing and contradict §3's "The
+                # held entry is not replaced", and that record has an entry
+                # anyway, so §3b's invariant is not the one at risk.
+                if record_id is not None and record_id != held.record_id:
+                    await self._dismiss(record_id)
                 return NotificationEnqueue.KEY_COLLISION
             victims = self._victims(candidate.candidate_key, now)
             for victim in victims:

@@ -987,6 +987,13 @@ class Settings(BaseSettings):
     # What that costs is an operator who lowers `hub_max_frame_bytes` and takes the
     # default: they get an outbox looser than §5a's 1 MiB rather than tighter, which
     # is the safe direction and is one setting away from §5a's figure.
+    #
+    # **The conflict itself is recorded rather than resolved here**: issue #965 holds
+    # the correction owed to §5a's Default column, because ADR-0070 §1 protects
+    # ratified decision text and `docs/adr/` was outside this lane's fence. What this
+    # line does is pick the only reading under which an unconfigured hub loads at all,
+    # which is the dispatcher's ruling on the lane's flag and not a lane's own choice
+    # between two ratified requirements.
     hub_max_notification_budget: _DurationSetting = Field(
         default=timedelta(seconds=300),
         gt=timedelta(0),
