@@ -390,9 +390,10 @@ def _refuse_an_unclaimed_name(socket_path: Path, setting: str) -> None:
     try:
         plantable = others_can_create_in(parent)
     except OSError as exc:
+        why = _displayable(exc.strerror)
         msg = (
             f"the directory {here} holding the overlay agent socket {setting} names "
-            f"cannot be read ({exc.strerror}), so whether an untrusted user could create "
+            f"cannot be read ({why}), so whether an untrusted user could create "
             f"that socket cannot be established; correct {setting}, or unset it"
         )
         raise ConfigurationError(msg) from exc
@@ -409,8 +410,8 @@ def _refuse_an_unclaimed_name(socket_path: Path, setting: str) -> None:
         raise ConfigurationError(msg)
 
 
-def _displayable(path: Path) -> str:
-    """A pathname rendered so that a refusal naming it can itself be built.
+def _displayable(path: Path | str | bytes | None) -> str:
+    """An OS-supplied value rendered so a refusal naming it can itself be built.
 
     :mod:`ai_assistant.core.types` requires message text to have a UTF-8 encoding,
     and gives the reason this function exists: "interpolating it raw would build an
@@ -419,7 +420,18 @@ def _displayable(path: Path) -> str:
     bytes, and a non-UTF-8 one reaches Python as PEP 383 surrogates — so it is
     escaped for display rather than echoed, and the operator still sees which path
     was meant.
+
+    **Everything the OS hands back goes through here, not only the argument.**
+    ``OSError.filename`` is the one that is easy to miss — it is as much a pathname
+    as the argument, it is ``None`` when the platform supplied none, and
+    interpolating it raw reintroduces the identical fault one line from where it
+    was fixed. ``OSError.strerror`` is decoded with the locale encoding and can
+    carry surrogates for the same reason, so it takes the same treatment; escaping
+    a string that never needed it costs nothing, and the failure it prevents is a
+    refusal that cannot be reported.
     """
+    if path is None:
+        return "an unnamed path"
     return os.fsencode(path).decode("utf-8", "backslashreplace")
 
 
@@ -450,9 +462,11 @@ def _check_path_to(socket_path: Path, setting: str) -> None:
         # misconfiguration — ADR-0083 §5 maps this class to a stay-down exit, and a
         # raw `FileNotFoundError` out of the composition root would instead be an
         # unexpected fault, reported as though the hub had a defect.
+        why = _displayable(exc.strerror)
+        where = _displayable(exc.filename)
         msg = (
             f"the path to the overlay agent socket {shown}, which {setting} names, "
-            f"cannot be read ({exc.strerror} at {exc.filename}), so whether an untrusted "
+            f"cannot be read ({why} at {where}), so whether an untrusted "
             f"user could answer for the overlay there cannot be established; correct "
             f"{setting}, or unset it to look at the two paths the daemon is packaged to "
             f"use ({', '.join(TAILSCALE_SOCKETS)})"
@@ -501,9 +515,10 @@ def _check_socket_at(socket_path: Path, setting: str) -> None:
         # cannot read is a configuration fault, not a defect. Reached when a parent
         # is owned by the hub's uid but not traversable, which the walk's `stat` of
         # the directory itself does not detect.
+        why = _displayable(exc.strerror)
         msg = (
             f"the overlay agent socket {shown}, which {setting} names, cannot be "
-            f"read ({exc.strerror}), so whether an untrusted user could answer for the "
+            f"read ({why}), so whether an untrusted user could answer for the "
             f"overlay there cannot be established; correct {setting}, or unset it to look "
             f"at the two paths the daemon is packaged to use ({', '.join(TAILSCALE_SOCKETS)})"
         )
