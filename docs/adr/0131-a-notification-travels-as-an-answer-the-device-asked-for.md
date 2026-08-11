@@ -1157,11 +1157,13 @@ explicit that "dismissing a notification frees capacity at once" — so this use
 ratified operation for what it was built for, through the Protocol the composition
 root injects, rather than reaching into another subsystem's store.
 
-**The residual is a duplicate, which is the direction this seam already fails in.** A
-crash between the dismissal and the removal leaves an entry whose record is dismissed;
-the outbox's ordinary rules carry it, and the owner may be told once more. That is
-at-least-once (§3), reached one more way, and it is the failure §3 argues is the right
-one for a notification. Nothing in either order of events can lose one.
+**A crash between the dismissal and the removal leaves a departing entry, and §3
+governs it precisely.** Its record is dismissed, so it participates in no transition
+but its own removal, and the reconciliation above removes it before any poll is
+served: it is not delivered again. The residual exposure this seam does carry is
+§3a's — a delivery *selected* before its departure may still land — which is
+at-least-once (§3) and the failure §3 argues is the right one for a notification.
+Nothing in either order of events can lose one.
 
 **A separate Protocol rather than a method on ADR-0130's writer, and the boundary is
 the propose/dispose line itself.** `NotificationWriter` decides *whether* the user is
