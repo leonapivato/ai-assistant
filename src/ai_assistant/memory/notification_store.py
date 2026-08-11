@@ -423,7 +423,7 @@ def _check_page_bound(name: str, value: object, *, floor: int = 0) -> None:
         raise ValueError(msg)
 
 
-def _check_tuning(retention: timedelta | None, cap: object) -> None:
+def check_notification_tuning(retention: timedelta | None, cap: object) -> None:
     """Refuse a retention or a cap the store cannot work under (ADR-0130 §7).
 
     The ``_check_tuning`` arrangement ADR-0022 §4a ratified, and for its reason: a
@@ -432,6 +432,17 @@ def _check_tuning(retention: timedelta | None, cap: object) -> None:
     constructor parameters is also what makes the retention read **once per
     store** — the other half of §7's rule that a stamped duration is never
     consulted from the setting afterwards.
+
+    **Public because it touches no resource, and the composition root needs to
+    ask it before it touches one.** The retention bound below is the first tuning
+    in this tree that ``Settings`` accepts and a store refuses, so
+    ``build_composition`` would otherwise create the data directory and open
+    seven databases before learning the configuration was unusable — which is the
+    contract #372 established, that "a bad configuration fails without ever
+    touching disk: no directory is created and no database file is written for a
+    build that was never going to succeed". The constructor still calls this
+    itself: it is public and anyone may build a store directly, so the check
+    belongs to the store whether or not a caller asked first.
 
     **The upper bound is this backend's own, and it is not decoration.**
     ``Settings.notification_retention`` accepts any strictly positive duration
@@ -630,7 +641,7 @@ class SqliteNotificationStore:
                 ADR-0130's promises in opposite directions.
             NotificationStoreError: If the database cannot be opened or prepared.
         """
-        _check_tuning(retention, cap)
+        check_notification_tuning(retention, cap)
         self._clock = checked_clock(now, owner="SqliteNotificationStore")
         self._retention = retention
         self._cap = cap
