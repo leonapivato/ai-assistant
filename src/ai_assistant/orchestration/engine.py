@@ -1212,6 +1212,13 @@ class Engine:
         #: guarding per object, and a second object over the same database in the
         #: same live process would still void a lease a device is holding.
         self._leases_recovered = False
+        #: Serialises the check-recover-set that reads the flag above, so two
+        #: overlapping ``start`` calls cannot both pass it. Its own lock rather than
+        #: ``_recovery_lock``: that one guards the confirmation table's recovery and
+        #: resolution, is held across a different critical section, and coupling two
+        #: unrelated startup exclusions would make each one's reasoning the other's
+        #: problem.
+        self._lease_recovery_lock = asyncio.Lock()
         if max_notification_budget <= timedelta(0):
             msg = (
                 f"max_notification_budget must be positive, got {max_notification_budget!r}: a "
@@ -1327,16 +1334,26 @@ class Engine:
         one data directory in one process would each recover, which the composition
         root does not do and only a test can reach today (#969).
 
-        **Two concurrent first calls are harmless**, so no lock is owed for them:
-        both necessarily run before any poll is served — the hub starts the engine at
-        step 4 and accepts at step 6 — so there is no lease of this process's for a
-        double void to take. What the flag guards against is a *later* call, and a
-        later call is not concurrent with the first.
+        **The check, the recovery and the flag are one critical section**, because a
+        bare flag is not a guard across an ``await``. Two overlapping ``start`` calls
+        both read ``False``; the first recovers and returns, a poll then leases an
+        entry, and the second resumes its already-started recovery and voids that
+        live lease — one entry claimable by a second device, which is the very thing
+        this guard exists to prevent, reached through the guard itself. An earlier
+        draft argued the window was unreachable because the hub starts the engine at
+        step 4 and accepts at step 6, so no poll can interleave. That is a fact about
+        ``service/hub.py``, not about this class: ``start`` is public, documents only
+        that it is safe to call more than once, and says nothing that excludes
+        overlap. Adversarial review found it on the tenth round. The lock costs
+        nothing and makes the argument unnecessary rather than load-bearing.
         """
-        if self._notification_outbox is None or self._leases_recovered:
+        if self._notification_outbox is None:
             return
-        await self._notification_outbox.recover_leases()
-        self._leases_recovered = True
+        async with self._lease_recovery_lock:
+            if self._leases_recovered:
+                return
+            await self._notification_outbox.recover_leases()
+            self._leases_recovered = True
 
     async def purge_expired(self) -> PurgeReport:
         """Physically reclaim what the two Tier 1 stores and the trace store owe.

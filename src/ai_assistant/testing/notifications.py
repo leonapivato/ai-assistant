@@ -81,6 +81,12 @@ _DEFAULT_RETENTION = timedelta(days=7)
 #: The bounded default every enumeration here uses (ADR-0073 §2, §8).
 _DEFAULT_PAGE_LIMIT = 50
 
+#: How many records :class:`FakeNotificationOutbox` reads per page when it walks the
+#: whole store. The durable outbox's own figure, so the two implementations page the
+#: same way — what matters is that both *page* rather than asking for one wide page
+#: and treating its size as a total.
+_RECORD_PAGE = 200
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -1096,12 +1102,36 @@ class FakeNotificationOutbox:
             return False
         return await self._records.dismiss(record_id)
 
+    async def _all_records(self) -> list[HeldNotification]:
+        """Every record the store retains, walked a page at a time.
+
+        **Paged, and a single wide page was the defect.** Both callers used to ask
+        for one page of a thousand, which is not a bound the store honours as a
+        total: :class:`FakeNotificationStore`'s ``cap`` is caller-configurable, so a
+        consumer holding more than that silently lost every record past the first
+        page — the reconciliation never offered them, and ``_resolve`` answered
+        ``None`` for a candidate whose record was simply further down. The durable
+        outbox pages until a short page (``_held_records``), and a canonical fake
+        that truncates where the shipped implementation does not certifies consumers
+        against a contract nothing implements.
+        """
+        if self._records is None:
+            return []
+        gathered: list[HeldNotification] = []
+        offset = 0
+        while True:
+            page = await self._records.held(limit=_RECORD_PAGE, offset=offset)
+            gathered.extend(page)
+            if len(page) < _RECORD_PAGE:
+                return gathered
+            offset += len(page)
+
     async def _resolve(self, candidate_key: str) -> str | None:
         """The actionable record this candidate belongs to, where one is readable."""
         if self._records is None:
             return None
         now = self._now()
-        for record in await self._records.held(limit=1000, offset=0):
+        for record in await self._all_records():
             if record.candidate.candidate_key == candidate_key and record.is_actionable_at(now):
                 return record.id
         return None
@@ -1302,7 +1332,7 @@ class FakeNotificationOutbox:
             keys = set(self._entries)
         if self._records is None:
             return
-        for record in await self._records.held(limit=1000, offset=0):
+        for record in await self._all_records():
             if record.kind is not NotificationDispositionKind.INTERRUPT:
                 continue
             if not record.is_actionable_at(now) or record.candidate.candidate_key in keys:
