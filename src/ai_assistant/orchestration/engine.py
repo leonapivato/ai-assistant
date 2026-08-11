@@ -2210,7 +2210,36 @@ class Engine:
             notification_id=named,
         )
         store = self._notification_surface()
-        return await self._tracked(store.dismiss(named), "dismiss_notification", checked=True)
+        return await self._tracked(
+            self._dismiss(store, named), "dismiss_notification", checked=True
+        )
+
+    async def _dismiss(self, store: NotificationStore, notification_id: str) -> bool:
+        """End the record's actionability, then give up its outbox entry (§3, §3a).
+
+        **A dismissal reaches the outbox, and the seam cannot notice it by
+        itself.** ADR-0131 §3 makes an entry departing when its record "has ceased
+        to be actionable", and names the two causes the seam can decide locally —
+        it gave the entry up, or the candidate expired. An owner's dismissal is
+        neither, which is why §3 says the third route "arrives as §3a's withdrawal —
+        **the disposing act calls the seam** rather than the seam polling for it".
+        Without this call the entry stays selectable and the next poll delivers a
+        notification the owner has already dismissed.
+
+        **Dismiss first, remove after**, which is §3b's order rather than §3a's
+        delete order, and the difference is what each act leaves behind. A *delete*
+        destroys the record, so the entry has to go first or it is orphaned; a
+        dismissal leaves the record readable, so the safe order is the one §3b
+        states — "entry absent" implying "record dismissed" — and it keeps this
+        call's answer the store's own.
+
+        A removal that fails does not fail the call: the record is dismissed, the
+        entry is departing, and §3b's reconciliation completes it.
+        """
+        dismissed = await store.dismiss(notification_id)
+        if self._notification_outbox is not None:
+            await self._notification_outbox.withdraw(notification_id)
+        return dismissed
 
     async def forget_notification(self, notification_id: Identifier) -> bool:
         """Destroy one notification (§9, ADR-0004 §6).

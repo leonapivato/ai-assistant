@@ -597,11 +597,21 @@ class SqliteNotificationOutbox:
                     candidate_key=victim.key,
                     notification_id=victim.record_id,
                 )
-            await _run_to_completion(
-                self._insert_sync, candidate, encoded, record_id, cost, victims
+            inserted = await _run_to_completion(
+                self._insert_sync, candidate, encoded, record_id, cost, victims, now
             )
-            self._wake()
-            return NotificationEnqueue.ENQUEUED
+            if inserted is NotificationEnqueue.KEY_COLLISION:
+                await self._refuse(
+                    NotificationEnqueue.KEY_COLLISION,
+                    candidate,
+                    record_id,
+                    held_by=await _run_to_completion(
+                        self._held_record_id_sync, candidate.candidate_key
+                    ),
+                )
+            elif inserted is NotificationEnqueue.ENQUEUED:
+                self._wake()
+            return inserted
 
     async def _refuse(
         self,
@@ -762,24 +772,63 @@ class SqliteNotificationOutbox:
             total -= victim.cost
         return victims
 
-    def _insert_sync(
+    def _insert_sync(  # noqa: PLR0913 — one parameter per persisted column, plus what it evicted and the instant
         self,
         candidate: NotificationCandidate,
         encoded: str,
         record_id: str | None,
         cost: int,
         victims: list[_Entry],
-    ) -> None:
-        """Remove the dismissed victims and insert the entry, in one step."""
+        now: datetime,
+    ) -> NotificationEnqueue:
+        """Re-check the key, remove the dismissed victims and insert, in one step.
+
+        **The re-check is what makes the enqueue one linearizable transition**, and
+        without it the decision and the act were two. The victims' dismissals reach
+        the *other* store, so they cannot run inside a transaction on this one — the
+        deciding transaction therefore has to end before this one begins, and across
+        processes another writer may commit an entry under this key in the gap. Both
+        callers would then have been told ``ENQUEUED`` and one entry would have
+        silently replaced the other, losing the custody ADR-0131 §3 says transfers
+        at that commit.
+
+        ADR-0131 §3 names this discharge in terms: an implementation may hold
+        transitions against one another *or* re-read "immediately before acting and
+        falling through to the rule the fresh state implies". This is the second, so
+        the fresh state decides the outcome and the insert never replaces a row.
+
+        Returns:
+            What the fresh state implies — ``ENQUEUED`` ordinarily, or the duplicate
+            or collision answer where another writer reached the key first.
+        """
         with self._transaction("enqueue a notification") as conn:
+            rows = self._rows(
+                conn,
+                "re-read the key before inserting",
+                "SELECT candidate_key, candidate, record_id, sequence, delivery_id, "
+                "leased_until, departing, cost FROM outbox WHERE candidate_key = ?",
+                (candidate.candidate_key,),
+            )
+            if rows:
+                held = _entry_from(rows[0])
+                if not held.is_departing_at(now):
+                    return (
+                        NotificationEnqueue.ALREADY_HELD
+                        if held.candidate == candidate
+                        else NotificationEnqueue.KEY_COLLISION
+                    )
+                conn.execute(
+                    "DELETE FROM outbox WHERE candidate_key = ?", (candidate.candidate_key,)
+                )
             for victim in victims:
                 conn.execute("DELETE FROM outbox WHERE candidate_key = ?", (victim.key,))
             sequence = self._take_sequence(conn)
             conn.execute(
-                "INSERT OR REPLACE INTO outbox(candidate_key, candidate, record_id, sequence, "
+                "INSERT INTO outbox(candidate_key, candidate, record_id, sequence, "
                 "delivery_id, leased_until, departing, cost) VALUES (?, ?, ?, ?, NULL, NULL, 0, ?)",
                 (candidate.candidate_key, encoded, record_id, sequence, cost),
             )
+            return NotificationEnqueue.ENQUEUED
 
     def _take_sequence(self, conn: sqlite3.Connection) -> int:
         """The next enqueue order, advanced durably in the same transaction."""
@@ -822,6 +871,15 @@ class SqliteNotificationOutbox:
                 if not entry.is_leased_at(now) and not entry.is_departing_at(now)
             ]
             if not available:
+                # **Cleared here and nowhere else**, which is what makes the wake
+                # lossless. Clearing inside the wait erased an arrival that landed
+                # between a poll's empty claim and its call to wait: the event was
+                # already set, the wait discarded it, and the poll slept out its
+                # whole budget with an entry available the whole time. The clear
+                # belongs to the transition that *observed* the emptiness, so it is
+                # taken under the same lock as that observation and an ``offer``
+                # setting it afterwards cannot be lost.
+                self._arrivals.clear()
                 return None
             entry = min(available, key=lambda candidate_entry: candidate_entry.sequence)
             delivery_id = self._take_delivery_id(conn)
@@ -1089,7 +1147,6 @@ class SqliteNotificationOutbox:
         Returns:
             Whether an arrival may have happened; ``False`` where the wait ran out.
         """
-        self._arrivals.clear()
         try:
             await asyncio.wait_for(self._arrivals.wait(), timeout.total_seconds())
         except TimeoutError:
