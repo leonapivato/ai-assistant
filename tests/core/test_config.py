@@ -840,6 +840,12 @@ def test_every_integer_setting_is_discovered() -> None:
         "observation_batch_size",
         "observation_max_proposals",
         "deferral_queue_limit",
+        # ADR-0130 §7's cap on actionable held notifications, acknowledged here
+        # for `deferral_queue_limit`'s reason and with the same `bool` argument:
+        # `notification_queue_limit=True` is a store at capacity after its first
+        # admission, which drops every later candidate while the system reports
+        # health.
+        "notification_queue_limit",
         # ADR-0084 §3's transport figures. Acknowledged here rather than exempted:
         # each is refused at load unless strictly positive, and joining this tuple
         # is what subjects them to the parametrised guards below. The ``bool`` one
@@ -1094,6 +1100,17 @@ def test_every_duration_setting_is_discovered() -> None:
         "retention_purge_interval",
         "conversation_sweep_interval",
         "observation_interval",
+        # ADR-0130 §5's reconsideration interval, a fourth row on ADR-0083 §7's
+        # table and subject to its convention unchanged — finite and strictly
+        # positive, or `None` for disabled and never `0`. It is the one job on
+        # that table whose latency is user-visible, which is why its default is
+        # minutes rather than hours and why a `bool` here is the difference
+        # between "re-rule every five minutes" and "re-rule every second".
+        "notification_reconsider_interval",
+        # ADR-0130 §7's retention for a held notification, on `deferral_ttl`'s
+        # convention: finite by default, with `None` the user's deliberate "keep
+        # them" and the one escape the cap axis does not offer.
+        "notification_retention",
         # ADR-0111 §4's run budget. It does **not** follow §7's nullable convention,
         # for ``hub_read_timeout``'s reason one clause on: a chunked run with no
         # budget is the unbounded walk ADR-0083 §7 accepted the absence of a bound
