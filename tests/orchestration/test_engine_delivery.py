@@ -443,6 +443,125 @@ class TestABudgetTheClockCannotAddIsRefusedNotCrashed:
             await outbox.claim()
 
 
+class _ParkingClaimOutbox(RecordingOutbox):
+    """An outbox whose ``claim`` parks, so a case can cancel *inside* the one step.
+
+    ADR-0131 §2a makes selection, minting and leasing indivisible, and the only way
+    to show a shield actually holds is to cancel while the step is running.
+    """
+
+    def __init__(self) -> None:
+        """Start with nobody claiming and nobody acknowledging."""
+        super().__init__()
+        self.claim_entered = asyncio.Event()
+        self.release_claim = asyncio.Event()
+        self.claim_completed = False
+        self.ack_entered = asyncio.Event()
+        self.release_ack = asyncio.Event()
+        self.ack_completed = False
+
+    async def claim(self) -> NotificationDelivery | None:
+        """Park mid-step, then finish — recording that it was allowed to."""
+        self.claim_entered.set()
+        await self.release_claim.wait()
+        self.claim_completed = True
+        return None
+
+    async def acknowledge(self, delivery_id: str) -> None:
+        """Park mid-retirement, so a cancel can be aimed inside it."""
+        self.ack_entered.set()
+        await self.release_ack.wait()
+        self.ack_completed = True
+        self.calls.append(f"acknowledge:{delivery_id}")
+
+
+class TestACancelledPollHonoursSection2a:
+    """§2a: a close before the selection takes no entry; during or after, the lease stands.
+
+    These drive the **production** ``Engine.next_notification``, because that is
+    where the property lives: the wire cancels its dispatch task, and a dispatch task
+    is a coroutine awaiting this method, so ``task.cancel()`` here is exactly what a
+    disconnect does. ``tests/wire``'s ``_PollingEngine`` overrides the method with a
+    directly awaitable park, so it can only show the wire *issues* the cancel — never
+    that the engine honours it.
+    """
+
+    async def test_a_cancel_while_parked_leaves_the_notification_for_the_next_poll(
+        self,
+    ) -> None:
+        """§2a: "A close detected before that step runs cancels the poll and takes no entry."
+
+        The failure this guards is the one an unconditional shield produced: the poll
+        outlived its connection, so a notification arriving afterwards was claimed and
+        leased for a device that had already gone, and the owner's next poll found
+        nothing. The entry has to survive the dead poll.
+        """
+        outbox = FakeNotificationOutbox(now=lambda: NOW)
+        engine = _wired(Harness(), outbox)
+        poll = asyncio.ensure_future(engine.next_notification(budget=timedelta(seconds=30)))
+        await asyncio.sleep(0.05)  # let it reach the park
+
+        poll.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await poll
+
+        # The notification arrives *after* the disconnect, which is the reviewer's
+        # own scenario: a shielded poll would still be parked to receive it.
+        await outbox.offer(_candidate())
+        await asyncio.sleep(0.05)  # ample time for a surviving poll to take it
+
+        delivery = await outbox.claim()
+        assert delivery is not None
+        assert delivery.notification.candidate_key == "k1"
+
+    async def test_a_cancel_inside_the_claim_still_completes_the_step(self) -> None:
+        """§2a: selection, mint and lease "are one indivisible step".
+
+        The other half, and the reason the poll is not simply left cancellable
+        throughout: a cancel landing *inside* the step would tear it. §2a prices that
+        deliberately — a close during or after the selection leaves the lease
+        standing and the entry returns when it expires, "the cost the lease exists to
+        carry".
+        """
+        outbox = _ParkingClaimOutbox()
+        engine = _wired(Harness(), outbox)
+        poll = asyncio.ensure_future(engine.next_notification(budget=timedelta(seconds=30)))
+        await asyncio.wait_for(outbox.claim_entered.wait(), 2)
+
+        poll.cancel()
+        outbox.release_claim.set()
+        with pytest.raises(asyncio.CancelledError):
+            await poll
+        await asyncio.sleep(0.05)
+
+        assert outbox.claim_completed is True
+
+    async def test_a_cancel_before_the_acknowledgement_does_not_half_retire(self) -> None:
+        """The acknowledgement is mutating and pre-selection, so it takes the same shield.
+
+        A cancel arriving mid-retirement would leave the entry dismissed in one store
+        and standing in the other, which is the tear §3b's ordering exists to prevent.
+        So the cancel is aimed *inside* the acknowledgement here — asserting only that
+        it ran before the claim would pass whether or not it was shielded, since
+        nothing cancels in that gap.
+        """
+        outbox = _ParkingClaimOutbox()
+        engine = _wired(Harness(), outbox)
+        poll = asyncio.ensure_future(
+            engine.next_notification(acknowledging="d-1", budget=timedelta(seconds=30))
+        )
+        await asyncio.wait_for(outbox.ack_entered.wait(), 2)
+
+        poll.cancel()
+        outbox.release_ack.set()
+        outbox.release_claim.set()
+        with pytest.raises(asyncio.CancelledError):
+            await poll
+        await asyncio.sleep(0.05)
+
+        assert outbox.ack_completed is True
+
+
 class TestAnUnwiredOutboxRefusesLegibly:
     """A deployment that composed none delivers nothing, and says so."""
 
