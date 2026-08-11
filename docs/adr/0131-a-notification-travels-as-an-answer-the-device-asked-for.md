@@ -477,6 +477,12 @@ deliberately given up, and gives the reason there.
 > outbox held nothing for it. Every drop is recorded in the hub's log naming the
 > entry, and the enqueue then proceeds.
 
+> **Normative.** Observing an entry's class and dropping it are **one step with
+> respect to the reservation-to-lease transition**. Where eviction selects a
+> reserved entry it cancels the poll holding it and does not remove the entry until
+> that cancellation has taken effect; a poll that reached its write first has
+> produced a lease, and the entry is then handled under the leased rule instead.
+
 > **Normative.** An entry whose own byte cost exceeds `hub_notification_outbox_bytes`
 > is refused at the enqueue, and the refusal is the enqueue's reported outcome. It is
 > never satisfied by evicting other entries.
@@ -509,6 +515,22 @@ ordinary case is on a screen. Dropping a *reserved* entry forfeits the notificat
 outright, and does so while a poll is actively trying to send it — so it is last,
 and it takes the poll down with it rather than leaving that poll to write a delivery
 for a record that no longer exists.
+
+**Classifying an entry and dropping it have to be one step, and the fourteenth round
+is why the clause says so.** A three-class order fixes *which* entry is chosen and
+says nothing about the interval between choosing it and removing it — during which a
+reserved entry's poll can reach its write and commit a lease. Eviction acting on its
+earlier observation then deletes a record whose notification has just been sent: the
+device holds a delivery it can neither acknowledge nor have redelivered, which is the
+exact failure the three-class order was added to prevent, reintroduced by the race
+rather than by the rule. **This is ADR-0124 §8's instrument applied to a second
+subject.** That section required a liveness check and the write it authorises to be
+"one step with respect to a revocation", for the same reason and against the same
+shape of window; here the window is between a class observation and a removal, and
+it is closed the same way. The clause admits both discharges — cancel and join, or
+re-observe and fall through to the leased rule — because they are the same guarantee
+reached from the two sides of the race, and choosing between them is an
+implementation's business rather than this ADR's.
 
 **It drops until the bounds hold, not once, and the difference is not pedantry.**
 One drop is enough for the count bound, where every entry costs exactly one — but
