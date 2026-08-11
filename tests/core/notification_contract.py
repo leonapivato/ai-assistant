@@ -463,6 +463,50 @@ class NotificationPolicyContract(ABC):
         assert in_tokyo.kind is NotificationDispositionKind.HOLD
         assert in_tokyo.reason is NotificationCondition.QUIET_WINDOW
 
+    async def test_a_window_ending_inside_a_dst_gap_wakes_late_and_never_early(
+        self, policy_in: Callable[[str], NotificationPolicy]
+    ) -> None:
+        """The spring-forward case, and why "late" is the answer §5 asks for.
+
+        In ``America/New_York`` on 2026-03-08 the clock jumps 02:00 to 03:00, so a
+        window ending at 02:30 names a local time that does not occur. The instant
+        this returns is 07:30Z, where the clock first leaves the window at 07:00Z —
+        **half an hour late, and §5 says so is not a fault**: ``reconsider_at`` is
+        "the instant before which a record may not be reconsidered, never a
+        deadline by which it must have been".
+
+        **Early would be the unsafe direction, and that is the assertion that
+        matters.** The obvious "normalise to the first valid instant" reading maps
+        the endpoint to 06:30Z, whose local time is 01:30 — still inside the
+        window. A record woken there re-rules, re-holds, and computes 06:30Z
+        again, so the maintenance drain would rule it forever without progress.
+        Any implementation is therefore free to be later than the true end and
+        must not be earlier than the ruling instant.
+
+        ADR-0093 §7b's ``fold=0`` rule covers the *ambiguous* instant of the
+        autumn transition, which is a different hazard and the one the ADR names;
+        this is the gap the same transition leaves in spring.
+        """
+        preferences = NotificationPreferences(
+            reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
+            quiet_windows=(QuietWindow.between(time(22, 0), time(2, 30)),),
+        )
+        inside = datetime(2026, 3, 8, 5, 0, tzinfo=UTC)  # 00:00 local, inside the window
+        leaves_the_window = datetime(2026, 3, 8, 7, 0, tzinfo=UTC)  # 03:00 local, the transition
+
+        ruling = await _rule(
+            policy_in("America/New_York"),
+            candidate(noticed_at=inside, expires_at=inside + timedelta(days=1)),
+            preferences=preferences,
+            now=inside,
+        )
+
+        assert ruling.reason is NotificationCondition.QUIET_WINDOW
+        assert ruling.reconsider_at is not None
+        assert ruling.reconsider_at > inside, "an instant at or before the ruling never progresses"
+        assert ruling.reconsider_at >= leaves_the_window, "waking inside the gap re-holds forever"
+        assert ruling.reconsider_at <= leaves_the_window + timedelta(hours=1), "at most one gap"
+
     async def test_a_producers_confidence_settles_nothing(self, policy: NotificationPolicy) -> None:
         """§4: the confidence is **evidence on the proposal**, not authority.
 

@@ -4069,7 +4069,11 @@ class NotificationPolicy(Protocol):
     vary it per call could move the user's night.
 
     **A DST-ambiguous local instant resolves at ``fold=0``**, on ADR-0093 §7b's
-    rule for the same hazard.
+    rule for the same hazard. A local time the spring transition skips entirely
+    resolves **late** rather than early: §5 tolerates a late reconsideration and
+    calls it "not a fault", while the first instant inside the gap is one the
+    window still covers — so a record woken there would re-hold to the same
+    instant and never make progress.
 
     Cancelling this method is governed by this module's cancellation clause
     (ADR-0060). Input observation (ADR-0065) binds it and is vacuous in practice:

@@ -256,6 +256,15 @@ class FakeNotificationPolicy:
         §7b's rule for the same hazard: the earlier of the two instants the wall
         clock names, which is the one a user reading their own clock means.
 
+        **A local time that does not occur at all resolves *late*, and that is
+        the safe direction.** In the spring gap the wall clock jumps over the
+        endpoint, and the instant this returns is one gap beyond where the clock
+        actually leaves the window — which §5 explicitly tolerates, a late
+        reconsideration being "not a fault". Resolving *early* is what cannot be
+        done: the first instant inside the gap is still one the window covers, so
+        a record woken there re-holds to the same instant and the maintenance
+        drain would rule it forever without progress.
+
         Args:
             local: The moment, already in this policy's zone.
             end: The window's end, a naive ``datetime.time``.
