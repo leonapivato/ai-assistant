@@ -988,7 +988,7 @@ merged and made it checkable.
 > `    ENQUEUED = "enqueued"` — the entry was made.
 > `    ALREADY_HELD = "already_held"` — an identical entry was already held under this key and none was made.
 > `    KEY_COLLISION = "key_collision"` — the key matched a held entry carrying a different candidate; the offer was refused.
-> `    TOO_LARGE = "too_large"` — the entry's own byte cost exceeds `hub_notification_outbox_bytes`; the offer was refused.
+> `    TOO_LARGE = "too_large"` — the candidate exceeds one of the hub's size ceilings: §4's delivery ceiling, or the entry's own byte cost against `hub_notification_outbox_bytes` (§3). The offer was refused.
 
 > **Normative.** The conformance suite of §3b's triad branches on these exact
 > members, so a second implementation is held to them rather than to a description.
@@ -1337,24 +1337,35 @@ what it meant. The harm is bounded to one entry and the acknowledgement is
 idempotent, and the general question — what a restore does to state a peer is
 holding — is ADR-0123's and is not reopened here.
 
-> **Normative.** **This ADR imposes a new bound on `NotificationCandidate`**, which
-> ADR-0130 does not carry: its canonical encoding is bounded by ADR-0085 §8's
-> contract limit **less a 256-byte delivery reserve**. A candidate exceeding it is
-> refused at validation and never reaches the outbox.
+> **Normative.** A candidate whose canonical encoding exceeds ADR-0085 §8's contract
+> limit **less a 256-byte delivery reserve** cannot be delivered. `offer` refuses it,
+> reporting `NotificationEnqueue.TOO_LARGE` (§3b), and it never reaches the outbox.
 
-> **Normative.** The implementing lane adds that bound to `NotificationCandidate`'s
-> own validation and to the conformance coverage ADR-0130 §9 establishes for it, so
-> the type and its suite carry the constraint rather than the delivery path checking
-> it late. §9 records the partial supersession this creates.
+> **Normative.** That ceiling is enforced **at the seam and never in
+> `NotificationCandidate`'s own validation**. The type is unchanged by this ADR, and
+> no lane may add a size validator to it.
 
-**Saying whose bound it is matters, and a draft got it backwards.** That draft read
-"ADR-0130 states that bound as a constraint on its own type", which architecture
-review checked on the fifty-second round and found false: ADR-0130 §2 defines the
-type's fields and validators and says nothing about payload size, and its conformance
-requirements carry no such rule. Presenting a *new* rejection condition as an existing
-obligation of another ADR is worse than adding one openly — it leaves the ratified
-type and its triad quietly inconsistent with this seam, and it puts the correction on
-whoever next reads both. So the clause now says plainly that this ADR is the source.
+**The ceiling is settings-derived, so the seam is the only place it can live.** It
+falls out of `hub_max_frame_bytes`, which differs between deployments; a frozen `core`
+model's validator has no `Settings` input, so the same candidate would be valid on one
+hub and invalid on another with no way for the type to tell. Architecture review found
+that on the fifty-third round, against a draft of this section that had required the
+bound in the type's own validation.
+
+**The corpus already answers this for the identical case, which is why the fix is a
+pattern rather than an invention.** ADR-0085 §8's contract limit is exactly such a
+figure — `hub_max_frame_bytes` less §8b's envelope reserve — and it is enforced by the
+engine and the client raising `OversizedValueError`, not by any promoted model
+refusing itself. §4's reserve is the same kind of number one layer in, so it takes the
+same treatment: a declared refusal at the seam that measures it. `TOO_LARGE` is that
+outcome, and it needs no new member because a producer's remedy is identical whichever
+ceiling it met — the notification has to get smaller.
+
+**Two rounds, two wrong homes, and the honest record of both.** A first draft claimed
+ADR-0130 already carried the bound, which was false (round 52). The correction moved
+it into `NotificationCandidate`'s validation, which was unimplementable (round 53).
+The bound itself was right throughout; where it belongs is the seam, and §9 records
+that ADR-0130 is consequently **not** superseded — its type is untouched.
 
 **The reserve exists because what ADR-0085 §8 measures is the result, and the
 result is the wrapper.** A `NotificationCandidate` sized at exactly the contract
@@ -1972,25 +1983,18 @@ freeze. ADR-0084's Status line and a dated header note carry the record in this
 change, on the same reasoning as ADR-0124's above; not one word of its Decision text is
 edited.
 
-**ADR-0130 §2's validation rules for `NotificationCandidate` are partially
-superseded**, in one scope: §4 above adds a bound on the type's canonical encoding
-that ADR-0130 does not carry. A reader holding only ADR-0130 builds the type — and its
-conformance suite — accepting candidates this ADR refuses, which is ADR-0070 §1's
-first limb. It is **partial** and the scope is narrow: every field §2 names, the
-reference-not-content rule, the producer-chosen sensitivity, the `DataTier.SECRET`
-refusal and the already-perished refusal are untouched and stay accepted, as is the
-whole of §3's chassis and §9's surface list. ADR-0130's Status line and a dated header
-note carry the record in this change, on the same ADR-0082 §7 reasoning as the two
-above; not one word of its Decision text is edited.
-
-**Why a supersession rather than a stacked addition, since ADR-0130 was silent on
-size.** Silence is what made §7's agent-authentication clause a stacked addition
-above: a reader of ADR-0124 §4 was led to act *incompletely*, never contrary. Here a
-reader of ADR-0130 §2 builds a validator that **accepts values this ADR refuses**, so
-the type admits a different set after this decision than before it. That is a change
-to what was decided rather than an addition beside it, and ADR-0070 §1 puts it on the
-supersession side. Architecture review's fifty-second round is what surfaced it, by
-checking a sentence that claimed ADR-0130 already carried the bound.
+**No record is owed on ADR-0130, and the route to that answer is worth keeping.** §4
+imposes a delivery ceiling on what a candidate may encode to, and two drafts put it in
+the wrong place before it landed in the right one: the first said ADR-0130 already
+carried it (false — §2 states no size rule), the second required it in
+`NotificationCandidate`'s own validation, which would have superseded §2's validation
+rules and which architecture review showed is unimplementable, since the figure derives
+from `hub_max_frame_bytes` and a frozen `core` model has no `Settings` input. Enforced
+where it can be — at `offer`, as a declared `TOO_LARGE` refusal — the ceiling changes
+nothing about the type. A reader holding only ADR-0130 builds `NotificationCandidate`
+exactly as this ADR expects it, and its conformance suite stays correct. So ADR-0130 is
+untouched, and this is the same shape as ADR-0085 §8's contract limit, which bounds
+every promoted model without being a rule of any of them.
 
 **No record is owed on ADR-0124 §1, and that is the substantive finding rather
 than a formality.** §1's accountability bullet — "There is no path by which either

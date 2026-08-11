@@ -1,30 +1,7 @@
 # 130. A notification is a proposal, and only a perishable one earns an interruption
 
-- Status: Partially superseded by ADR-0131 (§2's validation rules, only as to a bound on `NotificationCandidate`'s encoded size)
+- Status: Accepted
 - Date: 2026-08-10
-- Partially superseded: 2026-08-11 by ADR-0131 — **one clause, one property, and it
-  is a bound this ADR had no reason to know it needed.** ADR-0131 decides the delivery
-  seam, and a candidate crosses the wire nested inside its `NotificationDelivery`.
-
-  **Replaced — §2's validation rules, only as to encoded size.** §2 fixes what a
-  `NotificationCandidate` carries and the conditions it is refused under, and states
-  no bound on how large the whole may encode to. ADR-0131 §4 adds one: the canonical
-  encoding is bounded by ADR-0085 §8's contract limit less a 256-byte delivery
-  reserve, because what §8 measures is the *result* — the delivery wrapper — and a
-  candidate sized at the full limit is one the hub could accept and could never send.
-  A reader holding only this ADR builds the type, and its conformance suite, accepting
-  candidates ADR-0131 refuses, which is ADR-0070 §1's first limb.
-
-  **Not replaced — the rest of §2, which is all of it.** Every field the clause names,
-  the rule that a candidate references what it is about and does not contain it, the
-  producer-chosen sensitivity that is never defaulted, the `DataTier.SECRET` refusal
-  and the already-perished refusal are untouched and stay accepted.
-
-  **Not replaced — anything else in this ADR.** §3's one-call chassis and its
-  atomicity, §5's dispositions and budget, §6's standing preferences, §7's cap and
-  retention, §8's candidate key, and §9's surface list all stand, and ADR-0131 rests
-  on nearly every one of them. ADR-0131 §9 records the extent; the implementing lane
-  carries the bound into this type's validation and its conformance coverage.
 
 ## Context
 
