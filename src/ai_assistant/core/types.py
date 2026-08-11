@@ -8252,8 +8252,9 @@ class NotificationDisposition(BaseModel):
     failed: tuple[NotificationCondition, ...] = Field(
         default=(),
         description=(
-            "Every condition of INTERRUPT_CONDITIONS that failed, in that tuple's order. "
-            "Non-empty exactly for HOLD; the reason is its first member (ADR-0130 §5)."
+            "Every condition of INTERRUPT_CONDITIONS that failed, as an ordered "
+            "subsequence of that tuple. Non-empty exactly for HOLD; the reason is its "
+            "first member, so the order is what makes the reason true (ADR-0130 §5)."
         ),
     )
     reconsider_at: UtcInstant | None = Field(
@@ -8288,11 +8289,19 @@ class NotificationDisposition(BaseModel):
     def _check_failed_set(self) -> None:
         """Refuse a failed set that does not belong to the kind that carries it.
 
+        **The set is ordered, not merely a set.** ``reason`` is defined as its
+        first member, so an unordered ``failed`` would let a well-formed ruling
+        name the wrong deciding condition: ``(BUDGET, QUIET_WINDOW)`` with
+        ``reason=BUDGET`` is two true facts arranged into a false answer to "why
+        did you not tell me?", when §5's order makes the quiet window the first to
+        fail. Checking the order is what makes ``reason`` mean what §5 says it
+        means — and it matters most for a value that arrived over the wire, which
+        no producing implementation vouched for.
+
         Raises:
             ValueError: If a HOLD names no failures or names a first one that is
                 not its reason, if any other kind names failures at all, or if
-                the set holds a condition outside INTERRUPT_CONDITIONS or repeats
-                one.
+                the set is not an ordered subsequence of INTERRUPT_CONDITIONS.
         """
         if self.kind is NotificationDispositionKind.HOLD:
             if not self.failed:
@@ -8312,15 +8321,16 @@ class NotificationDisposition(BaseModel):
         elif self.failed:
             msg = f"only a HOLD carries a failed set, got {self.failed} on {self.kind}"
             raise ValueError(msg)
-        if any(condition not in INTERRUPT_CONDITIONS for condition in self.failed):
+        ordered = tuple(
+            condition for condition in INTERRUPT_CONDITIONS if condition in set(self.failed)
+        )
+        if self.failed != ordered:
             msg = (
-                f"a failed set holds only the four conditions of INTERRUPT_CONDITIONS, got "
-                f"{self.failed}: the four DROP conditions are evaluated first and each "
-                f"yields DROP naming itself (ADR-0130 §5)"
+                f"a failed set is an ordered subsequence of INTERRUPT_CONDITIONS, each "
+                f"condition at most once, got {self.failed} where {ordered} is the order §5 "
+                f"states — otherwise the reason names a condition that was not the first to "
+                f"fail, and a surface renders the wrong answer to 'why not?' (ADR-0130 §5)"
             )
-            raise ValueError(msg)
-        if len(set(self.failed)) != len(self.failed):
-            msg = f"a failed set names each condition once, got {self.failed}"
             raise ValueError(msg)
 
     def _check_reconsideration(self) -> None:

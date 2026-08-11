@@ -4257,6 +4257,18 @@ class NotificationStore(Protocol):
     that unrelaxable by an implementing lane, together with §7's rule that no
     notification and no count of notifications is injected into a turn.
 
+    **A spent unit of budget outlives the record that spent it** (§5: "no spent
+    unit is refunded except by an act that says so"). The count §5's budget clause
+    reads is therefore **not** derivable from the retained records, and an
+    implementation that derived it would refund a unit on three ordinary acts:
+    :meth:`delete`, :meth:`clear`, and a :meth:`purge` running under a retention
+    horizon shorter than the budget window. The last is a *scheduler's* act rather
+    than a user's, so the bound §5 exists to make computable would widen on a
+    timer. What an implementation keeps is the instant alone — no key, no summary,
+    no class — so it is a rate limiter's state rather than the user's content, it
+    appears in no :meth:`export`, and destroying a notification still destroys
+    everything the notification said.
+
     **The store produces every record; a caller hands none in.** ``id``,
     ``admitted_at``, ``ruled_at`` and ``retention`` are the store's own — the
     first two from its injected clock, the last from the retention it was
@@ -4557,6 +4569,10 @@ class NotificationStore(Protocol):
         Destroying the record destroys its ``candidate_key`` with it, so the same
         observation may be proposed again and admitted afresh.
 
+        **It does not refund a unit of budget** (§5). Destroying the record of an
+        interruption does not unmake the interruption, and a store that let it
+        would hand any caller a way to spend the budget twice per window.
+
         Args:
             notification_id: The record to destroy.
 
@@ -4575,7 +4591,8 @@ class NotificationStore(Protocol):
         unconditional in the same way :meth:`delete` is. It does **not** reset the
         standing preferences: those are the user's settings rather than the
         user's notifications, and a sweep that silently restored every class to
-        ``hold`` would undo a "never tell me this" the user meant to keep.
+        ``hold`` would undo a "never tell me this" the user meant to keep. It
+        does **not** refund the budget either, for :meth:`delete`'s reason (§5).
 
         Returns:
             How many records were destroyed.
@@ -4617,6 +4634,11 @@ class NotificationStore(Protocol):
         **The retention read is the record's, never the live setting's** (§7), so
         a configuration change never reaches back and shortens the horizon of a
         record already admitted.
+
+        **It refunds no unit of budget** (§5), which matters here more than at
+        :meth:`delete`: this is a *scheduler's* act, so a store deriving its spend
+        count from the retained records would widen the budget on a timer wherever
+        a deployment configured a retention shorter than the budget window.
 
         Returns:
             How many records were removed.

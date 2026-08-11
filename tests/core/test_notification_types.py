@@ -149,10 +149,40 @@ def test_only_a_hold_carries_a_failed_set() -> None:
 
 def test_a_failed_set_holds_only_the_four_conjunctive_conditions() -> None:
     """The four DROP conditions are evaluated first and each yields DROP itself."""
-    with pytest.raises(ValueError, match="INTERRUPT_CONDITIONS"):
+    with pytest.raises(ValueError, match="ordered subsequence"):
         _ruling(
             reason=NotificationCondition.DUPLICATE,
             failed=(NotificationCondition.DUPLICATE,),
+        )
+
+
+def test_a_failed_set_is_ordered_and_a_reversed_one_is_refused() -> None:
+    """§5 defines the reason as the *first* failure, so the order carries meaning.
+
+    ``(BUDGET, QUIET_WINDOW)`` with ``reason=BUDGET`` is two true facts arranged
+    into a false answer: §5's order makes the quiet window the first to fail, so a
+    surface rendering that ruling would tell the user their budget stopped a
+    notification their quiet hours stopped. It matters most for a value decoded
+    off the wire, which no producing implementation vouched for.
+    """
+    with pytest.raises(ValueError, match="ordered subsequence"):
+        _ruling(
+            reason=NotificationCondition.BUDGET,
+            failed=(NotificationCondition.BUDGET, NotificationCondition.QUIET_WINDOW),
+        )
+
+    ordered = _ruling(
+        reason=NotificationCondition.QUIET_WINDOW,
+        failed=(NotificationCondition.QUIET_WINDOW, NotificationCondition.BUDGET),
+    )
+    assert ordered.reason is ordered.failed[0]
+
+
+def test_a_failed_set_names_each_condition_once() -> None:
+    """A repeat is refused by the same rule, a subsequence having no duplicates."""
+    with pytest.raises(ValueError, match="ordered subsequence"):
+        _ruling(
+            failed=(NotificationCondition.QUIET_WINDOW, NotificationCondition.QUIET_WINDOW),
         )
 
 

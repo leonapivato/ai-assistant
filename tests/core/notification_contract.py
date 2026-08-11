@@ -971,6 +971,57 @@ class NotificationStoreContract(ABC):
         assert kinds.count(NotificationDispositionKind.DROP) == 1
         assert len(await store.held()) == 1
 
+    @pytest.mark.parametrize("destroy", ["delete", "clear", "purge"])
+    async def test_destroying_an_interrupt_record_refunds_no_unit_of_budget(
+        self, factory: StoreFactory, policy: NotificationPolicy, destroy: str
+    ) -> None:
+        """§5: "no spent unit is refunded except by an act that says so".
+
+        A store deriving its spend count from the records it still holds refunds
+        one on all three of these, and none of them says so. **The purge is the
+        one that matters most**: it is a *scheduler's* act, so the bound §5 exists
+        to make computable would widen on a timer wherever a deployment
+        configured a retention shorter than the budget window — which is what the
+        short retention below is.
+
+        Destroying the record of an interruption does not unmake the
+        interruption. What the user destroys is what the notification *said*; the
+        budget is a rate limiter, and the instant it remembers carries no key, no
+        summary and no class.
+        """
+        clock = MutableClock()
+        store = factory(now=clock, retention=timedelta(minutes=1))
+        await store.set_preferences(
+            NotificationPreferences(
+                reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
+                interruption_budget=1,
+                budget_window=timedelta(hours=6),
+            )
+        )
+        spent = await store.admit(
+            candidate(key="k1", expires_at=NOW + timedelta(days=1)), policy=policy
+        )
+        assert spent.kind is NotificationDispositionKind.INTERRUPT
+        assert spent.notification_id is not None
+
+        if destroy == "delete":
+            assert await store.delete(spent.notification_id) is True
+        elif destroy == "clear":
+            assert await store.clear() == 1
+        else:
+            assert await store.dismiss(spent.notification_id) is True
+            clock.advance(timedelta(minutes=2))  # past the record's own retention
+            assert await store.purge() == 1
+        assert await store.held() == []
+
+        held = await store.admit(
+            candidate(key="k2", noticed_at=clock.at, expires_at=NOW + timedelta(days=1)),
+            policy=policy,
+        )
+
+        assert held.kind is NotificationDispositionKind.HOLD
+        assert held.reason is NotificationCondition.BUDGET
+
     # --- §7: retention -----------------------------------------------------
 
     async def test_no_actionable_record_is_purged_however_long_it_has_run(
