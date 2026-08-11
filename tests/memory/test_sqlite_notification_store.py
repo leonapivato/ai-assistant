@@ -44,7 +44,7 @@ from ai_assistant.core.types import (
     QuietWindow,
 )
 from ai_assistant.memory.notification_policy import DefaultNotificationPolicy
-from ai_assistant.memory.notification_store import SqliteNotificationStore
+from ai_assistant.memory.notification_store import _MAX_RETENTION, SqliteNotificationStore
 from ai_assistant.testing.cancellation import ThreadSuspension
 
 if TYPE_CHECKING:
@@ -177,6 +177,95 @@ def test_the_store_refuses_a_retention_it_cannot_work_under(
     """``None`` is the only spelling for "never purged" (ADR-0130 §7)."""
     with pytest.raises(ValueError, match="retention must be"):
         SqliteNotificationStore(path=tmp_path / "n.db", retention=retention)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "retention",
+    [timedelta.max, _MAX_RETENTION + timedelta(microseconds=1)],
+    ids=["the-longest-duration-there-is", "one-microsecond-past-the-ceiling"],
+)
+def test_the_store_refuses_a_retention_it_cannot_persist(
+    tmp_path: Path, retention: timedelta
+) -> None:
+    """A duration ``Settings`` accepts and this column cannot hold (ADR-0022 §4a).
+
+    ADR-0130 §7 puts no ceiling on a retention — the deliberate escape is
+    ``None`` — and ``Settings.notification_retention`` is bounded only by being
+    strictly positive, so this is one config edit away rather than theoretical.
+    This store stamps a retention as exact microseconds into a signed 64-bit
+    column, and ``timedelta.max`` is about ten times what that holds.
+
+    Accepted here it would be §4a's own failure exactly: the store opens, the hub
+    reports health, and **every** admission that writes a record dies binding an
+    ``int`` the driver refuses — with a raw ``OverflowError``, outside the
+    ``NotificationStoreError`` this seam documents. Refused here, the deployment
+    fails once, at startup, naming the value.
+    """
+    with pytest.raises(ValueError, match="retention must be at most"):
+        SqliteNotificationStore(path=tmp_path / "n.db", retention=retention)
+
+
+async def test_the_longest_persistable_retention_round_trips(tmp_path: Path) -> None:
+    """The boundary is admissible, not merely the values short of it.
+
+    A ceiling asserted only from the refusing side would pass just as happily
+    over one set an order of magnitude too low, which would silently shorten a
+    retention an operator chose.
+    """
+    store = SqliteNotificationStore(
+        path=tmp_path / "n.db", now=_fixed_now, retention=_MAX_RETENTION
+    )
+    try:
+        ruling = await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+        assert ruling.notification_id is not None
+
+        record = await store.get(ruling.notification_id)
+
+        assert record is not None
+        assert record.retention == _MAX_RETENTION
+    finally:
+        store.close()
+
+
+async def test_a_horizon_past_the_calendar_is_not_purgeable_and_does_not_raise(
+    tmp_path: Path,
+) -> None:
+    """The sweep survives a record whose horizon leaves representable time.
+
+    ``HeldNotification.is_purgeable_at`` computes ``ceased + retention``, which
+    raises ``OverflowError`` once the sum passes the end of the calendar — and
+    :data:`_MAX_RETENTION` permits one, because the ceiling that bounds it is
+    SQLite's integer column rather than the calendar. A record dismissed today
+    under it is exactly that case.
+
+    Letting the raw error out would be worse than wrong: ``purge`` is called by
+    ADR-0083 §7's **shared** retention job, which sweeps the memory store and the
+    deferral queue in the same operation, so one such record would stop every
+    store's retention being enforced while the job logged a failure and retried
+    forever. "Not purgeable" is also the true answer — a horizon past the end of
+    representable time has not elapsed, and will not.
+
+    The predicate is ``core/types.py``'s and the fake raises here too; #954 holds
+    the contract-level fix, which this lane's fence excludes.
+    """
+    store = SqliteNotificationStore(
+        path=tmp_path / "n.db", now=_fixed_now, retention=_MAX_RETENTION
+    )
+    try:
+        ruling = await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
+        assert ruling.notification_id is not None
+        assert await store.dismiss(ruling.notification_id) is True
+        # The hazard is real: the record's own predicate cannot answer for it.
+        held = await store.get(ruling.notification_id)
+        assert held is not None
+        with pytest.raises(OverflowError):
+            held.is_purgeable_at(NOW)
+
+        assert await store.purge() == 0
+
+        assert len(await store.export()) == 1
+    finally:
+        store.close()
 
 
 def test_the_database_file_is_owner_only(tmp_path: Path) -> None:
