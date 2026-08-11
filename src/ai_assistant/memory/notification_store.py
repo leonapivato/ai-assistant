@@ -113,6 +113,17 @@ _DEFAULT_CAP = 100
 #: happened does not.
 _DEFAULT_RETENTION = timedelta(days=7)
 
+#: The longest retention this store can **persist**: it stamps a duration as
+#: exact microseconds, and a SQLite ``INTEGER`` is a signed 64-bit value.
+#: ``timedelta.max`` is roughly ten times this, so the gap is a real range of
+#: durations ``Settings`` accepts and this backend cannot hold — an admission
+#: under one binds an ``int`` the driver refuses with a raw ``OverflowError``,
+#: which is not the :class:`~ai_assistant.core.errors.NotificationStoreError`
+#: this seam documents. It is roughly 292,471 years, so no deployment loses
+#: anything it meant by "keep them"; the honest spelling for that is
+#: ``retention=None``, which §7 already gives and which is never purged.
+_MAX_RETENTION = timedelta(microseconds=_PAGE_BOUND - 1)
+
 #: The bounded default every enumeration here uses (ADR-0073 §2, §8).
 _DEFAULT_PAGE_LIMIT = 50
 
@@ -422,9 +433,27 @@ def _check_tuning(retention: timedelta | None, cap: object) -> None:
     store** — the other half of §7's rule that a stamped duration is never
     consulted from the setting afterwards.
 
+    **The upper bound is this backend's own, and it is not decoration.**
+    ``Settings.notification_retention`` accepts any strictly positive duration
+    (§7 puts no ceiling on it, the deliberate escape being ``None``), and this
+    store stamps a retention as exact microseconds into a signed 64-bit column.
+    A duration past :data:`_MAX_RETENTION` therefore binds an ``int`` the driver
+    refuses, and it refuses it at **every** admission that writes a record — with
+    a raw ``OverflowError``, outside the
+    :class:`~ai_assistant.core.errors.NotificationStoreError` this seam
+    documents. Refused here, that configuration fails the composition root once,
+    at startup, naming the value; accepted here, it is precisely ADR-0022 §4a's
+    "a bad value disables a stage while the system reports health" — the store
+    opens, the hub starts, and every notification is lost as an unhandled error.
+
+    Refused rather than clamped, on §7's reasoning for the cap: a silently
+    shortened retention would purge records the operator asked to keep, and
+    ``None`` is already the spelling for keeping them forever.
+
     Raises:
-        ValueError: If ``retention`` is set and not strictly positive, or ``cap``
-            is not an ``int`` in ``[1, 2**63)``.
+        ValueError: If ``retention`` is set and is not a strictly positive
+            ``timedelta`` this store can persist, or ``cap`` is not an ``int`` in
+            ``[1, 2**63)``.
     """
     # The type is checked before the comparison, because `None <= timedelta(0)`
     # raises `TypeError` and this documents `ValueError` for a duration it will
@@ -435,7 +464,50 @@ def _check_tuning(retention: timedelta | None, cap: object) -> None:
         described = describe_untrusted(retention)
         msg = f"retention must be a strictly positive timedelta or None, got {described}"
         raise ValueError(msg)
+    if retention is not None and retention > _MAX_RETENTION:
+        msg = (
+            f"retention must be at most {_MAX_RETENTION} — the longest this store can "
+            f"stamp as microseconds in a signed 64-bit column — got {retention}. Use "
+            f"None for 'keep them', which is never purged (ADR-0130 §7)"
+        )
+        raise ValueError(msg)
     _check_page_bound("cap", cap, floor=1)
+
+
+def _is_purgeable(record: HeldNotification, now: datetime) -> bool:
+    """:meth:`HeldNotification.is_purgeable_at`, with an unreachable horizon read as *not yet*.
+
+    **The predicate is still the record's** — §7 fixes that boundary half-open so
+    that two backends cannot disagree at the instant they name, and re-spelling it
+    here is how they come to. What this adds is the one input the predicate has no
+    answer for: ``ceased + retention`` raises ``OverflowError`` where the sum
+    leaves the representable datetime range, which a record that ceased recently
+    reaches under a retention of a few hundred thousand years —
+    :data:`_MAX_RETENTION` permits one, since the ceiling that bounds it is
+    SQLite's integer column rather than the calendar.
+
+    "Not purgeable" is the true answer rather than a shrug: a horizon past the end
+    of representable time has not elapsed, and will not. Letting the raw error out
+    would be worse than wrong — ``purge`` is called by ADR-0083 §7's **shared**
+    retention job, which sweeps the memory store and the deferral queue in the
+    same operation, so one such record would stop every store's retention being
+    enforced while the job logged a failure and retried forever.
+
+    The predicate itself is ``core/types.py``'s and is shared with the canonical
+    fake, which raises here too; making it overflow-safe is a contract change this
+    lane may not make, and #954 holds it.
+
+    Args:
+        record: The record to judge.
+        now: The instant to judge at.
+
+    Returns:
+        Whether retention has released it.
+    """
+    try:
+        return record.is_purgeable_at(now)
+    except OverflowError:
+        return False
 
 
 def _classes_reaching(
@@ -1450,7 +1522,7 @@ class SqliteNotificationStore:
                 f"SELECT {_COLUMNS} FROM notifications WHERE retention IS NOT NULL",  # noqa: S608 — a module constant, no input
             )
             doomed = [
-                record.id for record in map(_notification_from, rows) if record.is_purgeable_at(now)
+                record.id for record in map(_notification_from, rows) if _is_purgeable(record, now)
             ]
             for notification_id in doomed:
                 conn.execute("DELETE FROM notifications WHERE id = ?", (notification_id,))
