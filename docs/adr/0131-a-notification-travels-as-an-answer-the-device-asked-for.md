@@ -865,6 +865,36 @@ disposition until it is confirmed rather than deciding anything about it.
 > entry whose current outstanding delivery has been written may not be recalled: the
 > seam has no operation that unsends it, and no lane may add one.
 
+> **Normative.** An act that **deletes** an ADR-0130 record — its per-record delete
+> or its clear (ADR-0130 §9), which serve ADR-0004 §6's delete right and are not
+> dismissals — withdraws the record's outbox entry **first**, and deletes the record
+> only after the withdrawal has committed. No lane may delete a record whose entry it
+> has not already withdrawn.
+
+**The delete right reaches the outbox, and an earlier draft let it stop at the record
+store.** ADR-0130 §9 gives `NotificationStore` an unconditional per-record delete and
+a clear, distinct from dismissal, because "the delete surface is what ADR-0004 §6's
+delete right reaches". Delete a record whose entry has not yet been written and
+nothing in §3 made that entry departing — it was neither given up by the seam nor
+expired — so it stayed selectable and would be delivered on the next poll, after the
+user had deleted the thing it was about. Adversarial review found it on the
+forty-fourth round, and it is the most consequential of the cross-store findings
+because the rule it breaks is a right rather than a bound.
+
+**Withdraw first, and the order is forced the same way §3b's is.** Deleting the record
+first would leave an entry whose record is gone: not departing, not expired,
+undetectably stale, and delivered. Withdrawing first cannot produce that — the entry
+is gone before the record can be — and the one state a crash between them leaves is an
+actionable record with no entry, which is precisely the incomplete-handoff case §3b's
+invariant already names and its reconciliation already repairs. What the user then
+sees is a delete that did not complete, which they can repeat; what they never see is
+a notification about something they deleted.
+
+**An already-written delivery is out of reach here as it is in §3a, and for the same
+reason.** The bytes are on a device the hub never dials. The delete removes the record
+and the entry; it cannot unsend what a device already has, and this ADR does not
+pretend otherwise.
+
 **The line is the write, and it is the only line the seam can honestly draw.**
 ADR-0130 §6 stops its `off` sweep at *held* records precisely because "whether
 contact already handed to a channel can be recalled is the delivery seam's question",
