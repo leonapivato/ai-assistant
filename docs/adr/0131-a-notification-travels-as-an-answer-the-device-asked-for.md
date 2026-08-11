@@ -493,6 +493,10 @@ the tree rather than assumed.
 > counter advances when an entry is enqueued and never goes backwards, a restart
 > included.
 
+> **Normative.** An enqueue that would advance the counter beyond what 36 bytes can
+> render is **refused**, and the refusal is the enqueue's reported outcome. The
+> counter is never wrapped, reset or reused to make room.
+
 **Uniqueness has to be a clause because `Identifier` does not supply it**, and the
 gap is reachable rather than theoretical: the alias rejects only blank text, so a
 conforming minting implementation could issue the same value twice, or reuse one
@@ -511,6 +515,18 @@ this ADR would then have to bound too. A monotonic counter gives the guarantee
 *constructively* for one integer of durable state, which the outbox is already
 paying for a durable store to hold. There is no collision to retry and no history to
 keep.
+
+**Exhaustion is unreachable and is ruled anyway, which is this ADR's own standard
+applied to its own clause.** Two bounds meet at the identifier — 36 bytes from
+ADR-0085 §8a, and a counter that may only increase — so `10^36` enqueues is a state
+the pair genuinely defines, and the earlier draft gave it no conforming outcome:
+reuse is forbidden, a 37th byte is forbidden, and proceeding was not authorised.
+That is exactly the partial-rule defect §3's eviction clause was rewritten twice to
+remove, and adversarial review found this one on the eighth round. The refusal is
+the answer; wrapping or resetting is not, because both break the uniqueness the
+counter exists to supply. The figure will not be reached — at a notification a
+second it is some `10^28` years — and a rule that is never exercised is still
+cheaper than a state with no defined outcome.
 
 **Where the guarantee stops, named rather than left to be discovered.** It is a
 property of one data directory's life. Restoring an older copy of the directory
