@@ -117,11 +117,14 @@ would be declined even if a second seam already existed.
 ### 1. An accepted duration is honoured whole
 
 > **Normative.** Where this seam accepts a duration, the hub takes it at its whole
-> configured length and shortens it for no reason of its own. A `budget` argument
-> inside ADR-0131 §4's closed range is the caller's whole permitted wait: the poll
-> ends when the hub has an answer or when that whole span has elapsed, whichever
-> comes first, and the hub never treats the span as shorter than it is. A
-> configured `hub_notification_lease` (ADR-0131 §5a) is the whole span an
+> configured length and shortens it for no reason of its own. For a `budget`
+> argument inside ADR-0131 §4's closed range, the hub's willingness to wait is the
+> whole of that span: it does not cut the waiting short because of the span's size,
+> or because some quantity derived from it cannot be represented. This clause fixes
+> what the hub may not shorten and **does not enumerate what ends a poll** — §3
+> below ends one when the budget's waiting is spent, and ADR-0131 §2a ends one on a
+> closing connection, each for a reason of its own. A configured
+> `hub_notification_lease` (ADR-0131 §5a) is the whole span an
 > unacknowledged lease runs before it expires. A configured
 > `hub_max_notification_budget` (§5a) admits every `budget` up to and including
 > it. For none of the three does the hub clamp, saturate, truncate, round or
@@ -136,12 +139,21 @@ ADR-0131's early exits standing.** A poll answers "the moment it has one"
 full length; it is being willing to, and never deciding on the hub's own account
 that the willingness was shorter. A lease ends early when "the device
 acknowledges it" (§3), so honouring the lease whole is about what an
-*unacknowledged* lease gets. An earlier draft of this clause said the budget "is
-waited out to its full span" and the lease "runs for its full span", which
-obligated a hub to hold every poll open and to ignore an acknowledgement — it
-contradicted §3 of this ADR and falsified two ADR-0131 clauses at once. The
-distinction between *shortening a span* and *reaching an outcome inside it* is the
-whole of what this section is about, and stating it loosely gets it backwards.
+*unacknowledged* lease gets. The distinction between *shortening a span* and
+*reaching an outcome inside it* is the whole of what this section is about.
+
+**Two drafts of this clause got that backwards in opposite directions, and both
+are worth recording.** The first said the budget "is waited out to its full span"
+and the lease "runs for its full span" — which obliged a hub to hold every poll
+open and to ignore an acknowledgement, falsifying ADR-0131 §1 and §3 at once. The
+second overcorrected into an exhaustive end condition: the poll "ends when the hub
+has an answer or when that whole span has elapsed, whichever comes first". That
+reads as a complete list of a poll's exits and is not one — ADR-0131 §2a ends a
+poll on a close, and §3 below requires a first selection *after* an
+acknowledgement that may itself have outrun the budget. Both review lenses blocked
+on it in the same round, from the two different directions it was wrong in. A
+clause about what may not be shortened has no business saying when a thing ends,
+and this one now says so in its own words.
 
 **The ground is §4's marked honour clause, and being precise about which sentence
 obligates is worth a paragraph.** ADR-0131 is a marked ADR, so under ADR-0089 §3
@@ -257,18 +269,35 @@ a precedent about a different field.
 > selection step performs that first selection **whatever the state of its
 > budget** — after applying any acknowledgement, and including where the budget
 > has already elapsed, whether because it was zero or because an earlier step of
-> the same request consumed it — and where that selection succeeds the hub
-> answers with the delivery it made.
+> the same request consumed it — and an elapsed budget is no ground for
+> withholding a delivery that selection produced.
 
 > **Normative.** An elapsed budget is what ends a poll's **waiting**, not what
 > forbids its selecting. A poll whose selection found nothing and whose budget has
 > elapsed ends without an answer; it does not wait beyond its budget, and it does
-> not decline an entry it has already found.
+> not, *on account of the budget*, decline an entry it has already found.
 
 > **Normative.** This section constrains what a **budget** may do to a selection
-> and nothing else. It licenses no selection that another rule cancels: ADR-0131
-> §2a's close rule turns on the connection rather than on the budget, and a poll
-> cancelled under it never reaches the selection step this section governs.
+> and to the answer that follows it, and nothing else. It licenses no selection and
+> no answer that another rule prevents. ADR-0131 §2a governs a closing connection
+> throughout a poll's life and none of it turns on the budget: a close detected
+> before the selection step "cancels the poll and takes no entry", and a close
+> detected after it "leaves the lease standing" while the poll, under §2a's first
+> clause, "ends without an answer". Both outcomes stand unaltered here.
+
+**The order is stated once, here, because this is where two of this ADR's marked
+clauses meet.** ADR-0131 §4 fixes the upstream sequence — arguments are validated,
+then the acknowledgement is applied, then an entry is selected — and this section
+adds only that the budget governs the step *after* those: the waiting. So a
+request runs its acknowledgement and its first selection however long they take,
+and the budget then bounds how long the hub may wait for an entry that the first
+selection did not find. A one-second budget whose acknowledgement takes two
+seconds therefore reaches selection at two seconds, answers with whatever is
+there, and waits no further: the budget was overrun by work the request itself
+required, not by waiting the hub chose to do. **That reading is what makes §1 and
+this section jointly satisfiable**, and stating it is what the architecture lens
+asked for when it blocked on the pair — with §1 no longer claiming to say when a
+poll ends, the two clauses govern different things and no case forces both.
 
 **§4's zero-budget clause is the ground, and what it decides is the boundary
 case.** ADR-0131 §4 states, normatively: "A `budget` of zero is an **immediate
@@ -373,12 +402,18 @@ act differently, or read one of its clauses more widely than it now holds?
 - **§2a's indivisible-step clause.** Untouched. §3 above says the budget does not
   forbid a selection; it says nothing about how selection, minting and leasing
   relate to each other, which stays one indivisible step.
-- **§2a's close-cancellation clause** — "A close detected before that step runs
-  cancels the poll and takes no entry." Untouched, and §3 above's scope clause
-  says so in terms rather than leaving it to inference. Without it, "whatever the
-  state of its budget" could be read as overriding a rule that has nothing to do
-  with the budget, and ADR-0089 §3 puts the burden of stating a clause's scope on
-  the clause.
+- **§2a's close clauses, both of them** — "On detecting it the poll ends without
+  an answer", and "A close detected before that step runs cancels the poll and
+  takes no entry. A close detected after it leaves the lease standing." Untouched,
+  and §3 above's scope clause now names both outcomes rather than only the first.
+  An earlier draft named the before-selection half alone and let §3's selection
+  clause say the hub "answers with the delivery it made" — which contradicted the
+  after-selection half outright, since a poll whose peer closes after selection
+  ends *without* an answer while its lease stands. Adversarial review blocked on it
+  in round 1 and was right; §3 now says an elapsed budget is no ground for
+  withholding a delivery, which constrains the budget without promising an answer
+  no rule guarantees. ADR-0089 §3 puts the burden of a clause's scope on the
+  clause, and this is the clause that carries it.
 - **§5a's marked clause and its table.** Untouched, and §2's second clause above
   defends them: no range is narrowed, no upper bound is added, no default moves.
 - **§5a's occupancy bullet.** Read, not moved. §3 above takes it as evidence of
