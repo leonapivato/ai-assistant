@@ -761,15 +761,32 @@ across a reconnect. It also keeps this ADR's surface decidable without knowing
 whether ADR-0130's artifact carries an identity at all, which is the separation
 the two lanes were split on.
 
-> **Normative.** The hub bounds the `budget` it will honour by
-> `hub_max_notification_budget` (§5a). A request whose `budget` exceeds it is
-> refused as an ordinary correlated error naming the bound; the hub does not
-> silently clamp it.
+> **Normative.** `budget` is honoured over the closed range from zero to
+> `hub_max_notification_budget` (§5a). A `budget` of zero is an **immediate poll**:
+> the hub answers at once with whatever is available, which may be nothing.
 
-Clamping is the tempting answer and it is the one the corpus keeps refusing — it
-is accepting-and-ignoring in a second costume, and ADR-0084 §2's argument against
-that transfers exactly: a client whose ninety-minute budget is honoured as ninety
-seconds has been told, by acceptance, that its budget was accepted.
+> **Normative.** A `budget` outside that range — negative, or above the bound — is
+> refused as an ordinary correlated error naming the range. The hub does not
+> silently clamp it in either direction.
+
+**Both ends of the range needed stating and only one had it.** `timedelta` admits
+zero and negative values and neither exceeds a maximum, so a caller could send
+`timedelta(seconds=-1)` and one implementation would return an empty result while
+another handed it to a timeout primitive and raised something undeclared — no common
+conforming behaviour, which is the fifteenth round's finding.
+
+**Zero is admitted rather than refused because it is the one out-of-range value that
+means something.** A device that has just been opened by the owner wants to know
+what is waiting *now*, not in five minutes, and an immediate poll is exactly that
+call — the same request with the waiting removed. Refusing it would push every client
+into faking it with a one-second budget, which is the same behaviour with worse
+latency and an arbitrary constant in it.
+
+**Clamping is the tempting answer for the upper end and it is the one the corpus
+keeps refusing** — it is accepting-and-ignoring in a second costume, and ADR-0084
+§2's argument against that transfers exactly: a client whose ninety-minute budget is
+honoured as ninety seconds has been told, by acceptance, that its budget was
+accepted.
 
 > **Normative.** No argument of `next_notification` carries a device identity, and
 > no lane may add one. Where this ADR's rules are per-device, the identity is the
@@ -822,12 +839,19 @@ is not an approximation, it is the fact.
 > `next_notification` declares it as its failure alongside the `OversizedValueError`
 > every method declares (ADR-0085 §9):
 >
-> `NotificationBudgetTooLongError(AssistantError)` — the request's `budget` exceeds
-> `hub_max_notification_budget` (§5a).
+> `NotificationBudgetError(AssistantError)` — the request's `budget` is outside the
+> range §4 honours: negative, or above `hub_max_notification_budget` (§5a).
 
-> **Normative.** `NotificationBudgetTooLongError` carries **no structured state**.
-> Its message names the requested budget and the bound, and it contributes no
+> **Normative.** `NotificationBudgetError` carries **no structured state**. Its
+> message names the requested budget and the permitted range, and it contributes no
 > `details` object to an error payload.
+
+**One type for both limbs, and the name says the range rather than one end of it.**
+It was `NotificationBudgetTooLongError` until the fifteenth round established that
+the lower end needed ruling too, and a "too long" error reporting a negative duration
+would be a message that is false about the input it was raised on. A caller's remedy
+is the same either way — send a budget in the range — so a second type would
+distinguish two cases nobody branches on.
 
 **The refusal was already required to be an ordinary correlated error and had no
 vocabulary to be one in**, which is the sixth round's finding and is exactly the gap
