@@ -509,8 +509,12 @@ entry, which is latency bought for nothing.
 > **Normative.** The seam keeps shared state in **two independently owned domains**,
 > and no transition of either reads or writes the other. The **outbox** is the
 > engine's, behind the promoted surface. The **connection registry** — the per-device
-> delivery slot (§2) and the global delivery-capacity count (§5) — is the hub
-> listener's, beside the `Admission` it already holds per connection.
+> delivery slot (§2) and the global delivery-capacity count (§5) — is the **hub's**.
+
+> **Normative.** There is **one** connection registry per hub, constructed once and
+> shared by every listener, exactly as `ConnectionBudget` already is. No listener
+> holds a registry of its own, and no lane may give the loopback and remote listeners
+> separate delivery slots or separate capacity counts.
 
 > **Normative.** Within each domain, **every** transition is linearizable with
 > respect to every other in that same domain: each observes the state some serial
@@ -545,6 +549,18 @@ the entry is gone, so acknowledging `E` is a no-op and no redelivery is possible
 notification delivered to a device that will never have it confirmed and never have
 it again. Four findings, one defect: a predicate stated over outbox state binds
 nothing unless the read and the act that depends on it are one step.
+
+**One registry per hub, because "the listener's" is how ADR-0124 §7's warning gets
+disobeyed by an ADR that quotes it.** A draft placed the registry with the hub's
+listener, and the tree has two — `service.transport.Listener` and
+`service.remote.RemoteListener` — which today share exactly one thing, a
+`ConnectionBudget`, because ADR-0124 §7 required it. Give each its own registry and
+eight loopback polls and eight remote polls each pass a local
+`hub_max_delivery_connections` of 8, yielding sixteen delivery connections: §5's
+hub-wide bound broken and the ordinary-session reservation it exists for gone.
+Adversarial review found it on the thirtieth round, in a section whose own prose
+quotes §7's "a second listener is the natural place to double a budget by accident".
+The instrument is the one the tree already uses for the ceilings this sits beside.
 
 **Two domains rather than one, because one domain is not implementable behind this
 Protocol.** A draft stated the rule over "the seam's shared state" as a single
