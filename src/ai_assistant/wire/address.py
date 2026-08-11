@@ -27,11 +27,13 @@ deployment fact, decided before anything is opened.
 from __future__ import annotations
 
 import ipaddress
+import os
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.wire.custody import displayable
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -293,10 +295,18 @@ def _check_path(path: Path, *, what: str) -> None:
             which is what ADR-0084 §1 asks of it.
     """
     limit = sun_path_limit()
-    encoded = len(str(path).encode("utf-8")) + 1  # the NUL terminator counts
+    # `os.fsencode`, not a UTF-8 encode: these are the bytes the kernel is handed,
+    # and a filename need not be UTF-8 at all. A non-UTF-8 byte in `ASSISTANT_DATA_DIR`
+    # reaches Python as a surrogate (PEP 383), which `str.encode("utf-8")` refuses —
+    # so measuring the budget that way turned a perfectly valid data directory into a
+    # `UnicodeEncodeError` that no `ConfigurationError` or `OSError` handler catches,
+    # which is a crash rather than ADR-0083 §5's stay-down verdict (#940). It is also
+    # simply the wrong number where it does not raise. `fsencode` round-trips the
+    # surrogates back to the original bytes, which is what `sun_path` bounds.
+    encoded = len(os.fsencode(path)) + 1  # the NUL terminator counts
     if encoded > limit:
         msg = (
-            f"{what} path {path} encodes to {encoded} bytes including its "
+            f"{what} path {displayable(path)} encodes to {encoded} bytes including its "
             f"terminator, over this platform's {limit}-byte sun_path budget, so no socket "
             f"can be bound there; move the data directory somewhere shorter "
             f"(ASSISTANT_DATA_DIR)"
