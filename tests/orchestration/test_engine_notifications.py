@@ -196,6 +196,40 @@ async def test_one_run_drains_every_due_record_not_one_page() -> None:
     assert await store.due() == []
 
 
+@pytest.mark.parametrize(
+    ("page", "refusal"),
+    [(0, ValueError), (-1, ValueError), (2**63, ValueError), (1.5, TypeError), (True, TypeError)],
+    ids=["zero", "negative", "wide", "float", "bool"],
+)
+async def test_a_read_size_that_reads_nothing_is_refused(
+    page: object, refusal: type[Exception]
+) -> None:
+    """A page of zero is a silent no-op, not a smaller sweep.
+
+    The loop takes a page and stops when a page rules nothing, so ``page=0`` would
+    return ``0`` having left every due record due — a run that reports success and
+    does nothing, which is worse than one that fails. Stricter than this class's
+    read methods for that reason, exactly as ``recent_grants`` is stricter for its
+    own (ADR-0102 §10). A non-integer is a ``TypeError`` and a bad integer a
+    ``ValueError``, which is ``positive_page_argument``'s own split inherited
+    rather than restated.
+    """
+    store = FakeNotificationStore(now=lambda: AT)
+    policy = FakeNotificationPolicy()
+    engine = _wired(Harness(), store, policy)
+    await store.admit(_candidate("k1"), policy=policy)
+    await engine.set_notification_preferences(
+        NotificationPreferences(
+            reaches=(ClassReach(notification_class=_CLASS, reach=NotificationReach.INTERRUPT),)
+        )
+    )
+
+    with pytest.raises(refusal, match="page"):
+        await engine.reconsider_notifications(page=page)  # type: ignore[arg-type]
+
+    assert len(await store.due()) == 1, "the refusal left the work undone rather than lost"
+
+
 async def test_a_drained_run_leaves_each_record_ruled_afresh() -> None:
     """The drain re-rules; it does not merely clear the due flag.
 

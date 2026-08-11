@@ -450,9 +450,8 @@ class HubClient:
         """Write the standing settings, and re-arm what the change reaches.
 
         **The whole value goes over, not one field**, which is the contract's own
-        shape rather than this client's: a caller changing one setting reads,
-        adjusts and writes back, so two concurrent writers cannot each silently
-        drop the other's field.
+        shape rather than this client's — as is the last-write-wins it implies
+        (see the Protocol).
 
         Args:
             preferences: The settings to hold from now on.
