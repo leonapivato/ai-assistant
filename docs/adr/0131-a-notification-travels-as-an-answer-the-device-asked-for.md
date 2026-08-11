@@ -827,6 +827,52 @@ merged and made it checkable.
 > `ai_assistant.testing` — in one change (golden rule 5, ADR-0015 §5,
 > `CONTRIBUTING.md` → "Adding a Protocol").
 
+> **Normative.** The seam **reconciles at startup**, before it serves any poll: for
+> every ADR-0130 record that is ruled `INTERRUPT` and still **actionable** and for
+> which the outbox holds no entry, it offers the candidate with `origin_key` set to
+> that record's `candidate_key`. The reconciliation is idempotent by §3's origin-key
+> rule and requires no state of its own.
+
+> **Normative.** Retiring an entry on an acknowledgement (§3) **dismisses** its
+> ADR-0130 record, through the dismissal `NotificationStore` carries. A dismissed
+> record is not actionable, so the reconciliation above does not re-offer a
+> notification the owner has already received.
+
+**Those two clauses close a window the two-Protocol split opens, and it is a window
+that loses a notification outright.** ADR-0130 §3 makes recording the disposition and
+spending the budget "one atomic act in the store"; `offer` is a second act with its
+own commit. Crash between them and the budget is spent, the record exists, no entry
+exists, and nothing brings the two back into agreement — with §3 of this ADR still
+promising that a disposed, undelivered notification survives a restart. Adversarial
+review found it on the thirty-fourth round.
+
+**Reconciliation rather than one transaction, because one transaction is not
+available and is not needed.** Committing both in one act would mean two subsystems'
+stores sharing a transaction, which is the coordination contract architecture review
+already refused on the twenty-ninth round. What closes the window instead is that
+ADR-0130's record is *itself* the durable pending-enqueue obligation: it is committed
+first, it survives the crash, and its `candidate_key` (ADR-0130 §2, a digest §8's
+duplicate lookup already turns on) is a stable identity the origin key can carry. So
+recovery is a read of records the other side already keeps, and the origin-key rule
+makes running it twice, or running it against entries that already exist, a no-op.
+
+**Dismissing on the acknowledgement is what keeps the reconciliation from
+re-delivering, and it costs no new surface.** Without it, an entry that was delivered
+and retired leaves an actionable record with no entry — indistinguishable from one
+that never reached the outbox — so the next startup would tell the owner again. The
+alternative was for the outbox to remember every record it had ever taken, which is
+the unbounded durable set §3 refuses for origin keys. ADR-0130 §9 already provides a
+dismissal that "ends actionability and leaves the record readable", and §7 there is
+explicit that "dismissing a notification frees capacity at once" — so this uses a
+ratified operation for what it was built for, through the Protocol the composition
+root injects, rather than reaching into another subsystem's store.
+
+**The residual is a duplicate, which is the direction this seam already fails in.** A
+crash between retiring the entry and dismissing the record leaves an actionable record
+with no entry, and the next reconciliation delivers it again. That is at-least-once
+(§3), reached one more way, and it is the failure §3 argues is the right one for a
+notification. Nothing here can lose one.
+
 **A separate Protocol rather than a method on ADR-0130's writer, and the boundary is
 the propose/dispose line itself.** `NotificationWriter` decides *whether* the user is
 interrupted; `NotificationOutbox` carries an interruption that has already been ruled.
