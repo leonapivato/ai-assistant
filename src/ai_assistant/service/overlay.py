@@ -407,53 +407,8 @@ def _refuse_an_unclaimed_name(socket_path: Path, setting: str) -> None:
         raise ConfigurationError(msg)
 
 
-def check_configured_socket(socket_path: Path) -> None:
-    """A configured agent socket keeps the custody the two defaults have.
-
-    **This is what makes the setting safe to expose, and without it the setting
-    would be a different decision.** The comment on :data:`TAILSCALE_SOCKETS` gives
-    the reason the two packaged paths can be trusted at all: they are "the daemon's
-    own socket, protected by the operating system's own access control — which is
-    the custody ADR-0004 §3 leans on everywhere else, applied to a socket rather
-    than a keyring". ADR-0124 §4 then makes that socket's answer the identity of
-    every device that connects, and forbids taking that identity "from anything the
-    peer asserts". A path an operator can name is not in itself a breach of that
-    clause — a Unix socket is a local interface, and §4's third clause governs the
-    client's *enrolled hub identity*, not the agent's location. But a path with no
-    conditions on it would let a socket any local user owns answer for the overlay,
-    which reaches the same end by another route.
-
-    So the conditions are the ones ADR-0084 §1 already imposes on the data
-    directory, and for the same reason: nothing here is authenticated at the moment
-    it is opened, so the filesystem has to carry the trust. The ancestry walk is
-    literally shared (:mod:`ai_assistant.service.custody`) rather than restated.
-
-    **The leaf takes root-or-us, not exactly-us**, which is where this departs from
-    the data directory. The daemon runs as root in the ordinary deployment, so its
-    socket is root-owned and a hub demanding its own uid would reject every real
-    installation. What both cases exclude is the same: a *third* user owning the
-    thing the hub is about to trust.
-
-    Args:
-        socket_path: The path an operator configured.
-
-    **It asks who could answer, never whether anybody currently does.** An absent
-    socket is accepted, because refusing one would both contradict
-    :func:`local_agent`'s contract and turn "the hub started a moment before its
-    agent" into a stay-down fault. But an absent socket is held to one condition a
-    present one is not: its directory must be one only its owner can write. The
-    ancestry walk lets a sticky ``/tmp`` through, correctly, because sticky stops a
-    user renaming an entry they do not own — and a name nobody has taken yet is not
-    such an entry, so it would leave the socket for whoever creates it first.
-
-    Raises:
-        ConfigurationError: If the path is too long to connect to, if any ancestor
-            lets an untrusted user replace what sits beneath it, or if a socket is
-            present and is not a socket or belongs to a third user. Every one is a
-            stay-down deployment fault in ADR-0083 §5's sense — none is fixed by
-            restarting.
-    """
-    setting = "ASSISTANT_HUB_OVERLAY_AGENT_SOCKET"
+def _check_path_to(socket_path: Path, setting: str) -> None:
+    """The budget, and the ancestry that decides who could put something here."""
     limit = sun_path_limit()
     encoded = len(str(socket_path).encode("utf-8")) + 1  # the NUL terminator counts
     if encoded > limit:
@@ -498,6 +453,9 @@ def check_configured_socket(socket_path: Path) -> None:
         )
         raise ConfigurationError(msg)
 
+
+def _check_socket_at(socket_path: Path, setting: str) -> None:
+    """What occupies the path is the daemon's, and an unclaimed name is nobody's."""
     try:
         info = socket_path.stat()
     except FileNotFoundError:
@@ -513,10 +471,10 @@ def check_configured_socket(socket_path: Path) -> None:
         _refuse_an_unclaimed_name(socket_path, setting)
         return
     except OSError as exc:
-        # The same reasoning as the ancestry walk's own `OSError` above: a path the
-        # hub cannot read is a configuration fault, not a defect. Reached when a
-        # parent is owned by the hub's uid but not traversable, which the walk's
-        # `stat` of the directory itself does not detect.
+        # The same reasoning as the ancestry walk's own `OSError`: a path the hub
+        # cannot read is a configuration fault, not a defect. Reached when a parent
+        # is owned by the hub's uid but not traversable, which the walk's `stat` of
+        # the directory itself does not detect.
         msg = (
             f"the overlay agent socket {socket_path}, which {setting} names, cannot be "
             f"read ({exc.strerror}), so whether an untrusted user could answer for the "
@@ -540,6 +498,90 @@ def check_configured_socket(socket_path: Path) -> None:
         raise ConfigurationError(msg)
 
 
+def check_configured_socket(socket_path: Path) -> Path:
+    """A configured agent socket keeps the custody the two defaults have.
+
+    **This is what makes the setting safe to expose, and without it the setting
+    would be a different decision.** The comment on :data:`TAILSCALE_SOCKETS` gives
+    the reason the two packaged paths can be trusted at all: they are "the daemon's
+    own socket, protected by the operating system's own access control — which is
+    the custody ADR-0004 §3 leans on everywhere else, applied to a socket rather
+    than a keyring". ADR-0124 §4 then makes that socket's answer the identity of
+    every device that connects, and forbids taking that identity "from anything the
+    peer asserts". A path an operator can name is not in itself a breach of that
+    clause — a Unix socket is a local interface, and §4's third clause governs the
+    client's *enrolled hub identity*, not the agent's location. But a path with no
+    conditions on it would let a socket any local user owns answer for the overlay,
+    which reaches the same end by another route.
+
+    So the conditions are the ones ADR-0084 §1 already imposes on the data
+    directory, and for the same reason: nothing here is authenticated at the moment
+    it is opened, so the filesystem has to carry the trust. The ancestry walk is
+    literally shared (:mod:`ai_assistant.service.custody`) rather than restated.
+
+    **The path is canonicalised, and the checks are run against what will actually
+    be opened.** This is ``data_dir``'s rule (ADR-0084 §1) for ``data_dir``'s
+    reason: two readers that disagree about which file a name means is the whole
+    hazard. A symlink whose target is validated but whose *name* is connected to
+    leaves a gap between the two, and a dangling symlink under a trusted directory
+    would otherwise pass every check while pointing at a name any local user could
+    claim. So the ancestry of the name is checked — nobody untrusted may re-point
+    the link — and everything else is decided about the resolved path.
+
+    **The leaf takes root-or-us, not exactly-us**, which is where this departs from
+    the data directory. The daemon runs as root in the ordinary deployment, so its
+    socket is root-owned and a hub demanding its own uid would reject every real
+    installation. What both cases exclude is the same: a *third* user owning the
+    thing the hub is about to trust.
+
+    **It asks who could answer, never whether anybody currently does.** An absent
+    socket is accepted, because refusing one would both contradict
+    :func:`local_agent`'s contract and turn "the hub started a moment before its
+    agent" into a stay-down fault. But an absent socket is held to one condition a
+    present one is not: its directory must be one only its owner can write. The
+    ancestry walk lets a sticky ``/tmp`` through, correctly, because sticky stops a
+    user renaming an entry they do not own — and a name nobody has taken yet is not
+    such an entry, so it would leave the socket for whoever creates it first.
+
+    Args:
+        socket_path: The path an operator configured.
+
+    Returns:
+        The canonical path, which is the one to connect to.
+
+    Raises:
+        ConfigurationError: If the path is not a usable pathname, is too long to
+            connect to, has an ancestor that lets an untrusted user replace what
+            sits beneath it, names nothing in a directory others can write, or
+            holds something that is not a socket or belongs to a third user. Every
+            one is a stay-down deployment fault in ADR-0083 §5's sense — none is
+            fixed by restarting.
+    """
+    setting = "ASSISTANT_HUB_OVERLAY_AGENT_SOCKET"
+    try:
+        resolved = Path(os.path.realpath(socket_path))
+    except ValueError as exc:
+        # An embedded NUL is the case that reaches here: it survives every string
+        # operation and fails inside the first syscall, as a `ValueError` no
+        # `OSError` handler catches. A pathname the OS will not accept is a
+        # configuration fault like any other, not a defect in the hub.
+        msg = (
+            f"{setting} is not a usable pathname ({exc}); set it to the path of your "
+            f"overlay agent's Unix socket, or unset it to look at the two paths the "
+            f"daemon is packaged to use ({', '.join(TAILSCALE_SOCKETS)})"
+        )
+        raise ConfigurationError(msg) from exc
+
+    # The name's own ancestry still matters when it differs from the target's: it is
+    # what stops an untrusted user re-pointing the link between this check and the
+    # connection. Everything else is decided about the path that will be opened.
+    if resolved != socket_path:
+        _check_path_to(socket_path, setting)
+    _check_path_to(resolved, setting)
+    _check_socket_at(resolved, setting)
+    return resolved
+
+
 def local_agent(socket_path: str | None = None) -> TailscaleAgent:
     """The agent this machine runs, at whichever path it listens on.
 
@@ -550,19 +592,22 @@ def local_agent(socket_path: str | None = None) -> TailscaleAgent:
             packaged defaults are used exactly as before.
 
     Returns:
-        An agent pointed at a socket. Whether the daemon is actually there is
-        answered by the first query, which is where a refusal belongs — a
-        constructor that probed would ask the question at a moment nothing chose.
-        That holds for a configured path too: the custody check asks who *could*
-        answer, never whether anybody currently does.
+        An agent pointed at a socket — the *canonical* path when one was
+        configured, since that is what the custody check was decided about.
+        Whether the daemon is actually there is answered by the first query, which
+        is where a refusal belongs — a constructor that probed would ask the
+        question at a moment nothing chose. That holds for a configured path too:
+        the custody check asks who *could* answer, never whether anybody does.
 
     Raises:
         ConfigurationError: If an explicit ``socket_path`` fails the custody
             conditions the two defaults hold by construction.
     """
     if socket_path is not None:
-        check_configured_socket(Path(socket_path))
-        return TailscaleAgent(socket_path)
+        # The *canonical* path, not the one written: connecting to the name a
+        # symlink carries would reopen the gap between what was checked and what is
+        # opened, which is the hazard ADR-0084 §1 canonicalises `data_dir` to close.
+        return TailscaleAgent(check_configured_socket(Path(socket_path)))
     for candidate in TAILSCALE_SOCKETS:
         if Path(candidate).exists():
             return TailscaleAgent(candidate)

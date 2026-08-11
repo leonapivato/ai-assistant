@@ -446,3 +446,62 @@ def test_a_configured_socket_in_a_non_traversable_directory_is_a_configuration_f
             local_agent(str(private / "tailscaled.sock"))
     finally:
         private.chmod(0o755)
+
+
+def test_a_dangling_symlink_cannot_smuggle_in_an_untrusted_target(tmp_path: Path) -> None:
+    """Adversarial review, round 2: the checks must decide about the path that will
+    be opened, not the name that was written.
+
+    A symlink at a trusted path pointing at an absent name in a world-writable
+    directory passed every condition: ``stat`` follows the link and reports the
+    target missing, and the unclaimed-name check then examined the *link's*
+    directory, which is trusted. An untrusted user creates the target, the
+    connection follows the link, and their process answers for the overlay.
+    """
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    link = trusted / "tailscaled.sock"
+    link.symlink_to(loose / "attacker.sock")
+    loose.chmod(0o1777)
+
+    try:
+        with pytest.raises(ConfigurationError, match="could create that socket first"):
+            local_agent(str(link))
+    finally:
+        loose.chmod(0o755)
+
+
+def test_a_symlink_to_a_trustworthy_socket_is_accepted_and_canonicalised(
+    tmp_path: Path,
+) -> None:
+    """The discriminating half, and the reason the rule is not "no symlinks".
+
+    A link whose target is as trustworthy as the link is fine — and the agent is
+    pointed at the *resolved* path, because connecting to the name would leave the
+    gap between what was checked and what is opened that ADR-0084 §1 canonicalises
+    ``data_dir`` to close.
+    """
+    real = tmp_path / "run"
+    real.mkdir()
+    target = real / "tailscaled.sock"
+    link = tmp_path / "link.sock"
+    with contextlib.closing(_bind(target)):
+        link.symlink_to(target)
+
+        assert local_agent(str(link)).socket_path == str(target)
+
+
+def test_a_configured_path_that_is_not_a_usable_pathname_is_a_configuration_fault(
+    tmp_path: Path,
+) -> None:
+    """Adversarial review, round 2: an embedded NUL leaked a raw ``ValueError``.
+
+    It survives every string operation — including the ``sun_path`` budget, which
+    is a length — and fails inside the first syscall as a ``ValueError`` that no
+    ``OSError`` handler catches. A pathname the OS will not accept is an operator's
+    mistake, so it takes ADR-0083 §5's stay-down mapping like every other one.
+    """
+    with pytest.raises(ConfigurationError, match="not a usable pathname"):
+        local_agent(f"{tmp_path}/\0agent.sock")
