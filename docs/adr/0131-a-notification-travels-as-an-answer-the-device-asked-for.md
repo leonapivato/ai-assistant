@@ -1896,11 +1896,17 @@ one that makes the posture closed rather than merely deep.
 ### 8. What this ADR does not decide
 
 - **What a notification is, who may produce one, and what earns an interruption.**
-  ADR-0130's, entirely. This seam carries a `NotificationCandidate` whose
-  disposition was ruled `INTERRUPT` there, and never inspects one. Note what §3a
-  *does* decide and why that is not an exception: ADR-0130 §10 names retry and
-  recall as the seam's own questions, so answering them is discharging its
-  deferral rather than reaching into its ground.
+  ADR-0130's, entirely. This seam carries a `NotificationCandidate` whose disposition
+  was ruled `INTERRUPT` there and **decides nothing about its meaning** — it never
+  reads the summary, the detail, the confidence, the sensitivity or the references,
+  and never re-judges whether the interruption was earned. What it does read is the
+  metadata its own rules turn on: the `candidate_key` for deduplication (§3), the
+  expiry for departure (§3), and the canonical encoding's size for the delivery
+  ceiling (§4). Those are transport facts about a value, not judgements about a
+  notification, and stating the line that way is what an earlier "never inspects one"
+  got wrong. Note too what §3a *does* decide and why it is not an exception: ADR-0130
+  §10 names retry and recall as the seam's own questions, so answering them discharges
+  its deferral rather than reaching into its ground.
 - **Which device the owner is actually at.** §3 rules first-to-ask and says it is
   crude. The successor is a device as a context facet and a device-scoped
   permission input, which ADR-0124 §10 already defers and #920 holds. A later ADR
