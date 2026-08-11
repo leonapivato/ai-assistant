@@ -1,7 +1,48 @@
 # 131. A notification travels as an answer the device asked for, on a connection it keeps for that alone
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-10
+- **Note (2026-08-11, UTC): ratified.** `Proposed` → `Accepted` after the required
+  reviews came back green on the content this ADR merged with — both lenses,
+  because this ADR decides `core` surface: adversarial **APPROVE with no
+  findings** and architecture **APPROVE with no findings**, round 58, 2254 lines
+  net across 58 commits, churn `≥1.7×` (3862 touched, a lower bound because the
+  branch's history was rewritten and earlier rounds are not counted), posted to
+  PR #945 by `just ship`. The outcome is taken from that comment rather than from
+  a report. The comment's `<!-- ship:b9198bb0… -->` anchor is the pre-merge branch
+  head, not an ancestor of `main` after the rebase-merge; identity was established
+  through the tree rather than assumed — `b9198bb0^{tree}` and `9ba6d10a^{tree}`,
+  the tip the PR merged as, are both `4c344930`, the tree both review artifacts
+  record. This edit takes `CONTRIBUTING.md` → "Trivial ADR edits"' exemption for
+  the ratification flip and ADR-0015 §5's trivial-ADR exemption.
+- **Note (2026-08-11, UTC): five stale claims were corrected while this ADR still
+  stood `Proposed`, in the commit immediately before this one, and not one of them
+  is a decision.** ADR-0070 §1 protects *ratified* decision text, so the last
+  moment a document's own errors can be corrected rather than annotated is while it
+  is still a proposal — which is why they land ahead of the flip and not after it,
+  and why no commit in this change rewrites text any commit had already marked
+  `Accepted`. Each correction is also made under §1's amendment test, so a reader
+  acts identically before and after every one. (a) The durability
+  clause named `10e63a12` as the anchor for every ADR this decision composes with;
+  ADR-0130 did not exist on that tree, so the clause now names `e3717f5d` for it.
+  (b) §3b called ADR-0130 "a contract that merged yesterday", a relative time claim
+  ADR-0019 forbids a living document and one that was false on the day: ADR-0130
+  merged on 2026-08-11, the day this ADR did. (c) §4's count of `core/types.py`'s
+  frozen-only models was pinned at twenty-two; it was twenty-three on this ADR's
+  base and is twenty-three now, so it is stated as a magnitude, which is what the
+  sentence was ever using it as. (d) The Consequences pinned `PROTOCOL_VERSION` at
+  "moves to 3", which commit `e42255db` (PR #946) falsified by moving it to 3 for
+  the five methods ADR-0130's triad added under ADR-0124 §9; the figure is
+  replaced by the rule it was only ever an instance of. §4's marked clause —
+  landing this seam bumps `PROTOCOL_VERSION`, the obligation falling on the change
+  that adds the method — is correct, untouched, and is what an implementing lane
+  is bound by. (e) §9's supersession record read "while this ADR stands
+  `Proposed`", which the flip falsifies; it and its two companions are re-tensed
+  and record nothing new. **The records themselves do not move.** ADR-0082 §7
+  settles that a `Proposed` ADR may carry them — "§1's condition is that the
+  superseding ADR **exists**, not that it is ratified" — so ADR-0084's and
+  ADR-0124's Status lines and dated notes stand exactly as PR #945 landed them,
+  and neither file is touched by this change.
 - **Durability clause.** Every reference below to ADR-NNNN is to its text as it
   stood at this ADR's base, `10e63a12`, not to its status on any later day. **The
   one exception is ADR-0130**, which did not exist on that tree: every reference to
