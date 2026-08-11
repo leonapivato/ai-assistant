@@ -1,23 +1,36 @@
 # 133. A producer's read is a third use of a source, and the user grants it separately
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-11
-- **Note (2026-08-11, UTC): ratified.** `Proposed` → `Accepted` on the content this
-  ADR merges with, after both required reviews returned green: adversarial
-  **APPROVE with no findings**, and architecture **APPROVE with nits** whose single
-  `minor` — a Consequences bullet that compared a two-member scope to a three-member
-  one and read as though all three had once been required — is corrected in the same
-  commit as this flip. Both lenses are re-run on this ratified tree and `just ship`
-  posts their terminal figures to PR #956; the round numbers and churn ratio are
-  taken from that comment rather than restated here, so this note cannot disagree
-  with it. This edit takes `CONTRIBUTING.md` → "Trivial ADR edits"' exemption for
-  the ratification flip and ADR-0015 §5's trivial-ADR exemption; **the correction
-  riding with it is made in place rather than appended because this ADR still stood
-  `Proposed` when it was written** (ADR-0070 §1 scopes its no-rewrite rule to
-  ratified decision text, and ADR-0095 §7 states that adjudication in full). **No
-  decision changes**, and no normative clause acquires, loses or alters an
-  obligation — ADR-0070 §1's own test applied to the ratifying edit first. From
-  here, any further correction is an appended dated note.
+- **Note (2026-08-11, UTC): ratified, on the second flip.** `Proposed` →
+  `Accepted` on the content this ADR merges with, after both required reviews
+  returned green — adversarial and architecture, the set a `core/types.py`
+  decision owes. `just ship` posts their terminal verdicts and figures to PR #956;
+  the round numbers and the churn ratio are taken from that comment rather than
+  restated here, so this note cannot disagree with it.
+
+  **Three findings were corrected in place while this ADR stood `Proposed`, and
+  none of them is a decision.** Two arrived before the first flip: a Consequences
+  bullet that compared a two-member scope to a three-member one and read as though
+  all three had once been required, and §8's account of this ADR's own flip, which
+  was written in the future tense. One arrived *after* it — the Context's claim
+  that a producer writes a durable record for whatever it concludes, which ADR-0130
+  §8 falsifies for one of three dispositions ("A `DROP` writes no durable record.
+  `HOLD` and `INTERRUPT` do") — and this ADR was **returned to `Proposed`** for it
+  rather than carrying an appended note on a document one commit old. That is
+  ADR-0127's route when a finding arrived after its own flip, and it is taken for
+  ADR-0070 §1's reason: §1 scopes its no-rewrite rule to *ratified* decision text,
+  so the last moment a document's own errors can be corrected rather than annotated
+  is while it is still a proposal (ADR-0095 §7 states that adjudication in full).
+  Every one of the three is also made under §1's amendment test — a reader acts
+  identically before and after each — and all three are unmarked text.
+
+  **No decision changes**, and no normative clause acquires, loses or alters an
+  obligation; that is ADR-0070 §1's own test applied to the ratifying edit first.
+  This edit takes `CONTRIBUTING.md` → "Trivial ADR edits"' exemption for the
+  ratification flip and ADR-0015 §5's trivial-ADR exemption. **ADR-0070 §1's
+  no-rewrite rule now protects this text**, so any further correction is an
+  appended dated note.
 - **Partially supersedes: ADR-0097 — §2's enumeration of the uses a grant may
   name.** `GrantScope` has three members, not two. Everything else of §2 stands
   and is what this decision is built on: "A use a grant does not name is not
@@ -578,8 +591,10 @@ carries one.
 set is adversarial *and* architecture (header), and ADR-0015 §5's
 ratify-after-review sequencing reaches it: it was drafted and reviewed as
 `Proposed`, and its status flipped only once both required reviews had returned
-green. The record of that flip is the dated note in the header, per ADR-0070 §1.
-Nothing implements against §6 until this has merged.
+green — twice, in fact: the header note records a finding that arrived after the
+first flip and the return to `Proposed` that let it be corrected in place. The
+record of both flips is that dated note, per ADR-0070 §1. Nothing implements
+against §6 until this has merged.
 
 **ADR-0097's record lands in this change rather than at this ADR's ratification,
 and the corpus has adjudicated that question twice already.** The reading that a
