@@ -408,7 +408,8 @@ obligation is to have an unambiguous answer for the producer to act on.
 > selected for a poll (§2a), a lease expiry does not make it available, and an
 > acknowledgement naming it takes the no-op arm. It counts toward both bounds until it
 > is removed, and eviction may remove it — which is simply completing the removal
-> already owed.
+> already owed. An entry that became departing **after** it was selected is covered by
+> §3a's irrevocability clause: the delivery already under way may still land.
 
 > **Normative.** An offer whose key equals that of an entry the outbox currently
 > holds and is not departing, **and whose candidate is identical to that entry's**,
@@ -871,11 +872,13 @@ disposition until it is confirmed rather than deciding anything about it.
 > only after the withdrawal has committed. No lane may delete a record whose entry it
 > has not already withdrawn.
 
-> **Normative.** **Selection is irrevocable.** A delete reaches every entry that has
-> not been selected for a poll; an entry already selected and leased (§2a) may still
-> reach its device, and the delete neither waits for it nor recalls it. What the
-> delete guarantees is that no *later* poll can select it and that the record and the
-> entry are gone.
+> **Normative.** **Selection is irrevocable, for every cause.** Once an entry has
+> been selected and leased in §2a's indivisible step, it may reach its device whatever
+> happens afterwards — expiry, deletion, withdrawal, dismissal, eviction, or any
+> departure cause a later decision adds. Every rule in this ADR that removes,
+> withdraws or departs an entry reaches entries that have **not** been selected; none
+> of them recalls a delivery already selected. What each guarantees is that no *later*
+> poll selects it.
 
 **The delete right reaches the outbox, and an earlier draft let it stop at the record
 store.** ADR-0130 §9 gives `NotificationStore` an unconditional per-record delete and
@@ -895,16 +898,22 @@ actionable record with no entry, which is precisely the incomplete-handoff case 
 invariant already names and its reconciliation already repairs. What the user then
 sees is a delete that did not complete, which they can repeat.
 
-**Selection is the line, and an earlier draft claimed a stronger one than the seam can
-keep.** It said the user "never sees a notification about something they deleted",
-which adversarial review falsified on the forty-fifth round: a poll can select and
-lease an entry, and the delete can withdraw and remove it in the window before
-`_serve_requests` writes the reply it has already built — so the bytes go out after
-the delete completed. Closing *that* would take a revalidation between the delete and
-the write, which is the prepare/commit boundary architecture review refused on the
-seventeenth and twenty-ninth rounds and which §2a's whole design is built around not
-having. So the guarantee is narrowed to the true one rather than the machinery being
-invented to defend a sentence.
+**Selection is the line, for every cause, and it took two rounds to state that
+generally.** A draft claimed the user "never sees a notification about something they
+deleted", which adversarial review falsified on the forty-fifth round: a poll can
+select and lease an entry, and the delete can withdraw and remove it in the window
+before `_serve_requests` writes the reply it has already built, so the bytes go out
+after the delete completed. The next draft narrowed the guarantee for *deletion* — and
+the forty-sixth round returned with expiry, which reaches a selected entry the same
+way and had the same missing rule. So the clause is stated over every cause, which is
+the correction this ADR has now had to make six times: name the property, not the case
+you noticed.
+
+**Closing the window itself is what is not available.** It would take a revalidation
+between the departure and the write — the prepare/commit boundary architecture review
+refused on the seventeenth and twenty-ninth rounds, and the thing §2a's design is
+built around not having. So the guarantee is narrowed to the true one rather than
+machinery being invented to defend a sentence.
 
 **The narrowed line is the one the corpus already draws in two other places, which is
 why it is defensible rather than convenient.** ADR-0124 §8 accepts the same shape for
