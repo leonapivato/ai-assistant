@@ -439,35 +439,47 @@ entry, which is latency bought for nothing.
 > acknowledgement naming anything else — an unknown identifier, a retired entry, or
 > a delivery the entry has since superseded — is accepted and does nothing.
 
-> **Normative.** The outbox's transitions are **linearizable with respect to one
-> another**. Selecting an entry with its mint and lease (§2a), an acknowledgement's
-> match and retirement, a lease expiry, and an eviction's classification and drop
-> each observe the state some serial order of these transitions would produce, and
-> none may act on an observation another has since invalidated.
+> **Normative.** **Every** transition of the outbox is linearizable with respect to
+> every other: each observes the state some serial order of them would produce, and
+> none may act on an observation another has since invalidated. This ADR defines
+> five — an enqueue's origin-key decision, bound check, eviction and insertion (§3);
+> a selection with its mint and lease (§2a); an acknowledgement's match and
+> retirement (§3); a lease expiry (§3); and an eviction's classification and drop
+> (§3) — and **the list illustrates the rule rather than bounding it**: a transition
+> a later decision adds is inside it by being one.
 
 **One rule over the whole class, because closing these pairwise closed none of
-them.** Adversarial review found the same shape three times against three different
+them.** Adversarial review found the same shape four times against four different
 pairs: eviction against the reservation-to-lease commit on the fourteenth round,
-eviction against the collapsed selection-and-lease step on the eighteenth, and — on
-the twentieth — an acknowledgement against a redelivery. That last one runs: device
+eviction against the collapsed selection-and-lease step on the eighteenth, an
+acknowledgement against a redelivery on the twentieth, and the enqueue against
+itself and everything else on the twenty-first. The twentieth's case runs: device
 A's lease on delivery `D` expires while A is reconnecting to acknowledge it; an
 implementation reads that `D` is current, device B's selection then mints delivery
 `E` for the same entry, and A's retirement lands on its stale read. B holds `E` and
-the entry is gone, so acknowledging `E` is a no-op and no redelivery is possible —
-a notification delivered to a device that will never have it confirmed and never
-have it again. Three findings, one defect: a predicate stated over outbox state
-binds nothing unless the read and the act that depends on it are one step. Stating
-it per pair invited a fourth pair; stating it once over every transition is what
-actually closes it.
+the entry is gone, so acknowledging `E` is a no-op and no redelivery is possible — a
+notification delivered to a device that will never have it confirmed and never have
+it again. Four findings, one defect: a predicate stated over outbox state binds
+nothing unless the read and the act that depends on it are one step.
+
+**The enqueue is in the list because leaving it out reproduced the bug at the level
+of the rule**, which is the twenty-first round's finding and the sharpest of the
+four. A draft generalised from pairs to a *set* and then wrote the set as a closed
+enumeration of four — omitting the transition that mutates most. Two producers can
+then each observe room below a 256-entry bound and each commit, leaving 257; two
+concurrent enqueues carrying one origin key can each observe no held entry and both
+insert, so the deduplication §3 spends a clause on and the collision refusal beside
+it both silently fail. Generalising and then re-enumerating is how a rule acquires
+the gap it was written to remove, so the enumeration is now explicitly illustrative:
+the obligation is on *every* transition, and a later one is covered by being one.
 
 **This is ADR-0124 §8's instrument taken to its general form.** That section
 required a liveness check and the write it authorises to be "one step with respect
-to a revocation", and gave the reason a pairwise rule was enough there: it had two
-transitions. This seam has four, so the pairwise form would need six clauses and
-would still be one new transition away from a gap. How an implementation discharges
-it — holding transitions against one another, or re-reading immediately before
-acting and falling through to the rule the fresh state implies — is its business;
-what is not is acting on a reading something else has invalidated.
+to a revocation", and could state it pairwise because it had two transitions. How an
+implementation discharges the general form — holding transitions against one
+another, or re-reading immediately before acting and falling through to the rule the
+fresh state implies — is its business; what is not is acting on a reading something
+else has invalidated.
 
 **Piggybacking the acknowledgement is what makes the outbox one-deep per device
 rather than a second protocol.** The device that has shown a notification wants
