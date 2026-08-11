@@ -581,6 +581,108 @@ class TestACancelledPollHonoursSection2a:
         assert outbox.ack_completed is True
 
 
+class _Advancing:
+    """A clock a case moves, so a lease can expire while a poll is parked."""
+
+    def __init__(self, at: datetime = NOW) -> None:
+        """Start at ``at``."""
+        self._at = at
+
+    def __call__(self) -> datetime:
+        """The current reading."""
+        return self._at
+
+    def advance(self, by: timedelta) -> None:
+        """Move it forward."""
+        self._at += by
+
+
+class TestAPollTerminatesAndWakesThroughTheEngine:
+    """The poll loop driven through ``Engine.next_notification``, not around it.
+
+    **This is the guard the branch was missing, and its absence is why three
+    regressions in a row survived their own round.** The acknowledgement's ordering,
+    the deleted §2a cases, and the lease-expiry wake's spin were each introduced by
+    the fix for the finding before it, and each stayed green because the new cases
+    drove the outbox seam directly while the defect lived in the *loop* around it.
+    ``wait_for_arrival``'s contract only makes sense in terms of what the loop does
+    with its answer, so that is where it is now held.
+    """
+
+    async def test_a_frozen_clock_behind_a_lease_still_ends_the_poll(self) -> None:
+        """A poll that cannot be satisfied spends its budget and answers ``None``.
+
+        The entry is leased and the outbox's clock never advances, so it never becomes
+        claimable. The loop must still terminate: ``wait_for_arrival`` reporting an
+        availability hint it cannot honour turns this into an unbounded spin, one
+        iteration per lease horizon, and the outer ``wait_for`` is what makes that
+        show up as a failure instead of a hung suite.
+        """
+        outbox = FakeNotificationOutbox(now=lambda: NOW, lease=timedelta(milliseconds=50))
+        await outbox.offer(_candidate())
+        assert await outbox.claim() is not None  # leased to a device that goes quiet
+        engine = _wired(Harness(), outbox)
+
+        answer = await asyncio.wait_for(
+            engine.next_notification(budget=timedelta(milliseconds=200)), 3
+        )
+
+        assert answer is None
+
+    async def test_a_lease_expiring_under_a_parked_poll_is_answered_promptly(self) -> None:
+        """§1: the hub answers "the moment it has one", and an expiry is such a moment.
+
+        The other half, and the one that keeps the termination fix from being bought
+        by reverting the wake: the clock moves past the lease while the poll is parked,
+        so the entry becomes claimable and the poll must answer well inside a budget
+        far longer than the lease.
+        """
+        clock = _Advancing()
+        outbox = FakeNotificationOutbox(now=clock, lease=timedelta(milliseconds=50))
+        await outbox.offer(_candidate())
+        assert await outbox.claim() is not None
+        engine = _wired(Harness(), outbox)
+
+        async def expire() -> None:
+            await asyncio.sleep(0.02)
+            clock.advance(timedelta(seconds=1))
+
+        delivery, _ = await asyncio.gather(
+            asyncio.wait_for(engine.next_notification(budget=timedelta(seconds=30)), 3),
+            expire(),
+        )
+
+        assert delivery is not None
+        assert delivery.notification.candidate_key == "k1"
+
+    async def test_an_arrival_under_a_parked_poll_is_answered_promptly(self) -> None:
+        """The enqueue wake, held at the loop level too — the case that always worked."""
+        outbox = FakeNotificationOutbox(now=lambda: NOW)
+        engine = _wired(Harness(), outbox)
+
+        async def enqueue() -> None:
+            await asyncio.sleep(0.02)
+            await outbox.offer(_candidate())
+
+        delivery, _ = await asyncio.gather(
+            asyncio.wait_for(engine.next_notification(budget=timedelta(seconds=30)), 3),
+            enqueue(),
+        )
+
+        assert delivery is not None
+
+    async def test_an_empty_outbox_spends_the_budget_and_answers_nothing(self) -> None:
+        """The plainest termination: nothing leased, nothing arriving, budget spent."""
+        outbox = FakeNotificationOutbox(now=lambda: NOW)
+        engine = _wired(Harness(), outbox)
+
+        answer = await asyncio.wait_for(
+            engine.next_notification(budget=timedelta(milliseconds=100)), 3
+        )
+
+        assert answer is None
+
+
 class TestAnUnwiredOutboxRefusesLegibly:
     """A deployment that composed none delivers nothing, and says so."""
 

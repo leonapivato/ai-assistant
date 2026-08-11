@@ -1294,18 +1294,43 @@ class SqliteNotificationOutbox:
         Returns:
             Whether an arrival may have happened; ``False`` where the wait ran out.
         """
-        limit = timeout
+        remaining = timeout
         horizon = await self._next_lease_expiry()
-        if horizon is not None and horizon < limit:
-            limit = horizon
+        if horizon is not None and horizon < remaining:
+            try:
+                await asyncio.wait_for(self._arrivals.wait(), horizon.total_seconds())
+            except TimeoutError:
+                remaining -= horizon
+                # **Only a hint that is true is reported**, and this re-read is what
+                # makes it so. Reporting the expiry unconditionally spins the caller:
+                # its own clock may be injected and frozen, in which case the entry
+                # never becomes claimable, its remaining budget never falls, and the
+                # loop runs forever an horizon at a time. Where nothing did become
+                # available, the rest of the caller's timeout is spent here instead,
+                # so the call still terminates on the one answer the poll ends on.
+                if await self._has_available():
+                    return True
+            else:
+                return True
         try:
-            await asyncio.wait_for(self._arrivals.wait(), limit.total_seconds())
+            await asyncio.wait_for(self._arrivals.wait(), remaining.total_seconds())
         except TimeoutError:
-            # ``False`` only where the *caller's* budget ran out. Stopping early at a
-            # lease expiry is an availability hint like any other, so it reports one
-            # and the caller re-reads.
-            return limit < timeout
+            return False
         return True
+
+    async def _has_available(self) -> bool:
+        """Whether any entry could be claimed right now (ADR-0131 §3).
+
+        Raises:
+            NotificationOutboxError: If the outbox cannot be read.
+        """
+        now = self._now()
+        async with self._lock:
+            entries = await _run_to_completion(self._all_entries_sync)
+        return any(
+            not entry.is_leased_at(now, self._lease) and not entry.is_departing_at(now)
+            for entry in entries
+        )
 
     async def _next_lease_expiry(self) -> timedelta | None:
         """How long until the earliest live lease expires, or ``None`` if none is.

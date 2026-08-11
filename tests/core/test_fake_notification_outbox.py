@@ -15,6 +15,7 @@ fake that will diverge from the durable outbox the first time either changes.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -694,7 +695,8 @@ async def test_a_parked_wait_stops_at_the_next_lease_expiry() -> None:
     """
     # A short lease, because the horizon is spent in *real* time while the outbox's
     # own clock is injected — a 120-second lease would make the case take two minutes.
-    outbox = FakeNotificationOutbox(now=lambda: NOW, lease=timedelta(milliseconds=50))
+    clock = MovingClock()
+    outbox = FakeNotificationOutbox(now=clock, lease=timedelta(milliseconds=50))
     await outbox.offer(candidate(key="k1"))
     assert await outbox.claim() is not None  # leased to a device that goes quiet
     # The second claim finds nothing available and *clears* the arrival event, which
@@ -702,10 +704,30 @@ async def test_a_parked_wait_stops_at_the_next_lease_expiry() -> None:
     # on the enqueue's own event and the case proves nothing.
     assert await outbox.claim() is None
 
+    async def expire() -> None:
+        await asyncio.sleep(0.01)
+        clock.advance(timedelta(seconds=1))
+
     # A budget far longer than the lease: the wait must not honour all of it.
-    woke = await outbox.wait_for_arrival(timedelta(seconds=1))
+    woke, _ = await asyncio.gather(outbox.wait_for_arrival(timedelta(seconds=5)), expire())
 
     assert woke is True  # an availability hint, not "your budget ran out"
+
+
+async def test_a_parked_wait_reports_no_expiry_it_cannot_honour() -> None:
+    """A hint the caller cannot act on is what spins its loop.
+
+    Where the clock does not advance, the lease never actually expires — so the wait
+    spends the caller's whole timeout and reports that, rather than waking it to
+    re-read a state that has not changed. ``Engine.next_notification``'s loop ends on
+    exactly this answer; anything else runs it forever an horizon at a time.
+    """
+    outbox = FakeNotificationOutbox(now=lambda: NOW, lease=timedelta(milliseconds=20))
+    await outbox.offer(candidate(key="k1"))
+    assert await outbox.claim() is not None
+    assert await outbox.claim() is None
+
+    assert await outbox.wait_for_arrival(timedelta(milliseconds=80)) is False
 
 
 async def test_a_parked_wait_with_no_lease_still_reports_its_timeout() -> None:
