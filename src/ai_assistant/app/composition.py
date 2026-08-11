@@ -65,10 +65,12 @@ from ai_assistant.orchestration import (
     IngestionStage,
     LearningLoop,
     MemoryWriteStage,
+    NotificationWriteStage,
     ObservationStage,
     QuestionStage,
     StepExecutor,
     StepRunner,
+    UpcomingEventStage,
 )
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.permissions import (
@@ -337,22 +339,33 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
     observer_route = _observer_spec(settings)
     observer_model = _build_observer_provider(settings, observer_route)
     # The read-only sources, if this deployment configured one (ADR-0093 §7).
-    # **Two reader instances rather than one**, and ADR-0096 §5 decides it here
+    # **Three reader instances rather than one**, and ADR-0096 §5 decides it here
     # rather than
     # leaving the composition lane to pick by accident: ADR-0093 §7 bounds a reader
     # at one outstanding worker *per instance*, so a shared reader would let a
     # scheduled ingestion read suppress the request-path facet for as long as it
     # runs — coupling a request cadence to a periodic job, in the direction that
-    # makes an advisory facet wait on it. Two instances cost two workers at most,
-    # which is still bounded, and each consumer then owns its own failure.
+    # makes an advisory facet wait on it. Three instances cost three workers at
+    # most, which is still bounded, and each consumer then owns its own failure.
     #
-    # Both are built above the data directory, and they belong there for #372's
-    # reason rather than by association: constructing a reader opens nothing — it
-    # validates §7a's figures and names a daemon thread it has not started — so a
-    # calendar window or cap outside its range fails the build before any store is
-    # written.
+    # **The third is ADR-0132's producer, and ADR-0132 §3 requires it to be its
+    # own.** "The producer performs its own ``Reader.read()`` on its own schedule,
+    # and derives nothing from the facet path's reading or from the ingestion
+    # job's" — ADR-0093 §3's rule applied rather than stretched, because a producer
+    # reading a snapshot ingestion left behind would be reading durable
+    # cross-subsystem state §5 of that ADR forbids and would inherit a cadence
+    # chosen for a different job. The serial scheduler keeps the two scheduled
+    # reads from contending; what a deployment running both pays is duty cycle, and
+    # ADR-0132's Consequences name that rather than hide it.
+    #
+    # All three are built above the data directory, and they belong there for
+    # #372's reason rather than by association: constructing a reader opens nothing
+    # — it validates §7a's figures and names a daemon thread it has not started —
+    # so a calendar window or cap outside its range fails the build before any
+    # store is written.
     facet_reader = _build_calendar_reader(settings)
     ingestion_reader = _build_calendar_reader(settings)
+    upcoming_reader = _build_calendar_reader(settings)
     # The temporal core is built here, above the data directory, because it is what
     # *validates*: a non-conforming zone or a working-hours pair fails the build
     # before disk is touched (#372). The ``AssemblingContextProvider`` around it is
@@ -566,6 +579,34 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
         )
         opened.append(outbox.close)
 
+        # ADR-0130 §4 and §5's deterministic ruling, built once and held twice: the
+        # engine hands it to the store on the reconsideration path, and the write
+        # stage below hands it to the same store on the live path. One object,
+        # because two would be two policies over one store — and `Settings.timezone`
+        # is its one construction-time input (§6), so two could not even disagree
+        # about the user's night without a second timezone source, which there is
+        # not.
+        notification_policy = DefaultNotificationPolicy(timezone=settings.timezone)
+        # **ADR-0130 §3's producer seam, concrete at last** (#964). Until leg 10's
+        # first producer existed there was nothing to hold it and this root said so;
+        # ADR-0132's producer is that holder, so the seam is composed here, over the
+        # *same* store the engine's surface reads and the *same* outbox the engine
+        # serves polls from. A second store would let a ruled notification be
+        # unreadable and undismissable through the surfaces the user has (ADR-0028
+        # §4), and a second outbox would break ADR-0131 §3b's invariant outright.
+        #
+        # **The outbox is what makes the live handoff exist** (ADR-0131 §3b): "When
+        # a ``NotificationWriter`` call returns an actionable ``INTERRUPT``
+        # disposition, the same call path calls ``NotificationOutbox.offer`` with
+        # that candidate before it returns to the producer", and §3b's startup
+        # reconciliation is a repair for a handoff that did not happen rather than
+        # the trigger a notification relies on. It is passed explicitly rather than
+        # defaulted, so a root that meant "there is nowhere to deliver" would have
+        # to say so.
+        notification_writer = NotificationWriteStage(
+            store=notifications, policy=notification_policy, outbox=outbox
+        )
+
         # The context provider, assembled now that the grant seam exists. Its
         # calendar facet is registered only when a source is configured — a source
         # with nothing to read would be I/O on personal data in exchange for nothing
@@ -760,6 +801,34 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
                 if ingestion_reader is None
                 else IngestionStage(reader=ingestion_reader, writes=writes, grants=grants)
             ),
+            # Leg 10's upcoming-event producer (ADR-0132). **The first holder of
+            # ADR-0130 §3's seam**, and the reason `notification_writer` above
+            # exists at all.
+            #
+            # **Its own reader, its own grant scope, its own cadence** — three
+            # independences ADR-0132 states separately because each is a different
+            # ADR's rule. The reader is not shared (§3, ADR-0096 §5); the read is
+            # gated on `NOTIFY` and on nothing else, so a live `INGEST` or `FACET`
+            # grant on this calendar authorises it not at all (§2, ADR-0133 §2);
+            # and its interval is its own field rather than a share of
+            # `calendar_reader_interval` (§4).
+            #
+            # **Built whenever a source is configured, and armed only by its own
+            # interval.** The stage's presence answers "is there anything to read";
+            # the scheduler's row answers "should it be read on a timer"; and the
+            # grant answers "may it be read for this". None of the three stands in
+            # for another (ADR-0097 §8), which is why the stage is wired here even
+            # when `calendar_upcoming_interval` is `None`.
+            upcoming=(
+                None
+                if upcoming_reader is None
+                else UpcomingEventStage(
+                    reader=upcoming_reader,
+                    grants=grants,
+                    writer=notification_writer,
+                    lead=settings.calendar_upcoming_lead,
+                )
+            ),
             # Leg 7's consolidation stage (ADR-0106, ADR-0111, ADR-0114), over the
             # *same* write stage the three producers above use and the *same*
             # memory store it walks. Both are composition-root obligations no type
@@ -818,15 +887,17 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
             # load, which is what stands behind a figure that now decides when the
             # assistant is allowed to interrupt.
             #
-            # **No `NotificationWriter` is composed, and that is not an omission.**
-            # §3's seam exists for *producers*, and §10 rules each producer its own
-            # lane and its own decision; with none in the tree there is nothing to
-            # hold the seam. The store's `purge` needs no wiring either — the
-            # engine calls it behind ADR-0083 §7's existing retention-purge
-            # operation, as `PurgeReport.notifications`, exactly as ADR-0130 §7
-            # requires and as the trace store's sweep already does.
+            # **The `NotificationWriter` is composed above rather than here**, and
+            # that placement is §1's: the seam belongs to the *producer*, not to
+            # this façade — "A producer holds no channel, no delivery seam and no
+            # client connection", and the converse is that the engine holds no
+            # producer seam. It is built beside the store it writes through and
+            # handed to `upcoming` above. The store's `purge` needs no wiring
+            # either — the engine calls it behind ADR-0083 §7's existing
+            # retention-purge operation, as `PurgeReport.notifications`, exactly as
+            # ADR-0130 §7 requires and as the trace store's sweep already does.
             notifications=notifications,
-            notification_policy=DefaultNotificationPolicy(timezone=settings.timezone),
+            notification_policy=notification_policy,
             # ADR-0131's delivery seam. The outbox reaches the engine as
             # ``orchestration``'s own ``DeliveryOutbox`` rather than as ``core``'s
             # ``NotificationOutbox``, because §3b gives the latter "exactly one
@@ -851,15 +922,15 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
             # having to know what a calendar is. A *sequence* rather than a mapping:
             # §7 rules that two readers declaring one identity at differing
             # locations is a configuration error the engine does not build through,
-            # and a mapping would deduplicate that conflict away unseen. The two
-            # instances this function builds agree by construction — both come from
+            # and a mapping would deduplicate that conflict away unseen. The three
+            # instances this function builds agree by construction — all come from
             # `calendar_reader_path` — which is exactly why the refusal has to be
             # expressed rather than assumed.
             grant_operations=GrantOperations(
                 store=grants,
                 sources=[
                     HeldSource(reader.name, location=_configured_location(settings))
-                    for reader in (facet_reader, ingestion_reader)
+                    for reader in (facet_reader, ingestion_reader, upcoming_reader)
                     if reader is not None
                 ],
                 id_factory=_uuid,

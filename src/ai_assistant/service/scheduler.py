@@ -155,7 +155,7 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
     table rather than present and skipped, and ``hub_ready`` reports the names that
     are actually armed.
 
-    Five jobs, and each is a decision an ADR argues rather than describes:
+    Six jobs, and each is a decision an ADR argues rather than describes:
 
     * **Retention purge** — ``MemoryStore.purge_expired`` *and*
       ``DeferralStore.purge``, as **one** job, because ADR-0078 §10 item 8 says the
@@ -221,6 +221,30 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       run after that, so by 08:05 at the default. §5 rules ``reconsider_at`` a
       floor rather than a deadline, so the remedy available to a deployment is a
       shorter interval rather than a different guarantee.
+    * **The upcoming-event producer** — ADR-0132's job, and the **second** row over
+      the calendar. It is a new row of the kind ADR-0093 §6 and ADR-0130 §5 each
+      already added, and it adds no mechanism: the body is a bound public engine
+      method holding no store, no reader and no subsystem import (§7, §8).
+
+      **Its interval is its own and is never ``calendar_reader_interval``**
+      (ADR-0132 §4). The two consumers read the same file at their own cadence
+      (ADR-0093 §3) — ingestion's sized for how often beliefs should be refreshed,
+      this one's sized against its lead window — so arming or retuning one changes
+      the other in no way, and an operator who could not set one without setting
+      the other would have one cadence chosen for two jobs with different needs.
+
+      **Disabled by default for the calendar reader's reason exactly** (§7): a
+      fresh install that read a user's calendar unasked would be making that
+      decision by omission. ``Settings`` refuses an interval whose source path is
+      unset, and refuses a lead window that is not strictly greater than this
+      interval — a lead no longer than the gap between ticks leaves occurrences
+      that no tick ever sees, silently, while the job runs and reports health.
+
+      **A late tick still opens a hole this table cannot close**, and ADR-0132 §4
+      names it rather than smoothing it over: §7 schedules from *completion*, so
+      the real gap is the interval plus the run, and the remedy available to a
+      deployment is a lead comfortably larger than its interval. That is this
+      producer's coverage argument and it is a bounded one.
 
     **Consolidation is deliberately not here, and its absence is the decision.**
     Leg 7's chunked walk (ADR-0106, ADR-0111) is built and wired —
@@ -283,6 +307,11 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
             "notification_reconsider",
             settings.notification_reconsider_interval,
             engine.reconsider_notifications,
+        ),
+        (
+            "calendar_upcoming",
+            settings.calendar_upcoming_interval,
+            engine.notice_upcoming_events,
         ),
     )
     return tuple(

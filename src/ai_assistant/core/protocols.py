@@ -2472,9 +2472,14 @@ class SourceGrants(Protocol):
     The query half of the grant seam. **Anything that drives a reader holds this
     and only this** — `orchestration`'s ingestion stage for
     :attr:`~ai_assistant.core.types.GrantScope.INGEST`, `context`'s reader adapter
-    for :attr:`~ai_assistant.core.types.GrantScope.FACET` — as a **required
+    for :attr:`~ai_assistant.core.types.GrantScope.FACET`, and `orchestration`'s
+    upcoming-event producer for
+    :attr:`~ai_assistant.core.types.GrantScope.NOTIFY` — as a **required
     constructor argument with no default**, so a composition that omits the gate
-    does not type-check (ADR-0097 §5). The obligation stated in prose and honoured
+    does not type-check (ADR-0097 §5, ADR-0132 §2, ADR-0133 §5). The three are the
+    drivers that exist rather than a closed set: ADR-0133 §2 fixes the axis at one
+    scope per *consumer* of a reading, so a fourth arrives with a fourth consumer
+    and with its own decision. The obligation stated in prose and honoured
     by review is the shape ``IngestionStage``'s own docstring already calls "a
     composition-root obligation no type can express"; this one *can* be expressed,
     so it is.

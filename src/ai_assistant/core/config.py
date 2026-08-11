@@ -1959,6 +1959,136 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- The upcoming-event producer (ADR-0132 §4) ------------------------
+    # **Two fields of its own, and neither is `calendar_reader_interval`.** §4 is
+    # explicit that "arming or retuning one of these two changes ingestion's
+    # cadence in no way, and arming ingestion arms no producer": the two consumers
+    # read the same file at their own cadence (ADR-0093 §3), ingestion's sized for
+    # how often beliefs should be refreshed and this one's sized against the lead
+    # window by the cross-field rule below. A figure good for one is routinely
+    # wrong for the other, and an operator who cannot set one without setting the
+    # other has one cadence chosen for two jobs with different needs.
+    #
+    # **The interval is `None` until an operator sets it**, which is ADR-0093 §7's
+    # rule for the same source unchanged — "nothing may read a user's personal
+    # files because a default said so". Configuration, consent and reach are then
+    # three separate acts and none stands in for another: the operator arms the
+    # job here, the user grants `NOTIFY` (ADR-0133 §3, which back-fills nothing),
+    # and the user raises the class's reach from `hold` (ADR-0130 §6).
+    calendar_upcoming_interval: _NullableDuration = Field(
+        default=None,
+        gt=timedelta(0),
+        description=(
+            "How often the hub looks for calendar occurrences about to start; None "
+            "disables the upcoming-event producer (ADR-0132 §4). Never 0."
+        ),
+    )
+    # **Thirty minutes is named by the ADR rather than left to this lane** (§4), on
+    # ADR-0093 §5's rule that a figure invoked in a decision cannot be satisfied
+    # elsewhere and ADR-0074 §9.3's reason: two conforming implementations with
+    # different figures notice different things while each believes it conforms.
+    #
+    # Bounded above for `calendar_window_*`'s reason exactly — `> 0` alone admits
+    # `timedelta.max`, and the producer's window is `read_at` plus this figure.
+    calendar_upcoming_lead: _DurationSetting = Field(
+        default=timedelta(minutes=30),
+        gt=timedelta(0),
+        le=_MAX_CALENDAR_WINDOW,
+        description=(
+            "How far ahead of an occurrence's start the producer notices it "
+            "(ADR-0132 §4). Strictly positive; at most ten years."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _an_upcoming_interval_needs_a_source(self) -> Settings:
+        """Refuse an armed producer with nothing to read (ADR-0132 §4).
+
+        ``calendar_reader_interval``'s refusal below, for the second job over the
+        same source and for its reason unchanged: "An armed producer with no
+        source to read is an incoherent state and is refused as one rather than
+        discovered at the first tick."
+
+        Raises:
+            ValueError: If an interval is set with no path beside it.
+        """
+        if self.calendar_upcoming_interval is not None and self.calendar_reader_path is None:
+            msg = (
+                "calendar_upcoming_interval is set but calendar_reader_path is not; an "
+                "armed producer needs a source to read (ADR-0132 §4)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _a_lead_window_outruns_its_own_interval(self) -> Settings:
+        """Refuse a lead window that leaves holes between ticks (ADR-0132 §4).
+
+        **The misconfiguration is silent, and silence here is indistinguishable
+        from working**, which is the whole reason this is a load-time refusal.
+        With ticks at ``t``, ``t+I``, … and a lead ``L``, an occurrence is noticed
+        only if some tick sees it inside ``(tick, tick+L)``. Where ``L <= I`` the
+        intervals leave holes: an occurrence starting in ``(t+L, t+I]`` is too far
+        away at the first tick and already past at the second, so it is never
+        noticed at all — while the job runs, logs nothing and reports health.
+
+        **Conditioned on the producer being armed, because the clause names the
+        producer's own interval** and there is no interval to outrun when the job
+        is off. §4's argument for the refusal is written entirely about a running
+        job — "With ticks at t, t+I, …" — so an unarmed deployment carrying a lead
+        it does not use is not the incoherent state this refuses.
+
+        **What it does not buy is a guarantee**, and §4 names the gap rather than
+        smoothing it over: ADR-0083 §7 schedules a job from its *completion*, so
+        the real gap between ticks is the interval plus the run, and a late tick is
+        "never a correctness bug". ``L > I`` is necessary and not sufficient, and
+        the remedy available to a deployment is a lead comfortably larger than its
+        interval.
+
+        Raises:
+            ValueError: If an armed producer's lead is not strictly greater than
+                its interval.
+        """
+        interval = self.calendar_upcoming_interval
+        if interval is not None and self.calendar_upcoming_lead <= interval:
+            msg = (
+                f"calendar_upcoming_lead must be strictly greater than "
+                f"calendar_upcoming_interval, got {self.calendar_upcoming_lead!r} for "
+                f"{interval!r}; a lead no longer than the interval leaves occurrences "
+                f"that no tick ever sees, silently (ADR-0132 §4)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _a_lead_window_stays_inside_the_read(self) -> Settings:
+        """Refuse a lead window the read can never fill (ADR-0132 §4).
+
+        The producer's subject is the reading's own proposals, so an occurrence
+        beyond ``calendar_window_future`` is not in the reading at all: a lead
+        reaching past the reader's forward window selects from a region the read
+        never returns, and the job again runs, logs nothing and reports health.
+
+        **Unconditional, unlike the two refusals above.** This clause names no
+        interval and needs no running job to be true — the two figures are
+        incoherent as a pair whatever arms the producer — and §4 states it flatly.
+        The pair is also unreachable by accident: the shipped lead is thirty
+        minutes against a shipped forward window of seven days, so tripping this
+        takes an operator setting one of them deliberately.
+
+        Raises:
+            ValueError: If the lead window exceeds the reader's forward window.
+        """
+        if self.calendar_upcoming_lead > self.calendar_window_future:
+            msg = (
+                f"calendar_upcoming_lead must not exceed calendar_window_future, got "
+                f"{self.calendar_upcoming_lead!r} against {self.calendar_window_future!r}; "
+                f"a lead past the read's own forward window selects from occurrences the "
+                f"read never returns (ADR-0132 §4)"
+            )
+            raise ValueError(msg)
+        return self
+
     @model_validator(mode="after")
     def _a_reader_interval_needs_a_source(self) -> Settings:
         """Refuse a scheduled read of a source that is not configured (ADR-0093 §7a).

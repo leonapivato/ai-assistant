@@ -110,6 +110,18 @@ layer's. It is driven by a scheduler job and never by a turn (§6), and it holds
 cursor: §5's bound is a function of the clock, the reader's configuration and the
 source's own content, which is what makes a periodic re-read honest without new
 durable state.
+
+``NotificationWriteStage`` is ADR-0130 §3's **producer seam**, concrete: it holds
+the deterministic policy and hands it to the store, so the duplicate lookup, the
+cap check, the budget read, the ruling and the write stay one atomic act *in the
+store* — and then it runs ADR-0131 §3b's live handoff on the way out, which is the
+clause that keeps a ruled interruption from waiting for a restart.
+``UpcomingEventStage`` is ADR-0132's **upcoming-event producer** and the seam's
+first holder: one bounded calendar read per tick, gated on a live ``NOTIFY`` grant
+(ADR-0133 §5), one candidate per occurrence starting inside the lead window, and
+an expiry at the start instant — which is the only route ADR-0130 §5 offers to an
+interruption. It concludes nothing else: no model call, no importance judgement,
+no absence, no disposition, and no cursor (ADR-0111 §11).
 """
 
 from ai_assistant.orchestration.consolidation import (
@@ -136,6 +148,7 @@ from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.grants import GrantOperations, HeldSource
 from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
 from ai_assistant.orchestration.loop import LearningLoop
+from ai_assistant.orchestration.notifications import NotificationWriteStage, hand_off
 from ai_assistant.orchestration.observation import (
     ObservationStage,
     observed_ruled,
@@ -149,6 +162,7 @@ from ai_assistant.orchestration.payloads import (
 )
 from ai_assistant.orchestration.questions import QuestionStage, question_state
 from ai_assistant.orchestration.runner import StepDisposition, StepRunner
+from ai_assistant.orchestration.upcoming import UpcomingEventStage
 from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
 
 __all__ = [
@@ -168,16 +182,19 @@ __all__ = [
     "IngestionStage",
     "LearningLoop",
     "MemoryWriteStage",
+    "NotificationWriteStage",
     "ObservationStage",
     "QuestionStage",
     "StepDisposition",
     "StepExecutor",
     "StepRunner",
+    "UpcomingEventStage",
     "WriteOutcome",
     "belief_from_record",
     "belief_summary_from_record",
     "canonical_payload",
     "conversation_summary",
+    "hand_off",
     "learn_decision",
     "learn_outcome",
     "observed_ruled",

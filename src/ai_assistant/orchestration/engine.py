@@ -107,7 +107,6 @@ from ai_assistant.core.types import (
     LearnOutcome,
     MemoryDecisionKind,
     MemoryKind,
-    NotificationDispositionKind,
     ParkedBinding,
     QueuedQuestion,
     QueueOutcome,
@@ -117,6 +116,7 @@ from ai_assistant.core.types import (
     TurnOutcome,
     band_of,
 )
+from ai_assistant.orchestration.notifications import hand_off
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     check_arguments,
@@ -181,6 +181,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.observation import ObservationStage
     from ai_assistant.orchestration.questions import QuestionStage
     from ai_assistant.orchestration.runner import StepDisposition, StepRunner
+    from ai_assistant.orchestration.upcoming import UpcomingEventStage
     from ai_assistant.orchestration.writes import WriteOutcome
 
 _log = structlog.get_logger(__name__)
@@ -389,6 +390,22 @@ def _purged(report: PurgeReport) -> Observation:
     if report.notifications is not None:
         metrics["notifications"] = report.notifications
     return Observation(metrics=metrics)
+
+
+def _noticed(count: int) -> Observation:
+    """Read one producer run onto its own ``OPERATION`` trace (ADR-0119 §8).
+
+    **The count and nothing else.** ADR-0004 §5 keeps Tier 1 content out of the
+    operational record, and a producer's candidates are free text drawn from the
+    user's calendar — the summary is literally the entry's own rendered line.
+
+    Args:
+        count: How many candidates were offered.
+
+    Returns:
+        The count, keyed by a literal written here (§2's second clause).
+    """
+    return Observation(metrics={"noticed": count})
 
 
 def _ruled(count: int) -> Observation:
@@ -870,6 +887,7 @@ class Engine:
         questions: QuestionStage,
         grant_operations: GrantOperations,
         ingestion: IngestionStage | None = None,
+        upcoming: UpcomingEventStage | None = None,
         consolidation: ConsolidationStage | None = None,
         notifications: NotificationStore | None = None,
         notification_policy: NotificationPolicy | None = None,
@@ -1060,6 +1078,24 @@ class Engine:
                 refuses rather than reporting an empty success, because a job that
                 reports health while ingesting nothing is the failure mode this
                 corpus keeps naming (ADR-0022 §4a).
+            upcoming: ADR-0132's upcoming-event producer, or ``None`` where this
+                deployment configured no calendar source. **Its own reader
+                instance, and not ``ingestion``'s** (ADR-0132 §3): the two consumers
+                read at their own cadence and neither derives its answer from the
+                other's reading, and ADR-0093 §7's one-outstanding-worker
+                reservation is per instance, so a shared reader would let one job's
+                read suppress the other's.
+
+                **It holds the notification seam this engine does not hand it.**
+                The stage is given a ``NotificationWriter`` by the composition
+                root — over the *same* store ``notifications`` names, or a ruled
+                notification would be unreadable through the surfaces the user has
+                (ADR-0028 §4) — because ADR-0130 §1 puts the seam with the producer
+                and this façade is not one.
+
+                Optional for ``ingestion``'s reason exactly, and
+                :meth:`notice_upcoming_events` refuses rather than reporting an
+                empty success for the same one.
             consolidation: The chunked consolidation stage (ADR-0106, ADR-0111), or
                 ``None`` where this deployment wires none. It writes through the
                 *same* write stage every other producer here uses — ADR-0106 §6
@@ -1204,6 +1240,7 @@ class Engine:
         self._questions = questions
         self._grants = grant_operations
         self._ingestion = ingestion
+        self._upcoming = upcoming
         self._consolidation = consolidation
         if (notifications is None) != (notification_policy is None):
             msg = (
@@ -1601,6 +1638,85 @@ class Engine:
             )
             raise ConfigurationError(msg)
         return await self._tracked(self._ingestion.ingest(), "ingest", _ingested)
+
+    async def notice_upcoming_events(self) -> int:
+        """Notice what is about to start, and offer a candidate for each (ADR-0132).
+
+        The **maintenance surface**'s fourth scheduled operation, and ADR-0132 §1's
+        own shape: "a stage in ``orchestration`` driven by a public operation on the
+        concrete engine, which is in turn driven by a job on ADR-0083 §7's
+        scheduler whose body is that bound method and which holds no store, no
+        reader and no subsystem import". §8 already settled that a maintenance
+        surface belongs "on a class in ``orchestration``, not ``core`` contract
+        surface", so this is not a member of ``AssistantEngine``: no client asks for
+        it and no interface adapter may drive it.
+
+        **Takes no argument, deliberately** — ``ingest``'s reason unchanged: the
+        reader is given its own source and its own bound, so a caller able to widen
+        the read is a caller able to defeat the bound. It is also what makes this a
+        legal ``JobBody``.
+
+        **The engine concludes nothing itself.** It delegates to
+        :class:`~ai_assistant.orchestration.upcoming.UpcomingEventStage`, which
+        gates the read on a live ``NOTIFY`` grant (ADR-0133 §5), walks the
+        reading's per-occurrence proposals, and offers what falls inside the lead
+        window through ADR-0130 §3's seam. The disposition is that seam's and the
+        policy's; nothing here selects, ranks or influences one (ADR-0132 §8).
+
+        **Independent of ingestion in both directions** (ADR-0132 §3, §4). It has
+        its own reader instance, its own interval and its own grant scope, so
+        arming or retuning it changes ingestion's cadence in no way and arming
+        ingestion arms no producer. A deployment may run either, both or neither.
+
+        Tracked like every other public method, so shutdown drains the offer it is
+        in the middle of before closing the stores it is writing through
+        (ADR-0042 §2).
+
+        Returns:
+            How many candidates were offered. **Zero is a successful pass** over a
+            calendar with nothing starting soon, and no caller may read it as a
+            failure (ADR-0093 §8). It is not a count of interruptions: what became
+            of each candidate is ADR-0130 §5's ruling and is deliberately not
+            reported here.
+
+        Raises:
+            RuntimeError: If the engine is shutting down. The scheduler treats this
+                as *stop* rather than as a job failure (ADR-0083 §8).
+            ConfigurationError: If this engine was built with no producer stage,
+                which means exactly one thing: no configured source. Refusing is
+                the point — an empty count would be indistinguishable from a quiet
+                calendar, so a deployment whose stage failed to wire would look
+                healthy forever while noticing nothing (ADR-0022 §4a).
+            SourceNotGrantedError: If no live ``NOTIFY`` grant covers the source at
+                the moment of the read, or if one is revoked while the read is in
+                flight (ADR-0132 §2, ADR-0133 §5). Distinct from the error above:
+                that one is a deployment that cannot ask, this one is a user who
+                has not said yes. **No other grant substitutes** — ADR-0133 §2
+                rules the three uses independent, so a live ``INGEST`` grant on this
+                calendar authorises this read no more than a ``FACET`` one does.
+            GrantError: If the grant store could not answer. Propagated rather than
+                converted, so a store fault stays distinguishable from a refusal
+                (ADR-0097 §5a).
+            ReaderError: If the read could not complete because of its source.
+                Nothing is offered from a failed read, the process is never taken
+                down, and the scheduler retries at the next due instant
+                (ADR-0132 §9).
+            NotificationStoreError: If the notification store could not rule or
+                record. A run that fails partway leaves what it offered offered and
+                claims nothing about what it did not (ADR-0132 §5).
+            NotificationOutboxError: If a ruled interruption could not be handed to
+                the delivery seam (ADR-0131 §3b).
+        """
+        self._reject_if_closing()
+        if self._upcoming is None:
+            msg = (
+                "no upcoming-event producer is wired, so there is nothing to notice; it "
+                "needs a configured source (ASSISTANT_CALENDAR_READER_PATH, ADR-0132 §4). "
+                "Configuration says where a source is; a grant says whether it may be "
+                "read for this use, and neither stands in for the other"
+            )
+            raise ConfigurationError(msg)
+        return await self._tracked(self._upcoming.notice(), "notice_upcoming_events", _noticed)
 
     async def consolidate(self) -> ConsolidationReport:
         """Distil stored records into durable beliefs, one bounded run (ADR-0106).
@@ -2516,12 +2632,13 @@ class Engine:
 
         A deployment with no outbox composed hands off nothing, which is the CLI's
         case: it serves no poll, so there is nowhere for a notification to go.
+
+        **The rule itself lives in one place** —
+        :func:`~ai_assistant.orchestration.notifications.hand_off`, which
+        ADR-0130 §3's concrete write stage calls on the *live* path. §3b binds both
+        paths with one clause, and two copies of it are two places for it to drift.
         """
-        if self._notification_outbox is None:
-            return
-        if ruling.kind is not NotificationDispositionKind.INTERRUPT:
-            return
-        await self._notification_outbox.offer(candidate)
+        await hand_off(self._notification_outbox, ruling, candidate)
 
     async def _reconsider(self, page: int) -> int:
         """Drain the due set, a page at a time.
