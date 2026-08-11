@@ -265,3 +265,35 @@ def test_the_utc_helper_is_used_by_the_default_clock() -> None:
     outbox = FakeNotificationOutbox()
 
     assert outbox._now().tzinfo is UTC
+
+
+async def test_the_fakes_wait_reports_its_timeout() -> None:
+    """A wait that ran out says so, which is what stops a caller spinning.
+
+    The fake used to return at once on the reasoning that a wake is only a hint —
+    true, and the reason the *arrival* half is a hint. The timeout half is not: a
+    caller that could not tell them apart would re-read, find nothing and ask to
+    wait again, forever against the injected fixed clock this tree tests with.
+    """
+    outbox = FakeNotificationOutbox(now=lambda: NOW)
+
+    assert await outbox.wait_for_arrival(timedelta(milliseconds=20)) is False
+
+
+async def test_the_fakes_wait_returns_early_on_an_offer() -> None:
+    """The discriminating half: an enqueue wakes a parked wait.
+
+    Without it the fake would be a sleep, and a consumer's notification would wait
+    out the whole budget instead of arriving when it was produced.
+    """
+    import asyncio  # noqa: PLC0415 — the scheduling is the subject
+
+    outbox = FakeNotificationOutbox(now=lambda: NOW)
+
+    async def enqueue() -> None:
+        await asyncio.sleep(0.01)
+        await outbox.offer(candidate(key="k1"))
+
+    woke, _ = await asyncio.gather(outbox.wait_for_arrival(timedelta(seconds=5)), enqueue())
+
+    assert woke is True

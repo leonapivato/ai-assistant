@@ -75,6 +75,32 @@ class DeliveryOutbox(Protocol):
         """
         ...
 
+    async def withdraw(self, record_id: str) -> bool:
+        """Give up the entry carrying one ADR-0130 record (ADR-0131 §3a).
+
+        **The delete right reaches the outbox, and the order is forced.** §3a: "An
+        act that **deletes** an ADR-0130 record — its per-record delete or its
+        clear (ADR-0130 §9), which serve ADR-0004 §6's delete right and are not
+        dismissals — withdraws the record's outbox entry **first**, and deletes the
+        record only after the withdrawal has committed. No lane may delete a record
+        whose entry it has not already withdrawn."
+
+        Deleting the record first would leave an entry whose record is gone: not
+        departing, not expired, undetectably stale, and delivered on the next poll
+        — after the user had deleted the thing it was about. Withdrawing first
+        cannot produce that, and the one state a crash between them leaves is an
+        actionable record with no entry, which is exactly the incomplete-handoff
+        case §3b's reconciliation already repairs.
+
+        Args:
+            record_id: The ADR-0130 record whose entry is given up.
+
+        Returns:
+            Whether an entry was withdrawn. ``False`` where the outbox held none,
+            which is the ordinary case for a record that was never offered.
+        """
+        ...
+
     async def reconcile(self) -> None:
         """Make the outbox and the ADR-0130 records agree, in both directions.
 
@@ -83,16 +109,28 @@ class DeliveryOutbox(Protocol):
         """
         ...
 
-    async def wait_for_arrival(self, timeout: timedelta) -> None:  # noqa: ASYNC109 — the caller's own poll budget, not a deadline this seam owns (ADR-0029 §4)
+    async def wait_for_arrival(
+        self,
+        timeout: timedelta,  # noqa: ASYNC109 — the caller's own poll budget, not a deadline this seam owns (ADR-0029 §4)
+    ) -> bool:
         """Park until an entry may be available, or until ``timeout`` elapses.
 
-        **A hint and never a guarantee.** A caller that misses a wake falls back on
-        its own deadline and re-reads, so correctness rests on the re-read and this
-        buys latency alone. That is what keeps a conforming implementation free to
-        be a plain sleep.
+        **What it reports is a hint about arrivals and a fact about the timeout**,
+        and the second half is load-bearing. A wake is only ever a hint: a caller
+        that misses one falls back on its own deadline and re-reads, so correctness
+        rests on the re-read. But an implementation that returned *without* waiting
+        would turn the caller's loop into a spin — re-reading, finding nothing, and
+        asking to wait again, forever where the caller's clock is injected and does
+        not move. Reporting the timeout is what lets the caller end the poll on the
+        one answer it can trust rather than on a deadline the wait never advanced
+        towards.
 
         Args:
             timeout: How long to wait at most.
+
+        Returns:
+            Whether an arrival may have happened. ``False`` means the wait ran out,
+            and a caller may take that as its budget being spent.
         """
         ...
 
