@@ -439,18 +439,32 @@ holder is definitionally gone. Carrying leases across a restart would mean a hub
 that came back in ten seconds waited out a full lease before anyone could have the
 entry, which is latency bought for nothing.
 
-> **Normative.** A device acknowledges a delivery by naming its identifier on its
-> **next** `next_notification` request. An acknowledgement naming an entry the hub
-> does not hold, or one already retired, is accepted and does nothing.
+> **Normative.** A device acknowledges a delivery by naming its `delivery_id` on
+> its **next** `next_notification` request. The acknowledgement retires the entry
+> **only where that `delivery_id` is the entry's current outstanding delivery**. An
+> acknowledgement naming anything else — an unknown identifier, a retired entry, or
+> a delivery the entry has since superseded — is accepted and does nothing.
 
 **Piggybacking the acknowledgement is what makes the outbox one-deep per device
 rather than a second protocol.** The device that has shown a notification wants
 the next one; asking for the next one is therefore the natural moment to say it
 got the last one, and folding the two into one call means the seam needs one
 method rather than two and no state machine on the client beyond "the id I am
-holding". The idempotent no-op on an unknown id is what lets a client reconnect
+holding". The idempotent no-op on anything else is what lets a client reconnect
 after any failure and acknowledge blindly rather than having to reason about what
 the hub remembers.
+
+**The "current outstanding delivery" condition is what stops a stale holder
+retiring someone else's notification**, and it is the sixteenth round's finding.
+Device A takes a delivery and goes quiet; the lease expires; the entry is delivered
+to device B. An acknowledgement scoped to the *entry* would let A — reconnecting an
+hour later and acknowledging what it still holds — retire B's delivery, possibly
+before B has shown it, losing the notification and falsifying the at-least-once
+guarantee stated two paragraphs down. §4 makes each write mint a fresh
+`delivery_id` precisely so that this condition is decidable without the hub knowing
+who is asking: A's identifier is simply no longer the current one, and its
+acknowledgement lands on the no-op arm that every other stale acknowledgement lands
+on.
 
 **The lease is what gives every entry a terminal outcome in finite time**, which
 is the property ADR-0094 §10a demands of the mirror decision and which a
@@ -467,7 +481,8 @@ deliberately given up, and gives the reason there.
 > outbox holds, leased or not.
 
 > **Normative.** An entry's byte cost is everything the outbox persists for it —
-> the notification, the `delivery_id`, and the origin key where one was supplied.
+> the notification, the origin key where one was supplied, and the identifier of its
+> current outstanding delivery where it has one.
 
 > **Normative.** When an enqueue would exceed either bound, the hub drops entries
 > **until both bounds hold with the new entry counted**. Each drop takes the oldest
@@ -615,30 +630,40 @@ already been discarded. Forbidding extras makes the frame refuse at validation
 instead. Adversarial review found it on the fifth round, with the mechanism read off
 the tree rather than assumed.
 
-> **Normative.** `delivery_id` is minted by the seam when the entry is enqueued, is
-> stable across redeliveries of that entry, and is the value `acknowledging` names.
-> It is a **strictly increasing counter held durably with the outbox**, rendered as
-> a decimal string, joined by `.` to a **128-bit value from a cryptographically
-> secure source**, rendered as lowercase hex. Its UTF-8 encoding is at most 96
-> bytes.
+> **Normative.** `delivery_id` is minted **at each write**, and is the value
+> `acknowledging` names. A redelivery of the same entry carries a new one, and
+> minting it makes the previous one no longer that entry's current outstanding
+> delivery (§3). It is a **strictly increasing counter held durably with the
+> outbox**, rendered as a decimal string, joined by `.` to a **128-bit value from a
+> cryptographically secure source**, rendered as lowercase hex. Its UTF-8 encoding
+> is at most 96 bytes.
 
 > **Normative.** A `delivery_id` is unique over the outbox's whole life and is never
-> reused, including after the entry it named has been retired or dropped. The
-> counter advances when an entry is enqueued and never goes backwards, a restart
-> included.
+> reused, for any entry. The counter advances at each write and never goes
+> backwards, a restart included.
 
-> **Normative.** An enqueue that would advance the counter beyond what the
-> identifier's 96-byte bound leaves room to render is **refused**, and the refusal
-> is the enqueue's reported outcome. The counter is never wrapped, reset or reused
-> to make room.
+> **Normative.** A write that would advance the counter beyond what the identifier's
+> 96-byte bound leaves room to render does not happen: the poll answers as though
+> the outbox held nothing for it, and the condition is recorded in the hub's log.
+> The counter is never wrapped, reset or reused to make room.
+
+**Per write and not per entry, and the entry-scoped version was the defect.** An
+earlier draft made the identifier "stable across redeliveries", reasoning that a
+device holding it across a reconnect could then acknowledge what it had received.
+That reasoning is right only while the entry has not moved on. Once a lease expires
+and the entry goes to a *second* device, a stable identifier lets the first device
+retire the second's delivery — possibly before it has been shown — which loses the
+notification and falsifies §3's at-least-once guarantee. Adversarial review found it
+on the sixteenth round. Minting at each write keeps everything stability was for: a
+device reconnecting before any redelivery still holds the current identifier and its
+acknowledgement still lands, and one arriving after a redelivery holds a superseded
+one and lands on the no-op arm.
 
 **Uniqueness has to be a clause because `Identifier` does not supply it**, and the
 gap is reachable rather than theoretical: the alias rejects only blank text, so a
 conforming minting implementation could issue the same value twice, or reuse one
-after retirement. Then a device that has been holding an id across a reconnect — the
-case the stability clause above exists for — acknowledges an entry it never
-received, and that entry is retired without being delivered. Adversarial review
-found it on the sixth round.
+after a retirement. An acknowledgement then retires an entry the caller never
+received. Adversarial review found it on the sixth round.
 
 **Two halves, because the identifier carries two obligations and neither half
 carries both.** The corpus reached this in two steps and both are worth recording,
@@ -679,11 +704,11 @@ bound leaves beside the separator and the 32-character token is a state the pair
 genuinely defines, and an earlier draft gave it no conforming outcome: reuse is
 forbidden, a 97th byte is forbidden, and proceeding was not authorised. That is
 exactly the partial-rule defect §3's eviction clause was rewritten twice to remove,
-and adversarial review found this one on the eighth round. The refusal is the
-answer; wrapping or resetting is not, because both break the uniqueness the counter
-exists to supply. The figure will not be reached — 63 digits is `10^63` enqueues,
-which at a notification a second is some `10^55` years — and a rule that is never
-exercised is still cheaper than a state with no defined outcome.
+and adversarial review found this one on the eighth round. Declining the write is
+the answer; wrapping or resetting is not, because both break the uniqueness the
+counter exists to supply. The figure will not be reached — 63 digits is `10^63`
+writes, which at a delivery a second is some `10^55` years — and a rule that is
+never exercised is still cheaper than a state with no defined outcome.
 
 **Where the guarantee stops, named rather than left to be discovered.** It is a
 property of one data directory's life. Restoring an older copy of the directory
@@ -753,13 +778,14 @@ reader's inference. This ADR is second in its batch's merge order behind ADR-013
 so the prerequisite is satisfied before any lane can act on it.
 
 **Why the seam mints its own identifier instead of using the notification's.**
-The acknowledgement is about *the outbox entry*, and an entry has a life the
-artifact does not: it can be delivered, leased, returned and delivered again. A
-stable per-entry id makes an acknowledgement idempotent and makes a redelivery
-after a lease expiry acknowledgeable by a device that has been holding the id
-across a reconnect. It also keeps this ADR's surface decidable without knowing
-whether ADR-0130's artifact carries an identity at all, which is the separation
-the two lanes were split on.
+The acknowledgement is about *a delivery attempt*, and an attempt is a thing the
+artifact knows nothing about: one entry can be delivered, leased, returned and
+delivered again, and each of those writes is separately acknowledgeable by whoever
+received it and by nobody else. A notification's own identity — if ADR-0130's
+artifact even has one — could not carry that, because it is the same value on every
+attempt. Minting here also keeps this ADR's surface decidable without knowing
+whether the artifact carries an identity at all, which is the separation the two
+lanes were split on.
 
 > **Normative.** `budget` is honoured over the closed range from zero to
 > `hub_max_notification_budget` (§5a). A `budget` of zero is an **immediate poll**:
