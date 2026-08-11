@@ -205,17 +205,33 @@ class UpcomingEventStage:
                 not strictly greater than this job's interval.
 
         Raises:
-            ValueError: If ``lead`` is not strictly positive. ``Settings`` refuses
-                one at load; this is the same rule restated where the invariant is
-                actually *used*, exactly as ``service.scheduler``'s ``Job`` restates
-                its interval's. A stage built in a test or from a future
-                configuration that reads no setting must not be able to hold a
-                window that selects nothing while reporting a healthy pass.
+            TypeError: If ``lead`` is not exactly a ``timedelta``.
+            ValueError: If it is not strictly positive.
+
+                ``Settings`` refuses both at load; these are the same rules
+                restated where the invariant is actually *used*, exactly as
+                ``service.scheduler``'s ``Job`` restates its interval's. A stage
+                built in a test or from a future configuration that reads no
+                setting must not be able to hold a window that selects nothing
+                while reporting a healthy pass.
         """
+        # **The type check is what makes "finite" true**, and both siblings make the
+        # argument at length: `timedelta` is subclassable, a native one cannot hold
+        # a non-finite value because its constructor overflows first, and a subclass
+        # is free to override the comparisons the window below is decided by. So
+        # requiring the exact type *is* the guarantee, and it needs no second check
+        # that could never fire on a value which passed the first
+        # (`core.config`'s `_only_a_duration`, `service.scheduler`'s `Job`).
+        if type(lead) is not timedelta:
+            msg = (
+                f"the lead window must be exactly a timedelta, got {lead!r} of type "
+                f"{type(lead).__name__}; a subclass is free to answer a comparison "
+                f"however it likes, and the window below is decided by two of them "
+                f"(ADR-0132 §4)"
+            )
+            raise TypeError(msg)
         # Compared against `timedelta(0)` directly rather than through
-        # `total_seconds()`, so the guard never routes a duration through a float —
-        # `core.config`'s `_only_a_duration` and `service.scheduler`'s `Job` make
-        # the identical argument.
+        # `total_seconds()`, so the guard never routes a duration through a float.
         if lead <= timedelta(0):
             msg = (
                 f"the lead window must be strictly positive, got {lead!r}; a window of "
@@ -388,14 +404,19 @@ class UpcomingEventStage:
         # keeps `DESCRIPTION` out of a durable, exportable record — which `_render`
         # already refuses for a belief and which a notification does not get a
         # weaker rule about.
+        #
+        # **No guard stands between the reading and the candidate, deliberately.**
+        # `NotificationCandidate.summary` is non-blank while a `MemoryRecord`'s
+        # `content` is not, so a reader emitting a blank rendering raises out of
+        # here — and that is the right outcome rather than a case to skip. It is
+        # `IngestionStage`'s own posture, in its words: re-asserting a producer-side
+        # obligation here would be "a second copy of a rule the seam already holds,
+        # sited where a reader's non-conformance would be reported as an ingestion
+        # fault rather than as the contract breach it is". The `Reader` conformance
+        # suite pins what a reader may emit; this stage is not a second place to
+        # pin it, and absorbing the defect would hide a broken reader behind a
+        # quiet calendar.
         sentence = proposal.proposed.content
-        if not sentence.strip():
-            # A proposal that rendered to nothing has no sentence to tell anyone,
-            # and `NotificationCandidate.summary` refuses a blank outright. Skipping
-            # is the same posture as the missing extent above — the producer states
-            # only what the source gave — and it is the difference between one
-            # degenerate entry and a whole pass that fails on every tick.
-            return None
         return NotificationCandidate(
             candidate_key=_key(sentence, extent),
             producer=PRODUCER,
