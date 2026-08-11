@@ -480,9 +480,9 @@ than this document cost.
 
 **What gets easier.** PR #959's shape has a text behind it: the poll's
 elapsed-against-budget measurement and the outbox's `leased_at` anchor are what
-§2 requires rather than what a lane chose, and its unconditional first selection
-is what §3 requires rather than an overrule a reader has to find in a comment
-thread. A future reviewer of this corner now argues against a clause instead of
+§2 requires rather than what a lane chose, and its budget-independent first
+selection is what §3 requires rather than an overrule a reader has to find in a
+comment thread. A future reviewer of this corner now argues against a clause instead of
 against a lane, which is the exchange `docs/review/guide.md` is built on. #971 is
 closed — against its own proposal, which §"Alternatives considered" records.
 
