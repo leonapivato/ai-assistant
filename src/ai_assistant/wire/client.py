@@ -497,8 +497,9 @@ class HubClient:
             The notification to show and the token that retires it, or ``None``
             where the budget elapsed with nothing waiting.
         """
+        named = None if acknowledging is None else identifier(acknowledging, name="acknowledging")
         return await self._call(  # type: ignore[no-any-return]
-            "next_notification", acknowledging=acknowledging, budget=budget
+            "next_notification", acknowledging=named, budget=budget
         )
 
     async def recent_conversations(
