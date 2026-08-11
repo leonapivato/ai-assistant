@@ -1345,6 +1345,35 @@ async def test_the_policy_reads_quiet_windows_in_the_configured_timezone(
         await composed.engine.aclose()
 
 
+def test_an_unusable_notification_retention_fails_before_disk_is_touched(
+    tmp_path: Path,
+) -> None:
+    """#372's contract, for the first tuning that can reach it (ADR-0130 §7).
+
+    Every other configuration this root refuses is refused by ``Settings`` or by a
+    resource-free constructor. The notification retention is the first that
+    ``Settings`` **accepts** — §7 puts no ceiling on it, the deliberate escape
+    being ``None`` — and that a store refuses, because this backend stamps a
+    duration as microseconds into a signed 64-bit column.
+
+    Asked below the line it would still fail, but only after the directory was
+    created and seven databases opened; #372's contract is that "no directory is
+    created and no database file is written for a build that was never going to
+    succeed", and the leftovers are what an operator would then have to reason
+    about. So the assertion is about the *filesystem*, not the exception: a check
+    that touches no resource belongs above the line whatever opens it below.
+    """
+    directory = tmp_path / "never-built"
+    settings = Settings(
+        embedder=EmbedderKind.HASHING, notification_retention=timedelta(days=900_000_000)
+    )
+
+    with pytest.raises(ValueError, match="retention must be at most"):
+        build_engine(settings, data_dir=directory)
+
+    assert directory.exists() is False
+
+
 def _spy_on_traces(monkeypatch: pytest.MonkeyPatch) -> list[SqliteTraceStore]:
     """Record every trace store the builder constructs, still building real ones.
 

@@ -41,6 +41,7 @@ from ai_assistant.memory import (
 )
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.memory.health import DEFAULT_K, DEFAULT_SAMPLE, MAX_K, StoreHealthReader
+from ai_assistant.memory.notification_store import check_notification_tuning
 from ai_assistant.memory.reembed import Reembedder
 from ai_assistant.models import (
     BoundedEmbedder,
@@ -367,6 +368,22 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
     # unbuildable model fails as a ConfigurationError before any disk is touched
     # (ADR-0006 §2 default, #372's above-disk contract; see :func:`_build_embedder`).
     embedder = _build_embedder(settings)
+    # And the notification store's tuning is *asked* here, above the data
+    # directory, though its store opens below with the rest (ADR-0130 §7,
+    # ADR-0022 §4a). It is the first tuning in this tree that ``Settings`` accepts
+    # and a store refuses — §7 puts no ceiling on a retention, the deliberate
+    # escape being ``None``, while this backend stamps one as microseconds into a
+    # signed 64-bit column — so without this call a deployment configuring one
+    # past that bound would create the data directory and open seven databases
+    # before learning its configuration was unusable. #372's contract is that
+    # "no directory is created and no database file is written for a build that
+    # was never going to succeed", and a check that touches no resource belongs
+    # above the line whatever opens it below.
+    #
+    # The store checks again for itself when it is built: it is public, anyone
+    # may construct one directly, and a guard that only fires when a caller
+    # remembered to ask is not a guard.
+    check_notification_tuning(settings.notification_retention, settings.notification_queue_limit)
     # The keyword still wins over the setting when it is given (ADR-0083 §2), so
     # every existing caller — and the hub, handing over the directory it resolved
     # and locked before any store was opened — keeps its injection seam. What
