@@ -1259,8 +1259,11 @@ def _client_for(settings: Settings) -> HubClient:
         A client of the hub this device is configured to reach.
 
     Raises:
-        ConfigurationError: If the data directory cannot hold the socket, or the
-            configured remote address is not one a conforming hub could bind.
+        ConfigurationError: If the data directory cannot hold the socket, if the
+            configured remote address is not one a conforming hub could bind, or if
+            a configured overlay agent socket fails the custody conditions
+            (:func:`~ai_assistant.wire.overlay.check_configured_socket`). All three
+            are decided here, before anything is opened.
     """
     where = destination(
         data_dir=settings.data_dir,
@@ -1278,10 +1281,16 @@ def _client_for(settings: Settings) -> HubClient:
             check_socket_path(settings.data_dir)
             return HubEngineClient(where.socket_path, read_timeout=settings.hub_read_timeout)
         case RemoteDestination():
+            # ADR-0124 §4's second clause: the identity this destination has to
+            # match comes from the agent on *this* machine, so where that agent
+            # listens is a fact about this device and reaches the seam from the
+            # client's own setting (#937). Unset looks at the two packaged paths
+            # exactly as before; a configured path is held to the same custody
+            # conditions the hub's half runs, phrased in the client's words.
             return RemoteHubEngineClient(
                 where,
                 read_timeout=settings.hub_read_timeout,
-                agent=local_agent(),
+                agent=local_agent(settings.client_overlay_agent_socket),
                 secrets=_enrolment_secrets(settings),
             )
         case _:  # pragma: no cover — the union is closed
