@@ -152,7 +152,9 @@ if TYPE_CHECKING:
         Message,
         NonBlankEncodableText,
         NotificationCandidate,
+        NotificationDelivery,
         NotificationDisposition,
+        NotificationEnqueue,
         NotificationPreferences,
         ObservationOutcome,
         ObservationReport,
@@ -4235,6 +4237,115 @@ class NotificationWriter(Protocol):
 
 
 @runtime_checkable
+class NotificationOutbox(Protocol):
+    """Custody of a ruled interruption, from the producer to the wire (ADR-0131 §3).
+
+    **A separate Protocol from :class:`NotificationWriter`, and the boundary is
+    the propose/dispose line itself** (ADR-0131 §3b). The writer decides *whether*
+    the user is interrupted; this carries an interruption that has already been
+    ruled. Folding the enqueue into the writer would put the transport's custody
+    question inside the call whose whole subject is the policy question, and would
+    make ADR-0130's ratified single-call seam mean something new. Two Protocols
+    keep "producing is not delivering" (ADR-0130 §1) true in the type system
+    rather than only in prose, and the composition root is where they meet.
+
+    **What it holds is a durable, bounded, leased queue for the owner** (§3). An
+    entry is placed in the hub's data directory before it is offered to any
+    device and survives a restart; it is offered to **one** device at a time — the
+    first to ask — and retired when that device acknowledges it. Delivery is
+    **at-least-once**: a device that receives a notification, shows it and dies
+    before acknowledging will be shown it again, which is the right side to fail
+    on for a notification and is stated rather than discovered.
+
+    **It is not on :class:`AssistantEngine` and nothing it carries crosses the
+    wire** (§3b). Adding it bumps no protocol version of its own; ADR-0124 §9's
+    bump this seam incurs is for ``next_notification`` alone.
+
+    **The outbox holds notifications and nothing else** (§3). It is not a memory,
+    not an episode and not a trace; no lane may route it through
+    :class:`MemoryStore` or :class:`TraceStore`, and nothing in it is a record any
+    retrieval path reads.
+
+    **Every transition of the outbox is linearizable with respect to every
+    other** (§3): each observes the state some serial order of them would
+    produce, none may act on an observation another has since invalidated, and a
+    transition reading two parts of the outbox and acting on both does so in one
+    step. The obligation is on **every** transition, named or not — an enqueue's
+    key decision, bound check, eviction and insertion; a selection with its mint
+    and lease; an acknowledgement's match and retirement; a lease expiry; an
+    eviction's classification and drop. ADR-0131 §3 records four separate
+    findings of one defect behind that rule: a predicate stated over outbox state
+    binds nothing unless the read and the act that depends on it are one step. No
+    atomicity is required *across* to the hub's connection registry, whose
+    relation to this is an ordering rather than a shared state.
+
+    Cancelling this method is governed by this module's cancellation clause
+    (ADR-0060), and how it observes its argument by the input-observation clause
+    (ADR-0065) — vacuous here, the argument being a frozen model.
+    """
+
+    async def offer(self, candidate: NotificationCandidate) -> NotificationEnqueue:
+        """Hand one ruled interruption to the seam, and learn whether it took it.
+
+        **The enqueue is a single durable commit, and the seam takes custody at
+        that commit and not before** (§3). A caller that has not seen this return
+        has not handed the notification over, which is what leaves a producer able
+        to do something about a failure — ADR-0094 §10a's custody clause, mirrored
+        for material travelling outward.
+
+        **The entry is keyed by the candidate's own ``candidate_key``** (ADR-0130
+        §8), and this call takes no key from its caller. There is one key per
+        candidate and every path computes the same one, ADR-0131 §3b's startup
+        reconciliation included — which is what makes running it twice, or against
+        entries that already exist, a no-op. Keys of removed entries are not
+        remembered: a candidate re-offered after its entry was delivered and
+        acknowledged is a **new** notification earning its own disposition, its
+        own budget unit and its own entry (ADR-0130 §7).
+
+        **Matching is on the key *and* the candidate** (§3). Matching on the key
+        alone would turn a producer's bug into a silent loss — a different
+        candidate offered under a held key would receive what looks like a
+        successful enqueue and never be told — so an identical candidate is
+        :attr:`~ai_assistant.core.types.NotificationEnqueue.ALREADY_HELD` and a
+        differing one is
+        :attr:`~ai_assistant.core.types.NotificationEnqueue.KEY_COLLISION`.
+        Equality is ADR-0087 §2's canonical encoding: two candidates are identical
+        when theirs are.
+
+        **A departing entry matches nothing** (§3). An entry whose ADR-0130 record
+        has ceased to be actionable — the seam gave it up and dismissed its
+        record, or the candidate's own expiry has passed on the hub's clock —
+        participates in no transition except its own removal, so an offer whose
+        key equals a departing entry's makes a new entry rather than reporting the
+        one on its way out.
+
+        **Both refusals are terminal for the record, not merely for the offer**
+        (§3b): a caller that receives ``TOO_LARGE`` or ``KEY_COLLISION`` dismisses
+        the ADR-0130 record, which ends its actionability and frees §7's cap, and
+        records the refusal in the hub's log. No refusal may leave an actionable
+        record with no entry, because that is exactly the state §3b's invariant
+        reads as an incomplete handoff and reconciliation would re-offer forever.
+        The refusal does **not** refund the budget unit ADR-0130 §5 spent when the
+        disposition was recorded, and no lane may make it do so.
+
+        Args:
+            candidate: The candidate whose disposition ADR-0130 §5 ruled
+                ``INTERRUPT``. Its ``candidate_key`` is the entry's key and this
+                seam supplies none.
+
+        Returns:
+            Which of §3's four outcomes the offer reached.
+
+        Raises:
+            NotificationOutboxError: If the durable store cannot commit. **No
+                custody transfers**: the candidate is still the caller's, nothing
+                was enqueued, and the record stays actionable for a retry or for
+                the next reconciliation.
+        """
+        ...
+
+
+@runtime_checkable
 class NotificationStore(Protocol):
     """The durable home of held notifications and the user's standing settings.
 
@@ -5463,6 +5574,98 @@ class AssistantEngine(Protocol):
             ValueError: If two rows name the same notification class, or a quiet
                 window carries a timezone or has no readable extent.
             NotificationStoreError: If writing the store failed.
+        """
+        ...
+
+    # --- the delivery surface (ADR-0131 §1, §4) ---------------------------
+
+    async def next_notification(
+        self, *, acknowledging: Identifier | None = None, budget: timedelta
+    ) -> NotificationDelivery | None:
+        """Wait up to ``budget`` for a notification, and acknowledge the last one.
+
+        **The one method by which a notification crosses the wire** (ADR-0131 §1).
+        A disposed notification reaches a device only as the result payload of a
+        request that device sent: the device asks "have you anything for me, and I
+        will wait up to this long", and the hub answers with a notification the
+        moment it has one, or with nothing when the device's patience runs out.
+        That is a long poll, and it is the shape that costs no ratified clause —
+        ADR-0094 §2's direction rule is satisfied because the device establishes
+        the connection, ADR-0084 §3's serial rule because a poll is one request
+        frame and one result frame, and ADR-0124 §1's accountability bullet
+        because there is still no path by which the hub transmits something nobody
+        asked for.
+
+        **A poll owns its connection for that connection's whole life** (§2). Over
+        the wire, a client that has a poll outstanding sends no other request on
+        that connection, and one wanting an ordinary session while polling opens a
+        second. That is not a nicety: ADR-0084 §3 makes a second request while one
+        is outstanding a protocol violation that closes the connection, so a
+        shared connection does not degrade under load — it is simply broken, on
+        the first turn the owner takes while a poll is in flight. The hub enforces
+        it in both directions, by closing, and the rule is the **transport's**
+        rather than this method's: it turns on a connection identity this
+        signature deliberately does not have, which is why it is not a declared
+        failure here. An in-process engine has no connections and could never
+        raise such an error, and the same declared contract meaning two different
+        things on the two sides of the wire is exactly what ADR-0084 §5 promoted
+        this façade to a Protocol to prevent.
+
+        **No argument carries a device identity and no lane may add one** (§4).
+        Where ADR-0131's rules are per-device the identity is the one ADR-0124 §4
+        established at admission, held per connection by the hub's listener, and
+        never read from a payload — which ADR-0124 §4 forbids in terms. The rules
+        that live *here* need no identity: "an entry is offered to one device at a
+        time" is delivered by the **lease**, and the acknowledgement is honoured
+        because ``delivery_id`` is a capability that went to exactly one device.
+
+        **Selecting an entry, minting its ``delivery_id`` and starting its lease
+        are one indivisible step** (§2a), and nothing about the lease depends on
+        the transport. There is no state in which an entry is chosen for a poll
+        and not yet leased. A caller that goes away after that step leaves the
+        lease standing, and the entry returns to the outbox when it expires —
+        which is §3's at-least-once case reached one step earlier.
+
+        **A staged delivery cannot be recalled** (§3a). Once this has returned a
+        delivery, those bytes may reach the device whatever happens afterwards —
+        expiry, deletion, withdrawal, dismissal or eviction — and no lane may add
+        an operation that unsends one. What a departure guarantees is that no
+        *later* poll selects the entry.
+
+        Args:
+            acknowledging: The ``delivery_id`` this caller is confirming, or
+                ``None``. It retires the entry **only** where it is that entry's
+                current outstanding delivery; anything else — an unknown
+                identifier, a retired entry, or a delivery the entry has since
+                superseded — is accepted and does nothing. That idempotent no-op
+                is what lets a client reconnect after any failure and acknowledge
+                blindly rather than reason about what the hub remembers.
+            budget: How long the hub may hold this request before answering with
+                nothing. Honoured over the closed range from zero to
+                ``hub_max_notification_budget``; **zero is an immediate poll**,
+                answered at once with whatever is available, which may be nothing.
+
+        Returns:
+            The notification to show and the token that retires it, or ``None``
+            where the budget elapsed with nothing available.
+
+        Raises:
+            NotificationBudgetError: If ``budget`` is negative or above
+                ``hub_max_notification_budget``. The request then has **no effect
+                on the outbox**: arguments are validated before the
+                acknowledgement is applied, before any entry is selected and
+                before any other outbox state changes, so a refused request
+                retires nothing, leases nothing and mints nothing (§4). Without
+                that ordering a device sending a valid ``acknowledging`` with an
+                invalid ``budget`` could have its notification permanently retired
+                by a call that reported failure.
+            NotificationOutboxError: If applying ``acknowledging`` could not
+                commit its dismissal, or the outbox cannot be read or written.
+                Nothing is retired then and the same value may be sent again.
+            OversizedValueError: If the result exceeds ADR-0085 §8's contract
+                limit. Unreachable in a conforming deployment — §4's 256-byte
+                delivery reserve is what makes it so — and declared because
+                ADR-0085 §9 requires every method to declare it.
         """
         ...
 

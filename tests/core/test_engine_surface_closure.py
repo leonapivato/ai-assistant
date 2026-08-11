@@ -53,7 +53,7 @@ from ai_assistant.core.protocols import AssistantEngine
 #: needs ``core.types``' namespace handed in explicitly.
 _NAMESPACE: Final = {**vars(core_types), **vars(protocols_module)}
 
-#: The thirty-three the corpus has promoted. Twenty-four are ADR-0085 §5's own walk:
+#: The thirty-four the corpus has promoted. Twenty-four are ADR-0085 §5's own walk:
 #: thirteen from ``engine.py`` (of which ``BeliefSummary`` is new, §4a), six from
 #: ``questions.py``, one from ``runner.py``, one from ``loop.py``, two from
 #: ``observation.py`` and one from ``conversations.py``. The twenty-fifth is
@@ -65,6 +65,17 @@ _NAMESPACE: Final = {**vars(core_types), **vars(protocols_module)}
 #: ``AssistantEngine`` members — "These are contract surface, because
 #: ``AssistantEngine`` is a Protocol in ``core/protocols.py``" — so the same walk
 #: that caught ``GrantableSource`` is what makes them checkable rather than asserted.
+#:
+#: The thirty-fourth is ADR-0131 §4's ``NotificationDelivery``, which
+#: ``next_notification`` returns: the wrapper that pairs one delivery attempt's
+#: identifier with the candidate ADR-0130 already promoted. Its own §4 declares the
+#: model field by field for the reason ADR-0085 §3 spells out every signature —
+#: "this block is what an implementation is generated from" — and it nests
+#: ``NotificationCandidate``, so the walk terminates in types already here.
+#: ``NotificationEnqueue`` is deliberately **not** among them: ADR-0131 §3b puts it
+#: on ``NotificationOutbox``, which §3b rules "is **not** on ``AssistantEngine`` and
+#: nothing it carries crosses the wire", so it is `core` surface that this walk is
+#: right not to reach.
 #:
 #: ``SourceGrant`` and ``GrantScope`` are **not** here and that is not an omission:
 #: they predate this block (ADR-0097 §2) and are ``core`` leaves the walk terminates
@@ -98,6 +109,7 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "GrantableSource",
         "HeldNotification",
         "NotificationCandidate",
+        "NotificationDelivery",
         "NotificationCondition",
         "NotificationDispositionKind",
         "NotificationPreferences",
@@ -261,7 +273,8 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     promoted surface is what the contract ADRs put on it and nothing else:
     ADR-0085 §1's fifteen, plus ADR-0102 §1's four, plus ADR-0130 §9's five —
     a read of the held notifications, a dismissal, a per-notification delete, and
-    a read and a write of the standing preferences. **Reconsideration is not among
+    a read and a write of the standing preferences — plus ADR-0131 §4's one, the
+    long poll a notification travels on. **Reconsideration is not among
     them and may not become one**: ADR-0130 §5 puts it on the concrete
     ``orchestration`` engine, where ADR-0083 §8 puts a maintenance surface, and
     states that "no client asks for it and no interface adapter may drive it".
@@ -273,7 +286,7 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     check, since a method nobody bound to the shared contract is a method no
     implementation is held to.
     """
-    assert len(_method_names()) == 24
+    assert len(_method_names()) == 25
 
 
 def test_the_surface_and_the_protocol_version_moved_together() -> None:
@@ -283,7 +296,8 @@ def test_the_surface_and_the_protocol_version_moved_together() -> None:
     prose is explicit that this is not an oversight to be forgiven: "adding a
     method bumps… A sixteenth method on the promoted surface is a request an
     older hub answers with a failure the client did not ask for." ADR-0130 §9's
-    five took the surface to twenty-four and the version to 3.
+    five took the surface to twenty-four and the version to 3; ADR-0131 §4's
+    ``next_notification`` takes it to twenty-five and the version to 4.
 
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
@@ -293,7 +307,7 @@ def test_the_surface_and_the_protocol_version_moved_together() -> None:
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (24, 3), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (25, 4), (
         "the promoted method set and the protocol version move together "
         "(ADR-0124 §9); bump one and this pin makes you consider the other"
     )

@@ -857,6 +857,13 @@ def test_every_integer_setting_is_discovered() -> None:
         "hub_max_frame_bytes",
         "hub_max_connections",
         "hub_max_pending_handshakes",
+        # ADR-0131 §5a's three integer figures. Acknowledged here for the reason
+        # every hub ceiling is: none of them is nullable, because "a hub serving
+        # delivery with no lease, no outbox bound, no budget bound or no connection
+        # sub-bound has the failure the clause naming it exists to prevent".
+        "hub_notification_outbox_entries",
+        "hub_notification_outbox_bytes",
+        "hub_max_delivery_connections",
         # ADR-0124 §2's remote listener port. Acknowledged here for the same reason
         # and with the same ``bool`` argument: ``hub_remote_port=True`` would have
         # the hub bind port 1 — privileged, and not the port the owner configured —
@@ -1078,6 +1085,9 @@ def test_every_duration_setting_is_discovered() -> None:
     """The same tripwire for the durations, nullable and not alike."""
     assert set(_DURATION_FIELDS) == {
         "confirmation_ttl",
+        # ADR-0131 §5a's two durations, on the same argument as its integers.
+        "hub_notification_lease",
+        "hub_max_notification_budget",
         "episode_retention",
         "conversation_tombstone_grace",
         "deferral_ttl",
@@ -1432,7 +1442,11 @@ def test_a_frame_size_the_prefix_cannot_express_is_refused() -> None:
     """
     with pytest.raises(ValidationError):
         Settings(hub_max_frame_bytes=5 * 1024**3)
-    assert Settings(hub_max_frame_bytes=2**32 - 1).hub_max_frame_bytes == 2**32 - 1
+    # The outbox bound travels with the frame ceiling, ADR-0131 §5a refusing it
+    # below one frame — an outbox that could hold no entry a device could receive
+    # would evict every notification the instant it arrived.
+    widest = Settings(hub_max_frame_bytes=2**32 - 1, hub_notification_outbox_bytes=2**32 - 1)
+    assert widest.hub_max_frame_bytes == 2**32 - 1
 
 
 def test_the_floor_and_the_ceiling_admit_what_they_must() -> None:
@@ -1468,8 +1482,16 @@ def test_a_pending_ceiling_above_the_total_is_refused() -> None:
     peer can accumulate.
     """
     with pytest.raises(ValidationError, match="can never bind"):
-        Settings(hub_max_connections=4, hub_max_pending_handshakes=5)
-    assert Settings(hub_max_connections=4, hub_max_pending_handshakes=4).hub_max_connections == 4
+        Settings(
+            hub_max_connections=4, hub_max_pending_handshakes=5, hub_max_delivery_connections=2
+        )
+    # The delivery sub-bound travels with them: ADR-0131 §5a refuses it unless it
+    # is *strictly* below `hub_max_connections`, so a ceiling of 4 cannot keep the
+    # shipped 8 — the same relation this case is about, one clause along.
+    coherent = Settings(
+        hub_max_connections=4, hub_max_pending_handshakes=4, hub_max_delivery_connections=3
+    )
+    assert coherent.hub_max_connections == 4
 
 
 def test_load_settings_reports_a_bad_transport_setting_as_a_configuration_error(

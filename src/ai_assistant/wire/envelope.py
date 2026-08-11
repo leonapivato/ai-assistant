@@ -66,7 +66,19 @@ from ai_assistant.wire.errors import (
 #: exactly the frame-one-peer-may-send-that-the-other-refuses test, and exactly
 #: the half-finished upgrade §3 wants legible at the handshake rather than
 #: arriving as an unexplained error inside a call.
-PROTOCOL_VERSION: Final[int] = 3
+#:
+#: **4 since ADR-0131 §4**, which adds ``next_notification`` — the long poll a
+#: notification travels on, and the twenty-fifth method on the promoted surface.
+#: The same clause of ADR-0124 §9 decides it and ADR-0131 §4 records the
+#: consequence rather than weighing it: "Landing this seam bumps
+#: ``PROTOCOL_VERSION``, and the obligation falls on the change that adds the
+#: method, in that same change." Nothing about this seam offers a way out — a poll
+#: from a new client to an old hub is refused by ``_dispatch`` as a method "this
+#: build's engine surface does not declare", which closes the connection with no
+#: reply, so the operator sees a hub that hangs up rather than §3's message naming
+#: both versions. That is the half-finished upgrade this constant exists to make
+#: legible, and it is why the bump is not optional.
+PROTOCOL_VERSION: Final[int] = 4
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

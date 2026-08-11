@@ -125,6 +125,84 @@ class ConnectionBudget:
         self._serving -= 1
 
 
+class DeliverySlots:
+    """The hub's one delivery registry: a slot per device and a global count.
+
+    Implements :class:`~ai_assistant.wire.server.DeliveryRegistry`. **One per hub,
+    constructed once and shared by every listener**, exactly as
+    :class:`ConnectionBudget` already is and for the same reason ADR-0124 §7 gave
+    for that one — "a second listener is the natural place to double a budget by
+    accident". ADR-0131 §3 restates it against this registry with the arithmetic:
+    give each listener its own and "eight loopback polls and eight remote polls
+    each pass a local ``hub_max_delivery_connections`` of 8, yielding sixteen
+    delivery connections: §5's hub-wide bound broken and the ordinary-session
+    reservation it exists for gone".
+
+    **The counting is synchronous and holds no lock**, on
+    :class:`ConnectionBudget`'s own argument: the loop is single threaded, so a
+    check followed by a claim inside one step is already indivisible, and a lock
+    would add the suspension point this object exists to avoid. ADR-0131 §5
+    requires the per-device check, the global check and both claims to be one step
+    — "a bound checked separately is a bound that can be passed twice" — and
+    :meth:`claim` is that one step.
+
+    A device key of ``None`` is the loopback listener's, and it is an identity
+    rather than a missing one: ADR-0131 §4 rules that "all loopback connections
+    count as a single local device", which ADR-0084 §1's ``0600`` bit makes a fact
+    rather than an approximation.
+    """
+
+    def __init__(self, *, max_delivery_connections: int) -> None:
+        """Hold the deployment's sub-bound.
+
+        Args:
+            max_delivery_connections: ``hub_max_delivery_connections``. Already
+                refused at load unless strictly below ``hub_max_connections``
+                (ADR-0131 §5a), so a slot for an ordinary session always remains.
+        """
+        self.max_delivery_connections = max_delivery_connections
+        self._devices: set[str | None] = set()
+
+    @property
+    def polling(self) -> int:
+        """How many delivery connections the hub holds, across every listener."""
+        return len(self._devices)
+
+    def claim(self, device: str | None) -> bool:
+        """Take the device's slot and one unit of capacity, or neither (§2, §5).
+
+        Args:
+            device: The connection's identity, or ``None`` for loopback.
+
+        Returns:
+            Whether both claims were obtained. ``False`` means this connection
+            closes and the one already polling is untouched — the direction that
+            cannot be used as a weapon, since newest-poll-wins would let any peer
+            evict the owner's notifier and have it look like a transport failure.
+        """
+        if device in self._devices:
+            return False
+        if len(self._devices) >= self.max_delivery_connections:
+            return False
+        self._devices.add(device)
+        return True
+
+    def release(self, device: str | None) -> None:
+        """Give back one connection's slot and its capacity unit, in one step.
+
+        Both or neither (ADR-0131 §2a): §5's global claim was added beside §2's
+        per-device one with no release of its own, so an implementation could hold
+        eight capacity claims after eight clients had disconnected and close every
+        later poll while no delivery connection was live at all — the delivery
+        channel dead with the hub reporting nothing wrong. Holding one set keyed by
+        device makes the two releases the same act by construction.
+
+        Args:
+            device: The identity the claim was taken under.
+        """
+        self._devices.discard(device)
+
+
 class Listener:
     """The hub's door: one Unix socket, and the connections it is serving.
 
@@ -139,6 +217,7 @@ class Listener:
         *,
         data_dir: Path,
         budget: ConnectionBudget | None = None,
+        delivery: DeliverySlots | None = None,
     ) -> None:
         """Prepare a listener; nothing is bound until :meth:`start`.
 
@@ -149,12 +228,21 @@ class Listener:
             budget: The hub's shared ceilings (ADR-0124 §7). Defaulted from
                 ``settings`` for a hub that binds this listener alone, so a caller
                 that has no second listener does not have to construct one.
+            delivery: The hub's one delivery registry (ADR-0131 §3), defaulted from
+                ``settings`` on the same argument. A hub binding more than one
+                listener passes the same object to each: two listeners each
+                honouring ``hub_max_delivery_connections`` independently would mean
+                the hub honours neither, which is ADR-0124 §7's warning restated by
+                §3 against this registry.
         """
         self._engine = engine
         self._settings = settings
         self.path = socket_path(data_dir)
         self._server: asyncio.Server | None = None
         self._connections: set[asyncio.Task[None]] = set()
+        self._delivery = delivery or DeliverySlots(
+            max_delivery_connections=settings.hub_max_delivery_connections
+        )
         self._budget = budget or ConnectionBudget(
             max_connections=settings.hub_max_connections,
             max_pending_handshakes=settings.hub_max_pending_handshakes,
@@ -257,6 +345,7 @@ class Listener:
                         build=self._build,
                     ),
                     on_handshake=settled,
+                    delivery=self._delivery,
                 )
         finally:
             if task is not None:

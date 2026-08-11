@@ -78,7 +78,7 @@ from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.service.overlay import OverlayIdentityUnavailableError, local_agent
 from ai_assistant.service.remote import RemoteListener
 from ai_assistant.service.scheduler import Scheduler, jobs_for
-from ai_assistant.service.transport import ConnectionBudget, Listener
+from ai_assistant.service.transport import ConnectionBudget, DeliverySlots, Listener
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -549,7 +549,14 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
             max_connections=settings.hub_max_connections,
             max_pending_handshakes=settings.hub_max_pending_handshakes,
         )
-        listener = Listener(engine, settings, data_dir=data_dir, budget=budget)
+        # And one delivery registry, on exactly the same argument one layer up
+        # (ADR-0131 §3): "There is **one** connection registry per hub, constructed
+        # once and shared by every listener, exactly as `ConnectionBudget` already
+        # is. No listener holds a registry of its own, and no lane may give the
+        # loopback and remote listeners separate delivery slots or separate
+        # capacity counts."
+        delivery = DeliverySlots(max_delivery_connections=settings.hub_max_delivery_connections)
+        listener = Listener(engine, settings, data_dir=data_dir, budget=budget, delivery=delivery)
         remote: _Remote | None = None
         try:
             # ADR-0119 §9's configuration stamp, "after the stores are open and
@@ -607,7 +614,9 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
             # whose overlay agent cannot confirm its bind address never accepts a
             # connection at all — ADR-0124 §2's "refused at load time rather than
             # bound", at the latest point this deployment can still refuse.
-            remote = await _build_remote(engine, settings, data_dir=data_dir, budget=budget)
+            remote = await _build_remote(
+                engine, settings, data_dir=data_dir, budget=budget, delivery=delivery
+            )
             # **Every door binds before any door accepts** (ADR-0083 §14.2). The two
             # remote sockets are bound first and left not-serving, then the loopback
             # socket binds and accepts, then the remote pair begins serving. What
@@ -671,6 +680,7 @@ async def _build_remote(
     *,
     data_dir: Path,
     budget: ConnectionBudget,
+    delivery: DeliverySlots,
 ) -> _Remote | None:
     """Build the remote listener's apparatus, or nothing where it is not configured.
 
@@ -686,6 +696,8 @@ async def _build_remote(
         settings: The deployment's configuration.
         data_dir: The directory the hub owns.
         budget: The hub's shared ceilings (ADR-0124 §7).
+        delivery: The hub's one delivery registry (ADR-0131 §3), shared with the
+            loopback listener for the same reason the budget is.
 
     Returns:
         The apparatus, or ``None`` on a hub with no remote-listener configuration.
@@ -718,7 +730,9 @@ async def _build_remote(
     return _Remote(
         store=store,
         registry=registry,
-        listener=RemoteListener(engine, settings, registry=registry, agent=agent, budget=budget),
+        listener=RemoteListener(
+            engine, settings, registry=registry, agent=agent, budget=budget, delivery=delivery
+        ),
         admin=AdminListener(registry, data_dir=data_dir),
     )
 

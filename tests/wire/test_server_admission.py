@@ -76,6 +76,10 @@ class _ScriptedAdmission:
         """Keep what the wire asked to be recorded."""
         self.refusals.append(code)
 
+    def device(self) -> str:
+        """The identity ADR-0124 §4 established, which §2 keys a slot on."""
+        return "a-device"
+
 
 class _GatedEngine(FakeAssistantEngine):
     """An engine whose ``beliefs`` waits until the test lets it finish.

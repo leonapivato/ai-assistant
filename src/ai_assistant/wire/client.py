@@ -96,6 +96,7 @@ if TYPE_CHECKING:
         LearnOutcome,
         MemoryKind,
         NonBlankEncodableText,
+        NotificationDelivery,
         NotificationPreferences,
         ObservationReport,
         Question,
@@ -460,6 +461,45 @@ class HubClient:
             The settings now in force, as the hub holds them.
         """
         return await self._call("set_notification_preferences", preferences=preferences)  # type: ignore[no-any-return]
+
+    async def next_notification(
+        self, *, acknowledging: Identifier | None = None, budget: timedelta
+    ) -> NotificationDelivery | None:
+        """Park on the hub until a notification is due, or ``budget`` elapses.
+
+        ADR-0131 §1's long poll, from the device's side. **This client already
+        satisfies §2's isolation rule by construction**: :meth:`_call` opens a
+        connection of its own for every call and hangs up in its ``finally``, so a
+        poll never shares a connection with an ordinary request and a caller
+        wanting a session while polling gets the second connection §2 requires
+        without asking for one. A client that pooled connections would have to
+        earn that back with a rule; this one cannot break it.
+
+        **Nothing about the read deadline changes for a parked poll**, and that is
+        also not new: :meth:`_read` already passes ``idle=None`` while a request is
+        outstanding, because the hub is not idle while it is working. What
+        ``hub_read_timeout`` still bounds is a *stalled frame* — bytes that started
+        and stopped — which is the fault it was written for and is orthogonal to an
+        answer that is legitimately late.
+
+        Args:
+            acknowledging: The ``delivery_id`` this device is confirming, or
+                ``None``. Naming a superseded or unknown one is accepted and does
+                nothing, so a device that reconnected may acknowledge blindly.
+            budget: How long the hub may hold the request. Zero is an immediate
+                poll. A value outside the hub's range comes back as
+                :class:`~ai_assistant.core.errors.NotificationBudgetError`,
+                reconstructed here from the hub's own refusal rather than guessed
+                at locally — the ceiling is the hub's figure and this client is not
+                told it.
+
+        Returns:
+            The notification to show and the token that retires it, or ``None``
+            where the budget elapsed with nothing waiting.
+        """
+        return await self._call(  # type: ignore[no-any-return]
+            "next_notification", acknowledging=acknowledging, budget=budget
+        )
 
     async def recent_conversations(
         self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0

@@ -1214,6 +1214,10 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             "grants.db",
             "memory.db",
             "notifications.db",
+            # ADR-0131 §3's delivery outbox, the ninth. Tier 1 for the notification
+            # store's reason exactly: an entry holds the same candidate, so it holds
+            # the same free text a producer wrote to be shown to a person.
+            "outbox.db",
             "plans.db",
             "traces.db",
         ]
@@ -1221,6 +1225,8 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
         # ADR-0004 §4 reaches the eighth exactly as it reaches the sixth: a
         # candidate carries free text a producer wrote to be shown to a person.
         assert stat.S_IMODE((tmp_path / "notifications.db").stat().st_mode) == 0o600
+        # And the ninth on the same clause (ADR-0131 §3, ADR-0004 §4).
+        assert stat.S_IMODE((tmp_path / "outbox.db").stat().st_mode) == 0o600
     finally:
         await engine.aclose()
 
