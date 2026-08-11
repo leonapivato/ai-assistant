@@ -1019,6 +1019,39 @@ found it on the forty-eighth round.
 > does not, the next reconciliation offers it. Neither is silent: the failure reaches
 > the producer as §3b's declared error.
 
+> **Normative.** An `offer` returning a **terminal refusal** — `TOO_LARGE` or
+> `KEY_COLLISION` — **dismisses the record**, which ends its actionability and frees
+> ADR-0130 §7's cap, and records the refusal and its outcome in the hub's log. No
+> refusal leaves an actionable record with no entry, so none is retried by
+> reconciliation.
+
+> **Normative.** A terminal refusal does **not** refund the budget unit ADR-0130 §5
+> spent when the disposition was recorded, and no lane may make it do so.
+
+**Every outcome of `offer` has to terminate, and two of them did not.** A candidate
+can be ruled actionable `INTERRUPT`, spend its unit, and then exceed §4's delivery
+ceiling — an outcome the policy path cannot see, since the ceiling is the seam's (§4).
+Returning `TOO_LARGE` and doing nothing else left the record actionable with no entry,
+which is exactly the state §3b's invariant reads as an incomplete handoff: every
+reconciliation would offer the same permanently-undeliverable candidate again, until
+it expired, while a polling device received nothing. Adversarial review found it on the
+fifty-seventh round. `KEY_COLLISION` has the same shape and takes the same answer.
+
+**Dismissing is the terminal outcome that fits, because the record's own vocabulary
+already has one.** A dismissal ends actionability and leaves the record readable
+(ADR-0130 §9), which is exactly what an undeliverable notification wants: the owner
+can still see it in the held-notification surface, the cap is freed, and nothing
+retries it. Inventing a new disposition would be reaching into ADR-0130's ground; a
+dismissal is an operation it already provides for a notification that is done.
+
+**Not refunding the unit is deliberate and is stated because the alternative is
+forbidden.** ADR-0130 §5 rules that "no spent unit is refunded except by an act that
+says so" and that a delivery seam "may not refund a unit implicitly on a failed
+attempt". A terminal refusal is such an attempt. So an undeliverable notification costs
+the owner one unit of that hour's budget, which is a small and visible cost, and the
+log entry is what makes it visible; the honest alternative would be a producer that
+does not build notifications too large to send.
+
 **Without that clause an implementation could be conforming and never deliver
 anything until a restart.** ADR-0130 rules an `INTERRUPT` a notification that has
 earned contact now, and this section had specified only the recovery path — so a hub
