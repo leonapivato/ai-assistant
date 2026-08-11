@@ -1066,6 +1066,10 @@ class FakeNotificationOutbox:
         #: Set by an ``offer``, so a parked poll wakes on an enqueue instead of
         #: waiting out its whole budget. In-process only, and never load-bearing.
         self._arrivals = asyncio.Event()
+        #: Whether this instance has voided the leases it inherited. ADR-0131 §3
+        #: authorises voiding for a restart, and a second reconciliation on a live
+        #: outbox is not one.
+        self._leases_voided = False
         self._sequence = count(1)
         self._deliveries = count(1)
         self._lock = asyncio.Lock()
@@ -1244,9 +1248,15 @@ class FakeNotificationOutbox:
         async with self._lock:
             await asyncio.sleep(0)
             now = self._now()
+            voiding = not self._leases_voided
+            self._leases_voided = True
             for entry in list(self._entries.values()):
-                entry.delivery_id = None
-                entry.leased_until = None
+                if voiding:
+                    # Once per instance: a live lease belongs to the process that
+                    # granted it, and taking it would put one entry in two devices'
+                    # hands — the thing §3 forbids outright.
+                    entry.delivery_id = None
+                    entry.leased_until = None
                 if self._is_departing(entry, now):
                     await self._dismiss(entry.record_id)
                     self._entries.pop(entry.candidate.candidate_key, None)

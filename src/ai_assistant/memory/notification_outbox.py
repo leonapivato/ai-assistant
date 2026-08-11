@@ -360,6 +360,12 @@ class SqliteNotificationOutbox:
         #: and never load-bearing: a poll that misses it falls back on its own
         #: deadline, so correctness never rests on a notification nobody received.
         self._arrivals = asyncio.Event()
+        #: Whether this process has already voided the leases it inherited.
+        #: ADR-0131 §3 authorises voiding for a *restart* — "no lease survives the
+        #: process that granted it" — and this instance's life is this process's
+        #: hold on the outbox, so the first reconciliation is the restart and
+        #: every later one is not.
+        self._leases_voided = False
         self._conn = self._setup()
 
     # --- opening -------------------------------------------------------------
@@ -1129,16 +1135,33 @@ class SqliteNotificationOutbox:
         ``candidate_key``, and it requires no state of its own — both directions are
         read off the two stores as they stand.
 
-        A restart also voids every lease here, which is "the only answer that is
-        both correct and free" (§3): a lease is meaningful only while the connection
-        that took the delivery exists, and no connection survives a restart, so an
-        entry still leased at startup is one whose holder is definitionally gone.
+        **A restart voids every lease, and only a restart does.** §3 calls it "the
+        only answer that is both correct and free": a lease is meaningful only while
+        the connection that took the delivery exists, and no connection survives a
+        restart, so an entry still leased at startup is one whose holder is
+        definitionally gone. That argument is about the *previous* process, so the
+        voiding happens once per instance — a second call on a live hub would strip
+        a lease from the device currently holding it and let another claim the same
+        entry, which is exactly the "one entry, two devices" §3 forbids. Everything
+        else here is repeatable, which is what :meth:`Engine.start`'s promise that
+        it is safe to call more than once actually requires.
 
         Raises:
             NotificationOutboxError: If either store cannot be read or written.
         """
         async with self._lock:
-            await _run_to_completion(self._void_leases_sync)
+            # **Once per process, and a second `start()` is not a restart.**
+            # ADR-0131 §3 authorises voiding because "an entry still leased at
+            # startup is one whose holder is definitionally gone" — true of a lease
+            # the *previous* process granted, and false of one this process granted
+            # a moment ago. `Engine.start` promises it is safe to call more than
+            # once, so an unconditional void would take a live lease from the device
+            # holding it and let a second device claim the same entry: one entry
+            # outstanding to two devices, which §3 forbids outright. The rest of the
+            # reconciliation stays repeatable, which is what that promise needs.
+            if not self._leases_voided:
+                await _run_to_completion(self._void_leases_sync)
+                self._leases_voided = True
             await self._settle_departing()
             records = await self._held_records()
             now = self._now()

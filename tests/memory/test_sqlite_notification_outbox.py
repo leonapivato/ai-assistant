@@ -814,3 +814,55 @@ class TestCleanupNeverTakesAReplacement:
 
         delivery = await outbox.claim()
         assert delivery is not None
+
+
+class TestVoidingLeasesIsARestartAndNotARepeat:
+    """ADR-0131 §3: "no lease survives the process that granted it" — that one."""
+
+    async def test_a_second_reconciliation_leaves_a_live_lease_alone(self, tmp_path: Path) -> None:
+        """`Engine.start` promises it is safe to call more than once.
+
+        An unconditional void would take a lease from the device currently holding
+        it and let another claim the same entry — one entry outstanding to two
+        devices, which §3 forbids outright. The voiding argument is about the
+        *previous* process: "an entry still leased at startup is one whose holder is
+        definitionally gone" is true of an inherited lease and false of one this
+        process granted a moment ago.
+        """
+        outbox = build(tmp_path / "outbox.db")
+        await outbox.reconcile()
+        await outbox.offer(candidate(key="k1"))
+        held = await outbox.claim()
+        assert held is not None
+
+        await outbox.reconcile()
+
+        assert await outbox.claim() is None
+        # And the device that holds it can still retire it.
+        await outbox.acknowledge(held.delivery_id)
+        assert await outbox.offer(candidate(key="k1")) is NotificationEnqueue.ENQUEUED
+
+    async def test_a_restart_still_voids_an_inherited_lease(self, tmp_path: Path) -> None:
+        """The discriminating half: a new process does void what it inherited."""
+        path = tmp_path / "outbox.db"
+        first = build(path)
+        await first.offer(candidate(key="k1"))
+        assert await first.claim() is not None
+        first.close()
+
+        reopened = build(path)
+        await reopened.reconcile()
+
+        assert await reopened.claim() is not None
+
+    async def test_the_rest_of_the_reconciliation_stays_repeatable(self, tmp_path: Path) -> None:
+        """Only the voiding is once; departing entries are swept every time."""
+        clock = MovingClock()
+        outbox = build(tmp_path / "outbox.db", now=clock)
+        await outbox.reconcile()
+        await outbox.offer(candidate(key="k1", expires_at=NOW + timedelta(minutes=5)))
+        clock.advance(timedelta(minutes=6))
+
+        await outbox.reconcile()
+
+        assert await outbox.claim() is None
