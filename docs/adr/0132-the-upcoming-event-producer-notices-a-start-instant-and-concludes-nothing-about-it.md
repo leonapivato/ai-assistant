@@ -222,22 +222,54 @@ reader; this clause covers the rest of the shapes that reach the same place.
 
 ### 4. The lead window, and the two figures
 
+> **Normative.** The instant a candidate was noticed is the reading's own
+> `read_at` — the acquisition instant the reader stamps once — and never a later
+> clock reading taken when the candidate was constructed or offered.
+
 > **Normative.** The producer notices an occurrence whose start lies in the
-> half-open interval from the read instant, exclusive, to the read instant plus
-> the lead window, exclusive.
+> half-open interval from that same instant, exclusive, to that instant plus the
+> lead window, exclusive. Selection and ADR-0130 §2's validation are evaluated
+> against one instant, not two.
 
-The lower edge is exclusive because ADR-0130 §2 refuses at validation a candidate
-whose expiry is not later than the instant it was noticed — "a candidate that has
-already perished is not a proposal, it is a defect" — and §5 below makes the
-expiry the start. An occurrence starting exactly at the read instant would
-therefore be a defect rather than a proposal, so it is not noticed. The upper edge
-is exclusive on ADR-0093 §7b's half-open convention, and the reader's own window
-is `[window_start, window_end)` for the same reason. The predicate at the lower
-edge is the one `CalendarReader._facet` already applies for `next_starts_at`.
+**The two clauses are one rule, and separating them is how the defect gets in.**
+ADR-0130 §2 refuses at validation a candidate whose expiry is not later than the
+instant it was noticed — "a candidate that has already perished is not a proposal,
+it is a defect" — and §5 below makes the expiry the start. Select against `read_at`
+but stamp the candidate with a clock read after parsing, and an occurrence
+starting in between is selected by this section and refused by that one: the
+producer offers a defect, on a schedule, for a window whose width is its own
+parse time. Anchoring both on `read_at` closes it by construction rather than by a
+second guard. It is also the honest reading of "noticed": the producer noticed the
+occurrence in bytes that came into our hands at `read_at`, and ADR-0093 §7b fixes
+that as the single anchor for exactly this reason — "Acquisition is a single
+point, so nothing drifts". The reader already stamps its facet and every proposal
+with it, so the candidate agrees with the reading it came from.
 
-> **Normative.** The lead window and the job's interval are `Settings` fields on
-> ADR-0083 §7's convention: a `timedelta`, finite and strictly positive, refused
-> at load otherwise, with "disabled" spelled `None` on the interval and never `0`.
+The lower edge is exclusive so that an occurrence starting exactly at `read_at`
+is not noticed, which is the same refusal seen from the selecting side. The upper
+edge is exclusive on ADR-0093 §7b's half-open convention, and the reader's own
+window is `[window_start, window_end)` for the same reason. The predicate at the
+lower edge is the one `CalendarReader._facet` already applies for
+`next_starts_at`.
+
+> **Normative.** The producer's job interval and its lead window are **two new
+> `Settings` fields of its own**, in the shape `calendar_upcoming_interval` and
+> `calendar_upcoming_lead`, on ADR-0083 §7's convention: a `timedelta`, finite and
+> strictly positive, refused at load otherwise, with "disabled" spelled `None` on
+> the interval and never `0`.
+
+> **Normative.** Neither field is `calendar_reader_interval`, and neither is
+> derived from it. That field arms the ingestion job and nothing else; arming or
+> retuning one of these two changes ingestion's cadence in no way, and arming
+> ingestion arms no producer.
+
+**A shared interval would make §3's independence unbuildable**, which is the
+practical half of the same point ADR-0093 §3 makes about cadence: the two
+consumers "read at their own cadence", and an operator who cannot set one without
+setting the other has one cadence chosen for two jobs with different needs.
+Ingestion's is sized for how often beliefs should be refreshed; this one's is
+sized against the lead window by the rule below, and a figure good for one is
+routinely wrong for the other.
 
 > **Normative.** The interval defaults to `None`. The producer does not run until
 > an operator sets it.
@@ -259,10 +291,11 @@ invoked here cannot be satisfied elsewhere and ADR-0074 §9.3's reason: two
 conforming implementations with different figures notice different things while
 each believes it conforms.
 
-> **Normative.** A lead window not strictly greater than the job's interval is
-> refused at load, in the cross-field shape `calendar_reader_interval` and
-> `calendar_reader_path` already take. A lead window exceeding
-> `calendar_window_future` is refused at load on the same mechanism.
+> **Normative.** A lead window not strictly greater than this producer's own
+> interval is refused at load, in the cross-field shape the incoherent-state
+> refusal over `calendar_reader_interval` and `calendar_reader_path` already
+> takes. A lead window exceeding `calendar_window_future` is refused at load on
+> the same mechanism.
 
 **Both refusals exist because the misconfiguration is silent, and silence here is
 indistinguishable from working.** With ticks at `t`, `t+I`, … and a lead `L`, an
@@ -313,6 +346,43 @@ Both are ADR-0130 §8's guarantee spent rather than duplicated: a duplicate of a
 actionable record is dropped and writes nothing, so a re-offer is free and a
 partial pass is not a state to repair. §8 says so in terms — "A producer that
 re-notices the same fact on every tick is behaving as designed."
+
+> **Normative.** A candidate this producer offers carries **no record
+> references**. Its subject is an occurrence in a source this system does not own,
+> which is not a record this system holds, and the producer cites no identifier
+> for it.
+
+**Empty is a decision here rather than an omission, and the alternative is worse
+than nothing.** ADR-0130 §2 requires that "A reference is an identifier resolved
+through an existing ratified read", and this producer holds no identifier that
+meets that: the reader "mints its own id per record" (ADR-0093 §5, on ADR-0092
+§6's rule that an import proposes "at an id it mints, opaque to the source"), so
+the id on the proposal in the producer's hand is fresh on every read and, where
+ingestion is not running at all, names nothing in any store. Citing it would put a
+dangling identifier on a durable record and make a surface that tried to resolve
+it fail — the shape §2's clause exists to prevent, reached by obeying its letter.
+
+**And §2's rule is a prohibition on *containing*, not a duty to cite.** Its
+sentence is "A candidate references what it is about and does not contain it", and
+what it forbids is copying a record's content into the candidate; the summary and
+detail are named as "the only free text a candidate carries" precisely so that a
+candidate carries a *rendering* rather than a copy. This producer obeys both
+halves: it carries one sentence the user is shown, and it copies no record because
+there is no record to copy.
+
+**What is lost is smaller than it looks.** The explainability ADR-0130 claims in
+its Consequences is about the *disposition* — "Every disposition names the
+condition that produced it" — and that is untouched. "Why did you tell me that?"
+is answered by the summary, the producer's declared name and the reason the
+ruling recorded; "what is it about?" is answered by the sentence itself, which is
+the entry. A reference would add a hop to a belief that may not exist, and it
+would be a hop to a *different* record about the same entry rather than to the
+thing noticed.
+
+**A durable per-occurrence identifier is the thing that would change this**, and
+nothing in the corpus has one: it is #631's territory, where identity for an
+imported record is re-established by similarity rather than by a source key.
+§11 records that this ADR does not open it.
 
 ### 6. The candidate key: the producer's name, the sentence and the span
 
@@ -485,6 +555,11 @@ ADR neither needs the scheduler's durable cursor nor closes its deferral.
   narrow it: §3 reads the source, so refusing `NOTIFY` forecloses it completely.
   Closing the residual needs the provenance surfaces ADR-0097 §12 defers, and
   those are not this lane's.
+- **A durable identifier for a calendar occurrence.** §5 carries no record
+  reference because none exists to carry: #631 holds the identity question for an
+  imported record, and ADR-0092 §6 rules the minted id opaque to the source.
+  Giving an occurrence a stable identity would let a candidate cite the belief
+  about the same entry, and it would reach every import rather than this producer.
 - **Retracting a candidate whose occurrence moved or vanished.** §8 forbids
   noticing an absence, so a candidate about an entry the user has since deleted
   expires at the start instant it was offered with. Making that better needs a
