@@ -1054,11 +1054,15 @@ class FakeNotificationOutbox:
         """Whether a live lease holds this entry — half-open at the expiry."""
         return entry.leased_until is not None and now < entry.leased_until
 
-    async def _dismiss(self, record_id: str | None) -> None:
-        """Dismiss the ADR-0130 record an entry carried, where there is one."""
+    async def _dismiss(self, record_id: str | None) -> bool:
+        """Dismiss the ADR-0130 record an entry carried, where there is one.
+
+        Returns:
+            Whether an actionable record was dismissed by this call.
+        """
         if record_id is None or self._records is None:
-            return
-        await self._records.dismiss(record_id)
+            return False
+        return await self._records.dismiss(record_id)
 
     async def _resolve(self, candidate_key: str) -> str | None:
         """The actionable record this candidate belongs to, where one is readable."""
@@ -1194,9 +1198,14 @@ class FakeNotificationOutbox:
             if entry is None:
                 return False
             entry.departing = True
-            await self._dismiss(record_id)
+            # **The store's own answer, not "an entry was here"**, which is the
+            # parity the durable outbox keeps: a lingering entry whose record was
+            # already dismissed must not report that this call ended something. A
+            # fake answering `True` there would have consumers observe a different
+            # promoted engine contract from the shipped one.
+            dismissed = await self._dismiss(record_id)
             self._entries.pop(entry.candidate.candidate_key, None)
-            return True
+            return dismissed
 
     async def reconcile(self) -> None:
         """Make the outbox and the records agree, in both directions (§3b)."""

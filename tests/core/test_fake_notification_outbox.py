@@ -18,11 +18,20 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from notification_contract import candidate
+from notification_contract import CLASS, candidate
 from outbox_contract import NOW, NotificationOutboxContract
 
-from ai_assistant.core.types import NotificationEnqueue
-from ai_assistant.testing import FakeNotificationOutbox
+from ai_assistant.core.types import (
+    ClassReach,
+    NotificationEnqueue,
+    NotificationPreferences,
+    NotificationReach,
+)
+from ai_assistant.testing import (
+    FakeNotificationOutbox,
+    FakeNotificationPolicy,
+    FakeNotificationStore,
+)
 
 
 class MovingClock:
@@ -297,3 +306,45 @@ async def test_the_fakes_wait_returns_early_on_an_offer() -> None:
     woke, _ = await asyncio.gather(outbox.wait_for_arrival(timedelta(seconds=5)), enqueue())
 
     assert woke is True
+
+
+async def test_the_fakes_withdrawal_reports_the_stores_answer() -> None:
+    """Parity with the durable outbox on the already-dismissed path.
+
+    A lingering entry whose record is no longer actionable must not report that the
+    withdrawal ended something. Answering ``True`` there would have a consumer
+    tested against this fake observe a different promoted engine contract from the
+    one the shipped engine has — which is the one thing a canonical fake may not do.
+    """
+    records = FakeNotificationStore()
+    await records.set_preferences(
+        NotificationPreferences(
+            reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),)
+        )
+    )
+    subject = candidate(key="k1", expires_at=NOW + timedelta(hours=2))
+    ruled = await records.admit(subject, policy=FakeNotificationPolicy())
+    assert ruled.notification_id is not None
+    outbox = FakeNotificationOutbox(records=records, now=lambda: NOW)
+    await outbox.offer(subject)
+    # The owner dismisses the record directly, leaving the entry behind.
+    assert await records.dismiss(ruled.notification_id) is True
+
+    assert await outbox.withdraw(ruled.notification_id) is False
+
+
+async def test_the_fakes_withdrawal_reports_a_dismissal_it_performed() -> None:
+    """The discriminating half: an actionable record ended here is ``True``."""
+    records = FakeNotificationStore()
+    await records.set_preferences(
+        NotificationPreferences(
+            reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),)
+        )
+    )
+    subject = candidate(key="k1", expires_at=NOW + timedelta(hours=2))
+    ruled = await records.admit(subject, policy=FakeNotificationPolicy())
+    assert ruled.notification_id is not None
+    outbox = FakeNotificationOutbox(records=records, now=lambda: NOW)
+    await outbox.offer(subject)
+
+    assert await outbox.withdraw(ruled.notification_id) is True

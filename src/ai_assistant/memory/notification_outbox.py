@@ -107,6 +107,7 @@ _DELIVERY_COUNTER_CEILING = 10**63
 #: whatever an operator sets it to.
 _RECORD_PAGE = 200
 
+
 #: The per-entry cost of the fixed-width columns an implementation persists
 #: beside the candidate — the lease instant, the enqueue sequence, the departing
 #: flag and the byte figure itself, at eight bytes each. Counted because ADR-0131
@@ -580,6 +581,22 @@ class SqliteNotificationOutbox:
             outcome, victims, held_record = await _run_to_completion(
                 self._enqueue_sync, candidate, encoded, record_id, cost, now
             )
+            if outcome is None:
+                # One retry, after the departure has been finished dismissal-first.
+                # Bounded at one because the settle removes the row: a second
+                # decline means another writer is re-opening departures under
+                # this key as fast as we clear them, and looping on that would spin
+                # the hub rather than answer the producer.
+                await self._settle_departing()
+                outcome, victims, held_record = await _run_to_completion(
+                    self._enqueue_sync, candidate, encoded, record_id, cost, now
+                )
+            if outcome is None:
+                msg = (
+                    "the outbox key this offer needs is held by an entry whose departure "
+                    "another writer keeps re-opening, so no custody transferred"
+                )
+                raise NotificationOutboxError(msg)
             if outcome is NotificationEnqueue.KEY_COLLISION:
                 await self._refuse(
                     NotificationEnqueue.KEY_COLLISION, candidate, record_id, held_by=held_record
@@ -600,15 +617,21 @@ class SqliteNotificationOutbox:
             # one while the dismissals run, and the bounds they still count toward
             # are restored by the removal below — or by the next `_settle_departing`
             # if this call dies in between.
-            for victim in victims:
-                await self._dismiss(victim.record_id)
-                _log.info(
-                    "notification_outbox_evicted",
-                    candidate_key=victim.key,
-                    notification_id=victim.record_id,
-                )
-            if victims:
-                await _run_to_completion(self._remove_many_sync, [victim.key for victim in victims])
+            # **Custody has transferred, so nothing after this point may report that
+            # it did not.** The entry is durably committed, so raising here would
+            # tell a producer it still owned a candidate the outbox will deliver —
+            # and its retry would come back `ALREADY_HELD`, contradicting the error
+            # it was just given. ADR-0131 §4 rules this exact shape at the other end
+            # of an entry's life: "a failure of the entry's subsequent removal does
+            # **not** fail the call: the entry is departing, it is deliverable to
+            # nobody, and §3b's reconciliation completes the removal." The victims
+            # are marked departing by the same transaction that inserted, so a
+            # failure below leaves entries no poll can select, and the bounds they
+            # still count toward are restored by the next `_settle_departing`.
+            try:
+                await self._evict(victims)
+            except NotificationOutboxError as exc:
+                _log.warning("notification_outbox_eviction_deferred", reason=str(exc))
             self._wake()
             return NotificationEnqueue.ENQUEUED
 
@@ -676,7 +699,7 @@ class SqliteNotificationOutbox:
         record_id: str | None,
         cost: int,
         now: datetime,
-    ) -> tuple[NotificationEnqueue, list[_Entry], str | None]:
+    ) -> tuple[NotificationEnqueue | None, list[_Entry], str | None]:
         """Decide the offer, mark what it evicts and insert it — one transaction.
 
         **One transaction and not two, which is what makes the enqueue a single
@@ -701,7 +724,10 @@ class SqliteNotificationOutbox:
         Returns:
             The outcome, the entries this enqueue gave up, and — on a collision — the
             record of the entry the key matched, so the refusal can tell that record
-            from the offered candidate's.
+            from the offered candidate's. A ``None`` outcome is not one of §3's four:
+            it means the key is held by a **departing** entry, which this transition
+            may not remove because §3b requires that entry's record be dismissed
+            first. The caller finishes that departure and retries.
         """
         with self._transaction("enqueue a notification") as conn:
             entries = self._all(conn)
@@ -718,9 +744,16 @@ class SqliteNotificationOutbox:
                     return NotificationEnqueue.ALREADY_HELD, [], held.record_id
                 return NotificationEnqueue.KEY_COLLISION, [], held.record_id
             if held is not None:
-                # Departing, so it matches nothing and its removal was already owed.
-                conn.execute("DELETE FROM outbox WHERE candidate_key = ?", (held.key,))
-                entries = [entry for entry in entries if entry.key != held.key]
+                # **Departing, and this is not the transition that may remove it.**
+                # §3b admits no exception: "No implementation removes an entry whose
+                # record it has not already dismissed." A row marked departing by
+                # another writer after this call's `_settle_departing` — or by one
+                # whose own dismissal has not committed — would be deleted here
+                # before its record was ever dismissed, which is the one order §3b
+                # rules unsafe. So this transition declines, the caller finishes the
+                # departure through the path that dismisses first, and the enqueue is
+                # retried against a table that no longer holds it.
+                return None, [], None
             victims = self._victims_for(entries, None, cost, now)
             for victim in victims:
                 conn.execute(
@@ -938,6 +971,30 @@ class SqliteNotificationOutbox:
     def _remove_sync(self, key: str) -> None:
         with self._transaction("remove an outbox entry") as conn:
             conn.execute("DELETE FROM outbox WHERE candidate_key = ?", (key,))
+
+    async def _evict(self, victims: list[_Entry]) -> None:
+        """Dismiss each victim's record, then remove them all (ADR-0131 §3b).
+
+        Dismiss first, remove after — the order §3b makes its invariant rest on. The
+        victims are already marked departing, so nothing can select one while this
+        runs, and a failure part-way leaves entries the next
+        :meth:`_settle_departing` finishes rather than entries a poll can reach.
+
+        Raises:
+            NotificationOutboxError: If a dismissal or the removal cannot commit.
+                What that means is the caller's to decide: after an insert has
+                committed it means the eviction is deferred, not that the offer
+                failed.
+        """
+        for victim in victims:
+            await self._dismiss(victim.record_id)
+            _log.info(
+                "notification_outbox_evicted",
+                candidate_key=victim.key,
+                notification_id=victim.record_id,
+            )
+        if victims:
+            await _run_to_completion(self._remove_many_sync, [victim.key for victim in victims])
 
     def _remove_many_sync(self, keys: list[str]) -> None:
         """Remove every dismissed victim in one transaction.
