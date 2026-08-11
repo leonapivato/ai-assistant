@@ -54,6 +54,7 @@ from ai_assistant.core.types import DataTier, GrantScope, NotificationCandidate
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import NotificationWriter, Reader, SourceGrants
     from ai_assistant.core.types import MemoryUpdateProposal, ReportedExtent
 
@@ -167,36 +168,26 @@ def _key(sentence: str, extent: ReportedExtent) -> str:
 class UpcomingEventStage:
     """Reads the calendar on its own cadence and offers what is about to start.
 
-    **It holds no clock, and that is a decision against ADR-0132 §1's own
-    enumeration** — recorded here rather than left to be rediscovered, because §1
-    does list one ("a `Reader`, a `SourceGrants`, a clock and the
-    `NotificationWriter` seam"). Three things decide it the other way:
+    **It holds a clock and never reads one, and both halves are ADR-0132's.** §1
+    enumerates the producer's collaborators as "a ``Reader``, a ``SourceGrants``, a
+    clock and the ``NotificationWriter`` seam of ADR-0130 §3", so the clock is held
+    — a ratified ADR is not narrowed by an implementation's judgement that one of
+    its collaborators has nothing to do. §4 then rules that it may not be *read*:
+    the instant a candidate was noticed "is the reading's own ``read_at`` … and
+    never a later clock reading taken when the candidate was constructed or
+    offered", and both the window selection and ADR-0130 §2's validation are
+    anchored on that one instant — "Selection and ADR-0130 §2's validation are
+    evaluated against one instant, not two".
 
-    * **§4 leaves a clock nothing to read.** The instant a candidate was noticed
-      "is the reading's own ``read_at`` … and never a later clock reading taken
-      when the candidate was constructed or offered", and *both* the window
-      selection and ADR-0130 §2's validation are anchored on it — "Selection and
-      ADR-0130 §2's validation are evaluated against one instant, not two". §4
-      spends four paragraphs establishing that a second clock reading here **is**
-      the defect: "the producer offers a defect, on a schedule, for a window whose
-      width is its own parse time".
-    * **The shape §1 invokes does not have one.** §1 is explicit that this is
-      "``Engine.ingest``'s shape reused rather than a new one", and
-      :class:`~ai_assistant.orchestration.ingestion.IngestionStage` takes a
-      ``reader``, a ``writes`` and a ``grants`` — no clock. So the enumeration
-      reads as the producer's *reach* rather than as its constructor signature,
-      which is the sense the same sentence's second half plainly carries ("It
-      holds no ``MemoryStore``, no ``MemoryWriter`` and no ``MemoryPolicy``").
-    * **An injected-but-unread collaborator is worse than a missing one here.**
-      ADR-0045 §1 and ADR-0028 §7 refuse surface with no consumer, and a clock in
-      this constructor would be a standing invitation for a later edit to read it
-      — closing by construction the hole §4 argues at length must stay closed.
-
-    Not holding one narrows §1 rather than widening it, and nothing in the
-    producer's behaviour differs either way.
-    ``tests/orchestration/test_upcoming.py`` pins the constructor's parameter set
-    so that §1's binding half — the collaborators it may **not** hold — is checked
-    rather than trusted.
+    **The two clauses only look contradictory, and the way they are reconciled is
+    a test rather than a comment.** §4 spends four paragraphs on what a second
+    clock reading here would cost — "the producer offers a defect, on a schedule,
+    for a window whose width is its own parse time" — so the hazard of holding one
+    is a later edit reaching for it. ``tests/orchestration/test_upcoming.py`` pins
+    the invariant directly: a full pass over a reading full of upcoming
+    occurrences calls the injected clock **zero** times. An implementation that
+    began anchoring on it fails there rather than in review, which is what makes
+    the held collaborator safe instead of merely explained.
     """
 
     def __init__(
@@ -205,6 +196,7 @@ class UpcomingEventStage:
         reader: Reader,
         grants: SourceGrants,
         writer: NotificationWriter,
+        now: Clock,
         lead: timedelta,
     ) -> None:
         """Wire the producer from its reader, its grant seam, the notification seam.
@@ -231,6 +223,14 @@ class UpcomingEventStage:
                 seam and no client connection; its only outcome is the disposition
                 this returns, and it may not select one, exempt itself from §5, or
                 write to the store other than through here.
+            now: The hub's clock, held because §1 enumerates it among this
+                producer's collaborators and **read by nothing here** because §4
+                anchors every instant on the reading's own ``read_at``. It is
+                injected rather than reached for, so the day a clause does need an
+                instant of ours it arrives through the seam the rest of this layer
+                already uses (ADR-0026) instead of through ``datetime.now``. The
+                class docstring carries the reconciliation and the test that keeps
+                it true.
             lead: How far ahead of a start instant an occurrence is noticed (§4).
                 ``Settings`` has already refused a figure that is not strictly
                 positive, that outruns the reader's own forward window, or that is
@@ -274,6 +274,8 @@ class UpcomingEventStage:
         self._reader = reader
         self._grants = grants
         self._writer = writer
+        #: Held per §1 and read by nothing per §4 — see the class docstring.
+        self._now = now
         self._lead = lead
 
     async def notice(self) -> int:

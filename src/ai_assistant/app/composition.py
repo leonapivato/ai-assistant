@@ -826,6 +826,13 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
                     reader=upcoming_reader,
                     grants=grants,
                     writer=notification_writer,
+                    # §1 enumerates a clock among the producer's collaborators, so
+                    # it is injected here rather than reached for — the same seam
+                    # the grant operations above take, and for ADR-0026's reason.
+                    # §4 then anchors every instant the producer uses on the
+                    # reading's own `read_at`, so nothing in the stage reads it and
+                    # a test pins that it never does.
+                    now=_utcnow,
                     lead=settings.calendar_upcoming_lead,
                 )
             ),
