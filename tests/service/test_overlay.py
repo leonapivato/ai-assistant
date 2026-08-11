@@ -537,3 +537,22 @@ def test_a_non_utf8_pathname_over_the_budget_is_still_refused(tmp_path: Path) ->
 
     with pytest.raises(ConfigurationError, match="sun_path budget"):
         local_agent(f"{tmp_path}/{long_name}.sock")
+
+
+def test_a_missing_non_utf8_ancestor_is_reported_and_not_crashed_on(tmp_path: Path) -> None:
+    """Adversarial review, round 4: escaping the argument was not enough.
+
+    The path handed in was rendered safely, but the ``OSError`` raised for a
+    missing ancestor carries its *own* pathname, and that was interpolated raw —
+    so the refusal for a mistyped non-UTF-8 path could not be constructed, and the
+    same ``ValueError`` escaped from one line away from where it was fixed. Every
+    value the OS hands back now goes through the same rendering, ``strerror``
+    included.
+    """
+    missing = f"{tmp_path}/\udcff/gone/agent.sock"
+
+    with pytest.raises(ConfigurationError, match="cannot be read") as caught:
+        local_agent(missing)
+
+    # The refusal names the path in an encodable form rather than omitting it.
+    assert R"\xff" in str(caught.value)
