@@ -385,18 +385,20 @@ def _refuse_an_unclaimed_name(socket_path: Path, setting: str) -> None:
     here it buys nothing at all.
     """
     parent = socket_path.parent
+    shown = _displayable(socket_path)
+    here = _displayable(parent)
     try:
         plantable = others_can_create_in(parent)
     except OSError as exc:
         msg = (
-            f"the directory {parent} holding the overlay agent socket {setting} names "
+            f"the directory {here} holding the overlay agent socket {setting} names "
             f"cannot be read ({exc.strerror}), so whether an untrusted user could create "
             f"that socket cannot be established; correct {setting}, or unset it"
         )
         raise ConfigurationError(msg) from exc
     if plantable:
         msg = (
-            f"no socket exists yet at {socket_path}, and {parent} is mode "
+            f"no socket exists yet at {shown}, and {here} is mode "
             f"{stat.S_IMODE(parent.stat().st_mode):04o} — writable by other users, so any "
             f"of them could create that socket first and answer for the overlay, which is "
             f"the identity ADR-0124 §4 admits every device by. A sticky bit does not help "
@@ -407,13 +409,34 @@ def _refuse_an_unclaimed_name(socket_path: Path, setting: str) -> None:
         raise ConfigurationError(msg)
 
 
+def _displayable(path: Path) -> str:
+    """A pathname rendered so that a refusal naming it can itself be built.
+
+    :mod:`ai_assistant.core.types` requires message text to have a UTF-8 encoding,
+    and gives the reason this function exists: "interpolating it raw would build an
+    error message that is itself unencodable, so reporting the fault would fail the
+    same way the fault does". A pathname is exactly such a value — on Unix it is
+    bytes, and a non-UTF-8 one reaches Python as PEP 383 surrogates — so it is
+    escaped for display rather than echoed, and the operator still sees which path
+    was meant.
+    """
+    return os.fsencode(path).decode("utf-8", "backslashreplace")
+
+
 def _check_path_to(socket_path: Path, setting: str) -> None:
     """The budget, and the ancestry that decides who could put something here."""
+    shown = _displayable(socket_path)
     limit = sun_path_limit()
-    encoded = len(str(socket_path).encode("utf-8")) + 1  # the NUL terminator counts
+    # `os.fsencode`, not a UTF-8 encode: these are the bytes the kernel is handed,
+    # and a filename need not be UTF-8 at all. A non-UTF-8 byte in the environment
+    # reaches Python as a surrogate (PEP 383), which `str.encode("utf-8")` refuses
+    # — so measuring the budget that way turned a perfectly valid pathname into a
+    # `UnicodeEncodeError` no handler catches, which is a crash rather than a
+    # verdict. `fsencode` round-trips the surrogates back to the original bytes.
+    encoded = len(os.fsencode(socket_path)) + 1  # the NUL terminator counts
     if encoded > limit:
         msg = (
-            f"the overlay agent socket {socket_path} encodes to {encoded} bytes including "
+            f"the overlay agent socket {shown} encodes to {encoded} bytes including "
             f"its terminator, over this platform's {limit}-byte sun_path budget, so no "
             f"connection can be made to it; set {setting} to a shorter path"
         )
@@ -428,34 +451,37 @@ def _check_path_to(socket_path: Path, setting: str) -> None:
         # raw `FileNotFoundError` out of the composition root would instead be an
         # unexpected fault, reported as though the hub had a defect.
         msg = (
-            f"the path to the overlay agent socket {socket_path}, which {setting} names, "
+            f"the path to the overlay agent socket {shown}, which {setting} names, "
             f"cannot be read ({exc.strerror} at {exc.filename}), so whether an untrusted "
             f"user could answer for the overlay there cannot be established; correct "
             f"{setting}, or unset it to look at the two paths the daemon is packaged to "
             f"use ({', '.join(TAILSCALE_SOCKETS)})"
         )
         raise ConfigurationError(msg) from exc
-    if fault is not None and fault.kind == "replaceable":
+    if fault is None:
+        return
+    culprit = _displayable(fault.ancestor)
+    if fault.kind == "replaceable":
         msg = (
-            f"{fault.ancestor} is mode {fault.mode:04o}, writable by other users and not "
+            f"{culprit} is mode {fault.mode:04o}, writable by other users and not "
             f"sticky, so another user could replace the overlay agent socket beneath it "
             f"and answer for the overlay — which is the identity ADR-0124 §4 admits every "
             f"device by; chmod it, set its sticky bit, or set {setting} to a path under a "
             f"directory you own"
         )
         raise ConfigurationError(msg)
-    if fault is not None:
-        msg = (
-            f"{fault.ancestor} is owned by uid {fault.uid}, neither root nor the "
-            f"uid {os.geteuid()} the hub runs as, so that user controls the path to the "
-            f"overlay agent socket and could answer for the overlay; set {setting} to a "
-            f"path under a directory you own"
-        )
-        raise ConfigurationError(msg)
+    msg = (
+        f"{culprit} is owned by uid {fault.uid}, neither root nor the "
+        f"uid {os.geteuid()} the hub runs as, so that user controls the path to the "
+        f"overlay agent socket and could answer for the overlay; set {setting} to a "
+        f"path under a directory you own"
+    )
+    raise ConfigurationError(msg)
 
 
 def _check_socket_at(socket_path: Path, setting: str) -> None:
     """What occupies the path is the daemon's, and an unclaimed name is nobody's."""
+    shown = _displayable(socket_path)
     try:
         info = socket_path.stat()
     except FileNotFoundError:
@@ -476,7 +502,7 @@ def _check_socket_at(socket_path: Path, setting: str) -> None:
         # is owned by the hub's uid but not traversable, which the walk's `stat` of
         # the directory itself does not detect.
         msg = (
-            f"the overlay agent socket {socket_path}, which {setting} names, cannot be "
+            f"the overlay agent socket {shown}, which {setting} names, cannot be "
             f"read ({exc.strerror}), so whether an untrusted user could answer for the "
             f"overlay there cannot be established; correct {setting}, or unset it to look "
             f"at the two paths the daemon is packaged to use ({', '.join(TAILSCALE_SOCKETS)})"
@@ -484,13 +510,13 @@ def _check_socket_at(socket_path: Path, setting: str) -> None:
         raise ConfigurationError(msg) from exc
     if not stat.S_ISSOCK(info.st_mode):
         msg = (
-            f"{socket_path}, which {setting} names, is not a socket; the overlay agent's "
+            f"{shown}, which {setting} names, is not a socket; the overlay agent's "
             f"local API is a Unix socket, so nothing can be asked of this path"
         )
         raise ConfigurationError(msg)
     if info.st_uid not in (0, os.geteuid()):
         msg = (
-            f"the overlay agent socket {socket_path} is owned by uid {info.st_uid}, "
+            f"the overlay agent socket {shown} is owned by uid {info.st_uid}, "
             f"neither root nor the uid {os.geteuid()} the hub runs as, so that user "
             f"answers for the overlay and decides which device the hub admits "
             f"(ADR-0124 §4); point {setting} at your own overlay agent's socket"
