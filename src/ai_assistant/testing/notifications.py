@@ -39,6 +39,7 @@ from ai_assistant.core.errors import NotificationStoreError
 from ai_assistant.core.types import (
     DROP_CONDITIONS,
     INTERRUPT_CONDITIONS,
+    MINUTES_IN_A_DAY,
     TIME_RESOLVED_CONDITIONS,
     HeldNotification,
     NotificationCondition,
@@ -76,11 +77,6 @@ _DEFAULT_RETENTION = timedelta(days=7)
 
 #: The bounded default every enumeration here uses (ADR-0073 §2, §8).
 _DEFAULT_PAGE_LIMIT = 50
-
-#: How many times :meth:`FakeNotificationPolicy._quiet_until` may chase a window
-#: whose end lands inside another window. Bounded rather than looped to
-#: exhaustion, so a pathological set of windows cannot hang a ruling.
-_QUIET_CHAIN_BUDGET = 32
 
 
 def _utcnow() -> datetime:
@@ -193,11 +189,11 @@ class FakeNotificationPolicy:
                     reason=condition,
                 )
 
-        quiet_until = self._quiet_until(now, preferences)
+        quiet, quiet_until = self._quiet(now, preferences)
         held = {
             NotificationCondition.PERISHABLE: candidate.is_perishable_at(now),
             NotificationCondition.REACH_INTERRUPT: reach is NotificationReach.INTERRUPT,
-            NotificationCondition.QUIET_WINDOW: quiet_until is None,
+            NotificationCondition.QUIET_WINDOW: not quiet,
             NotificationCondition.BUDGET: budget_spent < preferences.interruption_budget,
         }
         failed = tuple(condition for condition in INTERRUPT_CONDITIONS if not held[condition])
@@ -221,33 +217,43 @@ class FakeNotificationPolicy:
             ),
         )
 
-    def _quiet_until(self, now: datetime, preferences: NotificationPreferences) -> datetime | None:
-        """When the quiet covering ``now`` ends, or ``None`` if none covers it.
+    def _quiet(
+        self, now: datetime, preferences: NotificationPreferences
+    ) -> tuple[bool, datetime | None]:
+        """Whether quiet covers ``now``, and when the covering stretch ends.
 
-        **Chained windows are followed**, so two adjacent windows read as one
-        stretch rather than releasing a candidate at the seam between them. The
-        chase is bounded: a pathological set of windows shortens the answer
-        rather than hanging the ruling, and a shortened answer only costs a
-        reconsideration that re-holds.
+        **Answered in minute-of-day space rather than by chasing instants**, and
+        that is what makes both hard cases right. A stretch of adjacent windows
+        reads as one — a candidate is not released at a seam — however many
+        windows it is made of, where a bounded chase silently shortened the answer
+        past its cap. And a set of windows covering **every** minute of the day is
+        recognised as such: quiet then never ends, so no instant resolves the
+        condition and ``None`` is the honest answer, which §5 spells as a ``HOLD``
+        with no ``reconsider_at``. Returning a bounded future instant there would
+        promise a re-ruling that can only re-hold, on every tick, for the life of
+        the record.
+
+        The day is a cycle of ``MINUTES_IN_A_DAY`` minutes, so walking it once
+        settles both: the first uncovered minute at or after the current one is
+        the answer, and its absence *is* the all-day case.
 
         Args:
             now: The ruling instant, tz-aware.
             preferences: The settings holding the windows.
 
         Returns:
-            The instant the quiet stretch ends, tz-aware and UTC, or ``None``.
+            Whether ``now`` is quiet, and the instant the quiet ends — ``None``
+            both when nothing covers ``now`` and when nothing ever will not.
         """
-        moment = now
-        ends: datetime | None = None
-        for _ in range(_QUIET_CHAIN_BUDGET):
-            local = moment.astimezone(self._zone)
-            here = minute_of_day(local.time().replace(tzinfo=None))
-            covering = [window for window in preferences.quiet_windows if window.covers(here)]
-            if not covering:
-                return ends
-            ends = max(self._instant_of(local, window.end_time) for window in covering)
-            moment = ends
-        return ends
+        local = now.astimezone(self._zone)
+        here = minute_of_day(local.time().replace(tzinfo=None))
+        if not preferences.is_quiet_at(here):
+            return False, None
+        for step in range(1, MINUTES_IN_A_DAY):
+            minute = (here + step) % MINUTES_IN_A_DAY
+            if not preferences.is_quiet_at(minute):
+                return True, self._instant_of(local, time(minute // 60, minute % 60))
+        return True, None  # every minute of the day is quiet; time resolves nothing
 
     def _instant_of(self, local: datetime, end: time) -> datetime:
         """The next instant at which the local clock next reads ``end``.
@@ -324,8 +330,8 @@ def _next_due(
 
     ``None`` where any failing condition is not one time alone resolves — the
     reach level and an absent expiry are each such a condition — and ``None``
-    again where a time-resolvable condition has no instant to offer, which a
-    budget of zero is (ADR-0130 §5).
+    again where a nominally time-resolvable condition has no instant to offer,
+    which a budget of zero and an all-day quiet each are (ADR-0130 §5).
 
     Args:
         failed: The conditions that failed at the ruling.
@@ -340,8 +346,8 @@ def _next_due(
         return None
     instants: list[datetime] = []
     if NotificationCondition.QUIET_WINDOW in conditions:
-        if quiet_until is None:  # pragma: no cover — a failure implies a covering window
-            return None
+        if quiet_until is None:
+            return None  # quiet covers every minute of the day, so time never lifts it
         instants.append(quiet_until)
     if NotificationCondition.BUDGET in conditions:
         if budget_frees_at is None:

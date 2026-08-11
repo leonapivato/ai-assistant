@@ -504,6 +504,67 @@ class NotificationPolicyContract(ABC):
         assert ruling.reason is NotificationCondition.QUIET_WINDOW
         assert ruling.reconsider_at == leaves_the_window
 
+    async def test_quiet_covering_every_minute_yields_no_due_instant(
+        self, policy: NotificationPolicy
+    ) -> None:
+        """§5: no instant is offered where time cannot lift the condition.
+
+        Two windows meeting at noon and at midnight cover the whole day, which is
+        a setting a user is entitled to hold — "do not interrupt me" is what the
+        quiet windows are *for*, and §6 gives no separate spelling for it. Quiet
+        then never ends, so there is no earliest instant at which the condition
+        could next hold and the ``HOLD`` carries none.
+
+        **A bounded future instant would be the wrong answer, not a conservative
+        one.** It promises a re-ruling that can only re-hold, so the maintenance
+        job spends a run on that record on every tick for as long as it lives.
+        """
+        preferences = NotificationPreferences(
+            reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
+            quiet_windows=(
+                QuietWindow.between(time(0, 0), time(12, 0)),
+                QuietWindow.between(time(12, 0), time(0, 0)),
+            ),
+        )
+
+        ruling = await _rule(
+            policy,
+            candidate(expires_at=NOW + timedelta(days=1)),
+            preferences=preferences,
+        )
+
+        assert ruling.reason is NotificationCondition.QUIET_WINDOW
+        assert ruling.reconsider_at is None
+
+    async def test_a_long_chain_of_adjacent_windows_reads_as_one_stretch(
+        self, policy: NotificationPolicy
+    ) -> None:
+        """A candidate is not released at a seam, however many seams there are.
+
+        Sixty adjacent ten-minute windows are one ten-hour quiet stretch, and an
+        implementation that followed the chain only so far would wake a record
+        inside it — early, on a tick that can only re-hold. The count is past any
+        plausible fixed bound on purpose: this is a property of the *day*, which
+        has a finite number of minutes, not of a budget someone chose.
+        """
+        windows = tuple(
+            QuietWindow(start=start, end=start + 10) for start in range(11 * 60, 17 * 60, 10)
+        )
+        preferences = NotificationPreferences(
+            reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
+            quiet_windows=windows,
+        )
+
+        ruling = await _rule(
+            policy,
+            candidate(expires_at=NOW + timedelta(days=1)),
+            preferences=preferences,
+        )
+
+        assert len(windows) == 36
+        assert ruling.reason is NotificationCondition.QUIET_WINDOW
+        assert ruling.reconsider_at == datetime(2026, 8, 11, 17, 0, tzinfo=UTC)
+
     async def test_a_producers_confidence_settles_nothing(self, policy: NotificationPolicy) -> None:
         """§4: the confidence is **evidence on the proposal**, not authority.
 
