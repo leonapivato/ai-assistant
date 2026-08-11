@@ -642,9 +642,22 @@ deliberately given up, and gives the reason there.
 > and `hub_notification_outbox_bytes` (§5a). Both bounds count **every** entry the
 > outbox holds, leased or not.
 
-> **Normative.** An entry's byte cost is everything the outbox persists for it —
-> the notification, the origin key where one was supplied, and the identifier of its
-> current outstanding delivery where it has one.
+> **Normative.** An entry's byte cost is **everything the outbox persists for it**,
+> defined by that property and not by a list: the notification, the origin key where
+> one was supplied, the identifier of its current outstanding delivery where it has
+> one, its lease state, its enqueue order, and any other per-entry field an
+> implementation persists to satisfy this ADR. A field an implementation adds is
+> counted by being persisted.
+
+**The byte cost is defined and not enumerated, for the reason §3's linearizability
+rule is.** A draft listed three components, and adversarial review pointed out that
+the outbox must also persist at least lease state — or expiry cannot be implemented
+across the restart that voids leases — and stable ordering state, or "the oldest
+entry" has no meaning after a restart. An implementation counting only the listed
+three would then accept entries up to `hub_notification_outbox_bytes` while the
+durable outbox sat above it, which is the bound failing by arithmetic rather than by
+disobedience. Every enumeration in this ADR that could be mistaken for a definition
+has now been the source of a finding; this one is written as a definition first.
 
 > **Normative.** When an enqueue would exceed either bound, the hub drops entries
 > **until both bounds hold with the new entry counted** — each drop taking the
@@ -773,6 +786,60 @@ notification written moments before the user says "never tell me this" still arr
 ADR-0130 §5 already accepts the same shape — no setting change reaches a record ruled
 `INTERRUPT` — so the seam is not introducing the exposure, it is naming where the
 existing one ends.
+
+### 3b. The producer-to-outbox seam, which nothing else declares
+
+§3 gives the enqueue an origin key and four outcomes and, until this section, no
+contract to express them in. ADR-0130's `NotificationWriter` is the only producer
+seam that exists and it is not this one: its single call reads the preferences, asks
+the policy to rule, records the ruling and returns a `NotificationDisposition`
+(ADR-0130 §3). It takes no origin key, and a disposition is a ruling about whether to
+interrupt rather than an answer about whether custody committed. So the handoff §3
+requires is surface this ADR owes, and golden rule 5 puts it here rather than in a
+lane. Adversarial review found the gap on the thirty-second round, after ADR-0130
+merged and made it checkable.
+
+> **Normative.** `core/protocols.py` gains a `NotificationOutbox` Protocol carrying
+> exactly one method:
+>
+> `async def offer(self, candidate: NotificationCandidate, *, origin_key: Identifier | None = None) -> NotificationEnqueue: ...`
+
+> **Normative.** `core/types.py` gains `NotificationEnqueue`, a `StrEnum` with
+> exactly four members, one per outcome §3 defines: the entry was enqueued; an
+> identical entry was already held under this origin key and none was made; the
+> origin key matched a held entry carrying a different notification and the offer was
+> refused; the entry's own byte cost exceeds `hub_notification_outbox_bytes` and the
+> offer was refused.
+
+> **Normative.** `NotificationOutbox` is **not** on `AssistantEngine` and nothing it
+> carries crosses the wire. Adding it therefore bumps no protocol version of its own;
+> §4's bump is for `next_notification` and is the only one this ADR incurs.
+
+> **Normative.** The implementing lane lands `NotificationOutbox` as a **triad** —
+> the Protocol, a shared conformance suite, and a canonical fake in
+> `ai_assistant.testing` — in one change (golden rule 5, ADR-0015 §5,
+> `CONTRIBUTING.md` → "Adding a Protocol").
+
+**A separate Protocol rather than a method on ADR-0130's writer, and the boundary is
+the propose/dispose line itself.** `NotificationWriter` decides *whether* the user is
+interrupted; `NotificationOutbox` carries an interruption that has already been ruled.
+Folding the enqueue into the writer would put the transport's custody question inside
+the call whose whole subject is the policy question, and it would make ADR-0130's
+ratified single-call seam mean something new — a change to a contract that merged
+yesterday, made by the ADR that was told not to decide its ground. Two Protocols keep
+"producing is not delivering" (ADR-0130 §1) true in the type system rather than only
+in prose, and the composition root is where they meet, which is where golden rule 1
+already puts every other pairing of this kind.
+
+**Four outcomes because §3 has four, and an enum because none of them carries
+anything.** A producer needs to tell a committed enqueue from a no-op retry, a key
+collision from either, and an outright refusal from all three — those are its four
+distinct remedies. None of them has an accompanying value the producer can act on:
+the entry has no identity this ADR exposes (§4's identifier is per *delivery*, not per
+entry), and the byte figures a refusal turns on are the hub's settings rather than
+news. So the return is the enum, in the shape `forget`'s bare `bool` already takes on
+the promoted surface, and a model wrapping one member would be surface with no
+content.
 
 ### 4. The surface this seam needs, and the `PROTOCOL_VERSION` bump that follows
 
