@@ -408,8 +408,9 @@ obligation is to have an unambiguous answer for the producer to act on.
 > selected for a poll (§2a), a lease expiry does not make it available, and an
 > acknowledgement naming it takes the no-op arm. It counts toward both bounds until it
 > is removed, and eviction may remove it — which is simply completing the removal
-> already owed. An entry that became departing **after** it was selected is covered by
-> §3a's irrevocability clause: the delivery already under way may still land.
+> already owed. Where an entry became departing **after** it was selected, §3a
+> governs: the entry is still removable, and only the delivery already staged is
+> beyond recall.
 
 > **Normative.** An offer whose key equals that of an entry the outbox currently
 > holds and is not departing, **and whose candidate is identical to that entry's**,
@@ -872,13 +873,17 @@ disposition until it is confirmed rather than deciding anything about it.
 > only after the withdrawal has committed. No lane may delete a record whose entry it
 > has not already withdrawn.
 
-> **Normative.** **Selection is irrevocable, for every cause.** Once an entry has
-> been selected and leased in §2a's indivisible step, it may reach its device whatever
-> happens afterwards — expiry, deletion, withdrawal, dismissal, eviction, or any
-> departure cause a later decision adds. Every rule in this ADR that removes,
-> withdraws or departs an entry reaches entries that have **not** been selected; none
-> of them recalls a delivery already selected. What each guarantees is that no *later*
-> poll selects it.
+> **Normative.** **A staged delivery cannot be recalled.** Once §2a's step has
+> selected an entry and returned its delivery, those bytes may reach the device
+> whatever happens afterwards — expiry, deletion, withdrawal, dismissal, eviction, or
+> any departure cause a later decision adds. No rule in this ADR unsends a delivery
+> already returned, and no lane may add one.
+
+> **Normative.** Selection does **not** protect the entry. Every departure cause may
+> remove any entry, selected or not, and removing a selected one breaks its lease and
+> forfeits its redelivery exactly as §3's all-leased eviction does. What a departure
+> guarantees is that no *later* poll selects the entry — never that a delivery already
+> staged will not land.
 
 **The delete right reaches the outbox, and an earlier draft let it stop at the record
 store.** ADR-0130 §9 gives `NotificationStore` an unconditional per-record delete and
@@ -914,6 +919,19 @@ between the departure and the write — the prepare/commit boundary architecture
 refused on the seventeenth and twenty-ninth rounds, and the thing §2a's design is
 built around not having. So the guarantee is narrowed to the true one rather than
 machinery being invented to defend a sentence.
+
+**Two things are being distinguished here that one clause conflated, and conflating
+them made a ratified rule unsatisfiable.** A draft said selection made an entry
+unreachable by every departure cause. Adversarial review showed on the forty-seventh
+round that this contradicts §3's all-leased eviction outright: with a one-entry bound
+and that entry selected, the hub must drop it to admit a fitting offer and must not
+drop it because it was selected, and neither retaining it nor refusing the offer is a
+permitted outcome. The property worth protecting was never the entry — it is the
+**staged reply**, which no hub-side state change can catch once `next_notification`
+has returned it. So the entry stays removable by everything, and only the bytes
+already on their way are beyond reach. That also keeps §3's forfeiture honest: removing
+a selected entry costs its redelivery, which is what breaking a lease has cost since
+the seventh round.
 
 **The narrowed line is the one the corpus already draws in two other places, which is
 why it is defensible rather than convenient.** ADR-0124 §8 accepts the same shape for
