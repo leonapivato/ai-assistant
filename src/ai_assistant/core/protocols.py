@@ -5497,6 +5497,14 @@ class AssistantEngine(Protocol):
         Raises:
             ValueError: If ``notification_id`` is blank.
             NotificationStoreError: If reading or updating the store failed.
+            NotificationOutboxError: If the notification's delivery outbox entry
+                could not be given up. **Nothing is reported as dismissed then**,
+                and the entry is left in a state no poll can select, so a retry is
+                safe and the seam's own reconciliation finishes what this call could
+                not (ADR-0131 §3, §3b). Declared because ADR-0131 §3a makes a
+                disposal reach the outbox — "the disposing act calls the seam rather
+                than the seam polling for it" — and ADR-0085 §9 requires a method's
+                failures to be declared rather than raised unnamed.
         """
         ...
 
@@ -5518,6 +5526,10 @@ class AssistantEngine(Protocol):
         Raises:
             ValueError: If ``notification_id`` is blank.
             NotificationStoreError: If reading or updating the store failed.
+            NotificationOutboxError: If the notification's delivery outbox entry
+                could not be withdrawn. **Nothing is destroyed then**, which is
+                ADR-0131 §3a's ordering holding rather than failing: "No lane may
+                delete a record whose entry it has not already withdrawn."
         """
         ...
 

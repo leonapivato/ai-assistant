@@ -120,8 +120,12 @@ class DeliveryOutbox(Protocol):
             record_id: The ADR-0130 record whose entry is given up.
 
         Returns:
-            Whether an entry was withdrawn. ``False`` where the outbox held none,
-            which is the ordinary case for a record that was never offered.
+            Whether the withdrawal **dismissed an actionable record**. That is what
+            a dismissal surface can report as its own answer, and it is why the
+            engine's dismissal goes through here rather than beside it: the entry is
+            marked departing *before* the record is dismissed, so a failure at any
+            step leaves an entry no poll can select rather than a dismissed record
+            with a deliverable entry beside it.
         """
         ...
 

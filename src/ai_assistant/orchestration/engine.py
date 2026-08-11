@@ -2229,20 +2229,23 @@ class Engine:
         Without this call the entry stays selectable and the next poll delivers a
         notification the owner has already dismissed.
 
-        **Dismiss first, remove after**, which is §3b's order rather than §3a's
-        delete order, and the difference is what each act leaves behind. A *delete*
-        destroys the record, so the entry has to go first or it is orphaned; a
-        dismissal leaves the record readable, so the safe order is the one §3b
-        states — "entry absent" implying "record dismissed" — and it keeps this
-        call's answer the store's own.
+        **The withdrawal goes first and performs the dismissal, and dismissing
+        here and withdrawing afterwards was the defect.** That order commits the
+        record's dismissal and only then reaches the outbox — so a withdrawal that
+        fails leaves a non-actionable record beside an unmarked, still selectable
+        entry, and the next poll delivers a notification the owner dismissed. The
+        withdrawal marks the entry departing *before* it dismisses, so every failure
+        along its path leaves an entry no poll can select, and §3b's reconciliation
+        finishes it. That is the shape the acknowledgement path already has.
 
-        A removal that fails does not fail the call: the record is dismissed, the
-        entry is departing, and §3b's reconciliation completes it.
+        Falling through to the store is for the ordinary case where the record was
+        never offered, so the outbox holds no entry and has nothing to withdraw.
         """
-        dismissed = await store.dismiss(notification_id)
-        if self._notification_outbox is not None:
-            await self._notification_outbox.withdraw(notification_id)
-        return dismissed
+        if self._notification_outbox is not None and await self._notification_outbox.withdraw(
+            notification_id
+        ):
+            return True
+        return await store.dismiss(notification_id)
 
     async def forget_notification(self, notification_id: Identifier) -> bool:
         """Destroy one notification (§9, ADR-0004 §6).
