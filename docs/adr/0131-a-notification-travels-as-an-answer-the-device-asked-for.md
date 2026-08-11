@@ -202,17 +202,32 @@ whole state is "a poll is outstanding", and §3 below puts the state that matter
 in the hub where a restart cannot lose it.
 
 > **Normative.** A device holds at most one delivery connection. A second
-> `next_notification` request from a device that already has one outstanding is
-> refused, and the refusal is an ordinary correlated error on the connection that
-> made it, not a close of the connection that was already polling.
+> `next_notification` request from a device that already has one outstanding causes
+> the hub to close **the connection that made the second request**. The connection
+> that was already polling is untouched, and neither is answered.
 
-**Refusing the second rather than closing the first is the direction that cannot
-be used as a weapon.** The opposite rule — newest poll wins — lets any process
-that can reach the listener evict the owner's real notifier by polling, and the
-eviction would look to the notifier exactly like an ordinary transport failure.
-The refusal is correlated because both frames decoded and the connection carrying
-the second one has broken no framing rule; ADR-0084 §3's second bullet is the
-governing one, not its third.
+**Closing the offender and not the incumbent is the direction that cannot be used
+as a weapon.** The opposite rule — newest poll wins — lets any process that can
+reach the listener evict the owner's real notifier by polling, and the eviction
+would look to the notifier exactly like an ordinary transport failure. Closing the
+second connection costs its caller nothing it can complain about: the client is
+stateless (ADR-0084 §7), so reconnecting is free, and the entry it was after is
+still in the outbox.
+
+**A typed error here would be the wrong instrument, and ADR-0084 §3 says so
+directly.** An earlier draft made it a correlated error on the reasoning that both
+frames decoded and the second broke no framing rule. That reasoning stops one
+clause short. §3's second bullet reads: "**A frame that decodes gets a typed error
+rather than a silent close — provided it is not itself a violation of the
+connection's own rules.**" A second poll is exactly such a violation — the same
+class as the serial rule, and answered the same way. Architecture review found the
+consequence of getting it wrong: a typed error would have to be declared on
+`next_notification`, and it could only ever be raised by the *transport*, since the
+fact it turns on is the connection-scoped identity §4 keeps out of the engine. That
+breaks the substitutability ADR-0084 §5 promoted the façade to a Protocol for — an
+in-process engine has no connections and could never raise it, so the same declared
+contract would mean two different things depending on which side of the wire the
+caller stood.
 
 ### 3. The outbox: one queue for the owner, durable, bounded, leased, at-least-once
 
@@ -444,7 +459,7 @@ ADR-0124 §10 forbids *that* ADR from deciding `core` surface and says what a la
 that needs it must do: "An implementing lane that finds it needs either stops and
 owes its own contract ADR, merged first (golden rule 5, ADR-0015 §5)." This ADR
 is that contract ADR for the delivery method. It decides the method, the one model
-and the two error types the *seam* needs; it decides nothing about the notification
+and the one error type the *seam* needs; it decides nothing about the notification
 inside it.
 
 > **Normative.** `AssistantEngine` (`core/protocols.py`) gains exactly one method
@@ -655,44 +670,45 @@ should be invented. Nor is one needed: ADR-0084 §1's `0600` bit means every loo
 peer is the owner on the owner's own machine, so treating them as one local device
 is not an approximation, it is the fact.
 
-> **Normative.** `core/errors.py` gains two `AssistantError` subtypes, and
-> `next_notification` declares both as its failures alongside the
-> `OversizedValueError` every method declares (ADR-0085 §9):
->
-> `DeliveryPollInProgressError(AssistantError)` — a delivery poll is already
-> outstanding for this device (§2). It carries no structured state; the remedy is to
-> use the connection that already has one, and there is no number that helps.
+> **Normative.** `core/errors.py` gains one `AssistantError` subtype, and
+> `next_notification` declares it as its failure alongside the `OversizedValueError`
+> every method declares (ADR-0085 §9):
 >
 > `NotificationBudgetTooLongError(AssistantError)` — the request's `budget` exceeds
-> `hub_max_notification_budget` (§5a). It carries `requested: timedelta` and
-> `limit: timedelta`, both in pydantic's JSON-mode form on the wire (ADR-0084 §3).
+> `hub_max_notification_budget` (§5a).
 
-**Both refusals were already required to be "ordinary correlated errors" and had no
+> **Normative.** `NotificationBudgetTooLongError` carries **no structured state**.
+> Its message names the requested budget and the bound, and it contributes no
+> `details` object to an error payload.
+
+**The refusal was already required to be an ordinary correlated error and had no
 vocabulary to be one in**, which is the sixth round's finding and is exactly the gap
 ADR-0085 §9 exists to close: "A Protocol whose methods raise unnamed exceptions is
 not a contract a conformance suite can hold anyone to." The wire's call-path
 vocabulary is "exactly the `AssistantError` subtree" (§10a), and ADR-0124 §7 draws
-the line these two fall on the far side of — its lowercase refusal tokens "appear on
-the handshake path and never on the call path". So an implementation holding only
-the earlier draft had three moves and all three were wrong: close the connection
-(which §2 forbids, because closing the *polling* connection is the eviction the
-clause was written against), reuse an unrelated code, or mint an unratified type.
+the line it falls on the far side of — its lowercase refusal tokens "appear on the
+handshake path and never on the call path".
 
-**`NotificationBudgetTooLongError` carries the two durations for
-`OversizedValueError`'s stated reason** — "'too large' without a number is not
-actionable" — and the two are the whole of what a caller needs: what it asked for
-and what it may ask for. `DeliveryPollInProgressError` carries nothing because there
-is nothing of that kind to carry, and inventing a field to look symmetrical would be
-surface with no caller.
+**It is an ordinary engine refusal, and that is what keeps the surface honest.** The
+budget is an *argument*, so an in-process engine has everything it needs to raise
+this and a wire client's hub raises it from the same value. Nothing about it depends
+on which side of the transport the caller stands, which is the substitutability
+ADR-0084 §5 promoted the façade to a Protocol for. §2's poll conflict was the
+condition that could not meet that test, and it is a connection close there rather
+than a second type here — architecture review's finding, and the whole reason this
+clause now names one type instead of two.
 
-**Where each is raised is not where a reader would guess, and that follows from the
-identity rule above rather than contradicting it.** `NotificationBudgetTooLongError`
-is an ordinary engine refusal — the budget is an argument, and the engine has it.
-`DeliveryPollInProgressError` is raised by the hub's listener before dispatch,
-because the fact it turns on is the connection-scoped identity the engine never
-receives; it is rendered into the same error frame `_dispatch` renders an engine's
-`AssistantError` into, so a client cannot tell — and must not have to tell — which
-side of that seam produced it.
+**Carrying no structured state is a decision, not an omission**, and the second
+architecture finding is why it is stated as a clause. ADR-0085 §10a requires an
+oversized error payload to travel with `details: null` and the client to reconstruct
+the declared exception with its structured state absent and `details_elided=True`.
+An error with fields must therefore be constructible *without* them and must say
+what their absence means — the discipline `OversizedValueError` pays for because
+ADR-0084 §4 obliges it to carry the limit and the field. Nothing obliges this one.
+Its two numbers are what a caller reads, not what a caller branches on, so they
+belong in the message where §10a's reduction cannot strand them: an error with no
+`details` object is one there is no reduced form of, and the reconstruction contract
+is satisfied by having nothing to reconstruct.
 
 **The origin-key collision (§3) is deliberately not among these.** The enqueue is a
 hub-internal call from a producer, not a request that crossed the wire, so its
