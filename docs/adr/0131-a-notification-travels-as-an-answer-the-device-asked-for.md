@@ -256,9 +256,38 @@ waits out a lease for a notification that was written to nothing. §3's lease
 already bounds that harm; this clause is what keeps it from being incurred on every
 dropped connection rather than only on a crashed client.
 
+> **Normative.** Taking an entry for a poll is **two transitions**. A
+> **reservation** makes the entry unavailable to any other poll and starts no
+> clock. The **write** of the result frame commits the reservation as a lease and
+> starts the lease's clock. An entry is never both reserved and leased.
+
+> **Normative.** A close detected before the write **releases the reservation**, and
+> the entry becomes available to another poll immediately. A close detected at or
+> after the write leaves the lease standing, and it expires under §3 like any other.
+
 > **Normative.** A poll arriving from a device whose previous poll has ended but
 > whose slot has not yet been released is closed under §2, and the device may
 > reconnect. No lane may resolve that race by evicting a live poll.
+
+**The two transitions exist because §2a's rule and §3's rule are otherwise
+unsatisfiable together.** §3 needs an entry to become unavailable the moment a poll
+selects it, or two concurrent polls select the same entry and one of them writes a
+notification the other has already been promised. §2a needs a closed poll to leave
+nothing behind. Those pull in opposite directions across the window between
+selecting an entry and writing it, and an implementation given only the two rules
+either leases to a dead connection or strands an entry nothing will ever release —
+adversarial review's second finding on the twelfth round. Splitting the transition
+is what makes both rules true at once: the reservation is the exclusivity §3 needs
+and is cheap to undo, and the lease — the thing with a clock and a redelivery
+promise — begins only once the bytes have gone.
+
+**Close wins before the write and loses after it, which is the only ordering that
+composes with ADR-0124 §8.** That section already puts `_check_live` immediately
+before the write for the same structural reason, and this clause hangs the lease
+transition on the same instant: the write is where the hub commits to a device
+having been told. Before it, nothing has been promised and the entry is simply
+available again. After it, the bytes may or may not have arrived, which is precisely
+the uncertainty the lease and §3's at-least-once guarantee exist to carry.
 
 **The residual race is stated rather than engineered away.** Detection is
 asynchronous, so a device fast enough to reconnect inside it meets a slot that is
@@ -469,10 +498,10 @@ end to end, because an earlier draft did it wrong by one step. ADR-0085 §8's
 contract limit is `hub_max_frame_bytes` less §8b's 512-byte envelope reserve, and
 what is measured against it is the **result**, which here is a
 `NotificationDelivery` and not the notification inside it. §4 therefore bounds the
-nested notification at the contract limit less a 128-byte delivery reserve. An
-entry's byte cost is then that notification, plus a `delivery_id` of at most 36
+nested notification at the contract limit less a 256-byte delivery reserve. An
+entry's byte cost is then that notification, plus a `delivery_id` of at most 96
 bytes, plus an origin key of at most 128 — so at most `hub_max_frame_bytes` less
-512, less 128, plus 164: comfortably below §5a's floor of `hub_max_frame_bytes`. An
+512, less 256, plus 224: comfortably below §5a's floor of `hub_max_frame_bytes`. An
 outbox at the floor therefore holds any notification the wire can carry, and the
 clause exists for the deployment that is not conforming rather than for the one
 that is.
@@ -537,18 +566,20 @@ the tree rather than assumed.
 
 > **Normative.** `delivery_id` is minted by the seam when the entry is enqueued, is
 > stable across redeliveries of that entry, and is the value `acknowledging` names.
-> It is minted from a **strictly increasing counter held durably with the outbox**,
-> rendered as a decimal string, and is at most 36 bytes — the bound ADR-0085 §8a
-> puts on a correlation id.
+> It is a **strictly increasing counter held durably with the outbox**, rendered as
+> a decimal string, joined by `.` to a **128-bit value from a cryptographically
+> secure source**, rendered as lowercase hex. Its UTF-8 encoding is at most 96
+> bytes.
 
 > **Normative.** A `delivery_id` is unique over the outbox's whole life and is never
 > reused, including after the entry it named has been retired or dropped. The
 > counter advances when an entry is enqueued and never goes backwards, a restart
 > included.
 
-> **Normative.** An enqueue that would advance the counter beyond what 36 bytes can
-> render is **refused**, and the refusal is the enqueue's reported outcome. The
-> counter is never wrapped, reset or reused to make room.
+> **Normative.** An enqueue that would advance the counter beyond what the
+> identifier's 96-byte bound leaves room to render is **refused**, and the refusal
+> is the enqueue's reported outcome. The counter is never wrapped, reset or reused
+> to make room.
 
 **Uniqueness has to be a clause because `Identifier` does not supply it**, and the
 gap is reachable rather than theoretical: the alias rejects only blank text, so a
@@ -558,28 +589,50 @@ case the stability clause above exists for — acknowledges an entry it never
 received, and that entry is retired without being delivered. Adversarial review
 found it on the sixth round.
 
-**A counter rather than a UUID, and the seventh round is why.** An earlier draft
-said "a UUID is unique by construction", which is false: a v4 UUID is
-collision-*resistant*, and the clause above asks for a guarantee rather than a
-probability. Adversarial review was right about that and its directed fix — retain a
-durable history of every identifier ever minted — was the wrong instrument, being
-precisely the unbounded durable set §3 refuses for origin keys, for a growth rate
-this ADR would then have to bound too. A monotonic counter gives the guarantee
-*constructively* for one integer of durable state, which the outbox is already
-paying for a durable store to hold. There is no collision to retry and no history to
-keep.
+**Two halves, because the identifier carries two obligations and neither half
+carries both.** The corpus reached this in two steps and both are worth recording,
+because the shape looks like belt-and-braces until you see what each part answers.
+
+**The counter is for uniqueness.** An earlier draft said "a UUID is unique by
+construction", which is false: a v4 UUID is collision-*resistant*, and the clause
+above asks for a guarantee rather than a probability. Adversarial review was right
+about that on the seventh round, and its directed fix — retain a durable history of
+every identifier ever minted — was the wrong instrument, being precisely the
+unbounded durable set §3 refuses for origin keys. A monotonic counter gives the
+guarantee *constructively* for one integer of durable state the outbox is already
+paying a durable store to hold. No collision to retry, no history to keep.
+
+**The random half is for unguessability, and it is there because the counter alone
+created a capability anyone could forge.** With a bare decimal identifier, a device
+that has seen `41` can send `acknowledging="42"` and retire an entry leased to
+*another* device that has not yet shown it — losing a notification outright and
+falsifying §3's at-least-once guarantee. Adversarial review found it on the twelfth
+round, and it is a defect the seventh round's own fix introduced: making the
+identifier predictable is exactly what a UUID was accidentally preventing. So the
+identifier is treated as what §3 now says it is — a capability — and 128 bits from a
+secure source is what makes holding it mean something.
+
+**The alternative was to bind an acknowledgement to the lease-holding device, and it
+is not available here.** That needs the connection-scoped identity §4 keeps out of
+the engine, for the substitutability reason architecture review established on the
+ninth round. A capability needs no identity at all: the entry was written to exactly
+one device, so exactly one device holds the token, and the engine can honour it
+without ever knowing who is asking. It is the same move ADR-0124 §6 makes with an
+enrolment credential — a secret disclosed once to one holder, checked without a
+directory.
 
 **Exhaustion is unreachable and is ruled anyway, which is this ADR's own standard
-applied to its own clause.** Two bounds meet at the identifier — 36 bytes from
-ADR-0085 §8a, and a counter that may only increase — so `10^36` enqueues is a state
-the pair genuinely defines, and the earlier draft gave it no conforming outcome:
-reuse is forbidden, a 37th byte is forbidden, and proceeding was not authorised.
-That is exactly the partial-rule defect §3's eviction clause was rewritten twice to
-remove, and adversarial review found this one on the eighth round. The refusal is
-the answer; wrapping or resetting is not, because both break the uniqueness the
-counter exists to supply. The figure will not be reached — at a notification a
-second it is some `10^28` years — and a rule that is never exercised is still
-cheaper than a state with no defined outcome.
+applied to its own clause.** Two bounds meet at the identifier — 96 bytes, and a
+counter that may only increase — so a counter that has consumed every digit the
+bound leaves beside the separator and the 32-character token is a state the pair
+genuinely defines, and an earlier draft gave it no conforming outcome: reuse is
+forbidden, a 97th byte is forbidden, and proceeding was not authorised. That is
+exactly the partial-rule defect §3's eviction clause was rewritten twice to remove,
+and adversarial review found this one on the eighth round. The refusal is the
+answer; wrapping or resetting is not, because both break the uniqueness the counter
+exists to supply. The figure will not be reached — 63 digits is `10^63` enqueues,
+which at a notification a second is some `10^55` years — and a rule that is never
+exercised is still cheaper than a state with no defined outcome.
 
 **Where the guarantee stops, named rather than left to be discovered.** It is a
 property of one data directory's life. Restoring an older copy of the directory
@@ -590,7 +643,7 @@ idempotent, and the general question — what a restore does to state a peer is
 holding — is ADR-0123's and is not reopened here.
 
 > **Normative.** `DisposedNotification`'s canonical encoding is bounded by ADR-0085
-> §8's contract limit **less a 128-byte delivery reserve**. ADR-0130 states that
+> §8's contract limit **less a 256-byte delivery reserve**. ADR-0130 states that
 > bound as a constraint on its own type; a notification exceeding it never reaches
 > the outbox.
 
@@ -603,12 +656,15 @@ must either refuse what it took or write a frame the client is obliged to reject
 outside the payload, and the members added here are inside it. Adversarial review
 found the gap on the fourth round.
 
-**128 bytes is a reserve rather than an exact figure, in §8b's own shape and for
-its own reason.** The exact overhead is 70 bytes at most: 34 structural — the
+**256 bytes is a reserve rather than an exact figure, in §8b's own shape and for
+its own reason.** The exact overhead is 130 bytes at most: 34 structural — the
 braces, the two quoted member names `"delivery_id"` and `"notification"`, the two
-colons and the comma, in ADR-0087 §2's canonical form — plus at most 36 for the
-identifier. Reserving 128 covers that with margin, and the margin is what stops a
+colons and the comma, in ADR-0087 §2's canonical form — plus at most 96 for the
+identifier. Reserving 256 covers that with margin, and the margin is what stops a
 later member on this model from being a silent overflow instead of a recomputation.
+It was 128 until the twelfth round widened the identifier from 36 bytes to 96 to
+carry a capability; recomputing rather than rounding is what the margin exists to
+make survivable, and this is it being used.
 
 **Stating the bound here and having ADR-0130 carry it is the division the two lanes
 already have.** The carrying capacity is the seam's fact — it falls out of
@@ -695,11 +751,14 @@ right.** Take them one at a time:
   by the *lease*: an entry written to any caller is unavailable to every other
   caller until it is acknowledged or expires. One outbox, one lease per entry, and
   "one at a time" holds without the outbox ever knowing who asked.
-- **§3's acknowledgement needs no identity either**, because `acknowledging` names
-  an entry the hub minted and holds, not a claim about who the caller is. A device
-  naming another device's entry acknowledges a delivery the owner has in fact
-  received, which is the truth; and the idempotent no-op means a wrong id costs
-  nothing.
+- **§3's acknowledgement needs no identity either, but only because the identifier
+  is a capability.** An earlier draft argued it needed none because a device naming
+  another device's entry "acknowledges a delivery the owner has in fact received,
+  which is the truth". That is false for an entry still leased and not yet shown,
+  and adversarial review demonstrated it with a guessed decimal identifier on the
+  twelfth round. What makes the argument work is the 128-bit half of `delivery_id`:
+  the token went to exactly one device, so possession stands in for identity, and
+  the engine can honour an acknowledgement without knowing who is asking.
 
 **The loopback clause is stated because silence there would be read as a gap rather
 than as an answer.** `admission is None` on that listener and ADR-0084 §2 declined
