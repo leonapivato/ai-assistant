@@ -236,7 +236,7 @@ the same step.** Two delivery connections opened at once can otherwise both obse
 no outstanding slot before either records one: both dispatch, the device holds two,
 neither is the second, and §2's rule fails without any implementation disobeying a
 word of it. Adversarial review found it on the twenty-second round, and §3's
-linearizability clause is stated over the seam's shared state — the slot registry
+linearizability clause covers the connection registry as its own domain — the slot
 included — for exactly this reason. Taking the claim *before* dispatch is what makes
 "exactly one wins" decidable: after dispatch the losing poll would already be
 running and the rule would have to unwind it. §5's global capacity is claimed in the
@@ -506,23 +506,31 @@ entry, which is latency bought for nothing.
 > acknowledgement naming anything else — an unknown identifier, a retired entry, or
 > a delivery the entry has since superseded — is accepted and does nothing.
 
-> **Normative.** The seam's **shared state** is *every* piece of state this seam
-> keeps that more than one request, poll or producer can observe or change. It is
-> defined by that property and not by a list.
+> **Normative.** The seam keeps shared state in **two independently owned domains**,
+> and no transition of either reads or writes the other. The **outbox** is the
+> engine's, behind the promoted surface. The **connection registry** — the per-device
+> delivery slot (§2) and the global delivery-capacity count (§5) — is the hub
+> listener's, beside the `Admission` it already holds per connection.
 
-> **Normative.** **Every** transition of that state is linearizable with respect to
-> every other: each observes the state some serial order of them would produce, and
-> none may act on an observation another has since invalidated. Where a transition
-> must read two parts of the shared state and act on both, the reads and the act are
-> one step over both.
+> **Normative.** Within each domain, **every** transition is linearizable with
+> respect to every other in that same domain: each observes the state some serial
+> order of them would produce, none may act on an observation another has since
+> invalidated, and a transition reading two parts of its domain and acting on both
+> does so in one step. The obligation is on every transition of a domain, whether or
+> not it is named below.
 
-> **Normative.** Seven transitions are named here **as illustration and not as a
-> bound** — an enqueue's origin-key decision, bound check, eviction and insertion
-> (§3); a selection with its mint and lease (§2a); an acknowledgement's match and
-> retirement (§3); a lease expiry (§3); an eviction's classification and drop (§3); a
-> delivery slot's check-and-claim and its release (§2, §2a); and the global
-> delivery-capacity check, claim and release (§5). Anything meeting the definition
-> above is inside the rule whether or not it appears here.
+> **Normative.** No atomicity is required *across* the two domains. Their relation is
+> an **ordering**: a connection's claims are taken before its poll is dispatched
+> (§2, §5) and released after it closes (§2a), and the outbox's transitions neither
+> observe nor depend on either claim.
+
+> **Normative.** Transitions are named here **as illustration and not as a bound**.
+> In the outbox: an enqueue's origin-key decision, bound check, eviction and
+> insertion (§3); a selection with its mint and lease (§2a); an acknowledgement's
+> match and retirement (§3); a lease expiry (§3); and an eviction's classification
+> and drop (§3). In the connection registry: the device slot's and the global
+> capacity's check-and-claim, taken together, and their release, taken together
+> (§2, §2a, §5).
 
 **One rule over the whole class, because closing these pairwise closed none of
 them.** Adversarial review found the same shape four times against four different
@@ -538,8 +546,27 @@ notification delivered to a device that will never have it confirmed and never h
 it again. Four findings, one defect: a predicate stated over outbox state binds
 nothing unless the read and the act that depends on it are one step.
 
-**Twice now the rule has been narrowed by the way it was written rather than by what
-it meant, and both narrowings are worth recording because they are the same
+**Two domains rather than one, because one domain is not implementable behind this
+Protocol.** A draft stated the rule over "the seam's shared state" as a single
+linearizable whole. Architecture review pointed out on the twenty-ninth round that
+this spans two subsystems: the connection claims are the listener's and the outbox is
+the engine's, and `next_notification` deliberately receives no connection identity
+(§4). One global state machine would therefore need either concrete cross-subsystem
+coupling, which golden rule 1 forbids, or a `core` contract to coordinate through,
+which this ADR has not ratified and which nothing needs.
+
+**Nothing needs it because no transition reads across.** Every outbox transition
+reads and writes outbox state alone — the enqueue, the selection, the
+acknowledgement, the expiry, the eviction. Every registry transition reads and writes
+registry state alone: the two claims together, the two releases together. The only
+relation between the domains is sequential, and it is one the listener already
+controls end to end — claim, dispatch, close, release. So the rule splits cleanly into
+two, each internally strong, with an ordering between them and no coordination
+contract to invent. What it costs is nothing the stale-read findings below were about:
+each of those was a race *within* one domain.
+
+**Twice, before that, the rule was narrowed by the way it was written rather than by
+what it meant, and both narrowings are worth recording because they are the same
 mistake.** The twenty-first round found a draft that generalised from pairs to a
 *set* and then wrote the set as a closed enumeration of four, omitting the enqueue —
 the transition that mutates most. Two producers can then each observe room below a
@@ -550,10 +577,11 @@ twenty-second round then found the *subject* narrowed the same way: stated over 
 outbox", the rule said nothing about the per-device slot registry, so a device
 opening two delivery connections at once can have both handlers observe no
 outstanding slot before either records one, and §2's one-connection rule fails with
-neither connection closed as the second. So the subject is the seam's shared state
-and the list is explicitly illustrative. **The lesson is that a rule against stale
-reads must not itself be scoped by an enumeration**, of either its members or its
-subject — that is exactly how it acquires the gap it was written to remove.
+neither connection closed as the second. So the registry became a subject of the
+rule in its own right and the list became explicitly illustrative. **The lesson is
+that a rule against stale reads must not be scoped by an enumeration**, of either its
+members or its subject — that is exactly how it acquires the gap it was written to
+remove.
 
 **This is ADR-0124 §8's instrument taken to its general form.** That section
 required a liveness check and the write it authorises to be "one step with respect
@@ -1072,9 +1100,9 @@ until #891 lands and is not a substitute for it.
 > remains.
 
 > **Normative.** The global capacity check and its claim happen in the **same step**
-> as §2's per-device check and claim, over both parts of the shared state at once. A
-> poll dispatches only if it obtains both; one that obtains neither or only one
-> claims nothing and its connection closes under §2.
+> as §2's per-device check and claim, over both parts of the connection registry at
+> once. A poll dispatches only if it obtains both; one that obtains neither or only
+> one claims nothing and its connection closes under §2.
 
 **Both clauses restate a mistake the corpus has already made once and caught
 once.** ADR-0124 §7 required the remote listener to share the hub's ceilings and
@@ -1091,7 +1119,7 @@ can each pass the capacity check and each claim its own per-device slot, leaving
 nine — adversarial review's twenty-third round, and the sixth finding of the shape
 §3's linearizability rule exists for. It is also why that rule's subject is now
 *defined* rather than listed: each earlier statement of it named the state it knew
-about, and each time the next round found shared state the naming had left out.
+about, and each time the next round found state the naming had left out.
 
 The second clause is the half a shared budget alone does not buy. Delivery
 connections are long-lived and ordinary sessions are not, so without a sub-bound a
