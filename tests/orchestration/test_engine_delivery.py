@@ -106,6 +106,7 @@ class RecordingOutbox:
     def __init__(self) -> None:
         """Start with nothing to give and nothing recorded."""
         self.calls: list[str] = []
+        self.waited: list[timedelta] = []
         self.reconciled = 0
         self.recovered = 0
         self.withdrew = True
@@ -160,7 +161,7 @@ class RecordingOutbox:
         it is what a caller ends its poll on — a fake that reported an arrival it
         had not waited for would spin the caller instead.
         """
-        del timeout
+        self.waited.append(timeout)
         self.calls.append("wait")
         return False
 
@@ -422,6 +423,21 @@ class TestABudgetTheClockCannotAddIsHonoured:
         assert delivery.notification.candidate_key == "k2"
         # The first entry was retired by the acknowledgement, so its key is free.
         assert await outbox.offer(_candidate()) is NotificationEnqueue.ENQUEUED
+
+    async def test_the_whole_configured_budget_reaches_the_wait(self) -> None:
+        """§4 honours the budget; a saturated deadline would hand over a shorter one.
+
+        The waiting itself is not observable — a maximal budget parks for the rest of
+        representable time — but the span the poll *asks* for is, and that is where a
+        clamp would show. On this engine's fixed clock no time elapses, so what the
+        wait is handed is the configured budget exactly.
+        """
+        outbox = RecordingOutbox()
+        engine = _wired(Harness(), outbox, max_notification_budget=timedelta.max)
+
+        assert await engine.next_notification(budget=timedelta.max) is None
+
+        assert outbox.waited == [timedelta.max]
 
     async def test_an_out_of_range_budget_is_still_refused(self) -> None:
         """The discriminating half: §4's own refusal is untouched."""
