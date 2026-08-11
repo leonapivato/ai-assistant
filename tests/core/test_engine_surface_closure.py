@@ -289,7 +289,7 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     assert len(_method_names()) == 25
 
 
-def test_the_surface_and_the_protocol_version_moved_together() -> None:
+def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None:
     """ADR-0124 §9: changing the promoted method set bumps ``PROTOCOL_VERSION``.
 
     The rule reaches "any change to the promoted surface's method set", and its
@@ -299,17 +299,26 @@ def test_the_surface_and_the_protocol_version_moved_together() -> None:
     five took the surface to twenty-four and the version to 3; ADR-0131 §4's
     ``next_notification`` takes it to twenty-five and the version to 4.
 
+    **The two numbers do not move in lockstep, and this pin never asserted that
+    they did.** ADR-0124 §9 has a second limb — "a change to a wire-carried
+    ``core`` type that makes a value one peer emits invalid for the other" — and
+    ADR-0133 §6 fires it for the ``NOTIFY`` member of ``GrantScope``, taking the
+    version to 5 with the method set unmoved at twenty-five. So a mismatch here
+    is not evidence of a fault in either direction: it is a lane being made to
+    look at ADR-0124 §9 and say which limb it is under.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
-    a deliberately crude one: it fails when either number moves without the
-    other, which is the moment a lane adding a method has to look at this rule
-    rather than discover it in review. The real check is #872's and is still owed.
+    a deliberately crude one: it fails when either number moves, which is the
+    moment a lane touching either has to read that rule rather than discover it
+    in review. The real check is #872's and is still owed.
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (25, 4), (
-        "the promoted method set and the protocol version move together "
-        "(ADR-0124 §9); bump one and this pin makes you consider the other"
+    assert (len(_method_names()), PROTOCOL_VERSION) == (25, 5), (
+        "the promoted method set and the protocol version are pinned together "
+        "(ADR-0124 §9); move either and this pin makes you name the limb you are "
+        "under — the method set, or a wire-carried core type"
     )
 
 

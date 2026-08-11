@@ -386,13 +386,22 @@ def _distinct_scope(value: list[GrantScope]) -> list[GrantScope]:
 #: with no default, deliberately: ADR-0097 §2 refuses an empty scope at
 #: construction, and a *default* scope would be this adapter deciding what a user
 #: permitted — the one decision ADR-0097 §8 says nothing may make for them.
+#:
+#: **The help names every member of the enum, and ADR-0133 §6 forbids it naming
+#: fewer.** The option is annotated ``list[GrantScope]``, so it accepts a new
+#: member the instant it is declared; a help string still enumerating the older
+#: uses would be "a surface disagreeing with the vocabulary", which is the failure
+#: ADR-0097 §8 names when it forbids anything deciding what the user permitted on
+#: their behalf. Suppressing a member here would take an added refusal that does
+#: not exist, rather than saving one.
 _GRANT_SCOPE_OPTION = typer.Option(
     ...,
     "--scope",
     callback=_distinct_scope,
     help=(
         "What this grant allows (repeatable): 'facet' to look at the source while "
-        "answering, 'ingest' to durably remember what it says."
+        "answering, 'ingest' to durably remember what it says, 'notify' to read it "
+        "in order to raise things with you unprompted."
     ),
 )
 
@@ -1028,9 +1037,11 @@ def grant(
 
     ``--scope facet`` lets me look at the source to answer what you are asking right
     now, and remember nothing from it. ``--scope ingest`` lets me durably believe
-    what it says. They are separate on purpose — "you may look at my calendar to
-    answer this, but do not remember it" is a thing people mean. Name both to allow
-    both.
+    what it says. ``--scope notify`` lets me read it in order to raise things with
+    you unprompted — it is permission to *read*, not a promise that anything
+    arrives. They are separate on purpose — "read my calendar and remember it, but
+    do not raise it with me unprompted" is a thing people mean. Name as many as you
+    mean; naming one allows only that one.
 
     A source can have one grant at a time. To change what a grant covers, revoke it
     and grant again; both acts stay on the record.
@@ -3117,9 +3128,20 @@ def _scope_phrase(scope: Sequence[GrantScope]) -> str:
     """Say what a scope allows, in words rather than in enum values.
 
     Total over :class:`~ai_assistant.core.types.GrantScope` through
-    :func:`assert_never`, so a third member surfaces at type-check time rather than
-    as a missing phrase — the same discipline every other exhaustive rendering on
-    this surface uses.
+    :func:`assert_never`, so a further member surfaces at type-check time rather
+    than as a missing phrase — the same discipline every other exhaustive
+    rendering on this surface uses. ADR-0133's ``NOTIFY`` is the member it was
+    written for and it did its job: the addition failed the type check instead of
+    reaching a user as a silently absent clause in the confirmation they were
+    shown before consenting.
+
+    **A phrase says what the reading is used for, never what follows from it**
+    (ADR-0133 §1). Granting ``NOTIFY`` decides nothing about whether the user is
+    ever contacted — producing a candidate reaches nobody (ADR-0130 §1) and every
+    class defaults to ``hold`` (§6) — so its phrase is about reading, on the same
+    footing as ``INGEST``'s, which promises remembering rather than that any
+    particular belief survives a memory policy. A phrase promising messages would
+    overclaim the grant in the one place the user is deciding.
     """
     phrases = []
     for use in scope:
@@ -3128,6 +3150,8 @@ def _scope_phrase(scope: Sequence[GrantScope]) -> str:
                 phrases.append("looking at it while answering")
             case GrantScope.INGEST:
                 phrases.append("durably remembering what it says")
+            case GrantScope.NOTIFY:
+                phrases.append("reading it to raise things with you unprompted")
             case _:  # pragma: no cover — exhaustive over the enum
                 assert_never(use)
     return " and ".join(phrases) if phrases else "nothing"

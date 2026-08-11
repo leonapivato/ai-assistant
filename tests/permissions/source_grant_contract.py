@@ -357,8 +357,15 @@ class SourceGrantsContract:
     # --- a grant covers the uses it names, and no others (ADR-0097 §2) ------
 
     async def test_a_grant_covers_each_use_in_its_scope(self, grants: SourceGrants) -> None:
-        """Every named use, not merely the first one a lookup happens to try."""
-        await self.given(grants, source_grant(SOURCE, scope=(GrantScope.FACET, GrantScope.INGEST)))
+        """Every named use, not merely the first one a lookup happens to try.
+
+        **The scope is built from the enum rather than enumerated**, so the case
+        keeps asking about *every* use as ``GrantScope`` grows. Spelled as a pair
+        it went stale the moment ADR-0133 added ``NOTIFY``: the loop below still
+        walked all three members while the grant named two, so the case failed for
+        naming the wrong scope rather than for anything an implementation did.
+        """
+        await self.given(grants, source_grant(SOURCE, scope=tuple(GrantScope)))
 
         for use in GrantScope:
             found = await grants.live(source=SOURCE, use=use)
@@ -380,6 +387,55 @@ class SourceGrantsContract:
 
         assert await grants.live(source=SOURCE, use=GrantScope.FACET) is not None
         assert await grants.live(source=SOURCE, use=GrantScope.INGEST) is None
+
+    async def test_notify_implies_no_other_use_and_no_other_use_implies_it(
+        self, grants: SourceGrants
+    ) -> None:
+        """The third use is independent in **both** directions (ADR-0133 §2, §6).
+
+        "``NOTIFY`` implies neither ``FACET`` nor ``INGEST``, and neither of them
+        implies ``NOTIFY``… No implementation may infer one member from another,
+        **rank** them, or treat any of them as a superset of another."
+
+        The sibling case above already holds "a use a grant does not name is not
+        authorised by it" over the original pair, and this one is asked for by
+        ADR-0133 §6 by name because the tempting wrong implementations are on this
+        member specifically. Reading ``NOTIFY`` as implied by ``INGEST`` is option
+        B re-entering through the implementation door after being refused at the
+        decision door (§3), and it would silently hand every existing grant a use
+        its user was never asked about. The opposite error is subtler and worse for
+        being generous-looking: treating ``NOTIFY`` as the widest member and so as
+        covering the reads beneath it would let a grant that authorises no
+        assembly-time read serve a ``ContextFacet``.
+
+        Both are checked on a *live* grant rather than through construction,
+        because it is ``live`` that every driver actually asks (ADR-0097 §5).
+        """
+        await self.given(grants, source_grant(SOURCE, scope=(GrantScope.NOTIFY,)))
+
+        assert await grants.live(source=SOURCE, use=GrantScope.NOTIFY) is not None
+        assert await grants.live(source=SOURCE, use=GrantScope.FACET) is None
+        assert await grants.live(source=SOURCE, use=GrantScope.INGEST) is None
+
+    async def test_neither_original_use_carries_notify_with_it(self, grants: SourceGrants) -> None:
+        """The other half of ADR-0133 §2's independence, and §3's inertness.
+
+        A store full of ``(FACET, INGEST)`` grants predates the member entirely,
+        and ADR-0133 §3 rules that arrival changes none of them: "A grant recorded
+        before ``NOTIFY`` existed names the uses it names, so it does not authorise
+        ``NOTIFY``". That is the property that makes an append-only consent store
+        worth having, and it is the one an implementation breaks by being helpful.
+
+        Separated from the case above so a failure says *which* direction broke:
+        one implementation infers upward from a narrow grant, another back-fills a
+        wide one, and a single case asserting both would report either as the same
+        defect.
+        """
+        await self.given(grants, source_grant(SOURCE, scope=(GrantScope.FACET, GrantScope.INGEST)))
+
+        assert await grants.live(source=SOURCE, use=GrantScope.FACET) is not None
+        assert await grants.live(source=SOURCE, use=GrantScope.INGEST) is not None
+        assert await grants.live(source=SOURCE, use=GrantScope.NOTIFY) is None
 
     async def test_an_ungranted_source_reads_as_none(self, grants: SourceGrants) -> None:
         """``None`` is a clean answer about an empty history, not a failure.

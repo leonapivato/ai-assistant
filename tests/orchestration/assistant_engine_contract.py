@@ -964,18 +964,31 @@ class AssistantEngineContract(ABC):
         assert withdrawn.source == granted.source
         assert withdrawn.scope == granted.scope
 
-    async def test_an_ingest_only_grant_is_revocable(
-        self, granting_engine: AssistantEngine
+    @pytest.mark.parametrize("only", list(GrantScope))
+    async def test_a_grant_naming_one_use_is_revocable_whichever_use_it_names(
+        self, granting_engine: AssistantEngine, only: GrantScope
     ) -> None:
         """§5's sweep, and the wrong version passes every other test here.
 
         ``SourceGrants.live`` takes a ``use``, so an implementation querying only
-        ``FACET`` resolves a ``FACET``-scoped grant and silently fails to find this
-        one — leaving it unrevokable while ``revoke`` reports success by returning
-        ``None``. Written over the enum rather than over its members, so it stays
-        total as ``GrantScope`` grows.
+        ``FACET`` resolves a ``FACET``-scoped grant and silently fails to find an
+        ``INGEST``-only one — leaving it unrevokable while ``revoke`` reports
+        success by returning ``None``. ADR-0102 §5 marks the sweep for exactly that
+        reason: the wrong implementation is silent and generous-looking.
+
+        **Parametrised over the enum rather than spelled per member**, which is the
+        property ADR-0102 §5 claims for the sweep — it "stays total as the enum
+        grows because it is written over the enum rather than over its members" —
+        and which the case could not deliver while it named ``INGEST`` alone.
+        ADR-0133 §6 asks by name for the ``NOTIFY`` case, "so ADR-0102 §5's sweep is
+        held total over the member that was added rather than over the two that
+        were there when it was written"; parametrising discharges that and stops
+        the same debt accruing against a fourth member.
+
+        One use at a time is the discriminating shape: a scope naming several
+        would be found by an implementation sweeping any one of them.
         """
-        await granting_engine.grant(_SOURCE, scope=[GrantScope.INGEST])
+        await granting_engine.grant(_SOURCE, scope=[only])
         assert await granting_engine.revoke(_SOURCE) is not None
 
     async def test_a_grant_reaches_the_enumeration_as_live_and_a_revocation_clears_it(

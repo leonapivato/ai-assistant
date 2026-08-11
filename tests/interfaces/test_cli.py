@@ -3084,6 +3084,61 @@ def test_grant_records_the_grant_once_the_user_agrees(
     assert "Granted" in output.getvalue()
 
 
+def test_every_scope_the_enum_offers_is_accepted_and_rendered_in_words(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0133 §6: the surface may not offer fewer uses than the vocabulary has.
+
+    "No lane may suppress the member from that surface while it is in the enum: an
+    option that silently refuses a member of its own type, or a help string
+    enumerating two of three uses, is a surface disagreeing with the vocabulary."
+
+    Written over ``GrantScope`` rather than per member, so it is the *offer* that
+    is asserted rather than today's three names — a member added without a phrase
+    fails here as well as at the type check, and a member accepted by the option
+    but rendered as nothing cannot pass at all.
+
+    **Both halves matter and neither implies the other.** The value must reach the
+    hub as the user's chosen scope, and the confirmation must say what that scope
+    allows *in words*: ADR-0102 §6 shows the user what they are consenting to
+    before it is recorded, and a phrase that silently rendered empty would ask
+    them to agree to a blank. That is why the rendered text is asserted to be
+    non-trivial rather than merely present.
+    """
+    for use in GrantScope:
+        engine = _granting_engine()
+        _wire(monkeypatch, engine)
+
+        result = CliRunner().invoke(cli.app, ["grant", "calendar", "--scope", use.value, "--yes"])
+
+        assert result.exit_code == 0, use
+        assert [record.scope for record in engine.grants_recorded] == [(use,)], use
+        rendered = output.getvalue()
+        assert cli._scope_phrase([use]) in rendered, use
+        assert len(cli._scope_phrase([use])) > len(use.value), use
+
+
+def test_the_scope_options_help_names_every_use_the_enum_carries(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0133 §6 again, on the surface a user reads *before* choosing.
+
+    The confirmation above is shown once a scope has been named; this is what
+    tells them the scope exists at all. A help string enumerating two of three
+    uses leaves the third undiscoverable while the option happily accepts it,
+    which is the "surface disagreeing with the vocabulary" §6 forbids — and it is
+    the failure the type checker cannot see, because the help is a string.
+    """
+    _wire(monkeypatch, _granting_engine())
+
+    result = CliRunner().invoke(cli.app, ["grant", "--help"])
+
+    assert result.exit_code == 0
+    rendered = " ".join(result.output.split())
+    for use in GrantScope:
+        assert f"'{use.value}'" in rendered, use
+
+
 def test_yes_supplies_the_answer_and_never_the_rendering(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:

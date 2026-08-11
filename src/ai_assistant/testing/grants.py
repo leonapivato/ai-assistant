@@ -68,9 +68,13 @@ DEFAULT_GRANTED_SOURCE: Final = DEFAULT_READER_NAME
 #: runs — ``permission_builders.AT``'s reason.
 DEFAULT_DECIDED_AT: Final = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 
-#: Every use, which is what a test that is not about scope wants. Declaration
-#: order, so it is already canonical.
-_ALL_USES: Final = (GrantScope.FACET, GrantScope.INGEST)
+#: Every use, which is what a test that is not about scope wants. Derived from
+#: the enum rather than enumerated, so it stays *every* use as ``GrantScope``
+#: grows: ADR-0133 added a third member, and a hand-written pair would silently
+#: have become "every use except the newest one" — which is exactly how a
+#: revocation sweep comes to look total while missing a member (ADR-0102 §5).
+#: ``GrantScope`` iterates in declaration order, so this is already canonical.
+_ALL_USES: Final = tuple(GrantScope)
 
 
 def _mint(prefix: str) -> str:

@@ -98,6 +98,52 @@ def test_the_scopes_order_survives_a_json_round_trip() -> None:
     assert reloaded.scope == (GrantScope.FACET, GrantScope.INGEST)
 
 
+def test_notify_normalises_last_because_it_was_declared_last() -> None:
+    """ADR-0133 §6: the member is *appended*, so the order records when it was decided.
+
+    Asserted through the record's own normalisation rather than off the enum,
+    because that is where the order is load-bearing: two implementations must
+    serialise one grant identically (ADR-0097 §10), and a member inserted rather
+    than appended would move ``(FACET, INGEST)`` grants that were written down
+    before it existed.
+    """
+    scrambled = grant(scope=(GrantScope.NOTIFY, GrantScope.INGEST, GrantScope.FACET))
+
+    assert scrambled.scope == (GrantScope.FACET, GrantScope.INGEST, GrantScope.NOTIFY)
+
+
+def test_a_scope_naming_notify_survives_a_json_round_trip_as_its_wire_value() -> None:
+    """The new member crosses the wire as ``"notify"`` (ADR-0133 §6).
+
+    The value, not merely the member: ADR-0133 §6 bumps ``PROTOCOL_VERSION``
+    because "a new client's ``grant`` argument carrying ``"notify"`` is refused by
+    an old hub", and that sentence is only true if this is the string the codec
+    puts on the wire. ADR-0097 §10 fixes the enum as a "stable, serialisable"
+    vocabulary, so the spelling is part of the contract rather than an
+    implementation detail of ``StrEnum``.
+    """
+    original = grant(scope=(GrantScope.INGEST, GrantScope.NOTIFY))
+
+    encoded = original.model_dump(mode="json")
+
+    assert encoded["scope"] == ["ingest", "notify"]
+    assert SourceGrant.model_validate(encoded) == original
+
+
+def test_a_scope_of_notify_alone_is_accepted() -> None:
+    """No member implies another, so ``NOTIFY`` alone is a well-formed scope.
+
+    ADR-0133 §2 rules the three independent — "``NOTIFY`` implies neither
+    ``FACET`` nor ``INGEST``, and neither of them implies ``NOTIFY``. A grant's
+    scope may name any non-empty subset of the three" — and the sentence the
+    member exists to make sayable ("do not raise it with me unprompted") needs its
+    converse to be constructible too.
+    """
+    alone = grant(scope=(GrantScope.NOTIFY,))
+
+    assert alone.scope == (GrantScope.NOTIFY,)
+
+
 # --- the remaining field invariants ------------------------------------------
 
 
@@ -169,26 +215,38 @@ def test_an_unknown_field_is_refused() -> None:
 # --- the enum (ADR-0097 §2, §10) ---------------------------------------------
 
 
-def test_grant_scope_has_exactly_the_two_uses_the_corpus_can_honour() -> None:
-    """Two members, each with a live consumer, and no placeholder among them.
+def test_grant_scope_has_exactly_the_three_ratified_uses() -> None:
+    """Three members, each with a consumer decided, and no placeholder among them.
 
-    ``INGEST`` gates ``orchestration``'s ingestion stage and ``FACET`` gates the
-    ``context`` adapter ADR-0096 §4 unblocked, which is what keeps this from being
-    surface with no consumer (ADR-0045 §1, ADR-0028 §7). Content-level scope is
-    deferred with the condition that fires it (ADR-0097 §12), so a third member
-    arriving here is a decision, not a tidy-up.
+    ``INGEST`` gates ``orchestration``'s ingestion stage, ``FACET`` gates the
+    ``context`` adapter ADR-0096 §4 unblocked, and ``NOTIFY`` gates a producer's
+    read (ADR-0133 §1) — whose consumer is ADR-0130's producer class, decided and
+    sequenced rather than imagined, which is what keeps this from being surface
+    with no consumer (ADR-0045 §1, ADR-0028 §7). Content-level scope is still
+    deferred with the condition that fires it (ADR-0097 §12, ADR-0133 §7), so a
+    fourth member arriving here is a decision, not a tidy-up.
+
+    **The list is asserted in order, not as a set**, because declaration order is
+    what :data:`~ai_assistant.core.types._SCOPE_ORDER` is read off and what
+    :attr:`SourceGrant.scope` normalises to. ADR-0133 §6 rules the member
+    "**appended after ``INGEST``**" so "the order stays a record of when each use
+    was decided" — inserting it anywhere else would silently rewrite the
+    serialised order of every existing grant that names two uses.
     """
-    assert list(GrantScope) == [GrantScope.FACET, GrantScope.INGEST]
-    assert [use.value for use in GrantScope] == ["facet", "ingest"]
+    assert list(GrantScope) == [GrantScope.FACET, GrantScope.INGEST, GrantScope.NOTIFY]
+    assert [use.value for use in GrantScope] == ["facet", "ingest", "notify"]
 
 
 def test_grant_scope_is_a_plain_str_enum_and_carries_no_severity_order() -> None:
     """Not a ``_SeverityScale``, and the difference is a decision (ADR-0097 §10).
 
     ``PermissionOutcome`` is ordered because outcomes are *ranked* by severity and
-    ``_SeverityScale`` combines them with ``max``. Two uses of a source are not
+    ``_SeverityScale`` combines them with ``max``. Uses of a source are not
     comparable — reading for a facet is not "less" than reading for ingestion — so
-    an order would invite a ``max()`` that means nothing.
+    an order would invite a ``max()`` that means nothing. ADR-0133 §2 keeps that
+    holding at three: "a third use is not more comparable than the second was",
+    and it forbids reading a rank off the declaration order the scope normalises
+    to, which is a serialisation convention and nothing else.
 
     What is asserted is the *absence of the scale*, not the absence of ``str``'s
     own comparisons: ``StrEnum`` members are strings and always compare, which is

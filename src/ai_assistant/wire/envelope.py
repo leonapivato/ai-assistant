@@ -78,7 +78,21 @@ from ai_assistant.wire.errors import (
 #: reply, so the operator sees a hub that hangs up rather than §3's message naming
 #: both versions. That is the half-finished upgrade this constant exists to make
 #: legible, and it is why the bump is not optional.
-PROTOCOL_VERSION: Final[int] = 4
+#:
+#: **5 since ADR-0133 §6**, which adds ``NOTIFY`` to
+#: :class:`~ai_assistant.core.types.GrantScope`. This is the **first bump that is
+#: not a method-set change**, and it lands under ADR-0124 §9's *second* limb
+#: rather than its first: "a change to a wire-carried ``core`` type that makes a
+#: value one peer emits invalid for the other, whether the change widens or
+#: narrows the type". ADR-0133 §6 states that it "bites in both directions — a new
+#: client's ``grant`` argument carrying ``"notify"`` is refused by an old hub, and
+#: an old client decoding a ``SourceGrant`` result whose scope names ``"notify"``
+#: is refused at the client", the second of which ``wire/codec.grant_scope``
+#: already names in its own docstring. So the promoted surface stays at
+#: twenty-five methods and this number still moves; ADR-0124 §9 makes that
+#: compliance a **review obligation** on the change and decides no mechanical
+#: check, and #891 carries the check that does not exist.
+PROTOCOL_VERSION: Final[int] = 5
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
