@@ -233,17 +233,22 @@ a precedent about a different field.
 
 > **Normative.** A poll's `budget` bounds how long the hub may hold that request
 > before answering. It is **not** a deadline after which an outbox entry becomes
-> ineligible for selection. A `next_notification` request performs its first
-> selection unconditionally — after applying any acknowledgement, and whatever the
-> state of its budget — and where that selection succeeds the hub answers with the
-> delivery it made, including where the budget has already elapsed, whether
-> because the budget was zero or because an earlier step of the same request
-> consumed it.
+> ineligible for selection. A `next_notification` request that reaches its
+> selection step performs that first selection **whatever the state of its
+> budget** — after applying any acknowledgement, and including where the budget
+> has already elapsed, whether because it was zero or because an earlier step of
+> the same request consumed it — and where that selection succeeds the hub
+> answers with the delivery it made.
 
 > **Normative.** An elapsed budget is what ends a poll's **waiting**, not what
 > forbids its selecting. A poll whose selection found nothing and whose budget has
 > elapsed ends without an answer; it does not wait beyond its budget, and it does
 > not decline an entry it has already found.
+
+> **Normative.** This section constrains what a **budget** may do to a selection
+> and nothing else. It licenses no selection that another rule cancels: ADR-0131
+> §2a's close rule turns on the connection rather than on the budget, and a poll
+> cancelled under it never reaches the selection step this section governs.
 
 **§4's zero-budget clause is the decisive ground, and it is marked.** ADR-0131 §4
 states, normatively: "A `budget` of zero is an **immediate poll**: the hub answers
@@ -281,14 +286,22 @@ unreclaimable, and refusing to answer does not reclaim it a microsecond sooner. 
 rule that spends a notification to buy nothing is not a strict reading of the
 bound; it is a misreading with a cost.
 
-**What is not licensed here is an unbounded poll.** The second clause is what
-keeps this section from swallowing the bound it is reading: a poll gets *one*
-unconditional selection, and thereafter the budget governs how long it may wait
-for another chance — not whether it may take what a wait has brought it. A poll
-that has waited out its budget with nothing to show ends, and does not extend its
-occupancy to look again. So the bound still does the whole job §5a's bullet
-describes; what it does not do is reach backwards into a selection the hub has
-already made.
+**What is not licensed here is an unbounded poll.** The waiting clause is what
+keeps this section from swallowing the bound it is reading: a poll gets one
+selection its budget cannot forbid, and thereafter the budget governs how long it
+may wait for another chance — not whether it may take what a wait has brought it.
+A poll that has waited out its budget with nothing to show ends, and does not
+extend its occupancy to look again. So the bound still does the whole job §5a's
+bullet describes; what it does not do is reach backwards into a selection the hub
+has already made.
+
+**And the scope clause is there because "whatever the state of its budget" is a
+phrase that travels.** Read flat it could be taken to override ADR-0131 §2a's
+"A close detected before that step runs cancels the poll and takes no entry" —
+a rule about the connection, which this section has no business touching.
+ADR-0089 §3 puts the burden of stating a clause's scope, conditions and
+exceptions on the clause itself rather than on the prose beside it, so the limit
+is marked rather than explained.
 
 **This section is written to be argued with.** `docs/review/guide.md` makes a
 finding a hypothesis to check against the text rather than a fact to comply with,
@@ -324,9 +337,15 @@ act differently, or read one of its clauses more widely than it now holds?
   is §2a's step, the clock is the hub's. This is the clause the round-17
   correction showed saturation *did* falsify, and the shape §2 ratifies is the one
   that restores it.
-- **§2a's indivisible-step clause.** Untouched. §3 above says a poll's first
-  selection is unconditional; it says nothing about how selection, minting and
-  leasing relate to each other, which stays one indivisible step.
+- **§2a's indivisible-step clause.** Untouched. §3 above says the budget does not
+  forbid a selection; it says nothing about how selection, minting and leasing
+  relate to each other, which stays one indivisible step.
+- **§2a's close-cancellation clause** — "A close detected before that step runs
+  cancels the poll and takes no entry." Untouched, and §3 above's scope clause
+  says so in terms rather than leaving it to inference. Without it, "whatever the
+  state of its budget" could be read as overriding a rule that has nothing to do
+  with the budget, and ADR-0089 §3 puts the burden of stating a clause's scope on
+  the clause.
 - **§5a's marked clause and its table.** Untouched, and §2's second clause above
   defends them: no range is narrowed, no upper bound is added, no default moves.
 - **§5a's occupancy bullet.** Read, not moved. §3 above takes it as evidence of
