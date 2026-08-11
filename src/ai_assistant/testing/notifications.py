@@ -87,9 +87,6 @@ _DEFAULT_PAGE_LIMIT = 50
 #: and treating its size as a total.
 _RECORD_PAGE = 200
 
-#: The furthest instant a ``datetime`` can name, on the hub's own timezone.
-_END_OF_TIME = datetime.max.replace(tzinfo=UTC)
-
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -994,7 +991,7 @@ def _check_outbox_bounds(*, lease: timedelta, max_entries: int) -> None:
 class _OutboxEntry:
     """One entry of :class:`FakeNotificationOutbox`."""
 
-    __slots__ = ("candidate", "delivery_id", "departing", "leased_until", "record_id", "sequence")
+    __slots__ = ("candidate", "delivery_id", "departing", "leased_at", "record_id", "sequence")
 
     def __init__(
         self, *, candidate: NotificationCandidate, record_id: str | None, sequence: int
@@ -1004,7 +1001,9 @@ class _OutboxEntry:
         self.record_id = record_id
         self.sequence = sequence
         self.delivery_id: str | None = None
-        self.leased_until: datetime | None = None
+        #: When the lease was *taken*, not when it expires — the expiry is the
+        #: configured span past it, which may be past what a datetime can name.
+        self.leased_at: datetime | None = None
         self.departing = False
 
 
@@ -1102,7 +1101,12 @@ class FakeNotificationOutbox:
 
     def _is_leased(self, entry: _OutboxEntry, now: datetime) -> bool:
         """Whether a live lease holds this entry — half-open at the expiry."""
-        return entry.leased_until is not None and now < entry.leased_until
+        if entry.leased_at is None:
+            return False
+        # Compared as a *duration* against the configured span, so a lease near
+        # `timedelta.max` runs for all of it rather than to the end of representable
+        # time — §3 runs a lease for `hub_notification_lease`, whole.
+        return now - entry.leased_at < self._lease
 
     async def _dismiss(self, record_id: str | None) -> bool:
         """Dismiss the ADR-0130 record an entry carried, where there is one.
@@ -1378,31 +1382,13 @@ class FakeNotificationOutbox:
             # durable outbox gets that from its transaction rolling back; here the
             # order is the whole of it, and getting it backwards would leave the fake
             # advancing its counter on a call that raised.
-            leased_until = self._leased_until(now)
+            leased_at = now
             # Two halves, as §4 requires: a counter for uniqueness, and an
             # unguessable half so the identifier is a capability rather than a
             # number a device can increment to retire someone else's delivery.
             entry.delivery_id = f"{next(self._deliveries)}.{token_hex(16)}"
-            entry.leased_until = leased_until
+            entry.leased_at = leased_at
             return NotificationDelivery(delivery_id=entry.delivery_id, notification=entry.candidate)
-
-    def _leased_until(self, now: datetime) -> datetime:
-        """When a lease taken now expires, held at the last representable instant.
-
-        Parity with the durable outbox: ADR-0131 §5a bounds the lease below and not
-        above, so one the clock cannot add to is carried to the end of representable
-        time rather than refusing the claim.
-
-        Args:
-            now: The reading at the moment the lease is taken.
-
-        Returns:
-            The instant the lease runs out.
-        """
-        try:
-            return now + self._lease
-        except OverflowError:
-            return _END_OF_TIME
 
     async def acknowledge(self, delivery_id: str) -> None:
         """Retire the entry this is the current outstanding delivery of (§3)."""
@@ -1469,7 +1455,7 @@ class FakeNotificationOutbox:
             await asyncio.sleep(0)
             for entry in self._entries.values():
                 entry.delivery_id = None
-                entry.leased_until = None
+                entry.leased_at = None
 
     async def reconcile(self) -> None:
         """Make the outbox and the records agree, in both directions (§3b).

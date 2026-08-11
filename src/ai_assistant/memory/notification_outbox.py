@@ -107,9 +107,6 @@ _DELIVERY_COUNTER_CEILING = 10**63
 #: whatever an operator sets it to.
 _RECORD_PAGE = 200
 
-#: The furthest instant a ``datetime`` can name, on the hub's own timezone.
-_END_OF_TIME = datetime.max.replace(tzinfo=UTC)
-
 
 #: The per-entry cost of the fixed-width columns an implementation persists
 #: beside the candidate — the lease instant, the enqueue sequence, the departing
@@ -209,7 +206,11 @@ class _Entry:
         sequence: The enqueue order, stable across a restart — without it "the
             oldest entry" has no meaning once the process has died.
         delivery_id: The current outstanding delivery, or ``None``.
-        leased_until: When the lease expires, or ``None`` where none is held.
+        leased_at: When the lease was **taken**, or ``None`` where none is held.
+            The start rather than the expiry, because §3 runs a lease for its whole
+            configured span and §5a bounds that span below and not above — an expiry
+            for a span near ``timedelta.max`` is nameable neither as a ``datetime``
+            nor as microseconds in an ``INTEGER``, while the start always is.
         departing: Whether this seam has given the entry up (§3).
         cost: The entry's byte cost, as persisted.
     """
@@ -220,7 +221,7 @@ class _Entry:
         "delivery_id",
         "departing",
         "key",
-        "leased_until",
+        "leased_at",
         "record_id",
         "sequence",
     )
@@ -233,7 +234,7 @@ class _Entry:
         record_id: str | None,
         sequence: int,
         delivery_id: str | None,
-        leased_until: datetime | None,
+        leased_at: int | None,
         departing: bool,
         cost: int,
     ) -> None:
@@ -243,11 +244,11 @@ class _Entry:
         self.record_id = record_id
         self.sequence = sequence
         self.delivery_id = delivery_id
-        self.leased_until = leased_until
+        self.leased_at = leased_at
         self.departing = departing
         self.cost = cost
 
-    def is_leased_at(self, moment: datetime) -> bool:
+    def is_leased_at(self, moment: datetime, lease: timedelta) -> bool:
         """Whether a live lease holds this entry at ``moment``.
 
         Half-open in the direction a lease has to take: **at** the expiry the
@@ -255,7 +256,9 @@ class _Entry:
         ADR-0131 §3's "on expiry it returns to the outbox" true rather than
         approximately true.
         """
-        return self.leased_until is not None and moment < self.leased_until
+        if self.leased_at is None:
+            return False
+        return moment - _from_micros(self.leased_at) < lease
 
     def is_departing_at(self, moment: datetime) -> bool:
         """Whether ADR-0131 §3's departing predicate holds.
@@ -393,7 +396,7 @@ class SqliteNotificationOutbox:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS outbox("
                 "candidate_key TEXT PRIMARY KEY, candidate TEXT NOT NULL, record_id TEXT, "
-                "sequence INTEGER NOT NULL, delivery_id TEXT, leased_until INTEGER, "
+                "sequence INTEGER NOT NULL, delivery_id TEXT, leased_at INTEGER, "
                 "departing INTEGER NOT NULL DEFAULT 0, cost INTEGER NOT NULL)"
             )
             # The enqueue order is what "the oldest entry" means, and it has to
@@ -496,7 +499,7 @@ class SqliteNotificationOutbox:
             conn,
             "read the outbox",
             "SELECT candidate_key, candidate, record_id, sequence, delivery_id, "
-            "leased_until, departing, cost FROM outbox ORDER BY sequence",
+            "leased_at, departing, cost FROM outbox ORDER BY sequence",
         )
         return [_entry_from(row) for row in rows]
 
@@ -800,7 +803,7 @@ class SqliteNotificationOutbox:
             sequence = self._take_sequence(conn)
             conn.execute(
                 "INSERT INTO outbox(candidate_key, candidate, record_id, sequence, "
-                "delivery_id, leased_until, departing, cost) VALUES (?, ?, ?, ?, NULL, NULL, 0, ?)",
+                "delivery_id, leased_at, departing, cost) VALUES (?, ?, ?, ?, NULL, NULL, 0, ?)",
                 (candidate.candidate_key, encoded, record_id, sequence, cost),
             )
             return NotificationEnqueue.ENQUEUED, victims, None
@@ -841,7 +844,7 @@ class SqliteNotificationOutbox:
         total = sum(entry.cost for entry in remaining) + cost
         victims: list[_Entry] = []
         while remaining and (count > self._max_entries or total > self._max_bytes):
-            available = [entry for entry in remaining if not entry.is_leased_at(now)]
+            available = [entry for entry in remaining if not entry.is_leased_at(now, self._lease)]
             departing = [entry for entry in available if entry.is_departing_at(now)]
             pool = departing or available or remaining
             victim = min(pool, key=lambda entry: entry.sequence)
@@ -889,7 +892,7 @@ class SqliteNotificationOutbox:
             available = [
                 entry
                 for entry in entries
-                if not entry.is_leased_at(now) and not entry.is_departing_at(now)
+                if not entry.is_leased_at(now, self._lease) and not entry.is_departing_at(now)
             ]
             if not available:
                 # **Cleared here and nowhere else**, which is what makes the wake
@@ -914,28 +917,10 @@ class SqliteNotificationOutbox:
                 _log.error("notification_outbox_delivery_counter_exhausted")
                 return None
             conn.execute(
-                "UPDATE outbox SET delivery_id = ?, leased_until = ? WHERE candidate_key = ?",
-                (delivery_id, _to_micros(self._leased_until(now)), entry.key),
+                "UPDATE outbox SET delivery_id = ?, leased_at = ? WHERE candidate_key = ?",
+                (delivery_id, _to_micros(now), entry.key),
             )
             return NotificationDelivery(delivery_id=delivery_id, notification=entry.candidate)
-
-    def _leased_until(self, now: datetime) -> datetime:
-        """When a lease taken now expires, held at the last representable instant.
-
-        ADR-0131 §5a bounds ``hub_notification_lease`` below and not above, so a
-        configured lease the clock cannot add to is carried to the end of
-        representable time rather than refusing a claim §3 does not let it refuse.
-
-        Args:
-            now: The hub's reading at the moment the lease is taken.
-
-        Returns:
-            The instant the lease runs out.
-        """
-        try:
-            return now + self._lease
-        except OverflowError:
-            return _END_OF_TIME
 
     def _take_delivery_id(self, conn: sqlite3.Connection) -> str | None:
         """Mint one delivery identifier, advancing the durable counter.
@@ -1009,7 +994,7 @@ class SqliteNotificationOutbox:
                 conn,
                 "read the acknowledged delivery",
                 "SELECT candidate_key, candidate, record_id, sequence, delivery_id, "
-                "leased_until, departing, cost FROM outbox WHERE delivery_id = ?",
+                "leased_at, departing, cost FROM outbox WHERE delivery_id = ?",
                 (delivery_id,),
             )
             if not rows:
@@ -1246,7 +1231,7 @@ class SqliteNotificationOutbox:
     def _void_leases_sync(self) -> None:
         """Void every lease the stopped process granted (ADR-0131 §3)."""
         with self._transaction("void the outbox leases a restart ended") as conn:
-            conn.execute("UPDATE outbox SET delivery_id = NULL, leased_until = NULL")
+            conn.execute("UPDATE outbox SET delivery_id = NULL, leased_at = NULL")
 
     def _keys_sync(self) -> set[str]:
         with self._transaction("read the outbox keys", immediate=False) as conn:
@@ -1361,20 +1346,20 @@ def _entry_from(row: Sequence[object]) -> _Entry:
         NotificationOutboxError: If the stored candidate no longer validates,
             which is a corrupt outbox rather than a caller's fault.
     """
-    key, encoded, record_id, sequence, delivery_id, leased_until, departing, cost = row
+    key, encoded, record_id, sequence, delivery_id, leased_at, departing, cost = row
     try:
         candidate = NotificationCandidate.model_validate_json(str(encoded))
     except ValidationError as exc:
         msg = f"a stored outbox entry no longer validates: {exc}"
         raise NotificationOutboxError(msg) from exc
-    leased = _int_from(leased_until, what="an outbox lease instant")
+    leased = _int_from(leased_at, what="an outbox lease instant")
     return _Entry(
         key=str(key),
         candidate=candidate,
         record_id=None if record_id is None else str(record_id),
         sequence=_require_int(sequence, what="an outbox entry's order"),
         delivery_id=None if delivery_id is None else str(delivery_id),
-        leased_until=None if leased is None else _from_micros(leased),
+        leased_at=leased,
         departing=bool(_require_int(departing, what="an outbox entry's departing flag")),
         cost=_require_int(cost, what="an outbox entry's byte cost"),
     )

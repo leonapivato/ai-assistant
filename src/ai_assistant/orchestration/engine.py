@@ -187,28 +187,15 @@ _log = structlog.get_logger(__name__)
 
 _T = TypeVar("_T")
 
-#: The furthest instant a ``datetime`` can name, on the hub's own timezone.
-_END_OF_TIME: Final = datetime.max.replace(tzinfo=UTC)
 
+def _elapsed_since(started: datetime, now: datetime) -> timedelta:
+    """How long a poll has run, never negative.
 
-def _saturating(now: datetime, span: timedelta) -> datetime:
-    """``now + span``, held at the last representable instant instead of overflowing.
-
-    ADR-0131 §5a bounds the delivery durations below and not above, and §4 honours
-    every budget inside the configured range — so a range whose far end the clock
-    cannot add to is honoured to the end of representable time rather than refused.
-
-    Args:
-        now: The hub's reading.
-        span: How far past it to reach.
-
-    Returns:
-        The instant, or :data:`_END_OF_TIME`.
+    A clock that steps backwards would otherwise lengthen the budget rather than
+    spend it, and on a maximal budget the subtraction against it would overflow.
     """
-    try:
-        return now + span
-    except OverflowError:
-        return _END_OF_TIME
+    elapsed = now - started
+    return max(elapsed, timedelta(0))
 
 
 #: Default ceiling on unanswered parked confirmations held in memory (see
@@ -2976,9 +2963,15 @@ class Engine:
         poll's length is fixed at its start rather than recomputed against a clock
         that may move under it.
 
-        **And before the acknowledgement is applied**, which ADR-0131 §4 requires of
-        anything that can still refuse and which also makes "fixed at its start"
-        literally true, the acknowledgement falling inside the budget.
+        **Measured as elapsed against the budget, not as an absolute deadline.**
+        ADR-0131 §5a bounds ``hub_max_notification_budget`` below and not above, and
+        §4 honours every budget in the configured range, so a deadline that saturated
+        at the last representable instant would silently shorten an accepted budget —
+        the clamping §4 refuses in the other direction. Subtraction never leaves the
+        range a ``timedelta`` can hold.
+
+        **The start is read before the acknowledgement is applied**, so the
+        acknowledgement falls inside the budget rather than ahead of it.
 
         **This runs unshielded, and each mutating step is shielded on its own**
         (ADR-0131 §2a). A poll spends most of its life parked in
@@ -2991,7 +2984,7 @@ class Engine:
         during or after it leaves the lease standing.
 
         """
-        deadline = _saturating(self._now(), budget)
+        started = self._now()
         if acknowledging is not None:
             # Mutating and *pre-selection*, so it takes the same scoped shield the
             # claim does: a cancel arriving mid-retirement would leave the entry
@@ -3010,7 +3003,7 @@ class Engine:
             delivery = await self._uninterruptibly(outbox.claim())
             if delivery is not None:
                 return delivery
-            remaining = deadline - self._now()
+            remaining = budget - _elapsed_since(started, self._now())
             if remaining <= timedelta(0):
                 return None
             if not await outbox.wait_for_arrival(remaining):
