@@ -728,6 +728,52 @@ empties without anything else being done.
 > `MemoryStore` or `TraceStore`, and nothing in it is a record any retrieval path
 > reads.
 
+### 3a. The two questions ADR-0130 hands the seam: retry, and recall
+
+ADR-0130 merged ahead of this ADR and its §10 names two things it decided not to
+decide, both of them this seam's. They are answered here rather than left to an
+implementing lane, because both are rulings and one of them constrains a budget
+ADR-0130 owns.
+
+> **Normative.** A redelivery under §3 — an entry returning to the outbox on a lease
+> expiry and being delivered again — spends **no** unit of ADR-0130 §5's budget and
+> requires no second disposition. It is the same `INTERRUPT` still being carried, not
+> a retry into a second one.
+
+**This is the reading ADR-0130 §5 leaves room for and it is worth being exact about
+why.** That section rules a unit "spent when a disposition of `INTERRUPT` is
+recorded, never when contact is attempted and never when contact succeeds", and then
+forbids a seam refunding implicitly or retrying "into a second unit without a second
+disposition". A redelivery does neither. Nothing is refunded — the unit stayed spent
+from the moment the disposition was recorded — and nothing is retried *into a second
+unit*, because the entry never left the one it was enqueued under. The clause bites
+on a seam that would treat a failed contact as un-spending the budget, or that would
+manufacture a fresh interruption on its own authority; at-least-once redelivery of
+one disposition does neither, and §3's whole design is that the outbox carries a
+disposition until it is confirmed rather than deciding anything about it.
+
+> **Normative.** An entry the outbox still holds may be **withdrawn** by the act that
+> disposes of it differently, and withdrawing it removes it as an eviction does. An
+> entry whose current outstanding delivery has been written may not be recalled: the
+> seam has no operation that unsends it, and no lane may add one.
+
+**The line is the write, and it is the only line the seam can honestly draw.**
+ADR-0130 §6 stops its `off` sweep at *held* records precisely because "whether
+contact already handed to a channel can be recalled is the delivery seam's question",
+so the answer has to be one the seam can keep. Before the write, an entry is a record
+in a database the hub owns and removing it is the eviction path with a different
+reason. After it, the bytes are on a device the hub cannot reach — ADR-0094 §2 means
+the hub never dials it — and the notification may already be on a screen. A recall
+operation would therefore be a promise the transport direction makes unkeepable, and
+promising it is worse than declining it: a user who lowers a class to `off` and is
+told the pending ones are gone should not then be shown one.
+
+**What this costs is bounded and is the honest half of §6's own trade.** A
+notification written moments before the user says "never tell me this" still arrives.
+ADR-0130 §5 already accepts the same shape — no setting change reaches a record ruled
+`INTERRUPT` — so the seam is not introducing the exposure, it is naming where the
+existing one ends.
+
 ### 4. The surface this seam needs, and the `PROTOCOL_VERSION` bump that follows
 
 ADR-0124 §10 forbids *that* ADR from deciding `core` surface and says what a lane
@@ -749,14 +795,13 @@ modifiers, in the shape `observe(*, conversation_id=…)` and `questions(*, limi
 offset)` already have.
 
 > **Normative.** `core/types.py` gains one frozen pydantic model for this seam,
-> declared exactly as below, where `DisposedNotification` stands for the type
-> ADR-0130 promotes for a disposed notification and is the only part of this
-> declaration ADR-0130 supplies:
+> declared exactly as below. `NotificationCandidate` is the type ADR-0130 §2
+> promotes, and is the only part of this declaration ADR-0130 supplies:
 >
 > `class NotificationDelivery(BaseModel):`
 > `    model_config = ConfigDict(extra="forbid", frozen=True)`
 > `    delivery_id: Identifier`
-> `    notification: DisposedNotification`
+> `    notification: NotificationCandidate`
 
 **`extra="forbid"` is load-bearing here and is not the house default**, which is
 why it is spelled out rather than left to the reader: `core/types.py` carries both
@@ -870,13 +915,13 @@ what it meant. The harm is bounded to one entry and the acknowledgement is
 idempotent, and the general question — what a restore does to state a peer is
 holding — is ADR-0123's and is not reopened here.
 
-> **Normative.** `DisposedNotification`'s canonical encoding is bounded by ADR-0085
+> **Normative.** `NotificationCandidate`'s canonical encoding is bounded by ADR-0085
 > §8's contract limit **less a 256-byte delivery reserve**. ADR-0130 states that
 > bound as a constraint on its own type; a notification exceeding it never reaches
 > the outbox.
 
 **The reserve exists because what ADR-0085 §8 measures is the result, and the
-result is the wrapper.** A `DisposedNotification` sized at exactly the contract
+result is the wrapper.** A `NotificationCandidate` sized at exactly the contract
 limit is a notification the hub could accept and could never deliver: wrapping it as
 `{"delivery_id":…,"notification":…}` puts the *result* over the limit, so the hub
 must either refuse what it took or write a frame the client is obliged to reject.
@@ -927,7 +972,13 @@ the corpus has a form for exactly that: ADR-0084 §11 named #473's evidence boun
 a **prerequisite of the client lane**, not merely as context", for the same reason —
 a dependency that binds a lane should bind it in a marked clause rather than in a
 reader's inference. This ADR is second in its batch's merge order behind ADR-0130,
-so the prerequisite is satisfied before any lane can act on it.
+so the prerequisite is satisfied before any lane can act on it — and it is satisfied
+already: ADR-0130 merged at `e3717f5d` while this ADR was in review, which is why the
+declaration above names `NotificationCandidate` rather than a placeholder, and why
+§3a can answer the two questions ADR-0130 §10 hands the seam instead of anticipating
+them. The clause stays rather than being struck, because it is what the *lane* is
+bound by and a discharged prerequisite read as an absent one is how the next seam
+gets built against a `Proposed` contract.
 
 **Why the seam mints its own identifier instead of using the notification's.**
 The acknowledgement is about *a delivery attempt*, and an attempt is a thing the
@@ -1362,8 +1413,11 @@ one that makes the posture closed rather than merely deep.
 ### 8. What this ADR does not decide
 
 - **What a notification is, who may produce one, and what earns an interruption.**
-  ADR-0130's, entirely. This seam carries a disposed notification and never
-  inspects one.
+  ADR-0130's, entirely. This seam carries a `NotificationCandidate` whose
+  disposition was ruled `INTERRUPT` there, and never inspects one. Note what §3a
+  *does* decide and why that is not an exception: ADR-0130 §10 names retry and
+  recall as the seam's own questions, so answering them is discharging its
+  deferral rather than reaching into its ground.
 - **Which device the owner is actually at.** §3 rules first-to-ask and says it is
   crude. The successor is a device as a context facet and a device-scoped
   permission input, which ADR-0124 §10 already defers and #920 holds. A later ADR
