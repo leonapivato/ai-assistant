@@ -221,6 +221,23 @@ governing one, not its third.
 > restart. A notification the hub has disposed and not yet delivered is never held
 > only in memory.
 
+> **Normative.** The enqueue is a **single durable commit**, and the seam reports
+> its outcome to the caller that offered the notification. The seam takes custody
+> at that commit and not before, so a caller that has not seen the enqueue succeed
+> has not handed the notification over.
+
+**The second clause is where the discipline below actually bites, and stating the
+first alone would have claimed it without applying it.** ADR-0094 §10a's first
+custody clause forbids "an acknowledgement precede the hub's durable custody of the
+submitted material" — the same failure, mirrored: a producer that treats a
+notification as disposed, and the hub that crashes between that act and a separate
+outbox write, together lose a notification that every clause here says survives a
+restart. Making the enqueue the single commit *and* the point custody transfers is
+what closes the window, and reporting its outcome is what leaves the producer able
+to do something about a failure. **What the producer then does is ADR-0130's** —
+retry, drop, record — and this ADR neither decides it nor needs to; the seam's
+obligation is to have an unambiguous answer for the producer to act on.
+
 **Silence on this is the one thing the corpus forbids outright.** ADR-0094 §10a
 binds the mirror-image decision — the spoke-to-hub custody handoff — with "An ADR
 deciding the custody handoff states explicitly whether an unresolved submission
@@ -251,6 +268,36 @@ as a considered view of where people are.
 > unavailable to any other device until the device acknowledges it or the lease
 > expires, and on expiry it returns to the outbox and may be delivered again.
 
+> **Normative.** The lease runs for a **named setting**, refused at load unless it
+> is strictly positive, under ADR-0093 §5's discipline. It starts at the instant
+> the hub writes the delivery, measured on the hub's clock, and no value a device
+> sends influences it.
+
+> **Normative.** A hub restart voids every lease. An entry leased when the hub
+> stopped is available again when it starts, and no lease survives the process that
+> granted it.
+
+**The figure is deferred and the dimension is not**, which is ADR-0094 §10's rule
+for exactly this: "What is decided here is which dimensions must be bounded, not by
+how much." A lease with no stated duration is not a lease — it is the indefinite
+hold the clause was written to prevent, and the finite-terminal-outcome property
+below would be an assertion rather than a consequence. So the setting is named
+here and its value is the implementing lane's, refused at load like every other
+figure the hub carries.
+
+**The hub's clock, and no device's.** A device that could choose its own lease
+could hold an entry for as long as it liked, which hands the eviction rule below to
+whichever peer asks for the longest lease. This is ADR-0094 §5's shape applied to a
+different quantity — the hub decides, a submission never raises its own — and the
+reason is the same one: a bound a peer sets is not a bound.
+
+**Voiding leases on restart is the only answer that is both correct and free.** A
+lease is only meaningful while the connection that took the delivery exists, and no
+connection survives a hub restart — so an entry still leased at startup is one whose
+holder is definitionally gone. Carrying leases across a restart would mean a hub
+that came back in ten seconds waited out a full lease before anyone could have the
+entry, which is latency bought for nothing.
+
 > **Normative.** A device acknowledges a delivery by naming its identifier on its
 > **next** `next_notification` request. An acknowledgement naming an entry the hub
 > does not hold, or one already retired, is accepted and does nothing.
@@ -271,12 +318,17 @@ fixes the delivery semantics honestly: this is **at-least-once**. A device that
 receives a notification, shows it, and dies before acknowledging will be shown it
 again. That is the right side to fail on for a notification — a repeated reminder
 is a small annoyance and a lost one is the whole failure — and it is stated rather
-than discovered.
+than discovered. The bound below names the one place that guarantee is
+deliberately given up, and gives the reason there.
 
 > **Normative.** The outbox is bounded per hub by a count and by total bytes, both
-> named settings refused at load under ADR-0093 §5's discipline. When a bound would
-> be exceeded the **oldest undelivered** entry is dropped, and the drop is recorded
-> in the hub's log naming the entry.
+> named settings refused at load under ADR-0093 §5's discipline. Both bounds count
+> **every** entry the outbox holds, leased or not.
+
+> **Normative.** When an enqueue would exceed either bound, the hub drops the
+> **oldest entry that is not leased**; when every entry is leased, it drops the
+> oldest entry and breaks its lease. Every drop is recorded in the hub's log naming
+> the entry, and the enqueue then proceeds.
 
 **An unbounded queue behind an offline owner is a disk-filling bug with a product
 name.** Dropping the oldest rather than refusing the newest is the choice a
@@ -285,6 +337,22 @@ been reachable, and of the notifications waiting, the stale ones are the ones wo
 least. The drop is logged because a silent drop is indistinguishable from a
 producer that never fired, and #939's own standard applies — a gap named is a gap
 someone can close.
+
+**The eviction rule is stated as a total function because the interesting case is
+the one a partial rule leaves undefined.** "Drop the oldest undelivered entry" has
+no subject when every entry is leased, and an implementation reaching that state has
+two illegal moves available — retain the new entry over the bound, or drop a leased
+one against the rule — with nothing to choose between them. So the leased case is
+named: leases are preferred *last*, and the tie-break is the same age order.
+
+**Breaking a lease is the cheapest thing available to break, and saying what it
+costs is the point of ruling it rather than leaving it.** A leased entry has already
+been written to a device, so in the ordinary case it is on a screen; dropping it
+forfeits the *redelivery*, not the notification. That degrades at-least-once to
+at-most-once for that one entry — the only place in this ADR where it does — and it
+buys the bound a total rule. The state is also transient by construction: leases
+expire, so an outbox in which every entry is leased is one the passage of time
+empties without anything else being done.
 
 > **Normative.** The outbox holds notifications and nothing else. It is not a
 > memory, not an episode and not a trace; no lane may route it through
@@ -315,6 +383,25 @@ offset)` already have.
 > notification ADR-0130 promotes. Its identifier is minted by the seam when the
 > entry is enqueued, is stable across redeliveries of that entry, and is the value
 > `acknowledging` names.
+
+> **Normative.** ADR-0130 is a **prerequisite of the implementing lane**, not
+> merely context for it. `NotificationDelivery` has no complete field layout until
+> ADR-0130 has promoted the type it nests, so no lane implements this seam before
+> ADR-0130 is merged.
+
+**That clause exists because this ADR is deliberately half of a pair, and a
+half-decision that does not say so reads as an underspecified whole.** Adversarial
+review raised it as a blocker on the first round: an implementing change has no
+model to build, because the tree at this ADR's base holds no ADR-0130. The
+observation is correct and the fix is not to absorb the other half — deciding what
+a notification *is* here would take the decision the leg-10 batch (#943) split into
+its own lane precisely so that "what is worth saying" and "how it travels" could be
+argued separately. What the review actually found is an unstated prerequisite, and
+the corpus has a form for exactly that: ADR-0084 §11 named #473's evidence bound "as
+a **prerequisite of the client lane**, not merely as context", for the same reason —
+a dependency that binds a lane should bind it in a marked clause rather than in a
+reader's inference. This ADR is second in its batch's merge order behind ADR-0130,
+so the prerequisite is satisfied before any lane can act on it.
 
 **Why the seam mints its own identifier instead of using the notification's.**
 The acknowledgement is about *the outbox entry*, and an entry has a life the
@@ -584,11 +671,14 @@ elsewhere.
 spoke's unresolved submissions" — material arriving at the hub from an edge whose
 state the hub cannot see. This seam runs the other way: the hub holds the material,
 the hub is the durable party, and the device is the one that may vanish. The
-clauses are not met because they are not engaged. §3 above adopts the analogous
-discipline by choice — durability stated rather than left silent, a terminal
-outcome in finite time via the lease, an aggregate bound by count and by bytes —
-and says so there, so a reader does not have to infer whether the resemblance was
-noticed.
+clauses are not met because they are not engaged. §3 above adopts the analogue of
+all four by choice — custody transferring at a single durable commit and not
+before, a terminal outcome in finite time via a lease with a named duration, an
+aggregate bound by count and by bytes with a total eviction rule, and durability
+across a restart stated rather than left silent — and says so at each, so a reader
+does not have to infer whether the resemblance was noticed. Adversarial review's
+first round is why the custody one is a clause: this ADR claimed the discipline
+before it applied it at the point where it bites.
 
 **This ADR is marked under ADR-0089.** Every obligation it imposes is a marked
 clause; unmarked text explains what a marked clause means and supplies no
