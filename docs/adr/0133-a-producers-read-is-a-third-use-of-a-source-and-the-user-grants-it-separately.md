@@ -194,23 +194,57 @@ source grant is not an action authorisation" is neither relaxed nor extended.
 ### 2. Refusing it forecloses unprompted contact from that source, and granting it implies neither other use
 
 > **Normative.** Where no live grant names `NOTIFY` for a source, that source is
-> not read to conclude a notification candidate. Nothing is opened, on ADR-0097
-> §5's rule for the other two uses; and no candidate about that source is
-> concluded by any other route, because a producer that has not read it has
-> nothing to conclude from.
+> **not read** to conclude a notification candidate. Nothing is opened, on
+> ADR-0097 §5's rule for the other two uses: the source is not resolved, not
+> opened and not parsed.
+
+> **Normative.** The guarantee is over the **read**, and it is not a guarantee
+> that nothing the user is ever told can be traced back to that source. A record
+> some other use lawfully wrote — a belief an `INGEST` read proposed — is a record
+> in memory, and a producer that reads memory reads memory. The absence of a
+> `NOTIFY` grant is not a filter over records already stored, and no
+> implementation may read it as one; a producer over such records is bounded by
+> its own decision and by ADR-0130 §5, not by this member.
 
 > **Normative.** `NOTIFY` implies neither `FACET` nor `INGEST`, and neither of
 > them implies `NOTIFY`. A grant's scope may name any non-empty subset of the
 > three, and it authorises exactly the uses it names. No implementation may infer
-> one member from another, order them, or treat any of them as a superset of
-> another.
+> one member from another, **rank** them, or treat any of them as a superset of
+> another. The declaration-order normalisation `SourceGrant.scope` carries (§6) is
+> a serialisation convention and is not a rank: it decides how two implementations
+> write one grant down, and nothing may read a precedence, a severity or an
+> authority relation off it.
 
 **Refusal is the property this member exists for, so it is stated first.** A user
 who declines `NOTIFY` on their calendar has bought a guarantee with a shape: the
 assistant will not read that calendar in order to raise something with them, so no
-durable record about it can be written, held, or later delivered. Under a widened
-`INGEST` that guarantee has no expression at all; under this member it is the
-ordinary meaning of ADR-0097 §2's surviving sentence.
+durable record about it can be written, held, or later delivered *from that
+reading*. Under a widened `INGEST` that guarantee has no expression at all; under
+this member it is the ordinary meaning of ADR-0097 §2's surviving sentence.
+
+**The second clause bounds that guarantee where the corpus has already bounded
+it, rather than promising more than a grant has ever bought.** ADR-0097 §6 is the
+settled precedent and it is emphatic: "Revoking a grant retires no belief, closes
+no validity window, deletes no record and alters no stored record. Its whole
+effect is that §5's check stops passing." A grant's reach ends at the read, in
+both directions — a revocation does not unwrite what an authorised read produced,
+and a refusal does not reach back over it either. Promising otherwise here would
+require what ADR-0097 §12 has twice deferred: per-belief grant attribution, which
+"needs a pointer field on `Attestation`", and "revoke and forget everything this
+source told me", which needs an enumeration of beliefs by `reported_by` that
+ADR-0092 §10 declined to add. Neither surface exists, so a guarantee resting on
+them would be a sentence with no mechanism — and would be the first place in this
+corpus where a grant reached past the read.
+
+**The residual is therefore named rather than papered over.** A producer reading
+memory can conclude a candidate about something the user's calendar said, on the
+strength of a belief an `INGEST` grant authorised, with no `NOTIFY` grant
+anywhere. That is a real gap in the sentence "do not raise my calendar with me",
+and it is the same gap ADR-0097 §6 already accepted when it ruled revocation
+prospective. What closes it is provenance the corpus has deferred with its firing
+condition attached, not a clause here; §7 records it as undecided, and until then
+ADR-0130 §6's reach level is the control that reaches such a producer, which is
+one more reason §4 keeps both.
 
 **Independence is ADR-0093 §3's axis held rather than restated.** That section
 rules that a reading's consumers read "at their own cadence" and that "neither may
@@ -411,6 +445,11 @@ under ADR-0102's existing operations, without asking this ADR.
   identity exactly as §1 of ADR-0097 keys a grant.
 - **Anything about delivery.** ADR-0131 owns the seam; §1 above forbids reading
   the scope for any part of it.
+- **Whether a refused `NOTIFY` reaches records another use lawfully wrote.** §2's
+  second clause rules that it does not, and names why: the surfaces that would
+  carry provenance are ADR-0097 §12's two deferrals, each with its firing
+  condition already attached. Widening the guarantee is that lane's, and it would
+  reach every grant rather than this member.
 - **A fourth member.** The axis admits one scope per consumer of a reading, so a
   fourth arrives with a fourth consumer and with its own decision — not by
   analogy with this one.
@@ -567,6 +606,12 @@ Nothing implements against §6 until this has merged.
   hazard it does not tolerate, but for one lane's duration the grant surface can
   offer a use nothing performs. That is golden rule 5's cost, paid here in the
   cheapest place it can be paid.
+- **A refusal is a refusal of the read, and a user may reasonably hear more in
+  it.** §2's second clause is honest about the gap — a producer over memory can
+  conclude about what an `INGEST` read put there — and that gap is ADR-0097 §6's,
+  inherited rather than created. It is the strongest argument for the provenance
+  ADR-0097 §12 defers, and it should be cited when that deferral's condition next
+  looks like firing.
 - **`GrantScope` is now a vocabulary that will keep growing.** Each new consumer
   class of a reading is a new member and a new user question, and the enum's
   friendliness degrades with its length. §7 declines a fourth member by analogy for
