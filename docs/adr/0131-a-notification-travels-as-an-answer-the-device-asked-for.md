@@ -185,6 +185,13 @@ member the *seam* needs around it.
 > other request on that connection, and a client wanting an ordinary session while
 > polling opens a second connection for it.
 
+> **Normative.** The hub enforces that in **both directions**, and each violation is
+> a violation of the connection's own rules, answered by closing that connection
+> (ADR-0084 §3, as ADR-0131 amends its count). A `next_notification` arriving on a
+> connection that has already carried any other request claims nothing and closes it;
+> a request other than `next_notification` arriving on a delivery connection closes
+> it.
+
 **This falls out of ADR-0084 §3 rather than being chosen against it**, and stating
 it as a rule is what stops the first implementation from discovering it in
 production. The serial rule means one outstanding request per connection. A poll
@@ -195,6 +202,18 @@ request while one is outstanding is "not queued, not run concurrently", and
 `_serve_requests` implements exactly that. So a shared connection does not degrade
 under load; it is simply broken, on the first turn the owner takes while a poll is
 in flight.
+
+**A rule stated only about the client is a rule nobody enforces, and an earlier draft
+stated only half of even that.** The isolation clause reads as an obligation on the
+sender, and adversarial review pointed out on the twenty-sixth round that the hub had
+no answer for a socket which completed a `converse` and *then* sent a poll: the
+serial server accepts sequential frames happily, so that socket would claim a
+delivery slot out of the capacity §5 reserves for isolated pollers, with §2's
+"carrying no other request for its lifetime" contradicted and nothing to contradict
+it. Both directions are now the hub's to enforce, and both are closes for the reason
+§2's poll conflict is — a decoded frame that violates the connection's own rules,
+which is the clause ADR-0084 §3 already provides and whose count this ADR amends in
+§9.
 
 **Two connections is cheap here in a way it would not be elsewhere**, and the
 reason is ADR-0084 §7's: "the client is stateless (§7) — so reconnecting costs it
