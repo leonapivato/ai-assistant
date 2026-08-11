@@ -21,7 +21,7 @@ import asyncio
 import sqlite3
 import stat
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -732,6 +732,60 @@ async def test_a_quiet_window_is_read_in_the_configured_zone(tmp_path: Path) -> 
         assert ruling.reason is NotificationCondition.QUIET_WINDOW
 
         assert ruling.reconsider_at == datetime(2026, 8, 11, 17, 0, tzinfo=UTC)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "ends_at",
+    [time(2, 1), time(2, 29), time(2, 30), time(2, 59)],
+    ids=["02:01", "02:29", "02:30", "02:59"],
+)
+async def test_a_window_ending_inside_a_spring_gap_resolves_to_the_transition(
+    tmp_path: Path, ends_at: time
+) -> None:
+    """ADR-0130 §5: **the earliest** instant at which the condition could next hold.
+
+    ``America/New_York`` skips 02:00 to 02:59 local on 2026-03-08, so a quiet window
+    ending anywhere in there never arrives on any clock; §5 asks for the instant
+    the clock next passes it, which is the transition itself — ``07:00:00Z``, to
+    the microsecond.
+
+    **Every endpoint is asserted because 02:30 is a coincidence.** A one-hour
+    bracket's first midpoint *is* the transition for that endpoint alone, so a
+    bisection that stopped a second short would look exact there and be up to a
+    second late everywhere else — which is not merely imprecise. §5 makes
+    ``reconsider_at`` the instant *before* which a record may not be
+    reconsidered, so an answer past the transition means the job ticking at the
+    transition finds the record not due and the user waits another whole
+    interval, five minutes by default.
+
+    The canonical fake still stops at a second and still answers the earlier way
+    for three of these four; #955 holds aligning it and putting this clause in
+    the shared suite, both of which need files outside this lane's fence.
+    """
+    transition = datetime(2026, 3, 8, 7, 0, tzinfo=UTC)
+    # 01:30 EST, inside the window and before the gap.
+    inside = datetime(2026, 3, 8, 6, 30, tzinfo=UTC)
+    store = SqliteNotificationStore(path=tmp_path / "n.db", now=lambda: inside)
+    try:
+        await store.set_preferences(
+            NotificationPreferences(
+                reaches=(
+                    ClassReach(notification_class="calendar", reach=NotificationReach.INTERRUPT),
+                ),
+                quiet_windows=(QuietWindow.between(time(1, 0), ends_at),),
+            )
+        )
+
+        ruling = await store.admit(
+            candidate(key="k1", noticed_at=inside, expires_at=inside + timedelta(days=1)),
+            policy=DefaultNotificationPolicy(timezone="America/New_York"),
+        )
+
+        assert ruling.kind is NotificationDispositionKind.HOLD
+        assert ruling.reason is NotificationCondition.QUIET_WINDOW
+        assert ruling.reconsider_at == transition
     finally:
         store.close()
 
