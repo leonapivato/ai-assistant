@@ -621,6 +621,40 @@ async def test_a_value_with_no_wire_form_is_refused_before_the_socket_is_opened(
         await client.belief("bad \ud800")
 
 
+async def test_a_blank_acknowledgement_is_refused_before_the_socket_is_opened(
+    tmp_path: Path,
+) -> None:
+    """ADR-0085 §9's "before any I/O", for the one argument that had no local check.
+
+    Every other identifier on this client is normalised through ``identifier(...)``
+    before ``_call``; ``next_notification``'s ``acknowledging`` was passed straight
+    through, so a blank one travelled — and the hub refused it while *decoding*,
+    which closes the connection. The caller then sees a transport failure where the
+    in-process engine raises ``ValueError``, and the same argument fails differently
+    depending on which implementation is behind the surface. Driven with no hub at
+    all, so it tests the ordering rather than the refusal.
+    """
+    client = HubEngineClient(tmp_path / "hub.sock", read_timeout=_PATIENT)
+
+    with pytest.raises(ValueError, match="acknowledging"):
+        await client.next_notification(acknowledging="   ", budget=timedelta(0))
+
+
+async def test_a_poll_with_no_acknowledgement_still_reaches_the_socket(
+    tmp_path: Path,
+) -> None:
+    """The discriminating half: only a blank one is refused locally.
+
+    ``None`` is the ordinary case and must not be normalised into a refusal, and a
+    well-formed identifier must still travel.
+    """
+    client = HubEngineClient(tmp_path / "hub.sock", read_timeout=_PATIENT)
+    with pytest.raises(HubUnavailableError):
+        await client.next_notification(budget=timedelta(0))
+    with pytest.raises(HubUnavailableError):
+        await client.next_notification(acknowledging="d-1", budget=timedelta(0))
+
+
 async def test_a_well_formed_argument_still_reaches_the_socket(tmp_path: Path) -> None:
     """The discriminating half: the local refusal refuses only what has no form.
 
