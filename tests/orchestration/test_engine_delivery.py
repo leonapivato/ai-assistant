@@ -24,6 +24,7 @@ from ai_assistant.core.types import (
     ClassReach,
     DataTier,
     NotificationCandidate,
+    NotificationEnqueue,
     NotificationPreferences,
     NotificationReach,
 )
@@ -90,6 +91,11 @@ class RecordingOutbox:
         self.calls: list[str] = []
         self.reconciled = 0
         self.withdrew = True
+
+    async def offer(self, candidate: NotificationCandidate) -> NotificationEnqueue:
+        """Record that a candidate was handed off (ADR-0131 §3b)."""
+        self.calls.append(f"offer:{candidate.candidate_key}")
+        return NotificationEnqueue.ENQUEUED
 
     async def claim(self) -> NotificationDelivery | None:
         """Answer that nothing is available."""
@@ -481,3 +487,57 @@ class TestForgettingWithdrawsBeforeItDeletes:
         )
 
         assert await engine.forget_notification("nothing") is False
+
+
+class TestReconsiderationHandsOffAtOnce:
+    """ADR-0131 §3b: the live handoff is the primary path, on this path too."""
+
+    async def test_a_reconsidered_interrupt_reaches_the_outbox(self) -> None:
+        """§3b names this call site: "It is also the reconsideration path's answer
+        without a second clause."
+
+        Without it the notification the user's own setting change made actionable
+        waits for a restart — which is exactly what §3b forbids reconciliation from
+        being, "a repair that is also the primary path being a design where the
+        ordinary case waits on a restart".
+        """
+        store = FakeNotificationStore()
+        subject = _candidate().model_copy(update={"expires_at": NOW + timedelta(hours=2)})
+        ruled = await store.admit(subject, policy=FakeNotificationPolicy())
+        assert ruled.kind is not None
+        outbox = RecordingOutbox()
+        engine = _wired(
+            Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
+        )
+        # Raising the class is the act that makes the held record due and
+        # re-rules it to INTERRUPT.
+        await engine.set_notification_preferences(
+            NotificationPreferences(
+                reaches=(
+                    ClassReach(notification_class="calendar", reach=NotificationReach.INTERRUPT),
+                )
+            )
+        )
+
+        assert await engine.reconsider_notifications() >= 1
+
+        assert f"offer:{subject.candidate_key}" in outbox.calls
+
+    async def test_a_reconsideration_that_still_holds_offers_nothing(self) -> None:
+        """The discriminating half: only an ``INTERRUPT`` is handed off.
+
+        A record re-ruled and still held has earned no contact, and offering it
+        would put a notification in the outbox that ADR-0130 §5 never ruled
+        deliverable.
+        """
+        store = FakeNotificationStore()
+        subject = _candidate().model_copy(update={"expires_at": NOW + timedelta(hours=2)})
+        await store.admit(subject, policy=FakeNotificationPolicy())
+        outbox = RecordingOutbox()
+        engine = _wired(
+            Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
+        )
+
+        await engine.reconsider_notifications()
+
+        assert not [call for call in outbox.calls if call.startswith("offer:")]

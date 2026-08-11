@@ -33,7 +33,11 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from datetime import timedelta
 
-    from ai_assistant.core.types import NotificationDelivery
+    from ai_assistant.core.types import (
+        NotificationCandidate,
+        NotificationDelivery,
+        NotificationEnqueue,
+    )
 
 
 @runtime_checkable
@@ -45,6 +49,26 @@ class DeliveryOutbox(Protocol):
     which is the failure ADR-0131 §4 declares on ``next_notification`` for exactly
     this reason.
     """
+
+    async def offer(self, candidate: NotificationCandidate) -> NotificationEnqueue:
+        """Hand one ruled interruption to the seam (ADR-0131 §3, §3b).
+
+        **This one is ``core``'s**, and it is named here because the engine calls
+        it too. :class:`~ai_assistant.core.protocols.NotificationOutbox` declares it
+        for the *producer*; ADR-0131 §3b then says the same handoff runs on the
+        reconsideration path — "ADR-0130 §5 rules a held record to ``INTERRUPT``
+        through the same writer, so the same handoff runs" — and that path is this
+        engine's. One object satisfies both Protocols, so naming the method here
+        costs nothing and keeps this seam a complete statement of what the engine
+        needs rather than a partial one the reader has to assemble.
+
+        Args:
+            candidate: The candidate whose disposition was ruled ``INTERRUPT``.
+
+        Returns:
+            Which of §3's four outcomes the offer reached.
+        """
+        ...
 
     async def claim(self) -> NotificationDelivery | None:
         """Select an entry, mint its identifier and lease it, in one step.
