@@ -339,6 +339,26 @@ class TestThePollTerminates:
 
         assert await engine.next_notification(budget=timedelta(milliseconds=20)) is None
 
+    async def test_an_arrival_between_the_claim_and_the_wait_is_not_lost(self) -> None:
+        """The wake is armed by the claim that found nothing, not by the wait.
+
+        An arrival landing between a poll's empty ``claim`` and its call to
+        ``wait_for_arrival`` used to be erased: the event was already set, the wait
+        cleared it, and the poll slept out its whole budget with an entry available
+        the whole time — answering ``None`` while the hub had something, which is
+        the one thing ADR-0131 §1 says a poll must not do.
+        """
+        outbox = FakeNotificationOutbox(now=lambda: NOW)
+        engine = _wired(Harness(), outbox)
+        # The claim that finds nothing is what arms the wake, so an offer taken
+        # before any wait begins is still visible to the next one.
+        assert await outbox.claim() is None
+        await outbox.offer(_candidate())
+
+        delivery = await engine.next_notification(budget=timedelta(seconds=5))
+
+        assert delivery is not None
+
     async def test_an_arrival_during_the_wait_is_delivered(self) -> None:
         """The discriminating half: a wake sends the poll back for the re-read.
 
@@ -413,6 +433,45 @@ class TestForgettingWithdrawsBeforeItDeletes:
         assert await engine.forget_notification(ruled.notification_id) is True
 
         assert await engine.next_notification(budget=timedelta(0)) is None
+
+    async def test_dismiss_notification_withdraws_the_entry(self) -> None:
+        """ADR-0131 §3: the owner's dismissal reaches the outbox, and must.
+
+        §3 makes an entry departing when its record "has ceased to be actionable",
+        and names the two causes the seam can decide locally — it gave the entry up,
+        or the candidate expired. An owner's dismissal is neither, which is why §3
+        rules that route "arrives as §3a's withdrawal — **the disposing act calls
+        the seam** rather than the seam polling for it".
+        """
+        store = FakeNotificationStore()
+        await store.set_preferences(
+            NotificationPreferences(
+                reaches=(
+                    ClassReach(notification_class="calendar", reach=NotificationReach.INTERRUPT),
+                )
+            )
+        )
+        subject = _candidate().model_copy(update={"expires_at": NOW + timedelta(hours=2)})
+        ruled = await store.admit(subject, policy=FakeNotificationPolicy())
+        assert ruled.notification_id is not None
+        outbox = FakeNotificationOutbox(records=store, now=lambda: NOW)
+        await outbox.offer(subject)
+        engine = _wired(
+            Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
+        )
+
+        assert await engine.dismiss_notification(ruled.notification_id) is True
+
+        assert await engine.next_notification(budget=timedelta(0)) is None
+
+    async def test_dismissing_without_an_outbox_still_dismisses(self) -> None:
+        """The CLI's engine serves no poll, so it has no entry to withdraw."""
+        store = FakeNotificationStore()
+        engine = _wired(
+            Harness(), None, notifications=store, notification_policy=FakeNotificationPolicy()
+        )
+
+        assert await engine.dismiss_notification("nothing") is False
 
     async def test_forgetting_without_an_outbox_still_deletes(self) -> None:
         """The CLI's engine serves no poll, so it has no entry to withdraw."""

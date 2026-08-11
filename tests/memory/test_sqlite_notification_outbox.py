@@ -578,3 +578,52 @@ class TestATerminalRefusalIsTerminalForTheRecord:
         assert held.dismissed_at is None
         delivery = await outbox.claim()
         assert delivery is not None
+
+
+class TestTheEnqueueIsOneTransition:
+    """ADR-0131 §3: the key decision and the insert may not be two steps."""
+
+    async def test_a_second_writer_under_one_key_is_refused_not_overwritten(
+        self, tmp_path: Path
+    ) -> None:
+        """Two outboxes on one database may not both report ENQUEUED.
+
+        The victims' dismissals reach the other store, so the deciding transaction
+        has to end before the inserting one begins — and across processes another
+        writer can commit under this key in the gap. Both callers would have been
+        told ``ENQUEUED`` and one entry would have silently replaced the other,
+        losing the custody §3 says transfers at that commit. The insert re-reads the
+        key and falls through to the rule the fresh state implies.
+        """
+        path = tmp_path / "outbox.db"
+        first = build(path)
+        second = build(path)
+        assert await first.offer(candidate(key="k1")) is NotificationEnqueue.ENQUEUED
+
+        differing = candidate(key="k1", confidence=0.9)
+        assert await second.offer(differing) is NotificationEnqueue.KEY_COLLISION
+
+        delivery = await second.claim()
+        assert delivery is not None
+        assert delivery.notification.confidence == 0.5
+
+    async def test_a_second_writer_offering_the_same_candidate_is_a_no_op(
+        self, tmp_path: Path
+    ) -> None:
+        """The discriminating half: an identical candidate is still a retry."""
+        path = tmp_path / "outbox.db"
+        first = build(path)
+        second = build(path)
+        subject = candidate(key="k1")
+        await first.offer(subject)
+
+        assert await second.offer(subject) is NotificationEnqueue.ALREADY_HELD
+
+
+async def test_an_arrival_before_the_wait_is_not_lost(tmp_path: Path) -> None:
+    """The clear belongs to the claim that observed emptiness, not to the wait."""
+    outbox = build(tmp_path / "outbox.db")
+    assert await outbox.claim() is None
+    await outbox.offer(candidate(key="k1"))
+
+    assert await outbox.wait_for_arrival(timedelta(seconds=5)) is True

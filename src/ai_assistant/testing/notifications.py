@@ -1142,6 +1142,10 @@ class FakeNotificationOutbox:
                 if not self._is_leased(entry, now) and not self._is_departing(entry, now)
             ]
             if not available:
+                # Cleared by the transition that observed the emptiness, never by
+                # the wait — clearing there erases an arrival that landed between a
+                # poll's empty claim and its call to wait.
+                self._arrivals.clear()
                 return None
             entry = min(available, key=lambda candidate_entry: candidate_entry.sequence)
             # Two halves, as §4 requires: a counter for uniqueness, and an
@@ -1242,7 +1246,6 @@ class FakeNotificationOutbox:
         Returns:
             Whether an arrival may have happened; ``False`` where the wait ran out.
         """
-        self._arrivals.clear()
         try:
             await asyncio.wait_for(self._arrivals.wait(), timeout.total_seconds())
         except TimeoutError:
