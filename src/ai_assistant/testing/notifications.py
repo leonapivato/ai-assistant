@@ -959,6 +959,29 @@ class FakeNotificationWriter:
         return await self._store.admit(candidate, policy=self._policy)
 
 
+def _check_outbox_bounds(*, lease: timedelta, max_entries: int) -> None:
+    """Refuse a bound ADR-0131 §5a does not admit, at construction.
+
+    Deliberately duplicated from the durable outbox's own guard rather than shared:
+    ``ai_assistant.testing`` stands in *for* an implementation and may not reach into
+    one, which is the same boundary ADR-0060 keeps for the cancellation helper. What
+    matters is that the two refuse the same values, and the tests either side assert
+    exactly that.
+
+    Raises:
+        ValueError: If either figure is not a strictly positive value of its type.
+    """
+    if lease.total_seconds() <= 0:
+        msg = f"hub_notification_lease must be positive, got {lease!r} (ADR-0131 §5a)"
+        raise ValueError(msg)
+    if not isinstance(max_entries, int) or isinstance(max_entries, bool) or max_entries < 1:
+        msg = (
+            f"hub_notification_outbox_entries must be a positive integer, "
+            f"got {max_entries!r} (ADR-0131 §5a)"
+        )
+        raise ValueError(msg)
+
+
 class _OutboxEntry:
     """One entry of :class:`FakeNotificationOutbox`."""
 
@@ -1024,7 +1047,16 @@ class FakeNotificationOutbox:
                 to enforce none. ``None`` is right for a fake with no frame behind
                 it: the ceiling is settings-derived (§4), so a fake inventing one
                 would refuse candidates a real deployment accepts.
+
+        Raises:
+            ValueError: If ``lease`` or ``max_entries`` is not strictly positive.
+                ADR-0131 §5a admits no "off" for either, and **a fake looser than
+                the contract certifies consumers a real outbox rejects** — a
+                ``max_entries`` of 0 would hold entries a durable outbox refuses to
+                construct at all, and a zero lease would expire every delivery the
+                instant it was taken.
         """
+        _check_outbox_bounds(lease=lease, max_entries=max_entries)
         self._clock = checked_clock(now, owner="FakeNotificationOutbox")
         self._records = records
         self._lease = lease

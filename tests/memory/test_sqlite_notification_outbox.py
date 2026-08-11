@@ -26,6 +26,7 @@ from ai_assistant.core.types import (
     NotificationReach,
 )
 from ai_assistant.memory import SqliteNotificationOutbox
+from ai_assistant.memory.notification_outbox import _run_to_completion
 from ai_assistant.testing import FakeNotificationPolicy, FakeNotificationStore
 
 if TYPE_CHECKING:
@@ -766,3 +767,50 @@ class _RefusingStore(FakeNotificationStore):
             msg = "the notification store is unavailable"
             raise NotificationStoreError(msg)
         return await super().dismiss(notification_id)
+
+
+class TestCleanupNeverTakesAReplacement:
+    """ADR-0131 §3b: "entry absent implies record dismissed", across writers."""
+
+    async def test_a_settle_does_not_delete_a_row_enqueued_under_the_same_key(
+        self, tmp_path: Path
+    ) -> None:
+        """A departure finishes the row it decided against, and no other.
+
+        The dismissal reaches the other store, so a departure yields between the
+        read that marked a row and the delete that finishes it. Another writer can
+        remove the old row and enqueue a fresh candidate under the same key in that
+        window; an unqualified delete then takes the *new* row without its record
+        having been dismissed — the invariant broken, and a notification lost until
+        a restart. Sequences are drawn from a durable monotonic counter, so a
+        replacement never shares one and the delete matches nothing.
+        """
+        clock = MovingClock()
+        path = tmp_path / "outbox.db"
+        first = build(path, now=clock)
+        await first.offer(candidate(key="k1", expires_at=NOW + timedelta(minutes=5)))
+        clock.advance(timedelta(minutes=6))
+
+        # A second writer clears the expired row and enqueues a fresh candidate
+        # under the same key, exactly as it would while the first was dismissing.
+        second = build(path, now=clock)
+        await second.reconcile()
+        fresh = candidate(key="k1", noticed_at=clock(), expires_at=clock() + timedelta(hours=1))
+        assert await second.offer(fresh) is NotificationEnqueue.ENQUEUED
+
+        # The first instance now finishes the departure it decided on earlier.
+        await first.reconcile()
+
+        delivery = await second.claim()
+        assert delivery is not None
+        assert delivery.notification.candidate_key == "k1"
+
+    async def test_a_removal_names_the_row_its_sequence_identifies(self, tmp_path: Path) -> None:
+        """The mechanism, asserted directly: a stale generation deletes nothing."""
+        outbox = build(tmp_path / "outbox.db")
+        await outbox.offer(candidate(key="k1"))
+
+        await _run_to_completion(outbox._remove_sync, "k1", 9999)
+
+        delivery = await outbox.claim()
+        assert delivery is not None

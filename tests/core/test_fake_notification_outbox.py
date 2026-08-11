@@ -348,3 +348,22 @@ async def test_the_fakes_withdrawal_reports_a_dismissal_it_performed() -> None:
     await outbox.offer(subject)
 
     assert await outbox.withdraw(ruled.notification_id) is True
+
+
+@pytest.mark.parametrize("entries", [0, -1, True])
+def test_the_fake_refuses_an_entry_bound_the_contract_does_not_admit(entries: int) -> None:
+    """ADR-0131 §5a admits no "off" for this bound, and nor may the fake.
+
+    A fake looser than the contract certifies consumers a real outbox rejects: a
+    ``max_entries`` of 0 held entries the durable outbox refuses to construct at
+    all, so a consumer could pass here and fail against the shipped hub.
+    """
+    with pytest.raises(ValueError, match="ADR-0131 §5a"):
+        FakeNotificationOutbox(max_entries=entries)
+
+
+@pytest.mark.parametrize("lease", [timedelta(0), timedelta(seconds=-1)])
+def test_the_fake_refuses_a_lease_the_contract_does_not_admit(lease: timedelta) -> None:
+    """A zero lease expires every delivery the instant it is taken."""
+    with pytest.raises(ValueError, match="ADR-0131 §5a"):
+        FakeNotificationOutbox(lease=lease)

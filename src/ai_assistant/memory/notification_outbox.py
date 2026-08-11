@@ -938,14 +938,14 @@ class SqliteNotificationOutbox:
             try:
                 await self._dismiss(entry.record_id)
             except NotificationOutboxError:
-                await _run_to_completion(self._unmark_sync, entry.key)
+                await _run_to_completion(self._unmark_sync, entry.key, entry.sequence)
                 raise
             # Once the dismissal has committed the acknowledgement has taken
             # effect, and a failure of the removal does **not** fail the call: the
             # entry is departing, deliverable to nobody, and the reconciliation
             # completes the removal (§4).
             with contextlib.suppress(NotificationOutboxError):
-                await _run_to_completion(self._remove_sync, entry.key)
+                await _run_to_completion(self._remove_sync, entry.key, entry.sequence)
 
     def _mark_acknowledged_sync(self, delivery_id: str, now: datetime) -> _Entry | None:
         with self._transaction("acknowledge a notification delivery") as conn:
@@ -961,16 +961,43 @@ class SqliteNotificationOutbox:
             entry = _entry_from(rows[0])
             if entry.is_departing_at(now):
                 return None
-            conn.execute("UPDATE outbox SET departing = 1 WHERE candidate_key = ?", (entry.key,))
+            conn.execute(
+                "UPDATE outbox SET departing = 1 WHERE candidate_key = ? AND sequence = ?",
+                (entry.key, entry.sequence),
+            )
             return entry
 
-    def _unmark_sync(self, key: str) -> None:
-        with self._transaction("restore an outbox entry") as conn:
-            conn.execute("UPDATE outbox SET departing = 0 WHERE candidate_key = ?", (key,))
+    def _unmark_sync(self, key: str, sequence: int) -> None:
+        """Restore the row this acknowledgement marked, and no other.
 
-    def _remove_sync(self, key: str) -> None:
+        Qualified for :meth:`_remove_sync`'s reason, in the other direction: a
+        replacement under the same key is not the row whose mark is being reversed,
+        and clearing *its* flag would revive an entry another writer is giving up.
+        """
+        with self._transaction("restore an outbox entry") as conn:
+            conn.execute(
+                "UPDATE outbox SET departing = 0 WHERE candidate_key = ? AND sequence = ?",
+                (key, sequence),
+            )
+
+    def _remove_sync(self, key: str, sequence: int) -> None:
+        """Remove the row this departure decided against, and no other.
+
+        **A delete by key alone can take a *replacement*.** Between the read that
+        marked a row departing and the delete that finishes it, this call awaits the
+        other store's dismissal — and in that window another writer may remove the
+        old row and enqueue a fresh candidate under the same key. An unqualified
+        delete then takes the new row without its record having been dismissed,
+        which breaks §3b's "entry absent implies record dismissed" outright and
+        loses a notification until the next restart. Conditioning on ``sequence``
+        makes the delete name the row it was decided against: sequences are drawn
+        from a durable monotonic counter, so a replacement never shares one, and the
+        delete simply matches nothing.
+        """
         with self._transaction("remove an outbox entry") as conn:
-            conn.execute("DELETE FROM outbox WHERE candidate_key = ?", (key,))
+            conn.execute(
+                "DELETE FROM outbox WHERE candidate_key = ? AND sequence = ?", (key, sequence)
+            )
 
     async def _evict(self, victims: list[_Entry]) -> None:
         """Dismiss each victim's record, then remove them all (ADR-0131 §3b).
@@ -994,17 +1021,24 @@ class SqliteNotificationOutbox:
                 notification_id=victim.record_id,
             )
         if victims:
-            await _run_to_completion(self._remove_many_sync, [victim.key for victim in victims])
+            await _run_to_completion(
+                self._remove_many_sync, [(victim.key, victim.sequence) for victim in victims]
+            )
 
-    def _remove_many_sync(self, keys: list[str]) -> None:
+    def _remove_many_sync(self, rows: list[tuple[str, int]]) -> None:
         """Remove every dismissed victim in one transaction.
 
         One transaction rather than one each, so an enqueue's eviction either frees
-        the room it decided to free or frees none of it.
+        the room it decided to free or frees none of it. Each delete is qualified by
+        the row's ``sequence`` for :meth:`_remove_sync`'s reason: a victim replaced
+        under its own key while the dismissals ran is a different entry, and taking
+        it would remove a row whose record nobody dismissed.
         """
         with self._transaction("remove the evicted outbox entries") as conn:
-            for key in keys:
-                conn.execute("DELETE FROM outbox WHERE candidate_key = ?", (key,))
+            for key, sequence in rows:
+                conn.execute(
+                    "DELETE FROM outbox WHERE candidate_key = ? AND sequence = ?", (key, sequence)
+                )
 
     async def withdraw(self, record_id: str) -> bool:
         """Give up the entry carrying one ADR-0130 record, as an eviction does (§3a).
@@ -1044,26 +1078,32 @@ class SqliteNotificationOutbox:
                 could not.
         """
         async with self._lock:
-            key = await _run_to_completion(self._mark_withdrawn_sync, record_id)
-            if key is None:
+            marked = await _run_to_completion(self._mark_withdrawn_sync, record_id)
+            if marked is None:
                 return False
+            key, sequence = marked
             dismissed = await self._dismiss(record_id)
-            await _run_to_completion(self._remove_sync, key)
+            await _run_to_completion(self._remove_sync, key, sequence)
             return dismissed
 
-    def _mark_withdrawn_sync(self, record_id: str) -> str | None:
+    def _mark_withdrawn_sync(self, record_id: str) -> tuple[str, int] | None:
+        """Mark the entry carrying one record, returning the row it marked."""
         with self._transaction("withdraw an outbox entry") as conn:
             rows = self._rows(
                 conn,
                 "read the withdrawn entry",
-                "SELECT candidate_key FROM outbox WHERE record_id = ?",
+                "SELECT candidate_key, sequence FROM outbox WHERE record_id = ?",
                 (record_id,),
             )
             if not rows:
                 return None
             key = str(rows[0][0])
-            conn.execute("UPDATE outbox SET departing = 1 WHERE candidate_key = ?", (key,))
-            return key
+            sequence = _require_int(rows[0][1], what="a withdrawn entry's order")
+            conn.execute(
+                "UPDATE outbox SET departing = 1 WHERE candidate_key = ? AND sequence = ?",
+                (key, sequence),
+            )
+            return key, sequence
 
     # --- startup reconciliation (ADR-0131 §3b) -------------------------------
 
@@ -1137,7 +1177,7 @@ class SqliteNotificationOutbox:
         departing = await _run_to_completion(self._departing_sync, now)
         for entry in departing:
             await self._dismiss(entry.record_id)
-            await _run_to_completion(self._remove_sync, entry.key)
+            await _run_to_completion(self._remove_sync, entry.key, entry.sequence)
 
     def _departing_sync(self, now: datetime) -> list[_Entry]:
         with self._transaction("read the departing outbox entries", immediate=False) as conn:
