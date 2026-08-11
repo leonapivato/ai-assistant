@@ -484,6 +484,12 @@ deliberately given up, and gives the reason there.
 > oldest entry, breaking its lease. Every drop is recorded in the hub's log naming
 > the entry, and the enqueue then proceeds.
 
+> **Normative.** Observing an entry's class and dropping it are **one step with
+> respect to §2a's selection-and-lease step**. Where the two race, an implementation
+> either holds them against one another or re-observes immediately before removal
+> and applies the leased rule if selection won; it may not act on a stale
+> observation.
+
 > **Normative.** An entry whose own byte cost exceeds `hub_notification_outbox_bytes`
 > is refused at the enqueue, and the refusal is the enqueue's reported outcome. It is
 > never satisfied by evicting other entries.
@@ -510,6 +516,22 @@ against the reservation-to-lease commit, and a restart rule of its own, each fou
 by a separate round. §2a now makes selecting an entry and leasing it one indivisible
 step, so no such state exists: an entry is available or it is leased, and eviction
 has exactly two classes to order.
+
+**What collapsing the reservation did *not* remove is the need for eviction to act
+on a fresh observation, and round 17 dropped that clause with the rest.** The
+fourteenth round had established it against the reservation-to-lease commit; the
+eighteenth re-established it against the selection-and-lease step, which is the same
+window with one less state in it. Eviction can observe the oldest entry as unleased,
+a concurrent poll can lease it and return the delivery, and eviction can then remove
+it on its stale reading — leaving a device holding a delivery whose record is gone,
+so its acknowledgement is a no-op and no redelivery is possible. Note what makes
+that a defect rather than an instance of the leased rule: dropping a leased entry is
+*sanctioned* and forfeits only the redelivery, but here the rule never knew the entry
+was leased, so the forfeit is reached without the decision that authorises it.
+**This is ADR-0124 §8's instrument again**, which required a liveness check and the
+write it authorises to be "one step with respect to a revocation" against the same
+shape of window; both discharges are admitted here because they are one guarantee
+reached from the two sides of the race.
 
 **It drops until the bounds hold, not once, and the difference is not pedantry.**
 One drop is enough for the count bound, where every entry costs exactly one — but
