@@ -213,27 +213,34 @@ def _duration_micros(duration: timedelta) -> int:
     return (duration.days * 86_400 + duration.seconds) * 1_000_000 + duration.microseconds
 
 
-def _shift(instant: datetime, by: timedelta) -> datetime | None:
-    """``instant + by``, or ``None`` where that is not a representable instant.
+def _shift(instant: datetime, by: timedelta, *, backwards: bool = False) -> datetime | None:
+    """``instant ± by``, or ``None`` where that is not a representable instant.
 
-    Both callers reach values a *user* chose: ``budget_window`` is a standing
+    Both callers reach a value a *user* chose: ``budget_window`` is a standing
     setting written through the engine surface and bounded only by being strictly
-    positive, so ``now - window`` and ``spent + window`` are each one edit away
-    from ``OverflowError``. That would escape a seam documenting
-    :class:`~ai_assistant.core.errors.NotificationStoreError` as a bare
-    arithmetic failure, and each caller has an honest answer for the absent
-    instant: a window wider than the epoch prunes nothing, and a unit whose window
-    ends beyond the representable range is one time alone will not free (§5).
+    positive (``gt=timedelta(0)``), so ``now - window`` and ``spent + window`` are
+    each one edit away from ``OverflowError``. That would escape a seam
+    documenting :class:`~ai_assistant.core.errors.NotificationStoreError` as a
+    bare arithmetic failure, and each caller has an honest answer for the absent
+    instant: a window wider than the representable range prunes nothing, and a
+    unit whose window ends beyond it is one time alone will not free (§5).
+
+    **The direction is a flag rather than a negated argument, and that is the
+    whole reason it takes one.** ``-timedelta.max`` raises before any arithmetic
+    on the instant is attempted, so a caller writing ``_shift(now, -window)``
+    would have failed *outside* this guard for exactly the value the guard exists
+    for.
 
     Args:
         instant: The instant to move.
-        by: How far, positive or negative.
+        by: How far, strictly positive.
+        backwards: Whether to subtract rather than add.
 
     Returns:
         The moved instant, or ``None`` where it is not representable.
     """
     try:
-        return instant + by
+        return instant - by if backwards else instant + by
     except OverflowError, ValueError:
         return None
 
@@ -896,7 +903,7 @@ class SqliteNotificationStore:
             one — ``None`` where time alone will not.
         """
         window = preferences.budget_window
-        floor = _shift(now, -window)
+        floor = _shift(now, window, backwards=True)
         if floor is not None:
             conn.execute(
                 "DELETE FROM notification_interruptions WHERE spent_at <= ?", (_to_micros(floor),)

@@ -17,6 +17,7 @@ from enum import StrEnum
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -43,11 +44,14 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     BeliefBand,
+    DataTier,
     GrantScope,
     MemoryKind,
     MemorySearchResult,
     MemorySource,
     MemoryUpdateProposal,
+    NotificationCandidate,
+    NotificationReach,
     Provenance,
     Reversibility,
     RiskLevel,
@@ -58,6 +62,7 @@ from ai_assistant.evaluation import SqliteTraceStore
 from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.memory import (
     DefaultMemoryPolicy,
+    DefaultNotificationPolicy,
     MemoryIngestor,
     SqliteDeferralStore,
     SqliteMemoryStore,
@@ -1191,8 +1196,11 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
 
     Asserted as a file on disk rather than through the object graph, because the
     claim ADR-0102 §12's normative clause makes is about the *directory* — the hub
-    owns seven databases exclusively (ADR-0083 ruling 4), and the sixth obeys that
+    owns eight databases exclusively (ADR-0083 ruling 4), and the sixth obeys that
     ruling by living inside the directory the instance lock already covers.
+    ADR-0130 §9's notification store is the eighth and obeys it for the same
+    reason: inside the directory the instance lock already covers, opened by the
+    same process, closed in the same ordered shutdown.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
@@ -1205,12 +1213,136 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             "deferrals.db",
             "grants.db",
             "memory.db",
+            "notifications.db",
             "plans.db",
             "traces.db",
         ]
         assert stat.S_IMODE((tmp_path / "grants.db").stat().st_mode) == 0o600
+        # ADR-0004 §4 reaches the eighth exactly as it reaches the sixth: a
+        # candidate carries free text a producer wrote to be shown to a person.
+        assert stat.S_IMODE((tmp_path / "notifications.db").stat().st_mode) == 0o600
     finally:
         await engine.aclose()
+
+
+# --- the notification chassis (ADR-0130 §3, §9) ----------------------------
+
+
+def _a_candidate() -> NotificationCandidate:
+    """One candidate, so a case can watch what a composed store stamps on it."""
+    return NotificationCandidate(
+        candidate_key="k1",
+        producer="a-test",
+        notification_class="calendar",
+        summary="something you did not ask for",
+        noticed_at=datetime(2026, 8, 11, 12, tzinfo=UTC),
+        confidence=0.5,
+        sensitivity=DataTier.PERSONAL,
+    )
+
+
+async def test_the_notification_surface_answers_instead_of_refusing(
+    tmp_path: Path,
+) -> None:
+    """ADR-0130 §9's five methods work on a composed hub (#948).
+
+    Until this wiring existed every one of them raised ``ConfigurationError`` in
+    ``Engine.ingest``'s shape — and "no store is composed" and "nothing is held"
+    are different facts, so answering an empty page would have reported the second
+    while the first was true. The read, the preferences and the maintenance drain
+    are asserted together because it is exactly the *pairing* the engine refuses
+    to be built without: a store with no policy could hold records nothing rules.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        assert await engine.notifications() == ()
+        # §6: an empty store is a working policy, so the tuning surface works on
+        # the first day with no history — which the ruling on #879 makes a
+        # precondition rather than a nicety.
+        preferences = await engine.notification_preferences()
+        assert preferences.reach_for("a-class-nobody-has-named") is NotificationReach.HOLD
+        assert preferences.interruption_budget == 3
+        assert preferences.quiet_windows == ()
+        # The maintenance drain runs rather than refusing, and rules nothing:
+        # with no producers there is nothing due (ADR-0130 §5).
+        assert await engine.reconsider_notifications() == 0
+    finally:
+        await engine.aclose()
+
+
+async def test_the_retention_purge_reaches_the_notification_store(
+    tmp_path: Path,
+) -> None:
+    """ADR-0130 §7: "the retention purge job ADR-0083 §7 already runs calls this
+    store's purge".
+
+    ``PurgeReport.notifications`` is ``None`` while no store is wired, which is the
+    honest report for a stage that did not run — so an integer here is the
+    observable that the sweep now reaches the eighth database. No new job and no
+    new interval, exactly as ADR-0119 §10 did for the trace store.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        report = await engine.purge_expired()
+
+        assert report.notifications == 0
+    finally:
+        await engine.aclose()
+
+
+async def test_the_store_takes_its_cap_and_retention_from_settings(
+    tmp_path: Path,
+) -> None:
+    """ADR-0130 §7: both tunings are read **once**, at construction.
+
+    Asserted through the published cap rather than through a private attribute,
+    because §7 publishes it for exactly this reason — "a conformance suite cannot
+    test a boundary nobody stated". The retention is asserted where it is
+    observable: stamped onto a record at admission, never consulted from the
+    setting afterwards.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        notification_queue_limit=7,
+        notification_retention=timedelta(days=3),
+    )
+    composed = build_composition(settings, data_dir=tmp_path)
+    try:
+        store = composed.engine._notifications
+        assert store is not None
+        assert store.cap == 7
+
+        ruling = await store.admit(
+            _a_candidate(), policy=DefaultNotificationPolicy(timezone=settings.timezone)
+        )
+        assert ruling.notification_id is not None
+        record = await store.get(ruling.notification_id)
+        assert record is not None
+        assert record.retention == timedelta(days=3)
+    finally:
+        await composed.engine.aclose()
+
+
+async def test_the_policy_reads_quiet_windows_in_the_configured_timezone(
+    tmp_path: Path,
+) -> None:
+    """ADR-0130 §6: quiet windows are read in ``Settings.timezone``.
+
+    The same value ADR-0008 §5 gives the temporal context and ADR-0093 §7b binds
+    the calendar reader to, with no second timezone source introduced — which is
+    why the policy takes it at construction rather than per call: a caller free to
+    vary it could move the user's night. A consequence ADR-0130 names is that
+    ``Settings.timezone`` becomes load-bearing for a user-visible behaviour, so
+    this asserts the wiring rather than trusting the comment.
+    """
+    settings = Settings(embedder=EmbedderKind.HASHING, timezone="Pacific/Kiritimati")
+    composed = build_composition(settings, data_dir=tmp_path)
+    try:
+        policy = composed.engine._notification_policy
+        assert isinstance(policy, DefaultNotificationPolicy)
+        assert policy._zone == ZoneInfo("Pacific/Kiritimati")
+    finally:
+        await composed.engine.aclose()
 
 
 def _spy_on_traces(monkeypatch: pytest.MonkeyPatch) -> list[SqliteTraceStore]:

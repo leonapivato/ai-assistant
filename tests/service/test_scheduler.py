@@ -34,9 +34,11 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import structlog
+from pydantic import ValidationError
 
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.core.protocols import AssistantEngine
 from ai_assistant.core.types import GrantScope
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, Engine
 from ai_assistant.readers import CALENDAR_READER_NAME
@@ -71,22 +73,83 @@ async def _drive(scheduler: Scheduler, *, until: asyncio.Event) -> None:
 # --- The job table (§7) ------------------------------------------------------
 
 
-async def test_the_job_table_is_the_adr_s_three_in_the_adr_s_order(tmp_path: Path) -> None:
+async def test_the_job_table_is_the_adr_s_enabled_defaults_in_the_adr_s_order(
+    tmp_path: Path,
+) -> None:
     """§7's table, built over a real engine, with observation disabled by default.
 
     A real ``Engine`` rather than a stand-in, because the claim being made is about
     *which methods the jobs are bound to* — and a fake with the right attribute
     names would satisfy that assertion while proving nothing about the façade the
     hub actually holds.
+
+    **Three enabled by default, and the third's default is minutes** (ADR-0130 §5):
+    the reconsideration job ships enabled because "with no producers it rules
+    nothing, and a held record whose window has passed is the one thing this ADR
+    cannot leave to a later act", and it is the one job here whose latency a user
+    can feel.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         jobs = jobs_for(engine, Settings())
 
-        assert [job.name for job in jobs] == ["retention_purge", "conversation_sweep"]
-        assert [job.interval for job in jobs] == [timedelta(hours=1), timedelta(hours=1)]
+        assert [job.name for job in jobs] == [
+            "retention_purge",
+            "conversation_sweep",
+            "notification_reconsider",
+        ]
+        assert [job.interval for job in jobs] == [
+            timedelta(hours=1),
+            timedelta(hours=1),
+            timedelta(minutes=5),
+        ]
     finally:
         await engine.aclose()
+
+
+async def test_the_reconsideration_job_is_the_concrete_engine_s_maintenance_call(
+    tmp_path: Path,
+) -> None:
+    """ADR-0130 §5 and §9, asserted by identity rather than by name.
+
+    §9 is explicit that reconsideration "is added to the concrete engine's
+    maintenance surface and to no Protocol" and that it "is **not** a member of
+    ``AssistantEngine``: no client asks for it and no interface adapter may drive
+    it". §5 then requires exactly one caller: a job on this table whose body is
+    that engine call and **which holds no store** — so ADR-0083 §7's "no job gets
+    new store surface" and §8's "every job is a bound public engine method" both
+    hold unchanged. Binding the job to the method object is what makes that
+    checkable; a name would pass over a job that reached the store directly.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        jobs = {job.name: job for job in jobs_for(engine, Settings())}
+
+        assert jobs["notification_reconsider"].run == engine.reconsider_notifications
+        assert not hasattr(AssistantEngine, "reconsider_notifications")
+    finally:
+        await engine.aclose()
+
+
+async def test_the_reconsideration_job_can_be_disabled_but_never_by_zero(
+    tmp_path: Path,
+) -> None:
+    """ADR-0083 §7's convention, inherited by ADR-0130 §5's new row.
+
+    "Off" and "as fast as possible" cannot be confused by a value — which is the
+    one confusion a scheduler cannot afford, because on a completion-scheduled
+    loop a zero interval turns this into a hot loop against SQLite.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        disabled = jobs_for(engine, Settings(notification_reconsider_interval=None))
+
+        assert "notification_reconsider" not in [job.name for job in disabled]
+    finally:
+        await engine.aclose()
+
+    with pytest.raises(ValidationError):
+        Settings(notification_reconsider_interval=timedelta(0))
 
 
 async def test_the_retention_job_is_the_engine_method_the_sweep_guard_permits(
@@ -127,7 +190,11 @@ async def test_a_disabled_job_is_absent_from_the_table_not_present_and_skipped(
     try:
         none_at_all = jobs_for(
             engine,
-            Settings(retention_purge_interval=None, conversation_sweep_interval=None),
+            Settings(
+                retention_purge_interval=None,
+                conversation_sweep_interval=None,
+                notification_reconsider_interval=None,
+            ),
         )
         assert none_at_all == ()
 
@@ -136,6 +203,7 @@ async def test_a_disabled_job_is_absent_from_the_table_not_present_and_skipped(
             "retention_purge",
             "conversation_sweep",
             "observation",
+            "notification_reconsider",
         ]
         assert with_observation[2].run == engine.observe
     finally:
@@ -174,7 +242,11 @@ async def test_the_calendar_reader_job_is_absent_until_an_operator_arms_it(
     engine = build_engine(settings, data_dir=tmp_path)
     try:
         unarmed = jobs_for(engine, settings)
-        assert [job.name for job in unarmed] == ["retention_purge", "conversation_sweep"]
+        assert [job.name for job in unarmed] == [
+            "retention_purge",
+            "conversation_sweep",
+            "notification_reconsider",
+        ]
 
         armed_settings = _reader_settings(tmp_path, interval=timedelta(hours=6))
         armed = jobs_for(engine, armed_settings)
@@ -182,6 +254,7 @@ async def test_the_calendar_reader_job_is_absent_until_an_operator_arms_it(
             "retention_purge",
             "conversation_sweep",
             "calendar_reader",
+            "notification_reconsider",
         ]
         assert armed[2].interval == timedelta(hours=6)
         # The body is a **public ``Engine`` call**, by identity and not by name: a

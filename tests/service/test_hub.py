@@ -77,6 +77,7 @@ class FakeEngine:
         self.observed = 0
         self.ingested = 0
         self.consolidated = 0
+        self.reconsidered = 0
         #: Run inside ``start()``. Tests use it to signal the process at a point
         #: where the hub's own handlers are certainly installed.
         self.on_start: Callable[[], None] | None = None
@@ -125,6 +126,15 @@ class FakeEngine:
         # *startup* rather than only the job it would have armed.
         self.consolidated += 1
         _marker.info("fake_engine_consolidated")
+
+    async def reconsider_notifications(self) -> int:
+        # Leg 10's reconsideration drain (ADR-0130 §5), and the one job on §7's
+        # table that ships **enabled** — so unlike `ingest` and `consolidate` this
+        # stand-in is actually driven by the default table rather than merely
+        # required to exist for it to be built.
+        self.reconsidered += 1
+        _marker.info("fake_engine_reconsidered")
+        return 0
 
     async def aclose(self) -> None:
         self.closed += 1
@@ -363,7 +373,11 @@ async def test_the_readiness_event_names_the_pid_the_directory_and_the_job_set(
     ready = _only(captured, "hub_ready")
     assert ready["pid"] == os.getpid()
     assert ready["data_dir"] == str(settings.data_dir)
-    assert ready["jobs"] == ["retention_purge", "conversation_sweep"]
+    assert ready["jobs"] == [
+        "retention_purge",
+        "conversation_sweep",
+        "notification_reconsider",
+    ]
 
 
 async def test_the_configuration_is_stamped_before_the_first_operation_runs(
@@ -647,7 +661,11 @@ async def test_shutdown_reports_its_completion_its_phase_and_what_it_cost(
     assert names.index("hub_shutdown_requested") < names.index("hub_shutdown_completed")
     assert done["exit_code"] == EXIT_OK
     assert done["drain_phase"] == "phase_a_quiesced"
-    assert done["jobs"] == ["retention_purge", "conversation_sweep"]
+    assert done["jobs"] == [
+        "retention_purge",
+        "conversation_sweep",
+        "notification_reconsider",
+    ]
     for field in ("drain_seconds", "scheduler_join_seconds", "elapsed_seconds"):
         assert isinstance(done[field], float), field
         assert done[field] >= 0
