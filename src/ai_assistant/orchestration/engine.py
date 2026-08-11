@@ -2253,7 +2253,7 @@ class Engine:
             checked=True,
         )
 
-    async def reconsider_notifications(self, *, limit: int = DEFAULT_PAGE_SIZE) -> int:
+    async def reconsider_notifications(self, *, page: int = DEFAULT_PAGE_SIZE) -> int:
         """Re-rule every held notification that has fallen due (ADR-0130 §5).
 
         The **maintenance surface** ADR-0083 §8 puts "on a class in
@@ -2270,37 +2270,65 @@ class Engine:
         correctness bug". A record another writer moved or resolved between the
         page and the re-ruling simply reports nothing to do.
 
+        **One run drains the whole due set**, and ``page`` is a read size rather
+        than a run bound. §5 defines this operation over "every record whose
+        ``reconsider_at`` has arrived", so a run that stopped at a page would
+        leave the fifty-first record held past the instant the user's own act
+        made it due — and the user has no way to ask for the rest.
+
         Args:
-            limit: How many due records one run takes, bounded by default.
+            page: How many due records one store read takes. It bounds the read,
+                never the run.
 
         Returns:
             How many records were re-ruled.
 
         Raises:
             RuntimeError: If the engine is shutting down.
-            ValueError: If ``limit`` is outside ``[0, 2**63)``.
+            ValueError: If ``page`` is outside ``[0, 2**63)``.
             ConfigurationError: If no notification store is wired.
             NotificationStoreError: If the store cannot be read or written.
         """
         self._reject_if_closing()
-        page_argument(limit, name="limit")
-        return await self._tracked(self._reconsider(limit), "reconsider_notifications", _ruled)
+        page_argument(page, name="page")
+        return await self._tracked(self._reconsider(page), "reconsider_notifications", _ruled)
 
-    async def _reconsider(self, limit: int) -> int:
-        """Re-rule one page of due records.
+    async def _reconsider(self, page: int) -> int:
+        """Drain the due set, a page at a time.
+
+        **Every due record, not the first page of them** (§5). ``page`` bounds
+        how many ids are held in memory at once and how large one store read is;
+        it does not bound the run, because a bounded run would leave the 51st
+        record of a large sweep held past the instant the user's own act made it
+        due — and §5's operation is defined over "every record whose
+        ``reconsider_at`` has arrived".
+
+        **The drain terminates, and the argument is monotonic progress.** A
+        re-ruling always writes a ``reconsider_at`` strictly later than the
+        instant it ruled at — a quiet window's end and the instant a rolling
+        budget frees a unit are both in the future by construction — or none at
+        all, so a record re-ruled here leaves the due set and cannot re-enter it
+        except by a later setting write. A page that re-rules nothing therefore
+        means nothing is left to do, and ends the loop; that is also what a page
+        of records another writer resolved first looks like.
 
         Args:
-            limit: How many due records to take.
+            page: How many due records one store read takes.
 
         Returns:
             How many were re-ruled.
         """
         store = self._notification_surface()
         assert self._notification_policy is not None  # noqa: S101 — wired together (see __init__)
+        policy = self._notification_policy
         ruled = 0
-        for record in await store.due(limit=limit):
-            if await store.reconsider(record.id, policy=self._notification_policy) is not None:
-                ruled += 1
+        while due := await store.due(limit=page):
+            before = ruled
+            for record in due:
+                if await store.reconsider(record.id, policy=policy) is not None:
+                    ruled += 1
+            if ruled == before:
+                break
         return ruled
 
     def _notification_surface(self) -> NotificationStore:
