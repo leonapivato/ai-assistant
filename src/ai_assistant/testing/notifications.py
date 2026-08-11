@@ -1103,9 +1103,9 @@ class FakeNotificationOutbox:
         """Whether a live lease holds this entry — half-open at the expiry."""
         if entry.leased_at is None:
             return False
-        # Compared as a *duration* against the configured span, so a lease near
-        # `timedelta.max` runs for all of it rather than to the end of representable
-        # time — §3 runs a lease for `hub_notification_lease`, whole.
+        # Compared as a *duration* against the configured span (ADR-0135 §2), so a
+        # lease near `timedelta.max` runs for all of it rather than to the end of
+        # representable time.
         return now - entry.leased_at < self._lease
 
     async def _dismiss(self, record_id: str | None) -> bool:

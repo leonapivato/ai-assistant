@@ -207,10 +207,12 @@ class _Entry:
             oldest entry" has no meaning once the process has died.
         delivery_id: The current outstanding delivery, or ``None``.
         leased_at: When the lease was **taken**, or ``None`` where none is held.
-            The start rather than the expiry, because §3 runs a lease for its whole
-            configured span and §5a bounds that span below and not above — an expiry
-            for a span near ``timedelta.max`` is nameable neither as a ``datetime``
-            nor as microseconds in an ``INTEGER``, while the start always is.
+            The start rather than the expiry, as ADR-0135 §2 requires of both of
+            this seam's measurements: "an entry's lease is judged by comparing the
+            time elapsed since the lease was **taken** against
+            ``hub_notification_lease``". An expiry for a span near ``timedelta.max``
+            is nameable neither as a ``datetime`` nor as microseconds in an
+            ``INTEGER``; the start always is.
         departing: Whether this seam has given the entry up (§3).
         cost: The entry's byte cost, as persisted.
     """

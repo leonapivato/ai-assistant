@@ -379,14 +379,20 @@ class TestTheStartupReconciliation:
 
 
 class TestABudgetTheClockCannotAddIsHonoured:
-    """§4: ``budget`` is honoured over the closed range, and the far end is in it."""
+    """ADR-0135 §1: an accepted duration is taken "at its whole configured length".
+
+    The hub "does not cut the waiting short because of the span's size, or because
+    some quantity derived from it cannot be represented", and neither clamps nor
+    refuses on that ground — §1 names both failures, and this branch shipped each of
+    them in turn before the ADR was written.
+    """
 
     async def test_a_maximal_ceiling_polled_at_its_own_ceiling_is_answered(self) -> None:
         """§5a bounds the budget below and not above, so this budget is in range.
 
-        §4 honours every in-range budget and reserves its refusal for one "negative,
-        or above the bound", so neither a raw ``OverflowError`` nor a refusal is
-        available here: the deadline is carried to the last representable instant.
+        ADR-0135 §1: neither a raw ``OverflowError`` nor a refusal is available here —
+        "representability is the implementation's problem and is never part of the
+        answer the caller or the operator gets".
 
         **An entry is waiting, deliberately.** Honouring a budget of ``timedelta.max``
         against an *empty* outbox means parking for the rest of representable time,
@@ -425,7 +431,8 @@ class TestABudgetTheClockCannotAddIsHonoured:
         assert await outbox.offer(_candidate()) is NotificationEnqueue.ENQUEUED
 
     async def test_the_whole_configured_budget_reaches_the_wait(self) -> None:
-        """§4 honours the budget; a saturated deadline would hand over a shorter one.
+        """ADR-0135 §2: the remaining wait is "its ``budget`` less the time elapsed
+        since that poll began", so the whole span reaches the wait.
 
         The waiting itself is not observable — a maximal budget parks for the rest of
         representable time — but the span the poll *asks* for is, and that is where a

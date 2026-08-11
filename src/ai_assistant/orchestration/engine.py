@@ -2963,12 +2963,13 @@ class Engine:
         poll's length is fixed at its start rather than recomputed against a clock
         that may move under it.
 
-        **Measured as elapsed against the budget, not as an absolute deadline.**
-        ADR-0131 §5a bounds ``hub_max_notification_budget`` below and not above, and
-        §4 honours every budget in the configured range, so a deadline that saturated
-        at the last representable instant would silently shorten an accepted budget —
-        the clamping §4 refuses in the other direction. Subtraction never leaves the
-        range a ``timedelta`` can hold.
+        **Measured as elapsed against the span, never as an absolute deadline**
+        (ADR-0135 §2): "a poll's remaining wait is its ``budget`` less the time
+        elapsed since that poll began", and an implementation "does not compute,
+        persist or compare an instant obtained by adding an accepted duration to the
+        hub's clock". §1 is what that serves — the budget is honoured whole, and
+        neither shortened nor refused because something derived from it will not fit.
+        Subtraction never leaves the range a ``timedelta`` can hold.
 
         **The start is read before the acknowledgement is applied**, so the
         acknowledgement falls inside the budget rather than ahead of it.
@@ -2991,6 +2992,11 @@ class Engine:
             # dismissed in one store and standing in the other.
             await self._uninterruptibly(outbox.acknowledge(acknowledging))
         while True:
+            # Reached **whatever the state of the budget** (ADR-0135 §3): the
+            # budget "bounds how long the hub may wait for an entry to become
+            # available, and bounds nothing else", so an elapsed one ends the
+            # waiting below rather than forbidding this selection.
+            #
             # **The one indivisible step, and the only shield this poll needs**
             # (ADR-0131 §2a): selecting an entry, minting its ``delivery_id`` and
             # starting its lease "are one indivisible step… There is no state in
