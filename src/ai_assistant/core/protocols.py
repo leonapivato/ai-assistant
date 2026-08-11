@@ -4554,11 +4554,21 @@ class NotificationStore(Protocol):
         act through §5's one ruling path instead of adding a second, and the
         reconsideration job picks the records up on its next run.
 
+        **The whole value is written, and the last write wins.** A caller
+        changing one setting reads, adjusts and writes back, so two writers
+        racing each other lose the earlier one's edit entirely — this contract
+        carries no version token and detects no conflict, and saying so is the
+        point of stating it. The alternative was not free: a per-field write
+        loses the *same* update with no way to notice it happened, and a
+        conflict-detecting write is contract surface ADR-0130 §9 does not
+        ratify. Both writers here are a person at a prompt rather than a machine
+        on a timer, which is why ADR-0078 §2's resolve-once compare-and-set
+        earns its cost there and not here. Tracked as an open question against
+        real usage rather than decided by an implementing lane.
+
         Args:
-            preferences: The settings to hold from now on, replacing what is
-                held. A caller changing one setting reads, adjusts and writes
-                back the whole value, so two concurrent writers cannot each
-                silently drop the other's field.
+            preferences: The settings to hold from now on, **replacing** what is
+                held rather than merging into it.
 
         Returns:
             How many records the write made due for reconsideration.
@@ -5428,12 +5438,15 @@ class AssistantEngine(Protocol):
         reaches a record already ruled ``INTERRUPT``**: whether contact already
         handed to a channel can be recalled is the delivery seam's question.
 
-        **The whole value is written, not one field.** A caller changing one
-        setting reads, adjusts and writes back, so two concurrent writers cannot
-        each silently drop the other's field.
+        **The whole value is written, and the last write wins.** A caller
+        changing one setting reads, adjusts and writes back; two writers racing
+        each other lose the earlier one's edit, this surface carrying no version
+        token and detecting no conflict. See :meth:`NotificationStore.set_preferences`
+        for why that is stated rather than designed around.
 
         Args:
-            preferences: The settings to hold from now on.
+            preferences: The settings to hold from now on, **replacing** what is
+                held rather than merging into it.
 
         Returns:
             The settings now in force, as the store holds them.

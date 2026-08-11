@@ -2276,6 +2276,13 @@ class Engine:
         leave the fifty-first record held past the instant the user's own act
         made it due — and the user has no way to ask for the rest.
 
+        **``page`` is refused unless it is strictly positive**, which is stricter
+        than the page rule on this class's read methods and is the drain's own
+        clause: a page of zero reads nothing, so the loop below would exit having
+        ruled nothing while this method promises to have ruled everything. A read
+        size of zero is not a smaller sweep, it is a silent no-op — the class of
+        value ADR-0022 §4a refuses rather than absorbs.
+
         Args:
             page: How many due records one store read takes. It bounds the read,
                 never the run.
@@ -2285,12 +2292,12 @@ class Engine:
 
         Raises:
             RuntimeError: If the engine is shutting down.
-            ValueError: If ``page`` is outside ``[0, 2**63)``.
+            ValueError: If ``page`` is not an integer in ``(0, 2**63)``.
             ConfigurationError: If no notification store is wired.
             NotificationStoreError: If the store cannot be read or written.
         """
         self._reject_if_closing()
-        page_argument(page, name="page")
+        positive_page_argument(page, name="page")
         return await self._tracked(self._reconsider(page), "reconsider_notifications", _ruled)
 
     async def _reconsider(self, page: int) -> int:
