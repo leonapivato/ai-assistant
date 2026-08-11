@@ -53,7 +53,20 @@ from ai_assistant.wire.errors import (
 #: half-finished upgrade made illegible rather than legible (ADR-0087 §8's
 #: precedent for the same reason). Bumping applies ADR-0084 §3's mechanism; it does
 #: not change it.
-PROTOCOL_VERSION: Final[int] = 2
+#:
+#: **3 since ADR-0130 §9**, which added five methods to the promoted
+#: ``AssistantEngine`` surface — the notification read, the dismissal, the
+#: per-notification delete, and the two preference operations. ADR-0124 §9 makes
+#: that a bump in as many words: the rule reaches "any change to the promoted
+#: surface's method set", and "adding a method bumps, and that is the honest
+#: consequence rather than an oversight. A sixteenth method on the promoted
+#: surface is a request an older hub answers with a failure the client did not ask
+#: for." ``wire/surface.METHODS`` is derived from the Protocol, so a version 3
+#: client sending ``notifications`` to a version 2 hub is refused there — which is
+#: exactly the frame-one-peer-may-send-that-the-other-refuses test, and exactly
+#: the half-finished upgrade §3 wants legible at the handshake rather than
+#: arriving as an unexplained error inside a call.
+PROTOCOL_VERSION: Final[int] = 3
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
