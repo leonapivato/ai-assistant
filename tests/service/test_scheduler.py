@@ -975,3 +975,88 @@ async def test_the_consolidation_engine_operation_runs_against_an_empty_store(
         assert report.examined == 0
     finally:
         await engine.aclose()
+
+
+def _producer_settings(tmp_path: Path, *, interval: timedelta | None) -> Settings:
+    """Settings that configure the calendar source, and optionally arm the producer.
+
+    The path is set in both cases for ``_reader_settings``' reasons exactly:
+    ``Settings`` refuses an armed producer with no source (ADR-0132 §4), and an
+    engine built without the path holds no producer stage for the job to reach.
+    """
+    return Settings(
+        embedder=EmbedderKind.HASHING,
+        calendar_reader_path=tmp_path / "calendar.ics",
+        calendar_upcoming_interval=interval,
+    )
+
+
+async def test_the_upcoming_event_job_is_absent_until_an_operator_arms_it(
+    tmp_path: Path,
+) -> None:
+    """ADR-0132 §4: the interval is ``None`` until an operator sets it.
+
+    ADR-0093 §7's rule for the same source unchanged — "nothing may read a user's
+    personal files because a default said so" — so the row is simply absent rather
+    than present and skipped, and ``hub_ready`` reports the names that are actually
+    armed. The armed half is asserted beside it because honouring one alone is a
+    plausible mistake in either direction: a producer that never appears is a
+    switch nobody can flip.
+    """
+    settings = _producer_settings(tmp_path, interval=None)
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        unarmed = jobs_for(engine, settings)
+        assert "calendar_upcoming" not in [job.name for job in unarmed]
+
+        armed_settings = _producer_settings(tmp_path, interval=timedelta(minutes=5))
+        armed = {job.name: job for job in jobs_for(engine, armed_settings)}
+        assert armed["calendar_upcoming"].interval == timedelta(minutes=5)
+        # The body is a **public ``Engine`` call**, by identity and not by name: a
+        # job that held a reader, a store or a subsystem import would be the shape
+        # ADR-0083 §8 forbids and ADR-0132 §1 restates.
+        assert armed["calendar_upcoming"].run == engine.notice_upcoming_events
+        # And it is *not* on the client-facing surface: no client asks for it and
+        # no interface adapter may drive it (ADR-0083 §8).
+        assert not hasattr(AssistantEngine, "notice_upcoming_events")
+    finally:
+        await engine.aclose()
+
+
+async def test_arming_the_producer_arms_no_ingestion_and_the_reverse(tmp_path: Path) -> None:
+    """ADR-0132 §4: the two jobs over one source have two intervals.
+
+    "Arming or retuning one of these two changes ingestion's cadence in no way, and
+    arming ingestion arms no producer." The scheduler is where that independence is
+    observable, and a lane that reused ``calendar_reader_interval`` for both would
+    pass every test about either job on its own.
+    """
+    engine = build_engine(_producer_settings(tmp_path, interval=None), data_dir=tmp_path)
+    try:
+        producing = jobs_for(engine, _producer_settings(tmp_path, interval=timedelta(minutes=5)))
+        ingesting = jobs_for(engine, _reader_settings(tmp_path, interval=timedelta(hours=6)))
+
+        producing_names = [job.name for job in producing]
+        ingesting_names = [job.name for job in ingesting]
+        assert "calendar_upcoming" in producing_names
+        assert "calendar_reader" not in producing_names
+        assert "calendar_reader" in ingesting_names
+        assert "calendar_upcoming" not in ingesting_names
+    finally:
+        await engine.aclose()
+
+
+async def test_the_producer_job_can_be_disabled_but_never_by_zero(tmp_path: Path) -> None:
+    """ADR-0083 §7's convention, inherited by ADR-0132 §4's new row.
+
+    On a completion-scheduled loop a zero interval turns a periodic re-read of the
+    user's calendar into a hot loop, and "off" and "as fast as possible" look
+    identical in a config file.
+    """
+    engine = build_engine(_producer_settings(tmp_path, interval=None), data_dir=tmp_path)
+    try:
+        assert jobs_for(engine, _producer_settings(tmp_path, interval=None)) is not None
+        with pytest.raises(ValidationError):
+            _producer_settings(tmp_path, interval=timedelta(0))
+    finally:
+        await engine.aclose()

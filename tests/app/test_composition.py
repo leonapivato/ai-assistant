@@ -44,6 +44,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     BeliefBand,
+    ClassReach,
     DataTier,
     GrantScope,
     MemoryKind,
@@ -51,6 +52,7 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryUpdateProposal,
     NotificationCandidate,
+    NotificationPreferences,
     NotificationReach,
     Provenance,
     Reversibility,
@@ -72,6 +74,12 @@ from ai_assistant.models import BoundedEmbedder, HashingEmbedder
 from ai_assistant.orchestration import Engine
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.retrieval import assemble_by_band
+from ai_assistant.orchestration.upcoming import (
+    NOTIFICATION_CLASS as UPCOMING_NOTIFICATION_CLASS,
+)
+from ai_assistant.orchestration.upcoming import (
+    PRODUCER as UPCOMING_PRODUCER,
+)
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.readers import CALENDAR_READER_NAME
@@ -2403,3 +2411,190 @@ class TestBuildMeasureReader:
         )
 
         assert "empty" in report.render()
+
+
+# --- ADR-0132's producer, and the seam it is the first holder of -------------
+
+
+def _imminent_event_calendar(directory: Path) -> Path:
+    """A minimal ``.ics`` with one event ten minutes from now, and its path.
+
+    ``_one_event_calendar``'s shape with a nearer start: an hour ahead sits inside
+    the reader's seven-day window but *outside* the producer's thirty-minute lead,
+    so a case about noticing needs an occurrence the lead window actually reaches.
+    Written against the real clock for that helper's reason — the composition root
+    deliberately leaves the reader's clock at its default, and inventing a second
+    one here would be the second timezone source ADR-0093 §7b refuses.
+    """
+    begins = datetime.now(UTC) + timedelta(minutes=10)
+    ends = begins + timedelta(minutes=30)
+    stamp = "%Y%m%dT%H%M%SZ"
+    path = directory / "calendar.ics"
+    path.write_bytes(
+        (
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//ai-assistant tests//EN\r\n"
+            "BEGIN:VEVENT\r\nUID:e1\r\nDTSTAMP:20260101T000000Z\r\n"
+            f"DTSTART:{begins.strftime(stamp)}\r\nDTEND:{ends.strftime(stamp)}\r\n"
+            "SUMMARY:Dentist\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        ).encode()
+    )
+    return path
+
+
+async def test_build_engine_wires_no_producer_when_no_source_is_configured(
+    tmp_path: Path,
+) -> None:
+    """The shipping default, and the refusal that keeps it honest (ADR-0132 §4).
+
+    The ordinary deployment builds no producer stage — and asking it to notice is a
+    wiring fault it refuses, rather than a zero count indistinguishable from a
+    calendar with nothing starting soon. A deployment whose stage failed to wire
+    would otherwise look healthy forever while noticing nothing, which is the shape
+    ADR-0022 §4a refuses and the reason ``ingest`` refuses in the same place.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        assert engine._upcoming is None
+        with pytest.raises(ConfigurationError):
+            await engine.notice_upcoming_events()
+    finally:
+        await engine.aclose()
+
+
+async def test_the_three_calendar_consumers_hold_separate_reader_instances(
+    tmp_path: Path,
+) -> None:
+    """ADR-0132 §3 joins ADR-0096 §5's ruling as a third instance.
+
+    "The producer performs its own ``Reader.read()`` on its own schedule, and
+    derives nothing from the facet path's reading or from the ingestion job's."
+    ADR-0093 §7 bounds a reader at one outstanding worker *per instance*, so a
+    shared reader would let one scheduled read suppress another — and a producer
+    reading a snapshot ingestion left behind would be reading durable
+    cross-subsystem state ADR-0093 §5 forbids outright.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING, calendar_reader_path=_one_event_calendar(tmp_path)
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        ingestion = engine._ingestion
+        producer = engine._upcoming
+        assert ingestion is not None
+        assert producer is not None
+        (facet_source,) = _calendar_sources(engine)
+
+        readers = {id(ingestion._reader), id(producer._reader), id(facet_source._reader)}
+        assert len(readers) == 3
+    finally:
+        await engine.aclose()
+
+
+async def test_the_producer_reads_only_on_a_notify_grant(tmp_path: Path) -> None:
+    """ADR-0132 §2 and ADR-0133 §2, over the surface a person actually uses.
+
+    The three uses are independent, so granting the two that existed before the
+    member was minted authorises nothing here: "a live ``INGEST`` grant on this
+    calendar authorises this read no more than a ``FACET`` one does", and ADR-0133
+    §3 rules that no grant recorded before the member existed acquires it. This is
+    what makes "do not raise my calendar with me unprompted" a sentence the user
+    can say while still letting the assistant answer questions from it.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING, calendar_reader_path=_imminent_event_calendar(tmp_path)
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        with pytest.raises(SourceNotGrantedError):
+            await engine.notice_upcoming_events()
+
+        # The two older uses, granted in full — and still not this one.
+        await _grant_the_calendar(engine)
+        with pytest.raises(SourceNotGrantedError):
+            await engine.notice_upcoming_events()
+
+        # Widening is a revocation followed by a new grant (ADR-0097 §4), which is
+        # part of what "the user grants this use separately" means in practice:
+        # adding ``NOTIFY`` to a standing grant is a decision the user takes, not an
+        # amendment something else can make on their behalf (ADR-0097 §8).
+        assert await engine.revoke(CALENDAR_READER_NAME) is not None
+        await engine.grant(
+            CALENDAR_READER_NAME,
+            scope=[GrantScope.FACET, GrantScope.INGEST, GrantScope.NOTIFY],
+        )
+        assert await engine.notice_upcoming_events() == 1
+    finally:
+        await engine.aclose()
+
+
+async def test_a_noticed_occurrence_is_held_and_reachable_through_the_user_s_surface(
+    tmp_path: Path,
+) -> None:
+    """The composed path, end to end: a file on disk becomes a held notification.
+
+    **Held rather than delivered, because every class defaults to ``hold``**
+    (ADR-0130 §6): "a producer cannot interrupt on the day it ships, however sure
+    its author is; raising a class is an act the user performs". So the untuned
+    deployment's outcome is a record the user can enumerate — which is also the
+    assertion that the composed ``NotificationWriter`` writes through the *same*
+    store the façade's surface reads (ADR-0028 §4). Wired to a second store this
+    would be a notification nobody could see or dismiss.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING, calendar_reader_path=_imminent_event_calendar(tmp_path)
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        await engine.grant(CALENDAR_READER_NAME, scope=[GrantScope.NOTIFY])
+
+        assert await engine.notice_upcoming_events() == 1
+
+        (held,) = await engine.notifications()
+        assert "Dentist" in held.candidate.summary
+        assert held.candidate.expires_at is not None
+        assert held.candidate.references == ()
+    finally:
+        await engine.aclose()
+
+
+async def test_a_raised_class_reaches_a_polling_device_on_the_live_handoff(
+    tmp_path: Path,
+) -> None:
+    """ADR-0131 §3b's live handoff, over real concretes and with nothing restarted.
+
+    This is the clause #964 recorded as unimplementable until a producer existed:
+    "a hub that committed a disposition, spent its budget and simply never called
+    ``offer`` broke no rule here, while a device sat on an outstanding long poll
+    receiving nothing". §3b's startup reconciliation is a **repair**, not the
+    trigger, so the assertion has to be a delivery available *now* — a restart
+    between the ruling and the poll would prove the opposite of what is wanted.
+
+    The user's two acts are both here and both are the ones a person takes: they
+    grant the source for this use, and they raise the class's reach. Nothing else
+    changes.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING, calendar_reader_path=_imminent_event_calendar(tmp_path)
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        await engine.grant(CALENDAR_READER_NAME, scope=[GrantScope.NOTIFY])
+        await engine.set_notification_preferences(
+            NotificationPreferences(
+                reaches=(
+                    ClassReach(
+                        notification_class=UPCOMING_NOTIFICATION_CLASS,
+                        reach=NotificationReach.INTERRUPT,
+                    ),
+                )
+            )
+        )
+
+        assert await engine.notice_upcoming_events() == 1
+
+        delivery = await engine.next_notification(budget=timedelta(seconds=1))
+        assert delivery is not None
+        assert "Dentist" in delivery.notification.summary
+        assert delivery.notification.producer == UPCOMING_PRODUCER
+    finally:
+        await engine.aclose()

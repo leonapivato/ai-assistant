@@ -78,6 +78,7 @@ class FakeEngine:
         self.ingested = 0
         self.consolidated = 0
         self.reconsidered = 0
+        self.noticed = 0
         #: Run inside ``start()``. Tests use it to signal the process at a point
         #: where the hub's own handlers are certainly installed.
         self.on_start: Callable[[], None] | None = None
@@ -126,6 +127,17 @@ class FakeEngine:
         # *startup* rather than only the job it would have armed.
         self.consolidated += 1
         _marker.info("fake_engine_consolidated")
+
+    async def notice_upcoming_events(self) -> int:
+        # ADR-0132's upcoming-event producer. Present for ``ingest``'s reason
+        # exactly — ``jobs_for`` builds §7's whole table before filtering it by
+        # interval — and disabled for ``ingest``'s reason too: nothing may read a
+        # user's personal files because a default said so (ADR-0093 §7, ADR-0132
+        # §4), so ``calendar_upcoming_interval`` is ``None`` until an operator sets
+        # it and this method exists only so the table can be built.
+        self.noticed += 1
+        _marker.info("fake_engine_noticed")
+        return 0
 
     async def reconsider_notifications(self) -> int:
         # Leg 10's reconsideration drain (ADR-0130 §5), and the one job on §7's

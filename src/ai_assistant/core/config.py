@@ -2069,17 +2069,23 @@ class Settings(BaseSettings):
         reaching past the reader's forward window selects from a region the read
         never returns, and the job again runs, logs nothing and reports health.
 
-        **Unconditional, unlike the two refusals above.** This clause names no
-        interval and needs no running job to be true — the two figures are
-        incoherent as a pair whatever arms the producer — and §4 states it flatly.
-        The pair is also unreachable by accident: the shipped lead is thirty
-        minutes against a shipped forward window of seven days, so tripping this
-        takes an operator setting one of them deliberately.
+        **Conditioned on the producer being armed, exactly as the two refusals
+        above are**, and §4's shared justification is what decides it: both are
+        there because "the misconfiguration is silent, and silence here is
+        indistinguishable from working", which is a statement about a job that
+        runs. An unarmed deployment reads this field nowhere, so a pair that could
+        only mislead a running producer is not an incoherent state for it — and
+        refusing a hub's startup over a figure nothing consults would be a
+        configuration act with no fact behind it.
 
         Raises:
-            ValueError: If the lead window exceeds the reader's forward window.
+            ValueError: If an armed producer's lead exceeds the reader's forward
+                window.
         """
-        if self.calendar_upcoming_lead > self.calendar_window_future:
+        if (
+            self.calendar_upcoming_interval is not None
+            and self.calendar_upcoming_lead > self.calendar_window_future
+        ):
             msg = (
                 f"calendar_upcoming_lead must not exceed calendar_window_future, got "
                 f"{self.calendar_upcoming_lead!r} against {self.calendar_window_future!r}; "

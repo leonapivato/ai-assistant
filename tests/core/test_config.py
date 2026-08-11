@@ -803,13 +803,22 @@ _INTEGER_FIELDS: Final = tuple(
 
 #: Fields a field-generic case must supply **beside** the one it is exercising,
 #: because some settings are only coherent together. ``calendar_reader_interval``
-#: is the only one today: ADR-0093 §7a refuses an interval with no source at load,
-#: so a case that set it alone would be exercising that cross-field refusal rather
-#: than the per-field guard it means to. Supplying the companion for every case is
-#: harmless — the path is a valid value and no assertion below reads it — and it
-#: keeps the parametrisation field-agnostic, which is what makes a new setting
-#: covered without anyone editing the cases.
-_COMPANIONS: Final[dict[str, Any]] = {"calendar_reader_path": Path("/srv/calendars/personal.ics")}
+#: and ``calendar_upcoming_interval`` are why: ADR-0093 §7a and ADR-0132 §4 each
+#: refuse an interval with no source at load, so a case that set one alone would be
+#: exercising that cross-field refusal rather than the per-field guard it means to.
+#: ``calendar_upcoming_lead`` joins them for ADR-0132 §4's other refusal — a lead
+#: must be strictly greater than the producer's interval, and the shipped
+#: thirty-minute default is *below* the one-hour value these cases use, so without a
+#: companion every duration case over that interval would refuse.
+#:
+#: Supplying all three for every case is harmless — each is a valid value in its own
+#: right, a case exercising one of them overrides the companion, and no assertion
+#: below reads any of them — and it keeps the parametrisation field-agnostic, which
+#: is what makes a new setting covered without anyone editing the cases.
+_COMPANIONS: Final[dict[str, Any]] = {
+    "calendar_reader_path": Path("/srv/calendars/personal.ics"),
+    "calendar_upcoming_lead": timedelta(hours=2),
+}
 
 
 def _settings_with(name: str, value: object) -> Settings:
@@ -1142,6 +1151,14 @@ def test_every_duration_setting_is_discovered() -> None:
         "calendar_window_past",
         "calendar_window_future",
         "calendar_read_timeout",
+        # ADR-0132 §4's two, for the producer reading the same source on its own
+        # cadence. The interval follows ADR-0083 §7's convention — disabled is
+        # ``None``, never ``0`` — and the lead is bounded above for
+        # ``calendar_window_future``'s reason exactly. Both carry cross-field
+        # preconditions, which is why the lead joins :data:`_COMPANIONS`; the
+        # parametrised guards below still hold each one's own range.
+        "calendar_upcoming_interval",
+        "calendar_upcoming_lead",
         # ADR-0119 §10's trace horizon. Acknowledged here rather than exempted,
         # for the reason every duration above is: joining this tuple is what
         # subjects it to the parametrised guards below. It follows
@@ -1782,3 +1799,150 @@ class TestTheOutboxByteDefaultIsARule:
         """A fault is reported where it happened, not buried under a guess."""
         with pytest.raises(ValidationError, match="hub_max_frame_bytes"):
             Settings(hub_max_frame_bytes="not-a-number")  # type: ignore[arg-type]  # the refusal is the subject
+
+
+class TestTheUpcomingEventProducerSFigures:
+    """ADR-0132 §4's two fields and its three load-time refusals.
+
+    **Every refusal here exists because the misconfiguration is silent**, and §4
+    says so in terms: with ticks at ``t``, ``t+I``, … and a lead ``L``, an
+    occurrence is noticed only if some tick sees it inside ``(tick, tick+L)``, so a
+    lead no longer than the interval leaves occurrences that no tick ever sees —
+    while the job runs, logs nothing and reports health. A hub that starts and
+    notices nothing is indistinguishable from a hub that starts and has nothing to
+    notice, which is the state ADR-0022 §4a keeps refusing.
+    """
+
+    _SOURCE: Final = Path("/srv/calendars/personal.ics")
+
+    def test_the_producer_ships_disabled(self) -> None:
+        """§4: "The interval defaults to ``None``. The producer does not run until
+        an operator sets it."
+
+        ADR-0093 §7's rule for the same source unchanged — "nothing may read a
+        user's personal files because a default said so" — and naming the reason is
+        what stops the default flipping the day the technical obstacle clears.
+        """
+        assert Settings().calendar_upcoming_interval is None
+
+    def test_the_lead_window_defaults_to_thirty_minutes(self) -> None:
+        """§4 names the figure rather than leaving it to the implementing lane.
+
+        ADR-0093 §5's rule that a figure a decision invokes cannot be satisfied
+        elsewhere, and ADR-0074 §9.3's reason: two conforming implementations with
+        different figures notice different things while each believes it conforms.
+        """
+        assert Settings().calendar_upcoming_lead == timedelta(minutes=30)
+
+    def test_the_interval_is_not_the_ingestion_job_s(self) -> None:
+        """§4: "Neither field is ``calendar_reader_interval``, and neither is
+        derived from it."
+
+        "Arming or retuning one of these two changes ingestion's cadence in no way,
+        and arming ingestion arms no producer." A shared interval would make §3's
+        independence unbuildable: ingestion's cadence is sized for how often beliefs
+        should be refreshed and this one's against the lead window, and a figure
+        good for one is routinely wrong for the other.
+        """
+        armed = Settings(
+            calendar_reader_path=self._SOURCE, calendar_reader_interval=timedelta(hours=6)
+        )
+        assert armed.calendar_upcoming_interval is None
+
+        producing = Settings(
+            calendar_reader_path=self._SOURCE, calendar_upcoming_interval=timedelta(minutes=5)
+        )
+        assert producing.calendar_reader_interval is None
+
+    def test_an_armed_producer_with_no_source_is_refused_at_load(self) -> None:
+        """§4: "An armed producer with no source to read is an incoherent state and
+        is refused as one rather than discovered at the first tick."
+
+        Exactly as ``calendar_reader_interval`` set without a path already is, and
+        for that refusal's reasons: a scheduler that omitted the requested job would
+        report health while noticing nothing, and one that armed it would re-run a
+        failing job forever.
+        """
+        with pytest.raises(ValidationError, match="armed producer needs a source"):
+            Settings(calendar_upcoming_interval=timedelta(minutes=5))
+
+    def test_a_lead_no_longer_than_the_interval_is_refused(self) -> None:
+        """§4's hole, closed at load because it cannot be seen at run time.
+
+        "Where ``L < I`` the intervals leave holes: an occurrence starting in
+        ``(t+L, t+I]`` is too far away at the first tick and already past at the
+        second, so it is never noticed at all." Equality is refused too — a lead
+        exactly equal to the interval leaves the single instant at the seam, and the
+        window's upper edge is exclusive.
+        """
+        with pytest.raises(ValidationError, match="strictly greater than"):
+            Settings(
+                calendar_reader_path=self._SOURCE,
+                calendar_upcoming_interval=timedelta(minutes=30),
+                calendar_upcoming_lead=timedelta(minutes=10),
+            )
+
+        with pytest.raises(ValidationError, match="strictly greater than"):
+            Settings(
+                calendar_reader_path=self._SOURCE,
+                calendar_upcoming_interval=timedelta(minutes=30),
+                calendar_upcoming_lead=timedelta(minutes=30),
+            )
+
+    def test_a_lead_past_the_read_s_forward_window_is_refused(self) -> None:
+        """§4's other silent hole: "the read never returns the occurrence".
+
+        The producer's subject is the reading's own proposals, so a lead reaching
+        past ``calendar_window_future`` selects from a region the read never covers
+        — and the job runs, logs nothing, and reports health exactly as in the case
+        above.
+        """
+        with pytest.raises(ValidationError, match="must not exceed calendar_window_future"):
+            Settings(
+                calendar_reader_path=self._SOURCE,
+                calendar_upcoming_interval=timedelta(minutes=5),
+                calendar_upcoming_lead=timedelta(days=8),
+            )
+
+    def test_the_two_lead_refusals_do_not_fire_on_an_unarmed_producer(self) -> None:
+        """Both are conditioned on the producer being armed, and §4's argument is why.
+
+        Each exists because "the misconfiguration is silent, and silence here is
+        indistinguishable from working" — a statement about a job that *runs*. An
+        unarmed deployment reads the lead nowhere, so refusing a hub's startup over
+        a figure nothing consults would be a configuration act with no fact behind
+        it. The first clause could not fire in any case: it names "this producer's
+        own interval", and there is none.
+        """
+        settings = Settings(
+            calendar_reader_path=self._SOURCE,
+            calendar_window_future=timedelta(hours=1),
+            calendar_upcoming_lead=timedelta(days=8),
+        )
+
+        assert settings.calendar_upcoming_lead == timedelta(days=8)
+        assert settings.calendar_upcoming_interval is None
+
+    def test_the_armed_coherent_state_loads(self) -> None:
+        """Without this, the four refusals above prove nothing.
+
+        A validator that refused everything would pass every case in this class.
+        """
+        settings = Settings(
+            calendar_reader_path=self._SOURCE,
+            calendar_upcoming_interval=timedelta(minutes=5),
+            calendar_upcoming_lead=timedelta(minutes=45),
+        )
+
+        assert settings.calendar_upcoming_interval == timedelta(minutes=5)
+        assert settings.calendar_upcoming_lead == timedelta(minutes=45)
+
+    def test_disabled_is_none_and_never_zero(self) -> None:
+        """ADR-0083 §7's convention, inherited by §4 in as many words.
+
+        On a completion-scheduled loop a zero interval turns the producer into a hot
+        loop re-reading a file, and "off" and "as fast as possible" look identical
+        in a config file — the one confusion a scheduler cannot afford.
+        """
+        with pytest.raises(ValidationError):
+            Settings(calendar_reader_path=self._SOURCE, calendar_upcoming_interval=timedelta(0))
