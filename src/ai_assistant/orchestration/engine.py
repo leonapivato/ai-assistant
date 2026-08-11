@@ -2310,14 +2310,21 @@ class Engine:
         due — and §5's operation is defined over "every record whose
         ``reconsider_at`` has arrived".
 
-        **The drain terminates, and the argument is monotonic progress.** A
-        re-ruling always writes a ``reconsider_at`` strictly later than the
-        instant it ruled at — a quiet window's end and the instant a rolling
-        budget frees a unit are both in the future by construction — or none at
-        all, so a record re-ruled here leaves the due set and cannot re-enter it
-        except by a later setting write. A page that re-rules nothing therefore
-        means nothing is left to do, and ends the loop; that is also what a page
-        of records another writer resolved first looks like.
+        **The drain terminates, and it does not take the policy's word for it.**
+        The argument for progress is that a re-ruling writes a ``reconsider_at``
+        strictly later than the instant it ruled at, or none at all, so a record
+        re-ruled here leaves the due set. But that is a property of an
+        *implementation* of :class:`~ai_assistant.core.protocols.NotificationPolicy`,
+        and this loop is the hub's scheduler thread: a policy that returned an
+        instant already past would spin it forever, which is a whole assistant
+        hung by a contract clause nothing enforces.
+
+        So the loop ends on either of two conditions, and each covers a case the
+        other does not. A page that re-rules **nothing** means nothing is left to
+        do — that is also what a page of records another writer resolved first
+        looks like. And a page holding **no id this run has not already ruled**
+        means the store is handing back records this run has dealt with, whatever
+        their instants now say.
 
         Args:
             page: How many due records one store read takes.
@@ -2328,10 +2335,15 @@ class Engine:
         store = self._notification_surface()
         assert self._notification_policy is not None  # noqa: S101 — wired together (see __init__)
         policy = self._notification_policy
+        seen: set[str] = set()
         ruled = 0
         while due := await store.due(limit=page):
+            fresh = [record for record in due if record.id not in seen]
+            if not fresh:
+                break
             before = ruled
-            for record in due:
+            for record in fresh:
+                seen.add(record.id)
                 if await store.reconsider(record.id, policy=policy) is not None:
                     ruled += 1
             if ruled == before:

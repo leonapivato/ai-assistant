@@ -504,6 +504,75 @@ class NotificationPolicyContract(ABC):
         assert ruling.reason is NotificationCondition.QUIET_WINDOW
         assert ruling.reconsider_at == leaves_the_window
 
+    async def test_a_repeated_local_hour_yields_an_instant_still_ahead(
+        self, policy_in: Callable[[str], NotificationPolicy]
+    ) -> None:
+        """The autumn fall-back, where the earlier reading of the endpoint is spent.
+
+        In ``America/New_York`` on 2026-11-01 the clock falls back 02:00 to 01:00,
+        so 01:35 happens twice. Ruling during the **second** one, the ``fold=0``
+        reading of a window ending at 01:45 is 05:45Z — fifty minutes in the past.
+        A due instant behind the ruling instant makes the record immediately due
+        again, so a reconsideration re-rules it, recomputes the same past instant,
+        and the maintenance drain runs forever: a whole assistant hung by a quiet
+        window.
+
+        The answer is 06:45Z, the second 01:45, which is what the clock will
+        actually read next. Coverage stays a wall-clock question and is
+        deliberately not fold-aware: a user who says "quiet from 01:30 to 01:45"
+        is speaking about what their clock reads, and that night it reads it
+        twice.
+        """
+        preferences = NotificationPreferences(
+            reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
+            quiet_windows=(QuietWindow.between(time(1, 30), time(1, 45)),),
+        )
+        second_pass = datetime(2026, 11, 1, 6, 35, tzinfo=UTC)  # the second 01:35 local
+
+        ruling = await _rule(
+            policy_in("America/New_York"),
+            candidate(noticed_at=second_pass, expires_at=second_pass + timedelta(days=1)),
+            preferences=preferences,
+            now=second_pass,
+        )
+
+        assert ruling.reason is NotificationCondition.QUIET_WINDOW
+        assert ruling.reconsider_at == datetime(2026, 11, 1, 6, 45, tzinfo=UTC)
+        assert ruling.reconsider_at > second_pass
+
+    async def test_no_due_instant_is_ever_at_or_before_the_ruling(
+        self, policy_in: Callable[[str], NotificationPolicy]
+    ) -> None:
+        """The property behind the case above, over every minute of both transitions.
+
+        A due instant at or before the ruling instant is not merely wrong: it
+        makes the record immediately due, so the maintenance drain re-rules it,
+        gets the same answer, and never finishes. Swept over the spring gap and
+        the autumn repeat rather than asserted at one instant, because both
+        transitions have edges an example picks by luck.
+        """
+        preferences = NotificationPreferences(
+            reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
+            quiet_windows=(
+                QuietWindow.between(time(1, 30), time(1, 45)),
+                QuietWindow.between(time(22, 0), time(2, 30)),
+            ),
+        )
+        policy = policy_in("America/New_York")
+
+        for transition in (datetime(2026, 3, 8, tzinfo=UTC), datetime(2026, 11, 1, tzinfo=UTC)):
+            for minutes in range(0, 12 * 60, 5):
+                moment = transition + timedelta(minutes=minutes)
+                ruling = await _rule(
+                    policy,
+                    candidate(noticed_at=moment, expires_at=moment + timedelta(days=7)),
+                    preferences=preferences,
+                    now=moment,
+                )
+                assert ruling.reconsider_at is None or ruling.reconsider_at > moment, (
+                    f"a due instant at or before {moment} never drains"
+                )
+
     async def test_quiet_covering_every_minute_yields_no_due_instant(
         self, policy: NotificationPolicy
     ) -> None:

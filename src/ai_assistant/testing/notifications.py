@@ -252,47 +252,68 @@ class FakeNotificationPolicy:
         for step in range(1, MINUTES_IN_A_DAY):
             minute = (here + step) % MINUTES_IN_A_DAY
             if not preferences.is_quiet_at(minute):
-                return True, self._instant_of(local, time(minute // 60, minute % 60))
+                return True, self._instant_of(now, time(minute // 60, minute % 60))
         return True, None  # every minute of the day is quiet; time resolves nothing
 
-    def _instant_of(self, local: datetime, end: time) -> datetime:
-        """The next instant at which the local clock next reads ``end``.
+    def _instant_of(self, now: datetime, end: time) -> datetime:
+        """The first instant **strictly after** ``now`` at which the clock reads ``end``.
 
-        **A DST-ambiguous local instant resolves at ``fold=0``**, on ADR-0093
-        §7b's rule for the same hazard: the earlier of the two instants the wall
-        clock names, which is the one a user reading their own clock means.
+        Stated over instants rather than over dates, because a wall-clock time is
+        not a function of the day it falls on and both transitions prove it.
 
-        **A local time the spring transition skips resolves to the instant the
-        clock next passes it**, which is the transition itself. Naming it matters
-        because §5 asks for "the earliest instant at which every condition that
-        failed could next hold", and §5's tolerance of a *late run* is about a
-        tick that did not happen on time — it does not licence computing a due
-        instant that is wrong. On 2026-03-08 in ``America/New_York`` the clock
-        jumps 02:00 to 03:00, so a window ending at 02:30 ends at 07:00Z; naive
-        construction gives 07:30Z, which is half an hour of quiet the user did not
-        ask for.
+        **The autumn fall-back repeats an hour, and the earlier reading is
+        already spent.** At 01:35 EST on 2026-11-01 — the *second* 01:35 — the
+        ``fold=0`` reading of 01:45 is 05:45Z, fifty minutes in the past. Handing
+        that back as a due instant made the record immediately due, so a
+        reconsideration re-ruled it, recomputed the same past instant, and the
+        maintenance drain ran forever. Filtering to instants after ``now`` picks
+        06:45Z, the second 01:45, which is what the user's clock will actually
+        read next.
 
-        The zone's own arithmetic is what finds it: in a gap the two ``fold``
-        readings disagree and neither round-trips, and the transition is the only
-        instant between them where the offset changes, so a bisection over that
-        bracket names it exactly. An *unambiguous* or merely *ambiguous* local
-        time round-trips on ``fold=0`` and takes that reading unchanged, which is
-        ADR-0093 §7b's rule.
+        **Where both readings are still ahead, the earlier wins**, which is
+        ADR-0093 §7b's ``fold=0`` rule reached by taking the minimum rather than
+        by naming a fold.
+
+        **The spring transition skips a local time entirely**, and then neither
+        reading round-trips; the instant the clock next passes it is the
+        transition itself (:meth:`_transition_between`). §5 asks for "the earliest
+        instant at which every condition that failed could next hold", so that is
+        the one to name.
+
+        **Coverage stays a wall-clock question and is deliberately not
+        fold-aware.** A user who sets quiet from 01:30 to 01:45 is speaking about
+        what their clock reads, and on the night the hour repeats it reads that
+        twice; quieting both is the reading that matches what they asked for.
 
         Args:
-            local: The moment, already in this policy's zone.
-            end: The window's end, a naive ``datetime.time``.
+            now: The ruling instant, tz-aware.
+            end: The local time-of-day to reach, naive.
 
         Returns:
-            The instant, in UTC.
+            The first instant after ``now`` whose local time-of-day is ``end``,
+            in UTC.
         """
-        day = local.date() if end > local.time() else local.date() + timedelta(days=1)
-        nominal = datetime.combine(day, end, tzinfo=self._zone)
-        if nominal.astimezone(UTC).astimezone(self._zone).time() == end:
-            return nominal.astimezone(UTC)  # exists, whether or not it is ambiguous
-        return self._transition_between(
-            nominal.replace(fold=1).astimezone(UTC), nominal.astimezone(UTC)
-        )
+        here = now.astimezone(self._zone).date()
+        reachable: list[datetime] = []
+        for offset in (-1, 0, 1):
+            nominal = datetime.combine(here + timedelta(days=offset), end, tzinfo=self._zone)
+            existing = [
+                moment
+                for fold in (0, 1)
+                if (moment := nominal.replace(fold=fold).astimezone(UTC))
+                .astimezone(self._zone)
+                .time()
+                == end
+            ]
+            reachable.extend(
+                existing
+                or [
+                    self._transition_between(
+                        nominal.replace(fold=1).astimezone(UTC), nominal.astimezone(UTC)
+                    )
+                ]
+            )
+        return min(moment for moment in reachable if moment > now)
 
     def _transition_between(self, before: datetime, after: datetime) -> datetime:
         """The instant the offset changes, somewhere in ``(before, after]``.
