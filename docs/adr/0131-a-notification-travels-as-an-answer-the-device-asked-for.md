@@ -261,6 +261,9 @@ dropped connection rather than only on a crashed client.
 > clock. The **write** of the result frame commits the reservation as a lease and
 > starts the lease's clock. An entry is never both reserved and leased.
 
+> **Normative.** A reservation is **process-local and never persisted**. A hub that
+> starts holds no reservations, and every entry the outbox holds is available.
+
 > **Normative.** A close detected before the write **releases the reservation**, and
 > the entry becomes available to another poll immediately. A close detected at or
 > after the write leaves the lease standing, and it expires under §3 like any other.
@@ -280,6 +283,16 @@ adversarial review's second finding on the twelfth round. Splitting the transiti
 is what makes both rules true at once: the reservation is the exclusivity §3 needs
 and is cheap to undo, and the lease — the thing with a clock and a redelivery
 promise — begins only once the bytes have gone.
+
+**A reservation is not persisted, and that is the same argument that voids leases on
+a restart, one step shorter.** A lease is meaningful only while the connection that
+took the delivery exists; a reservation is meaningful only while the *poll* holding
+it is still running, and a poll cannot outlive its process. Persisting one would
+therefore create a state with no holder, no clock and — since §3's restart rule
+voids leases and says nothing of reservations — no rule releasing it: an entry
+stranded and never delivered. Adversarial review found that on the thirteenth round,
+against the clause it had asked for on the twelfth. Process-local closes it without
+a recovery pass, because there is nothing to recover.
 
 **Close wins before the write and loses after it, which is the only ordering that
 composes with ADR-0124 §8.** That section already puts `_check_live` immediately
@@ -457,10 +470,12 @@ deliberately given up, and gives the reason there.
 > the notification, the `delivery_id`, and the origin key where one was supplied.
 
 > **Normative.** When an enqueue would exceed either bound, the hub drops entries
-> **until both bounds hold with the new entry counted** — each drop taking the
-> oldest entry that is not leased, or, when every remaining entry is leased, the
-> oldest entry, breaking its lease. Every drop is recorded in the hub's log naming
-> the entry, and the enqueue then proceeds.
+> **until both bounds hold with the new entry counted**. Each drop takes the oldest
+> entry of the first non-empty class in this order: neither reserved nor leased,
+> then leased, then reserved. Dropping a leased entry breaks its lease; dropping a
+> reserved entry cancels the poll holding it, which then answers as though the
+> outbox held nothing for it. Every drop is recorded in the hub's log naming the
+> entry, and the enqueue then proceeds.
 
 > **Normative.** An entry whose own byte cost exceeds `hub_notification_outbox_bytes`
 > is refused at the enqueue, and the refusal is the enqueue's reported outcome. It is
@@ -479,7 +494,21 @@ the one a partial rule leaves undefined.** "Drop the oldest undelivered entry" h
 no subject when every entry is leased, and an implementation reaching that state has
 two illegal moves available — retain the new entry over the bound, or drop a leased
 one against the rule — with nothing to choose between them. So the leased case is
-named: leases are preferred *last*, and the tie-break is the same age order.
+named — and so, since the thirteenth round, is the reserved one. An earlier draft
+said "the oldest entry that is not leased", and a reservation is not a lease: the
+rule therefore selected an entry a poll was about to write, and that poll would then
+deliver a notification whose outbox record had been dropped, leaving nothing to
+acknowledge and nothing to redeliver. Adversarial review exhibited it.
+
+**The three classes are ordered by what dropping one forfeits, which is why leased
+comes before reserved and not after.** Dropping an entry that is neither reserved
+nor leased forfeits a notification nobody has seen and nobody is mid-way through
+sending — the cheapest thing available. Dropping a *leased* entry forfeits only the
+redelivery, because the notification has already been written to a device and in the
+ordinary case is on a screen. Dropping a *reserved* entry forfeits the notification
+outright, and does so while a poll is actively trying to send it — so it is last,
+and it takes the poll down with it rather than leaving that poll to write a delivery
+for a record that no longer exists.
 
 **It drops until the bounds hold, not once, and the difference is not pedantry.**
 One drop is enough for the count bound, where every entry costs exactly one — but
