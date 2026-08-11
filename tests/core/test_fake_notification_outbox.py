@@ -21,6 +21,7 @@ import pytest
 from notification_contract import CLASS, candidate
 from outbox_contract import NOW, NotificationOutboxContract
 
+from ai_assistant.core.errors import NotificationOutboxError, NotificationStoreError
 from ai_assistant.core.types import (
     ClassReach,
     HeldNotification,
@@ -504,6 +505,176 @@ async def test_the_fakes_sweep_reads_every_record_and_not_one_page_of_them() -> 
     # And the resolution reached it too: the entry knows which record it carries,
     # which is the only reason a withdrawal can report that it ended one.
     assert await outbox.withdraw(probe.id) is True
+
+
+class _FailingStore(FakeNotificationStore):
+    """The canonical store with a ``dismiss`` and a ``held`` a case can break."""
+
+    def __init__(self) -> None:
+        """Start failing nothing, on the fixed clock the cases assert against."""
+        super().__init__(now=lambda: NOW)
+        self.refuse_dismiss = False
+        self.refuse_held = False
+
+    async def dismiss(self, notification_id: str) -> bool:
+        """Refuse when armed, so a post-commit path can be exercised."""
+        if self.refuse_dismiss:
+            msg = "the notification store is unavailable"
+            raise NotificationStoreError(msg)
+        return await super().dismiss(notification_id)
+
+    async def held(self, *, limit: int = 50, offset: int = 0) -> list[HeldNotification]:
+        """Refuse when armed, so the read path's translation is reachable."""
+        if self.refuse_held:
+            msg = "the notification store is unavailable"
+            raise NotificationStoreError(msg)
+        return await super().held(limit=limit, offset=offset)
+
+
+class TestTheFakeKeepsTheDurableOutboxsInvariants:
+    """The parity audit, as tests — one per invariant the durable outbox holds.
+
+    Four consecutive review rounds each found the fake diverging from
+    ``SqliteNotificationOutbox`` on a different invariant, which is a fact about how
+    the fake was built rather than about any one defect: it inherited the durable
+    outbox's hard-won rules by review instead of by construction. These close the
+    class. Where a difference is *intended* — the byte bound and §4's delivery-counter
+    ceiling, neither of which an in-memory fake can honestly model — it is recorded in
+    the class docstring rather than asserted here.
+    """
+
+    async def test_a_store_read_failure_is_the_seams_own_error(self) -> None:
+        """Both Protocols declare ``NotificationOutboxError`` and nothing else.
+
+        The read reaches every ``offer`` through ``_resolve``, and ``reconcile``
+        directly, so an untranslated store fault is the type a consumer catches
+        differing from the type the shipped hub raises.
+        """
+        records = _FailingStore()
+        outbox = FakeNotificationOutbox(records=records, now=lambda: NOW)
+        records.refuse_held = True
+
+        with pytest.raises(NotificationOutboxError):
+            await outbox.offer(candidate(key="k1"))
+        with pytest.raises(NotificationOutboxError):
+            await outbox.reconcile()
+
+    async def test_a_dismissal_failure_is_the_seams_own_error(self) -> None:
+        """The same for the write half, which two of three callers used to leak raw."""
+        records = _FailingStore()
+        record_id, subject = await _ruled(records)
+        outbox = FakeNotificationOutbox(records=records, now=lambda: NOW)
+        await outbox.offer(subject)
+        held = await outbox.claim()
+        assert held is not None
+        records.refuse_dismiss = True
+
+        with pytest.raises(NotificationOutboxError):
+            await outbox.acknowledge(held.delivery_id)
+        with pytest.raises(NotificationOutboxError):
+            await outbox.withdraw(record_id)
+
+    async def test_a_failed_acknowledgement_leaves_the_entry_deliverable(self) -> None:
+        """§4: a failure restores the entry exactly as it was.
+
+        Marked departing and then left that way would make it selectable by no poll
+        and recoverable only by a reconciliation — a notification lost to a transient
+        store fault.
+        """
+        records = _FailingStore()
+        _, subject = await _ruled(records)
+        outbox = FakeNotificationOutbox(records=records, now=lambda: NOW)
+        await outbox.offer(subject)
+        held = await outbox.claim()
+        assert held is not None
+        records.refuse_dismiss = True
+        with pytest.raises(NotificationOutboxError):
+            await outbox.acknowledge(held.delivery_id)
+
+        records.refuse_dismiss = False
+
+        await outbox.acknowledge(held.delivery_id)
+        assert await outbox.offer(subject) is NotificationEnqueue.ENQUEUED
+
+    async def test_custody_transfers_before_an_eviction_can_fail(self) -> None:
+        """§4's shape at the other end of an entry's life: the insert commits first.
+
+        A producer told "no custody transferred" would retry and be answered
+        ``ALREADY_HELD``, contradicting the error it was just given. So a failed
+        eviction is deferred — the victim stays departing, deliverable to nobody —
+        and the offer still reports ``ENQUEUED``.
+        """
+        records = _FailingStore()
+        _, old = await _ruled(records)
+        outbox = FakeNotificationOutbox(records=records, now=lambda: NOW, max_entries=1)
+        assert await outbox.offer(old) is NotificationEnqueue.ENQUEUED
+        records.refuse_dismiss = True
+
+        fresh = candidate(key="k2", expires_at=NOW + timedelta(hours=2))
+        assert await outbox.offer(fresh) is NotificationEnqueue.ENQUEUED
+
+        # The victim reaches nobody, and the entry that took its place is deliverable.
+        delivery = await outbox.claim()
+        assert delivery is not None
+        assert delivery.notification.candidate_key == "k2"
+        assert await outbox.claim() is None
+
+    async def test_an_offer_declines_a_key_held_by_a_departing_row(self) -> None:
+        """§3b: no entry is removed before its record's dismissal has committed.
+
+        The departing row's dismissal is exactly what can have failed, so replacing it
+        would remove an entry nobody disposed of — the invariant reconciliation rests
+        on, broken silently. The offer declines, the caller settles it dismissal-first,
+        and only a departure that cannot be finished at all is refused.
+        """
+        records = _FailingStore()
+        record_id, subject = await _ruled(records)
+        outbox = FakeNotificationOutbox(records=records, now=lambda: NOW)
+        await outbox.offer(subject)
+        records.refuse_dismiss = True
+        with pytest.raises(NotificationOutboxError):
+            await outbox.withdraw(record_id)  # leaves the row marked departing
+
+        fresh = candidate(key="k1", confidence=0.9)  # differs, so it is not ALREADY_HELD
+        with pytest.raises(NotificationOutboxError, match="no custody transferred"):
+            await outbox.offer(fresh)
+
+        # And once the store recovers, the settle finishes the departure and the same
+        # offer is taken — the decline was never a permanent refusal.
+        records.refuse_dismiss = False
+        assert await outbox.offer(fresh) is NotificationEnqueue.ENQUEUED
+
+    async def test_an_offer_settles_departures_under_other_keys_too(self) -> None:
+        """The head-of-offer settle is a store-wide sweep, as the durable one is.
+
+        Performed only inside ``reconcile``, departing entries accumulate between
+        repairs and keep counting toward ``max_entries`` — so an outbox at its bound
+        refuses work it has room for.
+        """
+        records = _FailingStore()
+        record_id, first = await _ruled(records)
+        outbox = FakeNotificationOutbox(records=records, now=lambda: NOW, max_entries=2)
+        await outbox.offer(first)
+        # A failed *withdrawal* is what strands a departure: unlike a failed
+        # acknowledgement, it does not restore the mark, so the row stays departing
+        # with its record still actionable — §3b's half-done handoff.
+        records.refuse_dismiss = True
+        with pytest.raises(NotificationOutboxError):
+            await outbox.withdraw(record_id)
+        records.refuse_dismiss = False
+
+        # An offer under a *different* key clears the departure left under the first.
+        second = candidate(key="k2", expires_at=NOW + timedelta(hours=2))
+        assert await outbox.offer(second) is NotificationEnqueue.ENQUEUED
+
+        # **Asserted on the record store, not on the next offer's outcome.** The
+        # decline-and-retry path reaches `ENQUEUED` for `first` either way, so only
+        # the record tells the two apart: the settle dismisses before it removes, so
+        # a swept departure leaves its record dismissed here and now.
+        swept = await records.get(record_id)
+        assert swept is not None
+        assert swept.dismissed_at is not None
+        assert await outbox.offer(first) is NotificationEnqueue.ENQUEUED
 
 
 @pytest.mark.parametrize("entries", [0, -1, True])
