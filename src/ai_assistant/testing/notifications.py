@@ -1127,20 +1127,29 @@ class FakeNotificationOutbox:
         **Dismisses before it removes**, which is what keeps §3b's invariant true
         whichever point a previous attempt died at: an entry whose record is still
         actionable has it dismissed here and is then removed, and one whose record
-        was already dismissed simply has the removal completed. A dismissal that
-        fails again leaves the entry marked and removes nothing, so the next settle
-        retries it rather than losing the record.
+        was already dismissed simply has the removal completed.
+
+        **A failure here propagates, and swallowing it was the defect.** The durable
+        outbox does not catch it either, and the position is what makes that right:
+        this runs at the *head* of an offer, before anything has committed, so the
+        offer transfers no custody and the producer is told so in the seam's declared
+        error — where a suppressed failure would answer `ENQUEUED` over a repair that
+        did not happen. The entry stays marked, so the next settle retries it rather
+        than losing the record. The eviction loop *after* an insert is the opposite
+        case and defers deliberately: custody has transferred there, so nothing may
+        report that it has not.
 
         The caller holds the lock.
+
+        Raises:
+            NotificationOutboxError: If a departing entry's record cannot be
+                dismissed. Nothing is removed then.
         """
         now = self._now()
         for entry in list(self._entries.values()):
             if not self._is_departing(entry, now):
                 continue
-            try:
-                await self._dismiss(entry.record_id)
-            except NotificationOutboxError:
-                continue
+            await self._dismiss(entry.record_id)
             self._entries.pop(entry.candidate.candidate_key, None)
 
     async def _all_records(self) -> list[HeldNotification]:
@@ -1286,6 +1295,14 @@ class FakeNotificationOutbox:
             # the dismissal is precisely what can have failed. Overwriting it would
             # remove an entry nobody disposed of, so this declines and the caller
             # settles it dismissal-first instead.
+            #
+            # **Defensive here, and load-bearing in the durable outbox**, which is
+            # why it is kept rather than asserted unreachable. There the settle and
+            # the insert are separate transactions, so another writer can re-open a
+            # departure between them; behind this fake's single lock a settle that
+            # succeeded leaves no departing row for the insert to meet, and one that
+            # failed has already raised. Dropping the branch would make the fake's
+            # enqueue structurally unable to express an outcome the contract has.
             return None
         victims = self._victims(candidate.candidate_key, now)
         for victim in victims:
@@ -1472,10 +1489,9 @@ class FakeNotificationOutbox:
         async with self._lock:
             await asyncio.sleep(0)
             now = self._now()
-            for entry in list(self._entries.values()):
-                if self._is_departing(entry, now):
-                    await self._dismiss(entry.record_id)
-                    self._entries.pop(entry.candidate.candidate_key, None)
+            # The same helper the offer's head uses, so there is one departure sweep
+            # rather than two that can drift apart.
+            await self._settle_departing()
             keys = set(self._entries)
         if self._records is None:
             return

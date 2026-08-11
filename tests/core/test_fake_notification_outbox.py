@@ -619,13 +619,16 @@ class TestTheFakeKeepsTheDurableOutboxsInvariants:
         assert delivery.notification.candidate_key == "k2"
         assert await outbox.claim() is None
 
-    async def test_an_offer_declines_a_key_held_by_a_departing_row(self) -> None:
-        """§3b: no entry is removed before its record's dismissal has committed.
+    async def test_an_offer_refuses_while_a_departure_cannot_be_finished(self) -> None:
+        """§3b: an offer whose head-of-offer repair fails transfers no custody.
 
-        The departing row's dismissal is exactly what can have failed, so replacing it
-        would remove an entry nobody disposed of — the invariant reconciliation rests
-        on, broken silently. The offer declines, the caller settles it dismissal-first,
-        and only a departure that cannot be finished at all is refused.
+        A failed withdrawal leaves an entry marked departing with its record still
+        actionable. An offer under **any** key then meets that departure in the
+        store-wide settle, and while the record store is still unavailable it cannot
+        be finished. Suppressing that would answer ``ENQUEUED`` over a repair that did
+        not happen, and let a consumer pass with state the durable outbox refuses —
+        it does not catch the failure either, and the settle runs before anything has
+        committed, so nothing is owed to a producer but the declared error.
         """
         records = _FailingStore()
         record_id, subject = await _ruled(records)
@@ -635,14 +638,17 @@ class TestTheFakeKeepsTheDurableOutboxsInvariants:
         with pytest.raises(NotificationOutboxError):
             await outbox.withdraw(record_id)  # leaves the row marked departing
 
-        fresh = candidate(key="k1", confidence=0.9)  # differs, so it is not ALREADY_HELD
-        with pytest.raises(NotificationOutboxError, match="no custody transferred"):
-            await outbox.offer(fresh)
+        independent = candidate(key="k2", expires_at=NOW + timedelta(hours=2))
+        with pytest.raises(NotificationOutboxError):
+            await outbox.offer(independent)
 
-        # And once the store recovers, the settle finishes the departure and the same
-        # offer is taken — the decline was never a permanent refusal.
+        # No custody transferred: the refused offer left no entry behind, and once the
+        # store recovers the same offer is taken and the departure is finished.
         records.refuse_dismiss = False
-        assert await outbox.offer(fresh) is NotificationEnqueue.ENQUEUED
+        assert await outbox.offer(independent) is NotificationEnqueue.ENQUEUED
+        swept = await records.get(record_id)
+        assert swept is not None
+        assert swept.dismissed_at is not None
 
     async def test_an_offer_settles_departures_under_other_keys_too(self) -> None:
         """The head-of-offer settle is a store-wide sweep, as the durable one is.
