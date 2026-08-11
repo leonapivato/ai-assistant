@@ -207,6 +207,21 @@ in the hub where a restart cannot lose it.
 > the hub to close **the connection that made the second request**. The connection
 > that was already polling is untouched, and neither is answered.
 
+> **Normative.** The slot's check and claim are **one step**, taken before the
+> request is dispatched. Among requests racing for one device's slot exactly one
+> claimant wins and every loser closes its own connection; the winner holds the slot
+> until it is released under §2a.
+
+**"Already has one outstanding" is a read, so the claim that depends on it has to be
+the same step.** Two delivery connections opened at once can otherwise both observe
+no outstanding slot before either records one: both dispatch, the device holds two,
+neither is the second, and §2's rule fails without any implementation disobeying a
+word of it. Adversarial review found it on the twenty-second round, and §3's
+linearizability clause is stated over the seam's shared state — the slot registry
+included — for exactly this reason. Taking the claim *before* dispatch is what makes
+"exactly one wins" decidable: after dispatch the losing poll would already be
+running and the rule would have to unwind it.
+
 **Closing the offender and not the incumbent is the direction that cannot be used
 as a weapon.** The opposite rule — newest poll wins — lets any process that can
 reach the listener evict the owner's real notifier by polling, and the eviction
@@ -439,14 +454,18 @@ entry, which is latency bought for nothing.
 > acknowledgement naming anything else — an unknown identifier, a retired entry, or
 > a delivery the entry has since superseded — is accepted and does nothing.
 
-> **Normative.** **Every** transition of the outbox is linearizable with respect to
-> every other: each observes the state some serial order of them would produce, and
-> none may act on an observation another has since invalidated. This ADR defines
-> five — an enqueue's origin-key decision, bound check, eviction and insertion (§3);
-> a selection with its mint and lease (§2a); an acknowledgement's match and
-> retirement (§3); a lease expiry (§3); and an eviction's classification and drop
-> (§3) — and **the list illustrates the rule rather than bounding it**: a transition
-> a later decision adds is inside it by being one.
+> **Normative.** **Every** transition of the seam's shared state is linearizable
+> with respect to every other: each observes the state some serial order of them
+> would produce, and none may act on an observation another has since invalidated.
+> The seam's shared state is the outbox (§3) and the per-device delivery-slot
+> registry (§2), and this rule reaches any other a later decision adds.
+
+> **Normative.** This ADR defines six such transitions — an enqueue's origin-key
+> decision, bound check, eviction and insertion (§3); a selection with its mint and
+> lease (§2a); an acknowledgement's match and retirement (§3); a lease expiry (§3);
+> an eviction's classification and drop (§3); and a delivery slot's check-and-claim
+> and its release (§2, §2a). **The list illustrates the rule rather than bounding
+> it**: a transition a later decision adds is inside it by being one.
 
 **One rule over the whole class, because closing these pairwise closed none of
 them.** Adversarial review found the same shape four times against four different
@@ -462,16 +481,22 @@ notification delivered to a device that will never have it confirmed and never h
 it again. Four findings, one defect: a predicate stated over outbox state binds
 nothing unless the read and the act that depends on it are one step.
 
-**The enqueue is in the list because leaving it out reproduced the bug at the level
-of the rule**, which is the twenty-first round's finding and the sharpest of the
-four. A draft generalised from pairs to a *set* and then wrote the set as a closed
-enumeration of four — omitting the transition that mutates most. Two producers can
-then each observe room below a 256-entry bound and each commit, leaving 257; two
-concurrent enqueues carrying one origin key can each observe no held entry and both
-insert, so the deduplication §3 spends a clause on and the collision refusal beside
-it both silently fail. Generalising and then re-enumerating is how a rule acquires
-the gap it was written to remove, so the enumeration is now explicitly illustrative:
-the obligation is on *every* transition, and a later one is covered by being one.
+**Twice now the rule has been narrowed by the way it was written rather than by what
+it meant, and both narrowings are worth recording because they are the same
+mistake.** The twenty-first round found a draft that generalised from pairs to a
+*set* and then wrote the set as a closed enumeration of four, omitting the enqueue —
+the transition that mutates most. Two producers can then each observe room below a
+256-entry bound and each commit, leaving 257; two concurrent enqueues carrying one
+origin key can each observe no held entry and both insert, so the deduplication §3
+spends a clause on and the collision refusal beside it both silently fail. The
+twenty-second round then found the *subject* narrowed the same way: stated over "the
+outbox", the rule said nothing about the per-device slot registry, so a device
+opening two delivery connections at once can have both handlers observe no
+outstanding slot before either records one, and §2's one-connection rule fails with
+neither connection closed as the second. So the subject is the seam's shared state
+and the list is explicitly illustrative. **The lesson is that a rule against stale
+reads must not itself be scoped by an enumeration**, of either its members or its
+subject — that is exactly how it acquires the gap it was written to remove.
 
 **This is ADR-0124 §8's instrument taken to its general form.** That section
 required a liveness check and the write it authorises to be "one step with respect
