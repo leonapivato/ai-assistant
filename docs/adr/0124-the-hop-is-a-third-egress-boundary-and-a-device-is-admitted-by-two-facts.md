@@ -1,6 +1,6 @@
 # 124. The hop is a third egress boundary, and a device is admitted by two independent facts
 
-- Status: Partially superseded by ADR-0125 (§6's reader clause) and ADR-0126 (§6's revocation-recording clause, only as it reaches an act that destroys the enrolment record) and ADR-0131 (§7's credential-type clause, only as it reaches the loopback listener)
+- Status: Partially superseded by ADR-0125 (§6's reader clause) and ADR-0126 (§6's revocation-recording clause, only as it reaches an act that destroys the enrolment record)
 - Date: 2026-08-09
 - Accepted: 2026-08-09
 - Partially superseded: 2026-08-09 by ADR-0125 — **one clause, one limb of it, and
@@ -71,35 +71,6 @@
   surface. §8's prospective rule, its two-lever rule, its supersession of ADR-0004
   §6 and its device-side unenrolment act all stand; ADR-0126 §9 makes that last one
   a prerequisite of its own implementation rather than changing it.
-- Partially superseded: 2026-08-10 by ADR-0131 — **one clause, one transport, and
-  one value.** ADR-0131 §6 rules that §7's credential-*type* clause is a rule of
-  the remote admission rule and binds the remote listener alone.
-
-  **Replaced — §7's third clause, only as it reaches the loopback listener.** "The
-  credential member is a JSON string, or it is absent. A connect frame whose
-  credential member is present and is not a string … is refused as a credential
-  that did not verify." Stated over the *member* rather than over a listener, it
-  can be read as a statement about the connect schema binding both transports, and
-  the supporting paragraph does not close that reading because its premise is
-  wrong about one value: `read_connect` "refuses anything not in `(None, "")`" is
-  true of an object, a boolean and a number, and false of a present JSON `null`,
-  which decodes to `None` and is admitted. A reader holding only §7 would extend
-  the type rule across the loopback transport, which is ADR-0070 §1's second limb.
-  ADR-0131 §6 narrows it: on loopback ADR-0084 §2 governs unchanged and a present
-  `null` is a client saying it carries no credential.
-
-  **Not replaced — everything else in §7, which is nearly all of it.** The two-fact
-  admission rule, the refusal of an absent or empty credential on the remote
-  listener, the type rule *on the remote listener*, the fourth clause preserving
-  ADR-0084 §2 on loopback, the distinguished refusals for unenrolled, revoked and
-  non-verifying, the shared frame, deadline, connection and pending-handshake
-  ceilings, and the lowercase refusal-code form are all untouched. §7's principle
-  — "admission never asserts a check that did not happen" — is what ADR-0131 §6
-  reasons from rather than something it displaces.
-
-  **Nothing in the tree changes.** `read_connect` and `read_remote_connect` already
-  implement the narrow reading, each with its reasoning attached (#933, #934); what
-  was missing was the ratified sentence saying which reading they implement.
 - **This ADR partially supersedes ADR-0017 and ADR-0004, and both records land in
   this change.** ADR-0004's two clauses are §12's; each is scoped to the one thing
   a device boundary makes unreachable — a hub-side delete cannot purge a keyring

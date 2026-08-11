@@ -1,6 +1,6 @@
 # 84. The local API: a loopback socket, a versioned envelope, and the CLI as a client
 
-- Status: Partially superseded by ADR-0087 (§3's rule that a payload is serialised through pydantic's JSON mode; §5's enumeration of the implementation sequence as four changes) and ADR-0131 (§3's count of the decoded-frame close as the one exception)
+- Status: Partially superseded by ADR-0087 (§3's rule that a payload is serialised through pydantic's JSON mode; §5's enumeration of the implementation sequence as four changes)
 - Date: 2026-07-31
 - Partially superseded: 2026-08-01 by ADR-0087 — **two clauses: §3's
   payload-encoding rule is replaced, and §5's sequence is five changes, not
@@ -74,46 +74,6 @@
   changed; §4's ruling that the size limit is contract rather than transport is
   the premise ADR-0087 serves; §6's placement of the codec in the `wire` package
   stands, ADR-0087 taking only the *specification* of that codec's output.
-- Partially superseded: 2026-08-11 by ADR-0131 — **one sentence, and it is a
-  count.** ADR-0131 §2 adds a second connection-level rule to this transport — a
-  device holds at most one delivery connection — and gives its violation the same
-  answer §3 gives the serial rule: the offending connection closes.
-
-  **Replaced — §3's count of the decoded-frame close as the one exception.** "**The
-  one exception on this side is a second request arriving while one is
-  outstanding**", and with it the second bullet's "the one exception being the
-  third bullet below". A reader holding only this ADR, handed a second delivery
-  poll, answers it with a typed error: the frame decodes, and it is not the single
-  exception §3 enumerates. Under ADR-0131 §2 the connection closes. That is
-  ADR-0070 §1's first limb, and the enumeration is what fails rather than the rule
-  around it.
-
-  **Not replaced — the proviso the enumeration was counting, which is what makes
-  the addition coherent.** §3's second bullet already conditions the typed error on
-  the frame "not [being] itself a violation of the connection's own rules". That
-  test is untouched and is exactly the test ADR-0131 §2's rule meets; what was
-  wrong was the corpus's belief, true when written, that seriality was the only
-  such rule. §3's own words say why the count was stated at all — "Stating the
-  exception once, here, is deliberate; it was previously written into one of the
-  two rules and not the other" — and the concern behind that sentence, one input
-  with one answer, is preserved rather than weakened: a second poll has exactly one
-  answer, stated once, in ADR-0131 §2.
-
-  **Not replaced — §3's *reason* for its own exception, which does not transfer and
-  is not claimed to.** §3 closes on an overlapping request because a correlated
-  error "would carry the *second* request's id, which the mismatch rule separately
-  obliges the client to reject". That does not hold for a second delivery poll,
-  which arrives on its own connection with its own id and could be answered. It is
-  closed for a different reason, stated in ADR-0131 §2: a typed error would have to
-  be a declared failure of `next_notification` raisable only by the transport,
-  which breaks the substitutability §5 promoted the façade to a Protocol for.
-
-  **Not replaced — everything else in §3, which is nearly all of it.** The framing,
-  the codec, the length prefix, the envelope and its members, the duplicate-member
-  refusal, the undecodable-frame close and its closed list, the correlated-error
-  boundary itself, the two serial-connection rules, the correlation id and its
-  reserved future, the exact-match protocol version and the permanent
-  representation freeze all stand, and ADR-0131 rests on every one of them.
 - **This is the second and last of leg 5's two decisions.** ADR-0083 decided the
   *process* — one resident instance, exclusive ownership of the five databases,
   two-phase shutdown, exit-code classification, the internal scheduler. This one

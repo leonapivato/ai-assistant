@@ -1096,12 +1096,19 @@ actionable record with no entry, which reconciliation reads as an incomplete han
 and re-offers — a duplicate arriving by the longest available path, and the invariant
 false exactly when it is being relied on.
 
-**What a crash under the safe order leaves is an entry whose record is dismissed**,
-and that state needs no special handling at all: the entry is still the outbox's, and
-the outbox's ordinary rules apply to it — it will be delivered, acknowledged, leased
-or evicted like any other. The user's exposure is one duplicate telling, which is §3's
-at-least-once semantics reached one more way, and the direction this seam has failed
-in from the beginning. Nothing is lost.
+**What a crash under the safe order leaves is a departing entry**, and §3 already
+governs it exactly: its record is dismissed, so it participates in no transition but
+its own removal — not selected, not matched, not made available by a lease expiry —
+and the reconciliation above removes it before any poll is served. An earlier draft
+said the outbox's "ordinary rules" carried it and that it might be delivered again;
+architecture review pointed out on the fiftieth round that this contradicts the
+departing rule outright, and it did. The correct statement is narrower and stronger:
+the crash leaves nothing deliverable, and the repair is the one §3b already requires.
+
+**The residual exposure is a duplicate and it arrives from elsewhere**, so it is
+stated where it belongs rather than here: an entry *selected* before its departure may
+still land (§3a), which is §3's at-least-once semantics and the direction this seam
+has failed in from the beginning. Nothing is lost in either order of events.
 
 **Reconciliation cannot ask "was this an incomplete handoff?"** — it sees only records
 and entries — so the design makes the two states distinguishable by construction
@@ -1902,8 +1909,12 @@ listener. That is ADR-0070 §1's second limb — a clause read more widely than 
 holds — so it is a supersession and not an amendment, and it is **partial**: §7's
 other four clauses, the whole of the two-fact admission rule, the distinguished
 refusals, the shared ceilings and the refusal-code form are untouched and stay
-accepted. ADR-0124's Status line and a dated header note record it; not one word of
-its Decision text is edited.
+accepted. **The record lands on ADR-0124 when this ADR is ratified**, not now: the
+supersession has not landed while this ADR stands `Proposed`, and ADR-0070 §1 permits
+a Status edit only for "a supersession that has landed". Marking it early would make a
+reader treat §7's clause as displaced by a decision nobody has accepted. The ratifying
+change adds ADR-0131 to ADR-0124's Status line and appends the dated note; not one word
+of its Decision text is edited then either.
 
 **No record is owed on ADR-0124 §4, and the reason is worth stating rather than
 assumed.** §7 above *adds* a condition to the overlay-agent seam where §4 was
@@ -1943,8 +1954,9 @@ the client must reject, and a second poll arrives on its own connection with its
 id. It is closed for §2's reason instead. Everything else in §3 stands and this ADR
 rests on nearly all of it — the framing, the codec, the envelope, the two serial
 rules, the correlation id and its unspent reserve, the frame ceiling and the version
-freeze. ADR-0084's Status line and a dated header note carry the record; not one
-word of its Decision text is edited.
+freeze. **The record lands on ADR-0084 when this ADR is ratified**, on the same
+reasoning and in the same change as ADR-0124's above; not one word of its Decision text
+is edited then.
 
 **No record is owed on ADR-0124 §1, and that is the substantive finding rather
 than a formality.** §1's accountability bullet — "There is no path by which either
