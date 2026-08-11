@@ -75,8 +75,9 @@ nothing in the document stops them.
 Each attempt was refuted by a *different* ratified sentence, and none of the three
 sentences is about representability. §4's honour clause excludes refusing and
 excludes clamping; §5a's ranges exclude an implementing lane inventing a ceiling;
-§3's "the lease runs for `hub_notification_lease`… measured on the hub's clock"
-excludes serving a shorter lease than the one configured. Every attempt satisfied
+§3's "The lease runs for `hub_notification_lease` (§5a)", measured under that
+section's clock rule, excludes serving a shorter lease than the one configured.
+Every attempt satisfied
 some of them. The lane's first overrule argued saturation was *entailed* by three
 of those constraints and the following round found the fourth, which is precisely
 the shape of a question that a document does not answer: reconstructible in
@@ -115,34 +116,51 @@ would be declined even if a second seam already existed.
 
 ### 1. An accepted duration is honoured whole
 
-> **Normative.** Where this seam accepts a duration, the hub honours it at its
-> whole configured length. A `budget` argument inside ADR-0131 §4's closed range
-> is waited out to its full span; a configured `hub_notification_lease`
-> (ADR-0131 §5a) runs for its full span; and a configured
+> **Normative.** Where this seam accepts a duration, the hub takes it at its whole
+> configured length and shortens it for no reason of its own. A `budget` argument
+> inside ADR-0131 §4's closed range is the caller's whole permitted wait: the poll
+> ends when the hub has an answer or when that whole span has elapsed, whichever
+> comes first, and the hub never treats the span as shorter than it is. A
+> configured `hub_notification_lease` (ADR-0131 §5a) is the whole span an
+> unacknowledged lease runs before it expires. A configured
 > `hub_max_notification_budget` (§5a) admits every `budget` up to and including
-> it. In none of the three does the hub clamp, saturate, truncate, round or
-> otherwise shorten the value, and in none does it refuse the value, on the
-> ground that the hub cannot represent some quantity derived from it.
+> it. For none of the three does the hub clamp, saturate, truncate, round or
+> otherwise shorten the configured length, and for none does it refuse the value,
+> on the ground that the hub cannot represent some quantity derived from it.
 > Representability is the implementation's problem and is never part of the
 > answer the caller or the operator gets.
 
+**Each of the three is a *maximum*, and the clause is worded to leave every one of
+ADR-0131's early exits standing.** A poll answers "the moment it has one"
+(ADR-0131 §1), so honouring a budget whole is not holding the connection for its
+full length; it is being willing to, and never deciding on the hub's own account
+that the willingness was shorter. A lease ends early when "the device
+acknowledges it" (§3), so honouring the lease whole is about what an
+*unacknowledged* lease gets. An earlier draft of this clause said the budget "is
+waited out to its full span" and the lease "runs for its full span", which
+obligated a hub to hold every poll open and to ignore an acknowledgement — it
+contradicted §3 of this ADR and falsified two ADR-0131 clauses at once. The
+distinction between *shortening a span* and *reaching an outcome inside it* is the
+whole of what this section is about, and stating it loosely gets it backwards.
+
 **The ground is §4's marked honour clause, and being precise about which sentence
 obligates is worth a paragraph.** ADR-0131 is a marked ADR, so under ADR-0089 §3
-"the marked clauses are the whole of what it obligates" and "unmarked text is read
-to determine what a marked clause *means*; it never supplies an obligation."
+"the marked clauses are the whole of what it obligates", and unmarked text "is
+read to determine what a marked clause *means*; it never supplies an obligation."
 §4's celebrated sentence about clamping — "it is accepting-and-ignoring in a
 second costume", with ADR-0084 §2's argument behind it — sits in a column-0
 paragraph and is therefore *evidence of meaning*, not the obligation. The
-obligation is the marked one: `budget` "is **honoured** over the closed range".
-The unmarked paragraph is what tells a reader that "honoured" means honoured at
-its stated length rather than honoured by acceptance, and §4's other marked
-sentence — the hub "does not silently clamp it in either direction" — is scoped to
-an out-of-range budget and so does not reach this case on its own. Getting that
-attribution right matters because round 17's correction was argued from the
-unmarked sentence, and an argument from unmarked text is persuasive rather than
-binding. This clause makes the same rule marked, and extends it to the two
-configured figures, which §4's honour clause never covered because they are not
-arguments.
+obligation is the marked one: `budget` "is honoured over the closed range". The
+unmarked paragraph is what tells a reader that "honoured" means honoured at its
+stated length rather than honoured by acceptance, and §4's other marked sentence —
+the hub "does not silently clamp it in either direction" — is scoped to an
+out-of-range budget and so does not reach this case on its own. PR #959's round-17
+correction had already found the right ground and said so — "it is the honour
+clause rather than that sentence which bites here" — citing the unmarked paragraph
+as corroboration only. What that correction could not do is make the rule binding
+for the next reader, because a PR comment binds nobody. This clause does, and
+extends the same rule to the two configured figures, which §4's honour clause
+never covered because they are not arguments.
 
 **The falsification is on the record and is why this is stated positively rather
 than as a prohibition on clamping.** With `timedelta.max` configured, saturating
@@ -207,11 +225,13 @@ gives the lease a *source and a clock* — it "runs for `hub_notification_lease`
 and comparing elapsed time against the configured span keeps every word of that
 true for any legal figure: the duration is the configured one, the clock is the
 hub's, the start is §2a's indivisible step. Storing the expiry instead makes the
-stored value a function of a figure that may not fit, and it also silently
-freezes the span at the moment the lease was taken, so an operator's change to
-`hub_notification_lease` would apply to leases granted after the change and not
-to those outstanding. That second effect is not what §3 describes either, and it
-is reachable on ordinary figures rather than only at the extreme.
+stored value a function of a figure that may not fit, which is the whole of the
+argument — an earlier draft added a second ground, that a stored expiry freezes
+the span against a later change to `hub_notification_lease`, and that ground is
+false here. ADR-0131 §3 is marked that "A hub restart voids every lease", and
+ADR-0083 §13 makes a restart the only reload there is, so no lease is ever
+outstanding across a change to the figure. Recording the retraction rather than
+deleting it quietly: the anchor choice needs one reason, and it has one.
 
 **What the first clause does not reach is an instant the hub was handed.** It
 binds an instant *derived* by adding an accepted duration to the hub's clock, and
@@ -250,18 +270,26 @@ a precedent about a different field.
 > §2a's close rule turns on the connection rather than on the budget, and a poll
 > cancelled under it never reaches the selection step this section governs.
 
-**§4's zero-budget clause is the decisive ground, and it is marked.** ADR-0131 §4
-states, normatively: "A `budget` of zero is an **immediate poll**: the hub answers
-at once with whatever is available, which may be nothing." A zero budget is
-elapsed at the instant it starts. If an elapsed budget forbade selection, the
-immediate poll could answer with nothing else *ever* — and §4 says it answers "at
-once with whatever is available", which is an obligation to select. So the ADR
-already requires selection at the budget's own boundary, and a rule forbidding
-selection past that boundary contradicts a marked clause rather than extending it.
-Round 18's finding conceded the point in its own remedy, which asked for a
-deadline-aware selection "while preserving the required zero-budget immediate-read
-behavior" — the exception it carves out *is* the unconditional first read it
-objected to.
+**§4's zero-budget clause is the ground, and what it decides is the boundary
+case.** ADR-0131 §4 states, normatively: "A `budget` of zero is an **immediate
+poll**: the hub answers at once with whatever is available, which may be nothing."
+A zero budget is elapsed at the instant it starts, and §4 nonetheless obliges the
+hub to select — "at once with whatever is available". So ADR-0131 does not leave
+the elapsed-budget question untouched: in the one case it addresses, it decides it
+in favour of selecting. This section takes the general rule the special case
+already exemplifies.
+
+**Being exact about the strength of that is worth doing, because the tempting
+version is too strong.** A rule of the form "no selection once the budget is
+*strictly* past" sits alongside §4's zero case without contradicting it — zero is
+elapsed but not strictly past — and that is precisely the rule round 18 proposed,
+which is why its remedy asked to preserve "the required zero-budget immediate-read
+behavior" as a carve-out. So the finding was not self-refuting on the text, and
+saying it was would be this ADR committing the error `docs/review/guide.md`
+warns about, in the other direction. What defeats it is the paragraph below: the
+carve-out is unprincipled, and the rule it protects buys nothing. The textual
+point is the weaker one and is stated as such — ADR-0131 decided this question
+once, and decided it the other way.
 
 **§5a's figure bullet says the same thing and is not what decides it.** The bullet
 reads: "**`hub_max_notification_budget` at 300 s.** The ceiling on how long one
@@ -284,7 +312,9 @@ zero, discards a notification the hub is holding, and costs the owner a round tr
 to ask for it again. The clause exists to bound how long a delivery connection is
 unreclaimable, and refusing to answer does not reclaim it a microsecond sooner. A
 rule that spends a notification to buy nothing is not a strict reading of the
-bound; it is a misreading with a cost.
+bound; it is a misreading with a cost. And the carve-out it needs to survive §4 is
+the tell: a rule that must exempt the zero case by name, to avoid forbidding what
+§4 obliges, is drawing its line somewhere the document never drew one.
 
 **What is not licensed here is an unbounded poll.** The waiting clause is what
 keeps this section from swallowing the bound it is reading: a poll gets one
@@ -327,13 +357,16 @@ act differently, or read one of its clauses more widely than it now holds?
   budget, §1 above is about an accepted one, and neither reads the other wider.
 - **§4's zero-budget clause.** Unchanged. §3 above generalises it and replaces
   none of it; the immediate poll behaves identically before and after.
-- **§4's argument-validation clause** — a refused request "retires nothing, leases
-  nothing and mints nothing". Untouched. Nothing here moves validation relative to
-  effects, and §3 above is explicit that selection follows the acknowledgement,
-  which is the order §4 already fixes.
+- **§4's argument-validation clause** — arguments are validated "before any entry
+  is selected", and a refused request "retires nothing, leases nothing and mints
+  nothing". Untouched, and §3 above is worded to stay inside it: it governs a
+  request that *reaches* its selection step, which a refused one never does.
+  Nothing here moves validation relative to effects, and §3 keeps §4's order by
+  putting selection after the acknowledgement.
 - **§3's lease clauses** — "The lease runs for `hub_notification_lease` (§5a). It
-  starts in the indivisible step §2a fixes, measured on the hub's clock." All
-  three facts survive §2 above exactly: the span is the configured one, the start
+  starts in the indivisible step §2a fixes, measured on the hub's clock, and no
+  value a device sends influences it." All three facts survive §2 above exactly:
+  the span is the configured one, the start
   is §2a's step, the clock is the hub's. This is the clause the round-17
   correction showed saturation *did* falsify, and the shape §2 ratifies is the one
   that restores it.
@@ -352,12 +385,15 @@ act differently, or read one of its clauses more widely than it now holds?
   §4's meaning under ADR-0089 §3 and states its own obligation from §4.
 
 **So no sentence of ADR-0131 becomes false under this ADR, and no reader acts
-contrary to one.** ADR-0131 §9 puts the distinction in its own words, judging its
-own relation to ADR-0084: a reader holding only the earlier ADR "was not led to
-act *contrary* to anything; they were led to act incompletely." That is the
-stacked-addition category ADR-0083 §15 established, and ADR-0134 §3 is its most
-recent application — to this same target document, for a corner ADR-0131 likewise
-did not address. No `Status` edit is owed to ADR-0131 and none is made.
+contrary to one.** ADR-0131 §9 puts the distinction in its own words, judging why
+it owed ADR-0124 §4 no record: its §7 "*adds* a condition to the overlay-agent
+seam where §4 was silent", and "A reader holding only §4 was not led to act
+*contrary* to anything; they were led to act incompletely." That is the
+stacked-addition category ADR-0083 §15 established and ADR-0084 §12 applied, and
+ADR-0134 §3 is its most recent application — there in ADR-0131 §5a's favour, for a
+corner ADR-0084 §3 had not addressed. The relation is the same one with the
+documents exchanged: here it is ADR-0131 that was silent, and this ADR that adds.
+No `Status` edit is owed to ADR-0131 and none is made.
 
 **The counter-argument deserves stating, because §3 is where it bites.** It runs:
 a reader holding only §5a's occupancy bullet could have concluded that an elapsed
@@ -366,13 +402,15 @@ differently, and §3 narrows §5a. The answer is ADR-0070 §1's own: the test is
 whether the earlier ADR **decided** the thing being changed, and "anything a
 reader would act on differently" is its 2026-07-31 amendment's gloss on *what was
 decided*, not a wider standalone test. §5a decided a field, a default and a range;
-the bullet explains why the figure is 300 s. The selection reading was never
-available to a reader of ADR-0131 read whole, because §4's marked zero-budget
-clause forecloses it — which is why round 18's finding had to carve that case out
-by hand to state itself at all. A reading that a document's own marked clause
-already excludes is not a decision the document made, and correcting it is not a
-supersession. **The test controls, not the label** (ADR-0082 §1), and run honestly
-it lands on this side.
+the bullet explains why the figure is 300 s, and an explanation of a figure is not
+a ruling about selection. That limb alone settles it. The second limb is weaker
+and is not leaned on: §4's marked zero-budget clause does not strictly *foreclose*
+the selection reading — §3 above says why, and says that round 18's carve-out is
+what a rule needs to coexist with §4 rather than what refutes it — so the honest
+statement is that ADR-0131 decided this question in one case and left the general
+rule open. Filling an opening is what a stacked addition *is*. **The test controls,
+not the label** (ADR-0082 §1), and run on the clause §5a actually decided rather
+than on the sentence a reader might over-read, it lands on this side.
 
 **No record is owed to ADR-0089.** §3's marked/unmarked rule is applied here, not
 narrowed: this ADR adds no mark to ADR-0131, and reads its unmarked text for
@@ -483,8 +521,9 @@ elapsed-against-budget measurement and the outbox's `leased_at` anchor are what
 §2 requires rather than what a lane chose, and its budget-independent first
 selection is what §3 requires rather than an overrule a reader has to find in a
 comment thread. A future reviewer of this corner now argues against a clause instead of
-against a lane, which is the exchange `docs/review/guide.md` is built on. #971 is
-closed — against its own proposal, which §"Alternatives considered" records.
+against a lane, which is the exchange `docs/review/guide.md` is built on. The
+change carrying this ADR closes **#971** — against that issue's own proposal,
+which "Alternatives considered" records.
 
 **What gets harder, and it is a real cost.** §2 binds a mechanism, not only an
 outcome, so an implementation of this seam is no longer free to compute an expiry
