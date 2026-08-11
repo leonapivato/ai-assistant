@@ -3,13 +3,17 @@
 - Status: Proposed
 - Date: 2026-08-10
 - **Durability clause.** Every reference below to ADR-NNNN is to its text as it
-  stood at this ADR's base, `10e63a12`, not to its status on any later day. Every
-  ADR this decision composes with reads `Accepted` there, or is partially
-  superseded in a scope this ADR does not touch. Where a later ADR *changes* one
-  of them, this ADR is read against the text quoted here and that ADR's own record
-  says what moved. The `Date` line is this ADR's authoring date in this clone's
-  `-0400` frame, the convention ADR-0112, ADR-0113 and ADR-0129 state for their
-  own; the base named here is the anchor that does not move under either frame.
+  stood at this ADR's base, `10e63a12`, not to its status on any later day. **The
+  one exception is ADR-0130**, which did not exist on that tree: every reference to
+  it is to its text as merged at `e3717f5d`, where it reads `Accepted` — the
+  prerequisite §4 names, satisfied during this ADR's own review rather than before
+  it. Every other ADR this decision composes with reads `Accepted` at the base, or
+  is partially superseded in a scope this ADR does not touch. Where a later ADR
+  *changes* one of them, this ADR is read against the text quoted here and that
+  ADR's own record says what moved. The `Date` line is this ADR's authoring date in
+  this clone's `-0400` frame, the convention ADR-0112, ADR-0113 and ADR-0129 state
+  for their own; the base named here is the anchor that does not move under either
+  frame.
 
 ## Context
 
@@ -1204,10 +1208,10 @@ interrupted; `NotificationOutbox` carries an interruption that has already been 
 Folding the enqueue into the writer would put the transport's custody question inside
 the call whose whole subject is the policy question, and it would make ADR-0130's
 ratified single-call seam mean something new — a change to a contract that merged
-yesterday, made by the ADR that was told not to decide its ground. Two Protocols keep
-"producing is not delivering" (ADR-0130 §1) true in the type system rather than only
-in prose, and the composition root is where they meet, which is where golden rule 1
-already puts every other pairing of this kind.
+one lane ahead of it, made by the ADR that was told not to decide its ground. Two
+Protocols keep "producing is not delivering" (ADR-0130 §1) true in the type system
+rather than only in prose, and the composition root is where they meet, which is
+where golden rule 1 already puts every other pairing of this kind.
 
 **Every member is an offer that reached a decision, and a failure to reach one is an
 exception rather than a sixth member.** That is the division the corpus already
@@ -1262,7 +1266,7 @@ offset)` already have.
 
 **`extra="forbid"` is load-bearing here and is not the house default**, which is
 why it is spelled out rather than left to the reader: `core/types.py` carries both
-shapes, twenty-two models frozen alone and some fifty forbidding extras as well.
+shapes, a couple of dozen models frozen alone and some fifty forbidding extras as well.
 This one must forbid, because the reserve above is otherwise defeated by the
 measuring order the tree actually implements. `wire/client.py` validates and *then*
 measures — `return_adapter(method).validate_python(reply.payload)` followed by
@@ -1980,12 +1984,12 @@ listener. That is ADR-0070 §1's second limb — a clause read more widely than 
 holds — so it is a supersession and not an amendment, and it is **partial**: §7's
 other four clauses, the whole of the two-fact admission rule, the distinguished
 refusals, the shared ceilings and the refusal-code form are untouched and stay
-accepted. **The record lands in this change**, while this ADR stands `Proposed`:
+accepted. **The record landed with this ADR**, while it still stood `Proposed`:
 ADR-0070 §1's condition is that the superseding ADR *exists*, not that it is ratified,
 and ADR-0082 §7 restates that in terms — "the hazard §1 names is a `Status` line
 pointing at nothing, and an atomic pair makes that unreachable". `CONTRIBUTING.md`
 carries the same sentence. So ADR-0124's Status line and a dated header note carry the
-record here; not one word of its Decision text is edited.
+record; not one word of its Decision text was edited.
 
 **No record is owed on ADR-0124 §4, and the reason is worth stating rather than
 assumed.** §7 above *adds* a condition to the overlay-agent seam where §4 was
@@ -2025,9 +2029,9 @@ the client must reject, and a second poll arrives on its own connection with its
 id. It is closed for §2's reason instead. Everything else in §3 stands and this ADR
 rests on nearly all of it — the framing, the codec, the envelope, the two serial
 rules, the correlation id and its unspent reserve, the frame ceiling and the version
-freeze. ADR-0084's Status line and a dated header note carry the record in this
-change, on the same reasoning as ADR-0124's above; not one word of its Decision text is
-edited.
+freeze. ADR-0084's Status line and a dated header note carry the record, landed in
+that same change on the same reasoning as ADR-0124's above; not one word of its
+Decision text was edited.
 
 **No record is owed on ADR-0130, and the route to that answer is worth keeping.** §4
 imposes a delivery ceiling on what a candidate may encode to, and two drafts put it in
@@ -2067,10 +2071,10 @@ does not have to infer whether the resemblance was noticed. Adversarial review's
 first round is why the custody one is a clause: this ADR claimed the discipline
 before it applied it at the point where it bites.
 
-**Both records land here rather than at ratification, and the corpus has already
-adjudicated the question that says so.** The two reviews took opposite positions on
-it in consecutive rounds: architecture ruled on the fiftieth that a `Proposed` ADR
-cannot carry a supersession record and the Status lines should be restored;
+**Both records landed with this ADR rather than at its ratification, and the corpus
+has already adjudicated the question that says so.** The two reviews took opposite
+positions on it in consecutive rounds: architecture ruled on the fiftieth that a
+`Proposed` ADR cannot carry a supersession record and the Status lines should be restored;
 adversarial ruled on the fifty-first that ADR-0070 §1's condition is *existence* and
 the records were owed in this change. Both cited ADR-0070 §1. **ADR-0082 §7 settles
 it, and settles it against the first**: it names this exact reading as "#458 — the
@@ -2097,7 +2101,8 @@ dispatched, with no new check. A client is still stateless, so a notifier that
 crashes reconnects and re-polls, and at-least-once means it loses nothing by doing
 so.
 
-**What gets harder.** `PROTOCOL_VERSION` moves to 3, which means the hop's two
+**What gets harder.** `PROTOCOL_VERSION` moves, by §4's bump and from whatever
+figure the tree holds when the seam lands, which means the hop's two
 halves must be upgraded together — the deployment ADR-0124 §11 validates by hand on
 two commodity devices, now with a version mismatch to notice on the next run. A
 second connection per notifying device makes the hub's connection accounting matter
