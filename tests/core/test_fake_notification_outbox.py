@@ -34,6 +34,7 @@ from ai_assistant.testing import (
     FakeNotificationPolicy,
     FakeNotificationStore,
 )
+from ai_assistant.testing.notifications import _RECORD_PAGE
 
 
 def _records() -> FakeNotificationStore:
@@ -449,6 +450,60 @@ async def test_the_fakes_producer_offer_still_needs_no_record_behind_it() -> Non
 
     assert await outbox.offer(candidate(key="k1")) is NotificationEnqueue.ENQUEUED
     assert await outbox.claim() is not None
+
+
+#: The single wide page the fake used to read the whole store with, and treat as a
+#: total. Named so the case can point at the records that page cut off.
+_OLD_SINGLE_PAGE = 1000
+
+#: Comfortably more records than that, so there are records beyond it to point at.
+_PAST_ONE_PAGE = _OLD_SINGLE_PAGE + 100
+
+
+async def test_the_fakes_sweep_reads_every_record_and_not_one_page_of_them() -> None:
+    """Parity with the durable outbox, which pages until a short page.
+
+    Both of the fake's reads asked for ``held(limit=1000, offset=0)`` and treated
+    that page as the whole store. It is not one: ``FakeNotificationStore``'s ``cap``
+    is caller-configurable, so a consumer holding more silently lost every record
+    past the first page — ADR-0131 §3b's reconciliation never offering them, and
+    ``_resolve`` answering ``None`` for a candidate whose record was merely further
+    down. A canonical fake that truncates where the shipped implementation does not
+    certifies consumers against a contract nothing implements.
+    """
+    records = FakeNotificationStore(now=lambda: NOW, cap=_PAST_ONE_PAGE + 100)
+    await records.set_preferences(
+        NotificationPreferences(
+            reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),),
+            interruption_budget=_PAST_ONE_PAGE * 2,
+        )
+    )
+    for index in range(_PAST_ONE_PAGE):
+        ruled = await records.admit(
+            candidate(key=f"k{index}", expires_at=NOW + timedelta(hours=2)),
+            policy=FakeNotificationPolicy(),
+        )
+        assert ruled.notification_id is not None
+    outbox = FakeNotificationOutbox(
+        records=records, now=lambda: NOW, max_entries=_PAST_ONE_PAGE + 100
+    )
+    # Read the probe out of the store's **own** order rather than assuming the last
+    # candidate admitted lands last: ``held`` orders by the admission instant, which
+    # this fixed clock makes identical for every record, so the tie-break decides and
+    # "the one I added last" is not reliably past the boundary. Taking the first
+    # record the old single page would have cut off makes the case exact.
+    beyond = await records.held(limit=_RECORD_PAGE, offset=_OLD_SINGLE_PAGE)
+    assert beyond, "the store must hold more than the page the fake used to read"
+    probe = beyond[0]
+
+    await outbox.reconcile()
+
+    # The sweep reached it: an entry exists under its key, so a fresh offer of the
+    # same candidate is the no-op §3 makes it rather than an enqueue.
+    assert await outbox.offer(probe.candidate) is NotificationEnqueue.ALREADY_HELD
+    # And the resolution reached it too: the entry knows which record it carries,
+    # which is the only reason a withdrawal can report that it ended one.
+    assert await outbox.withdraw(probe.id) is True
 
 
 @pytest.mark.parametrize("entries", [0, -1, True])

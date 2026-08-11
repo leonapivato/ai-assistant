@@ -13,6 +13,7 @@ uses, so nothing here imports a subsystem (CLAUDE.md golden rule 1).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -125,7 +126,14 @@ class RecordingOutbox:
         self.calls.append(f"acknowledge:{delivery_id}")
 
     async def recover_leases(self) -> None:
-        """Record that the inherited leases were voided (ADR-0131 §3)."""
+        """Record that the inherited leases were voided (ADR-0131 §3).
+
+        **It suspends**, for :class:`FakeNotificationOutbox`'s reason: a real
+        recovery reaches a store and yields, and a guard that is only correct while
+        nothing interleaves is not a guard. Without the yield the concurrency case
+        below would pass against an unlocked check-and-set.
+        """
+        await asyncio.sleep(0)
         self.calls.append("recover_leases")
         self.recovered += 1
 
@@ -349,6 +357,24 @@ class TestTheStartupReconciliation:
 
         assert outbox.recovered == 1
         assert outbox.reconciled == 2
+
+    async def test_two_overlapping_starts_recover_once_between_them(self) -> None:
+        """A bare flag is not a guard across an ``await`` (round 10).
+
+        Both calls read the flag as ``False``; the first recovers and returns, a poll
+        leases an entry, and the second resumes its already-started recovery and
+        voids that live lease — one entry claimable by a second device, reached
+        *through* the guard meant to prevent it. ``start`` is public and documents
+        only that it is safe to call more than once, so nothing in this class
+        excludes the overlap; the hub's step 4/step 6 ordering is a fact about
+        ``service/hub.py`` and not a property callers of this method inherit.
+        """
+        outbox = RecordingOutbox()
+        engine = _wired(Harness(), outbox)
+
+        await asyncio.gather(engine.start(), engine.start())
+
+        assert outbox.recovered == 1
 
 
 class TestAnUnwiredOutboxRefusesLegibly:
