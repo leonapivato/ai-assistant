@@ -539,6 +539,24 @@ async def test_the_durable_wait_returns_early_on_an_offer(tmp_path: Path) -> Non
     assert woke is True
 
 
+async def test_the_durable_wait_stops_at_the_next_lease_expiry(tmp_path: Path) -> None:
+    """§1: the hub answers "the moment it has one", and a lease expiry is such a moment.
+
+    Parity with the canonical fake. A lease expiring makes an entry available and
+    sets no arrival event, so a poll parked before it slept out its whole budget with
+    the entry sitting there — the lease *plus* a budget, where §5a prices the lease
+    alone as "how long a *dead* device withholds a notification from a live one".
+    """
+    # A short lease: the horizon is spent in *real* time while this clock is injected.
+    outbox = build(tmp_path / "outbox.db", lease=timedelta(milliseconds=50))
+    await outbox.offer(candidate(key="k1"))
+    assert await outbox.claim() is not None
+    # Clears the arrival event, which is the state a parked poll is really in.
+    assert await outbox.claim() is None
+
+    assert await outbox.wait_for_arrival(timedelta(seconds=1)) is True
+
+
 class TestATerminalRefusalIsTerminalForTheRecord:
     """ADR-0131 §3b: a refusal that left the record actionable was the defect."""
 
