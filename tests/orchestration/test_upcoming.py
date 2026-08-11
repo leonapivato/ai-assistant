@@ -71,6 +71,24 @@ _READ_AT = datetime(2026, 6, 1, 14, 0, tzinfo=UTC)
 _LEAD = timedelta(minutes=20)
 
 
+class _CountingClock:
+    """A ``Clock`` that records every reading and answers a fixed instant.
+
+    Fixed rather than moving, and deliberately **later** than :data:`_READ_AT`: an
+    implementation that anchored on this instead of on the reading would select a
+    different set of occurrences and stamp a different ``noticed_at``, so the
+    substitution is visible in the assertions rather than only in the counter.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> datetime:
+        """Answer, and count that the producer asked."""
+        self.calls += 1
+        return _READ_AT + timedelta(minutes=13)
+
+
 class _FailsOnTheRecheck:
     """A ``SourceGrants`` that answers once and raises from every later ``live``.
 
@@ -175,8 +193,16 @@ class Harness:
             grants if grants is not None else FakeSourceGrants([source_grant(self.reader.name)])
         )
         self.writer = writer if writer is not None else _RecordingWriter()
+        #: Counts every reading. ADR-0132 §1 has the producer hold a clock and §4
+        #: forbids it anchoring on one, so "held" and "unread" are two assertions
+        #: and this is what makes the second checkable.
+        self.clock = _CountingClock()
         self.stage = UpcomingEventStage(
-            reader=self.reader, grants=self.grants, writer=self.writer, lead=lead
+            reader=self.reader,
+            grants=self.grants,
+            writer=self.writer,
+            now=self.clock,
+            lead=lead,
         )
 
     @property
@@ -352,6 +378,7 @@ async def test_a_lead_window_of_no_width_is_refused_at_construction() -> None:
             reader=FakeReader([]),
             grants=FakeSourceGrants(),
             writer=_RecordingWriter(),
+            now=_CountingClock(),
             lead=timedelta(0),
         )
 
@@ -376,6 +403,7 @@ async def test_a_lead_window_that_is_not_exactly_a_timedelta_is_refused() -> Non
             reader=FakeReader([]),
             grants=FakeSourceGrants(),
             writer=_RecordingWriter(),
+            now=_CountingClock(),
             lead=_Sneaky(minutes=20),
         )
 
@@ -792,6 +820,37 @@ async def test_the_producer_holds_no_state_between_runs_and_re_offers() -> None:
     assert first == second
 
 
+async def test_the_clock_it_holds_is_never_read() -> None:
+    """§1 has the producer hold a clock; §4 forbids it anchoring on one.
+
+    The two clauses are reconciled by holding it and never reading it, and this is
+    what makes the second half checkable rather than a comment. §4: the instant a
+    candidate was noticed "is the reading's own ``read_at`` … and never a later
+    clock reading taken when the candidate was constructed or offered", and both
+    the selection and ADR-0130 §2's validation are evaluated "against one instant,
+    not two".
+
+    **The counter is the weaker half of the assertion.** The injected clock answers
+    thirteen minutes past the reading, so an implementation that anchored on it
+    would select a different set — the occurrence at +25 leaves the window, the one
+    at +5 falls behind it — and would stamp a different ``noticed_at``. Both are
+    asserted, so a producer that read the clock fails on what it *concluded* and
+    not only on having asked.
+    """
+    harness = Harness(
+        [_occurrence(starts_in=timedelta(minutes=n), summary=f"E{n}") for n in (5, 15, 25)]
+    )
+
+    assert await harness.stage.notice() == 2
+
+    assert harness.clock.calls == 0
+    assert {candidate.noticed_at for candidate in harness.offered} == {_READ_AT}
+    # Anchored on the reading, the window is (0, 20) and selects E5 and E15.
+    # Anchored on the clock it would be (13, 33) and select E15 and E25 — the same
+    # *count*, which is why the set is asserted rather than the number.
+    assert {candidate.summary.split(",")[0] for candidate in harness.offered} == {"E5", "E15"}
+
+
 def test_the_producer_holds_nothing_a_memory_or_a_model_would_need() -> None:
     """§1 and §8, pinned on the constructor rather than trusted to review.
 
@@ -804,4 +863,4 @@ def test_the_producer_holds_nothing_a_memory_or_a_model_would_need() -> None:
     """
     parameters = set(inspect.signature(UpcomingEventStage.__init__).parameters)
 
-    assert parameters == {"self", "reader", "grants", "writer", "lead"}
+    assert parameters == {"self", "reader", "grants", "writer", "now", "lead"}
