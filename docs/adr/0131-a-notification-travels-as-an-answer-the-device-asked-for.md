@@ -394,46 +394,61 @@ to do something about a failure. **What the producer then does is ADR-0130's** �
 retry, drop, record — and this ADR neither decides it nor needs to; the seam's
 obligation is to have an unambiguous answer for the producer to act on.
 
-> **Normative.** The enqueue accepts an optional caller-supplied **origin key**, an
-> `Identifier` whose UTF-8 encoding is at most 128 bytes; a longer one is refused at
-> the enqueue. An enqueue whose origin key equals that of an entry the outbox
-> currently holds, **and whose offered notification is identical to that entry's**,
-> makes no new entry and returns the held one. Retired keys are not remembered, and
-> an entry carrying no origin key is never matched against anything.
+> **Normative.** An entry is keyed by its candidate's own `candidate_key` (ADR-0130
+> §8). The enqueue takes no key from its caller and no entry is ever unkeyed.
 
-> **Normative.** An enqueue whose origin key matches a held entry's while the
-> offered notification differs from it is **refused** as a key collision, with an
-> outcome distinct from a successful match. The held entry is not replaced and the
-> offered notification is not enqueued under another key.
+> **Normative.** An offer whose key equals that of an entry the outbox currently
+> holds, **and whose candidate is identical to that entry's**, makes no new entry and
+> reports the held one. Keys of retired entries are not remembered.
+
+> **Normative.** An offer whose key matches a held entry's while the candidate
+> differs from it is **refused** as a key collision, with an outcome distinct from a
+> successful match. The held entry is not replaced and the offered candidate is not
+> enqueued under another key.
+
+**The key is the candidate's own, and a caller-supplied one was the defect.** A draft
+took an optional `origin_key` argument, so a producer could offer a candidate under
+no key or under a key of its choosing — and §3b's startup reconciliation, which has
+only the record to work from, offers under `candidate_key`. The two need not agree,
+so a candidate enqueued under one key and reconciled under another produces a second
+entry and a second telling. Adversarial review found it on the thirty-fifth round.
+Keying on `candidate_key` closes it by construction rather than by a rule anyone has
+to obey: there is one key per candidate and every path computes the same one.
+
+**`candidate_key` is the right key rather than merely an available one.** ADR-0130 §8
+makes it "a digest over the producer's declared name and a canonical projection of
+what was noticed", containing "no clock reading, no random value, and nothing derived
+from the run that produced it, so the same observation yields the same key across
+ticks and across process lives". That is exactly the property an outbox key needs,
+and it is the property a caller-supplied key could only promise. It also means the
+seam inherits ADR-0130 §8's bound on the key rather than inventing one, so the
+overlong-key refusal an earlier draft carried has no subject and is gone.
 
 **Matching on the key alone would turn a producer's bug into a silent loss**, which
-is the third round's finding and the exact failure mode the key was added to
-prevent, arriving from the other side: a producer with a low-cardinality or simply
-mistaken key enqueues B under the key A already holds, receives what looks like a
-successful enqueue, and B is never told. Comparing the notification is what makes
-the no-op a *retry* rather than a coincidence, and refusing the collision is what
-makes the difference reach the producer instead of the floor. Equality is
-well-defined without this ADR inventing anything: ADR-0087 §2 gives every payload a
-canonical encoding, and two notifications are identical when theirs are.
+is the fourth round's finding and the exact failure mode deduplication was added to
+prevent, arriving from the other side: a candidate B enqueued under a key A already
+holds would receive what looks like a successful enqueue and never be told. Comparing
+the candidate is what makes the no-op a *retry* rather than a coincidence, and
+refusing the collision is what makes the difference reach the producer instead of the
+floor. Equality is well-defined without this ADR inventing anything: ADR-0087 §2
+gives every payload a canonical encoding, and two candidates are identical when
+theirs are.
 
-**A commit the caller never learns the outcome of is the case this exists for, and
-it is a narrower case than it first looks.** The hub can commit the entry and then
-die before the call returns; the producer, restarting, may offer the same
-notification again. The origin key makes that retry a no-op rather than a second
-telling — the reviewer's finding on the second round, and correct.
+**A commit the caller never learns the outcome of is the case this exists for.** The
+hub can commit the entry and then die before the call returns; the producer,
+restarting, may offer the same candidate again, and the key makes that retry a no-op
+rather than a second telling — the reviewer's finding on the second round, and
+correct. §3b's reconciliation is the same mechanism reached from the other side.
 
-**Two things are deliberately *not* bought, and pretending otherwise would be the
-larger error.** First, **a producer with no durable identity for its own
-notifications gets no protection**, because it has no key to send. Whether
-ADR-0130's producer has such an identity — and whether its noticer re-notices after
-a restart at all — is ADR-0130's question and #632's durable cursor is adjacent to
-it; the seam supplies the slot and cannot supply the identity. Second, **retired
-keys are forgotten**, so a retry arriving after the notification has been delivered
-and acknowledged makes a second entry. Remembering them would mean a durable set of
-every key the hub has ever seen, growing forever, bounded by nothing — a worse
-failure than the one it prevents, traded for a window that only opens when a crash
-lands between a commit and a return *and* the delivery has already completed. The
-bound is where this ADR spends its durable state, and it spends it on entries.
+**Retired keys are forgotten, and that is a deliberate bound rather than an
+oversight.** A retry arriving after the notification has been delivered and
+acknowledged would make a second entry. Remembering keys would mean a durable set of
+every one the hub has ever seen, growing forever, bounded by nothing — a worse failure
+than the one it prevents. What actually closes that case is §3b's dismissal: an
+acknowledged entry's record stops being actionable, so neither reconciliation nor a
+re-noticing producer offers it again (ADR-0130 §8 rules a candidate matching an
+actionable record `DROP`). The bound is where this ADR spends its durable state, and
+it spends it on entries.
 
 **Silence on this is the one thing the corpus forbids outright.** ADR-0094 §10a
 binds the mirror-image decision — the spoke-to-hub custody handoff — with "An ADR
@@ -529,7 +544,7 @@ entry, which is latency bought for nothing.
 > observe nor depend on either claim.
 
 > **Normative.** Transitions are named here **as illustration and not as a bound**.
-> In the outbox: an enqueue's origin-key decision, bound check, eviction and
+> In the outbox: an enqueue's key decision, bound check, eviction and
 > insertion (§3); a selection with its mint and lease (§2a); an acknowledgement's
 > match and retirement (§3); a lease expiry (§3); and an eviction's classification
 > and drop (§3). In the connection registry: the device slot's and the global
@@ -587,7 +602,7 @@ mistake.** The twenty-first round found a draft that generalised from pairs to a
 *set* and then wrote the set as a closed enumeration of four, omitting the enqueue —
 the transition that mutates most. Two producers can then each observe room below a
 256-entry bound and each commit, leaving 257; two concurrent enqueues carrying one
-origin key can each observe no held entry and both insert, so the deduplication §3
+key can each observe no held entry and both insert, so the deduplication §3
 spends a clause on and the collision refusal beside it both silently fail. The
 twenty-second round then found the *subject* narrowed the same way: stated over "the
 outbox", the rule said nothing about the per-device slot registry, so a device
@@ -643,8 +658,7 @@ deliberately given up, and gives the reason there.
 > outbox holds, leased or not.
 
 > **Normative.** An entry's byte cost is **everything the outbox persists for it**,
-> defined by that property and not by a list: the notification, the origin key where
-> one was supplied, the identifier of its current outstanding delivery where it has
+> defined by that property and not by a list: the candidate, the identifier of its current outstanding delivery where it has
 > one, its lease state, its enqueue order, and any other per-entry field an
 > implementation persists to satisfy this ADR. A field an implementation adds is
 > counted by being persisted.
@@ -721,8 +735,8 @@ what is measured against it is the **result**, which here is a
 `NotificationDelivery` and not the notification inside it. §4 therefore bounds the
 nested notification at the contract limit less a 256-byte delivery reserve. An
 entry's byte cost is then that notification, plus a `delivery_id` of at most 96
-bytes, plus an origin key of at most 128 — so at most `hub_max_frame_bytes` less
-512, less 256, plus 224: comfortably below §5a's floor of `hub_max_frame_bytes`. An
+bytes — so at most `hub_max_frame_bytes` less 512, less 256, plus 96: comfortably
+below §5a's floor of `hub_max_frame_bytes`. An
 outbox at the floor therefore holds any notification the wire can carry, and the
 clause exists for the deployment that is not conforming rather than for the one
 that is.
@@ -789,12 +803,12 @@ existing one ends.
 
 ### 3b. The producer-to-outbox seam, which nothing else declares
 
-§3 gives the enqueue an origin key and four outcomes and, until this section, no
-contract to express them in. ADR-0130's `NotificationWriter` is the only producer
+§3 gives the enqueue four outcomes and, until this section, no contract to express
+them in. ADR-0130's `NotificationWriter` is the only producer
 seam that exists and it is not this one: its single call reads the preferences, asks
 the policy to rule, records the ruling and returns a `NotificationDisposition`
-(ADR-0130 §3). It takes no origin key, and a disposition is a ruling about whether to
-interrupt rather than an answer about whether custody committed. So the handoff §3
+(ADR-0130 §3), and a disposition is a ruling about whether to interrupt rather than
+an answer about whether custody committed. So the handoff §3
 requires is surface this ADR owes, and golden rule 5 puts it here rather than in a
 lane. Adversarial review found the gap on the thirty-second round, after ADR-0130
 merged and made it checkable.
@@ -802,15 +816,13 @@ merged and made it checkable.
 > **Normative.** `core/protocols.py` gains a `NotificationOutbox` Protocol carrying
 > exactly one method:
 >
-> `async def offer(self, candidate: NotificationCandidate, *, origin_key: Identifier | None = None) -> NotificationEnqueue: ...`
+> `async def offer(self, candidate: NotificationCandidate) -> NotificationEnqueue: ...`
 
 > **Normative.** `core/types.py` gains `NotificationEnqueue`, a `StrEnum` with
-> exactly five members, one per outcome §3 defines: the entry was enqueued; an
-> identical entry was already held under this origin key and none was made; the
-> origin key matched a held entry carrying a different notification and the offer was
-> refused; the origin key's UTF-8 encoding exceeds 128 bytes and the offer was
-> refused; the entry's own byte cost exceeds `hub_notification_outbox_bytes` and the
-> offer was refused.
+> exactly four members, one per outcome §3 defines: the entry was enqueued; an
+> identical entry was already held under this key and none was made; the key matched
+> a held entry carrying a different candidate and the offer was refused; the entry's
+> own byte cost exceeds `hub_notification_outbox_bytes` and the offer was refused.
 
 > **Normative.** `core/errors.py` gains `NotificationOutboxError(AssistantError)`,
 > in the shape `MemoryStoreError`, `DeferralStoreError` and `TraceStoreError` already
@@ -829,9 +841,9 @@ merged and made it checkable.
 
 > **Normative.** The seam **reconciles at startup**, before it serves any poll: for
 > every ADR-0130 record that is ruled `INTERRUPT` and still **actionable** and for
-> which the outbox holds no entry, it offers the candidate with `origin_key` set to
-> that record's `candidate_key`. The reconciliation is idempotent by §3's origin-key
-> rule and requires no state of its own.
+> which the outbox holds no entry, it offers that record's candidate. The
+> reconciliation is idempotent by §3's key rule — every path keys on the candidate's
+> own `candidate_key` — and requires no state of its own.
 
 > **Normative.** Retiring an entry on an acknowledgement (§3) **dismisses** its
 > ADR-0130 record, through the dismissal `NotificationStore` carries. A dismissed
@@ -852,16 +864,16 @@ stores sharing a transaction, which is the coordination contract architecture re
 already refused on the twenty-ninth round. What closes the window instead is that
 ADR-0130's record is *itself* the durable pending-enqueue obligation: it is committed
 first, it survives the crash, and its `candidate_key` (ADR-0130 §2, a digest §8's
-duplicate lookup already turns on) is a stable identity the origin key can carry. So
-recovery is a read of records the other side already keeps, and the origin-key rule
-makes running it twice, or running it against entries that already exist, a no-op.
+duplicate lookup already turns on) is the key §3 already uses. So recovery is a read
+of records the other side already keeps, and §3's key rule makes running it twice, or
+running it against entries that already exist, a no-op.
 
 **Dismissing on the acknowledgement is what keeps the reconciliation from
 re-delivering, and it costs no new surface.** Without it, an entry that was delivered
 and retired leaves an actionable record with no entry — indistinguishable from one
 that never reached the outbox — so the next startup would tell the owner again. The
 alternative was for the outbox to remember every record it had ever taken, which is
-the unbounded durable set §3 refuses for origin keys. ADR-0130 §9 already provides a
+the unbounded durable set §3 refuses for retired keys. ADR-0130 §9 already provides a
 dismissal that "ends actionability and leaves the record readable", and §7 there is
 explicit that "dismissing a notification frees capacity at once" — so this uses a
 ratified operation for what it was built for, through the Protocol the composition
@@ -896,14 +908,10 @@ with no contract telling it whether the notification had been taken. §3's claus
 "the seam takes custody at that commit and not before" is the rule this discharges;
 the error is how the producer hears it.
 
-**Five outcomes because §3 has five, and an enum because none of them carries
+**Four outcomes because §3 has four, and an enum because none of them carries
 anything.** A producer needs to tell a committed enqueue from a no-op retry, a key
-collision from either, and each of the two refusals from all of those — those are its
-distinct remedies. The overlong origin key was the one §3 defined and this section
-first failed to give a home, which adversarial review found in the same round: §3
-refuses a key above 128 bytes and the enum had no member for it, so the only
-conforming implementations were ones that reported some other outcome for it. None of
-the five has an accompanying value the producer can act on:
+collision from either, and an outright refusal from all three — those are its distinct
+remedies. None of the four has an accompanying value the producer can act on:
 the entry has no identity this ADR exposes (§4's identifier is per *delivery*, not per
 entry), and the byte figures a refusal turns on are the hub's settings rather than
 news. So the return is the enum, in the shape `forget`'s bare `bool` already takes on
@@ -1007,7 +1015,7 @@ construction", which is false: a v4 UUID is collision-*resistant*, and the claus
 above asks for a guarantee rather than a probability. Adversarial review was right
 about that on the seventh round, and its directed fix — retain a durable history of
 every identifier ever minted — was the wrong instrument, being precisely the
-unbounded durable set §3 refuses for origin keys. A monotonic counter gives the
+unbounded durable set §3 refuses for retired keys. A monotonic counter gives the
 guarantee *constructively* for one integer of durable state the outbox is already
 paying a durable store to hold. No collision to retry, no history to keep.
 
@@ -1264,7 +1272,7 @@ belong in the message where §10a's reduction cannot strand them: an error with 
 `details` object is one there is no reduced form of, and the reconstruction contract
 is satisfied by having nothing to reconstruct.
 
-**The origin-key collision (§3) is deliberately not among these.** The enqueue is a
+**The key collision (§3) is deliberately not among these.** The enqueue is a
 hub-internal call from a producer, not a request that crossed the wire, so its
 outcome is reported to that caller and never rendered as a frame. Giving it an
 `AssistantError` would put a type on the promoted surface that no client can ever
