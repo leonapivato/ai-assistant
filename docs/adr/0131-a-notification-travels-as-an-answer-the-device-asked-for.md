@@ -1008,10 +1008,29 @@ direction is not reversed; it is the premise §1 is built on. A deferral dischar
 by the kind of ADR it named is a stacked addition (ADR-0084 §12's treatment of
 ADR-0083).
 
-**No record is owed on ADR-0084 §3.** Examined throughout and found to need
-nothing: a long poll is one request and one response, serial, correlated, inside
-the frame ceiling. §3's deferred multiplexing stays deferred and its correlation-id
-reserve stays unspent.
+**ADR-0084 §3's count of the decoded-frame close as the one exception is partially
+superseded**, and an earlier draft of this section wrongly said no record was owed.
+§3's second bullet gives a decoded frame a typed error "provided it is not itself a
+violation of the connection's own rules", and its third names "**the one exception
+on this side**". §2 above adds a second connection-level rule and closes on its
+violation, so a reader holding only ADR-0084 — handed a second delivery poll —
+answers with a typed error where this ADR closes. That is ADR-0070 §1's first limb.
+Architecture review found it on the tenth round, after the same review's ninth-round
+finding had moved §2 from a typed error to a close in the first place; the second
+finding is the cost of the first, correctly priced.
+
+**What fails is the enumeration and not the rule**, which is why the scope is
+written as narrowly as it is. §3's proviso — a decoded frame that violates the
+connection's own rules — is untouched and is the very test §2's rule meets; what was
+wrong was a belief, true when written, that seriality was the only such rule. §3's
+*reason* for its own exception does not transfer and this ADR does not pretend it
+does: an overlapping request is closed because a correlated error would carry an id
+the client must reject, and a second poll arrives on its own connection with its own
+id. It is closed for §2's reason instead. Everything else in §3 stands and this ADR
+rests on nearly all of it — the framing, the codec, the envelope, the two serial
+rules, the correlation id and its unspent reserve, the frame ceiling and the version
+freeze. ADR-0084's Status line and a dated header note carry the record; not one
+word of its Decision text is edited.
 
 **No record is owed on ADR-0124 §1, and that is the substantive finding rather
 than a formality.** §1's accountability bullet — "There is no path by which either
