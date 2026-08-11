@@ -374,9 +374,10 @@ deliberately given up, and gives the reason there.
 > **Normative.** An entry's byte cost is everything the outbox persists for it —
 > the notification, the `delivery_id`, and the origin key where one was supplied.
 
-> **Normative.** When an enqueue would exceed either bound, the hub drops the
-> **oldest entry that is not leased**; when every entry is leased, it drops the
-> oldest entry and breaks its lease. Every drop is recorded in the hub's log naming
+> **Normative.** When an enqueue would exceed either bound, the hub drops entries
+> **until both bounds hold with the new entry counted** — each drop taking the
+> oldest entry that is not leased, or, when every remaining entry is leased, the
+> oldest entry, breaking its lease. Every drop is recorded in the hub's log naming
 > the entry, and the enqueue then proceeds.
 
 > **Normative.** An entry whose own byte cost exceeds `hub_notification_outbox_bytes`
@@ -397,6 +398,16 @@ no subject when every entry is leased, and an implementation reaching that state
 two illegal moves available — retain the new entry over the bound, or drop a leased
 one against the rule — with nothing to choose between them. So the leased case is
 named: leases are preferred *last*, and the tie-break is the same age order.
+
+**It drops until the bounds hold, not once, and the difference is not pedantry.**
+One drop is enough for the count bound, where every entry costs exactly one — but
+not for the byte bound, where entries differ in size by orders of magnitude. An
+outbox one byte below a 1 MiB bound whose oldest entry costs a byte, taking a
+512 KiB entry, is half a megabyte over after the single drop the earlier draft
+authorised, and the clause then said "the enqueue proceeds". Adversarial review
+exhibited exactly that arithmetic on the seventh round. The loop terminates because
+each pass removes an entry and the incoming entry is separately guaranteed to fit
+by the refusal clause below — so in the worst case the outbox empties and holds one.
 
 **The refusal clause is what keeps the eviction rule from emptying the outbox for a
 single entry that could never fit**, and §4's delivery reserve is what makes it
@@ -473,11 +484,14 @@ the tree rather than assumed.
 
 > **Normative.** `delivery_id` is minted by the seam when the entry is enqueued, is
 > stable across redeliveries of that entry, and is the value `acknowledging` names.
-> It is a UUID string, at most 36 bytes — the shape and the bound ADR-0085 §8a puts
-> on a correlation id.
+> It is minted from a **strictly increasing counter held durably with the outbox**,
+> rendered as a decimal string, and is at most 36 bytes — the bound ADR-0085 §8a
+> puts on a correlation id.
 
 > **Normative.** A `delivery_id` is unique over the outbox's whole life and is never
-> reused, including after the entry it named has been retired or dropped.
+> reused, including after the entry it named has been retired or dropped. The
+> counter advances when an entry is enqueued and never goes backwards, a restart
+> included.
 
 **Uniqueness has to be a clause because `Identifier` does not supply it**, and the
 gap is reachable rather than theoretical: the alias rejects only blank text, so a
@@ -487,10 +501,24 @@ case the stability clause above exists for — acknowledges an entry it never
 received, and that entry is retired without being delivered. Adversarial review
 found it on the sixth round.
 
-**Naming the shape is what makes the rule cost nothing to satisfy.** A UUID is
-unique by construction, so the clause needs no durable set of spent identifiers and
-no collision-retry rule; it is the same instrument ADR-0085 §8a chose for the
-correlation id, for the same reason, and it is already why 36 bytes is the number.
+**A counter rather than a UUID, and the seventh round is why.** An earlier draft
+said "a UUID is unique by construction", which is false: a v4 UUID is
+collision-*resistant*, and the clause above asks for a guarantee rather than a
+probability. Adversarial review was right about that and its directed fix — retain a
+durable history of every identifier ever minted — was the wrong instrument, being
+precisely the unbounded durable set §3 refuses for origin keys, for a growth rate
+this ADR would then have to bound too. A monotonic counter gives the guarantee
+*constructively* for one integer of durable state, which the outbox is already
+paying for a durable store to hold. There is no collision to retry and no history to
+keep.
+
+**Where the guarantee stops, named rather than left to be discovered.** It is a
+property of one data directory's life. Restoring an older copy of the directory
+rolls the counter and the entries back together, so a device still holding an
+identifier minted after that copy was taken could name an entry that no longer means
+what it meant. The harm is bounded to one entry and the acknowledgement is
+idempotent, and the general question — what a restore does to state a peer is
+holding — is ADR-0123's and is not reopened here.
 
 > **Normative.** `DisposedNotification`'s canonical encoding is bounded by ADR-0085
 > §8's contract limit **less a 128-byte delivery reserve**. ADR-0130 states that
