@@ -392,6 +392,59 @@ class TestTheConnectionGoingAwayEndsThePoll:
             assert slots.releases == [None]
 
 
+class TestCancellingTheServingTaskEndsThePollToo:
+    """§2a over the cause the EOF cases do not reach: the *hub* ending the connection.
+
+    ``serve_connection`` is a task, and shutdown cancels it. That unwinds the poll's
+    ``asyncio.wait`` from the outside, where the peer-hangup path unwinds it from the
+    inside — and ``asyncio.wait`` cancels nothing it waits on, so the dispatch task
+    can outlive the connection that owns it. §2a is stated over *any* close: "When a
+    delivery connection **closes** — by the close above or by any other cause — its
+    device slot and its global delivery-capacity claim are **both released**", and a
+    close "cancels the poll and takes no entry".
+    """
+
+    async def test_a_cancelled_serving_task_cancels_the_outstanding_poll(
+        self, tmp_path: Path
+    ) -> None:
+        """The orphan this guards can still claim and lease for a closed connection.
+
+        The slot is released and the socket closed on the way out, so a reconnect may
+        take the freed slot — and then find the notification unavailable until a lease
+        it never asked for expires.
+        """
+        engine = _PollingEngine()
+        slots = _Slots()
+        async with _serving(engine, slots, tmp_path) as (peer, served):
+            await _handshake(peer)
+            await peer.send(_poll())
+            await asyncio.wait_for(engine.poll_entered.wait(), 2)
+
+            served.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(served, 5)
+
+            assert engine.cancelled
+
+    async def test_the_slot_is_released_when_the_serving_task_is_cancelled(
+        self, tmp_path: Path
+    ) -> None:
+        """§2a's release is over any cause, and a cancelled server is one."""
+        engine = _PollingEngine()
+        slots = _Slots()
+        async with _serving(engine, slots, tmp_path) as (peer, served):
+            await _handshake(peer)
+            await peer.send(_poll())
+            await asyncio.wait_for(engine.poll_entered.wait(), 2)
+
+            served.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(served, 5)
+
+            assert slots.releases == [None]
+            assert slots.held == []
+
+
 class TestALoopbackConnectionIsOneLocalDevice:
     """ADR-0131 §4: "all loopback connections count as a single local device"."""
 
