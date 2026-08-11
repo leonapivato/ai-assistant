@@ -360,12 +360,6 @@ class SqliteNotificationOutbox:
         #: and never load-bearing: a poll that misses it falls back on its own
         #: deadline, so correctness never rests on a notification nobody received.
         self._arrivals = asyncio.Event()
-        #: Whether this process has already voided the leases it inherited.
-        #: ADR-0131 §3 authorises voiding for a *restart* — "no lease survives the
-        #: process that granted it" — and this instance's life is this process's
-        #: hold on the outbox, so the first reconciliation is the restart and
-        #: every later one is not.
-        self._leases_voided = False
         self._conn = self._setup()
 
     # --- opening -------------------------------------------------------------
@@ -1148,6 +1142,39 @@ class SqliteNotificationOutbox:
 
     # --- startup reconciliation (ADR-0131 §3b) -------------------------------
 
+    async def recover_leases(self) -> None:
+        """Void every lease this hub inherited from the process before it (§3).
+
+        ADR-0131 §3: "A hub restart voids every lease. An entry leased when the hub
+        stopped is available again when it starts, and no lease survives the
+        process that granted it." §3 argues it is "the only answer that is both
+        correct and free" because "an entry still leased at startup is one whose
+        holder is definitionally gone".
+
+        **A step of its own, because the argument above is about a restart and
+        nothing here can detect one.** An earlier shape hung the voiding off the
+        first :meth:`reconcile` of each outbox *object*, which reads as
+        once-per-process and is not: a second object over the same database in the
+        same live process begins un-voided, and its first reconciliation strips the
+        lease from a device the first object is currently delivering to — one entry
+        outstanding to two devices, which §3 forbids outright. ADR-0131 §3
+        deliberately does not say who detects a restart, so this method makes no
+        claim to: **it voids unconditionally, every time it is called**, and the
+        caller owns the once-ness. The caller is
+        :meth:`~ai_assistant.orchestration.engine.Engine.start`, which is what the
+        hub starts, and the chain that makes it once per restart runs instance lock
+        → one hub process → one composition root → one engine → one recovery.
+
+        Leaving :meth:`reconcile` purely repeatable is the other half of the same
+        move, and is what ``Engine.start``'s documented "safe to call more than
+        once" actually needs.
+
+        Raises:
+            NotificationOutboxError: If the outbox cannot be written.
+        """
+        async with self._lock:
+            await _run_to_completion(self._void_leases_sync)
+
     async def reconcile(self) -> None:
         """Make the two stores agree, in **both** directions, before any poll runs.
 
@@ -1170,33 +1197,18 @@ class SqliteNotificationOutbox:
         ``candidate_key``, and it requires no state of its own — both directions are
         read off the two stores as they stand.
 
-        **A restart voids every lease, and only a restart does.** §3 calls it "the
-        only answer that is both correct and free": a lease is meaningful only while
-        the connection that took the delivery exists, and no connection survives a
-        restart, so an entry still leased at startup is one whose holder is
-        definitionally gone. That argument is about the *previous* process, so the
-        voiding happens once per instance — a second call on a live hub would strip
-        a lease from the device currently holding it and let another claim the same
-        entry, which is exactly the "one entry, two devices" §3 forbids. Everything
-        else here is repeatable, which is what :meth:`Engine.start`'s promise that
-        it is safe to call more than once actually requires.
+        **It touches no lease**, and that separation is deliberate. Voiding the
+        leases a restart inherited is §3's own clause but it is not a repair the two
+        stores disagreeing calls for, and hanging it off this method made it happen
+        once per outbox *object* — which is not once per restart. It has its own
+        step, :meth:`recover_leases`, invoked by ``Engine.start``; everything here
+        is repeatable, which is what that method's promise that it is safe to call
+        more than once actually requires.
 
         Raises:
             NotificationOutboxError: If either store cannot be read or written.
         """
         async with self._lock:
-            # **Once per process, and a second `start()` is not a restart.**
-            # ADR-0131 §3 authorises voiding because "an entry still leased at
-            # startup is one whose holder is definitionally gone" — true of a lease
-            # the *previous* process granted, and false of one this process granted
-            # a moment ago. `Engine.start` promises it is safe to call more than
-            # once, so an unconditional void would take a live lease from the device
-            # holding it and let a second device claim the same entry: one entry
-            # outstanding to two devices, which §3 forbids outright. The rest of the
-            # reconciliation stays repeatable, which is what that promise needs.
-            if not self._leases_voided:
-                await _run_to_completion(self._void_leases_sync)
-                self._leases_voided = True
             await self._settle_departing()
             records = await self._held_records()
             now = self._now()

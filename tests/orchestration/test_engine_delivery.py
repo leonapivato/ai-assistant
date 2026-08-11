@@ -47,6 +47,18 @@ if TYPE_CHECKING:
 NOW = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
 
 
+def _records() -> FakeNotificationStore:
+    """A record store on the fixed clock every case here asserts against.
+
+    **Not the wall clock, and that is a correctness property rather than a style.**
+    ADR-0130 §5 admits a candidate only while it is still perishable, so a store left
+    on the real clock rules a ``NOW + 2 hours`` expiry to ``DROP``/``EXPIRED`` from
+    two hours after ``NOW`` onwards — a suite that passes when it is written and
+    fails later against a wall clock nobody touched.
+    """
+    return FakeNotificationStore(now=lambda: NOW)
+
+
 def _candidate(key: str = "k1") -> NotificationCandidate:
     """One candidate, with everything a case is not about held constant."""
     return NotificationCandidate(
@@ -94,6 +106,7 @@ class RecordingOutbox:
         """Start with nothing to give and nothing recorded."""
         self.calls: list[str] = []
         self.reconciled = 0
+        self.recovered = 0
         self.withdrew = True
         self.withdrawal_fails = False
 
@@ -110,6 +123,11 @@ class RecordingOutbox:
     async def acknowledge(self, delivery_id: str) -> None:
         """Record that an acknowledgement reached the outbox."""
         self.calls.append(f"acknowledge:{delivery_id}")
+
+    async def recover_leases(self) -> None:
+        """Record that the inherited leases were voided (ADR-0131 §3)."""
+        self.calls.append("recover_leases")
+        self.recovered += 1
 
     async def reconcile(self) -> None:
         """Record that the startup repair ran."""
@@ -300,6 +318,38 @@ class TestTheStartupReconciliation:
 
         await engine.start()  # must not raise
 
+    async def test_start_recovers_the_inherited_leases_before_it_reconciles(self) -> None:
+        """§3's voiding is the engine's step, and it precedes the repair.
+
+        Before the reconciliation because an entry whose inherited lease is still
+        standing is not available, so a repair running first would read the outbox in
+        a state the recovery is about to change.
+        """
+        outbox = RecordingOutbox()
+        engine = _wired(Harness(), outbox)
+
+        await engine.start()
+
+        assert outbox.calls == ["recover_leases", "reconcile"]
+
+    async def test_a_second_start_recovers_no_lease_a_second_time(self) -> None:
+        """§3 authorises voiding for a *restart*, and a second ``start`` is not one.
+
+        "An entry still leased at startup is one whose holder is definitionally gone"
+        is true of a lease the previous process granted and false of one this process
+        granted a moment ago. ``start`` promises it is safe to call more than once, so
+        an unguarded recovery would take a live lease and put one entry in two
+        devices' hands. The repair itself stays repeatable.
+        """
+        outbox = RecordingOutbox()
+        engine = _wired(Harness(), outbox)
+
+        await engine.start()
+        await engine.start()
+
+        assert outbox.recovered == 1
+        assert outbox.reconciled == 2
+
 
 class TestAnUnwiredOutboxRefusesLegibly:
     """A deployment that composed none delivers nothing, and says so."""
@@ -409,7 +459,7 @@ class TestForgettingWithdrawsBeforeItDeletes:
         """
         outbox = RecordingOutbox()
         harness = Harness()
-        store = FakeNotificationStore()
+        store = _records()
         engine = _wired(
             harness, outbox, notifications=store, notification_policy=FakeNotificationPolicy()
         )
@@ -424,7 +474,7 @@ class TestForgettingWithdrawsBeforeItDeletes:
         This is the case the ordering exists for: an entry already enqueued for an
         `INTERRUPT` record, deleted by the user, and then not delivered.
         """
-        store = FakeNotificationStore()
+        store = _records()
         await store.set_preferences(
             NotificationPreferences(
                 reaches=(
@@ -457,7 +507,7 @@ class TestForgettingWithdrawsBeforeItDeletes:
         rules that route "arrives as §3a's withdrawal — **the disposing act calls
         the seam** rather than the seam polling for it".
         """
-        store = FakeNotificationStore()
+        store = _records()
         await store.set_preferences(
             NotificationPreferences(
                 reaches=(
@@ -480,7 +530,7 @@ class TestForgettingWithdrawsBeforeItDeletes:
 
     async def test_dismissing_without_an_outbox_still_dismisses(self) -> None:
         """The CLI's engine serves no poll, so it has no entry to withdraw."""
-        store = FakeNotificationStore()
+        store = _records()
         engine = _wired(
             Harness(), None, notifications=store, notification_policy=FakeNotificationPolicy()
         )
@@ -489,7 +539,7 @@ class TestForgettingWithdrawsBeforeItDeletes:
 
     async def test_forgetting_without_an_outbox_still_deletes(self) -> None:
         """The CLI's engine serves no poll, so it has no entry to withdraw."""
-        store = FakeNotificationStore()
+        store = _records()
         engine = _wired(
             Harness(), None, notifications=store, notification_policy=FakeNotificationPolicy()
         )
@@ -509,7 +559,7 @@ class TestReconsiderationHandsOffAtOnce:
         being, "a repair that is also the primary path being a design where the
         ordinary case waits on a restart".
         """
-        store = FakeNotificationStore()
+        store = _records()
         subject = _candidate().model_copy(update={"expires_at": NOW + timedelta(hours=2)})
         ruled = await store.admit(subject, policy=FakeNotificationPolicy())
         assert ruled.kind is not None
@@ -538,7 +588,7 @@ class TestReconsiderationHandsOffAtOnce:
         would put a notification in the outbox that ADR-0130 §5 never ruled
         deliverable.
         """
-        store = FakeNotificationStore()
+        store = _records()
         subject = _candidate().model_copy(update={"expires_at": NOW + timedelta(hours=2)})
         await store.admit(subject, policy=FakeNotificationPolicy())
         outbox = RecordingOutbox()
@@ -563,7 +613,7 @@ class TestADisposalWithdrawsBeforeItCommits:
         and the next poll delivered a notification the owner had dismissed.
         """
         outbox = RecordingOutbox()
-        store = FakeNotificationStore()
+        store = _records()
         engine = _wired(
             Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
         )
@@ -581,7 +631,7 @@ class TestADisposalWithdrawsBeforeItCommits:
         """
         outbox = RecordingOutbox()
         outbox.withdrawal_fails = True
-        store = FakeNotificationStore()
+        store = _records()
         engine = _wired(
             Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
         )
@@ -593,7 +643,7 @@ class TestADisposalWithdrawsBeforeItCommits:
         """The ordinary case: never offered, so there is nothing to withdraw."""
         outbox = RecordingOutbox()
         outbox.withdrew = False
-        store = FakeNotificationStore()
+        store = _records()
         engine = _wired(
             Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
         )
@@ -607,7 +657,7 @@ class TestADisposalWithdrawsBeforeItCommits:
         withdrawn." """
         outbox = RecordingOutbox()
         outbox.withdrawal_fails = True
-        store = FakeNotificationStore()
+        store = _records()
         engine = _wired(
             Harness(), outbox, notifications=store, notification_policy=FakeNotificationPolicy()
         )
@@ -623,7 +673,14 @@ class TestTheFakeEngineDisposesLikeTheRealOne:
         """A fake that updated only the record store would certify consumers
         against a contract the shipped engine does not have."""
         engine = FakeAssistantEngine()
-        subject = _candidate().model_copy(update={"expires_at": NOW + timedelta(hours=2)})
+        # **Real-clock-relative, because this engine's notification surface takes no
+        # injected clock** (#970). A fixed ``NOW + 2 hours`` is a fuse: ADR-0130 §5
+        # admits a candidate only while it is perishable, so the case passes when it
+        # is written and rules ``DROP``/``EXPIRED`` two hours later, on a wall clock
+        # nobody touched. Every other case here injects ``NOW`` instead.
+        subject = _candidate().model_copy(
+            update={"expires_at": datetime.now(UTC) + timedelta(hours=2)}
+        )
         ruled = await engine.notification_store.admit(subject, policy=FakeNotificationPolicy())
         assert ruled.notification_id is not None
         await engine.notification_outbox.offer(subject)
@@ -635,7 +692,14 @@ class TestTheFakeEngineDisposesLikeTheRealOne:
     async def test_the_fake_does_not_deliver_a_forgotten_notification(self) -> None:
         """The same for the delete right (ADR-0004 §6, ADR-0131 §3a)."""
         engine = FakeAssistantEngine()
-        subject = _candidate().model_copy(update={"expires_at": NOW + timedelta(hours=2)})
+        # **Real-clock-relative, because this engine's notification surface takes no
+        # injected clock** (#970). A fixed ``NOW + 2 hours`` is a fuse: ADR-0130 §5
+        # admits a candidate only while it is perishable, so the case passes when it
+        # is written and rules ``DROP``/``EXPIRED`` two hours later, on a wall clock
+        # nobody touched. Every other case here injects ``NOW`` instead.
+        subject = _candidate().model_copy(
+            update={"expires_at": datetime.now(UTC) + timedelta(hours=2)}
+        )
         ruled = await engine.notification_store.admit(subject, policy=FakeNotificationPolicy())
         assert ruled.notification_id is not None
         await engine.notification_outbox.offer(subject)

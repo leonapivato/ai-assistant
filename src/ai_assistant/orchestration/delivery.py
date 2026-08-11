@@ -129,11 +129,31 @@ class DeliveryOutbox(Protocol):
         """
         ...
 
+    async def recover_leases(self) -> None:
+        """Void every lease inherited from the process before this one (§3).
+
+        ADR-0131 §3: "A hub restart voids every lease… no lease survives the
+        process that granted it." **This is unconditional and the caller owns the
+        once-ness**, because §3 says a restart voids and deliberately does not say
+        who detects a restart — an implementation that guarded itself would be
+        guarding per *object*, and a second outbox object over one database in one
+        live process would still strip a lease from the device holding it.
+
+        :meth:`Engine.start` is the caller, once per engine: the engine is what the
+        hub starts, so the chain reads instance lock → one hub process → one
+        composition root → one engine → one recovery. Calling it a second time on a
+        live hub would take a live lease and put one entry in two devices' hands,
+        which §3 forbids outright.
+        """
+        ...
+
     async def reconcile(self) -> None:
         """Make the outbox and the ADR-0130 records agree, in both directions.
 
         Runs to completion **before any poll is served** (ADR-0131 §3b), and is a
-        repair rather than the trigger a notification relies on.
+        repair rather than the trigger a notification relies on. It is *repeatable*
+        — it touches no lease, which is why :meth:`recover_leases` is a separate
+        step rather than this method's first act.
         """
         ...
 

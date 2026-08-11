@@ -20,6 +20,7 @@ from outbox_contract import NOW, NotificationOutboxContract
 from ai_assistant.core.errors import NotificationOutboxError, NotificationStoreError
 from ai_assistant.core.types import (
     ClassReach,
+    HeldNotification,
     NotificationCandidate,
     NotificationEnqueue,
     NotificationPreferences,
@@ -37,6 +38,19 @@ if TYPE_CHECKING:
 #: A ceiling wide enough that no case here meets it by accident. The cases that
 #: are *about* the ceiling set their own.
 _ROOMY = 1024 * 1024
+
+
+def _records() -> FakeNotificationStore:
+    """A record store on the fixed clock every case here asserts against.
+
+    **Not the wall clock, and that is a correctness property rather than a style.**
+    ADR-0130 §5 admits a candidate only while it is still perishable, so a store left
+    on the real clock rules a ``NOW + 2 hours`` expiry to ``DROP``/``EXPIRED`` from
+    two hours after ``NOW`` onwards — a suite that passes when it is written and
+    fails later against a wall clock nobody touched. Injecting the instant the cases
+    are written against removes the fuse rather than resetting it.
+    """
+    return FakeNotificationStore(now=lambda: NOW)
 
 
 class MovingClock:
@@ -69,7 +83,7 @@ def build(  # noqa: PLR0913 — one keyword per figure a case may vary, each def
     """One outbox, with everything a case is not about held constant."""
     return SqliteNotificationOutbox(
         path=path,
-        records=records if records is not None else FakeNotificationStore(),
+        records=records if records is not None else _records(),
         lease=lease,
         max_entries=max_entries,
         max_bytes=max_bytes,
@@ -160,7 +174,7 @@ class TestTheDurableTransitions:
         outbox.close()
 
         reopened = build(path)
-        await reopened.reconcile()
+        await reopened.recover_leases()
         second = await reopened.claim()
 
         assert second is not None
@@ -199,7 +213,7 @@ class TestTheDurableTransitions:
         outbox.close()
 
         reopened = build(path)
-        await reopened.reconcile()
+        await reopened.recover_leases()
 
         assert await reopened.claim() is not None
 
@@ -356,7 +370,7 @@ class TestTheTwoStoreOrdering:
         no entry — indistinguishable from one that never reached the outbox — so
         the next startup would tell the owner again.
         """
-        records = FakeNotificationStore()
+        records = _records()
         record_id, subject = await interrupting(records)
         outbox = build(tmp_path / "outbox.db", records=records)
         await outbox.offer(subject)
@@ -379,7 +393,7 @@ class TestTheTwoStoreOrdering:
         them and the budget is spent, the record exists, no entry exists, and
         nothing brings the two back into agreement.
         """
-        records = FakeNotificationStore()
+        records = _records()
         await interrupting(records)
         outbox = build(tmp_path / "outbox.db", records=records)
 
@@ -392,7 +406,7 @@ class TestTheTwoStoreOrdering:
     async def test_reconciliation_is_idempotent(self, tmp_path: Path) -> None:
         """§3b: "idempotent by §3's key rule, since every path keys on the
         candidate's own ``candidate_key``"."""
-        records = FakeNotificationStore()
+        records = _records()
         await interrupting(records)
         outbox = build(tmp_path / "outbox.db", records=records)
 
@@ -424,7 +438,7 @@ class TestTheTwoStoreOrdering:
         been written and nothing in §3 made that entry departing, so it would be
         delivered after the user deleted the thing it was about.
         """
-        records = FakeNotificationStore()
+        records = _records()
         record_id, subject = await interrupting(records)
         outbox = build(tmp_path / "outbox.db", records=records)
         await outbox.offer(subject)
@@ -472,7 +486,7 @@ def test_the_default_clock_reads_utc(tmp_path: Path) -> None:
     """The shipped clock is tz-aware, so a hub is never accidentally naive."""
     outbox = SqliteNotificationOutbox(
         path=tmp_path / "outbox.db",
-        records=FakeNotificationStore(),
+        records=_records(),
         lease=timedelta(seconds=120),
         max_entries=256,
         max_bytes=_ROOMY,
@@ -516,7 +530,7 @@ class TestATerminalRefusalIsTerminalForTheRecord:
         undeliverable candidate again, until it expired, while a polling device
         received nothing."
         """
-        records = FakeNotificationStore()
+        records = _records()
         record_id, subject = await interrupting(records)
         outbox = build(tmp_path / "outbox.db", records=records, candidate_ceiling=10)
 
@@ -535,7 +549,7 @@ class TestATerminalRefusalIsTerminalForTheRecord:
         actionable" is what reconciliation turns on and asserting the flag alone
         would not show that the loop is actually broken.
         """
-        records = FakeNotificationStore()
+        records = _records()
         _, subject = await interrupting(records)
         outbox = build(tmp_path / "outbox.db", records=records, candidate_ceiling=10)
         await outbox.offer(subject)
@@ -548,7 +562,7 @@ class TestATerminalRefusalIsTerminalForTheRecord:
         self, tmp_path: Path
     ) -> None:
         """The second ceiling takes the same answer, being the same outcome."""
-        records = FakeNotificationStore()
+        records = _records()
         record_id, subject = await interrupting(records)
         outbox = build(tmp_path / "outbox.db", records=records, max_bytes=200)
 
@@ -566,7 +580,7 @@ class TestATerminalRefusalIsTerminalForTheRecord:
         that would make the held entry departing. §3b's invariant is not the one at
         risk there, because that record still *has* an entry.
         """
-        records = FakeNotificationStore()
+        records = _records()
         record_id, subject = await interrupting(records)
         outbox = build(tmp_path / "outbox.db", records=records)
         await outbox.offer(subject)
@@ -684,7 +698,7 @@ class TestWithdrawalReportsItsDismissal:
         self, tmp_path: Path
     ) -> None:
         """``True`` means "an actionable record was dismissed by this withdrawal"."""
-        records = FakeNotificationStore()
+        records = _records()
         record_id, subject = await interrupting(records)
         outbox = build(tmp_path / "outbox.db", records=records)
         await outbox.offer(subject)
@@ -693,7 +707,7 @@ class TestWithdrawalReportsItsDismissal:
 
     async def test_a_second_withdrawal_reports_nothing(self, tmp_path: Path) -> None:
         """The discriminating half: nothing left to end is ``False``."""
-        records = FakeNotificationStore()
+        records = _records()
         record_id, subject = await interrupting(records)
         outbox = build(tmp_path / "outbox.db", records=records)
         await outbox.offer(subject)
@@ -757,8 +771,8 @@ class _RefusingStore(FakeNotificationStore):
     """
 
     def __init__(self) -> None:
-        """Start refusing nothing."""
-        super().__init__()
+        """Start refusing nothing, on the fixed clock the cases assert against."""
+        super().__init__(now=lambda: NOW)
         self.refuse = False
 
     async def dismiss(self, notification_id: str) -> bool:
@@ -816,10 +830,79 @@ class TestCleanupNeverTakesAReplacement:
         assert delivery is not None
 
 
-class TestVoidingLeasesIsARestartAndNotARepeat:
-    """ADR-0131 §3: "no lease survives the process that granted it" — that one."""
+class _DisposingStore(FakeNotificationStore):
+    """The canonical store, with a ``held`` that disposes of a record on its way out.
 
-    async def test_a_second_reconciliation_leaves_a_live_lease_alone(self, tmp_path: Path) -> None:
+    A subclass for :class:`_RefusingStore`'s reason — it *is* the contract-correct
+    fake in every respect but the one method under test. What it buys is a snapshot
+    that is stale **by construction**: the page it hands back still names the record,
+    and the record is no longer actionable by the time the caller acts on it. That is
+    the reconciliation race spelled as a fixture rather than raced for.
+    """
+
+    def __init__(self) -> None:
+        """Start disposing of nothing, on the fixed clock the cases assert against."""
+        super().__init__(now=lambda: NOW)
+        #: The record to dismiss on the next read, disarmed by that read.
+        self.dismiss_on_read: str | None = None
+
+    async def held(self, *, limit: int = 50, offset: int = 0) -> list[HeldNotification]:
+        """Answer the page, then dismiss the armed record behind the caller's back."""
+        page = await super().held(limit=limit, offset=offset)
+        if self.dismiss_on_read is not None:
+            disposing, self.dismiss_on_read = self.dismiss_on_read, None
+            await super().dismiss(disposing)
+        return page
+
+
+class TestAReconciliationNeverResurrectsADisposedRecord:
+    """ADR-0131 §3a's ordering, kept across the snapshot the repair works from.
+
+    §3b's reconciliation reads the records, releases the lock and offers what is
+    missing. The owner can dismiss or delete one of those records in that gap: the
+    withdrawal its disposal performs finds no entry to take, and an unconditional
+    re-offer then inserts one *afterwards* — delivering a notification the owner had
+    already removed, which is precisely what §3a's "withdraws the record's outbox
+    entry **first**" exists to make impossible.
+    """
+
+    async def test_a_record_dismissed_since_the_snapshot_is_not_re_offered(
+        self, tmp_path: Path
+    ) -> None:
+        """The repair re-resolves under the outbox's own lock, and finds nothing."""
+        records = _DisposingStore()
+        record_id, _ = await interrupting(records)
+        outbox = build(tmp_path / "outbox.db", records=records)
+        records.dismiss_on_read = record_id
+
+        await outbox.reconcile()
+
+        assert await outbox.claim() is None
+
+    async def test_a_producers_offer_still_needs_no_record_behind_it(self, tmp_path: Path) -> None:
+        """The discriminating half: only the *repair* declines a recordless offer.
+
+        §3b's live handoff arrives holding a candidate whose disposition was just
+        ruled, and its "nothing further is owed" covers a caller keeping records of
+        its own — or none. Declining there would make the outbox unusable by anything
+        but ADR-0130's store, so the rule is the repair's alone.
+        """
+        outbox = build(tmp_path / "outbox.db", records=_records())
+
+        assert await outbox.offer(candidate(key="k1")) is NotificationEnqueue.ENQUEUED
+        assert await outbox.claim() is not None
+
+
+class TestRecoveringLeasesIsItsOwnStep:
+    """ADR-0131 §3: "no lease survives the process that granted it" — that one.
+
+    The voiding is :meth:`recover_leases`, not a first act of ``reconcile``. Hanging
+    it off the repair made it happen once per outbox *object*, which is not once per
+    restart, and the case below that two live instances cannot steal each other's
+    leases is what that distinction buys.
+    """
+
+    async def test_a_reconciliation_leaves_every_lease_alone(self, tmp_path: Path) -> None:
         """`Engine.start` promises it is safe to call more than once.
 
         An unconditional void would take a lease from the device currently holding
@@ -827,7 +910,7 @@ class TestVoidingLeasesIsARestartAndNotARepeat:
         devices, which §3 forbids outright. The voiding argument is about the
         *previous* process: "an entry still leased at startup is one whose holder is
         definitionally gone" is true of an inherited lease and false of one this
-        process granted a moment ago.
+        process granted a moment ago. So the repair touches no lease at all.
         """
         outbox = build(tmp_path / "outbox.db")
         await outbox.reconcile()
@@ -851,12 +934,37 @@ class TestVoidingLeasesIsARestartAndNotARepeat:
         first.close()
 
         reopened = build(path)
-        await reopened.reconcile()
+        await reopened.recover_leases()
 
         assert await reopened.claim() is not None
 
+    async def test_a_second_live_instance_cannot_take_the_firsts_lease(
+        self, tmp_path: Path
+    ) -> None:
+        """The regression: recovery guarded per *object* is not guarded per restart.
+
+        A second :class:`SqliteNotificationOutbox` over the same database in the same
+        live process used to begin with its own un-voided flag, so its first
+        ``reconcile()`` stripped the lease from the device the first instance was
+        delivering to and let a second device claim the same entry — ADR-0131 §3's
+        "one entry outstanding to two devices", reached by a longer route than the
+        second ``start()`` the flag was added for. With the voiding moved to
+        ``recover_leases()``, a repair from any instance takes no lease.
+        """
+        path = tmp_path / "outbox.db"
+        first = build(path)
+        await first.offer(candidate(key="k1"))
+        held = await first.claim()
+        assert held is not None
+
+        second = build(path)
+        await second.reconcile()
+
+        assert await second.claim() is None
+        assert await first.claim() is None
+
     async def test_the_rest_of_the_reconciliation_stays_repeatable(self, tmp_path: Path) -> None:
-        """Only the voiding is once; departing entries are swept every time."""
+        """Nothing in the repair is once-only; departing entries are swept every time."""
         clock = MovingClock()
         outbox = build(tmp_path / "outbox.db", now=clock)
         await outbox.reconcile()
