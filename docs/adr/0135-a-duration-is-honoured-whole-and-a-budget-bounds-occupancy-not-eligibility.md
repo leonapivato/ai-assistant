@@ -2,21 +2,22 @@
 
 - Status: Proposed
 - Date: 2026-08-11
-- **No `core` surface is decided** — no Protocol in `core/protocols.py`, no type
-  or member in `core/types.py`, `PROTOCOL_VERSION` untouched — and **no
-  implementation lands with it**: no `src/`, no `tests/`. What it decides is how
-  two figures ADR-0131 §5a names and one argument ADR-0131 §4 declares behave at
-  the top of their ranges.
+- **No `core` surface changes** — no Protocol in `core/protocols.py`, no type or
+  member in `core/types.py`, `PROTOCOL_VERSION` untouched, no signature and no
+  error type moved — and **no implementation lands with it**: no `src/`, no
+  `tests/`. What it decides is how two figures ADR-0131 §5a names and one
+  argument ADR-0131 §4 declares behave at the top of their ranges.
 - **Its required review set is both lenses.** `scripts/ship.sh` fires its
   architecture requirement on `core/protocols.py` or `core/types.py` alone and
   this ADR touches neither, so the requirement here is the dispatcher's rather
-  than the script's. It is owed because what this decides is the meaning of
-  `next_notification`'s `budget` argument on the surface ADR-0085 promoted, and
-  because the architecture lens is the one that raised all three of the findings
-  §1 of the Context records. ADR-0134 took adversarial alone for a `Settings`
-  default and said why; an argument's semantics on a promoted surface is the
-  other case. `docs/adr/**` being in ADR-0027 §3's review floor bears on what a
-  base move costs, not on which lens is required.
+  than the script's. It is owed because a surface's *semantics* are part of its
+  contract even where its shape is untouched: what this decides is what
+  `next_notification`'s `budget` argument means on the `AssistantEngine` Protocol
+  ADR-0085 §1 promoted, and the architecture lens is the one that raised all
+  three of the findings the Context records. ADR-0134 took adversarial alone for
+  a `Settings` default and said why; an argument's semantics on a promoted
+  surface is the other case. `docs/adr/**` being in ADR-0027 §3's review floor
+  bears on what a base move costs, not on which lens is required.
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-11**,
   the durability form ADR-0100 established and ADR-0125, ADR-0126, ADR-0127 and
   ADR-0134 followed. This decision turns on the exact wording of ADR-0131 §2a,
@@ -112,13 +113,16 @@ below declines the general question deliberately.
 
 ### 1. An accepted duration is honoured whole
 
-> **Normative.** Where this seam accepts a duration — a `budget` argument inside
-> ADR-0131 §4's closed range, or a configured `hub_notification_lease` or
-> `hub_max_notification_budget` (ADR-0131 §5a) — the hub honours it for its whole
-> span. It does not clamp, saturate, truncate, round or otherwise shorten that
-> duration, and does not refuse it, on the ground that the hub cannot represent
-> some quantity derived from it. Representability is the implementation's problem
-> and is never part of the answer the caller or the operator gets.
+> **Normative.** Where this seam accepts a duration, the hub honours it at its
+> whole configured length. A `budget` argument inside ADR-0131 §4's closed range
+> is waited out to its full span; a configured `hub_notification_lease`
+> (ADR-0131 §5a) runs for its full span; and a configured
+> `hub_max_notification_budget` (§5a) admits every `budget` up to and including
+> it. In none of the three does the hub clamp, saturate, truncate, round or
+> otherwise shorten the value, and in none does it refuse the value, on the
+> ground that the hub cannot represent some quantity derived from it.
+> Representability is the implementation's problem and is never part of the
+> answer the caller or the operator gets.
 
 **The ground is §4's marked honour clause, and being precise about which sentence
 obligates is worth a paragraph.** ADR-0131 is a marked ADR, so under ADR-0089 §3
@@ -141,8 +145,9 @@ arguments.
 **The falsification is on the record and is why this is stated positively rather
 than as a prohibition on clamping.** With `timedelta.max` configured, saturating
 at the last representable instant does not merely shorten the budget: it shortens
-*the lease too*, by roughly eight thousand years against a span ADR-0131 §3 says
-"runs for `hub_notification_lease`". A prohibition on the word "clamp" would have
+*the lease too*, serving the roughly eight thousand years left to `datetime.max`
+against a span of some 2.7 million that ADR-0131 §3 says "runs for
+`hub_notification_lease`". A prohibition on the word "clamp" would have
 been read as satisfied by an implementation that called it something else — the
 integer-microsecond attempt is that shape, and it fails at a different boundary
 for the same reason. Stating what the hub owes, rather than one technique it may
@@ -206,6 +211,14 @@ freezes the span at the moment the lease was taken, so an operator's change to
 to those outstanding. That second effect is not what §3 describes either, and it
 is reachable on ordinary figures rather than only at the extreme.
 
+**What the first clause does not reach is an instant the hub was handed.** It
+binds an instant *derived* by adding an accepted duration to the hub's clock, and
+nothing else. A candidate's own expiry is a field ADR-0130 §2 puts on the
+candidate, and ADR-0131 §3's departing rule compares it against the hub's clock
+directly; no duration of this seam's is added to anything to obtain it, so that
+comparison is untouched here. The distinction is worth drawing because both
+comparisons look alike at a call site and only one of them can overflow.
+
 **And the second clause forecloses the tempting fourth attempt.** After crashing,
 refusing and saturating were each excluded, the shape still available to a lane
 under pressure is to bound `hub_notification_lease` above, so the arithmetic fits
@@ -266,13 +279,20 @@ unreclaimable, and refusing to answer does not reclaim it a microsecond sooner. 
 rule that spends a notification to buy nothing is not a strict reading of the
 bound; it is a misreading with a cost.
 
-**What is not licensed here is unbounded selection.** The second clause is what
-keeps §1's honour rule and this section from pulling apart: a poll gets *one*
-unconditional selection, and after that the budget governs the waiting exactly as
-§4 says. A poll does not loop selecting past its budget, and it does not extend
-its occupancy to look again. `docs/review/guide.md`'s rule applies to this
-section as much as to any finding — it is stated so the next reviewer has a text
-to argue against rather than a comment to find.
+**What is not licensed here is an unbounded poll.** The second clause is what
+keeps this section from swallowing the bound it is reading: a poll gets *one*
+unconditional selection, and thereafter the budget governs how long it may wait
+for another chance — not whether it may take what a wait has brought it. A poll
+that has waited out its budget with nothing to show ends, and does not extend its
+occupancy to look again. So the bound still does the whole job §5a's bullet
+describes; what it does not do is reach backwards into a selection the hub has
+already made.
+
+**This section is written to be argued with.** `docs/review/guide.md` makes a
+finding a hypothesis to check against the text rather than a fact to comply with,
+and that cuts both ways: the reading here is now a text a later reviewer can
+quote and attack, instead of an overrule they have to find in a comment thread
+and take on trust. That is the whole of what ratifying this square inch buys.
 
 ### 4. Classification under ADR-0070 §1 and ADR-0082 §1: a stacked addition, clause by clause
 
