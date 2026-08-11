@@ -42,8 +42,8 @@
   (ADR-0132) and stopped on one question: under ADR-0097 §2's own axis that
   producer's read is a *third* use of the calendar, and both ways of authorising
   it change ratified ground that lane's fence did not reach. The adjudication on
-  that PR ruled option A — a third member — and assigned this ADR. ADR-0132
-  resumes behind it.
+  that PR ruled option A — a third member — and assigned this ADR. ADR-0132 is
+  sequenced behind it.
 - Refs: #629 (the grant model, leg 11's, which this does not pre-empt), #943 (the
   batch), #891 (the mechanical wire-compatibility check that does not exist).
 
@@ -59,10 +59,10 @@ ADR-0130 §1 mints the proposal artifact for proactive contact:
 
 and rules that **any component may produce one**. §7 and §9 make what a producer
 concludes durable: a held record is "retained until retention removes it", stays
-enumerable after it expires, and reaches `NotificationStore`'s export — the same
-export ADR-0004 §6's right reaches. A producer therefore writes a durable,
-exportable record, in free text it wrote to be shown to a person, about whatever
-it read.
+enumerable after it expires, and reaches `NotificationStore`'s export, which
+ADR-0130 §9 puts there to carry the user's export right. A producer therefore
+writes a durable, exportable record, in free text it wrote to be shown to a
+person, about whatever it read.
 
 The first such producer reads the user's calendar (ADR-0132). Nothing in the
 corpus authorises that read.
@@ -96,8 +96,8 @@ scalars and it carries no entry text at all — and it proposes no belief, becau
 The sentence is "read my calendar and remember it, but do not raise it with me
 unprompted", which is not merely coherent but is the tuning leg 10's exit test
 promises: *"the user can tune what reaches them"*. And its consumer is decided,
-not imagined: ADR-0130 §10 reserves each producer to its own lane and ADR-0132 is
-that lane, held behind this one.
+not imagined: ADR-0130 §10 reserves each producer to its own lane, and ADR-0132
+is that lane.
 
 ### Why this is not a wider reading of `INGEST`
 
@@ -200,9 +200,10 @@ source grant is not an action authorisation" is neither relaxed nor extended.
 > nothing to conclude from.
 
 > **Normative.** `NOTIFY` implies neither `FACET` nor `INGEST`, and neither of
-> them implies `NOTIFY`. The three are independent members of one non-empty scope
-> and a grant authorises exactly the uses it names. No implementation may infer
-> one from another, order them, or treat any of them as a superset of another.
+> them implies `NOTIFY`. A grant's scope may name any non-empty subset of the
+> three, and it authorises exactly the uses it names. No implementation may infer
+> one member from another, order them, or treat any of them as a superset of
+> another.
 
 **Refusal is the property this member exists for, so it is stated first.** A user
 who declines `NOTIFY` on their calendar has bought a guarantee with a shape: the
@@ -378,10 +379,11 @@ cost, and it is worth naming because ADR-0097 §2 refused speculative surface.**
 The refusal there was of a member with no consumer *decided* — a scope enumerating
 entry kinds that "would be a schema with no reader on either side of it". This is
 the opposite case: the consumer is decided (ADR-0130's producer class), its first
-instance is written and held (ADR-0132), and golden rule 5 is what puts the
-vocabulary ahead of it. The window is also benign in both directions: while no
-producer exists, a granted `NOTIFY` authorises a read nobody performs, and a
-refused one forecloses a read nobody was going to perform. The last clause above
+instance is ADR-0132's and is sequenced behind this one, and golden rule 5 is
+what puts the vocabulary ahead of it. The window is also benign in both
+directions: while no producer exists, a granted `NOTIFY` authorises a read
+nobody performs, and a refused one forecloses a read nobody was going to
+perform. The last clause above
 is what keeps it benign — the hazard is not the idle member, it is a producer
 landing that reads without the gate.
 
