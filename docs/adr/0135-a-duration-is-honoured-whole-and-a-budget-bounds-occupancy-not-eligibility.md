@@ -1,7 +1,21 @@
 # 135. A duration is honoured whole, and a poll's budget bounds its occupancy rather than an entry's eligibility
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-11
+- **Note (2026-08-11, UTC): ratified.** `Proposed` → `Accepted` after **both**
+  required reviews came back green on the content this ADR merged with —
+  adversarial **APPROVE with no findings** and architecture **APPROVE with no
+  findings**, on one settled tree, posted together to PR #973 by `just ship`. Both
+  lenses were required for the reason the header bullet below gives, and both were
+  needed in fact: each blocked this ADR earlier, and the two blocks were on
+  different faces of the same defect. No figure from that comment is restated here
+  — it carries the round number and the ADR-0020 §2 aggregate, and a count of this
+  change's own lines stated inside this change is falsified by stating it
+  (adversarial review caught exactly that in an earlier draft of ADR-0134's note).
+  The outcome is taken from the posted comment rather than from a report. This edit
+  takes `CONTRIBUTING.md` → "Trivial ADR edits"' exemption for the ratification
+  flip and ADR-0015 §5's trivial-ADR exemption; it records the reviews' outcome
+  rather than replacing them.
 - **No `core` surface changes** — no Protocol in `core/protocols.py`, no type or
   member in `core/types.py`, `PROTOCOL_VERSION` untouched, no signature and no
   error type moved — and **no implementation lands with it**: no `src/`, no
