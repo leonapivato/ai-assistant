@@ -1,7 +1,44 @@
 # 97. A grant is a recorded user act on a source; revoking it stops the reading and does not unwrite the beliefs
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0133 (§2's enumeration of the uses a grant may name)
 - Date: 2026-08-03
+- Partially superseded: 2026-08-11 by ADR-0133 — **one enumeration, and the clause
+  that carries it otherwise stands whole.** ADR-0130 created a third consumer of a
+  reading — a producer that reads a source to conclude a `NotificationCandidate`,
+  a durable, exportable record that reaches the user unbidden — and ADR-0133 rules
+  that this is a third use on §2's own axis rather than a wider reading of
+  `INGEST`. `GrantScope` gains `NOTIFY`.
+
+  **Replaced — the enumeration inside §2's first marked clause.** "whose members
+  are `FACET` — reading the source to contribute a `ContextFacet` at assembly time
+  — and `INGEST` — reading the source to propose beliefs into memory". A reader
+  acting on that sentence builds a two-member enum, refuses an unknown third value
+  at its boundary, and concludes that a producer's read is authorised by one of the
+  two or by nothing at all. ADR-0133 §1 states the third member and its meaning,
+  and that is the exhaustive extent of what moves.
+
+  **Not replaced — the rest of §2, which is nearly all of it, and which ADR-0133
+  is built on rather than around.** "A use a grant does not name is not authorised
+  by it" stands, and it is what makes ADR-0133 §3's rule — that no grant recorded
+  before the member existed acquires it — follow rather than need inventing. The
+  non-empty-scope refusal stands, with three members to draw from instead of two.
+  The whole-revocation clause stands, and is the two-act form by which a live grant
+  acquires the new use. §2's *axis* — one scope per consumer of a reading, taken
+  from ADR-0093 §3 — is extended along its own line rather than replaced: a third
+  consumer, a third scope. §2's unmarked supporting text ("exactly two of them",
+  "the only scope distinction the ratified surfaces can honour today") and §10's
+  unmarked restatement of the enum as having "exactly two members" obligate nothing
+  under ADR-0089 §3; they read as evidence of the marked clause's meaning and move
+  with it rather than being separately superseded.
+
+  **Nothing else of this ADR is touched, and ADR-0133 §8 says so clause by
+  clause.** §5 and §5a are written over "a reader … for a use" and "every site that
+  drives a reader", so the third use lands inside them unchanged; ADR-0133 §5 names
+  the caller for a use §5 could not have named, which is a stacked addition under
+  ADR-0082 §1 and is recorded there and nowhere else. §7's rule that a source grant
+  is never an action authorisation is unnarrowed and is restated by ADR-0133 §1.
+  §12's deferrals — content-level scope, a lapsing grant, a grant for something
+  that is not a `Reader` — are unchanged and unfired.
 - **Note (2026-08-03): ratified, and §11's present-tense premise about ADR-0096's
   status was corrected in place at that moment.** `Proposed` → `Accepted`, in the
   separate lane #633 requires, after **both** required reviews came back green on
