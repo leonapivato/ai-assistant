@@ -148,11 +148,12 @@ three.** Take them in order.
   direction §2 was written for.
 - **ADR-0084 §3** is satisfied without extension. A poll is one request frame and
   one result frame, correlated, one at a time. The serial rule is not bent, the
-  correlation id keeps the single job §3 gave it, and `_serve_requests` needs no
-  new branch: a dispatch that takes ninety seconds is a dispatch that takes ninety
-  seconds, and §3's read deadline already exempts it — "the idle deadline applies
-  where the hub genuinely is idle — waiting for the *first* frame of the next
-  request."
+  correlation id keeps the single job §3 gave it, and §3's read deadline already
+  exempts a slow dispatch — "the idle deadline applies where the hub genuinely is
+  idle — waiting for the *first* frame of the next request." What §2a below does
+  require of the server is a way to notice the *connection* going away while a poll
+  is outstanding, which the existing path does not have; an earlier draft claimed
+  `_serve_requests` needed no new branch at all, and that claim was wrong.
 - **ADR-0124 §1** stays true word for word. The hub sends "the response to the
   request the device just made". There is still no path by which it transmits
   something nobody asked for.
@@ -228,6 +229,43 @@ breaks the substitutability ADR-0084 §5 promoted the façade to a Protocol for 
 in-process engine has no connections and could never raise it, so the same declared
 contract would mean two different things depending on which side of the wire the
 caller stood.
+
+### 2a. A poll whose connection has gone releases everything it held
+
+> **Normative.** While a `next_notification` request is outstanding, the hub
+> detects its connection closing. On detecting it the poll ends without an answer,
+> the device's delivery slot is released, and no entry is taken from the outbox for
+> that poll. A poll whose connection has closed never leases an entry.
+
+**The existing server path does not provide this, and saying so is the point of the
+clause.** `_serve_requests` (`wire/server.py`) reads the next frame concurrently
+with the dispatch — which is how it catches an overlapping request — but it settles
+that watcher only *after* `_dispatch` returns. For every request the hub has ever
+served that ordering is correct and invisible, because the dispatch is short. A
+long poll is the first request for which it is not: the watcher observes the peer's
+clean close within milliseconds and nothing acts on it until the poll's budget has
+run out. Adversarial review found it on the eleventh round, and it is the one place
+this seam genuinely reaches into the server's request loop.
+
+**Two things go wrong without the clause, and the second is the worse one.** The
+device's delivery slot stays held by a poll nobody is listening to, so the
+reconnect §2 calls free is closed as a second poll — the claim and the rule
+contradicting each other on the most ordinary failure a mobile device has. And an
+entry disposed during that window is leased to a dead connection, so the owner
+waits out a lease for a notification that was written to nothing. §3's lease
+already bounds that harm; this clause is what keeps it from being incurred on every
+dropped connection rather than only on a crashed client.
+
+> **Normative.** A poll arriving from a device whose previous poll has ended but
+> whose slot has not yet been released is closed under §2, and the device may
+> reconnect. No lane may resolve that race by evicting a live poll.
+
+**The residual race is stated rather than engineered away.** Detection is
+asynchronous, so a device fast enough to reconnect inside it meets a slot that is
+about to be free. Closing and letting it retry is correct and costs a stateless
+client one reconnect; the alternative — letting a new poll displace the incumbent —
+reintroduces exactly the eviction §2 exists to prevent, and would do it for a
+condition an attacker can manufacture at will.
 
 ### 3. The outbox: one queue for the owner, durable, bounded, leased, at-least-once
 
