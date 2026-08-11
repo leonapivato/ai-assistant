@@ -4121,7 +4121,11 @@ class NotificationPolicy(Protocol):
         one the setting change removes. ``reconsider_at`` is set to the earliest
         instant at which every failing condition could next hold, and is left
         unset where any of them is not one time alone resolves — the reach level
-        and an absent expiry are each such a condition.
+        and an absent expiry are each such a condition, as are the two that look
+        time-resolvable and are not: a budget of zero, and a set of quiet windows
+        covering every minute of the day. A due instant those cannot reach
+        promises a re-ruling that can only re-hold, on every tick, for the life of
+        the record.
 
         Args:
             candidate: The proposal to rule on.
