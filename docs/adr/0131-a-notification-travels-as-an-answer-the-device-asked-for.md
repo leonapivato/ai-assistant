@@ -864,16 +864,19 @@ merged and made it checkable.
 > own `candidate_key` — and requires no state of its own.
 
 > **Normative.** **Every** way an entry leaves the outbox **dismisses** its ADR-0130
-> record, through the dismissal `NotificationStore` carries, in the same step as
-> removing the entry — an acknowledgement (§3), an eviction under either bound (§3), a
-> broken lease (§3), and a withdrawal (§3a), together with any further way a later
-> decision adds. Where the act that removed the entry has already ended the record's
-> actionability, nothing further is owed.
+> record, through the dismissal `NotificationStore` carries — an acknowledgement (§3),
+> an eviction under either bound (§3), a broken lease (§3), and a withdrawal (§3a),
+> together with any further way a later decision adds. Where the act that removed the
+> entry has already ended the record's actionability, nothing further is owed.
 
-> **Normative.** The invariant those clauses establish is the one reconciliation
+> **Normative.** The two commits are **ordered, not atomic**: the record is dismissed
+> **first**, and the entry is removed only after that dismissal has committed. No
+> implementation removes an entry whose record it has not already dismissed.
+
+> **Normative.** The invariant that ordering establishes is the one reconciliation
 > rests on: **an actionable record with no outbox entry means its enqueue never
-> committed**, and nothing else. No lane may create a fifth way for an entry to leave
-> the outbox without ending its record's actionability.
+> committed**, and nothing else. No lane may create a further way for an entry to
+> leave the outbox that does not dismiss its record first.
 
 **Every departure and not only the acknowledgement, because reconciliation reads
 actionability and nothing else.** A draft dismissed on acknowledgement alone, and
@@ -885,15 +888,37 @@ to give a notification up; a record that survives it as actionable is the decisi
 taken. Dismissing there also frees ADR-0130 §7's cap, which is what that section wants
 of a notification that is gone.
 
-**The invariant is worth stating separately from the clause that produces it**, and
-it is the third time in this ADR that naming a property has done what enumerating
-cases could not. Reconciliation cannot ask "was this an incomplete handoff?" — it can
-only see records and entries. So the design makes the two indistinguishable states
-distinguishable by construction: every departure ends actionability, therefore the
-only actionable record without an entry is one whose enqueue never committed. If the
-fact still holds after an eviction, it comes back through the *producer* re-noticing
-it as a new candidate (ADR-0130 §7), which faces the cap and the budget afresh — not
-through a stale record resurrecting on a restart.
+**The ordering is what makes the invariant true, and a draft asserted the invariant
+while admitting its counterexample.** That draft required removal and dismissal "in
+the same step" and then, three paragraphs later, described a crash landing between
+them — in a section that had already established the two stores cannot share a
+transaction. Adversarial review put those three passages side by side on the
+thirty-eighth round, and it was right that no implementation could satisfy all of
+them. What was missing was not atomicity but an *order*, and only one of the two
+orders is safe.
+
+**Dismiss first.** Then a removal only ever happens after its dismissal has
+committed, so "entry absent" implies "record dismissed" implies "record not
+actionable" — and the contrapositive is exactly the invariant: an actionable record
+with no entry is one whose enqueue never committed. It holds through any crash, with
+no shared transaction and no recovery pass, because the unsafe state simply cannot be
+reached. Removing first would invert that: a crash between would leave a phantom
+actionable record with no entry, which reconciliation reads as an incomplete handoff
+and re-offers — a duplicate arriving by the longest available path, and the invariant
+false exactly when it is being relied on.
+
+**What a crash under the safe order leaves is an entry whose record is dismissed**,
+and that state needs no special handling at all: the entry is still the outbox's, and
+the outbox's ordinary rules apply to it — it will be delivered, acknowledged, leased
+or evicted like any other. The user's exposure is one duplicate telling, which is §3's
+at-least-once semantics reached one more way, and the direction this seam has failed
+in from the beginning. Nothing is lost.
+
+**Reconciliation cannot ask "was this an incomplete handoff?"** — it sees only records
+and entries — so the design makes the two states distinguishable by construction
+instead. If the fact still holds after an eviction, it comes back through the
+*producer* re-noticing it as a new candidate (ADR-0130 §7), which faces the cap and
+the budget afresh — not through a stale record resurrecting on a restart.
 
 **Those clauses close a window the two-Protocol split opens, and it is a window
 that loses a notification outright.** ADR-0130 §3 makes recording the disposition and
@@ -925,10 +950,10 @@ ratified operation for what it was built for, through the Protocol the compositi
 root injects, rather than reaching into another subsystem's store.
 
 **The residual is a duplicate, which is the direction this seam already fails in.** A
-crash between retiring the entry and dismissing the record leaves an actionable record
-with no entry, and the next reconciliation delivers it again. That is at-least-once
-(§3), reached one more way, and it is the failure §3 argues is the right one for a
-notification. Nothing here can lose one.
+crash between the dismissal and the removal leaves an entry whose record is dismissed;
+the outbox's ordinary rules carry it, and the owner may be told once more. That is
+at-least-once (§3), reached one more way, and it is the failure §3 argues is the right
+one for a notification. Nothing in either order of events can lose one.
 
 **A separate Protocol rather than a method on ADR-0130's writer, and the boundary is
 the propose/dispose line itself.** `NotificationWriter` decides *whether* the user is
