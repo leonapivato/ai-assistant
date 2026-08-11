@@ -165,7 +165,39 @@ def _key(sentence: str, extent: ReportedExtent) -> str:
 
 
 class UpcomingEventStage:
-    """Reads the calendar on its own cadence and offers what is about to start."""
+    """Reads the calendar on its own cadence and offers what is about to start.
+
+    **It holds no clock, and that is a decision against ADR-0132 §1's own
+    enumeration** — recorded here rather than left to be rediscovered, because §1
+    does list one ("a `Reader`, a `SourceGrants`, a clock and the
+    `NotificationWriter` seam"). Three things decide it the other way:
+
+    * **§4 leaves a clock nothing to read.** The instant a candidate was noticed
+      "is the reading's own ``read_at`` … and never a later clock reading taken
+      when the candidate was constructed or offered", and *both* the window
+      selection and ADR-0130 §2's validation are anchored on it — "Selection and
+      ADR-0130 §2's validation are evaluated against one instant, not two". §4
+      spends four paragraphs establishing that a second clock reading here **is**
+      the defect: "the producer offers a defect, on a schedule, for a window whose
+      width is its own parse time".
+    * **The shape §1 invokes does not have one.** §1 is explicit that this is
+      "``Engine.ingest``'s shape reused rather than a new one", and
+      :class:`~ai_assistant.orchestration.ingestion.IngestionStage` takes a
+      ``reader``, a ``writes`` and a ``grants`` — no clock. So the enumeration
+      reads as the producer's *reach* rather than as its constructor signature,
+      which is the sense the same sentence's second half plainly carries ("It
+      holds no ``MemoryStore``, no ``MemoryWriter`` and no ``MemoryPolicy``").
+    * **An injected-but-unread collaborator is worse than a missing one here.**
+      ADR-0045 §1 and ADR-0028 §7 refuse surface with no consumer, and a clock in
+      this constructor would be a standing invitation for a later edit to read it
+      — closing by construction the hole §4 argues at length must stay closed.
+
+    Not holding one narrows §1 rather than widening it, and nothing in the
+    producer's behaviour differs either way.
+    ``tests/orchestration/test_upcoming.py`` pins the constructor's parameter set
+    so that §1's binding half — the collaborators it may **not** hold — is checked
+    rather than trusted.
+    """
 
     def __init__(
         self,
