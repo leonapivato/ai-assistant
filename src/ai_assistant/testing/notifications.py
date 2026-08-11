@@ -402,7 +402,7 @@ class FakeNotificationStore:
         async with self._lock:
             await asyncio.sleep(0)  # the suspension a real store's I/O has anyway
             now = self._now()
-            record_id = self._new_id()
+            record_id = self._fresh_id()
             spent, frees_at = self._budget(now)
             ruling = await policy.rule(
                 candidate,
@@ -416,8 +416,9 @@ class FakeNotificationStore:
             )
             if ruling.kind is NotificationDispositionKind.DROP:
                 return ruling.model_copy(update={"notification_id": None})
-            self._record_spend(ruling)
-            self._records[record_id] = HeldNotification(
+            # Built before anything is committed: a record the type refuses must
+            # leave no spent unit behind it (ADR-0130 §5).
+            record = HeldNotification(
                 id=record_id,
                 candidate=candidate,
                 kind=ruling.kind,
@@ -428,6 +429,8 @@ class FakeNotificationStore:
                 admitted_at=now,
                 retention=self._retention,
             )
+            self._record_spend(ruling)
+            self._records[record_id] = record
             return ruling
 
     async def reconsider(
@@ -462,8 +465,7 @@ class FakeNotificationStore:
                 budget_spent=spent,
                 budget_frees_at=frees_at,
             )
-            self._record_spend(ruling)
-            self._records[record.id] = HeldNotification(
+            ruled = HeldNotification(
                 id=record.id,
                 candidate=record.candidate,
                 kind=ruling.kind,
@@ -476,6 +478,8 @@ class FakeNotificationStore:
                 dismissed_at=record.dismissed_at,
                 dropped_at=now if ruling.kind is NotificationDispositionKind.DROP else None,
             )
+            self._record_spend(ruling)
+            self._records[record.id] = ruled
             return ruling
 
     async def due(
@@ -670,6 +674,42 @@ class FakeNotificationStore:
         return any(
             record.candidate.candidate_key == candidate_key for record in self._actionable(now)
         )
+
+    def _fresh_id(self) -> str:
+        """Draw a record id, refusing one this store already holds.
+
+        **A store that overwrote a record here would lose one silently**, and the
+        two dispositions would name the same id — which is `DeferralStore.defer`'s
+        argument for making a present id "a hard error, not an overwrite" rather
+        than letting "a dict-backed store silently overwrite someone else's
+        pending question while a SQL one raises".
+
+        A collision is the *store's* fault and never a caller's: ids are minted
+        here and no caller supplies one, so this is a store fault and carries the
+        store's error rather than a ``ValueError``.
+
+        Returns:
+            An id no record holds.
+
+        Raises:
+            NotificationStoreError: If the id source returns something blank or
+                already present.
+        """
+        record_id = self._new_id()
+        if not isinstance(record_id, str) or not record_id.strip():
+            msg = (
+                f"the notification store's id source returned "
+                f"{describe_untrusted(record_id)}, which is not an identifier"
+            )
+            raise NotificationStoreError(msg)
+        if record_id in self._records:
+            msg = (
+                f"the notification store's id source returned {record_id!r}, which a "
+                f"stored record already holds: admitting over it would lose that record "
+                f"and leave two dispositions naming one id"
+            )
+            raise NotificationStoreError(msg)
+        return record_id
 
     def _record_spend(self, ruling: NotificationDisposition) -> None:
         """Note a unit spent, if this ruling spent one (ADR-0130 §5).
