@@ -1909,12 +1909,12 @@ listener. That is ADR-0070 §1's second limb — a clause read more widely than 
 holds — so it is a supersession and not an amendment, and it is **partial**: §7's
 other four clauses, the whole of the two-fact admission rule, the distinguished
 refusals, the shared ceilings and the refusal-code form are untouched and stay
-accepted. **The record lands on ADR-0124 when this ADR is ratified**, not now: the
-supersession has not landed while this ADR stands `Proposed`, and ADR-0070 §1 permits
-a Status edit only for "a supersession that has landed". Marking it early would make a
-reader treat §7's clause as displaced by a decision nobody has accepted. The ratifying
-change adds ADR-0131 to ADR-0124's Status line and appends the dated note; not one word
-of its Decision text is edited then either.
+accepted. **The record lands in this change**, while this ADR stands `Proposed`:
+ADR-0070 §1's condition is that the superseding ADR *exists*, not that it is ratified,
+and ADR-0082 §7 restates that in terms — "the hazard §1 names is a `Status` line
+pointing at nothing, and an atomic pair makes that unreachable". `CONTRIBUTING.md`
+carries the same sentence. So ADR-0124's Status line and a dated header note carry the
+record here; not one word of its Decision text is edited.
 
 **No record is owed on ADR-0124 §4, and the reason is worth stating rather than
 assumed.** §7 above *adds* a condition to the overlay-agent seam where §4 was
@@ -1954,9 +1954,9 @@ the client must reject, and a second poll arrives on its own connection with its
 id. It is closed for §2's reason instead. Everything else in §3 stands and this ADR
 rests on nearly all of it — the framing, the codec, the envelope, the two serial
 rules, the correlation id and its unspent reserve, the frame ceiling and the version
-freeze. **The record lands on ADR-0084 when this ADR is ratified**, on the same
-reasoning and in the same change as ADR-0124's above; not one word of its Decision text
-is edited then.
+freeze. ADR-0084's Status line and a dated header note carry the record in this
+change, on the same reasoning as ADR-0124's above; not one word of its Decision text is
+edited.
 
 **No record is owed on ADR-0124 §1, and that is the substantive finding rather
 than a formality.** §1's accountability bullet — "There is no path by which either
@@ -1982,6 +1982,22 @@ across a restart stated rather than left silent — and says so at each, so a re
 does not have to infer whether the resemblance was noticed. Adversarial review's
 first round is why the custody one is a clause: this ADR claimed the discipline
 before it applied it at the point where it bites.
+
+**Both records land here rather than at ratification, and the corpus has already
+adjudicated the question that says so.** The two reviews took opposite positions on
+it in consecutive rounds: architecture ruled on the fiftieth that a `Proposed` ADR
+cannot carry a supersession record and the Status lines should be restored;
+adversarial ruled on the fifty-first that ADR-0070 §1's condition is *existence* and
+the records were owed in this change. Both cited ADR-0070 §1. **ADR-0082 §7 settles
+it, and settles it against the first**: it names this exact reading as "#458 — the
+recurring misreading of ADR-0070 §1's 'a supersession that has landed' clause", calls
+it "not a governance gap but a reviewer failure mode", and states the condition — "§1's
+condition is that the superseding ADR **exists**, not that it is ratified". It records
+that the same disagreement, in the same two opposed forms, "recurred on PR #478" and
+deadlocked it. `CONTRIBUTING.md` carries the sentence too: "Recording a supersession
+likewise presupposes the superseding ADR exists". So the records stay, and this
+paragraph exists because ADR-0082 §7 predicted the argument and a third recurrence
+should cost the next author a citation rather than a round.
 
 **This ADR is marked under ADR-0089.** Every obligation it imposes is a marked
 clause; unmarked text explains what a marked clause means and supplies no
