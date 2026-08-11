@@ -452,9 +452,23 @@ offset)` already have.
 > declaration ADR-0130 supplies:
 >
 > `class NotificationDelivery(BaseModel):`
-> `    model_config = ConfigDict(frozen=True)`
+> `    model_config = ConfigDict(extra="forbid", frozen=True)`
 > `    delivery_id: Identifier`
 > `    notification: DisposedNotification`
+
+**`extra="forbid"` is load-bearing here and is not the house default**, which is
+why it is spelled out rather than left to the reader: `core/types.py` carries both
+shapes, twenty-two models frozen alone and some fifty forbidding extras as well.
+This one must forbid, because the reserve above is otherwise defeated by the
+measuring order the tree actually implements. `wire/client.py` validates and *then*
+measures — `return_adapter(method).validate_python(reply.payload)` followed by
+`check_payload(result, …)` — which is ADR-0087 §7's ordering applied correctly, and
+under pydantic's default an unknown member is dropped by the validation. So a peer
+could send a conforming delivery plus a large unknown member: under the frame
+ceiling, over the contract limit, and measured after the member it smuggled has
+already been discarded. Forbidding extras makes the frame refuse at validation
+instead. Adversarial review found it on the fifth round, with the mechanism read off
+the tree rather than assumed.
 
 > **Normative.** `delivery_id` is minted by the seam when the entry is enqueued, is
 > stable across redeliveries of that entry, and is the value `acknowledging` names.
