@@ -1,7 +1,38 @@
 # 131. A notification travels as an answer the device asked for, on a connection it keeps for that alone
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0134 (§5a's Default column for `hub_notification_outbox_bytes`)
 - Date: 2026-08-10
+- Partially superseded: 2026-08-11 by ADR-0134 — **one cell of one table, and the
+  two columns it sat between could not both be obeyed.** §5a gives
+  `hub_notification_outbox_bytes` a Default of 1 MiB and a Range of
+  `>= hub_max_frame_bytes`, whose named default under ADR-0084 §3 is 16 MiB. A hub
+  with no configuration at all is therefore refused at load by this ADR's own two
+  figures — the failure `Settings` validation exists to surface, produced by the
+  document rather than by an operator.
+
+  **Replaced — the Default column for that one field.** ADR-0134 §1 makes it the
+  greater of 1 MiB and the hub's *configured* `hub_max_frame_bytes`. A reader
+  holding only §5a computes 1 MiB, and an implementation obeying both columns on
+  the configuration this ADR ships builds a hub that will not start; that is
+  ADR-0070 §1's first limb, and it is why this is a supersession rather than the
+  dated amendment first attempted. Only one column could give way and §5a decides
+  both, so resolving the contradiction necessarily moves one of them — which is
+  what puts the correction outside §1's amendment mechanism, however narrow it is.
+
+  **Not replaced — everything else in §5a, which is most of it.** The range and
+  its refusal at load stand exactly as written and are what ADR-0134 §1 defers to;
+  so do the field's type and non-nullability, the other four rows of the table,
+  both relational validators, and §5a's whole argument for naming the figures here
+  rather than leaving them to a lane. No other section of this ADR is touched.
+  ADR-0134 §3 also records — changing nothing — that §5a's connection sub-bound
+  makes a `hub_max_connections` of 1 unexpressible on a hub serving delivery,
+  which §5a decided and did not say.
+
+  The record landed with ADR-0134 in one change, written while that ADR still
+  stood `Proposed`: ADR-0070 §1's condition is that the superseding ADR
+  **exists**, not that it is ratified, which ADR-0082 §7 states in terms and which
+  §9 below already applied to ADR-0084 and ADR-0124 in this ADR's own change. Not
+  one word of §5a is edited. Refs #965, PR #959.
 - **Note (2026-08-11, UTC): ratified.** `Proposed` → `Accepted` after the required
   reviews came back green on the content this ADR merged with — both lenses,
   because this ADR decides `core` surface: adversarial **APPROVE with no
