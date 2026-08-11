@@ -245,6 +245,32 @@ that as the single anchor for exactly this reason — "Acquisition is a single
 point, so nothing drifts". The reader already stamps its facet and every proposal
 with it, so the candidate agrees with the reading it came from.
 
+**Backdating is the objection to answer, and the answer is that `read_at` is what
+the corpus means by the instant of a reading.** The producer cannot know an
+occurrence exists until parsing finishes, so a candidate stamped `read_at` names
+an instant earlier than the one at which the code held the occurrence in a
+variable. That is true of every value this reading carries and is the ratified
+design, not a residue of it: `CalendarFacet.entries_in_progress` is membership
+"evaluated at an instant" that is `read_at` though it is computed afterwards, and
+every proposal's `provenance.last_updated` is `read_at` though the proposals are
+built afterwards. `CalendarReader._read_source` states the rule and the reason —
+the anchor is taken "**Here, and exactly once**", it is "the moment the bytes this
+reading describes came into our hands", and a drifting anchor gives you "proposals
+describing the 10:05 file stamped 10:00, with membership evaluated against an
+instant that predates the data". A producer that stamped its own later clock would
+be the one value in the reading that disagreed with the reading.
+
+**The case that objection is really about is handled, and it is handled by the
+chassis rather than here.** An occurrence starting between `read_at` and the
+offer — a five-second lead on a ten-second parse — is selected by this section and
+is a *valid* candidate at ADR-0130 §2's validation, because its expiry is later
+than the instant it was noticed. It is then ruled against the **ruling** instant,
+and ADR-0130 §5's first `DROP` condition is "the candidate declares an expiry not
+later than the ruling instant". So it is dropped, naming expiry, writing no durable
+record (§8). Nothing is offered late, nothing is refused as a defect, and the
+producer needs no second guard for a case §5 already decides — which is what
+selecting and validating against one instant buys.
+
 The lower edge is exclusive so that an occurrence starting exactly at `read_at`
 is not noticed, which is the same refusal seen from the selecting side. The upper
 edge is exclusive on ADR-0093 §7b's half-open convention, and the reader's own
@@ -291,11 +317,15 @@ invoked here cannot be satisfied elsewhere and ADR-0074 §9.3's reason: two
 conforming implementations with different figures notice different things while
 each believes it conforms.
 
+> **Normative.** An interval set with no `calendar_reader_path` configured is
+> refused at load, exactly as `calendar_reader_interval` set without one already
+> is. An armed producer with no source to read is an incoherent state and is
+> refused as one rather than discovered at the first tick.
+
 > **Normative.** A lead window not strictly greater than this producer's own
-> interval is refused at load, in the cross-field shape the incoherent-state
-> refusal over `calendar_reader_interval` and `calendar_reader_path` already
-> takes. A lead window exceeding `calendar_window_future` is refused at load on
-> the same mechanism.
+> interval is refused at load, in the cross-field shape that same incoherent-state
+> refusal takes. A lead window exceeding `calendar_window_future` is refused at
+> load on the same mechanism.
 
 **Both refusals exist because the misconfiguration is silent, and silence here is
 indistinguishable from working.** With ticks at `t`, `t+I`, … and a lead `L`, an
@@ -369,6 +399,21 @@ detail are named as "the only free text a candidate carries" precisely so that a
 candidate carries a *rendering* rather than a copy. This producer obeys both
 halves: it carries one sentence the user is shown, and it copies no record because
 there is no record to copy.
+
+**That ADR-0130 §2 permits an empty set is read off its own list rather than
+assumed, because the opposite reading is available.** The list marks optionality
+where it means it — "an optional detail", "an optional expiry", "an optional
+`Goal` reference" — and each of those is a field that is a value or nothing. The
+references entry is not marked, and it is not that shape: it is a *set* of
+identifiers, and a required field holding a possibly-empty sequence is exactly how
+this corpus writes one. Reading the absent "optional" as "at least one" would make
+the marking mean two different things in one sentence. §2's stated interest
+settles it in the same direction — every clause of it is about what a candidate
+may not *contain* — and §9, which tells the triad lane what to build and lists
+what the conformance suite must assert, imposes no cardinality on references at
+all. **#963 carries that to the triad lane** so the field's shape lands as a
+possibly-empty sequence rather than a non-empty one, which is where the question is
+actually settled in code.
 
 **What is lost is smaller than it looks.** The explainability ADR-0130 claims in
 its Consequences is about the *disposition* — "Every disposition names the
@@ -574,9 +619,19 @@ ADR-0082 §1 requires the judgement in this ADR's text, naming the clause and
 applying ADR-0070 §1's test: would a reader holding only the earlier ADR now act
 differently, or read one of its clauses more widely than it now holds?
 
-- **ADR-0130 — nothing owed.** §10 reserved this decision to a producer's own
+- **ADR-0130 — nothing owed, and the one clause that could be read as narrowed is
+  argued rather than waved past.** §10 reserved this decision to a producer's own
   lane and this is that lane. Every clause above is a producer obeying §1, §2, §5,
-  §6 and §8 as ratified; none narrows or widens one.
+  §6 and §8 as ratified. The clause worth stating is §2's references entry: §5
+  above rules that this producer's candidates carry none, which narrows §2 only if
+  that entry requires at least one identifier. It does not — §2 marks its optional
+  fields as optional and leaves the references *set* unmarked, its every clause is
+  about what a candidate may not contain, and §9's obligations on the triad lane
+  impose no cardinality. So a reader holding only ADR-0130 acts identically, and
+  ADR-0070 §1's test is not met in either limb. **#963 puts the question where it
+  is settled in code** rather than leaving this ADR as the only place it was
+  considered; if the triad lane rules the other way, §5 above is what is revisited
+  and ADR-0130 is untouched either way.
 - **ADR-0093 — nothing owed, and the clause that looks strained is met.** §3's
   normative rule is about how consumers *behave* — their own cadence, no deriving
   from another's reading, no presenting content without its instants — and §3
