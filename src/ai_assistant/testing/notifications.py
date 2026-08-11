@@ -256,14 +256,22 @@ class FakeNotificationPolicy:
         §7b's rule for the same hazard: the earlier of the two instants the wall
         clock names, which is the one a user reading their own clock means.
 
-        **A local time that does not occur at all resolves *late*, and that is
-        the safe direction.** In the spring gap the wall clock jumps over the
-        endpoint, and the instant this returns is one gap beyond where the clock
-        actually leaves the window — which §5 explicitly tolerates, a late
-        reconsideration being "not a fault". Resolving *early* is what cannot be
-        done: the first instant inside the gap is still one the window covers, so
-        a record woken there re-holds to the same instant and the maintenance
-        drain would rule it forever without progress.
+        **A local time the spring transition skips resolves to the instant the
+        clock next passes it**, which is the transition itself. Naming it matters
+        because §5 asks for "the earliest instant at which every condition that
+        failed could next hold", and §5's tolerance of a *late run* is about a
+        tick that did not happen on time — it does not licence computing a due
+        instant that is wrong. On 2026-03-08 in ``America/New_York`` the clock
+        jumps 02:00 to 03:00, so a window ending at 02:30 ends at 07:00Z; naive
+        construction gives 07:30Z, which is half an hour of quiet the user did not
+        ask for.
+
+        The zone's own arithmetic is what finds it: in a gap the two ``fold``
+        readings disagree and neither round-trips, and the transition is the only
+        instant between them where the offset changes, so a bisection over that
+        bracket names it exactly. An *unambiguous* or merely *ambiguous* local
+        time round-trips on ``fold=0`` and takes that reading unchanged, which is
+        ADR-0093 §7b's rule.
 
         Args:
             local: The moment, already in this policy's zone.
@@ -273,7 +281,37 @@ class FakeNotificationPolicy:
             The instant, in UTC.
         """
         day = local.date() if end > local.time() else local.date() + timedelta(days=1)
-        return datetime.combine(day, end, tzinfo=self._zone).astimezone(UTC)
+        nominal = datetime.combine(day, end, tzinfo=self._zone)
+        if nominal.astimezone(UTC).astimezone(self._zone).time() == end:
+            return nominal.astimezone(UTC)  # exists, whether or not it is ambiguous
+        return self._transition_between(
+            nominal.replace(fold=1).astimezone(UTC), nominal.astimezone(UTC)
+        )
+
+    def _transition_between(self, before: datetime, after: datetime) -> datetime:
+        """The instant the offset changes, somewhere in ``(before, after]``.
+
+        Found by bisection rather than read off the zone, ``zoneinfo`` publishing
+        no transition table. The bracket is the two ``fold`` readings of a local
+        time inside the gap, which straddle the transition by construction: the
+        earlier reading still carries the old offset and the later one already
+        carries the new.
+
+        Args:
+            before: An instant at the old offset.
+            after: An instant at the new one.
+
+        Returns:
+            The first instant carrying the new offset, in UTC.
+        """
+        old = before.astimezone(self._zone).utcoffset()
+        while after - before > timedelta(seconds=1):
+            middle = before + (after - before) / 2
+            if middle.astimezone(self._zone).utcoffset() == old:
+                before = middle
+            else:
+                after = middle
+        return after
 
 
 def _next_due(

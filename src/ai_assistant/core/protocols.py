@@ -4070,10 +4070,10 @@ class NotificationPolicy(Protocol):
 
     **A DST-ambiguous local instant resolves at ``fold=0``**, on ADR-0093 §7b's
     rule for the same hazard. A local time the spring transition skips entirely
-    resolves **late** rather than early: §5 tolerates a late reconsideration and
-    calls it "not a fault", while the first instant inside the gap is one the
-    window still covers — so a record woken there would re-hold to the same
-    instant and never make progress.
+    resolves to **the instant the clock next passes it**, which is the transition:
+    §5 asks for "the earliest instant at which every condition that failed could
+    next hold", and its tolerance of a late *run* is about a tick that slipped
+    rather than a licence to compute a due instant that is wrong.
 
     Cancelling this method is governed by this module's cancellation clause
     (ADR-0060). Input observation (ADR-0065) binds it and is vacuous in practice:
