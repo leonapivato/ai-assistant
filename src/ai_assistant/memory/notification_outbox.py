@@ -55,7 +55,7 @@ import contextlib
 import secrets
 import sqlite3
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -73,7 +73,6 @@ from ai_assistant.memory._transactions import transaction
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-    from datetime import timedelta
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import NotificationStore
@@ -1235,6 +1234,10 @@ class SqliteNotificationOutbox:
         with self._transaction("void the outbox leases a restart ended") as conn:
             conn.execute("UPDATE outbox SET delivery_id = NULL, leased_at = NULL")
 
+    def _all_entries_sync(self) -> list[_Entry]:
+        with self._transaction("read the outbox entries", immediate=False) as conn:
+            return list(self._all(conn))
+
     def _keys_sync(self) -> set[str]:
         with self._transaction("read the outbox keys", immediate=False) as conn:
             return {entry.key for entry in self._all(conn)}
@@ -1291,11 +1294,50 @@ class SqliteNotificationOutbox:
         Returns:
             Whether an arrival may have happened; ``False`` where the wait ran out.
         """
+        limit = timeout
+        horizon = await self._next_lease_expiry()
+        if horizon is not None and horizon < limit:
+            limit = horizon
         try:
-            await asyncio.wait_for(self._arrivals.wait(), timeout.total_seconds())
+            await asyncio.wait_for(self._arrivals.wait(), limit.total_seconds())
         except TimeoutError:
-            return False
+            # ``False`` only where the *caller's* budget ran out. Stopping early at a
+            # lease expiry is an availability hint like any other, so it reports one
+            # and the caller re-reads.
+            return limit < timeout
         return True
+
+    async def _next_lease_expiry(self) -> timedelta | None:
+        """How long until the earliest live lease expires, or ``None`` if none is.
+
+        **An expiry makes an entry available and sets no event, which is what this
+        answers.** ADR-0131 §3 returns an entry to the outbox "on expiry", and §1 has
+        the hub answer "with a notification the moment it has one" — but the arrival
+        event only fires on an enqueue, so a poll parked before the expiry would have
+        slept out its whole budget with the entry available. That puts the delay at
+        the lease *plus* a budget, where §5a prices the lease alone as "how long a
+        *dead* device withholds a notification from a live one".
+
+        Measured as a span rather than an instant, per ADR-0135 §2.
+
+        Returns:
+            The shortest remaining lease, never negative, or ``None`` where no entry
+            is leased.
+
+        Raises:
+            NotificationOutboxError: If the outbox cannot be read.
+        """
+        now = self._now()
+        async with self._lock:
+            entries = await _run_to_completion(self._all_entries_sync)
+        remaining = [
+            self._lease - (now - _from_micros(entry.leased_at))
+            for entry in entries
+            if entry.leased_at is not None and entry.is_leased_at(now, self._lease)
+        ]
+        if not remaining:
+            return None
+        return max(min(remaining), timedelta(0))
 
     async def _resolve_record(self, candidate_key: str) -> str | None:
         """The id of the actionable ADR-0130 record this candidate belongs to.

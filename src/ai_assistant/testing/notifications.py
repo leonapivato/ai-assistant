@@ -1509,11 +1509,39 @@ class FakeNotificationOutbox:
         Returns:
             Whether an arrival may have happened; ``False`` where the wait ran out.
         """
+        limit = timeout
+        horizon = self._next_lease_expiry()
+        if horizon is not None and horizon < limit:
+            limit = horizon
         try:
-            await asyncio.wait_for(self._arrivals.wait(), timeout.total_seconds())
+            await asyncio.wait_for(self._arrivals.wait(), limit.total_seconds())
         except TimeoutError:
-            return False
+            # ``False`` only where the *caller's* budget ran out; stopping early at a
+            # lease expiry reports an availability hint and the caller re-reads.
+            return limit < timeout
         return True
+
+    def _next_lease_expiry(self) -> timedelta | None:
+        """How long until the earliest live lease expires, or ``None`` if none is.
+
+        Parity with the durable outbox. A lease expiry makes an entry available and
+        sets no arrival event, so a poll parked before it would otherwise sleep out
+        its whole budget with the entry available — ADR-0131 §3 returns the entry "on
+        expiry" and §1 has the hub answer "the moment it has one".
+
+        Returns:
+            The shortest remaining lease, never negative, or ``None`` where none is
+            held.
+        """
+        now = self._now()
+        remaining = [
+            self._lease - (now - entry.leased_at)
+            for entry in self._entries.values()
+            if entry.leased_at is not None and self._is_leased(entry, now)
+        ]
+        if not remaining:
+            return None
+        return max(min(remaining), timedelta(0))
 
 
 __all__ = [

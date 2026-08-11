@@ -683,6 +683,42 @@ class TestTheFakeKeepsTheDurableOutboxsInvariants:
         assert await outbox.offer(first) is NotificationEnqueue.ENQUEUED
 
 
+async def test_a_parked_wait_stops_at_the_next_lease_expiry() -> None:
+    """§1: the hub answers "the moment it has one" — a lease expiry is such a moment.
+
+    A lease expiring makes an entry available and sets no arrival event, so a poll
+    parked before it used to sleep out its whole budget while the entry sat there.
+    That put the delay at the lease *plus* a budget, where §5a prices the lease alone
+    as "how long a *dead* device withholds a notification from a live one". The wait
+    now stops at the expiry and reports an availability hint, so the caller re-reads.
+    """
+    # A short lease, because the horizon is spent in *real* time while the outbox's
+    # own clock is injected — a 120-second lease would make the case take two minutes.
+    outbox = FakeNotificationOutbox(now=lambda: NOW, lease=timedelta(milliseconds=50))
+    await outbox.offer(candidate(key="k1"))
+    assert await outbox.claim() is not None  # leased to a device that goes quiet
+    # The second claim finds nothing available and *clears* the arrival event, which
+    # is the state a parked poll is actually in. Without it the wait returns at once
+    # on the enqueue's own event and the case proves nothing.
+    assert await outbox.claim() is None
+
+    # A budget far longer than the lease: the wait must not honour all of it.
+    woke = await outbox.wait_for_arrival(timedelta(seconds=1))
+
+    assert woke is True  # an availability hint, not "your budget ran out"
+
+
+async def test_a_parked_wait_with_no_lease_still_reports_its_timeout() -> None:
+    """The discriminating half: with nothing leased there is no earlier horizon.
+
+    ``False`` has to keep meaning "the caller's budget ran out", or the poll loop
+    loses the one answer it ends on and spins.
+    """
+    outbox = FakeNotificationOutbox(now=lambda: NOW)
+
+    assert await outbox.wait_for_arrival(timedelta(milliseconds=20)) is False
+
+
 @pytest.mark.parametrize("entries", [0, -1, True])
 def test_the_fake_refuses_an_entry_bound_the_contract_does_not_admit(entries: int) -> None:
     """ADR-0131 §5a admits no "off" for this bound, and nor may the fake.
