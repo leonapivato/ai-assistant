@@ -566,6 +566,31 @@ class SqliteNotificationOutbox:
             NotificationOutboxError: If the durable store cannot commit. No
                 custody transfers.
         """
+        return await self._offer(candidate, reconciled=False)
+
+    async def _offer(
+        self, candidate: NotificationCandidate, *, reconciled: bool
+    ) -> NotificationEnqueue:
+        """Take custody, or say why not — the body :meth:`offer` and the repair share.
+
+        ``reconciled`` is what tells the two callers apart, and it decides one thing:
+        whether an offer may commit an entry that **no actionable record backs**.
+
+        **A producer's offer may.** ADR-0131 §3b's live handoff arrives holding a
+        candidate whose disposition was just ruled, and §3b's "nothing further is
+        owed" covers a caller that keeps no records of its own; refusing it would
+        make the outbox unusable by anything but ADR-0130's store.
+
+        **The repair may not**, because it is working from a snapshot. §3b's
+        reconciliation reads the records, releases the lock and offers what is
+        missing — and the owner can dismiss or delete one of those records in the
+        gap. The withdrawal that disposal performs then finds no entry to take, and
+        an unconditional re-offer would insert one *afterwards*, delivering a
+        notification the owner had already removed and defeating §3a's whole
+        ordering. Re-resolving under this lock is what closes it: the record is
+        looked up now rather than when the snapshot was taken, and a disposal racing
+        this call serialises against the same lock its own withdrawal needs.
+        """
         encoded = candidate.model_dump_json()
         async with self._lock:
             await self._settle_departing()
@@ -574,6 +599,16 @@ class SqliteNotificationOutbox:
             # refusal has to *dismiss* this record and cannot dismiss one it never
             # looked up (§3b).
             record_id = await self._resolve_record(candidate.candidate_key)
+            if reconciled and record_id is None:
+                # The record this repair was reading has ceased to be actionable
+                # since the snapshot — dismissed, deleted, or expired. There is
+                # nothing to re-offer, and inserting anyway would resurrect what the
+                # owner disposed of.
+                _log.info(
+                    "notification_outbox_reconcile_skipped",
+                    candidate_key=candidate.candidate_key,
+                )
+                return NotificationEnqueue.ALREADY_HELD
             # §4's delivery ceiling is measured on the *candidate*, before any
             # bound is consulted, because it is a refusal the offer can never
             # satisfy by evicting other entries (§3).
@@ -1173,7 +1208,7 @@ class SqliteNotificationOutbox:
                 continue
             if record.candidate.candidate_key in keyed:
                 continue
-            await self.offer(record.candidate)
+            await self._offer(record.candidate, reconciled=True)
 
     def _void_leases_sync(self) -> None:
         """Void every lease the stopped process granted (ADR-0131 §3)."""
