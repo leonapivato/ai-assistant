@@ -53,11 +53,18 @@ from ai_assistant.core.protocols import AssistantEngine
 #: needs ``core.types``' namespace handed in explicitly.
 _NAMESPACE: Final = {**vars(core_types), **vars(protocols_module)}
 
-#: The twenty-five the corpus has promoted. Twenty-four are ADR-0085 §5's own walk:
+#: The thirty-three the corpus has promoted. Twenty-four are ADR-0085 §5's own walk:
 #: thirteen from ``engine.py`` (of which ``BeliefSummary`` is new, §4a), six from
 #: ``questions.py``, one from ``runner.py``, one from ``loop.py``, two from
 #: ``observation.py`` and one from ``conversations.py``. The twenty-fifth is
-#: ADR-0102 §3's ``GrantableSource``, which the four grant operations name.
+#: ADR-0102 §3's ``GrantableSource``, which the four grant operations name. The last
+#: eight are ADR-0130 §9's, which the five notification operations name: the held
+#: record, the candidate it carries, the two enumerations naming a ruling, the
+#: standing-preferences value, its per-class row, the reach level that row holds, and
+#: the quiet window. §9 promotes them by requiring the five methods to be
+#: ``AssistantEngine`` members — "These are contract surface, because
+#: ``AssistantEngine`` is a Protocol in ``core/protocols.py``" — so the same walk
+#: that caught ``GrantableSource`` is what makes them checkable rather than asserted.
 #:
 #: ``SourceGrant`` and ``GrantScope`` are **not** here and that is not an omission:
 #: they predate this block (ADR-0097 §2) and are ``core`` leaves the walk terminates
@@ -89,6 +96,14 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "ObservationReport",
         "ConversationDigest",
         "GrantableSource",
+        "HeldNotification",
+        "NotificationCandidate",
+        "NotificationCondition",
+        "NotificationDispositionKind",
+        "NotificationPreferences",
+        "ClassReach",
+        "NotificationReach",
+        "QuietWindow",
     }
 )
 
@@ -239,19 +254,24 @@ def test_the_walk_really_is_transitive() -> None:
     assert {"StepFailure", "ToolFailureKind", "Provenance", "Validity", "PlanStep"} <= reached
 
 
-def test_the_surface_carries_the_nineteen_methods_the_adrs_fixed() -> None:
+def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     """The count, which the conformance suite needs a number to be complete against.
 
     ``start`` and ``aclose`` are ruled off the Protocol by ADR-0084 §5, so the
-    promoted surface is what the two contract ADRs put on it and nothing else:
-    ADR-0085 §1's fifteen plus ADR-0102 §1's four. ADR-0085 §11b recorded fifteen as
+    promoted surface is what the contract ADRs put on it and nothing else:
+    ADR-0085 §1's fifteen, plus ADR-0102 §1's four, plus ADR-0130 §9's five —
+    a read of the held notifications, a dismissal, a per-notification delete, and
+    a read and a write of the standing preferences. **Reconsideration is not among
+    them and may not become one**: ADR-0130 §5 puts it on the concrete
+    ``orchestration`` engine, where ADR-0083 §8 puts a maintenance surface, and
+    states that "no client asks for it and no interface adapter may drive it". ADR-0085 §11b recorded fifteen as
     a correction of ADR-0084 §5's "around nineteen" — a count, not a decision, and
     §5's argument did not rest on the figure. It does not rest on this one either;
     what the number is for is making a *complete* suite something a reader can
     check, since a method nobody bound to the shared contract is a method no
     implementation is held to.
     """
-    assert len(_method_names()) == 19
+    assert len(_method_names()) == 24
 
 
 #: ADR-0085 §6b's twelve derived predicates. **The list is normative there** — "a

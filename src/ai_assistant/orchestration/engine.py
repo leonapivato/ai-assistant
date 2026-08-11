@@ -137,6 +137,8 @@ if TYPE_CHECKING:
         AuditTrail,
         DeferralStore,
         MemoryStore,
+        NotificationPolicy,
+        NotificationStore,
         PlanStore,
         TraceRetention,
         TraceSink,
@@ -152,9 +154,11 @@ if TYPE_CHECKING:
         FrozenJsonMapping,
         GrantableSource,
         GrantScope,
+        HeldNotification,
         Identifier,
         MemoryRecord,
         NonBlankEncodableText,
+        NotificationPreferences,
         ObservationReport,
         PermissionDecision,
         Question,
@@ -270,6 +274,11 @@ class PurgeReport:
     #: "off" and "found nothing" are different facts about a run, and a value that
     #: conflates them is the one an operator cannot recover afterwards.
     traces: int | None
+    #: Purgeable held-notification rows removed, or ``None`` where no notification
+    #: store is wired and the sweep was therefore **not run** (ADR-0130 §7).
+    #: ``None`` rather than ``0`` for :attr:`traces`' reason: "not wired" and
+    #: "found nothing" are different facts about a run.
+    notifications: int | None = None
 
 
 def _uuid() -> str:
@@ -342,7 +351,8 @@ def _purged(report: PurgeReport) -> Observation:
     swept clean by a sweep that never happened.
 
     Args:
-        report: What the three stores reclaimed.
+        report: What the stores reclaimed. ``notifications`` is absent for
+            ``traces``' reason, there being no notification store wired.
 
     Returns:
         The counts, keyed by literals written here (§2's second clause).
@@ -353,7 +363,54 @@ def _purged(report: PurgeReport) -> Observation:
     }
     if report.traces is not None:
         metrics["traces"] = report.traces
+    if report.notifications is not None:
+        metrics["notifications"] = report.notifications
     return Observation(metrics=metrics)
+
+
+def _ruled(count: int) -> Observation:
+    """Read one reconsideration run onto its own ``OPERATION`` trace (ADR-0119 §8).
+
+    Args:
+        count: How many held records were re-ruled.
+
+    Returns:
+        The count, keyed by a literal written here (§2's second clause).
+    """
+    return Observation(metrics={"reconsidered": count})
+
+
+async def _as_tuple[T](page: Awaitable[list[T]]) -> tuple[T, ...]:
+    """Materialise a store's page as the tuple the contract returns.
+
+    Args:
+        page: The store call.
+
+    Returns:
+        Its rows, as a tuple — ADR-0085 §3b's rule that every enumeration on the
+        surface returns one, so no caller can mutate a page it was handed.
+    """
+    return tuple(await page)
+
+
+async def _written_preferences(
+    store: NotificationStore, preferences: NotificationPreferences
+) -> NotificationPreferences:
+    """Write the standing settings and read back what the store now holds.
+
+    Reading back rather than echoing the argument: what a client renders after a
+    write must be what the store will rule against, and a store free to normalise
+    what it was handed would otherwise have the two silently disagree.
+
+    Args:
+        store: Where the settings live.
+        preferences: What to hold from now on.
+
+    Returns:
+        The settings in force.
+    """
+    await store.set_preferences(preferences)
+    return await store.preferences()
 
 
 def _ingested(report: IngestionReport) -> Observation:
@@ -791,6 +848,8 @@ class Engine:
         grant_operations: GrantOperations,
         ingestion: IngestionStage | None = None,
         consolidation: ConsolidationStage | None = None,
+        notifications: NotificationStore | None = None,
+        notification_policy: NotificationPolicy | None = None,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
         now: Clock = _utcnow,
@@ -990,6 +1049,20 @@ class Engine:
                 an ordinary deployment rather than a half-built one. And
                 :meth:`consolidate` refuses rather than reporting an empty success,
                 for the same reason again.
+            notifications: The durable home of held notifications and the user's
+                standing settings (ADR-0130 §9), or ``None`` where this deployment
+                wires none — which every deployment does today, the ADR ratifying
+                the contract surface ahead of a store to serve it. The five
+                ``AssistantEngine`` methods behind it refuse with
+                :class:`~ai_assistant.core.errors.ConfigurationError` in that
+                state, on ``ingest``'s shape: "no store is wired" and "no
+                notifications are held" are different facts, and answering an
+                empty page would report the second while the first is true.
+            notification_policy: The deterministic ruling of ADR-0130 §4 and §5,
+                wired **together with** ``notifications`` or not at all. §3 puts
+                the ruling inside the store's critical section, so this façade
+                only ever hands it over — it never rules anything itself, and a
+                policy without a store would have nothing to rule about.
             closers: The resources the façade owns, as async close callables, in
                 the order :meth:`aclose` must run them. The composition root hands
                 these over so the façade is the defined owner that releases every
@@ -1095,6 +1168,16 @@ class Engine:
         self._grants = grant_operations
         self._ingestion = ingestion
         self._consolidation = consolidation
+        if (notifications is None) != (notification_policy is None):
+            msg = (
+                "a notification store and a notification policy are wired together or "
+                "not at all: §3 puts the ruling inside the store's critical section, so "
+                "a store with no policy can rule nothing and a policy with no store has "
+                "nothing to rule about (ADR-0130 §3)"
+            )
+            raise ConfigurationError(msg)
+        self._notifications = notifications
+        self._notification_policy = notification_policy
         self._closers = tuple(closers)
         self._id_factory = id_factory
         self._max_outstanding = max_outstanding_confirmations
@@ -1259,7 +1342,8 @@ class Engine:
             if self._trace_retention is None
             else await self._traces.purge_before(_horizon(self._now(), self._trace_retention))
         )
-        return PurgeReport(records=records, questions=questions, traces=traces)
+        held = None if self._notifications is None else await self._notifications.purge()
+        return PurgeReport(records=records, questions=questions, traces=traces, notifications=held)
 
     def _now(self) -> datetime:
         """The guarded clock's reading, as the error of the sweep that read it.
@@ -2010,6 +2094,234 @@ class Engine:
         return await self._tracked(
             self._questions.forget_question(named), "forget_question", checked=True
         )
+
+    # --- the notification surface (ADR-0130 §7, §9) ------------------------
+
+    async def notifications(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[HeldNotification, ...]:
+        """List the notifications being held for the user, oldest first (§7).
+
+        **The only way a notification reaches anyone through this façade.** §7 is
+        unconditional that no notification and no count of notifications is
+        injected into a turn's result, into :meth:`converse`, or into any
+        response to a request that did not ask for it — ADR-0078 §8's third reach
+        applied unchanged, and §11 forbids an implementing lane relaxing it.
+
+        Args:
+            limit: Page size, bounded by default (ADR-0073 §2, §8).
+            offset: How many ordered rows to skip.
+
+        Returns:
+            The page, oldest first, expired records included and rendering as
+            expired.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
+            ConfigurationError: If no notification store is wired.
+            NotificationStoreError: If the store cannot be read.
+        """
+        self._reject_if_closing()
+        page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        check_arguments(
+            "notifications", max_bytes=self._max_payload_bytes, limit=limit, offset=offset
+        )
+        store = self._notification_surface()
+        return await self._tracked(
+            _as_tuple(store.held(limit=limit, offset=offset)), "notifications", checked=True
+        )
+
+    async def dismiss_notification(self, notification_id: Identifier) -> bool:
+        """Dispose of one notification without destroying it (§7, §9).
+
+        The first of the two acts §6 says a surface rendering an interruption
+        should offer in one step. **A dismissal is not a deletion**: the record
+        stays readable and stays in the user's export, and what ends is its
+        actionability — which frees a slot under the cap at once and stops its
+        key suppressing duplicates.
+
+        Args:
+            notification_id: The notification the user named, taken as opaque.
+
+        Returns:
+            Whether an actionable notification was dismissed.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``notification_id`` is blank.
+            ConfigurationError: If no notification store is wired.
+            NotificationStoreError: If the store cannot be written.
+        """
+        self._reject_if_closing()
+        named = identifier(notification_id, name="notification_id")
+        check_arguments(
+            "dismiss_notification",
+            max_bytes=self._max_payload_bytes,
+            notification_id=named,
+        )
+        store = self._notification_surface()
+        return await self._tracked(store.dismiss(named), "dismiss_notification", checked=True)
+
+    async def forget_notification(self, notification_id: Identifier) -> bool:
+        """Destroy one notification (§9, ADR-0004 §6).
+
+        ADR-0007's data right in :meth:`forget_question`'s shape, and
+        unconditional like every other deletion on this façade. Beside
+        :meth:`dismiss_notification` deliberately: that one ends actionability
+        and leaves the record readable, so this is the surface the delete right
+        reaches and that one is not.
+
+        Args:
+            notification_id: The notification the user named, taken as opaque.
+
+        Returns:
+            Whether a notification was destroyed.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``notification_id`` is blank.
+            ConfigurationError: If no notification store is wired.
+            NotificationStoreError: If the store cannot be written.
+        """
+        self._reject_if_closing()
+        named = identifier(notification_id, name="notification_id")
+        check_arguments(
+            "forget_notification",
+            max_bytes=self._max_payload_bytes,
+            notification_id=named,
+        )
+        store = self._notification_surface()
+        return await self._tracked(store.delete(named), "forget_notification", checked=True)
+
+    async def notification_preferences(self) -> NotificationPreferences:
+        """Read the three standing settings that tune proactive contact (§6).
+
+        Answerable from an empty store, which is the point: the tuning surface
+        has to work on the first day, with no history, because the ruling on #879
+        defers the usage anything could be calibrated from.
+
+        Returns:
+            The settings in force, defaulted where the user has set nothing.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ConfigurationError: If no notification store is wired.
+            NotificationStoreError: If the store cannot be read.
+        """
+        self._reject_if_closing()
+        check_arguments("notification_preferences", max_bytes=self._max_payload_bytes)
+        store = self._notification_surface()
+        return await self._tracked(store.preferences(), "notification_preferences", checked=True)
+
+    async def set_notification_preferences(
+        self, preferences: NotificationPreferences
+    ) -> NotificationPreferences:
+        """Write the standing settings and re-arm what the change reaches (§6).
+
+        **The write and the re-arming are one atomic act in the store**, and this
+        façade adds nothing to it: stamping a due instant routes the user's act
+        through §5's one ruling path instead of adding a second, and the
+        reconsideration job picks the records up on its next run.
+
+        Args:
+            preferences: The settings to hold from now on. The whole value, so
+                two concurrent writers cannot each silently drop the other's
+                field.
+
+        Returns:
+            The settings now in force, as the store holds them.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If two rows name one class, or a quiet window carries a
+                timezone or has no readable extent.
+            ConfigurationError: If no notification store is wired.
+            NotificationStoreError: If the store cannot be written.
+        """
+        self._reject_if_closing()
+        check_arguments(
+            "set_notification_preferences",
+            max_bytes=self._max_payload_bytes,
+            preferences=preferences,
+        )
+        store = self._notification_surface()
+        return await self._tracked(
+            _written_preferences(store, preferences),
+            "set_notification_preferences",
+            checked=True,
+        )
+
+    async def reconsider_notifications(self, *, limit: int = DEFAULT_PAGE_SIZE) -> int:
+        """Re-rule every held notification that has fallen due (ADR-0130 §5).
+
+        The **maintenance surface** ADR-0083 §8 puts "on a class in
+        ``orchestration``, not ``core`` contract surface", and §5 is explicit that
+        this is **not** a member of ``AssistantEngine``: no client asks for it and
+        no interface adapter may drive it. Its only caller is the hub's scheduler,
+        whose job body is this bound method and which holds no store — ADR-0083
+        §7's "no job gets new store surface" and §8's "every job is a bound public
+        engine method" both hold unchanged.
+
+        **A late run is not a fault.** ``reconsider_at`` is the instant before
+        which a record may not be reconsidered, never a deadline by which it must
+        have been, on ADR-0083 §7's rule that "a missed or late tick is never a
+        correctness bug". A record another writer moved or resolved between the
+        page and the re-ruling simply reports nothing to do.
+
+        Args:
+            limit: How many due records one run takes, bounded by default.
+
+        Returns:
+            How many records were re-ruled.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``limit`` is outside ``[0, 2**63)``.
+            ConfigurationError: If no notification store is wired.
+            NotificationStoreError: If the store cannot be read or written.
+        """
+        self._reject_if_closing()
+        page_argument(limit, name="limit")
+        return await self._tracked(self._reconsider(limit), "reconsider_notifications", _ruled)
+
+    async def _reconsider(self, limit: int) -> int:
+        """Re-rule one page of due records.
+
+        Args:
+            limit: How many due records to take.
+
+        Returns:
+            How many were re-ruled.
+        """
+        store = self._notification_surface()
+        assert self._notification_policy is not None  # noqa: S101 — wired together (see __init__)
+        ruled = 0
+        for record in await store.due(limit=limit):
+            if await store.reconsider(record.id, policy=self._notification_policy) is not None:
+                ruled += 1
+        return ruled
+
+    def _notification_surface(self) -> NotificationStore:
+        """The wired notification store, or a legible refusal.
+
+        Returns:
+            The store.
+
+        Raises:
+            ConfigurationError: If none is wired, in :meth:`ingest`'s shape — a
+                deployment that has composed no notification store has no held
+                notifications, and saying so is different from answering "none".
+        """
+        if self._notifications is None:
+            msg = (
+                "no notification store is wired, so there are no held notifications to "
+                "read or tune (ADR-0130 §9). The contract surface exists ahead of the "
+                "store the composition root will build for it"
+            )
+            raise ConfigurationError(msg)
+        return self._notifications
 
     async def recent_conversations(
         self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0

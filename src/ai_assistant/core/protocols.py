@@ -139,6 +139,7 @@ if TYPE_CHECKING:
         GoalDeletion,
         GrantableSource,
         GrantScope,
+        HeldNotification,
         Identifier,
         LearnOutcome,
         MemoryDecision,
@@ -150,6 +151,9 @@ if TYPE_CHECKING:
         MemoryWrite,
         Message,
         NonBlankEncodableText,
+        NotificationCandidate,
+        NotificationDisposition,
+        NotificationPreferences,
         ObservationOutcome,
         ObservationReport,
         ParkedBinding,
@@ -4031,6 +4035,599 @@ class DeferralStore(Protocol):
 
 
 @runtime_checkable
+class NotificationPolicy(Protocol):
+    """Rules on one notification candidate — mechanically (ADR-0130 §4, §5).
+
+    **The disposition is mechanical, and no model makes it.** §11 is normative:
+    no implementation may consult a ``ModelProvider``, and no lane may add a
+    model-judged disposition without superseding §4. An interruption a model
+    chose cannot be explained to the user who received it, cannot be tested
+    deterministically, and cannot run when no provider is reachable — which is
+    exactly when a resident process is still noticing.
+
+    **Determinism is an obligation of this contract, not a property of the
+    signature** (§9). For the same candidate, the same standing preferences, the
+    same durable record and the same instant, an implementation returns the same
+    disposition. Every input the ruling depends on is an argument or a
+    construction-time property of the implementation; the ruling is a function of
+    those and of nothing else. The method is ``async`` mirroring
+    :meth:`MemoryPolicy.decide`, and an implementation that awaits anything
+    outside its arguments has already broken the clause above.
+
+    **A producer's confidence, its summary and its choice of class are evidence
+    on the proposal** (§4). An implementation may read them; no clause of §5 is
+    satisfied by a producer asserting that it should be. And **no numeric
+    priority or urgency score is part of this contract** (§11): weighed by a
+    producer a score is self-granted authority, weighed by the policy it is a
+    threshold nobody can calibrate on the first day.
+
+    **The one construction-time input is the timezone.** §6 rules quiet windows
+    read in ``Settings.timezone`` — the same value ADR-0008 §5 gives the temporal
+    context and ADR-0093 §7b binds the calendar reader to — and introduces no
+    second timezone source. It is a property of the implementation rather than an
+    argument because it is configuration read once, and because a caller free to
+    vary it per call could move the user's night.
+
+    **A DST-ambiguous local instant resolves at ``fold=0``**, on ADR-0093 §7b's
+    rule for the same hazard.
+
+    Cancelling this method is governed by this module's cancellation clause
+    (ADR-0060). Input observation (ADR-0065) binds it and is vacuous in practice:
+    every argument is immutable — a frozen model, a ``bool``, an ``int`` or a
+    tz-aware ``datetime``.
+    """
+
+    async def rule(  # noqa: PLR0913 — §4's determinism needs every input the ruling reads to be an argument; bundling them would mint a type §9 does not name
+        self,
+        candidate: NotificationCandidate,
+        *,
+        notification_id: Identifier,
+        preferences: NotificationPreferences,
+        now: UtcInstant,
+        duplicate: bool,
+        at_cap: bool,
+        budget_spent: int,
+        budget_frees_at: UtcInstant | None,
+    ) -> NotificationDisposition:
+        """Rule on one candidate against the standing state as it then is (§5).
+
+        **Four conditions are evaluated first, in the order
+        :data:`~ai_assistant.core.types.DROP_CONDITIONS` states them, and each
+        yields ``DROP`` naming itself as the reason**: the candidate declares an
+        expiry not later than ``now``; the reach level for its class is ``off``;
+        it duplicates an actionable record; the store is at its cap. A candidate
+        that passes all four is ruled ``INTERRUPT`` when **every** condition of
+        :data:`~ai_assistant.core.types.INTERRUPT_CONDITIONS` holds, and ``HOLD``
+        otherwise — naming the first unsatisfied one, which for a candidate
+        declaring no expiry at all is the expiry condition.
+
+        **``HOLD`` is the outcome whenever no clause selects another**, and it is
+        not silence: a held record is readable through §7's enumeration, and what
+        ``HOLD`` withholds is the *interruption*, which is the scarce thing.
+
+        **Sensitivity is not a condition here.** A ``DataTier.SECRET`` candidate
+        is refused by
+        :class:`~ai_assistant.core.types.NotificationCandidate`'s own validator
+        and reaches no ruling (§2).
+
+        **The returned ``HOLD`` carries the whole set of conditions that failed,
+        not the first alone** (§5). The reason names the first for rendering; the
+        set is what §6 reads when a standing setting is written, and a rule that
+        read the reason instead would miss a record whose *second* failure is the
+        one the setting change removes. ``reconsider_at`` is set to the earliest
+        instant at which every failing condition could next hold, and is left
+        unset where any of them is not one time alone resolves — the reach level
+        and an absent expiry are each such a condition.
+
+        Args:
+            candidate: The proposal to rule on.
+            notification_id: The id of the record this ruling would produce or
+                update. Always stamped onto the returned disposition; a store
+                that ruled ``DROP`` on an *offer* clears it before returning,
+                because §8 writes no durable record for one.
+            preferences: The standing settings in force, which an empty store
+                supplies as
+                :class:`~ai_assistant.core.types.NotificationPreferences`'
+                shipped defaults (§6).
+            now: The ruling instant, tz-aware. Every comparison in §5 is made
+                against this one value rather than against a clock this
+                implementation reads, which is half of what makes the ruling
+                reproducible.
+            duplicate: Whether an **actionable** record already carries this
+                candidate's key (§8). A reconsideration passes ``False``: it is
+                not an offer and never matches itself (§5).
+            at_cap: Whether the store holds its cap of **actionable** records
+                (§7). A reconsideration passes ``False``: the record already
+                occupies its slot, so the cap is not a condition of re-ruling it.
+            budget_spent: How many ``INTERRUPT`` dispositions the store has
+                recorded inside ``preferences.budget_window`` ending at ``now``.
+                A unit is spent when a disposition is **recorded**, never when
+                contact is attempted and never when it succeeds (§5).
+            budget_frees_at: When that window next falls below the budget, or
+                ``None`` where time alone will not free a unit — which a budget
+                of zero is. Read only to stamp ``reconsider_at``.
+
+        Returns:
+            The ruling, naming the condition that decided it.
+        """
+        ...
+
+
+@runtime_checkable
+class NotificationWriter(Protocol):
+    """The one seam a producer holds, and the whole of what it may do (§1, §3).
+
+    **A producer holds no channel, no delivery seam and no client connection**
+    (§1). Its only outcome is the disposition this seam returns, and it may take
+    no other action on the strength of having produced a candidate. It may not
+    select its own disposition, exempt itself from §5, or write to the store
+    other than through here.
+
+    This is ADR-0093 §1's posture applied to the other end of the system: the
+    producer notices; it does not decide, and it does not deliver. In practice
+    the first producers will be scheduler jobs of ADR-0083 §7's shape, driven
+    from the composition root — but this contract names none of them, because
+    what makes proactive contact safe is that producing is not delivering, not
+    that some list of producers was blessed.
+
+    **Any component may hold this seam**, subject to the import boundaries
+    ``lint-imports`` enforces and to its own contract. ADR-0130 §1 widens no
+    existing prohibition and leaves ADR-0093 §1's rule that a ``Reader`` "takes
+    no store handle, no writer, no policy and no engine" unchanged — so a
+    ``Reader`` may **not** hold this seam.
+
+    **One call, because conflict detection is not a separate stage** — ADR-0028
+    §3's ruling for the memory write path, and the same holds here (§3).
+
+    Every method raises
+    :class:`~ai_assistant.core.errors.NotificationStoreError` for a store fault.
+
+    Cancelling this method is governed by this module's cancellation clause
+    (ADR-0060), and how it observes its argument by the input-observation clause
+    (ADR-0065) — vacuous here, the argument being a frozen model.
+    """
+
+    async def offer(self, candidate: NotificationCandidate) -> NotificationDisposition:
+        """Offer one candidate, and report what was ruled about it (§3).
+
+        Reads the standing preferences and the durable record, asks the injected
+        :class:`NotificationPolicy` to rule, records the ruling where §8 requires
+        a record, and returns the disposition.
+
+        **The duplicate lookup of §8, the cap check of §7, the budget read of §6,
+        the ruling of §5 and the writing of any record are one atomic act in the
+        store** (§3). Two offers made concurrently may not both proceed on the
+        strength of the same last remaining unit of budget, the same last free
+        slot under the cap, or the same absence of an actionable record for one
+        key. Without that, all three of those guarantees are advisory — a
+        ``HOLD`` racing another ``HOLD`` breaks duplicate suppression and the cap
+        exactly as a raced ``INTERRUPT`` breaks the budget.
+
+        **A ``DROP`` writes no durable record; a ``HOLD`` and an ``INTERRUPT``
+        do** (§8), and the returned disposition names the record where there is
+        one.
+
+        **Offering the same thing again is expected and is safe** (§8). A
+        producer that re-notices the same fact on every tick is behaving as
+        designed: no producer may require a durable cursor in order to be
+        correct, and the candidate key is what makes that so.
+
+        Args:
+            candidate: What the producer noticed, and what it says the user might
+                be told. Its ``candidate_key`` is what §8 deduplicates on.
+
+        Returns:
+            The ruling, naming the condition that decided it and the record it
+            produced where §8 required one.
+
+        Raises:
+            NotificationStoreError: If the store cannot be read or written.
+        """
+        ...
+
+
+@runtime_checkable
+class NotificationStore(Protocol):
+    """The durable home of held notifications and the user's standing settings.
+
+    ADR-0130 §9's third contract: it holds the durable records, the standing
+    preferences of §6, the cap of §7, the enumerations §7's read surface serves,
+    and the records due for reconsideration under §5.
+
+    **A Tier 1 store, and Tier 1 only.** A candidate carries free text a producer
+    wrote to be shown to a person, so this store inherits every obligation the
+    ``MemoryStore`` carries under ADR-0004 and ADR-0007 — the same data
+    directory and file permissions, inclusion in :meth:`export`, destructible on
+    request. A ``DataTier.SECRET`` candidate is **never held**:
+    :class:`~ai_assistant.core.types.NotificationCandidate` refuses one at
+    validation, so no conforming store can hold one however it is called, in any
+    disposition and under any setting (§2).
+
+    **Actionable is the population every rule here reads.** The cap counts
+    actionable records and no others, so dismissing frees capacity at once and an
+    expired record holds none; §8's duplicate rule reads the same population, so
+    a fact that recurs after its notification expired or was dismissed is a new
+    candidate and not a duplicate. Retention then runs from the instant a record
+    **ceased** to be actionable, and no record is purged while it is still
+    actionable, whatever its retention — which is what makes §8's suppression
+    guarantee unconditional (§7).
+
+    **The cap refuses; it never evicts** (§7, §11). At the cap a new candidate is
+    ruled ``DROP`` naming the cap and no existing record is displaced. §11 makes
+    that unrelaxable by an implementing lane, together with §7's rule that no
+    notification and no count of notifications is injected into a turn.
+
+    **The store produces every record; a caller hands none in.** ``id``,
+    ``admitted_at``, ``ruled_at`` and ``retention`` are the store's own — the
+    first two from its injected clock, the last from the retention it was
+    constructed with — for :class:`~ai_assistant.core.types.DeferredProposal`'s
+    reason: each decides something a caller would otherwise be deciding for
+    itself, and a validator that only checks the fields agree with each other
+    cannot catch it.
+
+    **The cap and the retention are constructor parameters, validated at
+    construction**, the ``_check_tuning`` arrangement ADR-0022 §4a ratified and
+    for its reason: a bad value here disables a stage while the system reports
+    health. It also means the retention is read **once per store**, never per
+    operation, which is the other half of §7's rule that a stamped duration is
+    never consulted from the setting afterwards.
+
+    Every method raises
+    :class:`~ai_assistant.core.errors.NotificationStoreError` for a store fault.
+    Where a method has a spelling for absence or refusal — the ``None`` from
+    :meth:`get` and :meth:`reconsider`, the ``bool`` of :meth:`dismiss` and
+    :meth:`delete` — that spelling is used and nothing is raised. A malformed
+    paging argument is a ``ValueError``, ADR-0073 §2's posture inherited rather
+    than restated.
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060). Input observation (ADR-0065) binds it too and is vacuous in
+    practice: every argument this seam takes is immutable — a ``str``, an
+    ``int``, or a frozen model.
+    """
+
+    @property
+    def cap(self) -> int:
+        """The most **actionable** records this store holds (ADR-0130 §7).
+
+        Exactly an integer in ``0 < value < 2**63``, fixed at construction. There
+        is deliberately no spelling for "unlimited": a cap of ``0`` is at
+        capacity before its first admission, and the duration axis is where the
+        deliberate escape lives (``retention`` of ``None``).
+
+        Published because a conformance suite cannot test a boundary nobody
+        stated, and because a surface rendering "you are at capacity" needs the
+        number rather than an inference from a refusal.
+        """
+        ...
+
+    async def admit(
+        self, candidate: NotificationCandidate, *, policy: NotificationPolicy
+    ) -> NotificationDisposition:
+        """Rule on an offered candidate and record the ruling — atomically (§3).
+
+        **The whole act is one atomic act in this store**: the duplicate lookup
+        of §8, the cap check of §7, the budget read of §6, the ruling of §5 and
+        the writing of any record. Two calls made concurrently may not both
+        proceed on the strength of the same last remaining unit of budget, the
+        same last free slot under the cap, or the same absence of an actionable
+        record for one key.
+
+        **The policy is an argument rather than a collaborator this store
+        holds**, and that is what makes the atomicity above expressible: the
+        ruling happens *inside* the critical section, so no window exists between
+        reading the state and writing the record it was ruled against. The store
+        neither chooses the policy nor rules anything itself — it supplies §5's
+        four store-side facts and applies what comes back.
+
+        **A ``DROP`` writes no durable record** (§8), and the disposition
+        returned for one carries no ``notification_id``: there is no record to
+        name. A ``HOLD`` and an ``INTERRUPT`` each write one, stamped with this
+        store's ``admitted_at`` and its constructed retention.
+
+        Args:
+            candidate: What was noticed. Refused before this store is reached if
+                its sensitivity is Tier 0 or its expiry has already passed (§2).
+            policy: The ruling, asked inside this store's critical section.
+
+        Returns:
+            The disposition, naming the condition that decided it.
+
+        Raises:
+            NotificationStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def reconsider(
+        self, notification_id: str, *, policy: NotificationPolicy
+    ) -> NotificationDisposition | None:
+        """Re-rule one held record that has fallen due, in place (§5).
+
+        **A reconsideration is not a new offer.** It introduces no second record,
+        §8's duplicate rule does not read the record being reconsidered as a
+        duplicate of itself, and the cap is not consulted — the record already
+        holds its slot. The policy rules it afresh against the standing state as
+        it then is, and the existing record is updated in place, atomically on
+        §3's clause.
+
+        **A late reconsideration is not a fault.** ``reconsider_at`` is the
+        instant *before* which a record may not be reconsidered, never a deadline
+        by which it must have been, on ADR-0083 §7's rule that "a missed or late
+        tick is never a correctness bug".
+
+        **A reconsideration ruled ``INTERRUPT`` spends a unit of budget like any
+        other ruling**, and ruled ``HOLD`` carries a fresh ``reconsider_at`` on
+        the same rule. **It never deletes a record and never writes a second
+        one**: ruled ``DROP`` — by expiry, or by a reach level lowered to ``off``
+        since the hold — it records that disposition, the record ceases to be
+        actionable, and §7's retention is what removes it.
+
+        Args:
+            notification_id: The record to re-rule.
+            policy: The ruling, asked inside this store's critical section.
+
+        Returns:
+            The fresh disposition, or ``None`` where the id named nothing, or
+            named a record that is not actionable or has not fallen due. The
+            ``None`` is a spelling for "there was nothing to do", not a fault:
+            a job driving this over a page of due records races other writers by
+            construction.
+
+        Raises:
+            NotificationStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def due(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> list[HeldNotification]:
+        """The actionable records whose ``reconsider_at`` has arrived (§5).
+
+        The read half of the reconsideration operation: a caller enumerates here
+        and re-rules each through :meth:`reconsider`, which is what keeps the
+        ruling inside this store's critical section while the *loop* stays on the
+        concrete engine where ADR-0083 §8 puts a maintenance surface.
+
+        Ordered by ``reconsider_at`` ascending with ``id`` ascending as tie-break,
+        so the record that has been due longest is on the first page.
+
+        Args:
+            limit: How many to return; defaults to
+                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`.
+            offset: How many to skip.
+
+        Returns:
+            A detached snapshot of the due records, oldest due first.
+
+        Raises:
+            ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
+            NotificationStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def held(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> list[HeldNotification]:
+        """The retained records, for the enumeration §7's read surface serves.
+
+        **Every retained record, not only the actionable ones.** §7 is explicit
+        that expiry "deletes nothing, and an expired record stays enumerable and
+        renders as expired", so filtering here would hide from the user the
+        record whose moment passed — which is most of what there is to say about
+        a notification.
+
+        Ordered **oldest first**, by ``admitted_at`` ascending with ``id``
+        ascending as tie-break, on ADR-0078 §7's ordering and for its reason: the
+        cap refuses rather than evicts, so the record blocking a newer one is the
+        oldest actionable one and belongs on the first page. §11 declines an
+        urgency-ordered or imminent-expiry view here as ADR-0078 §7 declined it
+        there.
+
+        Args:
+            limit: How many to return; defaults to
+                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`.
+            offset: How many to skip.
+
+        Returns:
+            A detached snapshot of frozen records, oldest first.
+
+        Raises:
+            ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
+            NotificationStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def get(self, notification_id: str) -> HeldNotification | None:
+        """One record by id, or ``None`` where the id names nothing.
+
+        Args:
+            notification_id: The record to read.
+
+        Returns:
+            A detached snapshot, or ``None``.
+
+        Raises:
+            NotificationStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def dismiss(self, notification_id: str) -> bool:
+        """End one record's actionability, leaving it readable (§7, §9).
+
+        **A dismissal is not a deletion.** The record stays enumerable and stays
+        in :meth:`export`; what ends is its actionability, which frees a slot
+        under the cap **at once** and stops its key suppressing duplicates. That
+        last part is deliberate: a fact that recurs after its notification was
+        dismissed is a new candidate, because the user has already disposed of
+        the old one.
+
+        Retention runs from this instant, not from admission (§7).
+
+        Dismissing a record that is already not actionable changes nothing and
+        reports ``False``: the cessation instant a retention horizon is measured
+        from may not be moved by a second call.
+
+        Args:
+            notification_id: The record to dismiss.
+
+        Returns:
+            ``True`` if an actionable record was dismissed, ``False`` if the id
+            named nothing or named a record that was already not actionable.
+
+        Raises:
+            NotificationStoreError: If the store cannot be written.
+        """
+        ...
+
+    async def preferences(self) -> NotificationPreferences:
+        """The three standing settings in force (§6).
+
+        **An empty store is a working policy.** A store holding no preference
+        returns
+        :class:`~ai_assistant.core.types.NotificationPreferences`' shipped
+        defaults — reach ``hold`` for every class, no quiet windows, and three
+        interruptions per rolling twenty-four hours — so no setting is a
+        precondition of the system running and the tuning surface works on the
+        first day, from an empty store, with no history.
+
+        Returns:
+            The settings, defaulted where the user has set nothing.
+
+        Raises:
+            NotificationStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def set_preferences(self, preferences: NotificationPreferences) -> int:
+        """Write the standing settings, and re-arm what the change reaches (§6).
+
+        **The write and the re-arming are one atomic act.** Writing a standing
+        setting sets ``reconsider_at`` to the instant of the write on every
+        **actionable held** record whose *failed-condition set* holds a condition
+        that change could remove. ``reconsider_at`` is a floor, so this may move
+        a record's due instant earlier as well as give it one — and a record
+        whose set holds only the expiry condition is reached by no setting and
+        keeps the stamp its ruling gave it.
+
+        **Reading the whole failed set is what makes the rule correct, and the
+        first reason is not.** A candidate inside a quiet window closing at 08:00
+        whose budget is also spent until 10:00 is held with two failures and due
+        at 10:00. If the user raises the budget at 07:30, a rule reading only the
+        recorded first reason sees "quiet window", leaves the record at 10:00,
+        and loses the two hours the user just bought.
+
+        **Lowering a class's reach to ``off`` is the one change that reads no
+        failed set**: it makes **every** actionable held record of that class due
+        at the instant of the write, so each is ruled ``DROP`` on the next
+        reconsideration and ceases to be actionable. "Never tell me this" reaches
+        what is already held, not only what comes next — the one direction where
+        under-reaching costs the user something rather than the machine.
+
+        **No setting change reaches a record already ruled ``INTERRUPT``** (§6).
+        Reconsideration is an operation on a *held* record throughout, and
+        whether contact already handed to a channel can be recalled is the
+        delivery seam's question, not this one's.
+
+        **Nothing here re-rules anything.** Stamping the write instant routes the
+        act through §5's one ruling path instead of adding a second, and the
+        reconsideration job picks the records up on its next run.
+
+        Args:
+            preferences: The settings to hold from now on, replacing what is
+                held. A caller changing one setting reads, adjusts and writes
+                back the whole value, so two concurrent writers cannot each
+                silently drop the other's field.
+
+        Returns:
+            How many records the write made due for reconsideration.
+
+        Raises:
+            NotificationStoreError: If the store cannot be written.
+        """
+        ...
+
+    async def delete(self, notification_id: str) -> bool:
+        """Destroy one record — **unconditionally** (§9, ADR-0004 §6).
+
+        ADR-0007's data right, shaped as ``DeferralStore.delete``. No state
+        refuses it, and it is a different act from :meth:`dismiss`: a dismissal
+        ends actionability and leaves the record readable, so the *delete*
+        surface is what ADR-0004 §6's delete right reaches.
+
+        Destroying the record destroys its ``candidate_key`` with it, so the same
+        observation may be proposed again and admitted afresh.
+
+        Args:
+            notification_id: The record to destroy.
+
+        Returns:
+            ``True`` if a record was removed, ``False`` if the id named nothing.
+
+        Raises:
+            NotificationStoreError: If the store cannot be written.
+        """
+        ...
+
+    async def clear(self) -> int:
+        """Destroy every record, whatever its state (§9, ADR-0007).
+
+        The sweep half of the data right, shaped as ``DeferralStore.clear`` and
+        unconditional in the same way :meth:`delete` is. It does **not** reset the
+        standing preferences: those are the user's settings rather than the
+        user's notifications, and a sweep that silently restored every class to
+        ``hold`` would undo a "never tell me this" the user meant to keep.
+
+        Returns:
+            How many records were destroyed.
+
+        Raises:
+            NotificationStoreError: If the store cannot be written.
+        """
+        ...
+
+    async def export(self) -> list[HeldNotification]:
+        """Return every stored record, for the user's own data export (ADR-0004 §6).
+
+        A plain list of the frozen record type, matching ``DeferralStore.export``
+        rather than minting a bespoke export type. Every record is included,
+        dismissed, expired and dropped alike: the content is the user's and the
+        export is theirs.
+
+        Raises:
+            NotificationStoreError: If the store cannot be read, or a stored
+                record is corrupt.
+        """
+        ...
+
+    async def purge(self) -> int:
+        """Sweep the records retention has released (§7).
+
+        Called by the retention purge job ADR-0083 §7 already runs, in the shape
+        it already calls ``MemoryStore.purge_expired`` and ``DeferralStore.purge``.
+
+        A record is purgeable only once it is **no longer actionable** and its
+        stamped retention has elapsed past the horizon — never at it
+        (:meth:`~ai_assistant.core.types.HeldNotification.is_purgeable_at`). Both
+        halves are load-bearing: **no record is purged while it is still
+        actionable, whatever its retention**, so a record's key suppresses
+        duplicates for the whole time §8 says it does; and ``retention is None``
+        is a complete answer rather than an undefined expression — such a record
+        is never purged.
+
+        **The retention read is the record's, never the live setting's** (§7), so
+        a configuration change never reaches back and shortens the horizon of a
+        record already admitted.
+
+        Returns:
+            How many records were removed.
+
+        Raises:
+            NotificationStoreError: If the store cannot be written.
+        """
+        ...
+
+
+@runtime_checkable
 class TraceSink(Protocol):
     """Where an emitter puts a trace, and the only trace seam a subsystem holds.
 
@@ -4673,6 +5270,146 @@ class AssistantEngine(Protocol):
         Raises:
             ValueError: If ``question_id`` is blank.
             DeferralStoreError: If reading or updating the queue failed.
+        """
+        ...
+
+    # --- the notification surface (ADR-0130 §7, §9) -----------------------
+    # Contract surface, because `AssistantEngine` is a Protocol in this file
+    # (§9). Five methods and no more: **reconsideration is deliberately absent**
+    # — it is part of the maintenance surface ADR-0083 §8 places "on a class in
+    # `orchestration`, not `core` contract surface", no client asks for it, and
+    # no interface adapter may drive it.
+
+    async def notifications(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[HeldNotification, ...]:
+        """List the notifications the assistant is holding for the user (§7).
+
+        **Held notifications are reachable only through this explicit
+        enumeration.** No notification, and no count of notifications, is
+        injected into a turn's result, into :meth:`converse`, or into any
+        response to a request that did not ask for it — ADR-0078 §8's third reach
+        applied unchanged, because a turn's content may not depend on queue
+        depth. Its count-on-every-turn variant stays declined and its "revisit
+        when the hub can push" trigger unfired, the hub still being unable to
+        push (ADR-0094 §2, ADR-0084 §3).
+
+        **Every retained record, oldest first**, including one whose moment has
+        passed: expiry ends interruptibility and actionability but deletes
+        nothing, so an expired record is still enumerated and renders as expired
+        (§7).
+
+        Args:
+            limit: How many to return; defaults to
+                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`.
+            offset: How many to skip.
+
+        Returns:
+            The page, oldest first.
+
+        Raises:
+            ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
+            NotificationStoreError: If reading the store failed.
+        """
+        ...
+
+    async def dismiss_notification(self, notification_id: Identifier) -> bool:
+        """Dispose of one notification, without destroying it (§7, §9).
+
+        The first of the two acts §6 says a surface rendering an interruption
+        should offer in one step; lowering that class's reach through
+        :meth:`set_notification_preferences` is the other.
+
+        **A dismissal is not a deletion.** The record stays readable and stays in
+        the user's export; what ends is its actionability, which frees a slot
+        under the cap at once and stops its key suppressing duplicates — so a
+        fact that recurs after the user dismissed its notification is a new
+        candidate rather than a duplicate (§7, §8).
+
+        Args:
+            notification_id: The notification to dismiss.
+
+        Returns:
+            Whether an actionable notification was dismissed. ``False`` where the
+            id named nothing, or named one already dismissed, expired or dropped.
+
+        Raises:
+            ValueError: If ``notification_id`` is blank.
+            NotificationStoreError: If reading or updating the store failed.
+        """
+        ...
+
+    async def forget_notification(self, notification_id: Identifier) -> bool:
+        """Destroy one notification, so its subject can be proposed again (§9).
+
+        ADR-0004 §6's delete right, in the shape :meth:`forget_question` takes.
+        Beside :meth:`dismiss_notification` deliberately: a dismissal ends
+        actionability and leaves the record readable, so this is the surface the
+        delete right reaches and that one is not.
+
+        Args:
+            notification_id: The notification to destroy.
+
+        Returns:
+            Whether a notification was destroyed. ``False`` where the id named
+            nothing.
+
+        Raises:
+            ValueError: If ``notification_id`` is blank.
+            NotificationStoreError: If reading or updating the store failed.
+        """
+        ...
+
+    async def notification_preferences(self) -> NotificationPreferences:
+        """Read the three standing settings that tune proactive contact (§6).
+
+        **An empty store is a working policy**: reach ``hold`` for every class
+        including one no preference names, no quiet windows, and three
+        interruptions per rolling twenty-four hours. So this is answerable on the
+        first day, from an empty store, with no history — which is what makes the
+        tuning surface reachable before there is any usage to learn from.
+
+        Returns:
+            The settings in force, defaulted where the user has set nothing.
+
+        Raises:
+            NotificationStoreError: If reading the store failed.
+        """
+        ...
+
+    async def set_notification_preferences(
+        self, preferences: NotificationPreferences
+    ) -> NotificationPreferences:
+        """Write the three standing settings, and re-arm what the change reaches (§6).
+
+        **Which is exactly why a setting change re-rules what is already held.**
+        Reach is not a condition time resolves, so a record held because its
+        class was at ``hold`` carries no ``reconsider_at`` from its ruling and
+        would otherwise sit there until it expired — the user raises the class,
+        agrees to be interrupted, and is not. The write stamps its own instant
+        onto the records it actually reaches, and the reconsideration job picks
+        them up on its next run.
+
+        **Lowering a class to ``off`` reaches every actionable held record of
+        that class**, whatever it was held for, so "never tell me this" reaches
+        what is already held and not only what comes next. **No setting change
+        reaches a record already ruled ``INTERRUPT``**: whether contact already
+        handed to a channel can be recalled is the delivery seam's question.
+
+        **The whole value is written, not one field.** A caller changing one
+        setting reads, adjusts and writes back, so two concurrent writers cannot
+        each silently drop the other's field.
+
+        Args:
+            preferences: The settings to hold from now on.
+
+        Returns:
+            The settings now in force, as the store holds them.
+
+        Raises:
+            ValueError: If two rows name the same notification class, or a quiet
+                window carries a timezone or has no readable extent.
+            NotificationStoreError: If writing the store failed.
         """
         ...
 
