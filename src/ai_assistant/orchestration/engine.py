@@ -107,6 +107,7 @@ from ai_assistant.core.types import (
     LearnOutcome,
     MemoryDecisionKind,
     MemoryKind,
+    NotificationDispositionKind,
     ParkedBinding,
     QueuedQuestion,
     QueueOutcome,
@@ -158,7 +159,9 @@ if TYPE_CHECKING:
         Identifier,
         MemoryRecord,
         NonBlankEncodableText,
+        NotificationCandidate,
         NotificationDelivery,
+        NotificationDisposition,
         NotificationPreferences,
         ObservationReport,
         PermissionDecision,
@@ -2407,6 +2410,42 @@ class Engine:
         positive_page_argument(page, name="page")
         return await self._tracked(self._reconsider(page), "reconsider_notifications", _ruled)
 
+    async def _hand_off(
+        self, ruling: NotificationDisposition, candidate: NotificationCandidate
+    ) -> None:
+        """Give a freshly ruled ``INTERRUPT`` to the outbox, now (ADR-0131 §3b).
+
+        **The live handoff is the primary path, and reconsideration is one of its
+        call sites.** §3b: "a hub that committed a disposition, spent its budget
+        and simply never called ``offer`` broke no rule here, while a device sat on
+        an outstanding long poll receiving nothing", and it names this path
+        specifically — "It is also the reconsideration path's answer without a
+        second clause — ADR-0130 §5 rules a held record to ``INTERRUPT`` through
+        the same writer, so the same handoff runs." Without this call the
+        notification the user's own setting change made actionable waits for a
+        restart, which is precisely what §3b forbids reconciliation from being:
+        "a repair that is also the primary path is a design where the ordinary case
+        waits on a restart".
+
+        The handoff belongs here because this path already holds both halves — it
+        has just received the disposition and it holds the candidate — so nothing
+        needs to be looked up and no scheduler needs to exist.
+
+        **A terminal refusal ends the record**, and the outbox does that itself:
+        ``offer`` dismisses on ``TOO_LARGE`` and ``KEY_COLLISION`` (§3b), so no
+        refusal leaves an actionable record with no entry. A
+        ``NotificationOutboxError`` propagates: no custody transferred, the record
+        stays actionable, and the next reconciliation offers it.
+
+        A deployment with no outbox composed hands off nothing, which is the CLI's
+        case: it serves no poll, so there is nowhere for a notification to go.
+        """
+        if self._notification_outbox is None:
+            return
+        if ruling.kind is not NotificationDispositionKind.INTERRUPT:
+            return
+        await self._notification_outbox.offer(candidate)
+
     async def _reconsider(self, page: int) -> int:
         """Drain the due set, a page at a time.
 
@@ -2451,8 +2490,10 @@ class Engine:
             before = ruled
             for record in fresh:
                 seen.add(record.id)
-                if await store.reconsider(record.id, policy=policy) is not None:
+                ruling = await store.reconsider(record.id, policy=policy)
+                if ruling is not None:
                     ruled += 1
+                    await self._hand_off(ruling, record.candidate)
             if ruled == before:
                 break
         return ruled
