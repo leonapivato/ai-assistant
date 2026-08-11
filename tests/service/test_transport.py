@@ -124,11 +124,14 @@ async def test_beyond_the_connection_ceiling_the_listener_refuses(tmp_path: Path
     inside its deadline".
     """
     # **A ceiling of one is no longer expressible**, and that is ADR-0131 §5a's
-    # consequence rather than this case drifting: `hub_max_delivery_connections`
-    # is refused at load unless it is at least 1 *and* strictly below
+    # consequence rather than this case drifting: `hub_max_delivery_connections` is
+    # refused at load unless it is at least 1 *and* strictly below
     # `hub_max_connections`, so a hub serving delivery needs at least two slots —
     # which is the sub-bound's whole point, a slot for a poller and a slot for the
-    # owner's CLI. The ceiling is therefore two here and two connections are held.
+    # owner's CLI. ADR-0134 §3 records the narrowing, and records this move as the
+    # right way round: "two pre-existing cases in `tests/service/test_transport.py`
+    # move from a ceiling of one to two rather than being exempted from the rule".
+    # The ceiling is therefore two here and two connections are held.
     async with _listening(
         tmp_path,
         hub_max_connections=2,
@@ -165,7 +168,7 @@ async def test_inside_the_ceiling_a_client_is_served(tmp_path: Path) -> None:
     ) as hub:
         # One slot held, so the client below takes the *last* one — which is what
         # keeps this "at the ceiling" now that ADR-0131 §5a makes a ceiling of one
-        # unexpressible for a hub that serves delivery.
+        # unexpressible for a hub that serves delivery (ADR-0134 §3 records it).
         held_reader, held_writer = await asyncio.open_unix_connection(str(hub.path))
         try:
             await asyncio.sleep(0)

@@ -1714,3 +1714,71 @@ def test_neither_agent_setting_is_an_identity() -> None:
 
     assert "client_overlay_agent_socket" in fields
     assert not {name for name in fields if "identity" in name}
+
+
+class TestTheOutboxByteDefaultIsARule:
+    """ADR-0134 §1: the greater of 1 MiB and the *configured* frame ceiling."""
+
+    def test_the_shipped_deployment_gets_the_frame_ceiling(self) -> None:
+        """The unconfigured hub, which ADR-0131 §5a's own two figures refused.
+
+        §5a gave this field a default of 1 MiB and a range of
+        ``>= hub_max_frame_bytes``, and ADR-0084 §3 ships a 16 MiB ceiling — so a
+        hub with no configuration at all could not load. ADR-0134 replaces the
+        Default column with a rule the range always satisfies.
+        """
+        assert Settings().hub_notification_outbox_bytes == 16 * 1024 * 1024
+
+    def test_a_lowered_ceiling_gets_the_1_mib_floor(self) -> None:
+        """§1's floor half, and the case a *static* default would get wrong.
+
+        This is the whole reason §1 is a rule over the configured value rather than
+        a figure: a default computed from ADR-0084 §3's *named* 16 MiB agrees with
+        §1 on an unmodified deployment and diverges the moment an operator lowers
+        the ceiling — 16 MiB where the rule says 1 MiB, looser than ratified.
+        """
+        settings = Settings(hub_max_frame_bytes=512 * 1024)
+
+        assert settings.hub_notification_outbox_bytes == 1024 * 1024
+
+    def test_a_raised_ceiling_carries_the_default_up_with_it(self) -> None:
+        """§1's other half: above 1 MiB the ceiling is the greater of the two."""
+        settings = Settings(hub_max_frame_bytes=32 * 1024 * 1024)
+
+        assert settings.hub_notification_outbox_bytes == 32 * 1024 * 1024
+
+    def test_the_resolved_default_always_satisfies_the_range(self) -> None:
+        """§1: "the range for this field is unchanged and is what this default
+        satisfies"."""
+        for ceiling in (1024, 512 * 1024, 1024 * 1024, 4 * 1024 * 1024, 2**31):
+            settings = Settings(hub_max_frame_bytes=ceiling)
+
+            assert settings.hub_notification_outbox_bytes >= settings.hub_max_frame_bytes
+
+    def test_a_configured_value_is_still_refused_below_the_ceiling(self) -> None:
+        """§1: refused "whether it came from an operator or from this default"."""
+        with pytest.raises(ValidationError, match="ADR-0134 §1"):
+            Settings(hub_max_frame_bytes=4 * 1024 * 1024, hub_notification_outbox_bytes=1024 * 1024)
+
+    def test_a_configured_value_is_never_overwritten_by_the_rule(self) -> None:
+        """The rule fills an *absent* value and decides nothing an operator set."""
+        settings = Settings(
+            hub_max_frame_bytes=1024 * 1024, hub_notification_outbox_bytes=8 * 1024 * 1024
+        )
+
+        assert settings.hub_notification_outbox_bytes == 8 * 1024 * 1024
+
+    def test_the_field_stays_a_non_nullable_integer(self) -> None:
+        """ADR-0134 §2: no sentinel reaches the settings surface.
+
+        "A nullable field, or an out-of-range marker like ``0`` or ``-1`` — would
+        each put a value in the settings surface that §5a ruled out." Absence is
+        distinguished before validation, so the public field never holds one.
+        """
+        with pytest.raises(ValidationError):
+            Settings(hub_notification_outbox_bytes=None)  # type: ignore[arg-type]  # the refusal is the subject
+
+    def test_an_unparseable_ceiling_is_left_to_the_field_validators(self) -> None:
+        """A fault is reported where it happened, not buried under a guess."""
+        with pytest.raises(ValidationError, match="hub_max_frame_bytes"):
+            Settings(hub_max_frame_bytes="not-a-number")  # type: ignore[arg-type]  # the refusal is the subject
