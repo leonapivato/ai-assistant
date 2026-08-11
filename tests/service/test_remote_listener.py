@@ -353,6 +353,72 @@ async def test_an_enrolled_device_presenting_its_credential_is_served(tmp_path: 
             assert (await peer.receive()).kind is env.FrameKind.RESULT
 
 
+async def test_an_enrolled_device_can_poll_for_a_notification(tmp_path: Path) -> None:
+    """ADR-0131 §1, over the transport the seam exists for.
+
+    **The listener that forgets to hand its registry to the wire fails only here.**
+    `_claim_delivery` treats a missing registry as a violation and closes before
+    dispatch, which is the safe direction — a listener answering polls while
+    enforcing no one-connection rule would hand out slots §5's sub-bound cannot see
+    — but it means the omission looks exactly like a healthy hub from every other
+    test: the handshake succeeds, ordinary requests are served, and only
+    `next_notification` is closed. So an enrolled device that completes the
+    handshake and then polls is the case that catches it, and nothing else does.
+    """
+    async with _remote(tmp_path) as hub:
+        minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        async with _dialling(hub) as peer:
+            assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
+
+            await peer.send(
+                env.Envelope(
+                    kind=env.FrameKind.REQUEST,
+                    id="r-0",
+                    payload={"budget": 0.0},
+                    method="next_notification",
+                )
+            )
+
+            assert (await peer.receive()).kind is env.FrameKind.RESULT
+
+
+async def test_a_remote_poll_claims_the_shared_delivery_slot(tmp_path: Path) -> None:
+    """ADR-0131 §3: one registry per hub, and the remote listener claims from it.
+
+    Asserted through the *second* device rather than by reading the registry: with
+    the sub-bound at one, a second enrolled device's poll must be refused, which is
+    only true if the first claimed from the object the listener actually holds.
+    """
+    async with _remote(tmp_path, hub_max_delivery_connections=1) as hub:
+        first = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        async with _dialling(hub) as peer:
+            assert (await peer.connect(first.credential)).kind is env.FrameKind.CONNECT_ACK
+            await peer.send(
+                env.Envelope(
+                    kind=env.FrameKind.REQUEST,
+                    id="r-0",
+                    payload={"budget": 0.0},
+                    method="next_notification",
+                )
+            )
+            assert (await peer.receive()).kind is env.FrameKind.RESULT
+
+            # The connection holds its claim for the rest of its life (§2a), so a
+            # second poll on a *new* connection from the same device is closed.
+            async with _dialling(hub) as second:
+                assert (await second.connect(first.credential)).kind is env.FrameKind.CONNECT_ACK
+                await second.send(
+                    env.Envelope(
+                        kind=env.FrameKind.REQUEST,
+                        id="r-1",
+                        payload={"budget": 0.0},
+                        method="next_notification",
+                    )
+                )
+
+                assert await second.reader.read(1) == b""
+
+
 @pytest.mark.parametrize(
     ("case", "code"),
     [
