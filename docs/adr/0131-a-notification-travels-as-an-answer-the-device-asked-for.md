@@ -863,12 +863,39 @@ merged and made it checkable.
 > reconciliation is idempotent by §3's key rule — every path keys on the candidate's
 > own `candidate_key` — and requires no state of its own.
 
-> **Normative.** Retiring an entry on an acknowledgement (§3) **dismisses** its
-> ADR-0130 record, through the dismissal `NotificationStore` carries. A dismissed
-> record is not actionable, so the reconciliation above does not re-offer a
-> notification the owner has already received.
+> **Normative.** **Every** way an entry leaves the outbox **dismisses** its ADR-0130
+> record, through the dismissal `NotificationStore` carries, in the same step as
+> removing the entry — an acknowledgement (§3), an eviction under either bound (§3), a
+> broken lease (§3), and a withdrawal (§3a), together with any further way a later
+> decision adds. Where the act that removed the entry has already ended the record's
+> actionability, nothing further is owed.
 
-**Those two clauses close a window the two-Protocol split opens, and it is a window
+> **Normative.** The invariant those clauses establish is the one reconciliation
+> rests on: **an actionable record with no outbox entry means its enqueue never
+> committed**, and nothing else. No lane may create a fifth way for an entry to leave
+> the outbox without ending its record's actionability.
+
+**Every departure and not only the acknowledgement, because reconciliation reads
+actionability and nothing else.** A draft dismissed on acknowledgement alone, and
+adversarial review pointed out on the thirty-seventh round that an *evicted* entry
+leaves its record actionable — so the next restart re-offers a notification the
+bound-enforcement deliberately dropped, and an entry evicted under the all-leased rule
+regains the redelivery §3 says breaking a lease forfeits. Eviction is the hub deciding
+to give a notification up; a record that survives it as actionable is the decision not
+taken. Dismissing there also frees ADR-0130 §7's cap, which is what that section wants
+of a notification that is gone.
+
+**The invariant is worth stating separately from the clause that produces it**, and
+it is the third time in this ADR that naming a property has done what enumerating
+cases could not. Reconciliation cannot ask "was this an incomplete handoff?" — it can
+only see records and entries. So the design makes the two indistinguishable states
+distinguishable by construction: every departure ends actionability, therefore the
+only actionable record without an entry is one whose enqueue never committed. If the
+fact still holds after an eviction, it comes back through the *producer* re-noticing
+it as a new candidate (ADR-0130 §7), which faces the cap and the budget afresh — not
+through a stale record resurrecting on a restart.
+
+**Those clauses close a window the two-Protocol split opens, and it is a window
 that loses a notification outright.** ADR-0130 §3 makes recording the disposition and
 spending the budget "one atomic act in the store"; `offer` is a second act with its
 own commit. Crash between them and the budget is spent, the record exists, no entry
