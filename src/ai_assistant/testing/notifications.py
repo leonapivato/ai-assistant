@@ -1066,10 +1066,6 @@ class FakeNotificationOutbox:
         #: Set by an ``offer``, so a parked poll wakes on an enqueue instead of
         #: waiting out its whole budget. In-process only, and never load-bearing.
         self._arrivals = asyncio.Event()
-        #: Whether this instance has voided the leases it inherited. ADR-0131 §3
-        #: authorises voiding for a restart, and a second reconciliation on a live
-        #: outbox is not one.
-        self._leases_voided = False
         self._sequence = count(1)
         self._deliveries = count(1)
         self._lock = asyncio.Lock()
@@ -1112,9 +1108,39 @@ class FakeNotificationOutbox:
 
     async def offer(self, candidate: NotificationCandidate) -> NotificationEnqueue:
         """Take custody of one ruled interruption, or say why not (ADR-0131 §3)."""
-        record_id = await self._resolve(candidate.candidate_key)
+        return await self._offer(candidate, reconciled=False)
+
+    async def _offer(
+        self, candidate: NotificationCandidate, *, reconciled: bool
+    ) -> NotificationEnqueue:
+        """Take custody, or say why not — the body :meth:`offer` and the repair share.
+
+        ``reconciled`` decides one thing, and it is the parity that matters here:
+        whether an offer may commit an entry that **no actionable record backs**.
+
+        **A producer's offer may.** ADR-0131 §3b's live handoff arrives holding a
+        candidate whose disposition was just ruled, and §3b's "nothing further is
+        owed" covers a caller keeping no records of its own — which is also the
+        ordinary case for this fake, constructed with ``records=None``.
+
+        **The repair may not**, because it works from a snapshot. §3b's
+        reconciliation reads the records, releases the lock and offers what is
+        missing; the owner can dismiss or delete one of those records in the gap, and
+        an unconditional re-offer would insert its entry *afterwards* — delivering a
+        notification the owner had already removed. Re-resolving the record under
+        this lock is what closes it. The durable outbox declines the same way, and a
+        fake that resurrected what the shipped one declines would certify consumers
+        against a contract nothing implements.
+        """
         async with self._lock:
             await asyncio.sleep(0)  # a real critical section suspends; see the class docstring
+            record_id = await self._resolve(candidate.candidate_key)
+            if reconciled and record_id is None:
+                # The record this repair was reading has ceased to be actionable
+                # since the snapshot — dismissed, deleted or expired. There is
+                # nothing to re-offer, and `ALREADY_HELD` is the outcome that means
+                # "no entry was made and none was owed".
+                return NotificationEnqueue.ALREADY_HELD
             now = self._now()
             if (
                 self._candidate_ceiling is not None
@@ -1243,20 +1269,33 @@ class FakeNotificationOutbox:
             self._entries.pop(entry.candidate.candidate_key, None)
             return dismissed
 
+    async def recover_leases(self) -> None:
+        """Void every lease inherited from the process before this one (§3).
+
+        **Unconditional, and the caller owns the once-ness** — the parity that
+        matters, because the durable outbox reached the same shape by the same
+        argument. §3 says "a hub restart voids every lease" and does not say who
+        detects a restart; a guard here would be a guard per *object*, and a second
+        outbox over one database in one live process would still take a lease from
+        the device holding it. ``Engine.start`` calls this once per engine.
+        """
+        async with self._lock:
+            await asyncio.sleep(0)
+            for entry in self._entries.values():
+                entry.delivery_id = None
+                entry.leased_until = None
+
     async def reconcile(self) -> None:
-        """Make the outbox and the records agree, in both directions (§3b)."""
+        """Make the outbox and the records agree, in both directions (§3b).
+
+        Touches no lease: voiding is :meth:`recover_leases`' step, so this one is
+        repeatable, which is what ``Engine.start``'s "safe to call more than once"
+        needs.
+        """
         async with self._lock:
             await asyncio.sleep(0)
             now = self._now()
-            voiding = not self._leases_voided
-            self._leases_voided = True
             for entry in list(self._entries.values()):
-                if voiding:
-                    # Once per instance: a live lease belongs to the process that
-                    # granted it, and taking it would put one entry in two devices'
-                    # hands — the thing §3 forbids outright.
-                    entry.delivery_id = None
-                    entry.leased_until = None
                 if self._is_departing(entry, now):
                     await self._dismiss(entry.record_id)
                     self._entries.pop(entry.candidate.candidate_key, None)
@@ -1268,7 +1307,9 @@ class FakeNotificationOutbox:
                 continue
             if not record.is_actionable_at(now) or record.candidate.candidate_key in keys:
                 continue
-            await self.offer(record.candidate)
+            # The repair may not resurrect a record disposed of since the snapshot,
+            # so it goes through the declining path rather than through `offer`.
+            await self._offer(record.candidate, reconciled=True)
 
     async def wait_for_arrival(
         self,

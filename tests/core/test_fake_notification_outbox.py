@@ -23,6 +23,8 @@ from outbox_contract import NOW, NotificationOutboxContract
 
 from ai_assistant.core.types import (
     ClassReach,
+    HeldNotification,
+    NotificationCandidate,
     NotificationEnqueue,
     NotificationPreferences,
     NotificationReach,
@@ -32,6 +34,18 @@ from ai_assistant.testing import (
     FakeNotificationPolicy,
     FakeNotificationStore,
 )
+
+
+def _records() -> FakeNotificationStore:
+    """A record store on the fixed clock every case here asserts against.
+
+    **Not the wall clock, and that is a correctness property rather than a style.**
+    ADR-0130 §5 admits a candidate only while it is still perishable, so a store left
+    on the real clock rules a ``NOW + 2 hours`` expiry to ``DROP``/``EXPIRED`` from
+    two hours after ``NOW`` onwards — a suite that passes when it is written and
+    fails later against a wall clock nobody touched.
+    """
+    return FakeNotificationStore(now=lambda: NOW)
 
 
 class MovingClock:
@@ -201,7 +215,7 @@ class TestTheFakesDeliveryTransitions:
         assert remaining is not None
         assert remaining.notification.candidate_key == "k3"
 
-    async def test_reconciliation_voids_every_lease(self) -> None:
+    async def test_recovery_voids_every_lease(self) -> None:
         """§3: "A hub restart voids every lease."
 
         "A lease is only meaningful while the connection that took the delivery
@@ -213,11 +227,28 @@ class TestTheFakesDeliveryTransitions:
         first = await outbox.claim()
         assert first is not None
 
-        await outbox.reconcile()
+        await outbox.recover_leases()
 
         second = await outbox.claim()
         assert second is not None
         assert second.delivery_id != first.delivery_id
+
+    async def test_reconciliation_takes_no_lease(self) -> None:
+        """Parity with the durable outbox: voiding is ``recover_leases``' step alone.
+
+        Guarded inside the repair it would be guarded per *object*, so a second
+        outbox over one store in one live process would strip a lease the first had
+        granted — ADR-0131 §3's "one entry, two devices". The caller owns the
+        once-ness (``Engine.start``), so a repair from anywhere takes nothing.
+        """
+        outbox = FakeNotificationOutbox(now=lambda: NOW)
+        await outbox.offer(candidate(key="k1"))
+        held = await outbox.claim()
+        assert held is not None
+
+        await outbox.reconcile()
+
+        assert await outbox.claim() is None
 
     async def test_reconciliation_removes_a_departing_entry(self) -> None:
         """§3b: the sweep runs in both directions, and this is the second.
@@ -316,7 +347,7 @@ async def test_the_fakes_withdrawal_reports_the_stores_answer() -> None:
     tested against this fake observe a different promoted engine contract from the
     one the shipped engine has — which is the one thing a canonical fake may not do.
     """
-    records = FakeNotificationStore()
+    records = _records()
     await records.set_preferences(
         NotificationPreferences(
             reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),)
@@ -335,7 +366,7 @@ async def test_the_fakes_withdrawal_reports_the_stores_answer() -> None:
 
 async def test_the_fakes_withdrawal_reports_a_dismissal_it_performed() -> None:
     """The discriminating half: an actionable record ended here is ``True``."""
-    records = FakeNotificationStore()
+    records = _records()
     await records.set_preferences(
         NotificationPreferences(
             reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),)
@@ -348,6 +379,76 @@ async def test_the_fakes_withdrawal_reports_a_dismissal_it_performed() -> None:
     await outbox.offer(subject)
 
     assert await outbox.withdraw(ruled.notification_id) is True
+
+
+class _DisposingStore(FakeNotificationStore):
+    """The canonical store, with a ``held`` that dismisses a record on its way out.
+
+    The reconciliation race as a fixture: the page it returns still names the record,
+    and the record is no longer actionable by the time the caller acts on it. A
+    subclass rather than a wrapper, so it is the contract-correct fake in every
+    respect but the one method under test.
+    """
+
+    def __init__(self) -> None:
+        """Start disposing of nothing, on the fixed clock the cases assert against."""
+        super().__init__(now=lambda: NOW)
+        #: The record to dismiss on the next read, disarmed by that read.
+        self.dismiss_on_read: str | None = None
+
+    async def held(self, *, limit: int = 50, offset: int = 0) -> list[HeldNotification]:
+        """Answer the page, then dismiss the armed record behind the caller's back."""
+        page = await super().held(limit=limit, offset=offset)
+        if self.dismiss_on_read is not None:
+            disposing, self.dismiss_on_read = self.dismiss_on_read, None
+            await super().dismiss(disposing)
+        return page
+
+
+async def _ruled(records: FakeNotificationStore) -> tuple[str, NotificationCandidate]:
+    """Rule one candidate to ``INTERRUPT``, returning its record id and candidate."""
+    await records.set_preferences(
+        NotificationPreferences(
+            reaches=(ClassReach(notification_class=CLASS, reach=NotificationReach.INTERRUPT),)
+        )
+    )
+    subject = candidate(key="k1", expires_at=NOW + timedelta(hours=2))
+    ruled = await records.admit(subject, policy=FakeNotificationPolicy())
+    assert ruled.notification_id is not None
+    return ruled.notification_id, subject
+
+
+async def test_the_fakes_reconciliation_does_not_resurrect_a_disposed_record() -> None:
+    """Parity with the durable outbox on ADR-0131 §3a's ordering.
+
+    §3b's repair reads the records, releases the lock and offers what is missing; the
+    owner can dismiss or delete one of those in the gap, and the withdrawal that
+    disposal performs finds no entry to take. An unconditional re-offer then inserts
+    one *afterwards*, delivering a notification the owner had already removed. The
+    durable outbox re-resolves under its own lock and declines; a fake that
+    resurrected it would certify consumers against a contract nothing implements.
+    """
+    records = _DisposingStore()
+    record_id, _ = await _ruled(records)
+    outbox = FakeNotificationOutbox(records=records, now=lambda: NOW)
+    records.dismiss_on_read = record_id
+
+    await outbox.reconcile()
+
+    assert await outbox.claim() is None
+
+
+async def test_the_fakes_producer_offer_still_needs_no_record_behind_it() -> None:
+    """The discriminating half: only the *repair* declines a recordless offer.
+
+    §3b's "nothing further is owed" covers a caller keeping records of its own — or
+    none, which is this fake's own default. Declining there would make the outbox
+    unusable by anything but ADR-0130's store.
+    """
+    outbox = FakeNotificationOutbox(now=lambda: NOW)
+
+    assert await outbox.offer(candidate(key="k1")) is NotificationEnqueue.ENQUEUED
+    assert await outbox.claim() is not None
 
 
 @pytest.mark.parametrize("entries", [0, -1, True])

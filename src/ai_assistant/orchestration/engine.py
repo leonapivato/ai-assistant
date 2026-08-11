@@ -1205,6 +1205,13 @@ class Engine:
         self._notifications = notifications
         self._notification_policy = notification_policy
         self._notification_outbox = notification_outbox
+        #: Whether this engine has already voided the delivery leases it inherited
+        #: (ADR-0131 §3). Held here rather than in the outbox because the engine is
+        #: what the hub starts: instance lock → one hub process → one composition
+        #: root → one engine → one recovery. An outbox guarding itself would be
+        #: guarding per object, and a second object over the same database in the
+        #: same live process would still void a lease a device is holding.
+        self._leases_recovered = False
         if max_notification_budget <= timedelta(0):
             msg = (
                 f"max_notification_budget must be positive, got {max_notification_budget!r}: a "
@@ -1266,11 +1273,16 @@ class Engine:
         outbox. Skipped where no outbox is wired, which is the CLI's in-process
         engine: it serves no poll, so there is nothing to reconcile before.
 
+        **Ahead of the reconciliation, and only on the first call, the delivery
+        leases this hub inherited are voided** (ADR-0131 §3). That is a separate
+        step from the reconciliation because it is the one part of startup that is
+        *not* repeatable — see :meth:`_recover_leases_once`.
+
         Idempotent, and safe to call more than once: both sweeps are re-runnable by
         construction, every drop is re-checked under the store's own
-        per-conversation exclusion, and the reconciliation is idempotent by
-        ADR-0131 §3's key rule, every path keying on the candidate's own
-        ``candidate_key``.
+        per-conversation exclusion, the lease recovery is guarded to the first call,
+        and the reconciliation is idempotent by ADR-0131 §3's key rule, every path
+        keying on the candidate's own ``candidate_key``.
 
         Raises:
             RuntimeError: If the engine is shutting down.
@@ -1290,7 +1302,41 @@ class Engine:
         await self._conversations.sweep_deletions()
         await self._conversations.reclaim()
         if self._notification_outbox is not None:
+            await self._recover_leases_once()
             await self._notification_outbox.reconcile()
+
+    async def _recover_leases_once(self) -> None:
+        """Void the delivery leases a previous hub process left behind (ADR-0131 §3).
+
+        **Once per engine, and that is what makes it once per restart.** §3
+        authorises voiding because "an entry still leased at startup is one whose
+        holder is definitionally gone" — true of a lease the *previous* process
+        granted, false of one this process granted a moment ago. `start` promises it
+        is safe to call more than once, so an unguarded recovery on a second call
+        would take a live lease from the device holding it and let a second device
+        claim the same entry: one entry outstanding to two devices, which §3 forbids
+        outright.
+
+        **The guard lives here rather than in the outbox** because §3 says a restart
+        voids every lease and says nothing about who detects a restart. An outbox
+        that guarded itself would be guarding per *object*, and two outbox objects
+        over one database in one live process would each recover. The engine is what
+        the hub starts, so the ownership chain that ends here — instance lock → one
+        hub process → one composition root → one engine — is the closest thing the
+        ratified texts give this decision. It is not airtight: two engines built over
+        one data directory in one process would each recover, which the composition
+        root does not do and only a test can reach today (#969).
+
+        **Two concurrent first calls are harmless**, so no lock is owed for them:
+        both necessarily run before any poll is served — the hub starts the engine at
+        step 4 and accepts at step 6 — so there is no lease of this process's for a
+        double void to take. What the flag guards against is a *later* call, and a
+        later call is not concurrent with the first.
+        """
+        if self._notification_outbox is None or self._leases_recovered:
+            return
+        await self._notification_outbox.recover_leases()
+        self._leases_recovered = True
 
     async def purge_expired(self) -> PurgeReport:
         """Physically reclaim what the two Tier 1 stores and the trace store owe.
