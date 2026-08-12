@@ -18,7 +18,6 @@ from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.wire import client as wire_client
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.codec import CONNECT_PAYLOAD_BYTES
-from ai_assistant.wire.credential import mint_credential
 from ai_assistant.wire.errors import (
     CredentialNotSupportedError,
     CredentialRejectedError,
@@ -30,7 +29,17 @@ from ai_assistant.wire.errors import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-_VALID: Final = mint_credential()
+#: One well-formed credential, **pinned rather than minted**. It is fed to two
+#: ``parametrize`` lists below, so a module-import-time ``mint_credential()`` gave
+#: every process a different set of test IDs — which is fine serially and fatal
+#: under ``pytest-xdist``, where workers collect independently and a mismatch fails
+#: the run before an assertion is reached. Nothing here tests the minting
+#: (``test_credential.py`` owns that); these cases need *a* value of the scheme
+#: ADR-0124 §6 mints, and a literal is one. What keeps the literal honest is
+#: ``test_a_well_formed_credential_is_read_back_whole``: it puts this value through
+#: ``read_remote_connect``, which refuses anything not well formed — so a pin that
+#: stopped matching the scheme would fail loudly rather than pass vacuously.
+_VALID: Final = "X1fH-ZM9TBrKrmGsNmjQ8mT3OA94HhblZa_QFPiyCEs"
 
 
 @contextlib.contextmanager
