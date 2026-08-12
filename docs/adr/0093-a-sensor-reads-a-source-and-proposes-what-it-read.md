@@ -1,8 +1,6 @@
 # 93. A sensor reads a source and proposes what it read; the clock bounds the read, so nothing needs a cursor
 
-- Status: Partially superseded by ADR-0095 (the contract's name and the package
-  its concretes live in) and ADR-0110 (§4's second sentence: an entry absent from
-  a reading that declares the coverage it exhausted)
+- Status: Partially superseded by ADR-0095 (the contract's name and the package its concretes live in) and ADR-0110 (§4's second sentence: an entry absent from a reading that declares the coverage it exhausted)
 - Date: 2026-08-02
 - Partially superseded: 2026-08-02 by ADR-0095 — **two decisions are replaced and
   nothing else is.** The contract below named `Sensor` is named `Reader`;
