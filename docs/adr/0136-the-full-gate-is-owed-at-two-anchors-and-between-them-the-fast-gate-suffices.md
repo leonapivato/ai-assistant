@@ -214,11 +214,14 @@ the record of a review covers.
   call, no CI-only divergence"* becomes over-wide: a reader holding only ADR-0015
   would run the whole suite before every commit, which §2 no longer requires. That
   is ADR-0070 §1's test failing on a named clause, so ADR-0082 §1 owes a record on
-  ADR-0015 — a qualifier on its `Status` line, which is a grandfathered
-  `Accepted, partially superseded …` line and so takes one (ADR-0082 §2), and an
-  appended dated note. **No ratified text of ADR-0015 is rewritten**; its sentence
-  stays legible beside the pointer to this decision, per ADR-0070 §1's append-only
-  mechanism.
+  ADR-0015 — **and this change carries it**: a qualifier on its `Status` line,
+  which is a grandfathered `Accepted, partially superseded …` line and so takes one
+  (ADR-0082 §2), and an appended dated note. The pair lands here rather than in a
+  later lane, because a merged ADR-0136 sitting beside an unrecorded ADR-0015 is
+  the window ADR-0082 exists to close, and ADR-0082 §7 is explicit that an atomic
+  pair is what makes the failure mode unreachable. **No ratified text of ADR-0015
+  is rewritten**; its sentence stays legible where it was written, beside the
+  pointer to this decision, per ADR-0070 §1's append-only mechanism.
   The change is an **amendment and not a supersession**, on ADR-0111's precedent
   against ADR-0083 §7: there, a ratified acceptance rested on a stated condition,
   the condition's revisit trigger fired, and the narrowing was recorded as an
