@@ -272,6 +272,39 @@ frame here as it does there.
 > **Normative.** `SourceGrants` is **unchanged**. The enumeration is not added to
 > the query seam, and no site that drives a reader may name it.
 
+> **Normative.** A store holding **two live grants for one source** answers the
+> enumeration with `GrantError` and answers nothing else. It does not return both,
+> does not choose between them, and does not return the sources it could answer
+> for. `standing_grants` propagates that `GrantError` rather than converting it.
+
+**The corruption is not hypothetical and the existing store already refuses it
+one query over.** ADR-0097 §4 guarantees at most one live grant per source and
+`record`'s atomic check is what keeps it true, so two can only arrive by a
+corrupted or hand-edited file — and `SqliteSourceGrantStore.live` already raises
+`GrantError` on exactly that, reasoning in its own docstring that "picking one of
+them would answer the gate from a store that cannot say what the user granted".
+An enumeration written as the same anti-join with its source predicate dropped
+would silently return both, so the invariant that holds per source has to be
+restated over the store-wide query or it is lost at precisely the point the query
+stops naming a source.
+
+**Refusing the whole call rather than the affected source is §2's completeness
+clause applied to itself.** Two live grants for one source make that source's
+authorisation unstatable — the user would be shown two standing grants where
+revoking one leaves the other live, and a later `grant` would be refused for a
+source the surface said was ungranted. Returning the rest with the bad source
+omitted is a set that reads as complete and is not, which is the failure the
+no-paging clause exists to prevent; a declared `GrantError` cannot be mistaken for
+an empty set. This is also the direction ADR-0097 §5a fixes for an unanswerable
+grant check — fail closed, and never proceed on the better of two answers.
+
+**It is stated rather than left to the implementation, because the wrong version
+passes every test a lane would otherwise write.** Every record a conformance suite
+can create goes through `record`, which refuses the second live grant, so the
+corrupt state is unreachable from the suite unless the suite is told to construct
+it — the same reason ADR-0097 §10 required its fakes to be scriptable into states
+their own writers refuse. §8 carries the obligation.
+
 **The store member is required rather than convenient, and the alternative is a
 surface that lies about its cost.** `SourceGrants.live` is keyed on a source name,
 so an engine-side answer would have to come from `export()`, whose cost grows with
@@ -308,10 +341,15 @@ is kept apart for the same reason.
 > grantable sources, and may not present a standing grant as a source the user
 > may grant.
 
-> **Normative.** Every member of `GrantScope` is presented to the user in words,
-> and a surface presents the whole vocabulary wherever it offers a choice among
-> uses. No client may offer, enumerate or explain a proper subset of the members
+> **Normative.** Wherever a surface offers, enumerates or explains the uses a
+> user may choose among, it carries **every** member of `GrantScope`, named in
+> words. No client may offer, enumerate or explain a proper subset of the members
 > its own type admits.
+
+> **Normative.** Wherever a surface renders an existing grant, it renders exactly
+> the uses that grant names. It may not add a use the grant does not name, may not
+> omit one it does, and may not present a partial scope as incomplete, provisional
+> or in need of the members it leaves out.
 
 > **Normative.** No surface presents a source's configuration state as part of a
 > grant, and no surface presents a grant as a statement about whether a source is
@@ -331,7 +369,27 @@ The reasoning is not about Typer. Stated over the surface it binds the next clie
 too — a spoke, a graphical one — where the type-level accident that makes the CLI
 correct today does not exist.
 
-**The third clause is where a management surface is most likely to go wrong,
+**The third clause is what keeps the second from reaching a rendering, and the two
+are separated because a single clause covering both is false in one direction.**
+An earlier draft stated the vocabulary rule unqualified — "no client may offer,
+enumerate or explain a proper subset of the members its own type admits" — and
+adversarial review showed it forbade the truthful display of a `FACET`-only grant:
+rendering `FACET` alone *is* enumerating a proper subset, and rendering all three
+would say the user granted uses they did not. The choice context wants the whole
+vocabulary because a user cannot choose what they are not shown; the rendering
+context wants exactly the grant, because ADR-0097 §2's "a use a grant does not
+name is not authorised by it" has a display counterpart and this is it. Two
+contexts, two obligations, and ADR-0089 §2's "a clause states one obligation" is
+the form that made the collision visible.
+
+**The trailing half of the third clause is aimed at the sympathetic version of the
+same error.** A view that renders a `FACET`-only grant as `FACET` and then greys
+out `INGEST` and `NOTIFY` beside it is presenting the user's decision as a
+half-filled form — which is the vocabulary rule leaking out of the choice context
+by way of a layout, and is a nudge toward a wider grant on a surface whose whole
+subject is what the user actually decided.
+
+**The fourth clause is where a management surface is most likely to go wrong,
 because the sentence a person writes is a true sentence about the wrong axis.**
 "Your calendar is not being read" is what a user wants to hear and what a client
 can nearly compute: the source is absent from `grantable_sources`, so no reader is
@@ -617,13 +675,18 @@ read as the Protocol *change* it is):
    new member returns every live grant and no revoked one; it returns a detached
    snapshot, written as a mutation of the returned record's `__dict__` leaving the
    next call answering as before (ADR-0097 §10's shape); it returns a grant for a
-   source `live` is never queried with; and it returns an empty result on an empty
-   store. Input observation (ADR-0065) and cancellation (ADR-0060) as every seam
-   owes.
+   source `live` is never queried with; it returns an empty result on an empty
+   store; and it raises `GrantError` on a store holding two live grants for one
+   source, returning nothing. Input observation (ADR-0065) and cancellation
+   (ADR-0060) as every seam owes.
 4. **The canonical fakes gain the member and the method**, `FakeSourceGrantStore`
    and the engine fake alike, scriptable to hold live grants for sources the fake
    engine does not enumerate as grantable — so a client's own presentation of the
    disagreeing case (§1) is reachable from a test.
+
+   Each is also scriptable into the **two-live-grants-for-one-source** state its
+   own writer refuses, and the SQLite store's own tests reach it by seeding rows
+   rather than through `record`.
 5. **One method on `HubEngineClient`, in the same change**, a `_call` with no
    local refusal to add, because the method takes no argument. It lands with the
    Protocol because `tests/wire/test_client_contract.py` binds the client to
@@ -873,6 +936,16 @@ this lane's fence.
   store member.** Rejected in §2: the cost would grow with the store's whole
   history rather than with the number of live grants, which is ADR-0102 §10's own
   objection to an engine-side `offset` — a surface that lies about its cost.
+- **Answer the enumeration for the sources a corrupted store can speak for, and
+  omit the one with two live grants.** Rejected in §2: it produces a set that reads
+  as complete and is not, which is the failure the no-paging clause exists to
+  prevent, and it is the "proceed on the better of two answers" direction ADR-0097
+  §5a refuses one query over. `SqliteSourceGrantStore.live` already raises on the
+  same state rather than picking.
+- **State a repair for two live grants — take the later one, or revoke both.**
+  Rejected in §2 as the store editing its own history, which ADR-0097 §4 forbids in
+  every other direction and which would put a write on a query path. A store that
+  cannot say what the user granted says so.
 - **Put the enumeration on `SourceGrants` so nothing new is added to the store
   seam.** Rejected in §2: `SourceGrants` is the driver's type, and ADR-0097 §3
   keeps it at the one member a driver is entitled to. A driver asks about the
