@@ -17,7 +17,8 @@ You are a worker agent in one of the sibling clones (`~/projects/ai-assistant-N`
 - **Your ADR number comes from the dispatch.** Never pick your own, never fill a gap.
 - **Your brief outranks an issue** (it is newer, and stale issue text is the largest source of rework), but a ratified ADR outranks your brief. Where the brief conflicts with an ADR, follow the ADR and escalate — FLAG or STOP by the test in "Two ways to escalate" below, which owns that call.
 - **Rebase before you gate *and* again before you review** (`CONTRIBUTING.md` → "Run it against a current `main`" gives both reasons). If a rebase moves you, re-run the gate.
-- **You cannot read your own loop.** There is deliberately no round cap (`CONTRIBUTING.md` → "Stop when the required reviews are green"), because a late round looks like an early one from inside — and in a dispatched lane the outside view is the coordinator's, not yours. So when the aggregate's churn ratio is running far above 1 and the required review still is not terminal, report the standing findings with your grounded assessment of each and let the coordinator decide, rather than spending another round on your own judgement.
+- **The gate and the review run in the foreground, on one command with a timeout long enough to finish.** Never background them, never poll for completion, never start a second while the first is out. One command, one result. A backgrounded run splits a single answer across turns and invites you to act on a partial one as if it were final — and the gate and the review are precisely the two answers a lane must not get wrong.
+- **You cannot read your own loop, so the limit is a number and not your judgement.** There is deliberately no round cap on the *change* (`CONTRIBUTING.md` → "Stop when the required reviews are green" gives the reason: a cap would forbid rounds that produce findings worth having). There *is* a limit on how long **you** stay on it, because a late round looks like an early one from inside and in a dispatched lane the outside view is the coordinator's, not yours. Stop at **7 review rounds on any single required lens, or a churn ratio of 1.5 — whichever fires first** — and hand off; see "Handing off a loop that is not converging" below.
 
 ## Pre-flight, before you write code
 
@@ -46,18 +47,33 @@ Make the call, do the work, and record it in **both** the PR description and you
 - **A design fork the ADRs do not settle.**
 - **The task itself is wrong.** The brief rests on a false premise about the code, the work is already done, the acceptance criteria cannot be met as scoped, or this is plainly several lanes presented as one. `CONTRIBUTING.md` names discovering the task was wrong as legitimate grounds to stop; doing the wrong work well is the most expensive outcome available to you.
 - **The brief is missing something you need.** No fence, or no ADR number where the change plainly needs one, is a STOP — **not a permission**. You cannot tell "unrestricted" from "the coordinator forgot," and the two produce very different work. Likewise if the ADR number you were given is already taken by the time you write the file: you may never pick your own.
-- **The review is not converging** — churn ratio far above 1, required review still not terminal.
+- **The review is not converging** — at either threshold in "Handing off a loop that is not converging" below, which replaces the older "far above 1" judgement call with a number you can read off the aggregate.
 
 **Every STOP report carries the resolution you would take, and why.** State the problem, then state what you would do if told to proceed — the reading you think the ADRs support, the fence you think the work actually needs, the number you would use. You generally know the answer; what you lack is the standing to act on it unilaterally. Reporting it with the problem turns the coordinator's reply into a yes or no instead of a fresh brief.
 
 Most of both lists should surface in the pre-flight, before you have written anything — that is what the pre-flight is for.
 
+### Handing off a loop that is not converging
+
+This is the one STOP triggered by a **number** rather than by your reading of the situation, and that is deliberate: the reading is exactly what a lane cannot perform on itself. **Stop when either fires, whichever fires first:**
+
+- **7 review rounds on a single required lens.** Counted *per lens*: where both adversarial and architecture are required, seven rounds of one fires it even if the other is at two.
+- **The aggregate's churn ratio reaches 1.5.** Every review run prints it, so there is nothing to compute.
+
+Stopping here is a handoff, not an abandonment. Before you report:
+
+1. **Write a handoff comment on the PR.** It carries: the standing findings, each with your grounded assessment (which you accept, which you verified against the actual text and reject, and why); what is already fixed **and committed**; what is contested and by which lens; and the **exact next action** you would take. Uncommitted work does not exist to the next lane or to the reviewer — commit it or say so.
+2. **Report to the coordinator and end the lane.** Do not buy one more round to "just finish it". The threshold exists because the round after the threshold has historically not converged either.
+
+The coordinator re-briefs a fresh worker into the same clone. That agent inherits your comment, not your reasoning — which is why the comment is the deliverable rather than a summary of one.
+
 ## Finishing
 
-`CONTRIBUTING.md` owns the mechanics; three duties are easy to drop in a dispatched lane:
+`CONTRIBUTING.md` owns the mechanics; four duties are easy to drop in a dispatched lane:
 
 - **Open the draft PR early — as soon as you have a branch and a first commit, before the work is done**, so CI gates every push and the coordinator can see your direction (and any contract change) while it is still cheap to redirect. Your pre-flight goes in its description.
 - **Put the review outcome in the PR description**, not only in your report to the coordinator: any `blocker`/`major` finding you waived with its rationale, and links to the issues you filed for what you deferred. Your report reaches one reader; the PR is the audit trail.
+- **On an ADR lane, a `ship` refusal immediately after the ratification flip is the rule working, not a bug to debug.** The `Proposed` → `Accepted` flip edits the very tree the reviews were recorded against, so the artifact stops covering `HEAD` and `ship` refuses by design. Re-run the required reviews on the flipped tree, then ship — that round is already ruled and you do not need the coordinator for it. Do **not** mistake this for the moved-base case below: that one is a base *somebody else* moved, and it is the one you must not spend on your own judgement; this is a byte *you* changed. `CONTRIBUTING.md` → "Finishing an ADR PR" carries the whole sequence and the reason.
 - **Expect a second act, and do not treat `gh pr ready` as the end of the lane.** You report, and then you very likely rebase — see below.
 
 ### You are probably not finished when you report

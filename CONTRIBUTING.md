@@ -287,6 +287,50 @@ in-flight ledger tried and failed to arbitrate. If two branches still collide on
 a number, the second to merge renumbers — a file rename plus its internal
 `ADR-NNNN` references and `Refs:` trailers, no code change.
 
+### Finishing an ADR PR: `Proposed` through the reviews, `Accepted` on the way out
+
+An ADR PR ends in a fixed order, and each step is what makes the next one mean
+something. It is written down once here so a lane does not re-derive it:
+
+1. **Draft, review and revise it while it stands `Proposed`.** That is the state
+   in which a finding can still change the decision, and in which the ADR's own
+   text is *corrected* rather than annotated — ADR-0070 §1's append-only
+   protection is scoped by its own words to **ratified** decision text, and
+   ADR-0095 §7 works that adjudication through ("A `Proposed` ADR is by
+   definition still in the state where review changes its text"). Run the whole
+   required set here: adversarial for most ADRs, adversarial *and* architecture
+   for one deciding a contract surface ("Stop when the required reviews are
+   green").
+2. **Flip `Proposed` → `Accepted` only once that whole set is green on one
+   tree.** Two lenses that came back clean on trees the ADR has since moved off
+   have not agreed with each other about the thing being ratified. Ratifying
+   ahead of them ratifies a decision the reviewer was still entitled to change.
+   The flip itself is a permitted in-place header edit (ADR-0070 §1).
+3. **Then re-run the required reviews on the flipped tree.** This is not a
+   judgement call and not a symptom of anything: the flip edits a reviewed byte,
+   so the recorded tree no longer equals `HEAD`'s and the unmoved-base path
+   refuses — "(a) — ADR-0020 §3 exactly as written. The tree is the whole test
+   here.", in `scripts/ship.sh`'s artifact-selection loop. The moved-base path
+   does not rescue it either, since the flip changes the reviewed patch identity
+   as well. "Trivial ADR edits" above says the flip earns no review *of the edit
+   itself*, and it does not — nothing in the re-run triages a status line. What
+   the re-run buys is **coverage**, which is mechanical, and no exemption in this
+   document lifts it. The round is cheap by construction: the flipped tree
+   differs from the one already judged by a status line.
+4. **`just ship`, then `gh pr ready`, then merge** — on your own judgement, like
+   any other change ("Report the review, then mark it ready").
+5. **Nothing implements against the ADR until that merge** (ADR-0015 §5, golden
+   rule 5).
+
+**Point at this block rather than re-arguing it.** ADR-0130 §12's status bullet
+is the worked precedent: drafted, reviewed and revised as `Proposed`, "its status
+flipped only once both required reviews returned clean on one tree", "Findings
+raised after the flip were folded the same way and both reviews re-run", and
+"nothing implements against §9 until this has merged". An ADR recording its own
+ratification owes a line naming the set it ran and the outcome it got, plus a
+pointer here — not a paragraph reasoning the sequencing out from first
+principles.
+
 ## The dispatcher
 
 ADR-0015 replaced the shared coordination files with a person: the **dispatcher**
