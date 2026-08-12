@@ -63,8 +63,8 @@ baseline="$(gh issue view <batch> --json createdAt --jq .createdAt)"
 
 gh pr list --state all --limit 200 \
   --json number,title,state,isDraft,mergedAt,headRefName,mergeStateStatus
-gh issue list --state all --limit 200 --search "created:>=${baseline%T*}" \
-  --json number,title,state,createdAt
+gh issue list --state all --limit 200 --json number,title,state,createdAt \
+  --jq "map(select(.createdAt >= \"$baseline\"))"   # full timestamp, filtered here
 gh pr checks <n>                      # per open PR — not the worker's report
 gh issue view <batch> --comments      # the batch's own record
 ```
@@ -74,6 +74,13 @@ older open item silently falls off the page and reads as absent. **If either
 returns exactly the limit, treat the list as truncated** — page with `gh api
 --paginate` or raise the limit until the count comes back short. A report that
 says "no new issues" from a truncated scan is worse than one that says nothing.
+
+**Cut the window on the baseline's full timestamp, not on its date.** Handing a
+bare `YYYY-MM-DD` to a `created:>=` search qualifier admits everything from that
+day, so a batch opened at midday sweeps in the morning's unrelated issues and the
+report triages them as its own. Keep the baseline as the API returned it and
+compare it yourself — those timestamps are ISO-8601 UTC, so a plain string
+comparison orders them correctly and needs no date arithmetic.
 
 The one section exempt from this rule is §6, and it is exempt because it is
 fenced as judgement and says so. Nothing else is.
