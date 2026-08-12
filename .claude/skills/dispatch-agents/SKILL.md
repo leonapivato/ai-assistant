@@ -56,6 +56,16 @@ you handed out is the primary source; the scan only catches what predates you.
 An under-specified brief is the largest source of rework. Each one carries:
 
 - **The clone path**, and that other clones are off-limits.
+- **A lane-unique prefix for scratch filenames.** Concurrent lanes can end up
+  writing into one scratchpad directory, so a generic name like `pr-body.md` is
+  a collision waiting to happen — one lane's PR body overwritten mid-run by
+  another's, which has now happened in three separate batches. Give the lane a
+  prefix (its slug, or `pr-body-lane-<X>-<pr>.md`), prefer clone-local paths,
+  and say that after a PR-body write from scratch space it re-reads the live
+  body and looks for a string only that lane would have written. The mitigation
+  existed every one of those three times and lived only in the dispatcher's
+  notes; a checklist line is what turns its absence into a visible blank rather
+  than an invisible default.
 - **A scope fence** — which directories this lane may touch and which it may
   not, naming the lane that owns each excluded one. `core/protocols.py` and
   `core/types.py` are the highest-collision surface; one lane holds them at a
@@ -142,7 +152,13 @@ gh pr diff <n> --name-only            # scope claims: did it touch what it said?
 gh pr view <n> --json comments --jq '.comments[].body' | grep -c "ship:$sha"
 ```
 
-`mergeStateStatus: BEHIND` means it was never gated against current `main`.
+`mergeStateStatus: BEHIND` says the branch is not current with its base and must
+be updated before `strict` protection will merge it — and **nothing beyond
+that**. It is not evidence that a gate was skipped: a lane that fetched, rebased
+and gated exactly as asked goes `BEHIND` the moment another lane merges ahead of
+it, which a merge order makes routine rather than exceptional (`worker.md`).
+Read it as the rebase the lane owes (§5), not as grounds to distrust the report.
+
 The last line is the one nothing else covers: green CI and a clean diff say
 nothing about whether `just review-codex` and `just ship` ever ran, and a report
 claiming both is not evidence that either did. `ship.sh` tags its comment with the
