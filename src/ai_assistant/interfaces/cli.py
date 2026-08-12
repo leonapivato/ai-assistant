@@ -687,30 +687,41 @@ def _positive_page_argument(value: int) -> int:
 
 
 def _present_notification_class(value: str | None) -> str | None:
-    """:func:`_present_id` for ``tune --class``, and the stripping is why it is here.
+    """:func:`_present_source` for ``tune --class``: **byte-exact**, and that is the point.
 
-    A notification class is ``NonBlankEncodableText`` rather than an ``Identifier``,
-    which is the shape ADR-0102 §2 keeps **byte-exact** for a grant's ``source`` — so
-    the choice has to be made rather than inherited. It goes the other way for a
-    reason particular to this argument: a source is compared against a reader the hub
-    already holds, where a value differing only by surrounding whitespace must be
-    refused rather than matched (ADR-0097 §10), while a class here is not matched
-    against anything. It *creates* a preference row, and
-    :meth:`~ai_assistant.core.types.NotificationPreferences.reach_for` then compares
-    that row exactly. A row written for ``" upcoming_event "`` would therefore be a
-    setting the user was shown accepting and that silently governs nothing — a worse
-    outcome than refusing, and one nothing later would explain.
+    A notification class is ``NonBlankEncodableText``, the shape ADR-0102 §2 keeps
+    byte-exact for a grant's ``source``, so the choice is made here rather than
+    inherited — and it lands the same way, because the same substitutability failure
+    is at the end of both roads.
+
+    An earlier version of this stripped, reasoning that a class is matched against
+    nothing: it *creates* a preference row, so a row written for ``" upcoming_event "``
+    would govern nothing and normalising seemed the friendlier reading. That was
+    wrong on the facts. ``NonBlankEncodableText`` preserves surrounding whitespace, so
+    ``" upcoming_event "`` is an admissible class a producer may declare and a record
+    may carry — and
+    :meth:`~ai_assistant.core.types.NotificationPreferences.reach_for` compares
+    exactly. Stripping therefore does not prevent the unreachable setting, it
+    *guarantees* one for that class: whatever ``assistant notifications`` prints, this
+    would write something else, and the class the user was looking at could not be
+    tuned at all.
+
+    Byte-exact makes the pasteable hint's round trip total instead: what the listing
+    shows is what reaches ``ClassReach``. The cost is the other direction — a user who
+    types a stray trailing space writes a row that governs nothing — which is
+    ADR-0097 §10's accepted trade for ``source`` and is the recoverable half, because
+    the class they meant is on screen.
 
     Args:
         value: The class as the user typed it, or ``None`` when unset.
 
     Returns:
-        The class stripped, or ``None``.
+        The value, unchanged.
 
     Raises:
         BadParameter: If a value was given and is blank, or has no UTF-8 encoding.
     """
-    return _present_optional_id(value)
+    return None if value is None else _present_source(value)
 
 
 def _quiet_window(spec: str) -> QuietWindow:
@@ -4222,6 +4233,13 @@ def _render_notification_acts(record: HeldNotification, *, now: datetime) -> Non
     The same exposure on the older ``answer``/``forget-question``/``revoke`` hints is
     #984 rather than a wider diff here.
 
+    **And where quoting is not enough, no command is printed at all**
+    (:func:`_is_pasteable`). ``_safe`` *replaces* a character a terminal must not be
+    handed, so a class carrying a control character renders as a command that would
+    set a different class — the failure quoting exists to prevent, arriving one step
+    later and looking exactly like a working instruction. A wrong command is worse
+    than none, so the record still renders and the acts are named in words instead.
+
     Args:
         record: The record whose acts to offer.
         now: The instant to judge its **expiry** at; the other two limbs are stamped.
@@ -4229,6 +4247,15 @@ def _render_notification_acts(record: HeldNotification, *, now: datetime) -> Non
     if record.dismissed_at is not None or record.dropped_at is not None:
         return
     if _has_perished(record.candidate, now):
+        return
+    notification_class = record.candidate.notification_class
+    if not _is_pasteable(record.id) or not _is_pasteable(notification_class):
+        console.print(
+            "  [yellow]Its id or its class holds characters this terminal cannot "
+            "show[/], so there is no command here to copy — one written from what is "
+            "on screen would name something else. The 'dismiss' and 'tune' commands "
+            "still take them, given the exact bytes."
+        )
         return
     console.print(f"  [dim]Deal with it:[/] assistant dismiss {_safe(shlex.quote(record.id))}")
     wanted = (
@@ -4238,8 +4265,28 @@ def _render_notification_acts(record: HeldNotification, *, now: datetime) -> Non
     )
     console.print(
         f"  [dim]Tune the class:[/] assistant tune --class "
-        f"{_safe(shlex.quote(record.candidate.notification_class))} --reach {wanted.value}"
+        f"{_safe(shlex.quote(notification_class))} --reach {wanted.value}"
     )
+
+
+def _is_pasteable(value: str) -> bool:
+    r"""Whether ``_safe`` renders ``value`` faithfully enough to be typed back in.
+
+    **Asked of ``_safe`` itself rather than by restating its rule**, so the two cannot
+    drift: ``_safe`` both replaces characters a terminal must not be handed *and*
+    escapes Rich markup, and only the first is lossy — Rich renders ``\\[red]`` back as
+    the literal ``[red]``, so escaping changes what is written and not what is read.
+    Comparing against :func:`~rich.markup.escape` alone therefore isolates the
+    replacement exactly, and it stays correct if ``_safe``'s set of replaced characters
+    ever changes.
+
+    Args:
+        value: The value a printed command would carry.
+
+    Returns:
+        Whether the value survives being displayed.
+    """
+    return _safe(value) == escape(value)
 
 
 def _render_notification_settings(preferences: NotificationPreferences) -> None:
