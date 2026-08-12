@@ -1,7 +1,24 @@
 # 139. A standing grant is read from the store, not from the sources the hub can offer
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-12
+- **Note (2026-08-12): ratified.** `Proposed` → `Accepted`, after **both**
+  required reviews came back green on **one** tree, `cfae4e00c6c3`: adversarial
+  **APPROVE with no findings** and architecture **APPROVE with no findings**, both
+  at round 11, churn ratio 1.3, on PR #1015. That is the outcome ADR-0070 §1
+  requires the ratifying edit to record, and `CONTRIBUTING.md` → "Finishing an ADR
+  PR" step 2 is the order it was taken in — the flip follows the green set rather
+  than preceding it, and step 3's re-run on the flipped tree is what covers this
+  edit. **No decision text is touched by the flip and no normative clause
+  acquires, loses or alters an obligation**, which is ADR-0070 §1's own test
+  applied to the ratifying edit first.
+
+  This ADR was drafted and revised across eleven rounds under two holders,
+  handed over at round 7 under ADR-0138 §1 with adversarial standing at `BLOCK`.
+  The findings that changed the decision are recorded where they bit rather than
+  listed here: §4's three-outcome rule and its cancellation clauses, §2's refusal
+  on a corrupt store, §8's ratified signatures, §9's fenced quotation, and the
+  ADR-0102 record landing atomically in this change.
 - **Decides the grant-management surface** ADR-0133 §7 holds for leg 11 — how
   sources are presented, how a grant is amended, and what a user is shown about
   the grants they hold — and rules on the audit-of-read ADR-0097 §12 deferred and
