@@ -9,6 +9,7 @@ the production, model-backed engine, so no network or key is needed.
 from __future__ import annotations
 
 import asyncio
+import re
 import shlex
 from datetime import UTC, datetime, timedelta
 from inspect import unwrap
@@ -4509,6 +4510,19 @@ def test_every_reach_level_has_a_distinct_phrase() -> None:
     assert len(set(phrases)) == len(list(NotificationReach))
 
 
+#: Rich's SGR colour sequences, which appear in help output only where colour is
+#: enabled — which the terminal decides, so it differs between a developer's shell
+#: and CI (#983). Stripped before any assertion about help text, together with the
+#: panel's box-drawing borders, so what is matched is the *words* rather than a
+#: rendering that a `TERM` or a `FORCE_COLOR` can change underneath it.
+_SGR = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _help_text(rendered: str) -> str:
+    """Help output as flowing words: no colour, no borders, no wrapping."""
+    return " ".join(_SGR.sub("", rendered).replace("\u2502", " ").split())
+
+
 def test_the_arming_acts_in_tunes_help_name_what_the_code_actually_calls_them() -> None:
     """#981: PR #977's body recorded ``assistant grant --source calendar``, which does
     not exist, and the next operator copies the record.
@@ -4525,7 +4539,7 @@ def test_the_arming_acts_in_tunes_help_name_what_the_code_actually_calls_them() 
     """
     result = CliRunner().invoke(cli.app, ["tune", "--help"])
     assert result.exit_code == 0
-    rendered = " ".join(result.output.split())
+    rendered = _help_text(result.output)
 
     prefix = Settings.model_config["env_prefix"]
     assert f"{prefix}calendar_upcoming_interval".upper() in rendered
