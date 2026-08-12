@@ -1,6 +1,6 @@
 # 137. The contract seam is where a slice is cut, and the triad rides with its primary implementation
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-11
 - **Durability clause.** Every reference below to ADR-NNNN is to its text as it
   stood at this ADR's base, `4bba371d`, not to its status on any later day. Every
