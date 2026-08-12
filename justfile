@@ -77,8 +77,12 @@ test-fast *args:
     #!/usr/bin/env bash
     set -euo pipefail
     tmp="$(mktemp -d /tmp/pt-XXXXXX)"
-    if uv run pytest -n auto --basetemp="$tmp" \
-            --deselect tests/core/test_protocol_triad.py "$@"; then
+    # `--basetemp` goes *after* "$@" so a forwarded one cannot displace it: pytest
+    # takes the last occurrence, and a run that emptied some other directory while
+    # the cleanup below removed this one would be the hazard this recipe exists to
+    # avoid, silently. `-n auto` leads instead, so `just test-fast -n 4` still works.
+    if uv run pytest -n auto --deselect tests/core/test_protocol_triad.py \
+            "$@" --basetemp="$tmp"; then
         rm -rf "$tmp"
     else
         status=$?
