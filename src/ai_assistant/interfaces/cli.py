@@ -2667,9 +2667,17 @@ async def _drive_tune(engine: AssistantEngine, asked: _Tuning) -> int:
     console.print("[green]Tuned.[/] These are the settings in force now.\n")
     _render_notification_settings(written)
     if asked.reach is NotificationReach.INTERRUPT:
+        # **Qualified, because reach is not the only condition** (ADR-0130 §5). The
+        # write does re-arm every held record of the class, but one that named no
+        # moment it stops mattering re-holds on `PERISHABLE`, which §6 says "is
+        # reached by no setting". An unqualified "can now reach you" would promise an
+        # interruption for those that never arrives, and leave the user believing the
+        # act they just performed had failed.
         console.print(
-            "\n[dim]Anything of that class I am already holding can now reach you "
-            "too — it does not wait for the next one.[/]"
+            "\n[dim]Anything of that class I am already holding is looked at again, so "
+            "one that named a moment it stops mattering can reach you now rather than "
+            "waiting for the next. One that named no such moment stays held: no reach "
+            "setting makes it urgent.[/]"
         )
     elif asked.reach is NotificationReach.OFF:
         console.print(
@@ -4224,6 +4232,19 @@ def _render_notification_acts(record: HeldNotification, *, now: datetime) -> Non
     else is already allowed to reach them, and the act §6 names for that is lowering
     it.
 
+    **Except where the set also names ``PERISHABLE``, and that exception is §5's
+    rather than a refinement.** Declaring an expiry "is the whole of the escalation
+    test": a candidate that commits to no moment "is held, never interrupted", and §6
+    says in terms that such a record "is reached by no setting". Raising the class
+    there is a real act with a real effect on every *other* record of the class and
+    none whatsoever on this one — the write does re-arm it, the reconsideration does
+    run, and it re-holds on the same condition. So the reach hint would be a surface
+    promising an interruption that cannot happen, which is #979's own failure wearing
+    the opposite face: there the act existed and had no door, here the door would open
+    onto nothing. Dismissal stays offered, the lowering act stays offered because it
+    still does something, and the reason is said rather than left to be inferred from
+    a notification that never arrives.
+
     **The values are shell-quoted before they are escaped for the terminal**, because
     these two lines are meant to be *pasted*. An id and a class are both non-blank
     encodable text and neither forbids an interior space, so an unquoted hint for a
@@ -4258,9 +4279,16 @@ def _render_notification_acts(record: HeldNotification, *, now: datetime) -> Non
         )
         return
     console.print(f"  [dim]Deal with it:[/] assistant dismiss {_safe(shlex.quote(record.id))}")
+    if NotificationCondition.PERISHABLE in record.failed:
+        console.print(
+            "  [dim]No reach setting can make this one interrupt:[/] it names no "
+            "moment it stops mattering, and that is the whole of what earns an "
+            "interruption."
+        )
     wanted = (
         NotificationReach.INTERRUPT
         if NotificationCondition.REACH_INTERRUPT in record.failed
+        and NotificationCondition.PERISHABLE not in record.failed
         else NotificationReach.OFF
     )
     console.print(
