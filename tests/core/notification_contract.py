@@ -1351,6 +1351,41 @@ class NotificationStoreContract(ABC):
         assert await store.purge() == 0
         assert len(await store.held()) == 1
 
+    async def test_a_retention_horizon_past_the_calendar_purges_nothing(
+        self, factory: StoreFactory, policy: NotificationPolicy
+    ) -> None:
+        """§7's exclusive horizon, at the far edge of the range §7 leaves unbounded.
+
+        §7 puts **no ceiling** on a retention — the deliberate escape is ``None``
+        — so a record that ceased yesterday under a retention of some ten thousand
+        years has a horizon outside the calendar entirely. Elapsed is elapsed: it
+        has not arrived and will not, so this is the clause above asserted where
+        the sum ``ceased + retention`` cannot be formed, rather than a new one.
+
+        **It belongs in the shared suite rather than in either backend's**,
+        because a horizon nobody can represent is exactly where two
+        implementations diverge silently: one raises out of ``purge``, the other
+        reads the failure as "not yet", and §7's boundary stops having one
+        definition. The figure below is inside what a durable backend can stamp as
+        exact microseconds in a signed 64-bit column, so no implementation may
+        refuse it at admission and answer the question that way.
+
+        The record must also **survive**: a ``purge`` that returned zero because
+        it abandoned the sweep would satisfy a count-only assertion, and ADR-0083
+        §7's job sweeps two other stores in the same operation.
+        """
+        retention = timedelta(days=4_000_000)
+        clock = MutableClock()
+        store = factory(now=clock, retention=retention)
+        ceased_at = await self._cease(store, policy, clock, how="dismissed")
+        with pytest.raises(OverflowError):
+            ceased_at + retention  # the horizon itself, unrepresentable
+
+        clock.advance(timedelta(days=3650))
+
+        assert await store.purge() == 0
+        assert len(await store.held()) == 1
+
     async def _cease(
         self,
         store: NotificationStore,
