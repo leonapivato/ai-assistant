@@ -235,6 +235,27 @@ the record of a review covers.
   the whole suite — §1 requires the suite, not a command name.
 - **`pre-commit`.** Its fast subset is unchanged and is not what §2 means by the
   fast gate; §2 binds the author, and a hook is not an author.
+- **`docs/review/guide.md`'s "Assume the gate is already green".** Left standing,
+  deliberately, and this is the one place where that needs arguing rather than
+  asserting — §1's second clause makes the sentence sometimes false about the tree
+  a later review is handed.
+  It is left standing because of what the sentence *does*. It is a **scoping
+  instruction, not a warranty**: it appears in "Reviewers are the judgment layer
+  **above** the mechanical gate (ruff, mypy, import-linter, pytest)", and the same
+  document's anti-patterns forbid reporting "anything ruff/mypy/pytest already
+  catch". Its function is to tell the reviewer where not to spend attention, and a
+  reviewer obeying it behaves **identically** whether the assumption holds or not
+  — it runs no tests either way and reports no test failures either way. A premise
+  that no output depends on is not one a reviewer can be misled by, which is why
+  §1 accepts the case instead of buying a suite run per round to preserve the
+  sentence's literal truth.
+  What is left is a reader-facing wording risk, not a behavioural one: someone
+  reading the guide cold could take "assume" as a promise about their tree rather
+  than an instruction about their scope. That is worth a one-sentence
+  clarification in `docs/review/guide.md`, and this ADR **does not make it** —
+  the file is outside this lane's fence and in ADR-0027 §3's review floor, so it
+  is filed as issue #994 for whoever next holds it rather than smuggled in here.
+  Nothing in this ADR depends on that edit landing.
 - **Which review lenses a change requires.** ADR-0015 §1 and `CONTRIBUTING.md` →
   "Stop when the required reviews are green" own that, unchanged.
 - **The rebase rules.** Rebasing before gating and before invoking a review is
