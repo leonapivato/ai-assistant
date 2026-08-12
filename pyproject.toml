@@ -182,6 +182,11 @@ dev = [
     "mypy>=1.18.0",
     "pytest>=8.4.0",
     "pytest-asyncio>=1.2.0",
+    # What `just test-fast` runs on — the test leg of ADR-0136 §2's fast gate,
+    # between that ADR's two anchors. The anchors themselves run the whole suite
+    # serially and so does CI, so this shortens the loop and substitutes for
+    # neither.
+    "pytest-xdist>=3.6.0",
     "pre-commit>=4.6.0",
     "import-linter>=2.0",
     "pip-audit>=2.7",

@@ -39,6 +39,37 @@ imports:
 test *args:
     uv run pytest "$@"
 
+# The test leg of ADR-0136 §2's fast gate — the whole suite, distributed, for the
+# rounds *between* §1's two anchors. It is neither anchor: §1 requires the suite
+# and not a command name, and both anchors run `just check`, as CI does.
+#
+# Two flags here are load-bearing rather than tuning, so neither should be
+# dropped without reading what it buys.
+#
+# `--basetemp` is about socket paths, not about tidiness. xdist inserts a
+# `popen-gwN/` component under the temp root, which took the hub's AF_UNIX paths
+# to 112 bytes against this platform's 108-byte `sun_path` budget — nine failures
+# that say nothing whatever about the code. A short root buys the margin back.
+# pytest *empties* whatever it is given, so this points at a per-clone scratch
+# path under /tmp and deliberately not at $TMPDIR, which is the one place a
+# reader may have made long on purpose.
+#
+# `--deselect tests/core/test_protocol_triad.py` is structural. That check reads
+# the run record `tests/conftest.py` accumulates across the session; under xdist
+# each worker accumulates only its own, so the check runs on one worker, sees
+# none of the contract subclasses that passed on the others, and reports every
+# Protocol as missing its triad. It is incompatible with a distributed run, not
+# flaky in one. Deselecting costs no enforcement: `just check`, both ADR-0136
+# anchors and CI all run it serially, so a real triad gap still cannot merge.
+#
+# Last line, because `just --list` shows only that one: what this recipe runs.
+# The suite in parallel — ADR-0136 §2's fast gate, and never one of its anchors
+test-fast *args:
+    uv run pytest -n auto \
+        --basetemp="/tmp/pt-$(basename "$(pwd)")" \
+        --deselect tests/core/test_protocol_triad.py \
+        "$@"
+
 # Tier 1 — an ADR file or an issue number that does not exist — exits non-zero;
 # Tier 2 — unresolved code citations and liveness disagreements — is reported and
 # never fails, and a non-empty Tier 2 list is expected (ADR-0088 §3). Tier 1 also
