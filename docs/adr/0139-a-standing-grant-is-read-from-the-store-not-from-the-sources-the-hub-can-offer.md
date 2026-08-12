@@ -437,9 +437,17 @@ later client can get wrong without touching the CLI.
 > continuously granted.
 
 > **Normative.** A surface offering amendment as one user-facing act reports the
-> outcome of **each** act. Where the revocation succeeded and the grant did not, it
-> reports that the source is now **ungranted** — naming the revocation that landed
-> — and does not report the amendment as merely failed.
+> outcome of **each** act. Where the revocation landed and the grant is **known**
+> not to have, it reports that the source is now **ungranted** — naming the
+> revocation that landed — and does not report the amendment as merely failed.
+
+> **Normative.** Where the revocation landed and the grant's outcome is
+> **unknown** — the call was cancelled, or its response was lost after the hub may
+> already have committed it — the surface reports exactly that: the revocation
+> landed, and whether the new grant did is not known to the client. It may not
+> report the source as ungranted, may not report the amendment as complete, and
+> may not resolve the ambiguity by guessing in either direction. Where a re-read
+> is available it says that `standing_grants` is what settles it.
 
 > **Normative.** A surface offering amendment takes the user's decision about the
 > new scope **before** it sends the revocation, and sends the revocation only for
@@ -470,7 +478,30 @@ line and ADR-0097 §5's facet path is an absence indistinguishable from every ot
 absence (ADR-0096 §4). The state is recoverable in one command; being told about
 it is what makes it recoverable.
 
-**The third clause removes the case that has no good report.** A surface that
+**The third clause exists because the second one, alone, forces a client to lie in
+a state the corpus already knows about.** A `grant` sent over the socket can be
+committed by the hub and lose its response — ADR-0085 §8e's residual, which the
+`AssistantEngine` docstring states in its own words ("On a mutating call the
+result is measured after the work has committed … a wire client meets the same
+situation one frame further out. The effect stands and is readable through the
+surface's own reads"), tracked as #570 — and ADR-0060 makes a cancelled write's
+effect indeterminate for the same reason. In that state the client knows the
+revocation landed and knows nothing else, so "the source is now ungranted" is a
+false statement about a source that may well be granted, and "the amendment
+succeeded" is a false statement about one that may not be. Adversarial review found
+the second clause forcing one of the two; the answer is a third outcome rather than
+a better guess.
+
+**And it is the second consumer `standing_grants` earns rather than the one it was
+designed for.** The indeterminacy is resolvable by reading, and the read that
+resolves it is the one §2 adds: a client that lost a response asks what the user
+currently authorises and is told, from the store, whatever the hub actually did.
+That is why the clause names the re-read rather than a retry — a retried `grant`
+against a hub that already committed one is refused with `InvalidGrantError`
+(ADR-0097 §4's one-live-grant rule), which reads to a user as a failure and is a
+success.
+
+**The fourth clause removes the case that has no good report.** A surface that
 revoked first and then asked the user what to grant would put the interactive part
 of the flow *inside* the ungranted window — so a user who hesitates, or closes the
 terminal, or is asked something they want to think about, has withdrawn their
@@ -813,9 +844,20 @@ reads rows the schema already holds.
 
 **The client lane**: the standing-grants view and the amendment flow, with §3's
 presentation clauses and §4's and §5's obligations as client-side tests — in
-particular a test that a halted amendment reports the source as ungranted, and a
-test that the granting half of an amendment renders the location before it sends
-(§5). Spellings are the lane's under ADR-0073 §1's form.
+particular a test that an amendment whose `grant` is **known** to have failed
+reports the source as ungranted; a test that an amendment whose `grant` outcome is
+**unknown** — the hub commits the record and the client loses the response —
+reports neither outcome and points at the re-read; and a test that the granting
+half of an amendment renders the location before it sends (§5). Spellings are the
+lane's under ADR-0073 §1's form.
+
+**The second of those is deterministic rather than a timing test**, and it is
+worth saying so because "lose the response" reads like a flake: the client is
+driven against a stub hub that records the grant and then closes without
+answering. `tests/wire/test_client.py` already drives that shape — its
+"what the hub refuses without answering" block — so the lane is extending a
+pattern rather than inventing one. What is being tested is the client's report,
+not the socket.
 
 > **Normative.** The lane that lands this ADR's supersession record edits
 > ADR-0102's `Status` line to the partial form ADR-0070 §4 fixes, naming this ADR
@@ -990,7 +1032,9 @@ this lane's fence.
 - **Amendment gains a shape rather than a mechanism.** The records stay two, the
   window stays open, and what changes is that a user who lands in it is told. That
   is the cheapest available fix and it is the only one that does not reopen
-  ADR-0097 §2.
+  ADR-0097 §2. It costs a client a third outcome to render — landed, known not to
+  have landed, and not known — which is ADR-0085 §8e's residual (#570) surfacing
+  where a user can act on it rather than being absorbed into a failure message.
 - **A four-times-deferred debt is fired rather than re-deferred.** ADR-0097 §12's
   read record is now a lane with binding conditions and an issue, not a bullet;
   ADR-0004 §7's unbuilt half is written down as unbuilt rather than left to read as
