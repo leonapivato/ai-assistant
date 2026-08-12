@@ -1,6 +1,6 @@
 # 102. The grant surface is four engine operations, and the source is chosen from what the hub holds
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0139 (§1's four-method count and the reporting limb of its exclusion)
 - Date: 2026-08-04
 - **Note (2026-08-04): ratified.** `Proposed` → `Accepted`, in the separate lane
   #633 requires, after **both** required reviews came back green on the content
@@ -58,6 +58,45 @@
   #633 mandates rather than ADR-0101's status, and it is what happened here.
   **ADR-0070 §1's no-rewrite rule now protects this text**, so any later
   correction is an appended dated note.
+- **Partially superseded: 2026-08-12 by ADR-0139 — §1's count of the client grant
+  surface, and the limb of its exclusion that forbids any other operation
+  *reporting* a `SourceGrant`, are replaced. Everything else §1 decides stands,
+  and so does the reasoning it gave.**
+  [ADR-0139](0139-a-standing-grant-is-read-from-the-store-not-from-the-sources-the-hub-can-offer.md)
+  adds a fifth method, `standing_grants`, which answers from the store every grant
+  live at the moment the response is computed. Its §9 states the extent
+  authoritatively, as ADR-0070 §4 requires of the superseding ADR; this note
+  records it and does not restate it.
+
+  **Replaced**, in §1 — transcribed inside a fence so it stays a quotation of a
+  superseded clause rather than becoming a live mark of this document again
+  (ADR-0089 §2: "a `**Normative.**` line inside a fenced block is display, not a
+  mark"):
+
+  ```text
+  > **Normative.** The client surface for grants is exactly four methods on
+  > `AssistantEngine`: `grantable_sources`, `grant`, `revoke` and `recent_grants`,
+  > with §2's signatures. No other operation on any surface creates, revokes, or
+  > reports a `SourceGrant`.
+  ```
+
+  **What stands.** "No other operation on any surface **creates** … a
+  `SourceGrant`" is untouched and is the load-bearing limb — ADR-0139 §2 adds a
+  *query*, and ADR-0097 §1's "only an explicit user act creates a grant" is
+  neither narrowed nor touched. "**Revokes**" stands whole: `revoke` remains the
+  only revoking operation. §1's derivation of the count from ADR-0097 §9 stands as
+  the account it is of why *those four* exist, every fold it refused stays refused,
+  and its second paragraph — that a hub operation reached by a client is an
+  `AssistantEngine` method — is what ADR-0139 follows rather than departs from.
+  §2's four signatures are unchanged, and so is every other section of this ADR.
+
+  **Why the record lands here and now.** ADR-0082 §7 makes the atomic pair the
+  thing that closes this window, and ADR-0136 §7 and ADR-0138 §7 each landed the
+  equivalent record in the same change as the ADR that owed it rather than in a
+  later lane. This edit therefore rides ADR-0139's own PR (#1015), which closes
+  #1016 rather than leaving it to outlive the decision. **No ratified text of this
+  ADR is rewritten** (ADR-0070 §1): §1's clause stays legible where it was
+  written, and only the `Status` line moves.
 - **Decides the client-facing surface ADR-0097 §9 names as owed.**
   `AssistantEngine` gains **four** methods — `grantable_sources`, `grant`,
   `revoke` and `recent_grants` — `core/types.py` gains **one** type,

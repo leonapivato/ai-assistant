@@ -21,9 +21,10 @@
   extent clause by clause: the sentence "No other operation on any surface
   creates, revokes, or reports a `SourceGrant`" keeps its `creates` and `revokes`
   limbs whole and loses its `reports` limb. **ADR-0102's Status line carries the
-  record under ADR-0070 §4 and ADR-0001, and that file is outside this lane's
-  fence** — the edit is flagged on the PR carrying this ADR and filed as **#1016**,
-  owed before the implementing lane starts.
+  record under ADR-0070 §4 and ADR-0001, and it lands in this change** — the
+  partial-supersession token plus the appended dated note ADR-0082 §2 puts it in,
+  atomically with this ADR on ADR-0136 §7's and ADR-0138 §7's precedent, closing
+  **#1016**. §8 carries the clause and the reason.
 - **Amends no other ADR and supersedes none.** §9 applies ADR-0070 §1's test and
   ADR-0082 §1's record rule to the six further places where the opposite reading
   is available: ADR-0097 §2's two-act form, ADR-0097 §12's read deferral,
@@ -971,19 +972,32 @@ The middle one is the assertion the fifth clause's new limb needs and the stub c
 already make, since it records every act it receives. What is being tested
 throughout is the client's report, not the socket.
 
-> **Normative.** The lane that lands this ADR's supersession record edits
-> ADR-0102's `Status` line to the partial form ADR-0070 §4 fixes, naming this ADR
-> and the scope §9 states. It is owed before the contract lane starts, and it is
-> filed as #1016.
+> **Normative.** This ADR's supersession record on ADR-0102 lands **in this
+> change**: its `Status` line takes the partial form ADR-0070 §4 fixes, naming this
+> ADR and the scope §9 states, on one physical line; and the record itself is the
+> appended dated note beside it (ADR-0082 §2). The contract lane does not start
+> before this pair has merged.
 
-**It is a separate lane rather than an omission, and the sequencing is ADR-0070
-§1's own.** That section permits the in-place edit "recording a supersession that
-**has landed**", and says in terms that "flipping a live decision to `Superseded`
-with no such ADR is not a status change but an unrecorded decision change, and is
-not permitted". So the record is owed *after* this ADR merges however the lanes
-are cut, and the fence this ADR was authored under put the neighbouring file out
-of reach in the same direction. What must not happen is the contract lane starting
-first: a lane reading ADR-0102 alone would still refuse a fifth operation.
+**The pair is atomic, and an earlier draft had it wrong.** That draft deferred the
+`Status` edit to a later lane on the reading that ADR-0070 §1 permits the in-place
+edit only for "recording a supersession that **has landed**", so the record could
+not precede this ADR's merge. Adversarial review blocked it, correctly, and the
+fence was widened by the one file (coordinator ruling, 2026-08-12). The reading was
+wrong in the direction that matters: ADR-0070 §1's own gloss on "has landed" is
+"This presupposes the superseding ADR *exists*" — a floor forbidding a `Superseded`
+mark with no ADR behind it, not a bar on landing both in one commit, where nothing
+is ever recorded ahead of its own decision because both land at the same instant.
+
+**And the corpus had already settled it twice.** ADR-0136 §7 landed its record on
+ADR-0015 in the same change, reasoning that "a merged ADR-0136 sitting beside an
+unrecorded ADR-0015 is the window ADR-0082 exists to close, and ADR-0082 §7 is
+explicit that an atomic pair is what makes the failure mode unreachable". ADR-0138
+§7 then hit this exact case — it too deferred the record to an issue, was blocked
+by adversarial review on round 2, had its fence widened by one file, and closed the
+issue with the change rather than letting it outlive the decision. **#1016 closes
+with this change** for the same reason. What must not happen either way is the
+contract lane starting first: a lane reading ADR-0102 alone would still refuse a
+fifth operation.
 
 ### 9. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -1096,8 +1110,10 @@ both required lenses.
 
 **No ADR's decision text is edited by this lane, and no `VISION.md`, `CLAUDE.md`,
 `CONTRIBUTING.md` or `docs/roadmap.md` is touched.** The one header edit this
-decision owes — ADR-0102's `Status` line — is stated as owed in §8 and is outside
-this lane's fence.
+decision owes — ADR-0102's `Status` line, with the dated note beside it — lands in
+this change under §8's clause, and it is a header edit in ADR-0070 §1's
+append-only form: no ratified sentence of ADR-0102 is rewritten, and §1's
+superseded clause stays legible where it was written.
 
 ### 10. Deferred, by name, each with the condition that fires it
 
