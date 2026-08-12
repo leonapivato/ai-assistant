@@ -317,6 +317,17 @@ something. It is written down once here so a lane does not re-derive it:
    the re-run buys is **coverage**, which is mechanical, and no exemption in this
    document lifts it. The round is cheap by construction: the flipped tree
    differs from the one already judged by a status line.
+
+   **This does not turn a green set into a checkpoint.** What "Stop when the
+   required reviews are green" forbids is committing *again to improve* content a
+   reviewer has already judged. The flip improves nothing and reworks nothing —
+   it is the ratifying act the PR exists to perform, and without it nothing may
+   implement against the ADR at all (ADR-0015 §5). And a finding that does arrive
+   on that round is not stranded by the flip having happened: **return the ADR to
+   `Proposed`, correct the text, and ratify again.** ADR-0070 §1's no-rewrite
+   rule protects *ratified* decision text, and an ADR returned to `Proposed` is
+   not that — so the correction stays an in-place edit rather than becoming a
+   dated note appended to a document one commit old.
 4. **`just ship`, then `gh pr ready`, then merge** — on your own judgement, like
    any other change ("Report the review, then mark it ready").
 5. **Nothing implements against the ADR until that merge** (ADR-0015 §5, golden
