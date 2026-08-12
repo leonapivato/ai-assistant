@@ -315,8 +315,13 @@ something. It is written down once here so a lane does not re-derive it:
    as well. "Trivial ADR edits" above says the flip earns no review *of the edit
    itself*, and it does not — nothing in the re-run triages a status line. What
    the re-run buys is **coverage**, which is mechanical, and no exemption in this
-   document lifts it. The round is cheap by construction: the flipped tree
-   differs from the one already judged by a status line.
+   document lifts it. **ADR-0020 is not in tension with this step; it is what
+   obliges it.** Its §3 keeps the tree comparison mechanical — a review "taken
+   against different content or a different base" will "still fail, mechanically,
+   as before" — so ADR-0020 is itself the rule under which the flipped tree is
+   refused, and it cannot both mandate that refusal and forbid the round that
+   clears it. The round is cheap by construction: the flipped tree differs from
+   the one already judged by a status line.
 
    **This does not turn a green set into a checkpoint.** What "Stop when the
    required reviews are green" forbids is committing *again to improve* content a
@@ -351,10 +356,14 @@ something. It is written down once here so a lane does not re-derive it:
 is the worked precedent: drafted, reviewed and revised as `Proposed`, "its status
 flipped only once both required reviews returned clean on one tree", "Findings
 raised after the flip were folded the same way and both reviews re-run", and
-"nothing implements against §9 until this has merged". An ADR recording its own
-ratification owes a line naming the set it ran and the outcome it got, plus a
-pointer here — not a paragraph reasoning the sequencing out from first
-principles.
+"nothing implements against §9 until this has merged". ADR-0136 §7 is the same
+bullet for a single-lens ADR: drafted, reviewed and revised as `Proposed`, with
+"the status flipped only once the required review returned clean on one tree,
+with the required review re-run on the flipped tree". Two ratified ADRs recording
+step 3 as the route they took is why this is a settled sequence to point at
+rather than one to re-argue. An ADR recording its own ratification owes a line
+naming the set it ran and the outcome it got, plus a pointer here — not a
+paragraph reasoning the sequencing out from first principles.
 
 ## The dispatcher
 
