@@ -62,9 +62,9 @@ An under-specified brief is the largest source of rework. Each one carries:
   silently, with nothing in the gate or on the PR that catches it. Give the lane
   a prefix (its slug, or `pr-body-lane-<X>-<pr>.md`), prefer clone-local paths,
   and say that after a PR-body write from scratch space it re-reads the live
-  body and looks for a string only that lane would have written. The mitigation
-  is obvious to anyone it has already bitten, which is exactly why it stays in
-  the dispatcher's head and drops out of the brief; a checklist line is what
+  body and looks for a string only that lane would have written. Say it every
+  time: the mitigation reads as obvious once stated, which is why it stays in
+  the dispatcher's head and drops out of the brief, and a checklist line is what
   turns that omission into a visible blank rather than an invisible default.
 - **A scope fence** — which directories this lane may touch and which it may
   not, naming the lane that owns each excluded one. `core/protocols.py` and
