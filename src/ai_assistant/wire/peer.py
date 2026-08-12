@@ -38,8 +38,14 @@ from typing import Final
 
 from ai_assistant.wire.errors import ProtocolError
 
-#: ``struct ucred`` — pid, uid, gid, three native integers.
-_UCRED: Final[str] = "3i"
+#: ``struct ucred`` — ``{ pid_t pid; uid_t uid; gid_t gid; }``, three native 32-bit
+#: integers, but not three of the same kind: ``pid_t`` is signed while ``uid_t`` and
+#: ``gid_t`` are **unsigned**. Reading all three as ``i`` costs nothing until a uid
+#: reaches 2\ :sup:`31` — directory-service id mapping and some container uid
+#: remappings do — and then it decodes as a negative number that equals neither
+#: ``0`` nor any real euid, so the checks below refuse the user's own hub or agent.
+#: ``struct.calcsize`` is 12 either way, so only the value would have been wrong.
+_UCRED: Final[str] = "iII"
 
 
 def peer_uid(sock: socket.socket) -> int:
