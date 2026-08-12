@@ -88,12 +88,16 @@ proactive contact end to end — the operator's interval setting, the user's
 (ADR-0132 §4, ADR-0133 §3, ADR-0130 §6) and a record of them was until now in ADR
 bodies alone (#981).
 
-Nothing here reads a clock for any of it, which is why a held record is rendered
-with the expiry the engine put on it rather than with a verdict about whether that
-instant has passed — ``questions`` renders an expiring question the same way and for
-the same reason (golden rule 3). The ruling, its reason and the conditions it is
-waiting on all arrive on the record; this module re-rules nothing, re-orders
-nothing, and computes no reach.
+The ruling, its reason and the conditions it is waiting on all arrive on the
+record; this module re-rules nothing, re-orders nothing, and computes no reach.
+Its **one** clock reading is the listing's, taken once per page: ADR-0130 §7 has
+an expired record stay enumerable and render *as expired*, no field says which
+side of that line a record is on, and the comparison itself belongs to the core
+type — so what the adapter supplies is the reading, exactly as it does when it
+stamps a ``FeedbackEvent``. On a remote hub the reading is this device's, so a
+record within clock skew of its expiry may be labelled from the wrong side; that
+moves a label and never an act, the engine staying the authority on what any verb
+does.
 
 v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 """
@@ -102,6 +106,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import shlex
 import sys
 from datetime import UTC, datetime, time, timedelta
 from typing import TYPE_CHECKING, NamedTuple, assert_never
@@ -2543,17 +2548,24 @@ async def _drive_notifications(engine: AssistantEngine, *, limit: int, offset: i
     """Ask the façade for one page of held notifications and render it (ADR-0130 §7).
 
     The adapter relays the page and renders what comes back. It re-rules nothing,
-    re-orders nothing, re-filters nothing and **reads no clock**: the ruling, the
-    condition that decided it and the whole set it is waiting on all arrived on each
-    record, and an expiry is shown as the instant the engine put there rather than as
-    a verdict about whether it has passed (:func:`_render_notification`).
+    re-orders nothing and re-filters nothing: the ruling, the condition that decided
+    it and the whole set it is waiting on all arrived on each record, and every
+    instant shown is one the engine recorded.
+
+    **The one clock reading is taken here, once per page, and is an argument
+    everywhere below it.** ADR-0130 §7 has an expired record stay enumerable and
+    render *as expired*, and no field on the record says which side of that line it is
+    on — so the reading is the missing half of a comparison the core type performs
+    (:func:`_render_notification`). Taking it once is what keeps two rows of one page
+    from being judged at two instants, and passing it down is what keeps every
+    renderer a pure function of what it was handed.
     """
     try:
         page = await engine.notifications(limit=limit, offset=offset)
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
-    _render_notifications(page, limit=limit, offset=offset)
+    _render_notifications(page, now=_utcnow(), limit=limit, offset=offset)
     return _EXIT_OK
 
 
@@ -4011,18 +4023,43 @@ def _hours(duration: timedelta) -> str:
     return f"{count:g} hour" if count == 1 else f"{count:g} hours"
 
 
-def _render_notifications(page: tuple[HeldNotification, ...], *, limit: int, offset: int) -> None:
+def _render_notifications(
+    page: tuple[HeldNotification, ...], *, now: datetime, limit: int, offset: int
+) -> None:
     """Render one page of held notifications (ADR-0130 §7).
 
     **No total is shown** and none is available: "is there more" is answered by asking
     for the next page, exactly as the belief, conversation and question listings
     answer it.
 
-    An empty page is where the arming chain is worth naming, because an empty page is
+    An empty *first* page is where the arming chain is worth naming, because that is
     what an operator sees when one of its three links is missing and it is the one
     moment they are certainly looking (#979, #981).
+
+    ``now`` is supplied by the caller rather than read here, so every row on one page
+    is judged at one instant and a test can render a page at a chosen one. What it is
+    for is :func:`_render_notification`'s expiry rendering, which ADR-0130 §7 requires
+    and which no field on the record answers by itself.
+
+    Args:
+        page: The records the engine returned, oldest first.
+        now: The instant to judge each record's expiry and actionability at.
+        limit: The page size that was asked for.
+        offset: How many rows were skipped.
     """
     if not page:
+        # **An empty page is not the same claim as an empty store**, and only one of
+        # the two is checkable from here. A page asked for past the end, or asked for
+        # with `--limit 0`, is empty whatever the store holds — so saying "I am
+        # holding nothing" there would be a false absence, and a confident one:
+        # `--limit 0` is accepted, exactly as it is on every other listing.
+        if offset or not limit:
+            console.print(
+                "[dim]No notifications on this page.[/] That says nothing about what "
+                "is held — ask from the first page ('--offset 0' with a limit above 0) "
+                "to see."
+            )
+            return
         console.print(
             "[dim]I am holding nothing for you.[/] Out of the box nothing reaches you "
             "unprompted — see 'assistant tune --help' for the three separate acts that "
@@ -4031,27 +4068,43 @@ def _render_notifications(page: tuple[HeldNotification, ...], *, limit: int, off
         return
     console.print(f"[bold]{len(page)} notification(s)[/] I am holding, oldest first.")
     for record in page:
-        _render_notification(record)
+        _render_notification(record, now=now)
     if limit and len(page) == limit:
         console.print(
             f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]"
         )
 
 
-def _render_notification(record: HeldNotification) -> None:
+def _render_notification(record: HeldNotification, *, now: datetime) -> None:
     """Render one held notification with what a person needs in order to act on it.
 
-    **No clock is read and none may be** (golden rule 3), which decides how an expiry
-    is shown: the instant the engine put on the record, never a verdict about whether
-    it has passed. ``assistant questions`` renders an expiring question the same way,
-    for the same reason — every time this surface shows is one the engine recorded.
-    An expired record is listed either way; expiry ends a notification, it deletes
-    nothing (ADR-0130 §7).
+    **An expired record renders as expired**, which ADR-0130 §7 requires of any
+    surface that enumerates one: expiry ends a notification's interruptibility and its
+    actionability and deletes nothing, so the record is still listed and the listing
+    has to say which side of that line it is on. No field answers it — the record
+    carries the expiry instant and nothing else — so the caller's ``now`` is compared
+    against it.
+
+    **The comparison is the core type's and not this module's** (golden rule 3):
+    :meth:`~ai_assistant.core.types.NotificationCandidate.is_perishable_at` is the
+    boundary "spelled once so that a policy, a store and a suite cannot disagree about
+    it", and this asks it rather than restating ``<=``. What the adapter supplies is a
+    clock reading, which is what it already does when it stamps a ``FeedbackEvent``.
+
+    **On a remote hub that reading is this device's, not the hub's** (ADR-0124), so a
+    record within clock skew of its expiry may be labelled from the wrong side. That
+    is a label being early or late by the skew, never a wrong action: the engine
+    remains the authority on what an act does, and :func:`_render_notification_acts`
+    withholds only the *hint*, never the id the user would type.
 
     Producer-supplied text — the summary, the detail, the class and the producer's own
     name — is neutralised for this terminal (``_safe``, ADR-0042 §4). The ruling, its
     reason and the conditions it is waiting on are this system's own closed
     vocabularies and are rendered through total matches.
+
+    Args:
+        record: The record to render.
+        now: The instant to judge its expiry and actionability at.
     """
     candidate = record.candidate
     console.print(f"\n  [bold cyan]{_safe(record.id)}[/]")
@@ -4066,9 +4119,14 @@ def _render_notification(record: HeldNotification) -> None:
     console.print(f"  [dim]Noticed:[/] {_when(candidate.noticed_at)}")
     if candidate.expires_at is None:
         console.print("  [dim]Expires:[/] never — which is why it is held rather than urgent")
-    else:
+    elif candidate.is_perishable_at(now):
         console.print(f"  [dim]Expires:[/] {_when(candidate.expires_at)}")
-    _render_notification_acts(record)
+    else:
+        console.print(
+            f"  [yellow]Expired:[/] {_when(candidate.expires_at)} "
+            f"[dim]— it is kept and readable, and it will not reach you[/]"
+        )
+    _render_notification_acts(record, now=now)
 
 
 def _render_notification_ruling(record: HeldNotification) -> None:
@@ -4098,26 +4156,45 @@ def _render_notification_ruling(record: HeldNotification) -> None:
         console.print(f"  [dim]Ruled out:[/] {_when(record.dropped_at)}")
 
 
-def _render_notification_acts(record: HeldNotification) -> None:
+def _render_notification_acts(record: HeldNotification, *, now: datetime) -> None:
     """Offer the two acts ADR-0130 §6 says a surface rendering one should offer.
 
     "Every ``INTERRUPT`` disposition carries its notification class, so any surface
     rendering it can offer the two acts that tune it in one step: dismissing the
     notification, and lowering that class's reach." Both are offered here, on every
-    record still outstanding rather than on an interruption alone — a held one is
+    record still **actionable** rather than on an interruption alone — a held one is
     exactly what a user wants to dispose of or unblock, and it is the case #979 found
     unreachable.
+
+    **Actionability is §7's own three-part test and is asked of the record**
+    (:meth:`~ai_assistant.core.types.HeldNotification.is_actionable_at`), not
+    reconstructed from the stamps: dismissed, expired *and* dropped all end it, and a
+    check reading only the two stamped ones would keep offering ``dismiss`` on a
+    record that perished, where the engine answers ``False``. Offering an act that
+    does nothing is a surface making a promise the engine will not keep.
 
     **Which direction to offer is read off the record and decided nowhere.** A record
     whose failed set names the reach condition is one the user's own setting is
     holding back, so the act that changes its outcome is raising that class; anything
     else is already allowed to reach them, and the act §6 names for that is lowering
-    it. A record already dismissed or ruled out gets neither: offering an act that
-    would do nothing is a surface making a promise the engine will not keep.
+    it.
+
+    **The values are shell-quoted before they are escaped for the terminal**, because
+    these two lines are meant to be *pasted*. An id and a class are both non-blank
+    encodable text and neither forbids an interior space, so an unquoted hint for a
+    class named ``calendar upcoming`` reads as a valid command that sets a different
+    class. ``_safe`` is about Rich markup and control characters and answers a
+    different question; quoting happens first, so what is escaped is the quoted form.
+    The same exposure on the older ``answer``/``forget-question``/``revoke`` hints is
+    #984 rather than a wider diff here.
+
+    Args:
+        record: The record whose acts to offer.
+        now: The instant to judge its actionability at.
     """
-    if record.kind is NotificationDispositionKind.DROP or record.dismissed_at is not None:
+    if not record.is_actionable_at(now):
         return
-    console.print(f"  [dim]Deal with it:[/] assistant dismiss {_safe(record.id)}")
+    console.print(f"  [dim]Deal with it:[/] assistant dismiss {_safe(shlex.quote(record.id))}")
     wanted = (
         NotificationReach.INTERRUPT
         if NotificationCondition.REACH_INTERRUPT in record.failed
@@ -4125,7 +4202,7 @@ def _render_notification_acts(record: HeldNotification) -> None:
     )
     console.print(
         f"  [dim]Tune the class:[/] assistant tune --class "
-        f"{_safe(record.candidate.notification_class)} --reach {wanted.value}"
+        f"{_safe(shlex.quote(record.candidate.notification_class))} --reach {wanted.value}"
     )
 
 
