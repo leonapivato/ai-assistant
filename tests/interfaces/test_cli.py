@@ -2659,27 +2659,31 @@ def test_a_pasted_question_hint_names_the_question_it_was_printed_for(
     ]
 
 
+@pytest.mark.parametrize("unshowable", ["\n", "\t"], ids=["replaced", "expanded"])
 def test_a_question_hint_is_withheld_where_showing_it_would_change_what_it_says(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, unshowable: str
 ) -> None:
     """Quoting settles where an argument ends, not whether it survives being shown.
 
+    Two ways a value fails to reach the screen intact, and the hint has to go for both.
     ``_safe`` **replaces** a character a terminal must not be handed, so an id carrying
-    a newline renders as ``q�1`` — inside perfectly correct shell quotes, naming a
-    question that does not exist. That is the failure quoting was added to prevent,
+    a newline renders as ``q�1``; Rich **expands** a tab, which ``_safe`` deliberately
+    keeps, so an id tabbed in the middle renders with spaces. Either way the line is
+    perfectly quoted
+    and names a question that does not exist — the failure quoting was added to prevent,
     arriving one step later and looking like a working instruction rather than a
-    mistake, which is why ``_render_notification_acts`` has always withheld the line and
-    why these two now do (#1013).
+    mistake (#1013).
 
     The question still renders and both recovery steps keep their numbers: what is
     withheld is the copyable command, and the replacement says so rather than leaving a
-    gap the reader has to notice.
+    gap the reader has to notice. Asserted as the *absence of an offered argument*
+    rather than against one mangled spelling, so one case can cover both mechanisms.
     """
     _wire(
         monkeypatch,
         _QuestionEngine(
-            waiting=(_question("q\n1"),),
-            stranded=(_question("q\n2", state=QuestionState.INTERRUPTED),),
+            waiting=(_question(f"q{unshowable}1"),),
+            stranded=(_question(f"q{unshowable}2", state=QuestionState.INTERRUPTED),),
         ),
     )
 
@@ -2689,8 +2693,8 @@ def test_a_question_hint_is_withheld_where_showing_it_would_change_what_it_says(
     assert "the user works from Lisbon" in rendered, "the question itself still renders"
     assert "2. Check" in rendered, "the second recovery step keeps its number"
     assert rendered.count("cannot show") == 2, "one per withheld hint, not one for the page"
-    assert "assistant answer " + shlex.quote("q�1") not in rendered
-    assert "assistant forget-question " + shlex.quote("q�2") not in rendered
+    assert "assistant answer '" not in rendered, "no argument is offered at all"
+    assert "assistant forget-question '" not in rendered
 
 
 def test_the_follow_up_hint_is_withheld_where_the_successors_id_cannot_be_shown(
@@ -3254,39 +3258,44 @@ def test_a_pasted_revoke_hint_withdraws_the_source_it_was_printed_for(
     assert _pasted(prompt, "assistant revoke", "'.") == ["assistant", "revoke", "my calendar"]
 
 
+@pytest.mark.parametrize("unshowable", ["\n", "\t"], ids=["replaced", "expanded"])
 def test_a_revoke_hint_is_withheld_where_the_source_name_cannot_be_shown(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, unshowable: str
 ) -> None:
     """A declared name a terminal cannot show costs the hint, not the grant (#1013).
 
     ADR-0102 §4 admits any declared identity equal to its own ``strip()`` that validates
-    as an ``Identifier``, so ``my\\ncalendar`` is enumerated and grantable — and ``_safe``
-    then renders it ``my�calendar``, which is a *different* source. The act still
-    happens and is still confirmed; what goes is the line offering to undo it.
+    as an ``Identifier``, and neither an interior newline nor an interior tab is
+    stripped — so both names below are enumerated and grantable, and both reach the
+    screen as a *different* source: the newline is replaced by ``_safe`` and the tab is
+    expanded by Rich.
+
+    The act still happens and is still recorded byte-exact; what goes is the line
+    offering to undo it. Which is the point of separating the two — an unshowable name
+    must not become an ungrantable one.
     """
+    named = f"my{unshowable}calendar"
     engine = FakeAssistantEngine()
-    engine.hold_source("my\ncalendar", location="/srv/calendar.ics")
+    engine.hold_source(named, location="/srv/calendar.ics")
     _wire(monkeypatch, engine)
 
-    granted = CliRunner().invoke(
-        cli.app, ["grant", "my\ncalendar", "--scope", "facet"], input="y\n"
-    )
+    granted = CliRunner().invoke(cli.app, ["grant", named, "--scope", "facet"], input="y\n")
     assert granted.exit_code == 0
-    assert [record.source for record in engine.grants_recorded] == ["my\ncalendar"], (
+    assert [record.source for record in engine.grants_recorded] == [named], (
         "the grant is recorded byte-exact; only the printed hint is affected"
     )
     confirmation = _flowed(output.getvalue())
     assert "Granted." in confirmation
     assert "cannot show" in confirmation
-    assert "assistant revoke " + shlex.quote("my�calendar") not in confirmation
+    assert "assistant revoke '" not in confirmation, "no argument is offered at all"
 
     already = len(output.getvalue())
-    again = CliRunner().invoke(cli.app, ["grant", "my\ncalendar", "--scope", "facet"], input="n\n")
+    again = CliRunner().invoke(cli.app, ["grant", named, "--scope", "facet"], input="n\n")
     assert again.exit_code == 0
     prompt = _flowed(output.getvalue()[already:])
     assert "It is already granted" in prompt
     assert "cannot show" in prompt
-    assert "assistant revoke " + shlex.quote("my�calendar") not in prompt
+    assert "assistant revoke '" not in prompt
 
 
 def test_every_scope_the_enum_offers_is_accepted_and_rendered_in_words(
@@ -4124,6 +4133,31 @@ def test_a_hint_is_withheld_where_showing_it_would_change_what_it_says(
     assert "assistant tune --class" not in rendered
     assert "assistant dismiss ntf-1" not in rendered
     assert "cannot show" in rendered
+
+
+def test_a_tab_is_uncopyable_even_though_safe_keeps_it(output: StringIO) -> None:
+    """``_safe`` is not the only lossy step between a value and the screen (#1013).
+
+    A tab is the case the "ask ``_safe`` itself" construction misses: ``_safe`` keeps it
+    on purpose — a tab inside displayed prose is legitimate, and replacing it would
+    corrupt what a producer wrote — but **Rich expands it to the next tab stop** when it
+    renders, before any terminal is involved. So a hint carrying one is displayed
+    correctly quoted and naming a different value, which is precisely the failure
+    ``_is_pasteable`` exists to catch.
+
+    The expansion is read off Rich rather than asserted from this docstring, and the
+    consequence is stated as a round trip: what is on screen, split as a shell splits
+    it, is not the value it was printed for.
+    """
+    tabbed = "my\tcalendar"
+    assert cli._safe(tabbed) == tabbed, "_safe keeps it, which is why asking _safe is not enough"
+
+    cli.console.print(shlex.quote(tabbed))
+
+    shown = output.getvalue().rstrip("\n")
+    assert "\t" not in shown, "Rich expanded it on the way to the screen"
+    assert shlex.split(shown) != [tabbed], "so reading the screen back names something else"
+    assert not cli._is_pasteable(tabbed)
 
 
 def test_tune_sends_a_class_byte_for_byte_so_the_listing_round_trips(

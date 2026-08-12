@@ -4479,13 +4479,23 @@ def _is_pasteable(value: str) -> bool:
     replacement exactly, and it stays correct if ``_safe``'s set of replaced characters
     ever changes.
 
+    **A tab is refused separately, because ``_safe`` is not the only lossy step.**
+    ``_safe`` keeps ``\t`` deliberately — a tab inside displayed *prose* is legitimate,
+    and replacing it would corrupt what a producer wrote — but Rich expands it to the
+    next tab stop when it renders, before any terminal is involved. So a hint carrying
+    one is displayed as ``assistant revoke 'my    calendar'``: correctly quoted, and
+    naming a source whose name holds spaces rather than a tab. That is this function's
+    own failure arriving through a second channel, so it is named here rather than by
+    tightening ``_safe`` — which would change every value this surface *displays* to fix
+    the few it offers to be *copied*.
+
     Args:
         value: The value a printed command would carry.
 
     Returns:
         Whether the value survives being displayed.
     """
-    return _safe(value) == escape(value)
+    return "\t" not in value and _safe(value) == escape(value)
 
 
 def _render_notification_settings(preferences: NotificationPreferences) -> None:
