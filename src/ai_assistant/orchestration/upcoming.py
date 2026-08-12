@@ -48,6 +48,7 @@ from datetime import timedelta
 from hashlib import sha256
 from typing import TYPE_CHECKING, Final
 
+from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import SourceNotGrantedError
 from ai_assistant.core.types import DataTier, GrantScope, NotificationCandidate
 
@@ -225,12 +226,11 @@ class UpcomingEventStage:
                 write to the store other than through here.
             now: The hub's clock, held because §1 enumerates it among this
                 producer's collaborators and **read by nothing here** because §4
-                anchors every instant on the reading's own ``read_at``. It is
-                injected rather than reached for, so the day a clause does need an
-                instant of ours it arrives through the seam the rest of this layer
-                already uses (ADR-0026) instead of through ``datetime.now``. The
-                class docstring carries the reconciliation and the test that keeps
-                it true.
+                anchors every instant on the reading's own ``read_at``. Stored
+                through ``checked_clock`` like every other clock seam in the tree,
+                on ADR-0026 §2 and on §7's refusal to exempt a clock whose consumer
+                is advisory. The class docstring carries the reconciliation and the
+                test that keeps it true.
             lead: How far ahead of a start instant an occurrence is noticed (§4).
                 ``Settings`` has already refused a figure that is not strictly
                 positive, that outruns the reader's own forward window, or that is
@@ -274,8 +274,16 @@ class UpcomingEventStage:
         self._reader = reader
         self._grants = grants
         self._writer = writer
-        #: Held per §1 and read by nothing per §4 — see the class docstring.
-        self._now = now
+        # **Wrapped rather than stored raw, and ADR-0026 §7 is why it is wrapped
+        # even here.** §2 requires every constructor holding a clock to store
+        # `checked_clock(now, owner=...)`, and §7 refuses an exemption for a clock
+        # whose consumer is advisory or absent in as many words: "A rule that
+        # exempted 'advisory' clocks would oblige every future author to classify
+        # their clock, with nothing checking the guess and a wrong timestamp —
+        # unfalsifiable afterwards — as the failure." Nothing here reads it (§4),
+        # so the guard is inert today; what it buys is that the day a clause does,
+        # the reading is already held to §3's range and to ADR-0023 §5's aware.
+        self._now = checked_clock(now, owner="UpcomingEventStage")
         self._lead = lead
 
     async def notice(self) -> int:

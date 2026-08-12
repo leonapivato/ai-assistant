@@ -851,6 +851,35 @@ async def test_the_clock_it_holds_is_never_read() -> None:
     assert {candidate.summary.split(",")[0] for candidate in harness.offered} == {"E5", "E15"}
 
 
+def test_the_clock_it_holds_is_still_stored_through_the_shared_guard() -> None:
+    """ADR-0026 §2, and §7's refusal to exempt a clock whose consumer is advisory.
+
+    §2 requires every constructor holding a clock to store
+    ``checked_clock(now, owner=...)`` rather than the raw callable, and §7 declines
+    the obvious exemption in as many words: "A rule that exempted 'advisory' clocks
+    would oblige every future author to classify their clock, with nothing checking
+    the guess and a wrong timestamp — unfalsifiable afterwards — as the failure."
+    A clock read by nothing is the limiting case of that, so it is wrapped like
+    every other.
+
+    The wrap is inert while §4 keeps the reading unread, which is exactly why it
+    needs asserting rather than trusting: nothing else in this module can tell a
+    stored ``checked_clock`` from a stored lambda. Reading the seam directly is
+    what makes the difference observable, and the owner label is the diagnostic
+    §2 says the guard exists to provide.
+    """
+    stage = UpcomingEventStage(
+        reader=FakeReader([]),
+        grants=FakeSourceGrants(),
+        writer=_RecordingWriter(),
+        now=lambda: datetime(2026, 6, 1, 14, 0),  # noqa: DTZ001 — the naive reading is the subject
+        lead=_LEAD,
+    )
+
+    with pytest.raises(ValueError, match="UpcomingEventStage"):
+        stage._now()
+
+
 def test_the_producer_holds_nothing_a_memory_or_a_model_would_need() -> None:
     """§1 and §8, pinned on the constructor rather than trusted to review.
 
