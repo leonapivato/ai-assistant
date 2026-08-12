@@ -125,20 +125,36 @@ between them.**
 > invocation** on that branch, and immediately before the **final push preceding
 > `gh pr ready`**. Both are mandatory and neither is at the author's discretion.
 
-> **Normative.** Each anchor is a run on the tree as it then stands. A full gate
-> run on an earlier tree does not discharge either anchor, and a rebase between
-> the closing anchor and the final push re-opens it (`CONTRIBUTING.md` → "Run it
-> against a current `main`": a green gate is evidence about the tree it ran on).
+> **Normative.** Each anchor is a run on the tree as it then stands, and a full
+> gate run on an earlier tree does not discharge it.
+
+> **Normative.** A rebase that moves the branch's base re-opens the next anchor
+> owed: the full gate is run again before the next review invocation and before
+> the final push, whichever follow. This holds however many anchors have already
+> been discharged.
 
 The first anchor is owed **once per branch, not once per review invocation**, and
 this ADR accepts what that means rather than leaving it to be discovered: a review
 invoked at round 7 may run on a tree whose tests fail, because §2 permitted the
 author not to run them at round 6.
 
-> **Normative.** A second or later review invocation on a branch reopens neither
-> anchor. A tree whose tests fail is not, on that ground, ineligible for review.
+> **Normative.** A second or later review invocation on a branch does not on its
+> own re-open an anchor. A tree whose tests fail is not, on that ground,
+> ineligible for review. This is subject to the rebase clause above, which
+> re-opens the anchor whenever the base has moved.
 
-That is accepted on the reading of `docs/review/guide.md` above: the reviewer runs
+The rebase carve-out is not a concession; it is the case where a full run carries
+real information and the cheap checks carry none. What a rebase brings into the
+branch is **other lanes' merged code**, and the interaction between that code and
+this branch's is exactly the cross-subsystem regression `CONTRIBUTING.md` warns
+`lint-imports` cannot see. It is also cheap to require: a lane rebases once or
+twice, not once per round, so this costs a run per *base move* rather than the run
+per *round* the paragraph below declines. Without it §6's claim that the freshness
+rules stand whole would be false — `CONTRIBUTING.md` requires the gate green
+before a review and a rebase before invoking one, and a rule that let a rebased
+tree reach a reviewer on the static four alone would quietly narrow both.
+
+The rest is accepted on the reading of `docs/review/guide.md` above: the reviewer runs
 no tests and may not report what `pytest` catches, so a failing test changes
 nothing it does — where a tree it cannot parse or type-check would, which is why
 §2 keeps `ruff` and `mypy` mandatory before every commit and only `pytest`
@@ -260,7 +276,12 @@ the record of a review covers.
   "Stop when the required reviews are green" own that, unchanged.
 - **The rebase rules.** Rebasing before gating and before invoking a review is
   about *freshness*, not breadth (`CONTRIBUTING.md` states them as distinct
-  judgements), and both stand. §1's second clause leans on them.
+  judgements), and both stand **whole** — which is what §1's rebase clause is for.
+  A rebase re-opens the next anchor owed, so a rebased tree still meets a reviewer
+  gate-green, and `CONTRIBUTING.md`'s "**after** the gate is green" is narrowed for
+  no rebased tree. What §1 narrows is only the un-rebased case between anchors,
+  where the tree the reviewer reads is the author's own work on a base already
+  proven once.
 
 ### 7. What this records against earlier ADRs
 
@@ -349,10 +370,15 @@ the record of a review covers.
 
 **Follow-on.** Batch #986 lane 1b — a parallel test recipe and the
 `CONTRIBUTING.md` edit that states this cadence where an author reads it — is
-briefed after this merges (§6). `CONTRIBUTING.md` and `CLAUDE.md` continue to
-state the every-commit rule until that lane lands; where they and this ADR
-disagree in that window, this ADR governs, since a ratified ADR outranks
-`CONTRIBUTING.md`.
+briefed after this merges (§6). That edit carries **three** things, not one: the
+two anchors, §1's rebase clause (which is what keeps "Run it against a current
+`main`" and "**after** the gate is green" true as written), and the replacement of
+"Run the whole suite, always" together with the revisit trigger this decision
+discharges. `CONTRIBUTING.md` and `CLAUDE.md` continue to state the every-commit
+rule until that lane lands; where they and this ADR disagree in that window, this
+ADR governs, since a ratified ADR outranks `CONTRIBUTING.md`. Issue #994 carries
+the separate `docs/review/guide.md` wording clarification argued in §6, which
+nothing here waits on.
 
 **Revisit if** the suite's serial cost falls back under a minute (the anchors stop
 being worth naming — restore the simpler rule), or if a regression that the
