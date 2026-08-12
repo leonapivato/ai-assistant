@@ -70,6 +70,31 @@ destroys a belief and ADR-0073 §5 requires the thing be shown first, while revo
 destroys nothing and is the user's whole remedy, which ADR-0102 §4 says nothing may
 stand between them and.
 
+``notifications``, ``dismiss``, ``forget-notification``, ``notification-settings``
+and ``tune`` are the notification surface — exactly the five engine operations
+ADR-0130 §9 ratifies and no sixth. Four of them relay one call each; ``tune`` reads,
+substitutes what the user named, and writes the whole value back, which is the flow
+``AssistantEngine.set_notification_preferences`` itself prescribes ("a caller
+changing one setting reads, adjusts and writes back") together with its consequence,
+that two writers racing lose the earlier one's edit.
+
+**The write is the half that makes the rest reachable, and that is ADR-0130 §6's
+design rather than this module's.** Every class defaults to ``hold``, so out of the
+box nothing interrupts and the first interruption follows a deliberate act by the
+user; before this surface existed the act had no door and the default could not be
+moved (#979). ``tune``'s help therefore names the three independent acts that arm
+proactive contact end to end — the operator's interval setting, the user's
+``notify`` grant, and the reach raise — because none of them implies another
+(ADR-0132 §4, ADR-0133 §3, ADR-0130 §6) and a record of them was until now in ADR
+bodies alone (#981).
+
+Nothing here reads a clock for any of it, which is why a held record is rendered
+with the expiry the engine put on it rather than with a verdict about whether that
+instant has passed — ``questions`` renders an expiring question the same way and for
+the same reason (golden rule 3). The ruling, its reason and the conditions it is
+waiting on all arrive on the record; this module re-rules nothing, re-orders
+nothing, and computes no reach.
+
 v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 """
 
@@ -78,8 +103,8 @@ from __future__ import annotations
 import asyncio
 import math
 import sys
-from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, assert_never
+from datetime import UTC, datetime, time, timedelta
+from typing import TYPE_CHECKING, NamedTuple, assert_never
 
 import typer
 from rich.console import Console
@@ -90,16 +115,23 @@ from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import AssistantError
 from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import (
+    DEFAULT_NOTIFICATION_REACH,
     AnswerKind,
     BeliefBand,
+    ClassReach,
     Disposition,
     FeedbackEvent,
     FeedbackKind,
     GrantScope,
     LearnDecision,
     MemoryKind,
+    NotificationCondition,
+    NotificationDispositionKind,
+    NotificationPreferences,
+    NotificationReach,
     QuestionState,
     QueueOutcome,
+    QuietWindow,
     SecretScope,
     StepStatus,
     encodable_text,
@@ -132,6 +164,7 @@ if TYPE_CHECKING:
         ConversationDigest,
         ConversationSummary,
         GrantableSource,
+        HeldNotification,
         IngestSummary,
         LearnOutcome,
         ObservationReport,
@@ -646,6 +679,229 @@ def _positive_page_argument(value: int) -> int:
     return value
 
 
+def _present_notification_class(value: str | None) -> str | None:
+    """:func:`_present_id` for ``tune --class``, and the stripping is why it is here.
+
+    A notification class is ``NonBlankEncodableText`` rather than an ``Identifier``,
+    which is the shape ADR-0102 §2 keeps **byte-exact** for a grant's ``source`` — so
+    the choice has to be made rather than inherited. It goes the other way for a
+    reason particular to this argument: a source is compared against a reader the hub
+    already holds, where a value differing only by surrounding whitespace must be
+    refused rather than matched (ADR-0097 §10), while a class here is not matched
+    against anything. It *creates* a preference row, and
+    :meth:`~ai_assistant.core.types.NotificationPreferences.reach_for` then compares
+    that row exactly. A row written for ``" upcoming_event "`` would therefore be a
+    setting the user was shown accepting and that silently governs nothing — a worse
+    outcome than refusing, and one nothing later would explain.
+
+    Args:
+        value: The class as the user typed it, or ``None`` when unset.
+
+    Returns:
+        The class stripped, or ``None``.
+
+    Raises:
+        BadParameter: If a value was given and is blank, or has no UTF-8 encoding.
+    """
+    return _present_optional_id(value)
+
+
+def _quiet_window(spec: str) -> QuietWindow:
+    """Parse one ``HH:MM-HH:MM`` quiet window into the engine's own value.
+
+    Turning what the user typed into the request type is the adapter's own job
+    (ADR-0042 §6, "Adaptation"), and it is *only* that: the endpoints go straight to
+    :meth:`~ai_assistant.core.types.QuietWindow.between`, which owns the half-open
+    convention, the wrap across midnight and the refusal of a window with no readable
+    extent (ADR-0130 §6). Nothing here decides any of them.
+
+    **The endpoints are naive local times and this refuses a zone**, by handing them
+    to a constructor that does: quiet windows are read in ``Settings.timezone`` and
+    ADR-0130 §6 introduces no second timezone source, so ``22:00+01:00`` is an error
+    rather than a value quietly reinterpreted.
+
+    Args:
+        spec: The window as the user typed it, e.g. ``22:00-07:00``.
+
+    Returns:
+        The window.
+
+    Raises:
+        ValueError: If the text is not two ``HH:MM`` endpoints separated by ``-``,
+            if either carries a timezone, or if the two name the same minute.
+    """
+    start, separator, end = spec.partition("-")
+    if not separator:
+        msg = f"expected a window of the form HH:MM-HH:MM, got {spec!r}"
+        raise ValueError(msg)
+    return QuietWindow.between(time.fromisoformat(start.strip()), time.fromisoformat(end.strip()))
+
+
+def _present_quiet_windows(value: list[str]) -> list[str]:
+    """Reject an unparseable ``--quiet-window`` during Typer's parameter parsing.
+
+    :func:`_page_argument`'s shape and its reason exactly: every refusal
+    :func:`_quiet_window` can hit is a ``ValueError`` — from
+    :func:`~datetime.time.fromisoformat`, from
+    :func:`~ai_assistant.core.types.minute_of_day`, or from ``QuietWindow``'s own
+    validator — and a ``ValueError`` is **not** an :class:`AssistantError`, so it
+    would escape :func:`_tune_notifications`'s error boundary as an uncaught
+    traceback with no controlled exit code (ADR-0042 §7). Parsing here makes a
+    mistyped window a normal usage error (exit code 2) before any client is built.
+
+    The value is returned **unchanged** and parsed again where it is used: keeping
+    the option's declared type ``list[str]`` is what lets one function be both the
+    parser and the check, so the two can never disagree about what is admissible.
+
+    Args:
+        value: The windows as the user repeated them.
+
+    Returns:
+        The value, unchanged.
+
+    Raises:
+        BadParameter: If any window will not parse.
+    """
+    for spec in value:
+        try:
+            _quiet_window(spec)
+        except ValueError as exc:
+            raise typer.BadParameter(f"{spec!r}: {exc}") from exc
+    return value
+
+
+def _budget_argument(value: int | None) -> int | None:
+    """Reject an ``--budget`` :class:`NotificationPreferences` would refuse.
+
+    The field is ``0 <= budget < 2**63`` (ADR-0130 §6), and zero is a legible "never
+    interrupt" rather than a defect, so the floor is 0 and not 1. Refused at parse
+    time for :func:`_page_argument`'s reason: pydantic raises ``ValidationError``,
+    which is not an :class:`AssistantError`, so it would escape the command's error
+    boundary as a traceback.
+    """
+    if value is not None and not 0 <= value < _PAGE_BOUND:
+        msg = f"must be between 0 and {_PAGE_BOUND - 1}"
+        raise typer.BadParameter(msg)
+    return value
+
+
+#: ``assistant tune``'s reach flag, hoisted to module scope for the reason the
+#: ``learn``, ``beliefs`` and ``grant`` enum options are (ruff's B008). Optional
+#: rather than required: ``tune`` writes only the axes the user named, and reach is
+#: one of three standing settings (ADR-0130 §6).
+_TUNE_REACH_OPTION = typer.Option(
+    None,
+    "--reach",
+    help=(
+        "How far the class named by --class may reach you: 'off' never tells you, "
+        "'hold' keeps it for when you next look (the default for every class), "
+        "'interrupt' lets it reach you at the time."
+    ),
+)
+
+#: ``assistant tune``'s repeatable quiet-window flag, hoisted for B008's reason — a
+#: list-annotated option is no more exempt from it than an enum-annotated one.
+#: Repeating it **replaces** the whole set, which is the one legible reading of a
+#: repeated flag against a surface that writes the whole value (ADR-0130 §6).
+_TUNE_QUIET_WINDOW_OPTION = typer.Option(
+    None,
+    "--quiet-window",
+    callback=_present_quiet_windows,
+    metavar="HH:MM-HH:MM",
+    help=(
+        "An interval of your local day during which nothing interrupts, e.g. "
+        "'22:00-07:00' (it may cross midnight). Repeatable; giving any replaces the "
+        "whole set. Use --no-quiet-windows to remove them all."
+    ),
+)
+
+
+class _Tuning(NamedTuple):
+    """What one ``assistant tune`` invocation was asked to change (ADR-0130 §6).
+
+    A parcel rather than five parameters threaded through four functions, and it is
+    the **parsed** form: :func:`_tuning` is where what the user typed becomes the
+    value the engine's own type takes, so everything downstream of it relays rather
+    than parses. ``None`` on an axis means "the user did not name this", which
+    :func:`_tuned` reads as "write back what was already there" — the distinction
+    that lets one act be performed without restating the other two.
+    """
+
+    notification_class: str | None
+    reach: NotificationReach | None
+    quiet_windows: tuple[QuietWindow, ...]
+    clear_quiet_windows: bool
+    budget: int | None
+
+
+def _tuning(
+    *,
+    notification_class: str | None,
+    reach: NotificationReach | None,
+    quiet_windows: list[str],
+    clear_quiet_windows: bool,
+    budget: int | None,
+) -> _Tuning:
+    """Check the flags agree with each other and parse them (ADR-0042 §6, §7).
+
+    Three refusals live here rather than behind the engine call, because all three are
+    decidable from what was typed and none should cost a round trip — and because a
+    usage error belongs at parse time, where it is exit code 2 rather than an
+    :class:`AssistantError` rendered from inside a session:
+
+    * **``--class`` and ``--reach`` are one setting and are given together.** Either
+      alone names half of "this class may reach me this far", and supplying the other
+      half would be this adapter deciding what the user permitted.
+    * **``--quiet-window`` and ``--no-quiet-windows`` contradict each other**, so the
+      pair is refused rather than resolved by precedence. A precedence rule is a
+      decision the user cannot see in what they typed.
+    * **A call naming nothing at all is refused**, because the write is not a no-op:
+      ADR-0130 §6 has it stamp a reconsideration instant onto the records the change
+      reaches, so "write back exactly what I read" would re-arm held notifications
+      with nothing to show for it.
+
+    Args:
+        notification_class: ``--class``, already stripped and non-blank, or ``None``.
+        reach: ``--reach``, or ``None``.
+        quiet_windows: ``--quiet-window``, each already known to parse.
+        clear_quiet_windows: Whether ``--no-quiet-windows`` was given.
+        budget: ``--budget``, already known to be in range, or ``None``.
+
+    Returns:
+        The parsed request.
+
+    Raises:
+        BadParameter: If the flags contradict each other or name nothing.
+    """
+    if (notification_class is None) != (reach is None):
+        msg = "--class and --reach set one class's reach and are given together"
+        raise typer.BadParameter(msg)
+    if quiet_windows and clear_quiet_windows:
+        msg = "--quiet-window and --no-quiet-windows contradict each other; give one"
+        raise typer.BadParameter(msg)
+    if (
+        notification_class is None
+        and not quiet_windows
+        and not clear_quiet_windows
+        and budget is None
+    ):
+        msg = (
+            "names nothing to change; give --class with --reach, --quiet-window, "
+            "--no-quiet-windows or --budget"
+        )
+        raise typer.BadParameter(msg)
+    return _Tuning(
+        notification_class=notification_class,
+        reach=reach,
+        # Parsed here and not in the callback: keeping the option's declared type
+        # ``list[str]`` is what lets one function be both the parser and the
+        # parse-time check, so the two can never disagree about what is admissible.
+        quiet_windows=tuple(_quiet_window(spec) for spec in quiet_windows),
+        clear_quiet_windows=clear_quiet_windows,
+        budget=budget,
+    )
+
+
 @app.command()
 def ask(
     utterance: str = typer.Argument(..., help="What you want the assistant to do."),
@@ -1089,6 +1345,158 @@ def grants(
     that it still stands — use ``assistant sources``, which asks me directly.
     """
     code = asyncio.run(_list_grants(limit=limit))
+    raise typer.Exit(code)
+
+
+@app.command()
+def notifications(
+    limit: int = typer.Option(
+        50, "--limit", callback=_page_argument, help="How many notifications to show at most."
+    ),
+    offset: int = typer.Option(
+        0,
+        "--offset",
+        callback=_page_argument,
+        help="How many notifications to skip before the page begins.",
+    ),
+) -> None:
+    """List what I am holding to tell you, oldest first.
+
+    This is the only way a held notification reaches you: nothing is folded into an
+    answer you did not ask for, and no count of them appears on an ordinary turn.
+
+    Each row shows what I would tell you, the class it belongs to — which is what
+    ``assistant tune`` takes — the ruling I made and what it is waiting on, and the
+    ids that ``assistant dismiss`` and ``assistant forget-notification`` take. One
+    whose moment has passed is still listed and still says when it expired; expiry
+    ends it, it does not delete it.
+
+    There is no total count — ask for the next page to find out whether there is
+    more.
+    """
+    code = asyncio.run(_list_notifications(limit=limit, offset=offset))
+    raise typer.Exit(code)
+
+
+@app.command()
+def dismiss(
+    notification_id: str = typer.Argument(
+        ..., callback=_present_id, help="The id of the notification to dismiss."
+    ),
+) -> None:
+    """Deal with one notification, without destroying it.
+
+    Dismissing ends it: it stops counting against how many I may hold, and it stops
+    suppressing the same observation — so if that fact comes up again it is a fresh
+    notification rather than a duplicate I quietly swallow.
+
+    **It is not a deletion.** The record stays readable and stays in your export; use
+    ``assistant forget-notification`` to destroy it. To stop a whole class reaching
+    you rather than one item, use ``assistant tune --class ... --reach off``.
+    """
+    code = asyncio.run(_dismiss_notification(notification_id))
+    raise typer.Exit(code)
+
+
+@app.command("forget-notification")
+def forget_notification(
+    notification_id: str = typer.Argument(
+        ..., callback=_present_id, help="The id of the notification to destroy."
+    ),
+) -> None:
+    """Destroy one notification, so the same thing can be raised again.
+
+    This removes the record and the words it holds — from the listing and from any
+    export. Because the record is also what stops the same observation being raised
+    twice, destroying it means the next time I notice that fact it is new to me.
+
+    To deal with a notification while keeping the record, use ``assistant dismiss``.
+    """
+    code = asyncio.run(_forget_notification(notification_id))
+    raise typer.Exit(code)
+
+
+@app.command("notification-settings")
+def notification_settings() -> None:
+    """Show what you have decided may reach you unprompted, and how often.
+
+    Three standing settings: how far each notification class may reach you, the hours
+    during which nothing interrupts, and how many interruptions I may make in a
+    rolling window. Every one of them has a shipped default, so this answers on the
+    first day from an empty store — and the default reach is **hold** for every
+    class, which is why nothing interrupts until you say it may.
+
+    Change any of them with ``assistant tune``.
+    """
+    code = asyncio.run(_show_notification_settings())
+    raise typer.Exit(code)
+
+
+@app.command()
+def tune(
+    notification_class: str | None = typer.Option(
+        None,
+        "--class",
+        callback=_present_notification_class,
+        help=(
+            "The notification class to set the reach of, as 'assistant notifications' "
+            "prints it beside each record. Give it with --reach."
+        ),
+    ),
+    reach: NotificationReach | None = _TUNE_REACH_OPTION,
+    quiet_window: list[str] | None = _TUNE_QUIET_WINDOW_OPTION,
+    budget: int | None = typer.Option(
+        None,
+        "--budget",
+        callback=_budget_argument,
+        help="How many times I may interrupt you per rolling window. 0 means never.",
+    ),
+    *,
+    clear_quiet_windows: bool = typer.Option(
+        False, "--no-quiet-windows", help="Remove every quiet window, so no hour is quiet."
+    ),
+) -> None:
+    """Tune what may reach you unprompted — reach, quiet hours, and how often.
+
+    Out of the box **nothing interrupts**: every class is held for when
+    you next look, deliberately, so nothing I have just learned to notice
+    can interrupt you before you have said it may. Raising a class is
+    that act, and it is the only thing that makes an interruption
+    possible at all.
+
+    Only what you name is changed; the rest is read and written back
+    untouched. If something else changes these at the same moment, the
+    last write wins.
+
+    Raising a class also reaches what I am **already** holding of it, so
+    a notification that has been sitting there can reach you once you
+    allow it. Setting a class to ``off`` likewise reaches what is already
+    held — "never tell me this" is about what is waiting as well as what
+    comes next — and it recalls nothing already sent.
+
+    **Three separate acts arm unprompted contact, and none implies
+    another.** For the calendar's upcoming events they are:
+
+    1. The operator arms the producer, in the hub's environment:
+       ASSISTANT_CALENDAR_UPCOMING_INTERVAL, an ISO-8601 duration.
+       'PT15M' is fifteen minutes and 'PT30S' thirty seconds; a bare
+       number such as '15' is refused.
+    2. You grant the read: 'assistant grant calendar --scope notify'.
+       The source is positional — there is no --source option. See
+       'assistant sources' for what this installation offers.
+    3. You raise the class, here:
+       'assistant tune --class upcoming_event --reach interrupt'.
+       Every deployment's classes are whatever its producers declare;
+       'assistant notifications' prints each record's own class.
+    """
+    asked = _tuning(
+        notification_class=notification_class,
+        reach=reach,
+        quiet_windows=quiet_window or [],
+        clear_quiet_windows=clear_quiet_windows,
+        budget=budget,
+    )
+    code = asyncio.run(_tune_notifications(asked))
     raise typer.Exit(code)
 
 
@@ -1646,6 +2054,91 @@ async def _list_grants(*, limit: int) -> int:
     return await _drive_grants(engine, limit=limit)
 
 
+async def _list_notifications(*, limit: int, offset: int) -> int:
+    """Obtain a client, read the held notifications, and render them (ADR-0130 §7).
+
+    The notification counterpart to :func:`_list_questions`, with the same single
+    error boundary (ADR-0042 §7). The paging arguments were already checked against
+    the range the engine refuses outside of at parse time (:func:`_page_argument`),
+    so the one failure that is not an ``AssistantError`` cannot reach here.
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_notifications(engine, limit=limit, offset=offset)
+
+
+async def _dismiss_notification(notification_id: str) -> int:
+    """Obtain a client, dismiss one notification, and say what happened (ADR-0130 §9).
+
+    **No show-then-confirm ceremony**, for :func:`_forget_question`'s reason and one
+    more of its own. A held notification is not a belief of any band, so ADR-0073 §5's
+    requirement to render before destroying does not reach it — and a dismissal
+    destroys nothing at all: the record stays readable and stays in the export
+    (ADR-0130 §9). What ends is its actionability, which is what ``assistant
+    notifications`` has already shown the user before they typed this.
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_dismiss_notification(engine, notification_id)
+
+
+async def _forget_notification(notification_id: str) -> int:
+    """Obtain a client, destroy one notification, and say what happened (ADR-0130 §9).
+
+    **No ceremony either, and that is ADR-0130 §9's own instruction rather than this
+    module's convenience**: the per-record delete lands "in the shape
+    ``forget_question`` takes", and :func:`_forget_question` is where the reasoning
+    for that shape is written down — a question is not a belief, so nothing is being
+    un-believed and ADR-0073 §5 does not reach it. Neither is a notification: it is a
+    proposal about a moment, the user has just read it in ``assistant
+    notifications``, and showing it again would need a single-record read the façade
+    does not have and ADR-0130 §9 does not name.
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_forget_notification(engine, notification_id)
+
+
+async def _show_notification_settings() -> int:
+    """Obtain a client, read the three standing settings, and render them (§6)."""
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_notification_settings(engine)
+
+
+async def _tune_notifications(asked: _Tuning) -> int:
+    """Obtain a client and write the standing settings the user named (ADR-0130 §6).
+
+    The tuning counterpart to :func:`_grant_source`, with the same single error
+    boundary (ADR-0042 §7). The flags were already checked against each other and
+    parsed at parse time (:func:`_tuning`), so the failures that are not an
+    ``AssistantError`` cannot reach here.
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_tune(engine, asked)
+
+
 async def _forget_belief(belief_id: str, *, assume_yes: bool) -> int:
     """Load settings, build the engine, run the deletion ceremony, and close it.
 
@@ -2041,6 +2534,173 @@ async def _drive_grants(engine: AssistantEngine, *, limit: int) -> int:
         return _EXIT_ERROR
     _render_grants(recorded, limit=limit)
     return _EXIT_OK
+
+
+async def _drive_notifications(engine: AssistantEngine, *, limit: int, offset: int) -> int:
+    """Ask the façade for one page of held notifications and render it (ADR-0130 §7).
+
+    The adapter relays the page and renders what comes back. It re-rules nothing,
+    re-orders nothing, re-filters nothing and **reads no clock**: the ruling, the
+    condition that decided it and the whole set it is waiting on all arrived on each
+    record, and an expiry is shown as the instant the engine put there rather than as
+    a verdict about whether it has passed (:func:`_render_notification`).
+    """
+    try:
+        page = await engine.notifications(limit=limit, offset=offset)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_notifications(page, limit=limit, offset=offset)
+    return _EXIT_OK
+
+
+async def _drive_dismiss_notification(engine: AssistantEngine, notification_id: str) -> int:
+    """Dismiss one notification and report whether there was one to dismiss (§7, §9).
+
+    ``False`` covers four different states — no such id, and one already dismissed,
+    expired or dropped — and the message says so rather than picking one, because the
+    façade returns a single boolean and guessing between them here would be inventing
+    a diagnosis this process cannot make.
+    """
+    try:
+        dismissed = await engine.dismiss_notification(notification_id)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    if not dismissed:
+        console.print(
+            "[yellow]Nothing to dismiss:[/] no notification with that id is still "
+            "outstanding. It may never have existed, or it may already have been "
+            "dismissed, expired, or ruled out — 'assistant notifications' lists what "
+            "I am holding."
+        )
+        return _EXIT_ERROR
+    console.print(
+        "[green]Dismissed.[/] It will not reach you, and the record is still there — "
+        "'assistant forget-notification' destroys it. If I notice that again it is a "
+        "new notification rather than a duplicate."
+    )
+    return _EXIT_OK
+
+
+async def _drive_forget_notification(engine: AssistantEngine, notification_id: str) -> int:
+    """Destroy one notification and report whether anything was there (ADR-0130 §9)."""
+    try:
+        destroyed = await engine.forget_notification(notification_id)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    if not destroyed:
+        console.print("[yellow]Nothing to forget:[/] no notification has that id.")
+        return _EXIT_ERROR
+    console.print(
+        "[green]Forgotten.[/] That notification is destroyed — it is in no export. "
+        "Because its record is also what stopped me raising the same thing twice, "
+        "the next time I notice it, it is new to me."
+    )
+    return _EXIT_OK
+
+
+async def _drive_notification_settings(engine: AssistantEngine) -> int:
+    """Read the three standing settings and render them (ADR-0130 §6)."""
+    try:
+        preferences = await engine.notification_preferences()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_notification_settings(preferences)
+    return _EXIT_OK
+
+
+async def _drive_tune(engine: AssistantEngine, asked: _Tuning) -> int:
+    """Read the standing settings, substitute what the user named, and write back.
+
+    **Read-adjust-write is the flow the contract prescribes**, not one this adapter
+    invented: :meth:`AssistantEngine.set_notification_preferences` writes the whole
+    value and says in terms that "a caller changing one setting reads, adjusts and
+    writes back", together with the consequence — no version token, no conflict
+    detection, and the later of two racing writes wins. A CLI that instead demanded
+    every setting on every invocation would make the one act ADR-0130 §6 requires of
+    the user (raising a class) cost them the rest of their settings to perform.
+
+    Nothing is decided here. The axes the user named are substituted and the rest are
+    relayed verbatim; which held records the write then re-arms, and what a class's
+    reach means for any of them, is the engine's ruling (§5, §6) and this module
+    neither computes nor predicts it. The resulting settings are rendered from what
+    the *store* handed back rather than from what was sent, so what is shown is what
+    is in force.
+    """
+    try:
+        current = await engine.notification_preferences()
+        written = await engine.set_notification_preferences(_tuned(current, asked))
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    console.print("[green]Tuned.[/] These are the settings in force now.\n")
+    _render_notification_settings(written)
+    if asked.reach is NotificationReach.INTERRUPT:
+        console.print(
+            "\n[dim]Anything of that class I am already holding can now reach you "
+            "too — it does not wait for the next one.[/]"
+        )
+    elif asked.reach is NotificationReach.OFF:
+        console.print(
+            "\n[dim]Anything of that class I am already holding is ruled out as "
+            "well; it stays readable in 'assistant notifications'. Nothing already "
+            "sent is recalled.[/]"
+        )
+    return _EXIT_OK
+
+
+def _tuned(current: NotificationPreferences, asked: _Tuning) -> NotificationPreferences:
+    """The settings to write: ``current`` with the named axes replaced (ADR-0130 §6).
+
+    Pure, so the substitution can be checked without a hub. A named class replaces
+    that class's row and leaves every other row alone — which is what keeps
+    ``NotificationPreferences``' refusal of two rows for one class unreachable from
+    here rather than merely unlikely. A row is written even where the reach equals the
+    shipped default, because "I have decided this class holds" and "I have not decided
+    about this class" are the same setting today and only one of them is something the
+    user did.
+
+    **The budget window is relayed and never set**, and that is not an omission: the
+    setting ADR-0130 §6 makes tunable is the count, expressed per rolling window,
+    whose figure the ADR fixes at twenty-four hours. ``notification-settings`` renders
+    the window so the count is readable, and #982 holds the question of whether a user
+    should be able to move it.
+
+    Constructed rather than copied: :meth:`~pydantic.BaseModel.model_copy` skips
+    validation, and this value's validator is the one refusing a duplicated class.
+
+    Args:
+        current: The settings in force, as the store handed them back.
+        asked: What the user named, parsed.
+
+    Returns:
+        The value to send.
+
+    Raises:
+        ValueError: If the result is not a coherent settings value.
+    """
+    reaches = current.reaches
+    if asked.notification_class is not None and asked.reach is not None:
+        kept = tuple(row for row in reaches if row.notification_class != asked.notification_class)
+        reaches = (
+            *kept,
+            ClassReach(notification_class=asked.notification_class, reach=asked.reach),
+        )
+    if asked.clear_quiet_windows:
+        windows: tuple[QuietWindow, ...] = ()
+    elif asked.quiet_windows:
+        windows = asked.quiet_windows
+    else:
+        windows = current.quiet_windows
+    return NotificationPreferences(
+        reaches=reaches,
+        quiet_windows=windows,
+        interruption_budget=(current.interruption_budget if asked.budget is None else asked.budget),
+        budget_window=current.budget_window,
+    )
 
 
 # --- rendering (ADR-0042 §4, §6: escaping is the adapter's, per target) --
@@ -3290,6 +3950,213 @@ def _render_grants(recorded: tuple[SourceGrant, ...], *, limit: int) -> None:
         "\n[dim]Whether a source is granted *now* is 'assistant sources' — a record "
         "here says an act happened, not that it still stands.[/]"
     )
+
+
+def _condition_phrase(condition: NotificationCondition) -> str:
+    """Say what one condition of a ruling means, in words rather than in enum values.
+
+    Total over :class:`~ai_assistant.core.types.NotificationCondition` through
+    :func:`assert_never`, the discipline :func:`_scope_phrase` uses: a ninth
+    condition surfaces at type-check time rather than as a ruling rendered with a
+    missing explanation.
+
+    **Each member is worded in the one polarity it is ever shown in**, which the
+    vocabulary makes safe: the four members of ``DROP_CONDITIONS`` and the four of
+    ``INTERRUPT_CONDITIONS`` are disjoint groups (ADR-0130 §5), and this surface
+    renders a member of the first as a ``DROP``'s reason and a member of the second
+    only from a ``HOLD``'s failed set — where every entry is a condition that did
+    **not** hold. So no phrase has to read both ways.
+    """
+    match condition:
+        case NotificationCondition.EXPIRED:
+            phrase = "it had already perished by the time I ruled on it"
+        case NotificationCondition.REACH_OFF:
+            phrase = "you have set that class to never tell you"
+        case NotificationCondition.DUPLICATE:
+            phrase = "I am already holding the same thing"
+        case NotificationCondition.AT_CAP:
+            phrase = "I am holding as many notifications as I may"
+        case NotificationCondition.PERISHABLE:
+            phrase = "it names no moment it stops mattering, so nothing makes it urgent"
+        case NotificationCondition.REACH_INTERRUPT:
+            phrase = "that class is not set to interrupt you"
+        case NotificationCondition.QUIET_WINDOW:
+            phrase = "it fell inside your quiet hours"
+        case NotificationCondition.BUDGET:
+            phrase = "your interruption budget for that window was already used up"
+        case _:  # pragma: no cover — exhaustive over the enum
+            assert_never(condition)
+    return phrase
+
+
+def _reach_phrase(reach: NotificationReach) -> str:
+    """Say what one reach level does, in words. Total, for :func:`_condition_phrase`'s reason."""
+    match reach:
+        case NotificationReach.OFF:
+            return "never tell you, and rule out what is already held"
+        case NotificationReach.HOLD:
+            return "keep it for when you next look"
+        case NotificationReach.INTERRUPT:
+            return "may reach you at the time"
+        case _:  # pragma: no cover — exhaustive over the enum
+            assert_never(reach)
+
+
+def _hours(duration: timedelta) -> str:
+    """Render a rolling window in the unit ``assistant tune --budget-window`` takes."""
+    count = duration / timedelta(hours=1)
+    return f"{count:g} hour" if count == 1 else f"{count:g} hours"
+
+
+def _render_notifications(page: tuple[HeldNotification, ...], *, limit: int, offset: int) -> None:
+    """Render one page of held notifications (ADR-0130 §7).
+
+    **No total is shown** and none is available: "is there more" is answered by asking
+    for the next page, exactly as the belief, conversation and question listings
+    answer it.
+
+    An empty page is where the arming chain is worth naming, because an empty page is
+    what an operator sees when one of its three links is missing and it is the one
+    moment they are certainly looking (#979, #981).
+    """
+    if not page:
+        console.print(
+            "[dim]I am holding nothing for you.[/] Out of the box nothing reaches you "
+            "unprompted — see 'assistant tune --help' for the three separate acts that "
+            "arm it, and 'assistant notification-settings' for what is set now."
+        )
+        return
+    console.print(f"[bold]{len(page)} notification(s)[/] I am holding, oldest first.")
+    for record in page:
+        _render_notification(record)
+    if limit and len(page) == limit:
+        console.print(
+            f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]"
+        )
+
+
+def _render_notification(record: HeldNotification) -> None:
+    """Render one held notification with what a person needs in order to act on it.
+
+    **No clock is read and none may be** (golden rule 3), which decides how an expiry
+    is shown: the instant the engine put on the record, never a verdict about whether
+    it has passed. ``assistant questions`` renders an expiring question the same way,
+    for the same reason — every time this surface shows is one the engine recorded.
+    An expired record is listed either way; expiry ends a notification, it deletes
+    nothing (ADR-0130 §7).
+
+    Producer-supplied text — the summary, the detail, the class and the producer's own
+    name — is neutralised for this terminal (``_safe``, ADR-0042 §4). The ruling, its
+    reason and the conditions it is waiting on are this system's own closed
+    vocabularies and are rendered through total matches.
+    """
+    candidate = record.candidate
+    console.print(f"\n  [bold cyan]{_safe(record.id)}[/]")
+    console.print(f"  [bold]{_safe(candidate.summary)}[/]")
+    if candidate.detail is not None:
+        console.print(f"  {_safe(candidate.detail)}")
+    console.print(
+        f"  [dim]Class:[/] {_safe(candidate.notification_class)} "
+        f"[dim](noticed by {_safe(candidate.producer)})[/]"
+    )
+    _render_notification_ruling(record)
+    console.print(f"  [dim]Noticed:[/] {_when(candidate.noticed_at)}")
+    if candidate.expires_at is None:
+        console.print("  [dim]Expires:[/] never — which is why it is held rather than urgent")
+    else:
+        console.print(f"  [dim]Expires:[/] {_when(candidate.expires_at)}")
+    _render_notification_acts(record)
+
+
+def _render_notification_ruling(record: HeldNotification) -> None:
+    """Say what was decided about one notification and why (ADR-0130 §5).
+
+    A ``HOLD`` is explained by its **whole** failed set rather than by its reason
+    alone: the reason is the set's first member (``NotificationDisposition``'s own
+    rule), so naming it by itself would answer "why did you not tell me?" with one of
+    several true answers and hide the rest — and the rest are exactly what a user
+    would have to change. A ``DROP`` carries no set and is explained by its reason. An
+    ``INTERRUPT`` failed nothing, so there is nothing to explain beyond the ruling.
+    """
+    match record.kind:
+        case NotificationDispositionKind.INTERRUPT:
+            console.print("  [dim]Ruled:[/] to reach you at the time")
+        case NotificationDispositionKind.HOLD:
+            console.print("  [dim]Ruled:[/] held for when you next look")
+        case NotificationDispositionKind.DROP:
+            console.print(f"  [dim]Ruled:[/] ruled out — {_condition_phrase(record.reason)}")
+        case _:  # pragma: no cover — exhaustive over the enum
+            assert_never(record.kind)
+    for condition in record.failed:
+        console.print(f"  [dim]Not now, because:[/] {_condition_phrase(condition)}")
+    if record.dismissed_at is not None:
+        console.print(f"  [dim]Dismissed:[/] {_when(record.dismissed_at)}")
+    if record.dropped_at is not None:
+        console.print(f"  [dim]Ruled out:[/] {_when(record.dropped_at)}")
+
+
+def _render_notification_acts(record: HeldNotification) -> None:
+    """Offer the two acts ADR-0130 §6 says a surface rendering one should offer.
+
+    "Every ``INTERRUPT`` disposition carries its notification class, so any surface
+    rendering it can offer the two acts that tune it in one step: dismissing the
+    notification, and lowering that class's reach." Both are offered here, on every
+    record still outstanding rather than on an interruption alone — a held one is
+    exactly what a user wants to dispose of or unblock, and it is the case #979 found
+    unreachable.
+
+    **Which direction to offer is read off the record and decided nowhere.** A record
+    whose failed set names the reach condition is one the user's own setting is
+    holding back, so the act that changes its outcome is raising that class; anything
+    else is already allowed to reach them, and the act §6 names for that is lowering
+    it. A record already dismissed or ruled out gets neither: offering an act that
+    would do nothing is a surface making a promise the engine will not keep.
+    """
+    if record.kind is NotificationDispositionKind.DROP or record.dismissed_at is not None:
+        return
+    console.print(f"  [dim]Deal with it:[/] assistant dismiss {_safe(record.id)}")
+    wanted = (
+        NotificationReach.INTERRUPT
+        if NotificationCondition.REACH_INTERRUPT in record.failed
+        else NotificationReach.OFF
+    )
+    console.print(
+        f"  [dim]Tune the class:[/] assistant tune --class "
+        f"{_safe(record.candidate.notification_class)} --reach {wanted.value}"
+    )
+
+
+def _render_notification_settings(preferences: NotificationPreferences) -> None:
+    """Render the three standing settings that tune proactive contact (ADR-0130 §6).
+
+    All three are shown whether or not the user has touched any of them, because each
+    has a shipped default that is in force regardless — an empty store is a working
+    policy, and rendering only what was set would present "I have decided nothing" as
+    "nothing governs this". The default reach is named beside the classes for the same
+    reason: it is what governs every class no row mentions, which on a fresh
+    installation is all of them.
+    """
+    console.print("[bold]How far each class may reach you[/]")
+    for row in preferences.reaches:
+        console.print(
+            f"  {_safe(row.notification_class)}: [bold]{row.reach.value}[/] "
+            f"[dim]— {_reach_phrase(row.reach)}[/]"
+        )
+    console.print(
+        f"  [dim]every other class:[/] [bold]{DEFAULT_NOTIFICATION_REACH.value}[/] "
+        f"[dim]— {_reach_phrase(DEFAULT_NOTIFICATION_REACH)} (the shipped default)[/]"
+    )
+    console.print("\n[bold]Quiet hours[/] [dim](read in your configured timezone)[/]")
+    if not preferences.quiet_windows:
+        console.print("  [dim]none — no part of the day is quiet[/]")
+    for window in preferences.quiet_windows:
+        console.print(f"  {window.start_time:%H:%M}-{window.end_time:%H:%M}")
+    console.print("\n[bold]Interruption budget[/]")
+    console.print(
+        f"  {preferences.interruption_budget} per {_hours(preferences.budget_window)}"
+        f"{' [dim]— never interrupt[/]' if preferences.interruption_budget == 0 else ''}"
+    )
+    console.print("\n[dim]Change any of these with 'assistant tune'.[/]")
 
 
 def _confirm_forget(_belief: Belief) -> bool:
