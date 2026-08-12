@@ -78,7 +78,12 @@ learn/update memory.
 - **One subsystem per change.** Scope a change to a single package plus its
   tests. Small diffs review faster and fail more clearly. The one exception is a
   Protocol triad (below): contract, conformance suite, and canonical fake are
-  one unit of work, not three changes.
+  one unit of work, not three changes. Where a slice was cut at that contract
+  seam — because its implementation would otherwise put new machinery into two
+  subsystems — the triad rides inside that same exception **together with its
+  primary production implementation**, the consumer whose demands shape the
+  contract (ADR-0137 §2). That widening is the whole of it: every other
+  cross-subsystem pairing is still more than one change.
 - **Contract first, and land the triad.** If a subsystem needs a new capability
   from another, the Protocol goes in `core/protocols.py` first — its ADR merged
   ahead of the implementation (golden rule 5). Then the *new* Protocol ships as

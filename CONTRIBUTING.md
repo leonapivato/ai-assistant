@@ -563,9 +563,19 @@ A Protocol on its own is an unenforced promise. The required unit of work for a
 A triad spans `core/`, `ai_assistant/testing/`, and `tests/`, and that is
 deliberate: it is **one** unit of work, the standing exception to "one subsystem
 per change" (`CLAUDE.md`). Splitting it across PRs is the failure mode this rule
-exists to prevent, not a way to satisfy the scoping rule. It stays a small diff
-because it is a contract and its guardrails, with no *production* implementation
-attached (the canonical fake is an implementation, but a test-only one).
+exists to prevent, not a way to satisfy the scoping rule. On its own it stays a
+small diff, because it is then a contract and its guardrails with no
+*production* implementation attached (the canonical fake is an implementation,
+but a test-only one).
+
+**It does not always travel alone.** Where a slice was cut at this contract seam
+— because its implementation would otherwise put new machinery into two
+subsystems — the triad rides with its **primary production implementation**, the
+consumer whose demands shape the contract, as one lane and one PR (ADR-0137 §2).
+That is a widening of the same exception, not a second one: any other
+cross-subsystem pairing stays outside it, the triad itself is still never split
+(ADR-0137 §3), the sequence below is unchanged, and every further consumer group
+is a follow-on lane briefed against the merged contract (ADR-0137 §4).
 
 Not "Protocol now, tests when someone implements it." Deferring 2 and 3 is how
 the original backfill debt came to exist: contracts landed, the machinery that
