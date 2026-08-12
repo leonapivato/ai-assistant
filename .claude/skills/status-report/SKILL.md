@@ -39,10 +39,17 @@ that went red, or an issue someone else closed leaves no trace in your context.
   were dispatched — and worthless as the answer. `dispatch-agents` §3 says this
   of a worker's report; it is no less true of your own recollection, which was
   written down by the same process and has been stale longer.
-- **Pin the state once.** Resolve the ref and record the query time before
-  writing, then answer every section from that reading. Two sections queried ten
-  minutes apart can contradict each other, and a report that disagrees with
-  itself gets re-derived by the reader from scratch.
+- **Pin what can be pinned; timestamp what cannot.** `origin/main` resolves to a
+  commit, and every read of the *tree* can come from that one commit. GitHub
+  state does not work that way: `gh pr list`, `gh pr checks` and `gh issue list`
+  are separate live calls with no common snapshot, and a PR can merge between two
+  of them — which is how a report calls a lane in flight in one section and
+  reports checks for a head that has already landed in the next. So collect the
+  GitHub reads close together, record the clock time you took them, and present
+  them as a reading taken *then* rather than as one atomic state. Where a fact is
+  load-bearing — a lane you are about to describe as blocked in §3 — re-query
+  that one immediately before sending, the way `pre-dispatch-survey` re-scans
+  before it posts.
 - **State the baseline in the report.** "Since when" defaults to the moment the
   batch issue `pre-dispatch-survey` opened, unless the request names another
   window ("since yesterday", "since the last report"). Say which one you used —
@@ -50,7 +57,8 @@ that went red, or an issue someone else closed leaves no trace in your context.
 
 ```bash
 git fetch origin
-surveyed="$(git rev-parse origin/main^{commit})"
+surveyed="$(git rev-parse origin/main^{commit})"   # pinned; the tree reads use it
+observed="$(date -u +%FT%TZ)"                     # the GitHub reads below are not
 baseline="$(gh issue view <batch> --json createdAt --jq .createdAt)"
 
 gh pr list --state all --limit 200 \
