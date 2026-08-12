@@ -179,16 +179,21 @@ reach. §2 says what rides **with** the triad, never what may be taken out of it
 ### 4. Each further consumer group is a follow-on lane
 
 > **Normative.** Every consumer of the contract other than the primary
-> implementation is a separate lane, briefed only after the paired lane has
-> merged. The merged contract text is that brief's authority.
+> implementation is briefed only after the paired lane has merged, and the
+> merged contract text is that brief's authority. Those consumers are dispatched
+> as **consumer groups**, one lane per group: consumers ride in one group where
+> §1 admits them as a single lane — substantial new machinery in at most one
+> subsystem between them, adaptation anywhere — and are separate groups
+> otherwise.
 
 This is the same sequencing golden rule 5 applies to an ADR and its
 implementation, applied one step later: a brief written against an unmerged
 contract is written against a draft in its author's head.
 
-A consumer group may hold more than one consumer where they draw one class of
-finding — three call sites adapting to the same new method are one lane under
-§1, because they are adaptation.
+Grouping is §1 applied a second time, not a second rule with its own threshold.
+Three call sites adapting to the same new method are one group, because they are
+adaptation and draw one class of finding; two consumers that each need a new
+machine are two, for the reason §1 already gives.
 
 ### 5. What this decides in the standards, and what lands where
 
