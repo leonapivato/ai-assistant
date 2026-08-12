@@ -367,12 +367,14 @@ the record of a review covers.
   pytest where there were ~110. The saving is largest exactly where it hurts most —
   a long review loop is already the expensive case — and what it now scales with is
   base moves, which a lane has few of, rather than commits, which it has many of.
-- **A docs-only lane pays the two anchors and nothing else.** An ADR PR that
+- **A docs-only lane pays the anchors and nothing else.** An ADR PR that
   touches no code stops running 15,678 tests *per commit* to prove that prose did
   not break them; §2's third clause makes that explicit rather than leaving it to
-  the author's discretion. It still pays both anchor runs in full — §1 admits no
-  exemption for a docs-only branch, and this is the saving as it actually is: the
-  per-commit runs go, the two that prove the shipping tree stay.
+  the author's discretion. **§1 admits no docs-only exemption**, so it still pays
+  both anchor runs in full, and one more per base-moving rebase — a docs-only lane
+  waiting behind a merge under `strict` protection is exactly the case that
+  rebases. That is the saving as it actually is: the per-commit runs go, the runs
+  that prove a shipping tree stay, prose or not.
 - **The early draft PR stops being a liability.** `CONTRIBUTING.md` asks for the
   draft to open before the work is done so CI gates every push; §3 makes that
   honest rather than something an author avoids to keep the check green.
