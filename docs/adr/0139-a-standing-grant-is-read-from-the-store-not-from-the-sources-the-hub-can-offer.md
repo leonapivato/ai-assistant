@@ -696,12 +696,34 @@ read as the Protocol *change* it is):
    arguments and results are validated from the annotations, and an error code is
    the exception class's own name resolved over `core.errors` (ADR-0102 §12).
 
-**Two of the contract lane's obligations are stated below the list rather than
-inside it, and that placement is forced.** ADR-0089 §2 puts a normative clause at
-column 0 and draws the consequence in as many words — "**a normative clause cannot
-live inside a list item**" — and §3 makes the marks the whole of a marked ADR's
-obligations. Written as sub-items they would bind nothing, which is the failure
-ADR-0089 §2 exists to prevent and which ADR-0094 §10a records having hit.
+**The list above is a lane's checklist and binds nothing; what binds is marked,
+and this paragraph is the accounting ADR-0089 §4 asks a reviewer to check.**
+ADR-0089 §2 puts a normative clause at column 0 and draws the consequence in as
+many words — "**a normative clause cannot live inside a list item**" — and §3
+makes the marks the whole of a marked ADR's obligations, with partial marking
+named as the hazard. So the obligations this ADR intends are marked, and they are
+marked in three places rather than gathered here:
+
+- **The behaviour every implementation must have** is §2's: the complete live set
+  or a failure, liveness from the `revokes` relation alone, meaningless ordering,
+  a store-wide answer independent of what the hub holds, and `GrantError` on two
+  live grants for one source. A lane that shipped the list above and none of §2
+  would be refused by §2, not by the list.
+- **What a client may present** is §3's four clauses; **how an amendment behaves**
+  is §4's and §5's. None of them is restated here.
+- **Detachment is already bound and is not re-marked**, which is why it appears in
+  the list as a test rather than as a clause: ADR-0097 §4's marked clause reads
+  "Every query on **either** seam returns a detached snapshot likewise", and a new
+  query on that seam is a query on that seam. Re-marking it here would be this ADR
+  restating a live obligation of another, which ADR-0082 §1 makes a thing to
+  classify rather than a thing to do.
+
+Two obligations are marked below because they are the ones a lane can satisfy the
+letter of while leaving the clause untested, which is ADR-0097 §10's stated
+criterion for lifting a case out of prose — "a test that cannot reach the code a
+clause forbids is worse than no test". Everything else stays a checklist, which is
+the shape ADR-0097 §10 and ADR-0102 §12 each used for the same section under this
+same regime.
 
 > **Normative.** The contract lane restates `AssistantEngine`'s docstring method
 > count as the count the Protocol then carries, rather than incrementing the
@@ -726,6 +748,19 @@ touching that docstring may not perpetuate it.
 reason ADR-0102 §12 gave for its own: an implementation computing liveness by
 walking records ordered by `decided_at` passes every other clause in the list,
 because every other clause is about membership rather than about ordering.
+
+> **Normative.** The canonical fakes are scriptable into the **two live grants for
+> one source** state their own writers refuse, so §2's refusal is reachable from a
+> test; and the SQLite store's own tests reach it by seeding rows rather than
+> through `record`.
+
+**Without it §2's refusal is a clause nothing exercises.** Every record a
+conformance suite can create goes through `record`, whose atomic one-live-grant
+check refuses the second — so an implementation that returned both grants would
+pass the whole suite, and the surface would show two standing authorisations where
+revoking one leaves the other live. This is ADR-0097 §10's requirement that its
+own fakes be scriptable into a raising `live()`, applied to the second state a
+writer makes unreachable.
 
 **The store lane**: the new member on `SqliteSourceGrantStore`, as the existing
 live anti-join without its source predicate, and `GrantOperations` gaining the
@@ -760,12 +795,25 @@ or read one of its clauses more widely than it now holds?* Applied clause by
 clause.
 
 **ADR-0102 §1 — partially superseded, and this is the whole of what is replaced.**
-Its clause reads:
+Its clause reads, transcribed inside a fence so that it stays ADR-0102's clause
+and does not become one of this ADR's — ADR-0089 §2's own escape, since "a
+`**Normative.**` line inside a fenced block is display, not a mark", and its
+grammar would otherwise make a quotation of a superseded clause a live obligation
+of the document superseding it:
 
+```text
 > **Normative.** The client surface for grants is exactly four methods on
 > `AssistantEngine`: `grantable_sources`, `grant`, `revoke` and `recent_grants`,
 > with §2's signatures. No other operation on any surface creates, revokes, or
 > reports a `SourceGrant`.
+```
+
+**The escape is used rather than the quotation dropped**, because ADR-0070 §4
+requires the superseding ADR to state the extent of what it replaced and an extent
+stated against a paraphrase is one a reader has to trust. Adversarial review found
+the unfenced form on round 2, where the scan read it as this ADR's own clause and
+as a direct contradiction of §2 — which is the grammar working exactly as ADR-0089
+§2 intends, on the one construction that looks most like careful citation.
 
 **Replaced: the sentence's third limb, and the count in the sentence before it.** A
 reader acting on that text builds a surface of exactly four methods and refuses a
