@@ -57,15 +57,15 @@ An under-specified brief is the largest source of rework. Each one carries:
 
 - **The clone path**, and that other clones are off-limits.
 - **A lane-unique prefix for scratch filenames.** Concurrent lanes can end up
-  writing into one scratchpad directory, so a generic name like `pr-body.md` is
-  a collision waiting to happen — one lane's PR body overwritten mid-run by
-  another's, which has now happened in three separate batches. Give the lane a
-  prefix (its slug, or `pr-body-lane-<X>-<pr>.md`), prefer clone-local paths,
+  writing into one scratchpad directory, where a generic name like `pr-body.md`
+  is a collision — one lane's PR body overwritten mid-run by another's,
+  silently, with nothing in the gate or on the PR that catches it. Give the lane
+  a prefix (its slug, or `pr-body-lane-<X>-<pr>.md`), prefer clone-local paths,
   and say that after a PR-body write from scratch space it re-reads the live
   body and looks for a string only that lane would have written. The mitigation
-  existed every one of those three times and lived only in the dispatcher's
-  notes; a checklist line is what turns its absence into a visible blank rather
-  than an invisible default.
+  is obvious to anyone it has already bitten, which is exactly why it stays in
+  the dispatcher's head and drops out of the brief; a checklist line is what
+  turns that omission into a visible blank rather than an invisible default.
 - **A scope fence** — which directories this lane may touch and which it may
   not, naming the lane that owns each excluded one. `core/protocols.py` and
   `core/types.py` are the highest-collision surface; one lane holds them at a
