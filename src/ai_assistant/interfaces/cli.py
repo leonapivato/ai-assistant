@@ -2535,10 +2535,14 @@ async def _drive_grant(
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
+    withdrawal = (
+        f"Withdraw it any time with 'assistant revoke {_argument(recorded.source)}'."
+        if _is_pasteable(recorded.source)
+        else f"Withdraw it any time with 'assistant revoke'. {_uncopyable('Its name')}"
+    )
     console.print(
         f"[green]Granted.[/] I may now read [bold]{_safe(recorded.source)}[/] for "
-        f"{_scope_phrase(recorded.scope)}. Withdraw it any time with "
-        f"'assistant revoke {_argument(recorded.source)}'."
+        f"{_scope_phrase(recorded.scope)}. {withdrawal}"
     )
     return _EXIT_OK
 
@@ -2851,6 +2855,11 @@ def _argument(value: str) -> str:
     space, and ADR-0102 §2 keeps a declared source name byte-exact precisely so it is
     compared unnormalised — so the admissible value is the one that breaks.
 
+    **It is a necessary condition and not a sufficient one.** Quoting settles where the
+    argument ends; it cannot settle whether the argument survives being *displayed*.
+    Every caller therefore asks :func:`_is_pasteable` first and prints
+    :func:`_uncopyable` where the answer is no — see there for the failure that catches.
+
     Args:
         value: The argument as the engine carries it, verbatim.
 
@@ -2858,6 +2867,41 @@ def _argument(value: str) -> str:
         The text to interpolate into a printed command.
     """
     return _safe(shlex.quote(value))
+
+
+def _uncopyable(
+    subject: str, remedy: str = "The command still takes it, given the exact bytes."
+) -> str:
+    r"""The line that replaces a command hint whose argument cannot be shown (#1013).
+
+    **A wrong command is worse than no command, and quoting does not prevent one.**
+    :func:`_argument` answers the shell's question and :func:`_safe` the terminal's, and
+    neither answers this one: ``_safe`` *replaces* a character a terminal must not be
+    handed, so a value carrying one renders — inside perfectly correct shell quotes — as
+    a command naming something that does not exist. That is the failure quoting was
+    added to prevent, arriving one step later and looking like a working instruction.
+
+    Reachable rather than theoretical. ``Identifier`` and ``NonBlankEncodableText``
+    require encodability and nothing more, and ADR-0102 §4 admits a declared source name
+    that equals its own ``strip()`` — so ``"my\ncalendar"`` is an admissible reader
+    identity and ``"q\x1b[2J1"`` an admissible question id.
+
+    The absence is explained rather than left as a gap the reader has to notice, and the
+    act is never withdrawn: what is withheld is the *copyable* line, and the command
+    itself still takes the value from anything that can carry the exact bytes.
+
+    Args:
+        subject: What cannot be shown, opening the sentence, e.g. ``"Its id"``.
+        remedy: How to perform the act anyway, closing it.
+
+    Returns:
+        The text to print in the hint's place.
+    """
+    return (
+        f"[yellow]{subject} holds characters this terminal cannot show[/], so there is "
+        "no command here to copy — one written from what is on screen would name "
+        f"something else. {remedy}"
+    )
 
 
 def _render_turn(outcome: TurnOutcome) -> bool:
@@ -3432,8 +3476,13 @@ def _render_question(question: Question) -> None:
             "  [yellow]An answer to this was begun and its outcome was never recorded.[/] "
             "I cannot tell you whether the change landed, so there is nothing to retry."
         )
+        # The step is numbered either way: what a lossy id costs is the copyable
+        # command, never the recovery step it belongs to.
         console.print(
             f"  [dim]1.[/] Dispose of it: assistant forget-question {_argument(question.id)}"
+            if _is_pasteable(question.id)
+            else f"  [dim]1.[/] Dispose of it with 'assistant forget-question'. "
+            f"{_uncopyable('Its id')}"
         )
         console.print(
             "  [dim]2.[/] Check 'assistant beliefs', and use 'assistant learn' again if "
@@ -3443,6 +3492,9 @@ def _render_question(question: Question) -> None:
         console.print(
             f"  [dim]Answer with:[/] assistant answer {_argument(question.id)} "
             f"--accept  [dim]|[/]  --reject"
+            if _is_pasteable(question.id)
+            else "  [dim]Answer with:[/] 'assistant answer', with --accept or --reject. "
+            f"{_uncopyable('Its id')}"
         )
     _render_successor(question)
 
@@ -3583,12 +3635,16 @@ def _render_redeferral(outcome: AnswerOutcome) -> None:
     identifier = _safe(successor.id)
     match successor.state:
         case QuestionState.OPEN:
-            console.print(
-                # Named and offered are two renderings of one id, and only the second
-                # is quoted: the name is read, the command is pasted.
-                f"  [dim]Here is the follow-up:[/] [bold cyan]{identifier}[/] "
+            # Named and offered are two renderings of one id, and only the second is
+            # quoted: the name is read, the command is pasted.
+            offer = (
                 f"[dim](assistant answer {_argument(successor.id)} --accept)[/]"
+                if _is_pasteable(successor.id)
+                else _uncopyable(
+                    "Its id", "'assistant answer' still takes it, given the exact bytes."
+                )
             )
+            console.print(f"  [dim]Here is the follow-up:[/] [bold cyan]{identifier}[/] {offer}")
         case QuestionState.DECLINED:
             console.print(
                 f"  [dim]That raises a question you had already declined:[/] {identifier} "
@@ -4043,11 +4099,15 @@ def _render_grant_prompt(chosen: GrantableSource, scope: Sequence[GrantScope]) -
         console.print(f"  It reads from: [bold]{_safe(chosen.location)}[/]")
     console.print(f"  You would be allowing: {_scope_phrase(scope)}.")
     if chosen.live is not None:
+        withdrawal = (
+            f"first with 'assistant revoke {_argument(chosen.source)}'."
+            if _is_pasteable(chosen.source)
+            else f"first with 'assistant revoke'. {_uncopyable('Its name')}"
+        )
         console.print(
             "\n  [yellow]It is already granted[/] for "
             f"{_scope_phrase(chosen.live.scope)}. A source has one grant at a time, "
-            "so this will be refused — withdraw the current one first with "
-            f"'assistant revoke {_argument(chosen.source)}'."
+            f"so this will be refused — withdraw the current one {withdrawal}"
         )
     console.print(
         "\n[dim]Withdrawing later stops further reads; it does not un-remember what "
@@ -4380,11 +4440,13 @@ def _render_notification_acts(record: HeldNotification, *, now: datetime) -> Non
         return
     notification_class = record.candidate.notification_class
     if not _is_pasteable(record.id) or not _is_pasteable(notification_class):
+        # Both acts go together here, because either value failing costs both hints.
         console.print(
-            "  [yellow]Its id or its class holds characters this terminal cannot "
-            "show[/], so there is no command here to copy — one written from what is "
-            "on screen would name something else. The 'dismiss' and 'tune' commands "
-            "still take them, given the exact bytes."
+            "  "
+            + _uncopyable(
+                "Its id or its class",
+                "The 'dismiss' and 'tune' commands still take them, given the exact bytes.",
+            )
         )
         return
     console.print(f"  [dim]Deal with it:[/] assistant dismiss {_argument(record.id)}")
