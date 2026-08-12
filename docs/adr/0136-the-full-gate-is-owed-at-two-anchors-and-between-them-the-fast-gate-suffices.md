@@ -129,9 +129,10 @@ between them.**
 > gate run on an earlier tree does not discharge it.
 
 > **Normative.** A rebase that moves the branch's base re-opens the next anchor
-> owed: the full gate is run again before the next review invocation and before
-> the final push, whichever follow. This holds however many anchors have already
-> been discharged.
+> owed. Where both anchors have already been discharged it re-opens the closing
+> one: the full gate is run again, and passes, before the rebased head is pushed
+> for merge — whether or not `gh pr ready` has already happened, and however many
+> times the branch is rebased.
 
 The first anchor is owed **once per branch, not once per review invocation**, and
 this ADR accepts what that means rather than leaving it to be discovered: a review
@@ -153,6 +154,18 @@ per *round* the paragraph below declines. Without it §6's claim that the freshn
 rules stand whole would be false — `CONTRIBUTING.md` requires the gate green
 before a review and a rebase before invoking one, and a rule that let a rebased
 tree reach a reviewer on the static four alone would quietly narrow both.
+
+**The post-`ready` rebase is the case that most needs saying, and it is already
+the practice.** Branch protection is `strict`, so a lane that reports while
+another merges ahead of it comes back `BEHIND` and must rebase after
+`gh pr ready` — routine in a batch with a merge order, not an exception. At that
+point no review invocation and no pre-`ready` push remain for the first two
+clauses to bite on, which is why the clause above names the closing anchor
+explicitly rather than relying on "the next one owed". `.claude/agents/worker.md`
+already instructs a dispatched lane to "**re-run the full gate against the landing
+tree**" on exactly this path; what this ADR adds is that the obligation is the
+closing anchor itself, so it holds for any author on any branch rather than only
+for a worker who was told.
 
 The rest is accepted on the reading of `docs/review/guide.md` above: the reviewer runs
 no tests and may not report what `pytest` catches, so a failing test changes
@@ -364,9 +377,16 @@ the record of a review covers.
   before. §3 says explicitly that mid-loop red is not on its own grounds for a
   report, so the ambiguity is resolved by not acting on it.
 - **The closing anchor is a single point of failure, and it is procedural.**
-  Nothing mechanical fires before `gh pr ready` to check that a full gate ran.
-  Branch protection catches the consequence — a red `gate` cannot merge — but the
-  wasted round-trip lands on whoever verifies the lane.
+  Nothing mechanical fires before `gh pr ready` to check that a full gate ran, and
+  nothing fires on the post-`ready` rebase either. Branch protection catches the
+  consequence — a red `gate` cannot merge — but the wasted round-trip lands on
+  whoever verifies the lane. §1 makes the obligation explicit precisely because it
+  cannot make it automatic.
+- **The closing anchor can be owed more than once.** A lane merging late in an
+  ordered batch pays it again per rebase. That is the cost of `strict` branch
+  protection rather than of this decision — the same lane owed a full gate on the
+  landing tree before — but this ADR is now the thing that says so, so the count is
+  visible where it was previously folded into "run the gate, always".
 
 **Follow-on.** Batch #986 lane 1b — a parallel test recipe and the
 `CONTRIBUTING.md` edit that states this cadence where an author reads it — is
