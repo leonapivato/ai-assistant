@@ -98,6 +98,53 @@ The reader's identity is ``calendar`` and a grant keys on **that**, never on the
 path (ADR-0097 §1) — so repointing the path leaves the grant standing over the new
 location, which ADR-0097 §9a states and does not close.
 
+**Arming unprompted contact is three further acts, and none implies another**
+(ADR-0132 §4, ADR-0133 §3). Everything above arms *ingestion* — this file read
+into beliefs. The upcoming-event producer is a second, independent consumer of
+the same reading (ADR-0093 §3), so arming one arms neither the other nor any
+interruption. In the order they can be performed:
+
+1. **The operator arms the producer**, in the hub's environment. It needs the
+   path above and nothing else — it does **not** need
+   ``ASSISTANT_CALENDAR_READER_INTERVAL``, and setting either changes the other
+   job's cadence in no way (ADR-0132 §4)::
+
+       ASSISTANT_CALENDAR_READER_PATH=/home/you/.calendars/calendar.ics
+       ASSISTANT_CALENDAR_UPCOMING_INTERVAL=PT5M     # unset: the producer is off
+       ASSISTANT_CALENDAR_UPCOMING_LEAD=PT30M        # the default
+
+   Every duration in ``Settings`` is an **ISO-8601 duration**: ``PT5M`` is five
+   minutes and ``PT30S`` thirty seconds. A bare ``15`` is refused at load with a
+   parse error naming a ``"day"`` identifier nobody typed — pydantic's message,
+   the same for every duration setting here, and the one thing about this chain
+   most likely to stop an operator (#981).
+
+   The lead must be strictly greater than the interval — a shorter one leaves
+   occurrences that no tick ever sees — and no larger than
+   ``ASSISTANT_CALENDAR_WINDOW_FUTURE``, which would select from occurrences the
+   read never returns. Both are refused at load rather than discovered as a job
+   that runs, logs nothing and reports health.
+
+2. **The user grants the read**, a third use of the source that ``facet`` and
+   ``ingest`` do not back-fill (ADR-0133 §3)::
+
+       assistant grant calendar --scope notify
+
+   The source is **positional**; there is no ``--source`` option. A source holds
+   one grant at a time, so adding ``notify`` to a calendar already granted for
+   ingestion is ``assistant revoke calendar`` and then one ``grant`` naming every
+   scope wanted — ``--scope facet --scope ingest --scope notify`` — and both acts
+   stay on the record.
+
+3. **The user raises the class's reach.** Every class ships at ``hold``, so a
+   producer cannot interrupt on the day it ships (ADR-0130 §6)::
+
+       assistant tune --class upcoming_event --reach interrupt
+
+   ``assistant notification-settings`` prints what is set now, ``assistant
+   notifications`` prints each held record beside its own class, and ``assistant
+   tune --help`` carries these same three acts from the user's side.
+
 **Configuration is not consent**, and no surface may present it as one (§7). A
 ``Settings`` field cannot be revoked by the user through the assistant, cannot be
 scoped, and leaves no audit record. The grant model is deferred (§11, #629), and
