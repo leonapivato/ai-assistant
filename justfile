@@ -49,10 +49,19 @@ test *args:
 # `--basetemp` is about socket paths, not about tidiness. xdist inserts a
 # `popen-gwN/` component under the temp root, which took the hub's AF_UNIX paths
 # to 112 bytes against this platform's 108-byte `sun_path` budget — nine failures
-# that say nothing whatever about the code. A short root buys the margin back.
-# pytest *empties* whatever it is given, so this points at a per-clone scratch
-# path under /tmp and deliberately not at $TMPDIR, which is the one place a
-# reader may have made long on purpose.
+# that say nothing whatever about the code. A short root buys the margin back:
+# the worst path in the suite runs 66 bytes below its root, so `/tmp/pt-XXXXXX`
+# leaves ~26 to spare where the default root left none. It is under /tmp and
+# deliberately not under $TMPDIR, which is the one place a reader may have made
+# long on purpose.
+#
+# It is a **fresh** root per invocation because pytest *empties* whatever it is
+# given. Anything derived from the clone — its name, its path — is shared by two
+# runs of this recipe in one clone, and by two clones that differ only in their
+# parent, and either pair would delete a live worker's tree out from under it.
+# `mktemp -d` cannot collide. The cost is that pytest's own retention of the last
+# few runs is gone, so a failing run keeps its tree and says where, and a passing
+# one is removed.
 #
 # `--deselect tests/core/test_protocol_triad.py` is structural. That check reads
 # the run record `tests/conftest.py` accumulates across the session; under xdist
@@ -65,10 +74,17 @@ test *args:
 # Last line, because `just --list` shows only that one: what this recipe runs.
 # The suite in parallel — ADR-0136 §2's fast gate, and never one of its anchors
 test-fast *args:
-    uv run pytest -n auto \
-        --basetemp="/tmp/pt-$(basename "$(pwd)")" \
-        --deselect tests/core/test_protocol_triad.py \
-        "$@"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp="$(mktemp -d /tmp/pt-XXXXXX)"
+    if uv run pytest -n auto --basetemp="$tmp" \
+            --deselect tests/core/test_protocol_triad.py "$@"; then
+        rm -rf "$tmp"
+    else
+        status=$?
+        echo "just test-fast: temp tree kept for inspection at $tmp" >&2
+        exit "$status"
+    fi
 
 # Tier 1 — an ADR file or an issue number that does not exist — exits non-zero;
 # Tier 2 — unresolved code citations and liveness disagreements — is reported and
