@@ -3516,13 +3516,20 @@ def _candidate(**overrides: object) -> NotificationCandidate:
 def _held(**overrides: object) -> HeldNotification:
     """A record held because its class is not set to interrupt — #979's own case.
 
-    ``reconsider_at`` stays ``None`` and that is the point of the example rather
-    than a detail of it: reach is not a condition time resolves, so this record
-    cannot free itself and the user's act is the only thing that moves it.
+    **The candidate declares an expiry, and that is not decoration.** ADR-0130 §5
+    makes declaring one the whole of the escalation test, so a record with none fails
+    ``PERISHABLE`` as well and the engine could never produce a failed set of
+    ``(REACH_INTERRUPT,)`` alone. Building the fixture without an expiry made every
+    case here a state no policy emits — and hid the one where the reach hint is a
+    promise nothing can keep (:func:`_perishing`'s sibling below).
+
+    ``reconsider_at`` stays ``None`` and that *is* the point of the example: reach is
+    not a condition time resolves, so this record cannot free itself and the user's
+    act is the only thing that moves it.
     """
     fields: dict[str, object] = {
         "id": "ntf-1",
-        "candidate": _candidate(),
+        "candidate": _candidate(expires_at=AT + timedelta(hours=1)),
         "kind": NotificationDispositionKind.HOLD,
         "reason": NotificationCondition.REACH_INTERRUPT,
         "failed": (NotificationCondition.REACH_INTERRUPT,),
@@ -3531,6 +3538,24 @@ def _held(**overrides: object) -> HeldNotification:
         "retention": timedelta(days=7),
     }
     return HeldNotification(**(fields | overrides))  # type: ignore[arg-type]
+
+
+def _never_urgent(**overrides: object) -> HeldNotification:
+    """The state an engine actually emits for a candidate that declares no expiry.
+
+    Two failing conditions in ``INTERRUPT_CONDITIONS`` order, ``PERISHABLE`` first and
+    therefore the reason — verified against ``FakeNotificationPolicy``, which is the
+    conformance-tested ruling. No reach setting removes the first of them (§5, §6).
+    """
+    fields: dict[str, object] = {
+        "candidate": _candidate(expires_at=None),
+        "reason": NotificationCondition.PERISHABLE,
+        "failed": (
+            NotificationCondition.PERISHABLE,
+            NotificationCondition.REACH_INTERRUPT,
+        ),
+    }
+    return _held(**(fields | overrides))
 
 
 def test_a_held_notification_renders_what_it_says_and_what_it_belongs_to(
@@ -3734,11 +3759,34 @@ def test_a_candidate_with_no_expiry_says_why_that_makes_it_unurgent(output: Stri
     absence as a blank would leave the user tuning a class that was never going to
     interrupt whatever they set.
     """
-    cli._render_notifications(
-        (_held(candidate=_candidate(expires_at=None)),), now=AT, limit=50, offset=0
-    )
+    cli._render_notifications((_never_urgent(),), now=AT, limit=50, offset=0)
 
     assert "never" in _flowed(output.getvalue())
+
+
+def test_a_record_no_setting_can_free_is_not_offered_a_reach_raise(
+    output: StringIO,
+) -> None:
+    """ADR-0130 §6: "a record whose set holds only the expiry condition is reached by
+    no setting", and §5 is why.
+
+    The engine's own ruling for a candidate with no expiry fails ``PERISHABLE`` *and*
+    ``REACH_INTERRUPT``, so a hint reading only the second offers a raise that re-arms
+    the record, runs a reconsideration, and re-holds it on the condition nothing can
+    remove — an interruption promised and never delivered, which is #979's failure
+    wearing the opposite face.
+
+    What is offered instead: dismissal, the lowering act (which still does something),
+    and the reason in words, because a user who performed the act and heard nothing
+    would reasonably conclude the act had failed.
+    """
+    cli._render_notifications((_never_urgent(),), now=AT, limit=50, offset=0)
+
+    rendered = _flowed(output.getvalue())
+    assert "assistant dismiss ntf-1" in rendered
+    assert "--reach interrupt" not in rendered
+    assert "assistant tune --class upcoming_event --reach off" in rendered
+    assert "No reach setting can make this one interrupt" in rendered
 
 
 def test_a_record_held_behind_its_reach_is_offered_the_raise_that_frees_it(
@@ -4382,7 +4430,13 @@ def test_raising_a_class_says_it_reaches_what_is_already_held(
 
     CliRunner().invoke(cli.app, ["tune", "--class", "upcoming_event", "--reach", "interrupt"])
 
-    assert "already holding" in _flowed(output.getvalue())
+    rendered = _flowed(output.getvalue())
+    assert "looked at again" in rendered
+    # **And the promise is qualified**, because reach is not the only condition (§5):
+    # a held record that named no moment it stops mattering re-holds on PERISHABLE,
+    # so an unqualified "can now reach you" would have the user believe the act they
+    # just performed failed when nothing arrived.
+    assert "stays held" in rendered
 
 
 def test_turning_a_class_off_says_what_it_reaches_and_what_it_does_not(
