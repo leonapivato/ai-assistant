@@ -87,6 +87,18 @@ An under-specified brief is the largest source of rework. Each one carries:
   becomes unsatisfiable and a fresh round is owed *even when not one reviewed
   byte moved*. Stacking buys a round at review time and forfeits one at the
   retarget its parent's merge makes inevitable.
+- **Which slice of a decomposition this lane carries, and what it waits on.**
+  Where a slice was cut at the contract seam (`pre-dispatch-survey` §3,
+  ADR-0137), name the side this lane is on — the contract triad plus its
+  primary implementation, or one consumer group — and, for a consumer lane, the
+  merged PR whose text is its authority. Neither side can infer this from its
+  fence, which says only what it may touch. A consumer lane that does not know
+  it is one reads the contract as ground it may reshape, and then STOPs or
+  widens when it does not fit; a contract lane that does not know consumers are
+  queued behind it fits the contract to its single caller, which is the shape
+  the seam exists to prevent. **Say the pairing in as many words** on a paired
+  lane: it crosses subsystems, and the exception it rides on is the one
+  ADR-0137 §2 ratified, not a general licence a lane may read into its fence.
 - **Cross-lane interactions** in both directions: what this lane will see if
   another merges first, and what it must not assume. Say **where in the merge
   order it sits and why** (§5). A lane told it merges last plans for the rebase
