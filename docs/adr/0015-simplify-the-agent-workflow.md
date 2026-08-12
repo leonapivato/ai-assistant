@@ -29,8 +29,10 @@
   anchored to, and §5's ratify-after-review sequencing is the rule ADR-0136 itself
   was ratified under. Nothing in Consequences is rewritten: the clause above stays
   legible where it was written, beside this note. What ADR-0136 does *not* touch is
-  ADR-0010's remote gate, which still runs the full five steps on every push and
-  every pull request — ADR-0136 §4 depends on that being unchanged, so this ADR's
+  ADR-0010's remote gate, which still runs the full five steps on the triggers
+  `.github/workflows/gate.yml` declares — `pull_request` and `push` to `main`, so
+  every pull-request event but not a branch push with no PR open, as ADR-0136 §4
+  states. ADR-0136 §4 depends on that being unchanged, so this ADR's
   "no CI-only divergence" survives as a statement about what CI runs, and is
   narrowed only as a statement about what the author runs before each commit.
 - Superseded: 2026-07-20 by ADR-0020 — §1's freshness clause ("refuses unless
