@@ -67,7 +67,7 @@ What those mid-loop runs buy is close to nothing, and the reason is structural
 rather than empirical: **the intermediate trees are not shipped.** Nobody merges
 round 7. The only tree whose full-suite result anyone acts on is the tree at the
 end, and that tree is gated twice over — once by the author before `gh pr ready`,
-and once by CI on every push and PR (ADR-0010), where a red `gate` blocks the
+and once by CI on every pull-request event (ADR-0010), where a red `gate` blocks the
 merge outright.
 
 ### The breadth argument is right about the wrong tree
@@ -81,10 +81,21 @@ visible earlier, and "earlier" here means "eleven minutes earlier in a loop that
 will run for another hour".
 
 There is one place where earlier genuinely matters, and it is not the merge. It is
-the **review**: Codex reads the working tree for context, so an invocation on a
-tree that does not build or does not pass is a wasted round — the review reports
-the breakage instead of the design, and the round is spent. That is a real anchor,
-and it is the first of the two below.
+the **review**, and the reason is written into the reviewer's own rubric:
+`docs/review/guide.md` tells every persona that reviewers "are the judgment layer
+**above** the mechanical gate (ruff, mypy, import-linter, pytest). **Assume the
+gate is already green.**" A review invocation is therefore conducted under a
+premise about the tree, and a branch that has never once satisfied that premise is
+sending the reviewer a diff whose stated foundation is fiction. That is a real
+anchor, and it is the first of the two below.
+
+Note what the rubric does *not* do, because it bounds how much that anchor can be
+asked to carry: the reviewer runs no tests, and is forbidden from reporting
+"anything ruff/mypy/pytest already catch". So a failing test is invisible to it —
+what a review round is actually wasted by is a tree it cannot *read*, and that is
+`ruff` and `mypy`'s department, which §2 keeps mandatory before every commit. §1's
+first anchor is a once-per-branch proof of the rubric's premise, not a per-round
+one; §3 says plainly what that costs.
 
 ### Why the answer is anchors rather than "use judgement"
 
@@ -119,11 +130,25 @@ between them.**
 > the closing anchor and the final push re-opens it (`CONTRIBUTING.md` → "Run it
 > against a current `main`": a green gate is evidence about the tree it ran on).
 
-The first anchor is owed once per branch, not once per review invocation: it
-protects the reviewer from a tree that cannot be read, and a tree that has been
-fully gated once and has since only had review findings folded into it is not that
-tree. The closing anchor is what makes the intervening discretion safe, and it is
-the one that must not be skipped.
+The first anchor is owed **once per branch, not once per review invocation**, and
+this ADR accepts what that means rather than leaving it to be discovered: a review
+invoked at round 7 may run on a tree whose tests fail, because §2 permitted the
+author not to run them at round 6.
+
+> **Normative.** A second or later review invocation on a branch reopens neither
+> anchor. A tree whose tests fail is not, on that ground, ineligible for review.
+
+That is accepted on the reading of `docs/review/guide.md` above: the reviewer runs
+no tests and may not report what `pytest` catches, so a failing test changes
+nothing it does — where a tree it cannot parse or type-check would, which is why
+§2 keeps `ruff` and `mypy` mandatory before every commit and only `pytest`
+discretionary. What is genuinely given up is that the rubric's "assume the gate is
+already green" is, after the first anchor, an assumption about a tree that was
+green rather than one that is. The alternative — reopening the anchor before every
+review — costs a full suite run per round, which is the ~110 minutes this ADR
+exists to remove, to protect a premise the reviewer does not act on. The closing
+anchor is what makes the whole of that discretion safe, and it is the one that
+must not be skipped.
 
 ### 2. Between the anchors, the fast gate
 
@@ -165,8 +190,15 @@ becomes the plan.
 
 Three nets sit under §2, none of which depends on the author's judgement:
 
-- **CI runs the full serial gate on every push and every PR** (ADR-0010), against
-  the locked environment. Nothing about that changes here (§6).
+- **CI runs the full serial gate on every pull-request event** (ADR-0010), against
+  the locked environment. `.github/workflows/gate.yml` triggers on `pull_request`
+  (`opened`, `synchronize`, `reopened`, `ready_for_review`) and on `push` to
+  `main` — **not** on a push to a branch that has no PR. This net therefore
+  depends on the draft PR being open, which `CONTRIBUTING.md` already requires
+  "as soon as you have a branch and a first commit"; with it open, `synchronize`
+  fires on every subsequent push and the net is continuous. Its one gap is the
+  window between the first push and the draft PR, which is the author's to close
+  and is measured in minutes. Nothing about the workflow changes here (§6).
 - **The closing anchor** re-runs everything locally on the tree that ships.
 - **Branch protection** requires `gate` green to merge (`CONTRIBUTING.md` →
   "`gate` is the only required check"), so a suite that fails on the merged tree
@@ -189,8 +221,10 @@ the record of a review covers.
 
 ### 6. What this does not decide
 
-- **CI's gate.** It stays the full five steps, serial, on every push and PR. This
-  ADR is about the *local* cadence only, and §4 depends on CI's being unchanged.
+- **CI's gate.** It stays the full five steps, serial, on the triggers
+  `.github/workflows/gate.yml` already declares. This ADR is about the *local*
+  cadence only, and §4 depends on CI's being unchanged — including on the trigger
+  set, which §4 relies on and does not propose widening.
 - **The Definition of Done itself.** The five steps and their order are ADR-0002's
   and ADR-0010's; "done" still means all five pass on the shipping tree.
 - **The tooling.** A parallel test recipe (`just test-fast`, `pytest-xdist`) is
@@ -261,9 +295,12 @@ the record of a review covers.
   branch instead of one per commit; on a 20-round lane that is ~10 minutes of
   pytest where there were ~110. The saving is largest exactly where it hurts most —
   a long review loop is already the expensive case.
-- **A docs-only lane pays nothing.** An ADR PR that touches no code no longer runs
-  15,678 tests per commit to prove that prose did not break them. The anchors
-  still catch a tree that will not build.
+- **A docs-only lane pays the two anchors and nothing else.** An ADR PR that
+  touches no code stops running 15,678 tests *per commit* to prove that prose did
+  not break them; §2's third clause makes that explicit rather than leaving it to
+  the author's discretion. It still pays both anchor runs in full — §1 admits no
+  exemption for a docs-only branch, and this is the saving as it actually is: the
+  per-commit runs go, the two that prove the shipping tree stay.
 - **The early draft PR stops being a liability.** `CONTRIBUTING.md` asks for the
   draft to open before the work is done so CI gates every push; §3 makes that
   honest rather than something an author avoids to keep the check green.
