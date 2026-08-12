@@ -22,8 +22,8 @@
   creates, revokes, or reports a `SourceGrant`" keeps its `creates` and `revokes`
   limbs whole and loses its `reports` limb. **ADR-0102's Status line carries the
   record under ADR-0070 §4 and ADR-0001, and that file is outside this lane's
-  fence** — the edit is flagged on the PR carrying this ADR and filed as its own
-  issue, owed before the implementing lane starts.
+  fence** — the edit is flagged on the PR carrying this ADR and filed as **#1016**,
+  owed before the implementing lane starts.
 - **Amends no other ADR and supersedes none.** §9 applies ADR-0070 §1's test and
   ADR-0082 §1's record rule to the six further places where the opposite reading
   is available: ADR-0097 §2's two-act form, ADR-0097 §12's read deferral,
@@ -65,10 +65,12 @@ wired:
   after it.
 
 So the grant *model* is not what leg 11 is missing. What it is missing is the
-surface a person manages grants through, which ADR-0133 §7 says in as many words:
-"What stays leg 11's is the grant-management **surface** — how sources are
-presented, how a grant is amended, what a user is shown about their standing
-grants — which #629 holds."
+surface a person manages grants through. ADR-0133 says so twice: §6's closing
+paragraph — "What stays leg 11's is the grant-management **surface** — how sources
+are presented, how a grant is amended, what a user is shown about their standing
+grants — which #629 holds and which this member joins rather than reshapes" — and
+§7's first bullet, which lists the same three questions among what that ADR does
+not decide.
 
 ### The leg's own exit test names the gap
 
@@ -275,9 +277,10 @@ surface that lies about its cost.** `SourceGrants.live` is keyed on a source nam
 so an engine-side answer would have to come from `export()`, whose cost grows with
 the store's whole history rather than with the number of live grants — which is
 the objection ADR-0102 §10 raised against an engine-side `offset`
-("over-fetch-and-slice — a paging surface that lies about its cost"). The SQL is
-the store's existing live anti-join with its source predicate dropped, over an
-index `permissions/grants.py` already declares.
+("over-fetch-and-slice — a paging surface that lies about its cost"). The query is
+the store's existing live anti-join with its source predicate dropped, over rows
+the shipped schema already holds and already indexes — which is why §8 rules that
+no new database and no schema version bump ride with it.
 
 **Leaving `SourceGrants` alone is ADR-0097 §3's capability split held rather than
 restated.** That section removed `record` from the driver's type so that "a
@@ -493,8 +496,9 @@ state and is not exportable, so "was this source read after I revoked it" has no
 answer today. That is a question the read lane may answer or may decline; what it
 may not do is not notice it.
 
-**Filed as an issue with this ADR**, so the fired deferral is tracked as a lane
-rather than as a paragraph.
+**Filed as #1017 with this ADR**, so the fired deferral is tracked as a lane
+rather than as a paragraph, with the clauses above carried into it by reference
+rather than by paraphrase.
 
 ### 7. #441's trigger ladder: the rungs are permission questions, and the model expresses exactly the first
 
@@ -600,36 +604,15 @@ read as the Protocol *change* it is):
 
 1. The two methods with their declared failures in their docstrings, and the
    `PROTOCOL_VERSION` bump. `core/types.py`'s promoted-surface comment is
-   untouched: no type is added, so its "twenty-five types" stays correct.
-
-   > **Normative.** The lane restates `AssistantEngine`'s docstring method count
-   > as the count the Protocol then carries, rather than incrementing the figure
-   > written there. At `25ceecb7` the Protocol carries **twenty-five** methods and
-   > the docstring says "nineteen" in two places — the figure ADR-0102 §12 set,
-   > left behind by the six methods added since — so an increment would write a
-   > second wrong number.
-
-   **The stale figure is recorded rather than fixed here, and it is not this
-   ADR's to fix**: it is live text in `src/`, `CONTRIBUTING.md` → "No state
-   claims in living documents" is the rule it breaks, and correcting it is filed
-   as its own issue rather than folded into a contract lane. What is decided here
-   is that the lane touching that docstring may not perpetuate it.
+   untouched: no type is added, so its "twenty-five types" stays correct. The
+   `AssistantEngine` docstring's method count is governed by the clause below the
+   list rather than by this item.
 2. **The `AssistantEngine` conformance suite gains the clauses a store cannot
    exhibit**: `standing_grants` returns a grant whose source no held reader
    declares; it returns nothing for a revoked grant; it returns one record per
    granted source and never two; and it is unaffected by a source being present
-   in or absent from `grantable_sources`.
-
-   > **Normative.** The suite pins §2's liveness clause with the case that
-   > distinguishes a stated liveness from a derived one: a grant revoked by a
-   > record whose `decided_at` is **earlier** than the grant's is absent from
-   > `standing_grants`, while `recent_grants` still returns both records.
-
-   **That case is the whole of the clause and nothing else reaches it**, for the
-   reason ADR-0102 §12 gave for its own: an implementation computing liveness by
-   walking records ordered by `decided_at` passes every other clause in the list,
-   because every other clause is about membership rather than ordering.
-
+   in or absent from `grantable_sources`. The ordering case below the list is a
+   required clause rather than one of these.
 3. **The `SourceGrantStore` conformance suite gains the store-side clauses**: the
    new member returns every live grant and no revoked one; it returns a detached
    snapshot, written as a mutation of the returned record's `__dict__` leaving the
@@ -650,6 +633,37 @@ read as the Protocol *change* it is):
    arguments and results are validated from the annotations, and an error code is
    the exception class's own name resolved over `core.errors` (ADR-0102 §12).
 
+**Two of the contract lane's obligations are stated below the list rather than
+inside it, and that placement is forced.** ADR-0089 §2 puts a normative clause at
+column 0 and draws the consequence in as many words — "**a normative clause cannot
+live inside a list item**" — and §3 makes the marks the whole of a marked ADR's
+obligations. Written as sub-items they would bind nothing, which is the failure
+ADR-0089 §2 exists to prevent and which ADR-0094 §10a records having hit.
+
+> **Normative.** The contract lane restates `AssistantEngine`'s docstring method
+> count as the count the Protocol then carries, rather than incrementing the
+> figure written there.
+
+**Because the figure written there is already wrong by six.** At `25ceecb7` the
+Protocol carries **twenty-five** methods and the docstring says "nineteen" in two
+places — ADR-0102 §12's figure, left behind by the notification and conversation
+methods added since — so an increment would write a second wrong number. **The
+stale figure is recorded rather than fixed here, and it is not this ADR's to
+fix**: it is live text in `src/`, `CONTRIBUTING.md` → "No state claims in living
+documents" is the rule it breaks, and correcting it is filed as **#1018** rather
+than folded into a contract lane. What is decided here is only that the lane
+touching that docstring may not perpetuate it.
+
+> **Normative.** The `AssistantEngine` conformance suite pins §2's liveness clause
+> with the case that distinguishes a stated liveness from a derived one: a grant
+> revoked by a record whose `decided_at` is **earlier** than the grant's is absent
+> from `standing_grants`, while `recent_grants` still returns both records.
+
+**That case is the whole of the clause and nothing else reaches it**, for the
+reason ADR-0102 §12 gave for its own: an implementation computing liveness by
+walking records ordered by `decided_at` passes every other clause in the list,
+because every other clause is about membership rather than about ordering.
+
 **The store lane**: the new member on `SqliteSourceGrantStore`, as the existing
 live anti-join without its source predicate, and `GrantOperations` gaining the
 engine operation over it. No new database and no schema version bump: the member
@@ -663,7 +677,17 @@ test that the granting half of an amendment renders the location before it sends
 
 > **Normative.** The lane that lands this ADR's supersession record edits
 > ADR-0102's `Status` line to the partial form ADR-0070 §4 fixes, naming this ADR
-> and the scope §9 states. It is owed before the contract lane starts.
+> and the scope §9 states. It is owed before the contract lane starts, and it is
+> filed as #1016.
+
+**It is a separate lane rather than an omission, and the sequencing is ADR-0070
+§1's own.** That section permits the in-place edit "recording a supersession that
+**has landed**", and says in terms that "flipping a live decision to `Superseded`
+with no such ADR is not a status change but an unrecorded decision change, and is
+not permitted". So the record is owed *after* this ADR merges however the lanes
+are cut, and the fence this ADR was authored under put the neighbouring file out
+of reach in the same direction. What must not happen is the contract lane starting
+first: a lane reading ADR-0102 alone would still refuse a fifth operation.
 
 ### 9. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -769,8 +793,9 @@ this lane's fence.
 ### 10. Deferred, by name, each with the condition that fires it
 
 - **The read record itself** (§6): its store, its shape, its bound, and whether a
-  refused read is recorded. Fired as a deferral, deferred as a *decision* to the
-  lane §6 binds. Fires now; it is owed and filed.
+  refused read is recorded. Fired as a deferral and handed on as a *decision* to
+  the lane §6 binds, because it needs a Protocol and golden rule 5 puts that in its
+  own ADR. Its condition is met now; it is owed, bound and filed as **#1017**.
 - **A grant export and a wholesale grant erasure.** ADR-0102 §14's, unchanged and
   riding on ADR-0101 §7's lane. `SourceGrantStore.export` and `clear` still reach
   no surface, and this ADR adds none: an export surface is one decision across
