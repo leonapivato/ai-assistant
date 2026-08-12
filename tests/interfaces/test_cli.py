@@ -4451,10 +4451,15 @@ def test_raising_a_class_says_it_reaches_what_is_already_held(
 
     rendered = _flowed(output.getvalue())
     assert "looked at again" in rendered
+    # **Due, not done.** §6 stamps `reconsider_at` and stops — "the existing job picks
+    # them up on its next run", and §5 makes that floor a floor. The record is still
+    # HOLD as this prints, so a message in the past tense would have the user read the
+    # silence that follows as the act having failed.
+    assert "due to be" in rendered
+    assert "next sweep" in rendered
     # **And the promise is qualified**, because reach is not the only condition (§5):
     # a held record that named no moment it stops mattering re-holds on PERISHABLE,
-    # so an unqualified "can now reach you" would have the user believe the act they
-    # just performed failed when nothing arrived.
+    # so an unqualified "can now reach you" would mislead in the other direction.
     assert "stays held" in rendered
 
 
@@ -4478,6 +4483,10 @@ def test_turning_a_class_off_says_what_it_reaches_and_what_it_does_not(
     rendered = _flowed(output.getvalue())
     assert "already holding" in rendered
     assert "recalled" in rendered
+    # `off` is deferred by the same clause and says so: §6 makes every actionable held
+    # record *due* at the instant of the write, and the ruling is the sweep's.
+    assert "due to be ruled out" in rendered
+    assert "next sweep" in rendered
 
 
 def test_every_condition_a_ruling_can_name_has_a_phrase() -> None:

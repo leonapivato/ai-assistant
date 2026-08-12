@@ -2695,24 +2695,31 @@ async def _drive_tune(engine: AssistantEngine, asked: _Tuning) -> int:
         return _EXIT_ERROR
     console.print("[green]Tuned.[/] These are the settings in force now.\n")
     _render_notification_settings(written)
+    # **Both lines say "due", never "done", and the tense is ADR-0130 §6's** rather
+    # than caution. The write is atomic with a `reconsider_at` stamp and stops there:
+    # "the existing job picks them up on its next run", and §5 makes that floor a
+    # floor — "a late reconsideration is not a fault". So a record is still `HOLD` when
+    # this message prints. Claiming it had already been re-ruled would have the user
+    # who raised a class read the silence that follows as the act having failed, on
+    # the one surface built because that act had no door at all (#979).
+    #
+    # The `interrupt` line is qualified a second time, because reach is not the only
+    # condition (§5): a held record that named no moment it stops mattering re-holds
+    # on `PERISHABLE`, which §6 says "is reached by no setting", so for those the
+    # sweep changes nothing whenever it runs.
     if asked.reach is NotificationReach.INTERRUPT:
-        # **Qualified, because reach is not the only condition** (ADR-0130 §5). The
-        # write does re-arm every held record of the class, but one that named no
-        # moment it stops mattering re-holds on `PERISHABLE`, which §6 says "is
-        # reached by no setting". An unqualified "can now reach you" would promise an
-        # interruption for those that never arrives, and leave the user believing the
-        # act they just performed had failed.
         console.print(
-            "\n[dim]Anything of that class I am already holding is looked at again, so "
-            "one that named a moment it stops mattering can reach you now rather than "
-            "waiting for the next. One that named no such moment stays held: no reach "
-            "setting makes it urgent.[/]"
+            "\n[dim]Anything of that class I am already holding is now due to be "
+            "looked at again, on my next sweep rather than this instant — so one that "
+            "named a moment it stops mattering can reach you without waiting for the "
+            "next such notification. One that named no such moment stays held however "
+            "long you wait: no reach setting makes it urgent.[/]"
         )
     elif asked.reach is NotificationReach.OFF:
         console.print(
-            "\n[dim]Anything of that class I am already holding is ruled out as "
-            "well; it stays readable in 'assistant notifications'. Nothing already "
-            "sent is recalled.[/]"
+            "\n[dim]Anything of that class I am already holding is now due to be ruled "
+            "out too, on my next sweep rather than this instant; it stays readable in "
+            "'assistant notifications' either way. Nothing already sent is recalled.[/]"
         )
     return _EXIT_OK
 
