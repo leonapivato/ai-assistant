@@ -9,6 +9,7 @@ the production, model-backed engine, so no network or key is needed.
 from __future__ import annotations
 
 import asyncio
+import shlex
 from datetime import UTC, datetime, timedelta
 from inspect import unwrap
 from io import StringIO
@@ -3542,7 +3543,7 @@ def test_a_held_notification_renders_what_it_says_and_what_it_belongs_to(
     listing missing the class is the one #978 drove around with a throwaway wire
     driver, because there was nothing on screen to type.
     """
-    cli._render_notifications((_held(),), limit=50, offset=0)
+    cli._render_notifications((_held(),), now=AT, limit=50, offset=0)
 
     rendered = _flowed(output.getvalue())
     assert "ntf-1" in rendered
@@ -3570,6 +3571,7 @@ def test_a_hold_is_explained_by_its_whole_failed_set_and_not_by_its_reason_alone
                 reconsider_at=AT + timedelta(hours=2),
             ),
         ),
+        now=AT,
         limit=50,
         offset=0,
     )
@@ -3579,19 +3581,19 @@ def test_a_hold_is_explained_by_its_whole_failed_set_and_not_by_its_reason_alone
     assert "budget" in rendered
 
 
-def test_an_expiry_is_rendered_as_the_instant_the_engine_recorded_never_as_a_verdict(
-    output: StringIO,
-) -> None:
-    """Golden rule 3: this surface reads no clock, so it cannot say "expired".
+def test_an_expired_record_is_still_listed_and_renders_as_expired(output: StringIO) -> None:
+    """ADR-0130 §7: expiry ends a notification's actionability and **deletes nothing**.
 
-    ``assistant questions`` renders an expiring question the same way and for the
-    same reason — every time it shows is one the engine recorded, never one this
-    process observed. A record whose expiry has long passed is still listed (§7:
-    expiry ends a notification and deletes nothing) and still shows that instant.
+    So the record stays enumerable — and the listing has to say which side of that
+    line it is on, because "renders as expired" is the clause and no field on the
+    record answers it. What the surface supplies is the clock reading; the boundary
+    itself is ``NotificationCandidate.is_perishable_at``'s, spelled once in ``core``
+    so a policy, a store and a listing cannot disagree about it.
 
-    The assertion is that the *instant* appears, not that a word does: a renderer
-    that read ``datetime.now`` to add "(expired)" would satisfy any "the listing
-    mentions expiry" check and breach the rule outright.
+    Both halves are asserted: the row is present (a listing that hid it would breach
+    "stays enumerable"), and it is marked (a listing that showed only the timestamp
+    would leave a person reading a live-looking notification about a moment that has
+    gone — which is the state #978 found the record sitting in).
     """
     long_past = AT - timedelta(days=400)
     cli._render_notifications(
@@ -3602,12 +3604,88 @@ def test_an_expiry_is_rendered_as_the_instant_the_engine_recorded_never_as_a_ver
                 )
             ),
         ),
+        now=AT,
         limit=50,
         offset=0,
     )
 
     rendered = _flowed(output.getvalue())
+    assert "ntf-1" in rendered
+    assert "Expired" in rendered
     assert cli._when(long_past) in rendered
+
+
+def test_a_record_whose_moment_is_still_ahead_is_not_called_expired(output: StringIO) -> None:
+    """The other side of the same boundary, at the instant §5 fixes it.
+
+    ``is_perishable_at`` is half-open in the direction §5 states — **at**
+    ``expires_at`` the candidate has perished — so a record judged one moment before
+    its expiry is live and one judged at it is not. Pinning both sides is what stops
+    an off-by-one that would label every notification expired the moment it arrives.
+    """
+    expires = AT + timedelta(minutes=10)
+    live = _held(candidate=_candidate(expires_at=expires))
+
+    cli._render_notifications((live,), now=AT, limit=50, offset=0)
+    ahead = _flowed(output.getvalue())
+
+    assert "Expires:" in ahead
+    assert "Expired" not in ahead
+
+
+def test_an_expired_record_is_offered_no_act_because_the_engine_would_decline_it(
+    output: StringIO,
+) -> None:
+    """ADR-0130 §7 makes expiry one of the three ways actionability ends.
+
+    ``dismiss_notification`` answers ``False`` for an expired record, so a hint beside
+    one is a surface promising what the engine will not do. The check asks the record
+    (``is_actionable_at``) rather than reading the two stamps: a version testing only
+    ``dismissed_at`` and ``dropped_at`` passes every other case here and fails exactly
+    this one.
+    """
+    long_past = AT - timedelta(days=400)
+    cli._render_notifications(
+        (
+            _held(
+                candidate=_candidate(
+                    noticed_at=long_past - timedelta(hours=1), expires_at=long_past
+                )
+            ),
+        ),
+        now=AT,
+        limit=50,
+        offset=0,
+    )
+
+    rendered = _flowed(output.getvalue())
+    assert "assistant dismiss" not in rendered
+    assert "assistant tune --class" not in rendered
+
+
+def test_a_pasted_hint_sets_the_class_it_names_even_when_that_class_has_a_space(
+    output: StringIO,
+) -> None:
+    """A hint meant to be pasted has to survive being pasted.
+
+    Neither ``Identifier`` nor ``NonBlankEncodableText`` forbids an interior space, so
+    an unquoted hint for a class named ``calendar upcoming`` reads as a *valid*
+    command that sets a different class — a wrong action, not an error. ``_safe``
+    answers a different question (Rich markup and control characters), so quoting
+    happens first and the escaped text is the quoted form.
+
+    Asserted by parsing the rendered line the way a shell would, rather than by
+    matching quote characters, so it holds whichever quoting form ``shlex`` picks.
+    """
+    spaced = _held(id="ntf 1", candidate=_candidate(notification_class="calendar upcoming"))
+
+    cli._render_notifications((spaced,), now=AT, limit=50, offset=0)
+
+    rendered = _flowed(output.getvalue())
+    dismiss = shlex.split(rendered[rendered.index("assistant dismiss") :].split("  ")[0])
+    assert dismiss[:3] == ["assistant", "dismiss", "ntf 1"]
+    tune = shlex.split(rendered[rendered.index("assistant tune") :])
+    assert tune[:5] == ["assistant", "tune", "--class", "calendar upcoming", "--reach"]
 
 
 def test_a_candidate_with_no_expiry_says_why_that_makes_it_unurgent(output: StringIO) -> None:
@@ -3618,7 +3696,9 @@ def test_a_candidate_with_no_expiry_says_why_that_makes_it_unurgent(output: Stri
     absence as a blank would leave the user tuning a class that was never going to
     interrupt whatever they set.
     """
-    cli._render_notifications((_held(candidate=_candidate(expires_at=None)),), limit=50, offset=0)
+    cli._render_notifications(
+        (_held(candidate=_candidate(expires_at=None)),), now=AT, limit=50, offset=0
+    )
 
     assert "never" in _flowed(output.getvalue())
 
@@ -3633,7 +3713,7 @@ def test_a_record_held_behind_its_reach_is_offered_the_raise_that_frees_it(
     outcome. Offering ``--reach off`` here would be a correct-looking suggestion
     that does the opposite of what the person reading it wants.
     """
-    cli._render_notifications((_held(),), limit=50, offset=0)
+    cli._render_notifications((_held(),), now=AT, limit=50, offset=0)
 
     rendered = _flowed(output.getvalue())
     assert "assistant dismiss ntf-1" in rendered
@@ -3657,6 +3737,7 @@ def test_a_record_that_is_already_allowed_through_is_offered_the_lowering_act(
                 failed=(),
             ),
         ),
+        now=AT,
         limit=50,
         offset=0,
     )
@@ -3691,7 +3772,7 @@ def test_a_record_that_can_no_longer_act_is_offered_no_act(
     is the invitation: ``dismiss`` on either returns ``False``, and printing it
     beside the record would advertise an act that does nothing.
     """
-    cli._render_notifications((_held(**overrides),), limit=50, offset=0)
+    cli._render_notifications((_held(**overrides),), now=AT, limit=50, offset=0)
 
     rendered = _flowed(output.getvalue())
     assert "ntf-1" in rendered, name
@@ -3709,11 +3790,35 @@ def test_an_empty_listing_names_the_chain_that_arms_unprompted_contact(
     and it is the one moment they are certainly looking. Saying only "nothing here"
     would leave them where #978 was, reading ADR bodies to find the acts.
     """
-    cli._render_notifications((), limit=50, offset=0)
+    cli._render_notifications((), now=AT, limit=50, offset=0)
 
     rendered = _flowed(output.getvalue())
     assert "assistant tune --help" in rendered
     assert "assistant notification-settings" in rendered
+
+
+@pytest.mark.parametrize(
+    ("name", "limit", "offset"),
+    [("a zero limit", 0, 0), ("a page past the end", 50, 100)],
+)
+def test_an_empty_page_that_proves_nothing_does_not_claim_the_store_is_empty(
+    name: str, limit: int, offset: int, output: StringIO
+) -> None:
+    """An empty *page* and an empty store are different claims, and only one is checkable.
+
+    ``--limit 0`` is accepted here exactly as it is on every other listing — the
+    engine refuses only outside ``[0, 2**63)`` — and it returns nothing whatever the
+    store holds; so does any offset past the end. Answering either with "I am holding
+    nothing for you" is a confident false absence, and it is worse on this surface
+    than on the others, because the same message goes on to explain how to arm a
+    thing that may already be armed.
+    """
+    cli._render_notifications((), now=AT, limit=limit, offset=offset)
+
+    rendered = _flowed(output.getvalue())
+    assert "holding nothing" not in rendered, name
+    assert "assistant tune --help" not in rendered, name
+    assert "this page" in rendered, name
 
 
 def test_notifications_relays_the_page_and_renders_what_the_engine_returned(
@@ -3741,7 +3846,7 @@ def test_a_full_page_of_notifications_offers_the_next_offset(output: StringIO) -
     The belief, conversation and question listings all answer it this way; a count
     here would be a number nothing on the contract can supply.
     """
-    cli._render_notifications((_held(),), limit=1, offset=0)
+    cli._render_notifications((_held(),), now=AT, limit=1, offset=0)
 
     assert "--offset 1" in _flowed(output.getvalue())
 
