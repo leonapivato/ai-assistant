@@ -41,13 +41,17 @@ on:
 | `uv run ruff check .` | 0.12 s |
 | `uv run mypy` | 1.54 s |
 | `uv run lint-imports` | 0.36 s |
-| `uv run pytest` | ~4 min (15,213 tests) |
+| `uv run pytest` | 355.64 s — 15,645 passed, 33 skipped |
 
-The four static steps together cost about **two seconds**. `pytest` costs about
-**four minutes** — roughly nine times ADR-0015's whole-gate figure, against a
-suite that has grown 2.6× since. The gate is no longer one thing with one price;
-it is two things whose prices differ by two orders of magnitude, and ADR-0015's
-sentence was written when it was one thing.
+The four static steps together cost **2.14 seconds**. `pytest` costs just under
+**six minutes** — batch #986 records ~4 min for the same suite on a less loaded
+machine, so four to six is the honest range and the low end is the one to argue
+against. Either figure is an order of magnitude past ADR-0015's *whole*-gate
+number, against a suite that has grown 2.7× since (5,777 → 15,678 collected).
+
+The gate is no longer one thing with one price. It is two things whose prices
+differ by a factor of about 165, and ADR-0015's sentence was written when it was
+one thing. That is the whole of what has changed.
 
 ### What the every-commit rule costs a dispatched lane
 
@@ -55,7 +59,8 @@ A lane requiring both review lenses can run up to roughly **20 rounds** before t
 required set is terminal (owner's ruling, 2026-08-11, batch #986). Each round is
 commit → review → triage → fix → commit, and Codex reviews the *committed* diff,
 so each round has at least one commit in it. Under the every-commit rule that is
-~20 × 4 min ≈ **80 minutes of pytest per lane**, nearly all of it re-running the
+~20 × 4–6 min ≈ **one and a half to two hours of pytest per lane**, nearly all of
+it re-running the
 same tests against trees that differ by a paragraph of prose or a renamed local.
 
 What those mid-loop runs buy is close to nothing, and the reason is structural
@@ -90,7 +95,7 @@ Two failure modes bound the design.
   refusal was right about the failure mode even where it is now wrong about the
   price. An author under review pressure is the worst-placed person to judge when
   the next run matters.
-- **A rule mandatory everywhere is paid everywhere.** That is the 80 minutes.
+- **A rule mandatory everywhere is paid everywhere.** That is the two hours.
 
 Naming the two points where a full run is *load-bearing* keeps the first property
 and drops the cost of the second: the discretion is bounded by two mandatory
@@ -250,11 +255,11 @@ the record of a review covers.
 **Easier.**
 
 - **A lane's local cost stops scaling with its round count.** Two full runs per
-  branch instead of one per commit; on a 20-round lane that is ~8 minutes of
-  pytest where there were ~80. The saving is largest exactly where it hurts most —
+  branch instead of one per commit; on a 20-round lane that is ~10 minutes of
+  pytest where there were ~110. The saving is largest exactly where it hurts most —
   a long review loop is already the expensive case.
 - **A docs-only lane pays nothing.** An ADR PR that touches no code no longer runs
-  15,213 tests per commit to prove that prose did not break them. The anchors
+  15,678 tests per commit to prove that prose did not break them. The anchors
   still catch a tree that will not build.
 - **The early draft PR stops being a liability.** `CONTRIBUTING.md` asks for the
   draft to open before the work is done so CI gates every push; §3 makes that
