@@ -8622,11 +8622,38 @@ class HeldNotification(BaseModel):
             Whether the record has ceased to be actionable and its retention has
             elapsed **strictly** — at the horizon it is still held, and past it
             it is not, which is the boundary §9's conformance clause states.
+
+        **The elapsed time is measured against the span, rather than the horizon
+        being materialized as an instant**, and that is what makes the far edge of
+        §7's retention range answerable at all. §7 puts no ceiling on a retention —
+        the deliberate escape is ``None`` — so ``ceased + self.retention`` leaves
+        the representable ``datetime`` range for a record that ceased recently
+        under a retention of a few hundred thousand years, and raises
+        ``OverflowError`` rather than answering. ``moment - ceased`` cannot
+        overflow, both operands being instants already in range, and the two
+        spellings agree everywhere the sum is representable: this changes no
+        in-range answer, it only gives the out-of-range ones. **``False`` is the
+        true answer there and not a shrug** — a horizon past the end of
+        representable time has not elapsed and will not — and it is the same shape
+        :meth:`ceased_at` and :meth:`is_actionable_at` already take, where an
+        absent cessation is a complete answer rather than an undefined expression.
+
+        Raising instead is not a local defect: ADR-0083 §7's retention job is
+        **shared**, sweeping ``MemoryStore`` and ``DeferralStore`` in the same
+        operation, so one such record would stop every store's retention being
+        enforced while the scheduler logged a failure and retried forever — and
+        ADR-0078 §1's exposure cap is measured by exactly that job running.
+
+        ADR-0135 §2 fixes this same mechanism for ADR-0131's delivery seam and is
+        deliberately scoped to it ("this clause binds this seam, not the tree",
+        §5), so it is cited here as precedent and not as authority: what obliges
+        the answer is §7's own "a record is purgeable only once ... its retention
+        has elapsed". #974 holds the general question.
         """
         ceased = self.ceased_at()
         if self.retention is None or ceased is None or self.is_actionable_at(moment):
             return False
-        return moment > ceased + self.retention
+        return moment - ceased > self.retention
 
 
 class NotificationEnqueue(StrEnum):

@@ -325,6 +325,59 @@ def test_the_retention_horizon_is_exclusive_and_none_is_never_purged() -> None:
     assert kept.is_purgeable_at(_AT + timedelta(days=3650)) is False
 
 
+@pytest.mark.parametrize(
+    "retention",
+    [timedelta(days=4_000_000), timedelta.max],
+    ids=["past-the-calendar", "the-longest-there-is"],
+)
+def test_a_retention_horizon_past_the_calendar_answers_not_purgeable(
+    retention: timedelta,
+) -> None:
+    """§7 puts no ceiling on a retention, so the horizon can leave the calendar.
+
+    ``ceased + retention`` raises ``OverflowError`` for both of these, and the
+    predicate has to answer anyway: it is what ADR-0083 §7's **shared** retention
+    job reads, so one such record raising would stop ``MemoryStore`` and
+    ``DeferralStore`` being swept too. The answer is the one §7 states — a
+    retention that has not elapsed leaves the record retained — and a horizon past
+    the end of representable time never elapses.
+
+    The smaller of the two is deliberately inside what a durable store can stamp
+    as microseconds in a signed 64-bit column, so the case is not merely
+    theoretical: it is an ``OverflowError`` for a retention a backend accepts.
+    """
+    dismissed = _record(dismissed_at=_AT, retention=retention)
+    with pytest.raises(OverflowError):
+        _AT + retention  # the spelling this predicate must not use
+
+    assert dismissed.is_actionable_at(_AT) is False
+    assert dismissed.is_purgeable_at(_AT) is False
+    assert dismissed.is_purgeable_at(datetime.max.replace(tzinfo=UTC)) is False
+
+
+def test_the_horizon_holds_at_the_far_end_of_the_calendar() -> None:
+    """The other end of the same range: a record that ceased near ``datetime.min``.
+
+    Here the sum *is* representable for a large retention, so this is the case
+    that would catch a fix which answered ``False`` for every long retention
+    rather than only for an unreachable horizon. The boundary stays §9's —
+    exclusive at the horizon, purgeable one microsecond past it.
+    """
+    ceased = datetime.min.replace(tzinfo=UTC) + timedelta(days=1)
+    retention = timedelta(days=2_000_000)
+    dismissed = _record(
+        candidate=_candidate(noticed_at=ceased),
+        ruled_at=ceased,
+        admitted_at=ceased,
+        dismissed_at=ceased,
+        retention=retention,
+    )
+    horizon = ceased + retention
+
+    assert dismissed.is_purgeable_at(horizon) is False
+    assert dismissed.is_purgeable_at(horizon + timedelta(microseconds=1)) is True
+
+
 def test_a_dismissed_record_is_never_due_however_long_it_waits() -> None:
     """§6 stops at *actionable* held records, and a dismissal ends that."""
     dismissed = _record(dismissed_at=_AT, reconsider_at=_AT)
