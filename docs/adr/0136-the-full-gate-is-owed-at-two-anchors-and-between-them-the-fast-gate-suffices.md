@@ -67,7 +67,7 @@ What those mid-loop runs buy is close to nothing, and the reason is structural
 rather than empirical: **the intermediate trees are not shipped.** Nobody merges
 round 7. The only tree whose full-suite result anyone acts on is the tree at the
 end, and that tree is gated twice over — once by the author before `gh pr ready`,
-and once by CI on every pull-request event (ADR-0010), where a red `gate` blocks the
+and once by CI on every push to an open PR (ADR-0010), where a red `gate` blocks the
 merge outright.
 
 ### The breadth argument is right about the wrong tree
@@ -229,10 +229,14 @@ becomes the plan.
 
 Three nets sit under §2, none of which depends on the author's judgement:
 
-- **CI runs the full serial gate on every pull-request event** (ADR-0010), against
-  the locked environment. `.github/workflows/gate.yml` triggers on `pull_request`
-  (`opened`, `synchronize`, `reopened`, `ready_for_review`) and on `push` to
-  `main` — **not** on a push to a branch that has no PR. This net therefore
+- **CI runs the full serial gate on every push to an open PR** (ADR-0010), against
+  the locked environment. `.github/workflows/gate.yml` triggers on four
+  `pull_request` types — `opened`, `synchronize`, `reopened`, `ready_for_review` —
+  and on `push` to `main`. `synchronize` is the one that carries this net: it is
+  the push-to-the-branch event. Other pull-request activity does **not** run the
+  gate (editing a title, applying a label), and neither does a push to a branch
+  that has no PR — which is the gap that matters, since the others change no code.
+  This net therefore
   depends on the draft PR being open, which `CONTRIBUTING.md` already requires
   "as soon as you have a branch and a first commit"; with it open, `synchronize`
   fires on every subsequent push and the net is continuous. Its one gap is the
@@ -357,10 +361,12 @@ the record of a review covers.
 
 **Easier.**
 
-- **A lane's local cost stops scaling with its round count.** Two full runs per
-  branch instead of one per commit; on a 20-round lane that is ~10 minutes of
+- **A lane's local cost stops scaling with its round count.** Two full runs on a
+  branch that never rebases, plus one per qualifying rebase under §1 — against one
+  per commit before. On a 20-round lane with two rebases that is ~17 minutes of
   pytest where there were ~110. The saving is largest exactly where it hurts most —
-  a long review loop is already the expensive case.
+  a long review loop is already the expensive case — and what it now scales with is
+  base moves, which a lane has few of, rather than commits, which it has many of.
 - **A docs-only lane pays the two anchors and nothing else.** An ADR PR that
   touches no code stops running 15,678 tests *per commit* to prove that prose did
   not break them; §2's third clause makes that explicit rather than leaving it to
