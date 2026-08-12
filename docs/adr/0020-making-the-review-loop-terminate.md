@@ -1,7 +1,6 @@
 # 20. Making the review loop terminate
 
-- Status: Accepted, §3 amended by ADR-0025 and ADR-0027; Consequences'
-  advisory-aggregate clause amended by ADR-0138
+- Status: Accepted, §3 amended by ADR-0025 and ADR-0027; Consequences' advisory-aggregate clause amended by ADR-0138
 - Date: 2026-07-20
 - **Amended: 2026-08-12 by
   [ADR-0138](0138-a-dispatched-lane-hands-its-loop-to-a-successor-at-a-counted-threshold.md)
