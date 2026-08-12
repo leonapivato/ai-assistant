@@ -2628,6 +2628,37 @@ def test_questions_keeps_the_interrupted_list_separate_and_offers_no_retry(
     assert "assistant answer q-open" in rendered, "the answerable one still is"
 
 
+def test_a_pasted_question_hint_names_the_question_it_was_printed_for(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both hints on this surface have to survive being pasted (#984).
+
+    ``Identifier`` strips a question id but does not forbid an interior space, so an
+    unquoted hint for ``q 1`` renders a *valid* command against the wrong argument:
+    ``assistant answer q 1 --accept`` answers ``q``. That is a wrong action rather
+    than an error, which is what makes it worth a test — ``_safe`` answers a different
+    question (Rich markup and control characters) and cannot catch it.
+
+    Asserted by parsing each line the way a shell would rather than by matching quote
+    characters, so it holds whichever quoting form ``shlex`` picks.
+    """
+    engine = _QuestionEngine(
+        waiting=(_question("q 1"),),
+        stranded=(_question("q 2", state=QuestionState.INTERRUPTED),),
+    )
+    _wire(monkeypatch, engine)
+
+    assert CliRunner().invoke(cli.app, ["questions"]).exit_code == 0
+
+    rendered = _flowed(output.getvalue())
+    assert _pasted(rendered, "assistant answer", "--accept") == ["assistant", "answer", "q 1"]
+    assert _pasted(rendered, "assistant forget-question", "2. Check") == [
+        "assistant",
+        "forget-question",
+        "q 2",
+    ]
+
+
 @pytest.mark.parametrize(
     ("state", "expected"),
     [
@@ -2763,6 +2794,34 @@ def test_answer_renders_a_re_deferral_as_a_completed_answer_with_the_next_questi
     assert "Your answer was used" in rendered
     assert "Here is the follow-up" in rendered
     assert "q-2" in rendered
+
+
+def test_the_follow_up_is_named_plainly_and_offered_quoted(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One id, two renderings, and only the copyable one is quoted (#984).
+
+    The re-deferral line both *names* the successor and *offers* a command for it.
+    The name is read, so it is shown as the id is; the command is pasted, so it is
+    shown as a shell would need it. Quoting the name too would have the user reading
+    quote characters as part of an id they may go and type somewhere else.
+    """
+    _wire(
+        monkeypatch,
+        _QuestionEngine(
+            answer=AnswerOutcome(
+                kind=AnswerKind.REDEFERRED,
+                question_id="q-1",
+                successor=SuccessorLink(id="q 2", state=QuestionState.OPEN),
+            )
+        ),
+    )
+
+    assert CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"]).exit_code == 0
+
+    rendered = _flowed(output.getvalue())
+    assert "Here is the follow-up: q 2 " in rendered, "named as the id reads"
+    assert _pasted(rendered, "assistant answer", "--accept") == ["assistant", "answer", "q 2"]
 
 
 def test_answer_says_no_follow_up_could_be_queued_rather_than_naming_one(
@@ -3095,6 +3154,41 @@ def test_grant_records_the_grant_once_the_user_agrees(
         (GrantScope.FACET, GrantScope.INGEST)
     ]
     assert "Granted" in output.getvalue()
+
+
+def test_a_pasted_revoke_hint_withdraws_the_source_it_was_printed_for(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both revoke hints have to survive being pasted (#984).
+
+    A source name with an interior space is admissible rather than exotic: ADR-0102 §2
+    keeps a reader's declared name byte-exact precisely because it is compared without
+    normalisation, and ``NonBlankEncodableText`` never normalises. Unquoted, the hint
+    for ``my calendar`` reads as ``assistant revoke my calendar`` — a valid command
+    that revokes ``my``, with ``calendar`` left over.
+
+    Both hints are exercised in one run because the second only exists after the
+    first: granting once produces the confirmation's hint, and granting again finds
+    the source already granted and produces the prompt's. Each sentence wraps its
+    command in quotes of its own, so the slice each assertion reads back closes at
+    that closing quote.
+    """
+    engine = FakeAssistantEngine()
+    engine.hold_source("my calendar", location="/srv/calendar.ics")
+    _wire(monkeypatch, engine)
+
+    granted = CliRunner().invoke(cli.app, ["grant", "my calendar", "--scope", "facet"], input="y\n")
+    assert granted.exit_code == 0
+    confirmation = _flowed(output.getvalue())
+    assert "Granted." in confirmation
+    assert _pasted(confirmation, "assistant revoke", "'.") == ["assistant", "revoke", "my calendar"]
+
+    already = len(output.getvalue())
+    again = CliRunner().invoke(cli.app, ["grant", "my calendar", "--scope", "facet"], input="n\n")
+    assert again.exit_code == 0
+    prompt = _flowed(output.getvalue()[already:])
+    assert "It is already granted" in prompt
+    assert _pasted(prompt, "assistant revoke", "'.") == ["assistant", "revoke", "my calendar"]
 
 
 def test_every_scope_the_enum_offers_is_accepted_and_rendered_in_words(
@@ -3498,6 +3592,31 @@ def _flowed(rendered: str) -> str:
     rather than the message.
     """
     return " ".join(rendered.split())
+
+
+def _pasted(rendered: str, start: str, until: str) -> list[str]:
+    """One printed command hint, read back the way a shell would read it (#984).
+
+    The check every quoting case here wants: not "are there quote characters", which
+    would pin whichever form ``shlex.quote`` happens to pick, but "does pasting this
+    line name the thing it was printed for". A hint whose argument is unquoted parses
+    into *more* words than it should, which is the failure — a valid command against
+    the wrong argument rather than an error.
+
+    Bounded at both ends rather than run to the end of the buffer, because the flowed
+    text that follows a hint is prose: an apostrophe in it would leave ``shlex`` with
+    an unterminated quote and fail every test for the wrong reason.
+
+    Args:
+        rendered: The console text, already flowed by :func:`_flowed`.
+        start: The first word of the hint, where the slice opens.
+        until: The first text after the hint, where the slice closes.
+
+    Returns:
+        The hint's words, as a shell would split them.
+    """
+    opened = rendered.index(start)
+    return shlex.split(rendered[opened : rendered.index(until, opened)])
 
 
 def _candidate(**overrides: object) -> NotificationCandidate:
@@ -4488,6 +4607,101 @@ def test_turning_a_class_off_says_what_it_reaches_and_what_it_does_not(
     # record *due* at the instant of the write, and the ruling is the sweep's.
     assert "due to be ruled out" in rendered
     assert "next sweep" in rendered
+
+
+@pytest.mark.parametrize("reach", ["interrupt", "off"])
+def test_restating_the_reach_already_in_force_announces_no_re_arming(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, reach: str
+) -> None:
+    """ADR-0130 §6 re-arms on a *removed* condition, so a repeat re-arms nothing (#985).
+
+    §6 stamps ``reconsider_at`` on held records whose failed-condition set holds "a
+    condition that change could remove". Where the class already reaches that far the
+    write removes nothing, so a record held only on ``QUIET_WINDOW`` or ``BUDGET`` sits
+    exactly where it was — and the re-arming sentence would be a claim about the store
+    that is false. The user who repeats the command is told what is true: the setting
+    was already this, and nothing moved on account of it.
+
+    Two invocations rather than a scripted read, so the "already" is one the surface's
+    own first write established.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+    argv = ["tune", "--class", "upcoming_event", "--reach", reach]
+
+    assert CliRunner().invoke(cli.app, argv).exit_code == 0
+    first = _flowed(output.getvalue())
+    assert "already holding" in first, "the transition still announces the re-arming"
+
+    repeated = len(output.getvalue())
+    assert CliRunner().invoke(cli.app, argv).exit_code == 0
+
+    again = _flowed(output.getvalue()[repeated:])
+    assert "Tuned." in again, "the write still happens and the settings are still shown"
+    assert "already reaching you exactly that far" in again
+    # And the claim it replaces is gone rather than merely softened: the two sentences
+    # that promise a sweep are the whole of what #985 says must not be printed here.
+    assert "due to be" not in again
+    assert "next sweep" not in again
+    # **The disclaimer stays about the reach.** The same invocation could have moved a
+    # quiet window or the budget, whose consequences are §6's too — so the line says
+    # nothing moved *on account of the reach*, not that nothing moved at all.
+    assert "on account of its reach" in again
+
+
+def test_lowering_a_class_to_hold_announces_nothing_either_way(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``hold`` is the silent one, and it is silent whether or not it moved (#985).
+
+    Lowering a class can only *add* a failed condition, never remove one, so §6 re-arms
+    nothing on account of it and there is no consequence to announce. Which makes it
+    the case that distinguishes "announce what changed" from "announce whether
+    anything changed": a surface reporting the second would print a no-op notice here,
+    for a write whose reach genuinely did move.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    assert (
+        CliRunner()
+        .invoke(cli.app, ["tune", "--class", "upcoming_event", "--reach", "interrupt"])
+        .exit_code
+        == 0
+    )
+    lowered = len(output.getvalue())
+    assert (
+        CliRunner()
+        .invoke(cli.app, ["tune", "--class", "upcoming_event", "--reach", "hold"])
+        .exit_code
+        == 0
+    )
+
+    rendered = _flowed(output.getvalue()[lowered:])
+    assert "Tuned." in rendered
+    assert "already reaching you" not in rendered
+    assert "next sweep" not in rendered
+
+
+def test_tuning_only_the_budget_says_nothing_about_any_class_reach(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An invocation naming no class makes no claim about a class (#985).
+
+    ``--class`` and ``--reach`` are one setting given together or not at all, so a
+    budget-only write has no reach to compare against and no sentence to print. Pinned
+    because the no-op notice is reached by an *absence* of change, which is exactly the
+    condition a call that changed no reach at all also satisfies.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    assert CliRunner().invoke(cli.app, ["tune", "--budget", "2"]).exit_code == 0
+
+    rendered = _flowed(output.getvalue())
+    assert "Tuned." in rendered
+    assert "already reaching you" not in rendered
+    assert "next sweep" not in rendered
 
 
 def test_every_condition_a_ruling_can_name_has_a_phrase() -> None:

@@ -2538,7 +2538,7 @@ async def _drive_grant(
     console.print(
         f"[green]Granted.[/] I may now read [bold]{_safe(recorded.source)}[/] for "
         f"{_scope_phrase(recorded.scope)}. Withdraw it any time with "
-        f"'assistant revoke {_safe(recorded.source)}'."
+        f"'assistant revoke {_argument(recorded.source)}'."
     )
     return _EXIT_OK
 
@@ -2695,19 +2695,54 @@ async def _drive_tune(engine: AssistantEngine, asked: _Tuning) -> int:
         return _EXIT_ERROR
     console.print("[green]Tuned.[/] These are the settings in force now.\n")
     _render_notification_settings(written)
-    # **Both lines say "due", never "done", and the tense is ADR-0130 §6's** rather
-    # than caution. The write is atomic with a `reconsider_at` stamp and stops there:
-    # "the existing job picks them up on its next run", and §5 makes that floor a
-    # floor — "a late reconsideration is not a fault". So a record is still `HOLD` when
-    # this message prints. Claiming it had already been re-ruled would have the user
-    # who raised a class read the silence that follows as the act having failed, on
-    # the one surface built because that act had no door at all (#979).
-    #
-    # The `interrupt` line is qualified a second time, because reach is not the only
-    # condition (§5): a held record that named no moment it stops mattering re-holds
-    # on `PERISHABLE`, which §6 says "is reached by no setting", so for those the
-    # sweep changes nothing whenever it runs.
-    if asked.reach is NotificationReach.INTERRUPT:
+    _render_reach_notice(current, asked)
+    return _EXIT_OK
+
+
+def _render_reach_notice(current: NotificationPreferences, asked: _Tuning) -> None:
+    """Say what raising or silencing a class does to what is *already* held (§6).
+
+    **Said in the future tense, never the past.** ADR-0130 §6's write is atomic with a
+    ``reconsider_at`` stamp and stops there — "the existing job picks them up on its
+    next run" — and §5 makes that floor a floor, since "a late reconsideration is not
+    a fault". A record is therefore still ``HOLD`` as this prints, and claiming it had
+    already been re-ruled would have the user who raised a class read the silence that
+    follows as the act having failed, on the one surface built because that act had no
+    door at all (#979).
+
+    **The ``interrupt`` line is qualified a second time**, because reach is not the
+    only condition (§5): a held record that named no moment it stops mattering re-holds
+    on ``PERISHABLE``, which §6 says "is reached by no setting", so for those the sweep
+    changes nothing whenever it runs.
+
+    **And nothing is announced where the reach did not move** (#985). §6 re-arms a held
+    record whose failed conditions hold "a condition that change could remove", so a
+    write restating the reach already in force removes nothing and re-arms nothing — a
+    record held only on ``QUIET_WINDOW`` or ``BUDGET`` sits exactly where it was, and
+    announcing a re-arming there is a claim about the store that is false. The
+    replacement says only that the setting did not move, and confines itself to the
+    reach: the same invocation may have changed a quiet window or the budget, whose
+    consequences are §6's and not this line's to summarise. Naming *which* records were
+    re-armed would be the other failure — a copy of §6's rule in an adapter, which is
+    the business logic golden rule 3 keeps out.
+
+    Args:
+        current: The settings as they stood before the write.
+        asked: What the user named, parsed.
+    """
+    if asked.notification_class is None or asked.reach is None:
+        return
+    if asked.reach is NotificationReach.HOLD:
+        # Silent whether it moved or not, and for one reason: lowering a class to
+        # `hold` can only *add* a failed condition, never remove one, so §6 re-arms
+        # nothing on account of it and there is no consequence to announce.
+        return
+    if current.reach_for(asked.notification_class) is asked.reach:
+        console.print(
+            "\n[dim]That class was already reaching you exactly that far, so nothing I "
+            "am holding was re-considered on account of its reach.[/]"
+        )
+    elif asked.reach is NotificationReach.INTERRUPT:
         console.print(
             "\n[dim]Anything of that class I am already holding is now due to be "
             "looked at again, on my next sweep rather than this instant — so one that "
@@ -2721,7 +2756,6 @@ async def _drive_tune(engine: AssistantEngine, asked: _Tuning) -> int:
             "out too, on my next sweep rather than this instant; it stays readable in "
             "'assistant notifications' either way. Nothing already sent is recalled.[/]"
         )
-    return _EXIT_OK
 
 
 def _tuned(current: NotificationPreferences, asked: _Tuning) -> NotificationPreferences:
@@ -2789,6 +2823,32 @@ def _safe(value: str) -> str:
     """
     cleaned = "".join(ch if ch.isprintable() or ch in "\t " else "�" for ch in value)
     return escape(cleaned)
+
+
+def _argument(value: str) -> str:
+    """One value, rendered as a shell argument a person can paste (#984).
+
+    **Two escapings in one fixed order, and neither substitutes for the other.**
+    :func:`shlex.quote` answers "where does this argument end", which is the shell's
+    question and is asked of the *real* value; :func:`_safe` answers "what may this
+    terminal be handed", which is Rich's question and is asked of whatever will be
+    written. So the value is quoted first and the quoted form is what gets escaped —
+    the other order would hand the shell the escape characters ``_safe`` inserted and
+    quote those instead.
+
+    Without this, a value carrying an interior space renders a line that is a *valid*
+    command against the wrong argument when pasted: ``assistant revoke my calendar``
+    revokes ``my``. Neither ``Identifier`` nor ``NonBlankEncodableText`` forbids that
+    space, and ADR-0102 §2 keeps a declared source name byte-exact precisely so it is
+    compared unnormalised — so the admissible value is the one that breaks.
+
+    Args:
+        value: The argument as the engine carries it, verbatim.
+
+    Returns:
+        The text to interpolate into a printed command.
+    """
+    return _safe(shlex.quote(value))
 
 
 def _render_turn(outcome: TurnOutcome) -> bool:
@@ -3363,14 +3423,16 @@ def _render_question(question: Question) -> None:
             "  [yellow]An answer to this was begun and its outcome was never recorded.[/] "
             "I cannot tell you whether the change landed, so there is nothing to retry."
         )
-        console.print(f"  [dim]1.[/] Dispose of it: assistant forget-question {_safe(question.id)}")
+        console.print(
+            f"  [dim]1.[/] Dispose of it: assistant forget-question {_argument(question.id)}"
+        )
         console.print(
             "  [dim]2.[/] Check 'assistant beliefs', and use 'assistant learn' again if "
             "the correction is missing."
         )
     else:
         console.print(
-            f"  [dim]Answer with:[/] assistant answer {_safe(question.id)} "
+            f"  [dim]Answer with:[/] assistant answer {_argument(question.id)} "
             f"--accept  [dim]|[/]  --reject"
         )
     _render_successor(question)
@@ -3513,8 +3575,10 @@ def _render_redeferral(outcome: AnswerOutcome) -> None:
     match successor.state:
         case QuestionState.OPEN:
             console.print(
+                # Named and offered are two renderings of one id, and only the second
+                # is quoted: the name is read, the command is pasted.
                 f"  [dim]Here is the follow-up:[/] [bold cyan]{identifier}[/] "
-                f"[dim](assistant answer {identifier} --accept)[/]"
+                f"[dim](assistant answer {_argument(successor.id)} --accept)[/]"
             )
         case QuestionState.DECLINED:
             console.print(
@@ -3974,7 +4038,7 @@ def _render_grant_prompt(chosen: GrantableSource, scope: Sequence[GrantScope]) -
             "\n  [yellow]It is already granted[/] for "
             f"{_scope_phrase(chosen.live.scope)}. A source has one grant at a time, "
             "so this will be refused — withdraw the current one first with "
-            f"'assistant revoke {_safe(chosen.source)}'."
+            f"'assistant revoke {_argument(chosen.source)}'."
         )
     console.print(
         "\n[dim]Withdrawing later stops further reads; it does not un-remember what "
@@ -4314,7 +4378,7 @@ def _render_notification_acts(record: HeldNotification, *, now: datetime) -> Non
             "still take them, given the exact bytes."
         )
         return
-    console.print(f"  [dim]Deal with it:[/] assistant dismiss {_safe(shlex.quote(record.id))}")
+    console.print(f"  [dim]Deal with it:[/] assistant dismiss {_argument(record.id)}")
     if NotificationCondition.PERISHABLE in record.failed:
         console.print(
             "  [dim]No reach setting can make this one interrupt:[/] it names no "
@@ -4329,7 +4393,7 @@ def _render_notification_acts(record: HeldNotification, *, now: datetime) -> Non
     )
     console.print(
         f"  [dim]Tune the class:[/] assistant tune --class "
-        f"{_safe(shlex.quote(notification_class))} --reach {wanted.value}"
+        f"{_argument(notification_class)} --reach {wanted.value}"
     )
 
 
