@@ -94,10 +94,11 @@ Its **one** clock reading is the listing's, taken once per page: ADR-0130 §7 ha
 an expired record stay enumerable and render *as expired*, no field says which
 side of that line a record is on, and the comparison itself belongs to the core
 type — so what the adapter supplies is the reading, exactly as it does when it
-stamps a ``FeedbackEvent``. On a remote hub the reading is this device's, so a
-record within clock skew of its expiry may be labelled from the wrong side; that
-moves a label and never an act, the engine staying the authority on what any verb
-does.
+stamps a ``FeedbackEvent``. It answers expiry and nothing else: dismissal and a
+``DROP`` are stamped by the hub and are taken as final. On a remote hub the
+reading is this device's, so a record within clock skew of its expiry may be
+labelled from the wrong side; that moves a label and never a verb, the engine
+staying the authority on what any act does.
 
 v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 """
@@ -172,6 +173,7 @@ if TYPE_CHECKING:
         HeldNotification,
         IngestSummary,
         LearnOutcome,
+        NotificationCandidate,
         ObservationReport,
         ObservedProposal,
         Question,
@@ -4092,10 +4094,12 @@ def _render_notification(record: HeldNotification, *, now: datetime) -> None:
     clock reading, which is what it already does when it stamps a ``FeedbackEvent``.
 
     **On a remote hub that reading is this device's, not the hub's** (ADR-0124), so a
-    record within clock skew of its expiry may be labelled from the wrong side. That
-    is a label being early or late by the skew, never a wrong action: the engine
-    remains the authority on what an act does, and :func:`_render_notification_acts`
-    withholds only the *hint*, never the id the user would type.
+    record within clock skew of its expiry may be labelled from the wrong side. It
+    reaches expiry alone: dismissal and a ``DROP`` are stamped by the hub, and
+    :func:`_render_notification_acts` treats either as final without consulting a
+    clock. And what a mislabelled expiry costs is a hint, never a verb — the engine
+    stays the authority on what any act does, and the id the user would type is on
+    screen either way.
 
     Producer-supplied text — the summary, the detail, the class and the producer's own
     name — is neutralised for this terminal (``_safe``, ADR-0042 §4). The ruling, its
@@ -4119,14 +4123,36 @@ def _render_notification(record: HeldNotification, *, now: datetime) -> None:
     console.print(f"  [dim]Noticed:[/] {_when(candidate.noticed_at)}")
     if candidate.expires_at is None:
         console.print("  [dim]Expires:[/] never — which is why it is held rather than urgent")
-    elif candidate.is_perishable_at(now):
-        console.print(f"  [dim]Expires:[/] {_when(candidate.expires_at)}")
-    else:
+    elif _has_perished(candidate, now):
         console.print(
             f"  [yellow]Expired:[/] {_when(candidate.expires_at)} "
             f"[dim]— it is kept and readable, and it will not reach you[/]"
         )
+    else:
+        console.print(f"  [dim]Expires:[/] {_when(candidate.expires_at)}")
     _render_notification_acts(record, now=now)
+
+
+def _has_perished(candidate: NotificationCandidate, now: datetime) -> bool:
+    """Whether a candidate's declared moment has gone, as of ``now`` (ADR-0130 §5).
+
+    The boundary is **not restated here**:
+    :meth:`~ai_assistant.core.types.NotificationCandidate.is_perishable_at` is where
+    §5's half-open test is "spelled once so that a policy, a store and a suite cannot
+    disagree about" it, and this only supplies the absent-expiry case that predicate
+    reads as "not perishable" rather than as "perished". Written once because the
+    listing needs the answer twice — for the label, and for whether an act is worth
+    offering — and two spellings of it would be two chances to disagree.
+
+    Args:
+        candidate: The proposal whose expiry to judge.
+        now: The instant to judge it at, tz-aware.
+
+    Returns:
+        Whether it declared a moment and that moment has arrived. A candidate
+        declaring none has not perished and never will (§5).
+    """
+    return candidate.expires_at is not None and not candidate.is_perishable_at(now)
 
 
 def _render_notification_ruling(record: HeldNotification) -> None:
@@ -4166,12 +4192,20 @@ def _render_notification_acts(record: HeldNotification, *, now: datetime) -> Non
     exactly what a user wants to dispose of or unblock, and it is the case #979 found
     unreachable.
 
-    **Actionability is §7's own three-part test and is asked of the record**
-    (:meth:`~ai_assistant.core.types.HeldNotification.is_actionable_at`), not
-    reconstructed from the stamps: dismissed, expired *and* dropped all end it, and a
-    check reading only the two stamped ones would keep offering ``dismiss`` on a
-    record that perished, where the engine answers ``False``. Offering an act that
-    does nothing is a surface making a promise the engine will not keep.
+    **Actionability is §7's three-part test taken in two parts, and the split is about
+    whose clock decided each.** Dismissal and a reconsideration's ``DROP`` are
+    *persisted*: the hub stamped them, and that they happened is a fact this device
+    cannot be more current about — so either stamp ends the offer unconditionally,
+    whatever this clock reads. Expiry is the limb with nothing stored; the record
+    carries the instant and no verdict, so it is the one the reading answers.
+
+    Asking :meth:`~ai_assistant.core.types.HeldNotification.is_actionable_at` for all
+    three would put the two stamped limbs behind this device's clock as well, and a
+    client running behind the hub would then offer ``dismiss`` on a record the hub has
+    already dismissed — the engine answering ``False`` for a reason the user was shown
+    no sign of, two lines under a rendered "Dismissed:" stamp. Offering an act that
+    does nothing is a surface making a promise the engine will not keep, and a stale
+    clock is the one case where that is avoidable for nothing.
 
     **Which direction to offer is read off the record and decided nowhere.** A record
     whose failed set names the reach condition is one the user's own setting is
@@ -4190,9 +4224,11 @@ def _render_notification_acts(record: HeldNotification, *, now: datetime) -> Non
 
     Args:
         record: The record whose acts to offer.
-        now: The instant to judge its actionability at.
+        now: The instant to judge its **expiry** at; the other two limbs are stamped.
     """
-    if not record.is_actionable_at(now):
+    if record.dismissed_at is not None or record.dropped_at is not None:
+        return
+    if _has_perished(record.candidate, now):
         return
     console.print(f"  [dim]Deal with it:[/] assistant dismiss {_safe(shlex.quote(record.id))}")
     wanted = (

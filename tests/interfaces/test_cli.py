@@ -3663,6 +3663,44 @@ def test_an_expired_record_is_offered_no_act_because_the_engine_would_decline_it
     assert "assistant tune --class" not in rendered
 
 
+@pytest.mark.parametrize(
+    ("name", "overrides"),
+    [
+        ("dismissed", {"dismissed_at": AT + timedelta(minutes=5)}),
+        (
+            "ruled out",
+            {
+                "kind": NotificationDispositionKind.DROP,
+                "reason": NotificationCondition.REACH_OFF,
+                "failed": (),
+                "dropped_at": AT + timedelta(minutes=5),
+            },
+        ),
+    ],
+)
+def test_a_stamped_cessation_ends_the_offer_whatever_this_devices_clock_reads(
+    name: str, overrides: dict[str, object], output: StringIO
+) -> None:
+    """A client behind the hub must not offer an act on a record the hub already closed.
+
+    Dismissal and a reconsideration's ``DROP`` are **persisted**: the hub stamped
+    them, so that they happened is not something this device's clock has a view on.
+    Judging them against the local reading — which one ``is_actionable_at(now)`` call
+    for all three limbs would do — makes a client running five minutes behind render
+    the "Dismissed:" stamp *and*, two lines under it, offer ``assistant dismiss``,
+    which the engine answers ``False`` for.
+
+    The stamps here are deliberately **after** ``now``, which is exactly the skew this
+    is about and a state the equal-timestamp cases elsewhere cannot reach.
+    """
+    cli._render_notifications((_held(**overrides),), now=AT, limit=50, offset=0)
+
+    rendered = _flowed(output.getvalue())
+    assert "ntf-1" in rendered, name
+    assert "assistant dismiss" not in rendered, name
+    assert "assistant tune --class" not in rendered, name
+
+
 def test_a_pasted_hint_sets_the_class_it_names_even_when_that_class_has_a_space(
     output: StringIO,
 ) -> None:
