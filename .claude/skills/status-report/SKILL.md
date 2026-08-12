@@ -129,10 +129,24 @@ carry that in rather than re-deriving one — it is usually the recommendation i
 (`dispatch-agents` §4). A FLAG is not a ruling request; it belongs in §4 or §9
 unless you disagree with it, in which case it has become one.
 
-**When a decision is pending and no session is active, push a notification
-rather than letting it sit.** A ruling that waits for the owner to happen to
-look adds their entire away-time to the batch's latency, and that is the one
-cost in this whole loop that no amount of parallelism recovers.
+**Surface a pending decision through a channel that reaches the owner when they
+are not watching, and do it before your own session ends.** A ruling that waits
+for them to happen to read a transcript adds their entire away-time to the
+batch's latency, and that is the one cost in this loop no amount of parallelism
+recovers. The responsibility is the reporting session's, because at that moment
+it is the only actor that exists:
+
+- **The harness's push notification**, where the operator has it enabled — the
+  report reaching their device is what turns an unread transcript into a prompt.
+- **A comment on the batch issue** carrying the decision brief. This is the
+  durable half and worth doing regardless: it outlives every session, it is where
+  in-flight state already belongs (ADR-0015), and whoever picks the batch up next
+  reads it there rather than reconstructing it.
+
+Be plain about the limit rather than promising past it. Once every session has
+exited, nothing is running to chase a ruling — which is the argument for pushing
+*and* writing the decision down before the reporting session exits, not for
+assuming some later session will notice it.
 
 ## 4. Progress since the baseline
 
@@ -159,8 +173,12 @@ Three groups, each queried, in this order:
 **Every state in that table has a query behind it.** `isDraft`,
 `mergeStateStatus`, and `gh pr checks` are facts; "nearly done" and "should land
 today" are forecasts, and if you want to make one, it goes in §6 where it is
-fenced. `BEHIND` in particular is worth reporting as itself — it means the lane
-was never gated against current `main` and owes a rebase before it can merge.
+fenced. `BEHIND` in particular is worth reporting as itself: it says the branch
+is not current with its base and owes a rebase before it can merge, and **nothing
+beyond that**. A lane that rebased, gated and reviewed exactly as it should goes
+`BEHIND` the instant another lane merges ahead of it, which a merge order makes
+routine rather than exceptional (`worker.md`). Report the rebase it owes, not an
+inference about whether it was ever gated.
 
 ## 5. New issues since the baseline
 
