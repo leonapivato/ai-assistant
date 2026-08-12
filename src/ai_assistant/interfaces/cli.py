@@ -2715,19 +2715,28 @@ def _render_reach_notice(current: NotificationPreferences, asked: _Tuning) -> No
     on ``PERISHABLE``, which §6 says "is reached by no setting", so for those the sweep
     changes nothing whenever it runs.
 
-    **And nothing is announced where the reach did not move** (#985). §6 re-arms a held
+    **And no sweep is announced where the reach did not move** (#985). §6 re-arms a held
     record whose failed conditions hold "a condition that change could remove", so a
     write restating the reach already in force removes nothing and re-arms nothing — a
     record held only on ``QUIET_WINDOW`` or ``BUDGET`` sits exactly where it was, and
-    announcing a re-arming there is a claim about the store that is false. The
-    replacement says only that the setting did not move, and confines itself to the
-    reach: the same invocation may have changed a quiet window or the budget, whose
-    consequences are §6's and not this line's to summarise. Naming *which* records were
-    re-armed would be the other failure — a copy of §6's rule in an adapter, which is
-    the business logic golden rule 3 keeps out.
+    announcing a sweep there is a claim about the store that is false.
+
+    **The sentence that replaces it makes no claim about the store either**, and that
+    is deliberate rather than terse. ``current`` is a *pre-write* read, and the contract
+    it was taken under has no version token and no conflict detection: a second client
+    may write between the read and the write, in which case the delta the store computes
+    is not the delta seen here. So the replacement reports only the two things this
+    process knows for certain — what its own read held, and what it therefore asked for
+    — and leaves every statement about held records to the branches that were already
+    making one. Where that residual staleness bites the *other* two lines is #1019,
+    whose remedy is a contract that returns what the write re-armed rather than better
+    guessing here.
+
+    Naming *which* records were re-armed would be the opposite failure: a copy of §6's
+    rule in an adapter, which is the business logic golden rule 3 keeps out.
 
     Args:
-        current: The settings as they stood before the write.
+        current: The settings as this process read them, before the write.
         asked: What the user named, parsed.
     """
     if asked.notification_class is None or asked.reach is None:
@@ -2739,8 +2748,8 @@ def _render_reach_notice(current: NotificationPreferences, asked: _Tuning) -> No
         return
     if current.reach_for(asked.notification_class) is asked.reach:
         console.print(
-            "\n[dim]That class was already reaching you exactly that far, so nothing I "
-            "am holding was re-considered on account of its reach.[/]"
+            "\n[dim]That class was already reaching you exactly that far in the settings "
+            "I read, so this asked for no change to it.[/]"
         )
     elif asked.reach is NotificationReach.INTERRUPT:
         console.print(

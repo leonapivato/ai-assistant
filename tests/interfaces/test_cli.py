@@ -4619,8 +4619,7 @@ def test_restating_the_reach_already_in_force_announces_no_re_arming(
     condition that change could remove". Where the class already reaches that far the
     write removes nothing, so a record held only on ``QUIET_WINDOW`` or ``BUDGET`` sits
     exactly where it was — and the re-arming sentence would be a claim about the store
-    that is false. The user who repeats the command is told what is true: the setting
-    was already this, and nothing moved on account of it.
+    that is false. The user who repeats the command is told what is true instead.
 
     Two invocations rather than a scripted read, so the "already" is one the surface's
     own first write established.
@@ -4638,15 +4637,18 @@ def test_restating_the_reach_already_in_force_announces_no_re_arming(
 
     again = _flowed(output.getvalue()[repeated:])
     assert "Tuned." in again, "the write still happens and the settings are still shown"
-    assert "already reaching you exactly that far" in again
+    assert "already reaching you exactly that far in the settings I read" in again
     # And the claim it replaces is gone rather than merely softened: the two sentences
     # that promise a sweep are the whole of what #985 says must not be printed here.
     assert "due to be" not in again
     assert "next sweep" not in again
-    # **The disclaimer stays about the reach.** The same invocation could have moved a
-    # quiet window or the budget, whose consequences are §6's too — so the line says
-    # nothing moved *on account of the reach*, not that nothing moved at all.
-    assert "on account of its reach" in again
+    # **And what replaces it claims nothing about the store.** ``current`` is a
+    # pre-write read taken under a contract with no version token (#1019), so a second
+    # client can write between the read and the write and make any statement about held
+    # records wrong. The two things this process knows for certain are what its own read
+    # held and what it therefore asked for, and those are the only two it states.
+    assert "I am already holding" not in again
+    assert "re-considered" not in again
 
 
 def test_lowering_a_class_to_hold_announces_nothing_either_way(
