@@ -289,10 +289,11 @@ reaches this method too: `Identifier` and `DurableIdentifier` carry no maximum
 length, so a sufficiently long identity or minted id exceeds a small configured
 frame here as it does there.
 
-> **Normative.** `SourceGrantStore` gains **one** member: a query returning every
-> live grant in the store, computed from the `revokes` relation. It takes no
-> argument, is not paged, and returns detached snapshots as every other query on
-> that seam does (ADR-0097 §4).
+> **Normative.** `SourceGrantStore` gains **one** member,
+> `async standing(self) -> list[SourceGrant]`, returning every live grant in the
+> store, computed from the `revokes` relation. It takes no argument, is not paged,
+> and returns detached snapshots as every other query on that seam does
+> (ADR-0097 §4). It declares `GrantError` and no other failure.
 
 > **Normative.** `SourceGrants` is **unchanged**. The enumeration is not added to
 > the query seam, and no site that drives a reader may name it.
@@ -746,9 +747,9 @@ lane's to decide with its producer in hand.
 **New surface in `core` — a breaking change (golden rule 5):**
 
 - **`core/protocols.py`** gains **one** method on `AssistantEngine` and **one**
-  member on `SourceGrantStore`. Illustrative signatures, in ADR-0073 §7's and
-  ADR-0102 §2's form — the semantics above are the contract, the spelling is the
-  lane's:
+  member on `SourceGrantStore`. **Every annotation is spelled out and the
+  spelling is ratified, not the lane's**, in ADR-0085 §3's and ADR-0102 §2's
+  form. The signatures below restate §2's two clauses and add nothing to them:
 
   ```python
   class AssistantEngine(Protocol):
@@ -763,7 +764,36 @@ lane's to decide with its producer in hand.
   ADR-0085 §3 and ADR-0102 §2 state for their own blocks. The store member's
   return shape follows its neighbours on that seam (`recent` and `export` return
   lists); the engine method's follows its neighbours on the promoted surface
-  (`recent_grants` returns a tuple).
+  (`recent_grants` returns a tuple). `standing` is the one-word form its seam
+  uses throughout — `record`, `live`, `recent`, `export`, `clear` — and collides
+  with no member of it; the engine's `standing_grants` carries the noun because
+  the promoted surface is flat and names the subject, as `recent_grants` does
+  beside it.
+
+  **The member had no ratified name anywhere, and that is the defect rather than
+  the illustrative label.** An earlier draft left both spellings to the
+  implementing lane on ADR-0073 §7's and ADR-0102 §2's authority; architecture
+  review found it on round 1 of that lens, and neither citation carries it.
+  ADR-0073 §7 leaves its names as "*shape*, not as spelling" for the reason it
+  gives in the same sentence — "the seam is the concrete `orchestration` façade,
+  which is **not** a contract surface" — which is the one thing that does not hold
+  here. ADR-0102 §2 adds four methods to this same `AssistantEngine` surface and
+  does the opposite: titled "The four signatures", opening "**Every annotation is
+  spelled out**", and spending its length settling one argument's type and one
+  method's name against the collisions they would cause.
+
+  **What the corpus actually leaves to a lane is argument spelling, never the
+  member's identity.** ADR-0073 §1 does call a `MemoryStore` signature
+  illustrative, and it is a contract surface — but the method it adds is named in
+  its own heading and in the block, so what the lane is handed is the keyword
+  spelling of four filters, not the question of which member it is implementing.
+  The draft's failure was one step worse than that: §2's clause said only that the
+  store "gains **one** member: a query", naming nothing, so a lane could satisfy
+  §2 and §8 with two different members and no reading of the document would catch
+  it. The engine half is not exposed this way — §2's first clause fixes
+  `standing_grants(self) -> tuple[SourceGrant, ...]`, that it takes no argument,
+  and its two declared failures — which is why the repair is to §2's store clause
+  and this block, and not to the section's form.
 
 - **`core/types.py` gains nothing, `core/errors.py` gains nothing, and no
   `Settings` figure is owed.** `standing_grants` returns the type
