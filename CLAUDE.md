@@ -100,7 +100,7 @@ learn/update memory.
   `# type: ignore[code]` — no blanket ignores.
 - **Leave a paper trail.** Any non-obvious design decision goes in an ADR.
 
-## The gate (must all pass before a change is done)
+## The gate (Definition of Done)
 
 ```bash
 uv run ruff format .    # format
@@ -110,9 +110,27 @@ uv run lint-imports     # architecture boundary check
 uv run pytest           # tests
 ```
 
-Run **all** of it, every time. CI runs the same gate on every PR and push to
-`main` (ADR-0010) as the backstop, not the first line of defence. `pre-commit`
-runs the fast subset on commit; `just setup` enables it once per clone.
+All five pass, or the change is not done — `just check` runs the same five, with
+the formatting checked rather than rewritten. **When you owe all five is ADR-0136:**
+the full gate runs and passes at two anchors on a branch — immediately before the
+**first review invocation**, and immediately before the **final push preceding
+`gh pr ready`** — each on the tree as it then stands, neither at your discretion
+and neither admitting a docs-only exemption. A rebase that moves your base re-opens
+the obligation.
+
+**Between the anchors, the four static steps stay mandatory before every commit**
+— they cost about two seconds, and they catch what a *selected* test run would
+miss. `pytest` between the anchors is yours to choose: the whole suite,
+`just test-fast` (the suite across cores, about a minute — it satisfies **neither**
+anchor), a scoped selection, or no run at all. A diff touching no file under `src/`
+or `tests/` owes no run between the anchors.
+
+**`CONTRIBUTING.md` → "When the full gate is owed, and when it is not" carries the
+rebase clauses and every condition; do not work them out from memory.** CI runs the
+full gate on every PR and push to `main` (ADR-0010) as the backstop, not the first
+line of defence — so a red push between the anchors is acceptable, and a red
+*final* push is not. `pre-commit` runs the fast subset on commit; `just setup`
+enables it once per clone.
 
 ## Review (local only, ADR-0015)
 
