@@ -177,7 +177,8 @@ counted threshold, and we will forbid no round in doing so.**
 
 > **Normative.** A dispatched lane also hands its review loop to a successor when
 > the churn ratio printed by `scripts/codex-review.sh` first reaches 1.5 during
-> the current holder's tenure and no required lens is yet terminal (§3). A holder
+> the current holder's tenure and **at least one required lens is not terminal**
+> (§3). A holder
 > that took the lane on a ratio already at or above 1.5 does not hand off on that
 > ground. Where the ratio is printed as a lower bound, this clause is satisfied
 > only when that lower bound is itself at least 1.5.
@@ -187,6 +188,13 @@ The two arms are separate clauses because they are separable obligations
 lane for each case. "Whichever fires first" needs no clause of its own — each
 obliges the handoff independently, so the first to be satisfied is the one that
 does.
+
+**The churn arm's condition is "at least one lens open", not "no lens closed",
+and the difference only shows on a two-lens change.** Adversarial can go terminal
+at round 1 while architecture runs on; a condition reading "no required lens is
+yet terminal" would be false from that moment and would switch the churn arm off
+for the rest of the loop — silently, and precisely on the lanes with two lenses to
+spend. On a single-lens change the two readings are the same condition.
 
 **There is no near-terminal exception, and that is deliberate.** #987 is the case
 that would want one: two rounds from done when the arm fires. An exception for it
@@ -239,6 +247,22 @@ marked clause carries its own conditions (ADR-0089 §3).
 > draft on the strength of a lens that is not terminal, does not choose its own
 > successor, and does not re-brief itself. Briefing a successor into the clone is
 > the coordinator's act.
+
+> **Normative.** A *successor* is an agent other than the handing-off holder,
+> briefed fresh into the clone. The same run continued, or the same holder briefed
+> again, is not a successor and does not discharge the handoff §1 requires; a
+> holder that has handed off does not resume the loop on that branch.
+
+**The successor being a different agent is a clause and not an aspiration.** It is
+the entire mechanism: §1 is worth its cost only because round eight is read by
+someone who did not write the text under review, and ADR-0020's finding is that
+the author is the one reader who cannot see the loop. Left in the prose it would
+have obligated nothing (ADR-0089 §3) while every stated obligation was met by
+handing the loop back to the same agent — which is the self-diagnosis remedy
+ADR-0020 tested twice, reached by a route this ADR would have opened. Adversarial
+review found it on round 1, and it is recorded rather than quietly fixed because
+it is the under-marking hazard ADR-0089 §4 names, occurring in a document that
+cites §4 for it.
 
 The comment is the artifact, not the report: a report reaches one reader and a
 successor arriving days later reads the PR. `.claude/agents/worker.md` already
@@ -372,9 +396,12 @@ is where it is answered.
   successor a spent budget, so the second holder hands off on its first round and
   the loop degenerates into a relay. The subtraction costs one line in a comment
   the handoff writes anyway.
-- **Deciding the successor's brief.** What a coordinator tells a successor — fresh
-  eyes, scope cut, a ruling on a contested finding — is a dispatch decision and is
-  outside this ADR. §4 fixes only what the handing-off lane must leave behind.
+- **Deciding the successor's brief.** What a coordinator *tells* a successor —
+  fresh eyes, scope cut, a ruling on a contested finding — is a dispatch decision
+  and is outside this ADR. §4 fixes what the handing-off lane must leave behind
+  and that the successor is a different agent, which is the handoff's mechanism
+  rather than a brief's content; everything else about the brief is the
+  coordinator's.
 
 ## Consequences
 
@@ -384,7 +411,7 @@ is where it is answered.
   identified the remedy — an aggregate view held from outside — and could only
   print a number toward it. §1 routes the loop to the reader who holds that view,
   at a point where rounds remain to be saved.
-- **The successor is a genuinely different reader.** What made #475 and #945
+- **The successor is a genuinely different reader (§4).** What made #475 and #945
   expensive was not that rounds were spent but that they were spent by the author
   of the text under review, re-reading their own prose. Round 8 under a new holder
   is the first round in the loop conducted without that.
