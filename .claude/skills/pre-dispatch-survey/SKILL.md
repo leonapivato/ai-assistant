@@ -117,6 +117,73 @@ Slices within a leg are not automatically independent. Before proposing a batch:
 - **The roadmap's leg order is a dependency order.** Slices from a later leg are
   not parallel work just because they touch different files.
 
+### New machinery in more than one subsystem is more than one lane
+
+A slice is one lane only if its implementation would put substantial **new
+machinery** into at most one subsystem (ADR-0137 §1). New machinery is the thing
+that did not exist — a store, a loop, a codec, a producer. **Adaptation is
+not**: a call site updated, an argument threaded through, a method added to a
+class that already had the rest of them. Adaptation across any number of
+subsystems is still one lane; new machinery in two is two lanes, however clean
+the seam between them looks from the survey.
+
+Where a slice fails that test, **cut it at the contract seam**:
+
+- **The contract triad plus its primary implementation is one lane**
+  (ADR-0137 §2) — primary meaning the consumer whose demands actually shape the
+  contract, not the one that is easiest to write. **The sequence ahead of it is
+  unchanged**: the contract ADR still ships as its own PR and is ratified before
+  the implementation PR that depends on it (golden rule 5, ADR-0015 §5), and the
+  triad itself is still never split (bullet above, ADR-0137 §3). What pairs is
+  the triad's *code* with its first real caller, so the contract stays **soft
+  while its hardest consumer stress-tests it**. A contract whose only exercise
+  is its own conformance suite hardens before anything has tried to use it in
+  anger, and the first real consumer must then either bend around a shape that
+  is already fixed or reopen a settled decision. The pairing does make a
+  cross-subsystem lane, and it is a **ratified** one rather than a dispatcher's
+  per-batch invention: ADR-0137 §2 widens `CLAUDE.md`'s "one subsystem per
+  change" exception from the triad alone to the triad with its primary
+  implementation, and `CONTRIBUTING.md` → "Adding a Protocol" carries the same
+  widening. Any *other* cross-subsystem pairing stays outside the exception.
+- **Each further consumer group is a follow-on lane** (ADR-0137 §4), briefed
+  only once the paired lane has merged. The merged contract text is that
+  brief's authority, exactly as a merged ADR is for the implementation it
+  governs (golden rule 5, `dispatch-agents` §2). **Group by the same test as
+  above**: consumers ride in one group where that test admits them as a single
+  lane — substantial new machinery in at most one subsystem between them,
+  adaptation anywhere — and are separate groups otherwise. Three call sites
+  adapting to one new method are a single group, because they are adaptation
+  and draw one class of finding; two consumers that each need a new machine are
+  two groups.
+
+**This is the bound on "prefer fewer, larger, well-fenced lanes"**
+(`dispatch-agents` §6): larger up to the contract seam, not past it. Two
+mechanisms put the cost there rather than further out.
+
+- **Review does not decompose the way the diff does.** Each subsystem's new
+  machinery draws its own findings, and they arrive in one triage queue against
+  one diff, every round re-reading all of it. The rounds compound rather than
+  add — and a lane that spends enough of them exhausts the context that made
+  keeping the work together look cheap in the first place.
+- **A contract cannot stay soft for two consumers at once.** Once the first
+  consumer's implementation has been reviewed, changing the contract to suit the
+  second invalidates reviewed bytes. Inside one lane that is rework at full
+  price; split across two, the identical change is just the second lane's
+  ordinary brief.
+
+**What the cut costs, accepted deliberately.** Consumer lanes serialize behind
+the contract lane's merge instead of running beside it, and every additional PR
+pays its own floor rounds out of the same finite review quota. That is the
+price of a contract that has met a real consumer before it hardens, and of
+lanes that finish.
+
+**Stated without the batch that prompted it, deliberately** — §2's caution
+applies to this rule as much as to a scope heuristic. The incident rots into a
+snapshot that looks authoritative; the mechanism keeps holding (ADR-0019). So
+the mechanism is what is written here, and ADR-0137's Context holds the round
+counts the rule was measured against, along with the aggregates it is on trial
+against.
+
 ## 4. Record the batch as one issue
 
 One issue for the batch, not one per lane. It records what is being dispatched —
