@@ -455,6 +455,12 @@ later client can get wrong without touching the CLI.
 > incomplete, and resolves the source's state by re-reading rather than by sending
 > a second act it could not interpret the outcome of.
 
+> **Normative.** Where an outcome is not known **because the amendment was
+> cancelled**, the surface reports it as not known and the cancellation still
+> propagates. ADR-0060's rule that external cancellation is re-raised is neither
+> relaxed nor satisfied by the report, and no surface may swallow a cancellation in
+> order to make one.
+
 > **Normative.** A surface offering amendment takes the user's decision about the
 > new scope **before** it sends the revocation, and sends the revocation only for
 > a source the user has decided a new scope for. No surface revokes in order to
@@ -526,7 +532,17 @@ the third clause forbids, and for the same reason: a refusal is equally consiste
 with another client having granted in between. One read settles it; a second write
 does not.
 
-**The fifth clause removes the case that has no good report.** A surface that
+**The fifth clause is what keeps the cancellation limb from being unreachable in
+practice, and the hazard is a language detail rather than a design one.**
+`CancelledError` is a `BaseException`, so the natural `except Exception` around
+two calls does not see it: a client written that way exits without reporting
+anything, and the one clause naming cancellation as a route to an unknown outcome
+never runs. The other repair — catching it and carrying on to print — is worse,
+because ADR-0060 requires external cancellation to propagate and a swallowed one
+leaves a task the caller believes it cancelled. So both halves are stated
+together, and the client lane owes a test for each act.
+
+**The sixth clause removes the case that has no good report.** A surface that
 revoked first and then asked the user what to grant would put the interactive part
 of the flow *inside* the ungranted window — so a user who hesitates, or closes the
 terminal, or is asked something they want to think about, has withdrawn their
@@ -876,17 +892,21 @@ client granted the source in between** reports the source's state from the re-re
 rather than from the refusal; an amendment whose `grant` outcome is **unknown** —
 the hub commits the record and the client loses the response — reports it as
 unknown and points at the re-read; an amendment whose **revocation** outcome is
-unknown sends no grant at all; and the granting half of an amendment renders the
+unknown sends no grant at all; an amendment **cancelled** after the hub may have
+committed either act reports that act as unknown **and** lets the `CancelledError`
+propagate, written once per act; and the granting half of an amendment renders the
 location before it sends (§5). Spellings are the lane's under ADR-0073 §1's form.
 
-**The two lost-response cases are deterministic rather than timing tests**, and it
-is worth saying so because "lose the response" reads like a flake: the client is
-driven against a stub hub that records the act and then closes without answering.
-`tests/wire/test_client.py` already drives that shape — its "what the hub refuses
-without answering" block — so the lane is extending a pattern rather than inventing
-one. What is being tested is the client's report, not the socket. The competing-
-grant case is deterministic too: it is a second engine call between the client's
-two, not a race to provoke.
+**Every one of those is deterministic rather than a timing test**, and it is worth
+saying so because "lose the response" and "cancel mid-call" both read like flakes.
+The lost-response cases drive the client against a stub hub that records the act
+and then closes without answering, which is the shape `tests/wire/test_client.py`
+already uses in its "what the hub refuses without answering" block. The
+competing-grant case is a second engine call placed between the client's two. The
+cancellation cases cancel the client's task at a point the stub controls, and
+assert two things rather than one — the report, and that the `CancelledError`
+still leaves the client. What is being tested throughout is the client's report,
+not the socket.
 
 > **Normative.** The lane that lands this ADR's supersession record edits
 > ADR-0102's `Status` line to the partial form ADR-0070 §4 fixes, naming this ADR
