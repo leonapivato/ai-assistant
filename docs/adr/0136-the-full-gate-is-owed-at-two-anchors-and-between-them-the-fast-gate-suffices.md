@@ -128,11 +128,21 @@ between them.**
 > **Normative.** Each anchor is a run on the tree as it then stands, and a full
 > gate run on an earlier tree does not discharge it.
 
-> **Normative.** A rebase that moves the branch's base re-opens the next anchor
-> owed. Where both anchors have already been discharged it re-opens the closing
-> one: the full gate is run again, and passes, before the rebased head is pushed
-> for merge — whether or not `gh pr ready` has already happened, and however many
-> times the branch is rebased.
+> **Normative.** After a rebase that moves the branch's base, the full gate is run
+> again and passes before the **next review invocation** on that branch, if one
+> follows.
+
+> **Normative.** After a rebase that moves the branch's base, the full gate is run
+> again and passes before the rebased head is **pushed for merge** — whether or not
+> `gh pr ready` has already happened, and however many times the branch is rebased.
+
+Both obligations are stated outright rather than by reference to "the next anchor
+owed", because that indirection has a hole at each end: read against a branch whose
+opening anchor is spent it defers to the closing one and lets a rebased tree reach
+a reviewer ungated, and read against a branch whose anchors are both spent it names
+nothing at all. They are two clauses and not one because they are separable — a
+rebase can be followed by a review, by a merge push, by both, or by neither
+(ADR-0089 §2).
 
 The first anchor is owed **once per branch, not once per review invocation**, and
 this ADR accepts what that means rather than leaving it to be discovered: a review
@@ -141,8 +151,8 @@ author not to run them at round 6.
 
 > **Normative.** A second or later review invocation on a branch does not on its
 > own re-open an anchor. A tree whose tests fail is not, on that ground,
-> ineligible for review. This is subject to the rebase clause above, which
-> re-opens the anchor whenever the base has moved.
+> ineligible for review. This is subject to the two rebase clauses above, which
+> bind whenever the base has moved.
 
 The rebase carve-out is not a concession; it is the case where a full run carries
 real information and the cheap checks carry none. What a rebase brings into the
@@ -159,13 +169,13 @@ tree reach a reviewer on the static four alone would quietly narrow both.
 the practice.** Branch protection is `strict`, so a lane that reports while
 another merges ahead of it comes back `BEHIND` and must rebase after
 `gh pr ready` — routine in a batch with a merge order, not an exception. At that
-point no review invocation and no pre-`ready` push remain for the first two
-clauses to bite on, which is why the clause above names the closing anchor
-explicitly rather than relying on "the next one owed". `.claude/agents/worker.md`
-already instructs a dispatched lane to "**re-run the full gate against the landing
-tree**" on exactly this path; what this ADR adds is that the obligation is the
-closing anchor itself, so it holds for any author on any branch rather than only
-for a worker who was told.
+point no review invocation and no pre-`ready` push remain, so the two anchors in
+the first clause have nothing left to bite on; the push-for-merge clause is what
+covers it, and it is written to bind on the push rather than on `gh pr ready` for
+exactly that reason. `.claude/agents/worker.md` already instructs a dispatched lane
+to "**re-run the full gate against the landing tree**" on this path; what this ADR
+adds is that the obligation is the decision's own, so it holds for any author on
+any branch rather than only for a worker who was told.
 
 The rest is accepted on the reading of `docs/review/guide.md` above: the reviewer runs
 no tests and may not report what `pytest` catches, so a failing test changes
@@ -289,10 +299,11 @@ the record of a review covers.
   "Stop when the required reviews are green" own that, unchanged.
 - **The rebase rules.** Rebasing before gating and before invoking a review is
   about *freshness*, not breadth (`CONTRIBUTING.md` states them as distinct
-  judgements), and both stand **whole** — which is what §1's rebase clause is for.
-  A rebase re-opens the next anchor owed, so a rebased tree still meets a reviewer
-  gate-green, and `CONTRIBUTING.md`'s "**after** the gate is green" is narrowed for
-  no rebased tree. What §1 narrows is only the un-rebased case between anchors,
+  judgements), and both stand **whole** — which is what §1's two rebase clauses are
+  for. A rebase obliges a full gate before the next review and before any push for
+  merge, so a rebased tree always meets a reviewer gate-green, and
+  `CONTRIBUTING.md`'s "**after** the gate is green" is narrowed for no rebased
+  tree. What §1 narrows is only the un-rebased case between anchors,
   where the tree the reviewer reads is the author's own work on a base already
   proven once.
 
