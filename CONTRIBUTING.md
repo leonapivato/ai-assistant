@@ -44,27 +44,76 @@ uv run lint-imports         # architecture boundary check
 uv run pytest               # tests
 ```
 
-`pre-commit` runs the fast subset on every commit; CI runs the full gate on
-every pull request and push to `main` (`.github/workflows/gate.yml`, ADR-0010).
-CI is the backstop — but run the gate locally before you push. A red PR is a
-wasted round-trip, not a first line of defence.
+`just check` runs the same five, with `ruff format --check` in place of the
+rewrite. `pre-commit` runs the fast subset on every commit; CI runs the full gate
+on every pull request and push to `main` (`.github/workflows/gate.yml`,
+ADR-0010), and it is the backstop rather than the first line of defence.
 
-**Run the whole suite, always.** Selecting "the tests that matter for this
-change" trades a shorter wait for a judgment call whose failure mode — a
-cross-subsystem regression `lint-imports` cannot see — surfaces in CI after you
-have moved on. Revisit if `pytest` ever crosses a couple of minutes.
+### When the full gate is owed, and when it is not (ADR-0136)
+
+The five steps are not one price. The four static ones cost about two seconds
+between them; `pytest` costs four to six minutes against ~15,600 tests. ADR-0136
+splits the cadence accordingly and governs it — what follows is operational, and
+where the two read differently the ADR wins.
+
+**The full gate runs and passes at two anchors on a branch, and neither is at
+your discretion:** immediately before the **first review invocation** on that
+branch, and immediately before the **final push preceding `gh pr ready`**. Each
+anchor is a run on the tree as it then stands, so a green run on an earlier tree
+does not discharge it, and an anchor admits no docs-only exemption.
+
+**A rebase that moves your base re-opens the obligation, twice over.** Run the
+full gate again, and have it pass, before the **next review invocation** on the
+branch if one follows — and again before the rebased head is **pushed for
+merge**, whether or not `gh pr ready` has already happened, and however many
+times you rebase. They are two obligations rather than one because a rebase can
+be followed by a review, by a merge push, by both, or by neither. What a rebase
+brings into your branch is other lanes' merged code, and its interaction with
+yours is precisely the cross-subsystem regression a selected run misses.
+
+**Between the anchors, the four static steps stay mandatory before every
+commit.** They are the cheap half, and `mypy` and `lint-imports` catch exactly
+the class of breakage a *selected* test run would not.
+
+**Between the anchors, `pytest` is yours to choose** — the whole suite,
+`just test-fast`, a scoped selection, `--lf`, or no run at all. No justification
+is owed for the choice, and no reviewer may require a particular one. A diff
+touching no file under `src/` or `tests/` owes no `pytest` run between the
+anchors at all.
+
+`just test-fast` is the recipe for that discretion: the whole suite distributed
+across cores, about a minute against the serial four to six. **It satisfies
+neither anchor** — it deselects one check that cannot run distributed, and the
+anchors require the suite rather than a command name, so an anchor is `just
+check` or the five steps above.
+
+**A red push between the anchors is acceptable.** The draft PR is opened early so
+that CI gates every push, and a rule that no push may ever be red is in tension
+with that. A red `gate` on a draft mid-loop is information, not a defect in
+conduct, and is not on its own grounds for a finding, a report or an escalation.
+**A red *final* push is not acceptable** — it is the failure the closing anchor
+exists to prevent, and a branch is not flipped out of draft on a tree whose full
+gate has not been run and passed locally.
+
+This section used to say "run the whole suite, always", on the stated ground that
+the gate was ~33s over 5,777 tests, and it named its own expiry: "revisit if
+`pytest` ever crosses a couple of minutes". It has, by an order of magnitude, and
+ADR-0136 is that revisit. The breadth argument stands as written — a
+cross-subsystem regression is what a selected run misses and `lint-imports`
+cannot see — but it is an argument about *some* tree being fully tested, and the
+anchors put it on the trees anyone acts on. Nobody merges round 7.
 
 **Run it against a current `main`.** A green gate is evidence about the tree you
 ran it on, so `git fetch origin && git rebase origin/main` comes first —
 otherwise you have tested a base nobody will merge. This is not the same
-judgment call as the one above: running everything is about *breadth*, and this
-is about *freshness*. A branch that predates a check added to `main` runs a full
-suite that cannot fail on it, which is how a change has been reported green
-while CI had it red. The same staleness misleads Codex, which reads the working
-tree for context and will report other branches' merged work as regressions in
-yours — so rebase before you *invoke* a review as well. The reviewer itself
-stays read-only (`docs/review/guide.md`); freshening the tree is the branch
-owner's job, not the reviewer's.
+judgment call as the breadth one above, and it survives ADR-0136 whole: what the
+anchors ration is *breadth*, and this is about *freshness*. A branch that
+predates a check added to `main` runs a full suite that cannot fail on it, which
+is how a change has been reported green while CI had it red. The same staleness
+misleads Codex, which reads the working tree for context and will report other
+branches' merged work as regressions in yours — so rebase before you *invoke* a
+review as well. The reviewer itself stays read-only (`docs/review/guide.md`);
+freshening the tree is the branch owner's job, not the reviewer's.
 
 ## Review (pre-merge)
 
@@ -72,6 +121,13 @@ The gate is mechanical; it cannot judge design or the adequacy of tests. Before
 merging a slice branch — **after** the gate is green — put the change through
 adversarial review. Claude writes the code; **Codex reviews it**, so every change
 is judged by a model independent of the one that produced it.
+
+"After the gate is green" is the first anchor above, and after a rebase it is the
+rebase clause; between the anchors a later review invocation does not on its own
+re-open one, so the tree a mid-loop review reads may be one whose tests were not
+run. That is ADR-0136 §1, deliberately: the reviewer runs no tests and may not
+report what `pytest` catches, so what it needs green is `ruff` and `mypy`, which
+stay mandatory before every commit.
 
 Two reviewers, defined by shared rubrics in `docs/review/`:
 
@@ -440,8 +496,9 @@ content, and a linear history where each commit keeps its `Refs:` trailer.
   and ready to be verified and merged.
 - **CI gates the PR.** The `gate` workflow runs the full Definition-of-Done gate
   on every PR and push; a PR cannot merge while it is red. This is enforced for
-  everyone. Run the gate locally first anyway — CI is the backstop, not the
-  substitute.
+  everyone. Run the full gate locally at ADR-0136's two anchors anyway — CI is
+  the backstop, not the substitute, and a red check on the *final* push is the
+  one the closing anchor exists to prevent.
 - **`gate` is the only required check; no approving review is required.** Branch
   protection asks for zero approvals, because there is no second author to ask —
   so the Codex review reported by `just ship` (see "Review") is the entire
