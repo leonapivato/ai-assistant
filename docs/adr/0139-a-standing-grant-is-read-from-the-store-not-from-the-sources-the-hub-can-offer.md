@@ -452,14 +452,18 @@ later client can get wrong without touching the CLI.
 
 > **Normative.** Where the revocation's outcome is **not known**, the surface does
 > not send the grant. It reports the revocation as not known, leaves the amendment
-> incomplete, and resolves the source's state by re-reading rather than by sending
-> a second act it could not interpret the outcome of.
+> incomplete, and does not infer the source's state from that unresolved act. A
+> surface still free to call resolves the state by re-reading, rather than by
+> sending a second act it could not interpret the outcome of; a surface being
+> cancelled says the state is unread, and the user's next call reads it.
 
 > **Normative.** Where an outcome is not known **because the amendment was
 > cancelled**, the surface reports it as not known and the cancellation still
-> propagates. ADR-0060's rule that external cancellation is re-raised is neither
-> relaxed nor satisfied by the report, and no surface may swallow a cancellation in
-> order to make one.
+> propagates. A cancelled surface starts no new call in order to report: it reports
+> the act as not known, says the source's state is unread, and lets the
+> `CancelledError` leave. ADR-0060's rule that external cancellation is re-raised is
+> neither relaxed nor satisfied by the report, and no surface may swallow a
+> cancellation in order to make one.
 
 > **Normative.** A surface offering amendment takes the user's decision about the
 > new scope **before** it sends the revocation, and sends the revocation only for
@@ -532,6 +536,22 @@ the third clause forbids, and for the same reason: a refusal is equally consiste
 with another client having granted in between. One read settles it; a second write
 does not.
 
+**And it stops short of mandating the read, because on the cancelled branch a
+mandated read is a call the surface may not make.** Cancellation is one of the two
+routes to an unknown outcome the second clause names, so an unconditional "resolves
+the state by re-reading" reaches a surface that is being cancelled — and ADR-0060
+permits deferring a cancellation only while a method "makes its resources safe",
+which a read performed to present a state is not. Such a clause would oblige a
+cancelled surface either to breach ADR-0060 or to breach this section, which is no
+obligation at all. The escape was already written into the third clause — a surface
+that has not read says the state is **unread** — and the fourth clause now takes it
+rather than restating a mandate the third clause had already made unnecessary.
+Nothing is lost on the branch the mandate was written for: a surface whose
+revocation was lost rather than cancelled is free to call, and reads. What is
+invariant across both branches is the prohibition, not the read — the state is
+never inferred from the unresolved act, and where this surface cannot read it, the
+user's next call can.
+
 **The fifth clause is what keeps the cancellation limb from being unreachable in
 practice, and the hazard is a language detail rather than a design one.**
 `CancelledError` is a `BaseException`, so the natural `except Exception` around
@@ -541,6 +561,17 @@ never runs. The other repair — catching it and carrying on to print — is wor
 because ADR-0060 requires external cancellation to propagate and a swallowed one
 leaves a task the caller believes it cancelled. So both halves are stated
 together, and the client lane owes a test for each act.
+
+**Its middle sentence is what makes the clause answerable on its own, and it is
+there because the report is the one thing a cancelled surface is still asked to
+do.** Asking for a report invites the third repair — reach for the state before
+reporting it — which is the same breach by a kinder route, and under ADR-0089 §3 a
+clause that leaves it out obliges nothing against it. So the clause says what the
+cancelled surface reports (the act, as not known), what it says about the source
+(unread, which is the third clause's own vocabulary), and what it does not do
+(start a call), and then lets the `CancelledError` leave. That is the complete
+behaviour of the cancelled path in one clause, which is what a client written
+against it needs and what §8's test asserts.
 
 **The sixth clause removes the case that has no good report.** A surface that
 revoked first and then asked the user what to grant would put the interactive part
@@ -893,9 +924,9 @@ rather than from the refusal; an amendment whose `grant` outcome is **unknown** 
 the hub commits the record and the client loses the response — reports it as
 unknown and points at the re-read; an amendment whose **revocation** outcome is
 unknown sends no grant at all; an amendment **cancelled** after the hub may have
-committed either act reports that act as unknown **and** lets the `CancelledError`
-propagate, written once per act; and the granting half of an amendment renders the
-location before it sends (§5). Spellings are the lane's under ADR-0073 §1's form.
+committed either act reports that act as unknown, **starts no further call in order
+to report it**, and lets the `CancelledError` propagate, written once per act; and
+the granting half of an amendment renders the location before it sends (§5). Spellings are the lane's under ADR-0073 §1's form.
 
 **Every one of those is deterministic rather than a timing test**, and it is worth
 saying so because "lose the response" and "cancel mid-call" both read like flakes.
@@ -904,9 +935,11 @@ and then closes without answering, which is the shape `tests/wire/test_client.py
 already uses in its "what the hub refuses without answering" block. The
 competing-grant case is a second engine call placed between the client's two. The
 cancellation cases cancel the client's task at a point the stub controls, and
-assert two things rather than one — the report, and that the `CancelledError`
-still leaves the client. What is being tested throughout is the client's report,
-not the socket.
+assert three things rather than one — the report, that no further call reaches the
+stub after the cancellation, and that the `CancelledError` still leaves the client.
+The middle one is the assertion the fifth clause's new limb needs and the stub can
+already make, since it records every act it receives. What is being tested
+throughout is the client's report, not the socket.
 
 > **Normative.** The lane that lands this ADR's supersession record edits
 > ADR-0102's `Status` line to the partial form ADR-0070 §4 fixes, naming this ADR
