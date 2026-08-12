@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-08-11
 - **Durability clause.** Every reference below to ADR-NNNN is to its text as it
-  stood at this ADR's base, `d94637ca`, not to its status on any later day. Every
+  stood at this ADR's base, `4bba371d`, not to its status on any later day. Every
   ADR this decision composes with reads `Accepted` there. References to
   `CLAUDE.md` and `CONTRIBUTING.md` are likewise to their text at that commit —
   which matters more here than usual, because §5 decides that two of those
@@ -245,12 +245,12 @@ be correct to flag its own brief.
   say — so the required review set is adversarial alone (ADR-0015 §1,
   `CONTRIBUTING.md` → "Stop when the required reviews are green"), and the
   architecture lens ADR-0130 §12 owed is not owed here. This follows ADR-0132's
-  note for the same reason it gave. ADR-0015 §5's ratify-after-review sequencing
-  is taken as ADR-0130 §12 and ADR-0132 took it: drafted, reviewed and revised as
-  `Proposed`, with the status flipped only once the required review returned
-  clean on one tree, and the required review re-run on the flipped tree. The PR
-  carries the round record; nothing implements against this ADR until it has
-  merged.
+  note for the same reason it gave. The ratification sequence is the one
+  `CONTRIBUTING.md` → "Finishing an ADR PR" writes down, and this ADR took it
+  rather than re-arguing it: drafted, reviewed and revised as `Proposed`, with
+  the status flipped only once the required review returned clean on one tree,
+  and that review re-run on the flipped tree. The PR carries the round record;
+  nothing implements against this ADR until it has merged.
 
 ## Consequences
 
