@@ -3835,6 +3835,59 @@ def test_an_empty_listing_names_the_chain_that_arms_unprompted_contact(
     assert "assistant notification-settings" in rendered
 
 
+def test_a_hint_is_withheld_where_showing_it_would_change_what_it_says(
+    output: StringIO,
+) -> None:
+    """A wrong command is worse than no command, and quoting alone does not stop one.
+
+    ``_safe`` **replaces** a character a terminal must not be handed, so a class
+    carrying a newline renders as ``calendar\ufffdupcoming`` — inside correct shell
+    quotes, and naming a class that does not exist. That is the exact failure quoting
+    was added to prevent, arriving one step later and looking like a working
+    instruction rather than a mistake.
+
+    The record still renders: what is withheld is the copyable line, and the
+    replacement says so rather than leaving a gap the reader has to notice.
+    """
+    unshowable = _held(candidate=_candidate(notification_class="calendar\nupcoming"))
+
+    cli._render_notifications((unshowable,), now=AT, limit=50, offset=0)
+
+    rendered = _flowed(output.getvalue())
+    assert "Standup starts in ten minutes" in rendered
+    assert "assistant tune --class" not in rendered
+    assert "assistant dismiss ntf-1" not in rendered
+    assert "cannot show" in rendered
+
+
+def test_tune_sends_a_class_byte_for_byte_so_the_listing_round_trips(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``NonBlankEncodableText`` preserves surrounding whitespace, and ``reach_for``
+    compares exactly — so normalising here would guarantee the unreachable setting it
+    looks like it prevents.
+
+    A producer may declare ``" upcoming_event "``; a record carries it and the listing
+    prints it. Were ``--class`` to strip, the row written would be for
+    ``"upcoming_event"``, the record would stay governed by the padded name, and the
+    class the user was looking at could not be tuned at all — the failure ADR-0102 §2
+    keeps a grant's ``source`` byte-exact to avoid, one argument over.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(
+        cli.app, ["tune", "--class", " upcoming_event ", "--reach", "interrupt"]
+    )
+
+    assert result.exit_code == 0
+    written = _written(engine)
+    assert [row.notification_class for row in written.reaches] == [" upcoming_event "]
+    assert written.reach_for(" upcoming_event ") is NotificationReach.INTERRUPT
+    # And it is emphatically *not* the stripped name, which governs nothing here.
+    assert written.reach_for("upcoming_event") is NotificationReach.HOLD
+
+
 @pytest.mark.parametrize(
     ("name", "limit", "offset"),
     [("a zero limit", 0, 0), ("a page past the end", 50, 100)],
