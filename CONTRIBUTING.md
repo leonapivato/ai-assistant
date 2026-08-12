@@ -324,10 +324,16 @@ something. It is written down once here so a lane does not re-derive it:
    it is the ratifying act the PR exists to perform, and without it nothing may
    implement against the ADR at all (ADR-0015 §5). And a finding that does arrive
    on that round is not stranded by the flip having happened: **return the ADR to
-   `Proposed`, correct the text, and ratify again.** ADR-0070 §1's no-rewrite
-   rule protects *ratified* decision text, and an ADR returned to `Proposed` is
-   not that — so the correction stays an in-place edit rather than becoming a
-   dated note appended to a document one commit old.
+   `Proposed` and re-enter at step 1.** ADR-0070 §1's no-rewrite rule protects
+   *ratified* decision text, and an ADR returned to `Proposed` is not that — so
+   the correction stays an in-place edit rather than becoming a dated note
+   appended to a document one commit old. What the return does **not** buy is a
+   shortcut back to step 3: §1 is explicit that its permitted edit forms "bound
+   the append-only *form* of an edit, not the review a decision needs. A
+   substantive contract ADR is still reviewed while `Proposed` and ratified only
+   after". So the corrected decision earns the whole required set green on the
+   corrected `Proposed` tree before it is flipped a second time — which is why an
+   ADR taking this route records itself as ratified *on its second flip*.
 4. **`just ship`, then `gh pr ready`, then merge** — on your own judgement, like
    any other change ("Report the review, then mark it ready").
 5. **Nothing implements against the ADR until that merge** (ADR-0015 §5, golden
