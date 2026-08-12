@@ -107,6 +107,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import shlex
 import sys
 from datetime import UTC, datetime, time, timedelta
@@ -284,6 +285,12 @@ _SUPPRESSOR_MESSAGES = {
     QuestionState.REDEFERRED: "Not stored — a matching question raised a follow-up:",
 }
 
+
+#: The only endpoint form ``--quiet-window`` takes, and the only one it can hold
+#: without changing: ``QuietWindow`` is minute-resolution and ``minute_of_day``
+#: truncates seconds deliberately, so a finer endpoint would be accepted and then
+#: rounded down with nothing said (:func:`_quiet_window`).
+_HH_MM = re.compile(r"\d{2}:\d{2}")
 
 #: One past the largest value ``--limit``/``--offset`` may take, mirroring the range
 #: ``MemoryStore.list_beliefs`` refuses outside of (ADR-0073 §2). Checked here at
@@ -738,6 +745,16 @@ def _quiet_window(spec: str) -> QuietWindow:
     ADR-0130 §6 introduces no second timezone source, so ``22:00+01:00`` is an error
     rather than a value quietly reinterpreted.
 
+    **The grammar is enforced rather than merely documented, and the reason is the one
+    input that would otherwise be accepted and changed.**
+    :func:`~datetime.time.fromisoformat` is lenient enough to take ``22:00:59``, and
+    :func:`~ai_assistant.core.types.minute_of_day` then *truncates* seconds — by
+    design, since a window is a minute-resolution setting — so a user asking for
+    ``22:00:59`` would be given ``22:00`` with nothing said. That is the failure
+    :func:`_present_source` exists to prevent one argument over: a surface must not
+    accept a value and then act on a different one. Anything but exactly ``HH:MM`` is
+    refused, so the only values this takes are the ones it can hold.
+
     Args:
         spec: The window as the user typed it, e.g. ``22:00-07:00``.
 
@@ -746,13 +763,25 @@ def _quiet_window(spec: str) -> QuietWindow:
 
     Raises:
         ValueError: If the text is not two ``HH:MM`` endpoints separated by ``-``,
-            if either carries a timezone, or if the two name the same minute.
+            if either carries a timezone or a finer precision than a minute, or if
+            the two name the same minute.
     """
     start, separator, end = spec.partition("-")
     if not separator:
         msg = f"expected a window of the form HH:MM-HH:MM, got {spec!r}"
         raise ValueError(msg)
-    return QuietWindow.between(time.fromisoformat(start.strip()), time.fromisoformat(end.strip()))
+    endpoints = []
+    for endpoint in (start, end):
+        trimmed = endpoint.strip()
+        if _HH_MM.fullmatch(trimmed) is None:
+            msg = (
+                f"each endpoint is exactly HH:MM, got {trimmed!r}: a quiet window is "
+                f"held to the minute, so a finer one would be accepted and then "
+                f"silently rounded down (ADR-0130 §6)"
+            )
+            raise ValueError(msg)
+        endpoints.append(time.fromisoformat(trimmed))
+    return QuietWindow.between(*endpoints)
 
 
 def _present_quiet_windows(value: list[str] | None) -> list[str] | None:

@@ -4284,7 +4284,19 @@ def test_a_quiet_window_may_cross_midnight_and_is_read_as_local(
 
 @pytest.mark.parametrize(
     "spec",
-    ["22:00", "22:00-", "not-a-time", "22:00-22:00", "22:00+01:00-07:00", "25:00-07:00"],
+    [
+        "22:00",
+        "22:00-",
+        "not-a-time",
+        "22:00-22:00",
+        "22:00+01:00-07:00",
+        "25:00-07:00",
+        # Accepted by `time.fromisoformat` and then **silently truncated** by
+        # `minute_of_day`, which is the one input that would otherwise be taken and
+        # acted on differently — a window asked for at 22:00:59 and set at 22:00.
+        "22:00:59-07:00",
+        "22:00-07:00:30",
+    ],
 )
 def test_an_unparseable_quiet_window_is_a_usage_error_before_any_client_is_built(
     spec: str, monkeypatch: pytest.MonkeyPatch
@@ -4292,10 +4304,17 @@ def test_an_unparseable_quiet_window_is_a_usage_error_before_any_client_is_built
     """ADR-0042 §7: every refusal on this path is a ``ValueError``, which the command's
     ``except (AssistantError, TransportError)`` boundary does not catch.
 
-    Six shapes, and each is a different refusal rather than a variation on one: no
+    Eight shapes, and each is a different refusal rather than a variation on one: no
     separator, an empty endpoint, unparseable text, the equal endpoints
-    ``QuietWindow`` declines as unreadable, a zoned endpoint ADR-0130 §6 forbids, and
-    an hour outside the day. All become exit code 2, and none reaches a hub.
+    ``QuietWindow`` declines as unreadable, a zoned endpoint ADR-0130 §6 forbids, an
+    hour outside the day, and — on either side — an endpoint finer than the minute
+    the setting holds.
+
+    **The last pair is the one a lenient parser would swallow.**
+    ``time.fromisoformat`` takes ``22:00:59`` and ``minute_of_day`` truncates it by
+    design, so without the grammar check the user asks for one window and is given
+    another 59 seconds wide of it, with nothing said. Every one becomes exit code 2,
+    and none reaches a hub.
     """
     engine = FakeAssistantEngine()
     _wire(monkeypatch, engine)
