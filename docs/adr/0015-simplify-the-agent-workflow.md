@@ -1,7 +1,38 @@
 # 15. Simplify the agent workflow: local review, clone per agent, issues over files
 
-- Status: Accepted, partially superseded by ADR-0020 and ADR-0025
+- Status: Accepted, partially superseded by ADR-0020 and ADR-0025; Consequences'
+  every-commit gate clause amended by ADR-0136
 - Date: 2026-07-19
+- **Amended: 2026-08-11 by
+  [ADR-0136](0136-the-full-gate-is-owed-at-two-anchors-and-between-them-the-fast-gate-suffices.md)
+  (Consequences — its every-commit full gate no longer binds between a branch's
+  two anchors, and the measurement it rests on has expired).** The Consequences
+  clause *"The gate is ~33s locally (27s of it pytest, 5,777 tests), so the full
+  gate stays mandatory on every commit — no test selection, no judgment call, no
+  CI-only divergence"* states its own premise, and the premise no longer holds:
+  measured at `d94637ca` the suite is 15,678 tests collected and the serial run
+  355.64s, against 2.14s for `ruff format`, `ruff check`, `mypy` and
+  `lint-imports` together. `CONTRIBUTING.md` carried the companion rule with the
+  trigger written into it — *"Revisit if `pytest` ever crosses a couple of
+  minutes"* — and ADR-0136's Context records that it has fired. ADR-0136 §1 keeps
+  the full gate mandatory at two anchors on a branch (before the first review
+  invocation, and before the final push preceding `gh pr ready`) and §2 leaves
+  `pytest` to the author's discretion between them, the four static steps staying
+  mandatory throughout. A reader holding only this ADR would run the whole suite
+  before every commit and would read its refusal of "test selection" and of a
+  "judgment call" as reaching the whole branch, which is ADR-0082 §1's test met on
+  its second limb, so the record is owed.
+  **This is an amendment and not a supersession** (ADR-0070 §1): none of §§1–5
+  moves. The local review loop, the triage rule, issues-over-files and
+  dispatcher-assigned ADR numbers all stand exactly as ratified, and ADR-0136
+  depends on several of them — §1's author-owned loop is what its anchors are
+  anchored to, and §5's ratify-after-review sequencing is the rule ADR-0136 itself
+  was ratified under. Nothing in Consequences is rewritten: the clause above stays
+  legible where it was written, beside this note. What ADR-0136 does *not* touch is
+  ADR-0010's remote gate, which still runs the full five steps on every push and
+  every pull request — ADR-0136 §4 depends on that being unchanged, so this ADR's
+  "no CI-only divergence" survives as a statement about what CI runs, and is
+  narrowed only as a statement about what the author runs before each commit.
 - Superseded: 2026-07-20 by ADR-0020 — §1's freshness clause ("refuses unless
   one exists for the exact commit the PR head is on") is replaced by an anchor on
   the reviewed content rather than the commit. The rest of §1 and §§2–5 stand.
