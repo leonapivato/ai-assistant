@@ -1,6 +1,6 @@
 # 138. A dispatched lane hands its review loop to a successor at a counted threshold, and forbids no round
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-12
 - **What this changes and what it does not.** It adds one obligation on one class
   of author: a **dispatched lane** stops holding its own review loop past a
