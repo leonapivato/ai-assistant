@@ -434,9 +434,11 @@ later client can get wrong without touching the CLI.
 ### 4. Amending a grant is two acts, and the surface says which of them landed
 
 > **Normative.** Amending a grant is ADR-0097 §2's two acts — revoke, then grant —
-> in that order, recorded as two records. No operation on any surface performs
-> both, and no surface presents an amendment as atomic or as leaving the source
-> continuously granted.
+> in that order, recorded as two records. **No single `AssistantEngine` method or
+> hub operation performs both**, and none is added that does. A surface offering
+> amendment issues the two ratified operations separately, in that order, and no
+> surface presents an amendment as atomic or as leaving the source continuously
+> granted.
 
 > **Normative.** A surface offering amendment as one user-facing act reports the
 > outcome of **each** act, as one of exactly three: it **landed**, it is **known
@@ -478,6 +480,22 @@ whose entire value is that it says what the user actually decided", and that the
 two-act form is legible at a glance. ADR-0102 §1 refused the compound operation on
 the same ground and added a second: `revoke` cannot be `grant` with an empty
 scope, because ADR-0097 §2 refuses an empty scope at construction. Both stand.
+
+**The prohibition bites on the engine method, not on the client flow, and an
+earlier draft did not say so.** It read "No operation on any surface performs
+both", which architecture review read — fairly — as forbidding the very flow the
+five clauses after it specify: a CLI command that amends is an operation on a
+surface, and it performs both. The corpus refusal was never that wide. ADR-0102 §1
+refuses a compound *call* — its own words are "a compound 'change the scope'
+operation", tested among the folds into `AssistantEngine`'s four methods — and
+`Alternatives considered` below refuses `amend(source, scope)` explicitly as one
+that "revokes and re-grants in **one call**", on the ground that it "would hide the
+intermediate state inside the hub, where the client could not report it". That
+reason is exactly why a client composing the two calls is required rather than
+merely tolerated: composing them client-side is what puts the intermediate state
+where a surface can report it, which is the whole of the second clause. So the
+clause now names the level it binds at, and the flow it protects is stated in the
+same breath.
 
 **What is decided here is the gap between the two acts, which the record shape
 does not reach.** ADR-0097 §2 named the cost — "a moment in which nothing is
