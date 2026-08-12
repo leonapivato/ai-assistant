@@ -267,8 +267,8 @@ cites §4 for it.
 The comment is the artifact, not the report: a report reaches one reader and a
 successor arriving days later reads the PR. `.claude/agents/worker.md` already
 carries this protocol for the case where a lane reports standing findings rather
-than spending another round, and §9 records that its one-line pointer to §1 is a
-follow-on lane's, not this ADR's.
+than spending another round, and `Consequences` → **Follow-on** records that its
+one-line pointer to §1 is a follow-on lane's to write, not this ADR's.
 
 ### 5. Scope, and what the trigger does not do
 
