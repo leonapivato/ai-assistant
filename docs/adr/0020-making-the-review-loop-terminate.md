@@ -1,7 +1,39 @@
 # 20. Making the review loop terminate
 
-- Status: Accepted, §3 amended by ADR-0025 and ADR-0027
+- Status: Accepted, §3 amended by ADR-0025 and ADR-0027; Consequences'
+  advisory-aggregate clause amended by ADR-0138
 - Date: 2026-07-20
+- **Amended: 2026-08-12 by
+  [ADR-0138](0138-a-dispatched-lane-hands-its-loop-to-a-successor-at-a-counted-threshold.md)
+  (Consequences — a dispatched lane may no longer ignore the printed aggregate
+  past a counted threshold; every other reader may).** The Consequences clause
+  *"The aggregate is advisory, so an author can still ignore it — deliberately;
+  the alternative forbids findings worth having"* is over-wide as to one class of
+  author. ADR-0138 §1 requires a **dispatched lane** — an agent working under a
+  coordinator who can brief a successor into its clone (ADR-0015 §2) — to hand its
+  review loop to a successor once a required lens has recorded seven rounds under
+  the lane's current holder, or once the churn ratio first reaches 1.5 during that
+  holder's tenure, whichever comes first. A reader holding only this ADR would read
+  that clause as licensing a dispatched lane to run on past both figures, which is
+  ADR-0082 §1's test met on its second limb, so the record is owed. Its Revisit
+  condition — *"if the printed aggregate is observed being ignored across several
+  changes"* — is what fired: PRs #475, #945 and #959 ran to 71, 58 and 24 rounds
+  with the aggregate printed at every round and acted on at none.
+  **This is an amendment and not a supersession** (ADR-0070 §1): nothing decided in
+  §§1–3 moves, and neither rejected alternative is undone. §2's *"Nothing here
+  blocks"* stays literally true — ADR-0138 §5 makes the aggregate no kind of gate,
+  fails no check on either figure, and changes neither `scripts/codex-review.sh`
+  nor `scripts/ship.sh`. The refusal of *"a hard round cap or diff-size threshold"*
+  stands on its own stated ground, that it *"would have cost #90 its most valuable
+  finding"*: a handoff forbids no round, because the successor runs round eight on
+  the same branch, so #90 loses none. The refusal of *"a stop-rule the author
+  applies to themselves"* stands on its ground too, that it asks for *"exactly the
+  self-diagnosis that failed twice"*: ADR-0138's trigger asks for arithmetic this
+  ADR's own §2 already prints, not for a judgement about whether a round's findings
+  are rework. An author with no coordinator to hand to is outside ADR-0138 §5's
+  scope entirely and reads this ADR unchanged. Nothing in Consequences is
+  rewritten: the clause above stays where it was written, and this note records
+  what narrowed it.
 - Amended: 2026-07-20 by ADR-0025 — §3's content anchor now pins the *terminal
   verdict* of a review conversation rather than the sole output of a one-shot
   `codex exec`. The acceptance rule (recorded base and tree both match the PR's

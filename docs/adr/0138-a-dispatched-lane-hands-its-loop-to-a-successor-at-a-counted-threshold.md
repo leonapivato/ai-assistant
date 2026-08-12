@@ -340,18 +340,19 @@ is where it is answered.
   ADR-0020 — a qualifier on its `Status` line, which is a plain `Accepted, §3
   amended by ADR-0025 and ADR-0027` with no leading `Partially superseded by`
   token and so takes one (ADR-0082 §2), and an appended dated note. **No ratified
-  text of ADR-0020 is rewritten** either way (ADR-0070 §1).
+  text of ADR-0020 is rewritten** (ADR-0070 §1): the clause stays where it was
+  written, and the note records what narrowed it.
 
-  **This change does not write that record, and the divergence is stated rather
-  than glossed.** ADR-0136 §7 landed the equivalent pair atomically, on the ground
+  **The pair lands here, in this change.** ADR-0136 §7 is the precedent and it is
+  on point: it landed the equivalent record on ADR-0015 atomically, on the ground
   that "a merged ADR-0136 sitting beside an unrecorded ADR-0015 is the window
-  ADR-0082 exists to close", and its lane's fence was the two files it needed
-  (PR #987). This lane's fence is one file, which is ADR-0089 §8's situation —
-  "an edit was owed and this ADR did not write it … because this lane's fence is
-  one file" — and it is filed as **#998**. The preferred resolution is the atomic
-  one: widen this lane's fence by `docs/adr/0020-making-the-review-loop-terminate.md`
-  and land the pair before this merges, at the cost of one review round, `docs/adr/**`
-  being an ADR-0027 §3 floor path. #998 is the fallback, not the plan.
+  ADR-0082 exists to close". The same window is the reason here. An earlier draft
+  deferred the record to an issue (**#998**) on ADR-0089 §8's precedent for a
+  one-file fence, and adversarial review blocked that on round 2 — correctly:
+  ADR-0089 §8 deferred a `docs/adr/template.md` edit, not an ADR-0082 §1 record on
+  an earlier ADR, and an open issue is not the record §1 owes. The lane's fence was
+  widened by the one file (coordinator ruling, 2026-08-12, PR #999), and #998 is
+  closed by this change rather than outliving it.
 - **ADR-0015 — nothing owed.** §2's one-clone dispatch and the dispatcher role are
   relied on as ratified and relied on *more* than before; §5's scope clause is the
   reliance. §1's required-lens rule and §5's contract-ADR sequencing are untouched.
@@ -449,8 +450,8 @@ is where it is answered.
 
 **Follow-on.** The one-line `.claude/agents/worker.md` pointer to §1 is batch
 #986's lane 1b and is briefed after this merges; nothing here implements itself
-(ADR-0015 §5). **#998** carries the ADR-0020 record §7 names, if it does not ride
-with this PR.
+(ADR-0015 §5). The ADR-0020 record §7 names rides with this change and closes
+**#998**, so nothing about this decision is left outstanding at merge.
 
 **Revisit if** the churn arm fires on a converging lane again — one more #988 and
 §6's recommendation should be ruled on rather than recorded, since two false
