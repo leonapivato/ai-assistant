@@ -315,10 +315,12 @@ behind the hub's API.
    `ATTESTED` band must not be readable as the user's own word or as our
    inference, and must not be offered our revision time as the source's. Whether
    `Provenance` grows fields for that is a `core` decision made with the producer
-   in hand (ADR-0073 §4, §10). The exit test's second half rests on a surface
-   nothing offers yet: `ActionPolicy` governs *actions*, not sources, so "you may
-   read my calendar" has nowhere to be recorded, and the grant model is its own
-   decision (#629), now scheduled as leg 11. *Exit: the assistant knows something true about
+   in hand (ADR-0073 §4, §10). The exit test's second half rested on a surface
+   nothing offered when this leg was scoped: `ActionPolicy` governs *actions*,
+   not sources, so "you may read my calendar" had nowhere to be recorded, and the
+   grant model was its own decision (#629). ADR-0097 took it and ADR-0102 gave it
+   four engine operations, so what leg 11 still holds is the management surface
+   over them (item 11). *Exit: the assistant knows something true about
    the user's day it was never told, from a source the user granted.*
 7. **Memory at volume.** Decided and built (ADR-0110 through ADR-0116; the
    batch record is #729). Consolidation is a chunked scheduler job resuming
@@ -543,19 +545,42 @@ the cheapest of those comes first.
     other proposal it gates waits patiently to be read.
     *Exit: the assistant tells the user something they did not ask for and were
     glad to be told, and the user can tune what reaches them.*
-11. **Sensor breadth, and the grant model.** More read-only sources — and the
-    thing that should have governed the first one. **#629** records the gap
-    exactly: a reader may be enabled with no grant at all, so VISION.md's
-    "granted, scoped, and revocable" is unmet by construction, and ADR-0093 §7
-    already rules that configuration is not a grant and no surface may present it
-    as one. `ActionPolicy` governs *actions*, not sources, so "you may read my
-    calendar" still has nowhere to be recorded. Leg 6 named this precondition and
-    could not close it against one source; breadth is what makes leaving it open
-    indefensible, which is why the two are one leg rather than two. ADR-0094 §10
-    expects this decision and #441's release ladder to be one decision rather
-    than two.
+11. **Sensor breadth, and the grant surface.** More read-only sources — and the
+    management surface over the model that now governs them. **The model #629
+    asks for is decided and running**, which is what this entry has been
+    corrected to say: ADR-0097 makes a grant a recorded user act on one source
+    instance, the store append-only and revocation prospective, and mints the
+    `SourceGrants`/`SourceGrantStore` pair; ADR-0102 puts four operations on the
+    engine — `grantable_sources`, `grant`, `revoke`, `recent_grants` — and rules
+    that the record *is* the audit rather than adding a log beside it; ADR-0133
+    adds `NOTIFY` as a third use, so a producer's read is granted apart from a
+    facet's and an ingest's. The gate is the caller's at all three paths, held by
+    construction, and it was driven through a live hub rather than only a suite:
+    grant, ingestion, folding and prospective revocation on the calendar (#886,
+    #919), and a producer inert until `notify` was granted (#978). ADR-0093 §7's
+    "configuration is not consent" stands unbroken — ADR-0097 §8 forbids minting
+    a grant from a `Settings` value, an upgrade or a first run.
+
+    **What is left is the surface, and breadth.** ADR-0133 §7 holds the first for
+    this leg by name: how sources are presented, how a grant is amended (today
+    only by revoking and granting again), and what a user is shown about the
+    grants they hold — together with the per-read audit record #629 asked for
+    alongside the grant, which ADR-0097 §12 defers until something needs to know
+    about a read that produced no belief. ADR-0094 §10 still expects that
+    decision and #441's release ladder to be one decision rather than two.
+    Breadth is where the leg starts: **email first**, ruled 2026-08-12 (#1009).
+    ADR-0093 §7 set its no-registry clause's revisit at the third source, which
+    is roughly where it said the grant question would stop being deferrable — so
+    the two come due together, which is why they are one leg rather than two.
     *Exit: the user can see every source the assistant reads, grant and revoke
     each one, and a revoked source stops reaching the model.*
+
+    **The exit's last clause already holds and was QA'd** (ADR-0097 §6, #886):
+    revoking stops the next read and unwrites nothing it already produced. What
+    keeps the test open is the first clause — `sources`, `grant`, `revoke` and
+    `grants` are a door the user can already use, but there is one source to see
+    through it, and what a standing grant looks like and how it is amended are
+    ADR-0133 §7's open questions rather than answered ones.
 12. **Actuators, in bulk.** MCP-shaped tool breadth, behind the decisions it
     forces: ranking among capable tools (#241 — a second capable tool stalls the
     step by design, ADR-0037 §1), parameter-schema enforcement (ADR-0029 §7),
@@ -676,7 +701,7 @@ ledger rather than into this document.
 | VISION promise | What closes the gap |
 | --- | --- |
 | Understood — a persistent user model | Legs 1–3 (the bands, capture, the observer) |
-| In Control — inspect, correct, restrict, delete | Leg 1 (inspection surface over ADR-0007's contract, where per-belief *delete* first met one); the whole-installation delete ADR-0004 §6 grants got its first surface in leg 9 (ADR-0126, `ai-assistant-purge`); *restrict* waits on leg 11's grant model (#629); `export` still has no interface (ADR-0073 §10, #692) |
+| In Control — inspect, correct, restrict, delete | Leg 1 (inspection surface over ADR-0007's contract, where per-belief *delete* first met one); the whole-installation delete ADR-0004 §6 grants got its first surface in leg 9 (ADR-0126, `ai-assistant-purge`); *restrict* has its model and its first door — ADR-0097/0102/0133's grants, enforced on the facet, ingest and notify paths — and waits on leg 11 only for the management surface ADR-0133 §7 holds (#629); `export` still has no interface (ADR-0073 §10, #692) |
 | More Capable Over Time | Explicit correction: ADR-0009/0022; legs 3–4 and 7 extend it to observation; leg 8 is what measures whether it is working, and the arc gate before leg 11 is what acts on the answer |
 | Context determines usefulness | Leg 6 feeds facets ADR-0008 anticipated; device context waits on #920, filed once leg 9's hop landed |
 | Supported — acts across tools | Leg 12 (actuators, in bulk); deliberately last |
