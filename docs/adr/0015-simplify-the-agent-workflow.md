@@ -1,7 +1,6 @@
 # 15. Simplify the agent workflow: local review, clone per agent, issues over files
 
-- Status: Accepted, partially superseded by ADR-0020 and ADR-0025; Consequences'
-  every-commit gate clause amended by ADR-0136
+- Status: Accepted, partially superseded by ADR-0020 and ADR-0025; Consequences' every-commit gate clause amended by ADR-0136
 - Date: 2026-07-19
 - **Amended: 2026-08-11 by
   [ADR-0136](0136-the-full-gate-is-owed-at-two-anchors-and-between-them-the-fast-gate-suffices.md)
