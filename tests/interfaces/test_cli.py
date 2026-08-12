@@ -2659,6 +2659,69 @@ def test_a_pasted_question_hint_names_the_question_it_was_printed_for(
     ]
 
 
+def test_a_question_hint_is_withheld_where_showing_it_would_change_what_it_says(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Quoting settles where an argument ends, not whether it survives being shown.
+
+    ``_safe`` **replaces** a character a terminal must not be handed, so an id carrying
+    a newline renders as ``q�1`` — inside perfectly correct shell quotes, naming a
+    question that does not exist. That is the failure quoting was added to prevent,
+    arriving one step later and looking like a working instruction rather than a
+    mistake, which is why ``_render_notification_acts`` has always withheld the line and
+    why these two now do (#1013).
+
+    The question still renders and both recovery steps keep their numbers: what is
+    withheld is the copyable command, and the replacement says so rather than leaving a
+    gap the reader has to notice.
+    """
+    _wire(
+        monkeypatch,
+        _QuestionEngine(
+            waiting=(_question("q\n1"),),
+            stranded=(_question("q\n2", state=QuestionState.INTERRUPTED),),
+        ),
+    )
+
+    assert CliRunner().invoke(cli.app, ["questions"]).exit_code == 0
+
+    rendered = _flowed(output.getvalue())
+    assert "the user works from Lisbon" in rendered, "the question itself still renders"
+    assert "2. Check" in rendered, "the second recovery step keeps its number"
+    assert rendered.count("cannot show") == 2, "one per withheld hint, not one for the page"
+    assert "assistant answer " + shlex.quote("q�1") not in rendered
+    assert "assistant forget-question " + shlex.quote("q�2") not in rendered
+
+
+def test_the_follow_up_hint_is_withheld_where_the_successors_id_cannot_be_shown(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The re-deferral line still names the successor; only its command goes (#1013).
+
+    Naming it is ADR-0078 §9's requirement and does not depend on the id being
+    copyable — a user who cannot paste the command still needs to know their answer
+    raised a question. So the two renderings part company here: the name stays and the
+    offer goes, which is the same split the quoting case makes for the opposite reason.
+    """
+    _wire(
+        monkeypatch,
+        _QuestionEngine(
+            answer=AnswerOutcome(
+                kind=AnswerKind.REDEFERRED,
+                question_id="q-1",
+                successor=SuccessorLink(id="q\n2", state=QuestionState.OPEN),
+            )
+        ),
+    )
+
+    assert CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"]).exit_code == 0
+
+    rendered = _flowed(output.getvalue())
+    assert "Here is the follow-up" in rendered, "the successor is still named"
+    assert "cannot show" in rendered
+    assert "assistant answer " + shlex.quote("q�2") not in rendered
+
+
 @pytest.mark.parametrize(
     ("state", "expected"),
     [
@@ -3189,6 +3252,41 @@ def test_a_pasted_revoke_hint_withdraws_the_source_it_was_printed_for(
     prompt = _flowed(output.getvalue()[already:])
     assert "It is already granted" in prompt
     assert _pasted(prompt, "assistant revoke", "'.") == ["assistant", "revoke", "my calendar"]
+
+
+def test_a_revoke_hint_is_withheld_where_the_source_name_cannot_be_shown(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A declared name a terminal cannot show costs the hint, not the grant (#1013).
+
+    ADR-0102 §4 admits any declared identity equal to its own ``strip()`` that validates
+    as an ``Identifier``, so ``my\\ncalendar`` is enumerated and grantable — and ``_safe``
+    then renders it ``my�calendar``, which is a *different* source. The act still
+    happens and is still confirmed; what goes is the line offering to undo it.
+    """
+    engine = FakeAssistantEngine()
+    engine.hold_source("my\ncalendar", location="/srv/calendar.ics")
+    _wire(monkeypatch, engine)
+
+    granted = CliRunner().invoke(
+        cli.app, ["grant", "my\ncalendar", "--scope", "facet"], input="y\n"
+    )
+    assert granted.exit_code == 0
+    assert [record.source for record in engine.grants_recorded] == ["my\ncalendar"], (
+        "the grant is recorded byte-exact; only the printed hint is affected"
+    )
+    confirmation = _flowed(output.getvalue())
+    assert "Granted." in confirmation
+    assert "cannot show" in confirmation
+    assert "assistant revoke " + shlex.quote("my�calendar") not in confirmation
+
+    already = len(output.getvalue())
+    again = CliRunner().invoke(cli.app, ["grant", "my\ncalendar", "--scope", "facet"], input="n\n")
+    assert again.exit_code == 0
+    prompt = _flowed(output.getvalue()[already:])
+    assert "It is already granted" in prompt
+    assert "cannot show" in prompt
+    assert "assistant revoke " + shlex.quote("my�calendar") not in prompt
 
 
 def test_every_scope_the_enum_offers_is_accepted_and_rendered_in_words(
