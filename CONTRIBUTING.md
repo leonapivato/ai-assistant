@@ -324,10 +324,18 @@ something. It is written down once here so a lane does not re-derive it:
    it is the ratifying act the PR exists to perform, and without it nothing may
    implement against the ADR at all (ADR-0015 §5). And a finding that does arrive
    on that round is not stranded by the flip having happened: **return the ADR to
-   `Proposed` and re-enter at step 1.** ADR-0070 §1's no-rewrite rule protects
-   *ratified* decision text, and an ADR returned to `Proposed` is not that — so
-   the correction stays an in-place edit rather than becoming a dated note
-   appended to a document one commit old. What the return does **not** buy is a
+   `Proposed` and re-enter at step 1.** This is a **pre-merge** move and only
+   that. Every step here runs on the open PR, so an `Accepted` flip sitting on the
+   branch has landed nowhere and binds no reader; restoring `Proposed` is then
+   ADR-0070 §1's *third* permitted in-place header edit — "correcting a `Status`
+   line to match what actually landed" — which is the clause ADR-0127 §3 invokes
+   for exactly this restoration, and the route ADR-0127 and ADR-0133 each took on
+   their own PRs. After the merge the route is gone and a change to the decision
+   is a new ADR that supersedes it (ADR-0070 §1), which is the whole reason the
+   flip waits for step 2's green set. ADR-0070 §1's no-rewrite rule protects
+   *ratified* decision text, and an ADR returned to `Proposed` before merge is not
+   that — so the correction stays an in-place edit rather than becoming a dated
+   note appended to a document one commit old. What the return does **not** buy is a
    shortcut back to step 3: §1 is explicit that its permitted edit forms "bound
    the append-only *form* of an edit, not the review a decision needs. A
    substantive contract ADR is still reviewed while `Proposed` and ratified only
