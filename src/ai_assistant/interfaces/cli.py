@@ -737,7 +737,7 @@ def _quiet_window(spec: str) -> QuietWindow:
     return QuietWindow.between(time.fromisoformat(start.strip()), time.fromisoformat(end.strip()))
 
 
-def _present_quiet_windows(value: list[str]) -> list[str]:
+def _present_quiet_windows(value: list[str] | None) -> list[str] | None:
     """Reject an unparseable ``--quiet-window`` during Typer's parameter parsing.
 
     :func:`_page_argument`'s shape and its reason exactly: every refusal
@@ -754,7 +754,10 @@ def _present_quiet_windows(value: list[str]) -> list[str]:
     parser and the check, so the two can never disagree about what is admissible.
 
     Args:
-        value: The windows as the user repeated them.
+        value: The windows as the user repeated them, or ``None`` when the flag was
+            not given at all — which Typer supplies for an optional repeatable
+            option and which is **not** the same as the empty set
+            (``--no-quiet-windows`` is how that is said).
 
     Returns:
         The value, unchanged.
@@ -762,7 +765,7 @@ def _present_quiet_windows(value: list[str]) -> list[str]:
     Raises:
         BadParameter: If any window will not parse.
     """
-    for spec in value:
+    for spec in value or ():
         try:
             _quiet_window(spec)
         except ValueError as exc:

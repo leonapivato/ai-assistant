@@ -8,6 +8,7 @@ the production, model-backed engine, so no network or key is needed.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from inspect import unwrap
 from io import StringIO
@@ -34,6 +35,7 @@ from ai_assistant.core.types import (
     Belief,
     BeliefBand,
     BeliefSummary,
+    ClassReach,
     Confirmation,
     ContinuationToken,
     CostBasis,
@@ -44,12 +46,18 @@ from ai_assistant.core.types import (
     FeedbackEvent,
     FeedbackKind,
     GrantScope,
+    HeldNotification,
     Idempotency,
     IngestSummary,
     LearnDecision,
     LearnOutcome,
     MemoryKind,
     MemorySource,
+    NotificationCandidate,
+    NotificationCondition,
+    NotificationDispositionKind,
+    NotificationPreferences,
+    NotificationReach,
     ObservationReport,
     ObservedProposal,
     PlanStep,
@@ -57,6 +65,7 @@ from ai_assistant.core.types import (
     QuestionState,
     QueuedQuestion,
     QueueOutcome,
+    QuietWindow,
     Retirement,
     Reversibility,
     RiskLevel,
@@ -82,6 +91,8 @@ from ai_assistant.orchestration import (
     StepExecutor,
     StepRunner,
 )
+from ai_assistant.orchestration.upcoming import NOTIFICATION_CLASS
+from ai_assistant.readers.calendar import CALENDAR_READER_NAME
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAssistantEngine,
@@ -2845,7 +2856,7 @@ def test_forget_question_reports_an_id_naming_nothing_with_a_nonzero_exit(
     result = CliRunner().invoke(cli.app, ["forget-question", "q-1"])
 
     assert result.exit_code == 1
-    assert "Nothing to forget" in output.getvalue()
+    assert "Nothing to forget" in _flowed(output.getvalue())
 
 
 # --- the disposition is the gate's verdict, not the outcome (#531) ----------
@@ -3326,6 +3337,12 @@ def _id_invocations(value: str) -> tuple[tuple[str, list[str]], ...]:
         ("forget-conversation", ["forget-conversation", value, "--yes"]),
         ("observe", ["observe", value]),
         ("ask --conversation", ["ask", "hello", "--conversation", value, "--yes"]),
+        ("dismiss", ["dismiss", value]),
+        ("forget-notification", ["forget-notification", value]),
+        # `tune --class` is the second id-shaped parameter spelled without an `_id`
+        # suffix, so the walk below cannot see it and this list is where it is held
+        # — the residual that walk's own docstring names.
+        ("tune --class", ["tune", "--class", value, "--reach", "interrupt"]),
     )
 
 
@@ -3455,8 +3472,826 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
     assert carried == {
         "answer:question_id": True,
         "ask:conversation": True,
+        "dismiss:notification_id": True,
         "forget:belief_id": True,
         "forget-conversation:conversation_id": True,
+        "forget-notification:notification_id": True,
         "forget-question:question_id": True,
         "observe:conversation_id": True,
     }
+
+
+# --- the notification surface (ADR-0130 §6, §7, §9) -------------------------
+# The five operations §9 ratifies, and the door #979 found missing: every clause
+# below was implemented and conformance-tested on the contract, and none of it
+# was reachable, so the tuning act §6 requires of the user could not be performed
+# and — every class defaulting to `hold` — nothing could ever interrupt.
+
+
+def _flowed(rendered: str) -> str:
+    """Rich wraps at the fixture's console width, so an assertion reads the flowed text.
+
+    A command line printed as a hint is exactly the sort of string that straddles a
+    wrap, and a test matching only what fits on one line pins the console width
+    rather than the message.
+    """
+    return " ".join(rendered.split())
+
+
+def _candidate(**overrides: object) -> NotificationCandidate:
+    """A producer's proposal, with the fields a surface renders already set."""
+    fields: dict[str, object] = {
+        "candidate_key": "key-1",
+        "producer": "calendar-upcoming",
+        "notification_class": "upcoming_event",
+        "summary": "Standup starts in ten minutes",
+        "noticed_at": AT,
+        "confidence": 0.9,
+        "sensitivity": DataTier.PERSONAL,
+    }
+    return NotificationCandidate(**(fields | overrides))  # type: ignore[arg-type]
+
+
+def _held(**overrides: object) -> HeldNotification:
+    """A record held because its class is not set to interrupt — #979's own case.
+
+    ``reconsider_at`` stays ``None`` and that is the point of the example rather
+    than a detail of it: reach is not a condition time resolves, so this record
+    cannot free itself and the user's act is the only thing that moves it.
+    """
+    fields: dict[str, object] = {
+        "id": "ntf-1",
+        "candidate": _candidate(),
+        "kind": NotificationDispositionKind.HOLD,
+        "reason": NotificationCondition.REACH_INTERRUPT,
+        "failed": (NotificationCondition.REACH_INTERRUPT,),
+        "ruled_at": AT,
+        "admitted_at": AT,
+        "retention": timedelta(days=7),
+    }
+    return HeldNotification(**(fields | overrides))  # type: ignore[arg-type]
+
+
+def test_a_held_notification_renders_what_it_says_and_what_it_belongs_to(
+    output: StringIO,
+) -> None:
+    """ADR-0130 §7: the explicit enumeration is the only way a held record reaches a user.
+
+    So it has to carry everything the act needs: the words the producer wrote, the
+    class ``assistant tune`` takes, and the id the two disposing verbs take. A
+    listing missing the class is the one #978 drove around with a throwaway wire
+    driver, because there was nothing on screen to type.
+    """
+    cli._render_notifications((_held(),), limit=50, offset=0)
+
+    rendered = _flowed(output.getvalue())
+    assert "ntf-1" in rendered
+    assert "Standup starts in ten minutes" in rendered
+    assert "upcoming_event" in rendered
+    assert "calendar-upcoming" in rendered
+
+
+def test_a_hold_is_explained_by_its_whole_failed_set_and_not_by_its_reason_alone(
+    output: StringIO,
+) -> None:
+    """ADR-0130 §5: ``reason`` is the failed set's *first* member, not its only one.
+
+    A record held behind a quiet window whose budget is also spent has two answers
+    to "why did you not tell me?", and both are things the user would have to
+    change. Rendering the first alone is a true answer arranged into a misleading
+    one — the same failure §6 names when it makes the setting-change rule read the
+    whole set rather than the recorded first reason.
+    """
+    cli._render_notifications(
+        (
+            _held(
+                reason=NotificationCondition.QUIET_WINDOW,
+                failed=(NotificationCondition.QUIET_WINDOW, NotificationCondition.BUDGET),
+                reconsider_at=AT + timedelta(hours=2),
+            ),
+        ),
+        limit=50,
+        offset=0,
+    )
+
+    rendered = _flowed(output.getvalue())
+    assert "quiet hours" in rendered
+    assert "budget" in rendered
+
+
+def test_an_expiry_is_rendered_as_the_instant_the_engine_recorded_never_as_a_verdict(
+    output: StringIO,
+) -> None:
+    """Golden rule 3: this surface reads no clock, so it cannot say "expired".
+
+    ``assistant questions`` renders an expiring question the same way and for the
+    same reason — every time it shows is one the engine recorded, never one this
+    process observed. A record whose expiry has long passed is still listed (§7:
+    expiry ends a notification and deletes nothing) and still shows that instant.
+
+    The assertion is that the *instant* appears, not that a word does: a renderer
+    that read ``datetime.now`` to add "(expired)" would satisfy any "the listing
+    mentions expiry" check and breach the rule outright.
+    """
+    long_past = AT - timedelta(days=400)
+    cli._render_notifications(
+        (
+            _held(
+                candidate=_candidate(
+                    noticed_at=long_past - timedelta(hours=1), expires_at=long_past
+                )
+            ),
+        ),
+        limit=50,
+        offset=0,
+    )
+
+    rendered = _flowed(output.getvalue())
+    assert cli._when(long_past) in rendered
+
+
+def test_a_candidate_with_no_expiry_says_why_that_makes_it_unurgent(output: StringIO) -> None:
+    """ADR-0130 §5: declaring an expiry **is** the escalation test.
+
+    A candidate that commits to no moment fails ``PERISHABLE``, which is why it is
+    held rather than dropped and why no setting can make it due. Rendering the
+    absence as a blank would leave the user tuning a class that was never going to
+    interrupt whatever they set.
+    """
+    cli._render_notifications((_held(candidate=_candidate(expires_at=None)),), limit=50, offset=0)
+
+    assert "never" in _flowed(output.getvalue())
+
+
+def test_a_record_held_behind_its_reach_is_offered_the_raise_that_frees_it(
+    output: StringIO,
+) -> None:
+    """ADR-0130 §6: the two acts a surface rendering one should offer, in one step.
+
+    Which direction to offer is read off the failed set: this record is held by the
+    user's own reach setting, so raising that class is the act that changes its
+    outcome. Offering ``--reach off`` here would be a correct-looking suggestion
+    that does the opposite of what the person reading it wants.
+    """
+    cli._render_notifications((_held(),), limit=50, offset=0)
+
+    rendered = _flowed(output.getvalue())
+    assert "assistant dismiss ntf-1" in rendered
+    assert "assistant tune --class upcoming_event --reach interrupt" in rendered
+
+
+def test_a_record_that_is_already_allowed_through_is_offered_the_lowering_act(
+    output: StringIO,
+) -> None:
+    """§6 names *lowering* as the second act, and an ``INTERRUPT`` is where it applies.
+
+    Nothing about this record's reach is holding it back, so "raise the class" would
+    suggest a change with no effect; what a person reading an interruption may want
+    is to stop that class reaching them.
+    """
+    cli._render_notifications(
+        (
+            _held(
+                kind=NotificationDispositionKind.INTERRUPT,
+                reason=NotificationCondition.BUDGET,
+                failed=(),
+            ),
+        ),
+        limit=50,
+        offset=0,
+    )
+
+    rendered = _flowed(output.getvalue())
+    assert "assistant tune --class upcoming_event --reach off" in rendered
+    assert "--reach interrupt" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("name", "overrides"),
+    [
+        (
+            "dropped",
+            {
+                "kind": NotificationDispositionKind.DROP,
+                "reason": NotificationCondition.REACH_OFF,
+                "failed": (),
+                "dropped_at": AT,
+            },
+        ),
+        ("dismissed", {"dismissed_at": AT}),
+    ],
+)
+def test_a_record_that_can_no_longer_act_is_offered_no_act(
+    name: str, overrides: dict[str, object], output: StringIO
+) -> None:
+    """A surface may not offer a verb the engine will decline (ADR-0130 §7).
+
+    Both states are still *enumerated* — a dismissal is not a deletion and a DROP
+    leaves the record readable — so the row is rendered either way. What is withheld
+    is the invitation: ``dismiss`` on either returns ``False``, and printing it
+    beside the record would advertise an act that does nothing.
+    """
+    cli._render_notifications((_held(**overrides),), limit=50, offset=0)
+
+    rendered = _flowed(output.getvalue())
+    assert "ntf-1" in rendered, name
+    assert "assistant dismiss" not in rendered, name
+    assert "assistant tune --class" not in rendered, name
+
+
+def test_an_empty_listing_names_the_chain_that_arms_unprompted_contact(
+    output: StringIO,
+) -> None:
+    """#979 and #981 meet here: nothing held is the state an unarmed hub sits in.
+
+    Out of the box every class holds, so an empty page is both the ordinary first-day
+    state and what an operator sees when one link of the arming chain is missing —
+    and it is the one moment they are certainly looking. Saying only "nothing here"
+    would leave them where #978 was, reading ADR bodies to find the acts.
+    """
+    cli._render_notifications((), limit=50, offset=0)
+
+    rendered = _flowed(output.getvalue())
+    assert "assistant tune --help" in rendered
+    assert "assistant notification-settings" in rendered
+
+
+def test_notifications_relays_the_page_and_renders_what_the_engine_returned(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0042 §6: the adapter relays the paging arguments and renders the result.
+
+    It re-filters nothing and re-orders nothing — membership and order are the
+    store's contract (ADR-0130 §7, oldest first).
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["notifications", "--limit", "5", "--offset", "2"])
+
+    assert result.exit_code == 0
+    assert [call for call in engine.calls if call[0] == "notifications"] == [
+        ("notifications", {"limit": 5, "offset": 2})
+    ]
+
+
+def test_a_full_page_of_notifications_offers_the_next_offset(output: StringIO) -> None:
+    """No total is available, so "is there more" is answered by asking (ADR-0130 §7).
+
+    The belief, conversation and question listings all answer it this way; a count
+    here would be a number nothing on the contract can supply.
+    """
+    cli._render_notifications((_held(),), limit=1, offset=0)
+
+    assert "--offset 1" in _flowed(output.getvalue())
+
+
+@pytest.mark.parametrize("bad", ["-1", "9223372036854775808"])
+def test_a_notification_page_outside_the_stores_range_is_a_usage_error(
+    bad: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0042 §7: the engine refuses these with ``ValueError``, not ``AssistantError``.
+
+    So without a parse-time refusal it escapes the command's error boundary as a
+    traceback with no controlled exit code — the treatment ``beliefs`` and
+    ``conversations`` already give the same argument.
+    """
+    _wire(monkeypatch, FakeAssistantEngine())
+
+    for flag in ("--limit", "--offset"):
+        result = CliRunner().invoke(cli.app, ["notifications", flag, bad])
+        assert result.exit_code == 2, flag
+        assert result.exception is None or isinstance(result.exception, SystemExit), flag
+
+
+def test_dismiss_relays_the_id_and_says_the_record_survives(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0130 §9: a dismissal is not a deletion, and the wording is load-bearing.
+
+    What ends is actionability — which frees a slot under the cap at once and stops
+    the key suppressing duplicates, so the same fact recurring afterwards is a new
+    candidate. A message reading "destroyed" would misstate all three.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+    held = asyncio.run(_admit(engine))
+
+    # Padded, so the strip `_present_id` performs is exercised on the way through:
+    # the engine is asked about the id the user meant, not about the spaces.
+    result = CliRunner().invoke(cli.app, ["dismiss", f"  {held}  "])
+
+    assert result.exit_code == 0
+    rendered = _flowed(output.getvalue())
+    assert "Dismissed" in rendered
+    assert "still there" in rendered
+    assert "forget-notification" in rendered
+
+
+def test_dismiss_reports_nothing_outstanding_without_guessing_which_state(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``False`` covers four states and the façade returns one boolean (ADR-0130 §9).
+
+    No such id, and one already dismissed, expired or dropped, are indistinguishable
+    from here. Naming one of them would be a diagnosis this process cannot make —
+    ``_render_no_such_source`` declines the same guess for the same reason.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["dismiss", "ntf-missing"])
+
+    assert result.exit_code == 1
+    assert "Nothing to dismiss" in _flowed(output.getvalue())
+    assert [call for call in engine.calls if call[0] == "dismiss_notification"] == [
+        ("dismiss_notification", {"notification_id": "ntf-missing"})
+    ]
+
+
+def test_forget_notification_says_the_same_thing_can_be_raised_again(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0130 §8: the record is what stops a cursorless producer re-raising a fact.
+
+    Destroying it therefore has a consequence a user should be told about rather
+    than discover — re-noticing is the *normal* case, and the record is the whole of
+    what makes it safe.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+    held = asyncio.run(_admit(engine))
+
+    result = CliRunner().invoke(cli.app, ["forget-notification", held])
+
+    assert result.exit_code == 0
+    rendered = _flowed(output.getvalue())
+    assert "Forgotten" in rendered
+    assert "no export" in rendered
+
+
+def test_forget_notification_reports_an_id_that_names_nothing(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shape ``forget_question`` takes, exit code included (ADR-0130 §9)."""
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["forget-notification", "ntf-missing"])
+
+    assert result.exit_code == 1
+    assert "Nothing to forget" in _flowed(output.getvalue())
+
+
+def test_neither_disposing_verb_asks_a_question_before_it_acts(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """ADR-0130 §9 puts the delete "in the shape ``forget_question`` takes", and that
+    shape has no ceremony.
+
+    ADR-0073 §5 requires show-then-confirm before destroying a **belief**; a
+    notification is not one, any more than a question is — nothing is being
+    un-believed, and ``assistant notifications`` has already rendered the record
+    together with both verbs. A dismissal destroys nothing at all.
+
+    Pinned by driving both with **no** ``--yes`` and no interactive input: a command
+    that grew a prompt would hang or abort here instead of acting.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    def _never(*_args: object, **_kwargs: object) -> bool:
+        message = "a disposing verb on this surface asks nothing"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(typer, "confirm", _never)
+    for argv in (["dismiss", "ntf-1"], ["forget-notification", "ntf-1"]):
+        result = CliRunner().invoke(cli.app, argv)
+        assert result.exception is None or isinstance(result.exception, SystemExit), argv
+        assert result.exit_code == 1, argv
+
+
+def test_notification_settings_renders_all_three_from_an_empty_store(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0130 §6: every standing setting has a shipped default, so an empty store
+    is a working policy.
+
+    All three are therefore shown whether or not the user has touched any — and the
+    **default reach is named beside the classes**, because it governs every class no
+    row mentions, which on a fresh installation is all of them. Rendering only what
+    was set would present "I have decided nothing" as "nothing governs this", which
+    is precisely the misreading that leaves someone waiting for an interruption that
+    was never going to come.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["notification-settings"])
+
+    assert result.exit_code == 0
+    rendered = _flowed(output.getvalue())
+    assert "hold" in rendered
+    assert "every other class" in rendered
+    assert "none" in rendered  # no quiet windows
+    assert "3 per 24 hours" in rendered
+
+
+async def _admit(engine: FakeAssistantEngine) -> str:
+    """Put one held record in the fake's store and return the id it minted."""
+    ruling = await engine.notification_store.admit(_candidate(), policy=engine.notification_policy)
+    assert ruling.notification_id is not None
+    engine.calls.clear()
+    return ruling.notification_id
+
+
+def _seeded() -> NotificationPreferences:
+    """Standing settings with something on every axis, so a write can lose one."""
+    return NotificationPreferences(
+        reaches=(
+            ClassReach(notification_class="upcoming_event", reach=NotificationReach.HOLD),
+            ClassReach(notification_class="inbox", reach=NotificationReach.OFF),
+        ),
+        quiet_windows=(QuietWindow(start=22 * 60, end=7 * 60),),
+        interruption_budget=5,
+        budget_window=timedelta(hours=12),
+    )
+
+
+def _written(engine: FakeAssistantEngine) -> NotificationPreferences:
+    """The value the last ``set_notification_preferences`` carried."""
+    sent = [call for call in engine.calls if call[0] == "set_notification_preferences"]
+    assert len(sent) == 1, sent
+    value = sent[0][1]["preferences"]
+    assert isinstance(value, NotificationPreferences)
+    return value
+
+
+async def _seed(engine: FakeAssistantEngine) -> None:
+    """Put :func:`_seeded` into the fake's store."""
+    await engine.notification_store.set_preferences(_seeded())
+
+
+def test_tune_reads_adjusts_and_writes_back_leaving_every_other_axis_alone(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0130 §6, and the flow ``set_notification_preferences`` prescribes in terms.
+
+    The surface writes the **whole** value, so a command that sent only what the user
+    named would silently discard their quiet hours and their budget the first time
+    they raised a class. That is not a hypothetical: raising a class is the one act
+    §6 requires of every user, so it is the act most likely to be performed by
+    someone who has already tuned the other two.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+    asyncio.run(_seed(engine))
+
+    result = CliRunner().invoke(
+        cli.app, ["tune", "--class", "upcoming_event", "--reach", "interrupt"]
+    )
+
+    assert result.exit_code == 0
+    written = _written(engine)
+    assert written.reach_for("upcoming_event") is NotificationReach.INTERRUPT
+    assert written.reach_for("inbox") is NotificationReach.OFF
+    assert written.quiet_windows == _seeded().quiet_windows
+    assert written.interruption_budget == 5
+    assert written.budget_window == timedelta(hours=12)
+
+
+def test_tune_replaces_a_classs_row_rather_than_adding_a_second(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``NotificationPreferences`` refuses two rows for one class, and this is why.
+
+    A second row would make the setting's meaning depend on which the reader looks at
+    first — so an ``off`` might silently not hold. Substituting rather than appending
+    keeps that refusal unreachable from here rather than merely unlikely; the type
+    would raise, but at a point where the user has already been told what would
+    happen.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+    asyncio.run(_seed(engine))
+
+    result = CliRunner().invoke(cli.app, ["tune", "--class", "inbox", "--reach", "hold"])
+
+    assert result.exit_code == 0
+    written = _written(engine)
+    assert [row.notification_class for row in written.reaches].count("inbox") == 1
+    assert written.reach_for("inbox") is NotificationReach.HOLD
+
+
+def test_repeating_quiet_window_replaces_the_whole_set(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one legible reading of a repeated flag against a whole-value write.
+
+    "Add to what is there" and "these are now the windows" cannot both be true of one
+    flag, and the second is what a user typing two windows means. It also gives the
+    only way to *shrink* the set to more than one member.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+    asyncio.run(_seed(engine))
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["tune", "--quiet-window", "23:00-06:30", "--quiet-window", "13:00-14:00"],
+    )
+
+    assert result.exit_code == 0
+    assert _written(engine).quiet_windows == (
+        QuietWindow(start=23 * 60, end=6 * 60 + 30),
+        QuietWindow(start=13 * 60, end=14 * 60),
+    )
+
+
+def test_no_quiet_windows_removes_every_one(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repeated flag cannot express the empty set, so the empty case needs a name."""
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+    asyncio.run(_seed(engine))
+
+    result = CliRunner().invoke(cli.app, ["tune", "--no-quiet-windows"])
+
+    assert result.exit_code == 0
+    assert _written(engine).quiet_windows == ()
+
+
+def test_a_quiet_window_may_cross_midnight_and_is_read_as_local(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0130 §6: the overnight case is expressed directly, not as two rows.
+
+    And the endpoints carry no zone and cannot: quiet windows are read in
+    ``Settings.timezone`` and no second timezone source is introduced, which the
+    parse refuses to smuggle one past.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    assert CliRunner().invoke(cli.app, ["tune", "--quiet-window", "22:00-07:00"]).exit_code == 0
+    assert _written(engine).quiet_windows == (QuietWindow(start=22 * 60, end=7 * 60),)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    ["22:00", "22:00-", "not-a-time", "22:00-22:00", "22:00+01:00-07:00", "25:00-07:00"],
+)
+def test_an_unparseable_quiet_window_is_a_usage_error_before_any_client_is_built(
+    spec: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0042 §7: every refusal on this path is a ``ValueError``, which the command's
+    ``except (AssistantError, TransportError)`` boundary does not catch.
+
+    Six shapes, and each is a different refusal rather than a variation on one: no
+    separator, an empty endpoint, unparseable text, the equal endpoints
+    ``QuietWindow`` declines as unreadable, a zoned endpoint ADR-0130 §6 forbids, and
+    an hour outside the day. All become exit code 2, and none reaches a hub.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["tune", "--quiet-window", spec])
+
+    assert result.exit_code == 2
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert not [call for call in engine.calls if call[0] == "set_notification_preferences"]
+
+
+def test_tune_sets_the_interruption_budget_and_accepts_zero(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0130 §6: zero is a legible "never interrupt" rather than a defect.
+
+    So the floor is 0 and not 1 — the opposite of the grant record's ``--limit``,
+    whose floor **is** 1. A parse-time refusal copied from that argument would take
+    away the one way to say "not right now, at all" without turning every class off
+    one by one.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    assert CliRunner().invoke(cli.app, ["tune", "--budget", "0"]).exit_code == 0
+    assert _written(engine).interruption_budget == 0
+    assert "never interrupt" in _flowed(output.getvalue())
+
+
+@pytest.mark.parametrize("bad", ["-1", "9223372036854775808"])
+def test_a_budget_the_type_would_refuse_is_a_usage_error(
+    bad: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``NotificationPreferences`` bounds it in ``[0, 2**63)`` with a ``ValidationError``.
+
+    Which is not an :class:`AssistantError`, so it would escape the command's error
+    boundary — ``_page_argument``'s case exactly, one field over.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["tune", "--budget", bad])
+
+    assert result.exit_code == 2
+    assert not [call for call in engine.calls if call[0] == "set_notification_preferences"]
+
+
+@pytest.mark.parametrize(
+    ("name", "argv"),
+    [
+        ("class without reach", ["tune", "--class", "upcoming_event"]),
+        ("reach without class", ["tune", "--reach", "interrupt"]),
+        (
+            "both quiet-window forms",
+            ["tune", "--quiet-window", "22:00-07:00", "--no-quiet-windows"],
+        ),
+        ("nothing at all", ["tune"]),
+    ],
+)
+def test_tune_refuses_a_request_it_cannot_read_and_sends_nothing(
+    name: str, argv: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three refusals, each decidable from what was typed, and none costing a round trip.
+
+    ``--class`` and ``--reach`` are one setting: either alone names half of "this
+    class may reach me this far", and supplying the other half would be this adapter
+    deciding what the user permitted (ADR-0097 §8's posture, ADR-0042 §6's boundary).
+    The two quiet-window forms contradict each other, and a precedence rule is a
+    decision the user cannot see in what they typed.
+
+    **An invocation naming nothing is refused rather than treated as a no-op**, and
+    that one is not cosmetic: ADR-0130 §6 has the write stamp a reconsideration
+    instant onto every held record the change could reach, so "write back exactly
+    what I read" would re-arm the store with nothing to show for it.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, argv)
+
+    assert result.exit_code == 2, name
+    assert result.exception is None or isinstance(result.exception, SystemExit), name
+    assert not [call for call in engine.calls if call[0] == "set_notification_preferences"], name
+
+
+def test_tune_renders_the_settings_the_store_handed_back(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What is shown is what is in force, not what was sent (ADR-0130 §6).
+
+    The two can differ — the surface has no version token and no conflict detection,
+    so a racing writer's value is what a later read returns — and echoing the request
+    would tell the user their edit stuck when it may not have.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    async def _returning_something_else(
+        _self: object, _preferences: NotificationPreferences
+    ) -> NotificationPreferences:
+        return NotificationPreferences(
+            reaches=(ClassReach(notification_class="somebody_elses", reach=NotificationReach.OFF),)
+        )
+
+    monkeypatch.setattr(
+        type(engine), "set_notification_preferences", _returning_something_else, raising=True
+    )
+
+    result = CliRunner().invoke(
+        cli.app, ["tune", "--class", "upcoming_event", "--reach", "interrupt"]
+    )
+
+    assert result.exit_code == 0
+    rendered = _flowed(output.getvalue())
+    assert "somebody_elses" in rendered
+    assert "upcoming_event" not in rendered
+
+
+def test_raising_a_class_says_it_reaches_what_is_already_held(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0130 §6: a setting change re-rules what is already held, and that is the
+    whole reason the act works.
+
+    Reach is not a condition time resolves, so a record held at ``hold`` carries no
+    due instant and would otherwise sit there until it expired — "the user raises the
+    class, agrees to be interrupted, and is not". A surface silent about it invites
+    exactly that misreading.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    CliRunner().invoke(cli.app, ["tune", "--class", "upcoming_event", "--reach", "interrupt"])
+
+    assert "already holding" in _flowed(output.getvalue())
+
+
+def test_turning_a_class_off_says_what_it_reaches_and_what_it_does_not(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0130 §6: ``off`` runs the other way and stops at held records.
+
+    It reaches **every** actionable held record of the class, whatever it was held
+    for — "never tell me this" is about what is waiting as well as what comes next —
+    and it reaches nothing already ruled ``INTERRUPT``, because whether contact
+    handed to a channel can be recalled is the delivery seam's question and not this
+    ADR's. Both halves are said, because a message giving only the first would read
+    as a promise to unsend.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    CliRunner().invoke(cli.app, ["tune", "--class", "upcoming_event", "--reach", "off"])
+
+    rendered = _flowed(output.getvalue())
+    assert "already holding" in rendered
+    assert "recalled" in rendered
+
+
+def test_every_condition_a_ruling_can_name_has_a_phrase() -> None:
+    """A ruling explained with a missing clause answers "why not?" with silence.
+
+    Totality is held by ``assert_never`` at type-check time; this pins that the
+    phrases are also *distinct*, which the type check cannot see — two conditions
+    sharing wording would render a ruling that names the wrong one.
+    """
+    phrases = [cli._condition_phrase(condition) for condition in NotificationCondition]
+
+    assert len(set(phrases)) == len(list(NotificationCondition))
+    assert all(phrase.strip() for phrase in phrases)
+
+
+def test_every_reach_level_has_a_distinct_phrase() -> None:
+    """The same obligation on the settings rendering (ADR-0130 §6)."""
+    phrases = [cli._reach_phrase(reach) for reach in NotificationReach]
+
+    assert len(set(phrases)) == len(list(NotificationReach))
+
+
+def test_the_arming_acts_in_tunes_help_name_what_the_code_actually_calls_them() -> None:
+    """#981: PR #977's body recorded ``assistant grant --source calendar``, which does
+    not exist, and the next operator copies the record.
+
+    So the record is pinned against the code it describes rather than kept by hand:
+    the source name comes from the reader's own declared identity, the class from the
+    producer that declares it, and the environment variable from ``Settings``' prefix
+    and field name. A rename that leaves the help behind fails here instead of in
+    somebody's terminal a year later.
+
+    The imports reach into two subsystems, which a **test** may do and this module
+    may not (golden rule 3, and ``lint-imports`` enforces it on ``interfaces``) —
+    which is exactly why the help carries literals and this carries the check.
+    """
+    result = CliRunner().invoke(cli.app, ["tune", "--help"])
+    assert result.exit_code == 0
+    rendered = " ".join(result.output.split())
+
+    prefix = Settings.model_config["env_prefix"]
+    assert f"{prefix}calendar_upcoming_interval".upper() in rendered
+    assert f"assistant grant {CALENDAR_READER_NAME} --scope notify" in rendered
+    assert f"assistant tune --class {NOTIFICATION_CLASS} --reach interrupt" in rendered
+    # The wrong form is named as wrong, so a reader copying from here cannot take it.
+    assert "there is no --source option" in rendered
+    # And the duration is given in the form the parser accepts; '15' is refused.
+    assert "'PT15M'" in rendered
+
+
+def test_the_notification_commands_reach_exactly_the_five_operations_adr_0130_ratifies(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """ADR-0130 §9 enumerates five, and this surface adds no sixth.
+
+    Driving all five and reading back the engine calls is what makes "thin" checkable
+    rather than asserted: a command that grew a second call — a listing that fetched
+    the settings to decide a hint, say — would be this adapter composing behaviour
+    the contract did not put on one operation, and it would show up here as an extra
+    name.
+
+    ``next_notification`` is deliberately absent: it is the *device's* door
+    (ADR-0131), polled by a spoke, and putting it on a person's command line would
+    let a human consume the delivery a device is owed.
+    """
+    engine = FakeAssistantEngine()
+    _wire(monkeypatch, engine)
+
+    for argv in (
+        ["notifications"],
+        ["dismiss", "ntf-1"],
+        ["forget-notification", "ntf-1"],
+        ["notification-settings"],
+        ["tune", "--budget", "2"],
+    ):
+        CliRunner().invoke(cli.app, argv)
+
+    assert [name for name, _ in engine.calls] == [
+        "notifications",
+        "dismiss_notification",
+        "forget_notification",
+        "notification_preferences",
+        # `tune` is the read-adjust-write the contract prescribes, so it is two.
+        "notification_preferences",
+        "set_notification_preferences",
+    ]
