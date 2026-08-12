@@ -1,6 +1,6 @@
 # 136. The full gate is owed at two anchors on a branch, and between them the fast gate suffices
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-11
 - **What this changes and what it does not.** It moves one sentence of ADR-0015's
   `Consequences` — the every-commit full gate — and nothing else. CI's gate is
