@@ -44,7 +44,7 @@ subsystem, `orchestration` included, may import ``ai_assistant.readers``.
 operator sets ``ASSISTANT_CALENDAR_UPCOMING_INTERVAL`` (unset, this stage never
 runs), the user grants the source ``notify``, and the user raises
 ``upcoming_event``'s reach from ``hold``. All three are written out, with the
-forms that exist and the ISO-8601 trap in the first, in
+command forms that exist and the duration forms the first one accepts, in
 :mod:`ai_assistant.readers.calendar`'s module docstring — beside the source's own
 deployment recipe, because that is where an operator connecting a calendar is
 already reading and this project has no operator-facing docs tree to hold it

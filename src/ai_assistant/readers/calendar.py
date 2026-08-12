@@ -113,11 +113,14 @@ interruption. In the order they can be performed:
        ASSISTANT_CALENDAR_UPCOMING_INTERVAL=PT5M     # unset: the producer is off
        ASSISTANT_CALENDAR_UPCOMING_LEAD=PT30M        # the default
 
-   Every duration in ``Settings`` is an **ISO-8601 duration**: ``PT5M`` is five
-   minutes and ``PT30S`` thirty seconds. A bare ``15`` is refused at load with a
-   parse error naming a ``"day"`` identifier nobody typed — pydantic's message,
-   the same for every duration setting here, and the one thing about this chain
-   most likely to stop an operator (#981).
+   Every duration setting takes **either an ISO-8601 duration or a full
+   ``HH:MM:SS`` clock string** — ``PT5M``, ``PT30S`` and ``00:05:00`` all load;
+   ``5:00`` does not, since the hours field is not optional. What is **not**
+   accepted from the environment is a bare number of seconds: ``15`` and ``300``
+   are both refused at load with a parse error naming a ``"day"`` identifier
+   nobody typed. That is pydantic's message and the same for every duration
+   setting here, and it is the one thing about this chain most likely to stop an
+   operator (#981).
 
    The lead must be strictly greater than the interval — a shorter one leaves
    occurrences that no tick ever sees — and no larger than
