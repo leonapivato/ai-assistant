@@ -226,9 +226,14 @@ shows up in a test.
 
 > **Normative.** `AssistantEngine` gains **one** method,
 > `async standing_grants(self) -> tuple[SourceGrant, ...]`, returning **every**
-> grant that is live at the instant the call is answered, whatever the hub holds.
-> It takes no argument. It declares `GrantError` and `OversizedValueError` and no
-> other failure.
+> grant that is live at the moment the response is computed, whatever the hub
+> holds. It takes no argument. It declares `GrantError` and `OversizedValueError`
+> and no other failure.
+
+> **Normative.** The result is computed from **one** read of the store, so it is a
+> snapshot: no source appears in it twice, none is missing because another was
+> being written, and the set is internally consistent. It is not a claim that
+> stays true after it is computed, and no client may present it as one.
 
 > **Normative.** `standing_grants` returns the **complete** live set or it fails.
 > It is not paged, admits no `limit` and no `offset`, and no implementation may
@@ -243,6 +248,26 @@ shows up in a test.
 > no meaning. No client may read a precedence, a recency claim or a liveness claim
 > off a record's position, and an implementation's chosen order is a display
 > convention rather than a contract clause.
+
+**The snapshot clause borrows ADR-0102 §3's wording rather than inventing one, and
+an earlier draft overclaimed.** That section defines `GrantableSource.live` as
+"the grant covering that source at the moment the response was computed", and the
+same bound is the honest one here: a `grant` recorded after the read and before
+the client renders is outside the set, as it is outside every other read in this
+system. What the clause does buy is the property a *set* can have and a scalar
+cannot — that the answer is one read rather than a walk that another write can
+interleave with, so a source cannot be doubled or dropped by the timing of a
+concurrent record.
+
+**A second writer is not the case this guards, and testing for one would test a
+state the system refuses.** ADR-0083 ruling 4 gives the hub exclusive ownership of
+every database under the data directory, one process per directory behind an
+instance lock, and ADR-0102 §12 already recorded that the grant store "lives inside
+the directory the instance lock already covers, is opened by the same process". So
+the interleaving this clause forecloses is the one that is actually reachable —
+another coroutine on the hub's own event loop, `record`ing between two reads of a
+multi-read implementation — and it is foreclosed by requiring one read rather than
+by a lock.
 
 **Not paged, and the refusal is the safe direction.** A paged answer to "what do
 I authorise" can omit an authorisation while reading as complete, which is the
@@ -669,8 +694,8 @@ read as the Protocol *change* it is):
    exhibit**: `standing_grants` returns a grant whose source no held reader
    declares; it returns nothing for a revoked grant; it returns one record per
    granted source and never two; and it is unaffected by a source being present
-   in or absent from `grantable_sources`. The ordering case below the list is a
-   required clause rather than one of these.
+   in or absent from `grantable_sources`. The ordering case and the oversized
+   refusal below the list are required clauses rather than two of these.
 3. **The `SourceGrantStore` conformance suite gains the store-side clauses**: the
    new member returns every live grant and no revoked one; it returns a detached
    snapshot, written as a mutation of the returned record's `__dict__` leaving the
@@ -718,12 +743,16 @@ marked in three places rather than gathered here:
   restating a live obligation of another, which ADR-0082 §1 makes a thing to
   classify rather than a thing to do.
 
-Two obligations are marked below because they are the ones a lane can satisfy the
-letter of while leaving the clause untested, which is ADR-0097 §10's stated
+Three obligations are marked below because they are the ones a lane can satisfy
+the letter of while leaving the clause untested, which is ADR-0097 §10's stated
 criterion for lifting a case out of prose — "a test that cannot reach the code a
-clause forbids is worse than no test". Everything else stays a checklist, which is
-the shape ADR-0097 §10 and ADR-0102 §12 each used for the same section under this
-same regime.
+clause forbids is worse than no test". Each fails that way for its own reason: the
+backdated revocation because every other case is about membership rather than
+ordering, the oversized refusal because it bites only at a size no ordinary case
+constructs, and the corrupt store because `record` makes the state unreachable
+from a suite at all. Everything else stays a checklist, which is the shape
+ADR-0097 §10 and ADR-0102 §12 each used for the same section under this same
+regime.
 
 > **Normative.** The contract lane restates `AssistantEngine`'s docstring method
 > count as the count the Protocol then carries, rather than incrementing the
@@ -748,6 +777,21 @@ touching that docstring may not perpetuate it.
 reason ADR-0102 §12 gave for its own: an implementation computing liveness by
 walking records ordered by `decided_at` passes every other clause in the list,
 because every other clause is about membership rather than about ordering.
+
+> **Normative.** The `AssistantEngine` conformance suite pins §2's refusal over
+> completion with a case that configures a frame small enough for the live set to
+> exceed it: `standing_grants` raises `OversizedValueError` and returns no set,
+> and the case is written against the **wire** implementation as well.
+
+**Because refusing rather than truncating is the whole of what distinguishes this
+operation, and it is the one property no other case reaches.** An implementation
+that returned the store's result unmeasured — skipping the size check the engine
+applies to its other operations — passes every membership, revocation and
+corrupt-store case in the list, and fails only at a size an ordinary test never
+constructs. ADR-0085 §8's bound and §2's clause both already forbid it; what is
+missing without this case is any test that would notice. The generic oversized
+coverage on the surface exercises a different method, and a bound enforced
+per-method is a bound tested per-method.
 
 > **Normative.** The canonical fakes are scriptable into the **two live grants for
 > one source** state their own writers refuse, so §2's refusal is reachable from a
