@@ -469,34 +469,42 @@ introduces rather than one it inherits, and an earlier draft of this paragraph
 claimed otherwise, on the strength of a limit that binds a cheaper walk.
 
 > **Normative.** A `parameters_schema` nested deeper than a fixed bound is
-> refused at construction. A parameter mapping nested deeper than that same
-> bound refuses the request before evaluation, as a reason of its own and never
-> as a `ParameterViolation`. The bound is one constant in `core`, not
+> refused at construction. The bound is one constant in `core`, not
 > configurable and not per-tool, and it is fixed low enough that evaluating a
-> schema and an instance both at the bound completes well inside the
-> interpreter's recursion limit.
+> schema at the bound against an instance of comparable depth completes well
+> inside the interpreter's recursion limit.
 
-**Its own reason, because it is not a violation of anything the schema says.**
-Arguments over the bound may satisfy their schema perfectly; what refuses them is
-this system declining to evaluate that deep. There is no failing keyword and no
-schema-owned value, so a `ParameterViolation` describing it could only be built
-by inventing both — and a fabricated keyword in the one type whose fields are
-the enforcement of §8 is exactly the wrong place to start making things up. It
-also composes with nothing: when the bound fires, no evaluation happened, so
-there are no other violations to report alongside it and none is guessed at.
-The refusal lands on the same path — the selection stage requests no ruling and
-returns `INVALID_PARAMETERS` (§4) — because from the pipeline's seat the answer
-is the same: these arguments do not go to this tool.
+**The bound is on the schema, which is the document this decision newly
+evaluates, and it stops there on purpose.** A schema is checked once, at
+construction, where a refusal already has a channel and a meaning; measuring its
+depth is one iterative walk added to walks §6 already performs. That takes the
+half of the exposure this ADR creates — a document from an untrusted server,
+evaluated on every call — and removes it before the evaluator is ever built.
 
-**Checked before recursing, not caught after.** §7's clause makes an evaluation
-that raises a refusal, and a `RecursionError` is an `Exception`, so the *outcome*
-would be safe either way. It is a bad thing to depend on: unwinding at the
-recursion limit leaves the handler almost no stack to run in, so the guarantee
-is weakest exactly where it is being relied on. Two depth measurements — one on
-a document at construction, one on a mapping before evaluation — are cheap,
-iterative, and mean the evaluator is only ever entered on inputs already known
-to fit. §13 requires the bound to be established by a test at the bound and at
-the bound plus one, rather than asserted.
+**The instance half is a pre-existing hazard at a shared ingress, and this ADR
+names it rather than half-fixing it.** A deep parameter mapping is a problem
+*before* validation reaches it: `_deep_freeze` in
+`src/ai_assistant/core/types.py` recurses over the whole structure with no depth
+limit, and it runs for every `FrozenJsonMapping` — `PlanStep.parameters` and
+`ToolResult.output` as much as `ActionRequest.parameters`. So a payload deep
+enough to matter exhausts the stack on the way in, today, with no schema
+evaluation anywhere in the picture. A depth check placed after that freeze
+cannot fire before the thing it is guarding against has already happened, and
+placing one *at* the freeze is a change to a shared `core` ingress affecting
+every holder of the type — a different decision, with its own cross-subsystem
+blast radius, and not one to make inside a schema-enforcement ADR. It is filed
+(§14).
+
+**What that leaves, stated exactly.** Evaluation spends more stack per level
+than freezing does, so there is a window: an instance deep enough that the freeze
+survives and the evaluation does not. In that window the outcome is still a
+refusal, because §7's clause makes an evaluation that raises a refusal and a
+`RecursionError` is an `Exception` — but it is the weakest guarantee in this
+document, since unwinding at the recursion limit leaves the handler almost no
+stack to run in. It is not a fail-open: no call proceeds. It is an ugly refusal
+rather than a clean one, in a window the filed ingress bound closes properly for
+every holder of the type at once. Saying so is better than a second bound that
+runs after the recursion it exists to prevent.
 
 **One check on the type, inherited by every stage that rebuilds one.** The
 repository already revalidates a definition wherever it could have been tampered
@@ -624,9 +632,7 @@ safe to render.
 
 > **Normative.** Where evaluating a schema finds several violations, all are
 > reported, in a deterministic order, and any truncation is stated in what is
-> reported rather than performed silently. A refusal that prevents evaluation
-> from happening at all — §6's depth bound — reports itself alone, and this
-> clause does not require violations to be reported beside it.
+> reported rather than performed silently.
 
 One violation at a time turns a correction into a sequence of round trips, each
 paying for a re-plan; a silently truncated list makes a caller believe it has
@@ -862,14 +868,11 @@ is owed is the evidence for the claims above that a signature does not show.
   only checks the outcome would pass against an implementation that reaches it by
   exhausting the stack. A same-document `$ref` and an `$anchor` are accepted, so
   the model is shown to be usable and not merely restrictive.
-- **The depth bound, measured rather than asserted** (§6): a schema at the bound
-  constructs and a schema one level deeper is refused; a parameter mapping one
-  level deeper than the bound refuses the request with the evaluator never
-  entered, **and no `ParameterViolation` produced** — the assertion that the
-  refusal did not smuggle in a fabricated keyword. And the bound is shown to be
-  *safe* rather than merely enforced — a schema and an instance both at the bound
-  evaluate to completion — because a bound nobody checked against the recursion
-  limit is a number, not a guarantee.
+- **The schema depth bound, measured rather than asserted** (§6): a schema at the
+  bound constructs and a schema one level deeper is refused. And the bound is
+  shown to be *safe* rather than merely enforced — a schema at the bound
+  evaluated against an instance of comparable depth completes — because a bound
+  nobody checked against the recursion limit is a number, not a guarantee.
 - **No I/O, as a test that cannot pass by accident** (§7): separately from the
   construction refusal, an evaluator built by the `core` seam is shown to raise
   rather than retrieve when handed an external reference, so the belt is tested
@@ -920,13 +923,18 @@ so deleting them changes a recorded outcome and the tests that pin it.
 - **Validating a tool's `output` against a declared schema.** `ToolDefinition`
   declares no output schema and ADR-0029 §3 makes `output` a `FrozenJsonValue`
   the tool is trusted for. Adding one is an ADR-0016 field change.
+- **A depth bound at the frozen-JSON ingress** (§6). `_deep_freeze` recurses
+  without one, for every holder of a `FrozenJsonMapping`, which is a pre-existing
+  hazard this ADR neither creates nor fixes and which is the proper place to
+  bound instance depth. Changing it reaches `PlanStep`, `ToolResult` and every
+  other holder, so it is its own decision. Filed.
 - **A cost budget for schema evaluation** (§6). The cycle refusal removes the
-  divergent case and the depth bound removes the deep one; an acyclic schema
-  within the bound that is merely *expensive* — a combinatorial `anyOf`, a
-  pathological `pattern`, an enormous `enum` — is bounded by nothing here. A
-  budget for that needs a unit and a constant neither of which is calibratable
-  before tool breadth exists, and guessing one would put a knob in `core` that
-  §2's clause (b) forbids. Filed.
+  divergent case and the schema depth bound removes the deep-document one; an
+  acyclic schema within the bound that is merely *expensive* — a combinatorial
+  `anyOf`, a pathological `pattern`, an enormous `enum` — is bounded by nothing
+  here. A budget for that needs a unit and a constant neither of which is
+  calibratable before tool breadth exists, and guessing one would put a knob in
+  `core` that §2's clause (b) forbids. Filed.
 - **A schema migration mechanism** (§6). If the supported dialect ever changes,
   stored decisions carrying the old one are a migration question this ADR does
   not answer and does not need to, since the corpus it lands on has none.
