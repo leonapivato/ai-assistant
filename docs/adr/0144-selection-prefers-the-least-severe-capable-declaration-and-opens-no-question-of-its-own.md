@@ -607,11 +607,32 @@ Each is scoped out with its reason, because scoping something out is a decision.
   the user *stated*, which is a decision on the record, not one inferred from
   behaviour.
 - **Asking the model to choose.** Rejected outright. It is non-deterministic, so
-  §1's ordering guarantee would not hold; it is unauditable, since no recorded
-  fact explains why one tool ran; and it collapses `planning → tool selection`
-  from the far side — the model already produced the plan, and letting it also
-  pick the tool makes ADR-0016's declared metadata decorative, which is the
-  hard-coding ADR-0016 §1 exists to remove.
+  §1's ordering guarantee would not hold; **no explanation of the choice exists
+  to be recorded**, so recording more would not make it checkable and re-running
+  it would not reproduce it; and it collapses `planning → tool selection` from
+  the far side — the model already produced the plan, and letting it also pick
+  the tool makes ADR-0016's declared metadata decorative, which is the
+  hard-coding ADR-0016 §1 exists to remove. The middle clause is stated as
+  *reproducibility* rather than as "unauditable" because this ADR's own rule does
+  not record its inputs either (below), and the difference between the two cases
+  is exactly that a rule stated in full can be recomputed from them while a
+  model's answer cannot.
+- **Recording the selection's provenance.** What reaches the audit trail is the
+  outcome, not the choice: `PermissionDecision` embeds the *selected*
+  `ToolDefinition` by value (ADR-0021 §1), and neither the candidate set nor the
+  §4 preference snapshot is recorded — the registry being in-memory and rebuilt
+  each run (ADR-0016 §6), the candidate set is not recoverable after a restart
+  either. So an auditor can establish what ran and what authorised it, and cannot
+  establish whether the tool that ran was uniquely least or one of several tied
+  candidates the preference picked between. **That gap is real and is narrower
+  than it first reads**: the rule is deterministic and written down, so the
+  selection is reproducible from its inputs by anyone — what is missing is the
+  keeping of the inputs, not the existence of an explanation. Closing it means a
+  field on `PermissionDecision` or a record beside it, which is a `core` change
+  with its own ADR and its own PR (golden rule 5), in a Tier 1 store with
+  retention obligations (ADR-0021 §4). Issue **#1104**, which points at #1101 and
+  #1103 as the decisions that shape it. ADR-0004 §7's reviewability holds for the
+  action; what is unreviewable is the counterfactual.
 - **Standing grants and spend accumulation** (ADR-0021 §6), **per-call data
   reach** (#57) and **enablement** (ADR-0016 §7). Unaffected and still deferred.
 
@@ -702,6 +723,12 @@ implements against this ADR until it has merged (ADR-0015 §5, golden rule 5).
   which axis of the ordering dominates. Agreement about severity gets the same
   guarantee in the dominated case, which is the case that matters, and gets it
   from a contract clause rather than from a call.
+- **The trail records which tool ran, not which tools it beat.** A step whose
+  capability had one candidate and one whose capability had four leave
+  indistinguishable records, so "why this tool" is answerable from the ADR and
+  the inputs but not from the trail alone (#1104). This is a *new* question the
+  trail could not previously be asked, because before this rule a capability with
+  several candidates produced no execution to audit at all.
 - **The ordering reads a subset of the declaration, and a policy may read
   outside it.** Keys 1 through 5 cover `risk_level`, `reversibility`,
   `discloses`, `cost.basis` and `latency`; §2 normatively excludes `reads`,
