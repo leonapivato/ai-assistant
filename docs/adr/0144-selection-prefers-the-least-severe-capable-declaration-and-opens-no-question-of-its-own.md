@@ -184,9 +184,12 @@ throughout.
 > **Normative.** Key 1 is `risk_level`, ascending under `RiskLevel`'s declaration
 > order (ADR-0016 §2). Key 2 is `reversibility`, ascending under
 > `Reversibility`'s declaration order. Key 3 is `discloses`, compared
-> **lexicographically** as a sequence under `DataTier`'s declaration order, so
-> the empty tuple is least and a proper prefix is less than its extension. Key 4
-> is `cost.basis`, ordered `FREE` < `PER_CALL` < `UNKNOWN`.
+> **elementwise as a sequence, under a tier order in which the less sensitive
+> tier is the lesser** — that is, `OPERATIONAL` < `PERSONAL` < `SECRET`, the
+> **reverse** of `DataTier`'s declaration order, which ADR-0016 §3 fixes as
+> most-sensitive-first. The empty tuple is least of all, and a proper prefix is
+> less than its extension. Key 4 is `cost.basis`, ordered
+> `FREE` < `PER_CALL` < `UNKNOWN`.
 
 Key 3 needs its shape stated once because two readings of "narrower disclosure"
 are available and they disagree. `discloses` is sorted most-sensitive-first and
@@ -195,6 +198,20 @@ comparing it elementwise makes the most sensitive tier dominate — `(SECRET,)` 
 worse than `(PERSONAL, OPERATIONAL)` — and makes a shorter tuple win against its
 own extension, so `(PERSONAL,)` beats `(PERSONAL, OPERATIONAL)`. Both readings
 are what a person means by "discloses less".
+
+**The tier order is the reverse of the declaration order, and saying so is not
+pedantry.** Keys 1 and 2 take their severity *from* declaration order, because
+`RiskLevel` and `Reversibility` are declared least-severe-first (ADR-0016 §2).
+`DataTier` is declared the other way round — ADR-0016 §3 chose most-sensitive-first
+deliberately, so that a serialised reach tuple does not "read as though
+sensitivity ran the other way". An earlier draft of this clause said "under
+`DataTier`'s declaration order" by symmetry with keys 1 and 2, and that sentence
+selected the `SECRET`-disclosing candidate over the `PERSONAL`-disclosing one: an
+inverted severity comparison, in the safety direction, written by symmetry with a
+neighbouring clause. It is the same shape as the `RiskLevel.CRITICAL <
+RiskLevel.LOW` trap ADR-0016 §2 disarmed on the type, arriving here through prose
+instead of through `StrEnum`, and it is why §8 requires the implementing lane to
+pin the direction of this key rather than only its shape.
 
 **This is the whole of what ADR-0016 §7's "informed by `permissions`" is
 discharged as, and the discharge is by *agreement* rather than by
@@ -348,17 +365,41 @@ out of a safe stage. That is precisely ADR-0036 §1's *"an injected non-monotone
 predicate produces a non-conforming policy out of a conforming class"*. The
 preference sequence decides nothing of the sort: the rule is fixed above it in
 full, the sequence is consumed at one position the rule defines, and it is
-consulted only after every safety-bearing key has already been applied and found
-the candidates equal.
+consulted only after every preceding key has already been applied and found the
+candidates equal.
 
 **So every value of the knob is safe, which is the exact property ADR-0036 §1
-required of a configuration surface.** A preference sequence orders candidates
-that are equal in `risk_level`, in `reversibility`, in `discloses` and in cost
-basis. Two such candidates are indistinguishable to every conforming policy —
-ADR-0021 §5's monotonicity holds *"everything else held equal"*, and here
-everything else *is* equal — so no ordering of them can make an action more
-dangerous, reach a different permission outcome, or turn a conforming policy
-non-conforming. There is no bad value to supply.
+required of a configuration surface** — and the claim has to be stated at exactly
+the width it holds, because the tempting wider one is false.
+
+> **Normative.** No value of the preference sequence can produce a **less
+> restrictive** permission outcome on any axis ADR-0021 §5 constrains, make a
+> conforming policy non-conforming, or reach a tool without the gate ruling on
+> it. The preference orders only candidates equal under keys 1 through 5, so it
+> moves no axis the contract constrains, and every candidate it can select is
+> still ruled on by `ActionPolicy` against its own declaration.
+
+**What it does not claim is that the tied candidates are indistinguishable to
+every conforming policy, because they need not be.** ADR-0021 §5 constrains a
+policy over `risk_level`, `reversibility` and `discloses`, plus the two floors;
+it does not forbid a policy from reading `reads`, `writes`, `side_effecting` or
+`idempotency`. ADR-0036 §1 declined those clauses for `ThresholdActionPolicy` —
+which therefore reads nothing outside the tied set — but that was an
+implementation's choice, not a contract's prohibition. A conforming policy that
+denied any tool whose `writes` include `SECRET` would rule differently on two
+candidates this ordering ties, and the preference sequence would decide which of
+them it ruled on.
+
+That residual is bounded in the direction that matters, and it is bounded by
+something structural rather than by the knob's good behaviour: **the gate is
+downstream and unconditional.** ADR-0016 §3 makes *"every tool invocation … go
+through `permissions/`"*, with no predicate that exempts one, so whichever
+candidate the preference selects is ruled on against its own declaration before
+anything runs. The preference can change *which* authorised action happens; it
+cannot produce an unauthorised one, and it cannot make a refused one proceed.
+There is no value to supply that reaches past the gate — which is the property
+ADR-0036 §1's test is about, and the one an injected comparator would have taken
+away.
 
 The composition root passing it in is ADR-0036 §1's own precedent, taken
 deliberately: the policy's thresholds *"are the user's configuration and belong
@@ -471,10 +512,13 @@ own argument rather than a leftover: *"No `SkipReason` is true of it"* remains
 true, `PENDING` remains *"already the truth about this step"*, and a tie broken by
 `id` would still be *"choosing between two side-effecting actions on an
 alphabetical accident"*. What changes is what the disposition *means*: the tied
-candidates are now known to be equivalent on every axis the system can reason
-over, so the only outstanding question is which one the *user* prefers — a
-question with a durable answer, where "several tools are capable" was a question
-with no answer at all.
+candidates are now known to be equal under every key this ADR ranks on — every
+axis ADR-0021 §5 constrains a policy over, plus cost basis and latency — so what
+is left is a question the ordering has no further ground to answer and the *user*
+does. That is a question with a durable answer, where "several tools are capable"
+was a question with no answer at all. It is not a claim that the tied candidates
+are identical: §4 records that they may still differ on declared fields no key
+reads, and that a policy reading one of those may rule on them differently.
 
 > **Normative.** `StepDisposition` carries the ids of the tied candidates on an
 > `AMBIGUOUS_CAPABILITY` disposition. This is a field on the frozen dataclass in
@@ -561,7 +605,10 @@ Each is scoped out with its reason, because scoping something out is a decision.
 > deciding in isolation with all other keys held equal; the lexicographic
 > composition, including a case where a later key is decisive and one where an
 > earlier key overrides a later one that disagrees; `discloses` compared as a
-> sequence, with the empty tuple least and a proper prefix beating its extension;
+> sequence, with the empty tuple least, a proper prefix beating its extension,
+> and — the direction, not merely the shape — `(OPERATIONAL,)` beating
+> `(PERSONAL,)` beating `(SECRET,)`, which is the reverse of the order the same
+> tuples are stored in;
 > two `PER_CALL` candidates equal under key 4 whatever their amounts and
 > currencies; an undeclared `latency` losing to every declared one; a preference
 > sequence failing to promote a candidate the severity block ranks lower; a
@@ -633,6 +680,17 @@ implements against this ADR until it has merged (ADR-0015 §5, golden rule 5).
   which axis of the ordering dominates. Agreement about severity gets the same
   guarantee in the dominated case, which is the case that matters, and gets it
   from a contract clause rather than from a call.
+- **The ordering reads a subset of the declaration, and a policy may read
+  outside it.** Keys 1 through 5 cover `risk_level`, `reversibility`,
+  `discloses`, `cost.basis` and `latency`; §2 normatively excludes `reads`,
+  `writes`, `side_effecting`, `idempotency` and the rest on ADR-0036 §1's ground
+  that a key on an axis the contract does not constrain is a key whose direction
+  nothing checks. The accepted cost is that a conforming policy *may* read one of
+  those — `ThresholdActionPolicy` does not — and then two candidates this
+  ordering ties can draw different rulings, with the preference sequence
+  deciding which. The gate still rules on whatever is selected (§4), so the
+  residual is about which authorised action runs, never about whether one is
+  authorised.
 - **The user is asked at most once per step, and never about tools.** The
   question they answer is the permission question, which shows the chosen
   declaration by name and description. The cost is that a user who would have
