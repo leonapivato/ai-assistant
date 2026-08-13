@@ -381,6 +381,13 @@ written to disk by the very consumers this shape exists for.
 > `ModelError` with ADR-0066 §3's disposition. It never submits the well-formed
 > subset.
 
+> **Normative.** `submit` refuses an **empty** item sequence, before contacting
+> any provider, raising `ModelError` with ADR-0066 §3's disposition. A batch of
+> nothing has no outcome the seam can describe: §9 requires `item_count` to be
+> positive, so no valid `BatchHandle` could be returned for one, and letting the
+> provider refuse it instead would breach §2's rule that every refusable check
+> happens on the near side of the acceptance window.
+
 > **Normative.** Every item carries a caller-minted `item_id`, unique within its
 > batch. `submit` refuses a batch containing a duplicate `item_id`, on the same
 > terms and with the same disposition as the clause above. An implementation
@@ -765,7 +772,7 @@ widely than it now holds?
 
 The table below is the audit. Every normative clause of §1–§10 appears in it
 exactly once, and every row names something a reviewer can run. The count is
-28 rows against the 31 marked clauses in this ADR; the remaining three have no
+29 rows against the 32 marked clauses in this ADR; the remaining three have no
 deliverable for that lane to own: two sit below the table and are obligations
 *about* the table and the suite that satisfies it, and §9's lane-shape clause
 binds the dispatching brief rather than the lane the table is addressed to.
@@ -780,6 +787,7 @@ binds the dispatching brief rather than the lane the table is addressed to.
 | §2 (issuer supplied) | `issuer` taken from the composition root and stamped on every handle | Contract cases: the handle carries the configured label unchanged; rotating the credential without changing the label leaves previously-minted handles valid; a test asserts no credential material reaches `issuer` |
 | §2 (issuer compared) | Mismatch detection against the configured value | Contract cases: a handle presented to a **freshly constructed** implementation of equal `issuer` is accepted; one carrying a different `issuer` raises, neither `retryable` nor `routable` |
 | §3 (well-formedness) | Pre-contact validation of every item | Contract cases: an empty history, a history ending on `Role.ASSISTANT`, and a history containing a `Role.TOOL` turn each refuse the whole batch with nothing submitted |
+| §3 (empty batch) | An empty-sequence refusal ahead of the provider call | Contract case: `submit` with no items raises, neither `retryable` nor `routable`, and the recording transport shows no request was sent |
 | §3 (unique ids) | Duplicate-`item_id` refusal | Contract case: a duplicate refuses; a test asserts `item_id`s round-trip unrewritten |
 | §3 (one observation) | A first-line snapshot of the items in `submit` | Contract case: a caller mutates the sequence it passed while `submit` is suspended on the provider call; what was validated, what was transmitted and the handle's `item_count` all describe one version |
 | §4 (one per item) | Outcome assembly keyed by `item_id` | Contract case: a mixed batch returns exactly one outcome per item and none extra |
