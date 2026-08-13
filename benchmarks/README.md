@@ -103,8 +103,10 @@ Under `.runs/<run_id>/`:
   interrupted run leaves usable records. Each line carries the answer, the grading, the
   retrieved record ids, the corpus's own evidence pointers, and the ADR-0119 retrieval
   telemetry for that answer.
-- `cases/<case>/traces.db` — the trace store. Kept; the other databases are removed
-  unless `--keep-stores` is passed.
+- `cases/<case>-<digest>/traces.db` — the trace store. Kept; the other databases are
+  removed unless `--keep-stores` is passed. The directory is the case key with anything
+  a path cannot carry replaced, plus a digest of the whole key — the readable half is
+  for you, the digest is what stops two keys that sanitise alike from sharing a store.
 
 A provider failure on one question is recorded as `ungraded` — keeping the retrieval it
 had already made, ids and telemetry intact — and stepped over rather than allowed to end
