@@ -131,9 +131,12 @@ def test_a_scored_run_is_refused_without_confirmation() -> None:
 
 
 def test_a_fully_eligible_scored_run_is_allowed() -> None:
+    """`max_sessions=0` is stated, not omitted: the default is `None`, which says the
+    selection recorded nothing and is refused."""
     refuse_ineligible_scored_run(
         RunMode.SCORED,
         preregistration_final=True,
+        max_sessions=0,
         embedder=EmbedderKind.ON_DEVICE,
         grader_kind="model",
         injected_seams=(),
@@ -147,6 +150,7 @@ def test_a_scored_run_under_the_hashing_embedder_is_refused() -> None:
         refuse_ineligible_scored_run(
             RunMode.SCORED,
             preregistration_final=True,
+            max_sessions=0,
             embedder=EmbedderKind.HASHING,
             grader_kind="model",
         )
@@ -159,6 +163,7 @@ def test_a_scored_run_with_the_exact_grader_is_refused() -> None:
         refuse_ineligible_scored_run(
             RunMode.SCORED,
             preregistration_final=True,
+            max_sessions=0,
             embedder=EmbedderKind.ON_DEVICE,
             grader_kind="exact",
         )
@@ -287,6 +292,21 @@ def test_a_scored_run_over_shortened_histories_is_refused() -> None:
             RunMode.SCORED,
             preregistration_final=True,
             max_sessions=2,
+            embedder=EmbedderKind.ON_DEVICE,
+            grader_kind="model",
+        )
+
+
+def test_a_scored_run_whose_selection_recorded_nothing_is_refused() -> None:
+    """An unrecorded bound is not a whole history (#1052). The bound now arrives from
+    the plan's own selection, so `None` says the cases reached the gate carrying no
+    account of what was done to them — and refusing that is what stops the truncation
+    from being invisible rather than merely undeclared."""
+    with pytest.raises(ValueError, match="no record of how"):
+        refuse_ineligible_scored_run(
+            RunMode.SCORED,
+            preregistration_final=True,
+            max_sessions=None,
             embedder=EmbedderKind.ON_DEVICE,
             grader_kind="model",
         )

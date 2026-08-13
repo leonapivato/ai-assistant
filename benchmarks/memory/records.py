@@ -193,7 +193,10 @@ class RunManifest(BaseModel):
             about a conversation that did not happen**, which is legitimate for a
             plumbing check and is not a measurement; it is recorded because a record
             set that cannot say which bound produced it can be neither reproduced nor
-            compared.
+            compared. Taken from the run's plan — the selection that did the shortening
+            is what sets it — rather than from what a caller said it was (#1052). A
+            smoke run planned from cases with no selection recorded is the one case
+            where a declaration lands here instead, and a scored run cannot be that.
         answer_route: The ``"provider:model"`` spec answers came from.
         observer_route: The spec episodes were distilled through.
         judge: What graded the answers.

@@ -8,18 +8,80 @@ history is a *different* memory and therefore a different experiment.
 
 They live here rather than in the command line so they can be tested without a
 fetched corpus and without a terminal.
+
+**What the session lever did travels with the cases it did it to.**
+:func:`first_sessions` hands back a :class:`CaseSelection` rather than a bare tuple,
+because the run's gate has to know whether the histories were shortened and asking the
+caller was the defect #1052 records: shortening happens here and the declaration was a
+separate argument to ``execute_run``, so a caller could truncate and declare nothing.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
+
+from benchmarks.memory.cases import BenchCase
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
-    from benchmarks.memory.cases import BenchCase
+__all__ = ["CaseSelection", "first_questions", "first_sessions"]
 
-__all__ = ["first_questions", "first_sessions"]
+
+class CaseSelection(tuple[BenchCase, ...]):
+    """The cases a run will work on, carrying the session bound actually applied.
+
+    **A tuple subclass, because the provenance has to travel where the cases travel.**
+    Every seam downstream takes a ``Sequence[BenchCase]`` and passes it along, so a
+    wrapper type would have to be unwrapped at each one — and the first seam that
+    unwrapped it would drop the fact the gate needs. Being a tuple, this reaches
+    :func:`~benchmarks.memory.run.plan_run` through code that was never told about it,
+    and :class:`~benchmarks.memory.run.RunPlan` records what it says.
+
+    **The bound is derived from what the shortening did, not from what was asked
+    for.** A limit no case ever reached shortened nothing, so it records ``0`` — the
+    histories *are* whole and a manifest saying otherwise would be false in the
+    direction that matters least but false all the same.
+
+    **The trust boundary, stated rather than implied.** Nothing stops a caller
+    constructing one of these around hand-truncated cases and calling it whole. What
+    it removes is the *omission*: the bound is no longer a separate argument that can
+    disagree with the data, and a scored run refuses a plan whose cases carry no
+    selection at all (:func:`~benchmarks.memory.run.refuse_ineligible_scored_run`), so
+    the false manifest has to be constructed deliberately rather than fallen into.
+    """
+
+    #: Set in ``__new__`` and read through the property below. Not a ``__slots__``
+    #: entry: a variable-length tuple is already variable-size, and CPython refuses a
+    #: non-empty ``__slots__`` on such a subtype.
+    _max_sessions: int
+
+    def __new__(cls, cases: Iterable[BenchCase], *, max_sessions: int) -> Self:
+        """Build a selection around ``cases``.
+
+        Args:
+            cases: The cases, as the selection leaves them.
+            max_sessions: The bound their histories were shortened to; ``0`` where
+                they are whole. Keyword-only, so it can never be mistaken for a
+                second positional sequence.
+
+        Returns:
+            The selection.
+
+        Raises:
+            ValueError: If ``max_sessions`` is negative.
+        """
+        if max_sessions < 0:
+            msg = f"a session bound cannot be negative, got {max_sessions}"
+            raise ValueError(msg)
+        selection = super().__new__(cls, cases)
+        selection._max_sessions = max_sessions
+        return selection
+
+    @property
+    def max_sessions(self) -> int:
+        """The bound these histories were shortened to; ``0`` where they are whole."""
+        return self._max_sessions
 
 
 def first_questions(cases: Sequence[BenchCase], limit: int) -> tuple[BenchCase, ...]:
@@ -61,7 +123,7 @@ def first_questions(cases: Sequence[BenchCase], limit: int) -> tuple[BenchCase, 
     return tuple(taken)
 
 
-def first_sessions(cases: Sequence[BenchCase], limit: int) -> tuple[BenchCase, ...]:
+def first_sessions(cases: Sequence[BenchCase], limit: int) -> CaseSelection:
     """Keep each case's first ``limit`` sessions.
 
     **A plumbing lever, never a measurement one.** A shortened history is a different
@@ -80,7 +142,10 @@ def first_sessions(cases: Sequence[BenchCase], limit: int) -> tuple[BenchCase, .
         limit: How many sessions to keep; ``0`` keeps all.
 
     Returns:
-        The cases, shortened.
+        The cases, shortened, in a :class:`CaseSelection` recording the bound that was
+        *applied* rather than the one that was asked for: a ``limit`` no case reached
+        left every history whole, and the selection says ``0``. That is what the run's
+        gate reads, so the difference decides whether a scored run is refused.
 
     Raises:
         ValueError: If ``limit`` is negative.
@@ -89,5 +154,12 @@ def first_sessions(cases: Sequence[BenchCase], limit: int) -> tuple[BenchCase, .
         msg = f"a session limit cannot be negative, got {limit}"
         raise ValueError(msg)
     if not limit:
-        return tuple(cases)
-    return tuple(case.model_copy(update={"sessions": case.sessions[:limit]}) for case in cases)
+        return CaseSelection(cases, max_sessions=0)
+    kept = tuple(case.model_copy(update={"sessions": case.sessions[:limit]}) for case in cases)
+    # Read off the cases themselves rather than assumed from `limit`: a case with fewer
+    # sessions than the limit is returned untouched, and where that is true of every
+    # case the run is over whole histories whatever was asked for.
+    shortened = any(
+        len(short.sessions) < len(case.sessions) for short, case in zip(kept, cases, strict=True)
+    )
+    return CaseSelection(kept, max_sessions=limit if shortened else 0)
