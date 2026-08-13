@@ -26,7 +26,7 @@ from benchmarks.memory.grade import ExactGrader
 from benchmarks.memory.ingest import ingest_case
 from benchmarks.memory.records import QuestionRecord, RunManifest, RunMode, read_jsonl
 from benchmarks.memory.run import case_dir_name, execute_run, plan_run
-from benchmarks.memory.select import first_sessions
+from benchmarks.memory.select import first_questions, first_sessions
 from benchmarks.memory.wiring import build_harness
 
 from ai_assistant.core.config import EmbedderKind, Settings
@@ -588,6 +588,27 @@ async def test_a_scored_run_cannot_truncate_in_selection_and_declare_nothing(
         )
 
     assert not (tmp_path / "runs").exists()
+
+
+async def test_a_scored_run_sees_a_bound_a_question_limit_passed_through(
+    tmp_path: Path,
+) -> None:
+    """The levers compose in either order, and the CLI applies the question one second.
+    A gate that only saw the bound when `first_sessions` was the outermost call would be
+    bypassed by putting the other lever after it."""
+    settings = _settings(tmp_path).model_copy(update={"embedder": EmbedderKind.ON_DEVICE})
+    cases = first_questions(first_sessions((_case(),), 1), 1)
+
+    with pytest.raises(ValueError, match="different memory"):
+        await execute_run(
+            plan_run(LOCOMO, cases, batch_size=BATCH),
+            output_root=tmp_path / "runs",
+            mode=RunMode.SCORED,
+            corpus_digests={},
+            settings=settings,
+            grader_kind="model",
+            preregistration_final=True,
+        )
 
 
 async def test_a_scored_run_is_refused_when_the_plan_records_no_selection(
