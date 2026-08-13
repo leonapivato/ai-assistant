@@ -22,6 +22,20 @@
   decision text is unchanged: the registry stays query-only, ids stay spent on
   first use, `latency` stays advisory and `ToolDefinition` gains no timeout
   field (ADR-0029 §4).
+- Note (2026-08-13): §7's **ranking and selection** deferral — which the
+  2026-07-21 note above still lists as remaining, correctly as at its own date —
+  is discharged by ADR-0144. It fixes the ordering the selection stage applies
+  over the inputs this ADR supplies: `risk_level`, `reversibility`, `discloses`,
+  `cost.basis` and `latency`, in that order, with a composition-root preference
+  sequence breaking what remains and a genuine tie left unselected. §5 is
+  untouched and is what the discharge respects — the registry still does not
+  choose, `find` still returns every candidate ordered by `id`, and ADR-0144 §1
+  does not read that order. ADR-0016's decision text is unchanged. §7's other
+  remaining deferrals — per-call data reach (#57), parameter-schema validation,
+  persistence, enablement, namespacing, transacted cost — are unaffected and
+  remain deferred, though ADR-0144 §7 records that **namespacing** becomes more
+  pressing under a rule that resolves a colliding capability name silently
+  instead of stalling on it.
 
 ## Context
 
