@@ -319,6 +319,12 @@ kinds. §13e's price is one ADR, and this is it.
 > or changes its disposition because a trace could not be written, and no trace
 > is written inside the ruling transaction.
 
+> **Normative.** The trace's `occurred_at` is the **ruling instant**: the single
+> clock reading taken inside ADR-0130 §3's atomic act, the same one §4 subtracts
+> `admitted_at` from. It is never the instant of emission. A crossing that raised
+> before ruling has no ruling instant and stamps the instant the fault was
+> observed.
+
 > **Normative.** A crossing that raised an `Exception` before ruling still emits
 > its trace, carrying its outcome and its fault class and **none** of the metric
 > keys §4 defines. Under ADR-0119 §3's observation rule their absence says the
@@ -363,6 +369,19 @@ above it. And the reconsideration path does not pass through the writer stage at
 all — the engine's maintenance operation drives `NotificationStore.reconsider`
 directly — so a writer-sited emitter would miss every ruling that is not a first
 offer, which is most of the interesting ones.
+
+**`occurred_at` is pinned to the ruling because the emission is deliberately
+later.** The clauses above put the emission after the commit, so an emitter
+reading its clock there would stamp the write rather than the event — which
+`EvaluationTrace.occurred_at` refuses in its own words, "never by the store on
+append, which would measure the write rather than the event". The gap is small
+and it is not harmless: §8's windows are half-open on `occurred_at`, so a ruling
+near a boundary lands inside the window under an emitter that stamps the ruling
+and outside it under one that stamps the emission, and the two report different
+interruption shares from the same stream — the divergence ADR-0120 §1 says these
+clauses exist to prevent. §4 already needs the ruling instant in hand for
+`held_seconds`, so naming it here costs nothing. Adversarial review found it on
+the eighth round.
 
 **Subordination is stated as its own clause because the ruling is transactional
 and the retrieval path is not.** ADR-0119 §5's rule is general, but the specific
@@ -790,6 +809,13 @@ named rather than approximated.
 > "a composition that omits it does not type-check". `app/composition.py` wires
 > it.
 
+> **Normative.** The emitter chooses `REFUSED` against `FAULT` with the refusal
+> tuple `ai_assistant.memory.traces` already holds — the package the store lives
+> in — on ADR-0119 §3's class-not-message rule and that tuple's own
+> fail-towards-`FAULT` default. `fault_class` is `core.types.fault_class_of`,
+> which is total and which this subsystem already imports. No shared classifier
+> is introduced and `core/types.py` gains nothing beyond §2's one member.
+
 > **Normative.** Emission is **not** an obligation of the `NotificationStore`
 > contract. ADR-0130 §9's shared conformance suite gains no case, and no
 > canonical fake is required to emit — the same arrangement `MemoryStore` and
@@ -811,6 +837,23 @@ named rather than approximated.
 > own constants, in the shape `tests/evaluation/test_measures_vocabulary.py`
 > already takes — `evaluation` may import only `core`, so the emitter's keys are
 > duplicated by construction and the test is what keeps the two copies honest.
+
+**The classifier is not missing, and naming which tuple is what was actually
+unsaid.** `fault_class_of` lives in `core/types.py` and `memory/traces.py`
+imports it today, so the emitting subsystem already holds both halves of
+ADR-0119 §3's derivation and no shared constant is wanted. What §3's fault-path
+clause did leave open is *which* refusal reading a new emitter takes, because the
+tuples are per-module by design and their memberships differ — `orchestration`'s
+lists `PermissionDeniedError`, `memory`'s deliberately lists two classes and
+nothing else. The clause above answers it with the tuple in the package the store
+lives in, and states the consequence rather than hiding it: a `NotificationPolicy`
+raising a class `orchestration` reads as a refusal traces here as `FAULT`, which
+is the fail-towards-`FAULT` rule `memory/traces.py` documents — "a fault nobody
+classified never looks quieter than it is". No policy in this tree raises one.
+That two subsystems' tuples can read one class differently at all is a property
+of the merged tree rather than of this decision; it is filed, not settled here.
+Adversarial review found the gap on the eighth round, reasoning from a premise
+about the classifier's location that the tree does not bear out.
 
 **The lane is one subsystem plus its tests, twice, and that is admissible rather
 than a widening.** The emitter is `memory`, the reader is `evaluation`, and
