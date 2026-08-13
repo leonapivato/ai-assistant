@@ -46,11 +46,20 @@ class LongMemEvalFormatError(ValueError):
     """The file did not have the shape this loader was written against."""
 
 
-def load(path: Path) -> tuple[BenchCase, ...]:
+def load(path: Path, *, corpus_key: str) -> tuple[BenchCase, ...]:
     """Read a LongMemEval split into one case per question.
+
+    **``corpus_key`` has no default, and that is the point.** Two corpora are parsed by
+    this one loader — ``longmemeval`` and the upstream-deprecated
+    ``longmemeval-original`` — and they are different corpora that do not produce the
+    same scores. A case carries its corpus into every ``QuestionRecord``, so a defaulted
+    key is how a run of one variant comes to write records labelled as the other while
+    its manifest names the variant correctly. Provenance is passed in, never assumed.
 
     Args:
         path: The verified corpus file.
+        corpus_key: The key of the corpus ``path`` belongs to, as
+            :mod:`~benchmarks.memory.corpora.provenance` names it.
 
     Returns:
         One case per question, in file order.
@@ -63,7 +72,7 @@ def load(path: Path) -> tuple[BenchCase, ...]:
     if not isinstance(raw, list):
         msg = f"expected a list of questions at the top level, got {type(raw).__name__}"
         raise LongMemEvalFormatError(msg)
-    return tuple(_case(entry) for entry in raw)
+    return tuple(_case(entry, corpus_key=corpus_key) for entry in raw)
 
 
 def stratified(cases: Sequence[BenchCase], *, total: int, seed: int) -> tuple[BenchCase, ...]:
@@ -142,11 +151,12 @@ def read_slice(path: Path) -> tuple[BenchCase, ...]:
     return tuple(BenchCase.model_validate(entry) for entry in raw)
 
 
-def _case(entry: Any) -> BenchCase:
+def _case(entry: Any, *, corpus_key: str) -> BenchCase:
     """Build one case from one LongMemEval question.
 
     Args:
         entry: One element of the top-level list.
+        corpus_key: The corpus the entry came from, carried onto the case.
 
     Returns:
         The case.
@@ -180,7 +190,7 @@ def _case(entry: Any) -> BenchCase:
         for session, stamp, session_id in zip(sessions, dates, ids, strict=True)
     ]
     return BenchCase(
-        corpus_key="longmemeval",
+        corpus_key=corpus_key,
         case_key=question_id,
         sessions=tuple(sorted(built, key=lambda session: session.occurred_at)),
         questions=(_question(entry, question_id=question_id),),

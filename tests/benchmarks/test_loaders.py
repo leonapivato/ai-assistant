@@ -21,6 +21,11 @@ from benchmarks.memory.corpora import locomo, longmemeval
 if TYPE_CHECKING:
     from pathlib import Path
 
+#: The two corpora this one loader parses. They are different corpora with different
+#: scores, which is why `load` makes the caller say which one it is reading.
+CLEANED = "longmemeval"
+ORIGINAL = "longmemeval-original"
+
 
 def _locomo_sample() -> list[dict[str, Any]]:
     """One LoCoMo sample carrying every shape the loader handles.
@@ -228,7 +233,7 @@ def longmemeval_file(tmp_path: Path) -> Path:
 
 def test_longmemeval_gives_every_question_its_own_case(longmemeval_file: Path) -> None:
     """Fifty questions is fifty ingestions; the loader makes that structural."""
-    cases = longmemeval.load(longmemeval_file)
+    cases = longmemeval.load(longmemeval_file, corpus_key=CLEANED)
 
     assert len(cases) == 2
     assert all(len(case.questions) == 1 for case in cases)
@@ -236,14 +241,14 @@ def test_longmemeval_gives_every_question_its_own_case(longmemeval_file: Path) -
 
 def test_longmemeval_orders_sessions_by_their_stated_date(longmemeval_file: Path) -> None:
     """File order does not track time, and ingesting out of order scrambles history."""
-    sessions = longmemeval.load(longmemeval_file)[0].sessions
+    sessions = longmemeval.load(longmemeval_file, corpus_key=CLEANED)[0].sessions
 
     assert [session.session_key for session in sessions] == ["s_early", "s_late"]
 
 
 def test_longmemeval_adds_no_speaker_prefix(longmemeval_file: Path) -> None:
     """Unlike LoCoMo: here the two sides genuinely are a user and an assistant."""
-    late = longmemeval.load(longmemeval_file)[0].sessions[1].turns[0]
+    late = longmemeval.load(longmemeval_file, corpus_key=CLEANED)[0].sessions[1].turns[0]
 
     assert late.text == "I bought a bicycle."
     assert late.user_side is True
@@ -251,19 +256,20 @@ def test_longmemeval_adds_no_speaker_prefix(longmemeval_file: Path) -> None:
 
 def test_longmemeval_marks_the_abstention_variant(longmemeval_file: Path) -> None:
     """`_abs` is the corpus's own marker for a haystack that does not answer."""
-    verdicts = [case.questions[0].unanswerable for case in longmemeval.load(longmemeval_file)]
+    cases = longmemeval.load(longmemeval_file, corpus_key=CLEANED)
+    verdicts = [case.questions[0].unanswerable for case in cases]
 
     assert verdicts == [False, True]
 
 
 def test_longmemeval_stringifies_an_integer_answer(longmemeval_file: Path) -> None:
     """32 of the real oracle's 500 answers are integers."""
-    assert longmemeval.load(longmemeval_file)[1].questions[0].answer == "3"
+    assert longmemeval.load(longmemeval_file, corpus_key=CLEANED)[1].questions[0].answer == "3"
 
 
 def test_longmemeval_reads_the_question_instant(longmemeval_file: Path) -> None:
     """The clock is moved to it before answering, so it has to survive the load."""
-    asked = longmemeval.load(longmemeval_file)[0].questions[0].asked_at
+    asked = longmemeval.load(longmemeval_file, corpus_key=CLEANED)[0].questions[0].asked_at
 
     assert asked == datetime(2023, 4, 10, 23, 7, tzinfo=UTC)
 
@@ -276,11 +282,25 @@ def test_longmemeval_refuses_mismatched_haystack_lengths(tmp_path: Path) -> None
     path.write_text(json.dumps(sample), encoding="utf-8")
 
     with pytest.raises(longmemeval.LongMemEvalFormatError, match="do not correspond"):
-        longmemeval.load(path)
+        longmemeval.load(path, corpus_key=CLEANED)
+
+
+def test_longmemeval_carries_the_corpus_it_was_told_it_is_reading(
+    longmemeval_file: Path,
+) -> None:
+    """One loader parses both variants, and a case carries its corpus into every
+    `QuestionRecord`. A key baked into the loader would label an `original` run
+    `longmemeval` while its manifest named `longmemeval-original` — two artifacts of
+    one run disagreeing about which corpus produced them."""
+    cleaned = longmemeval.load(longmemeval_file, corpus_key=CLEANED)
+    original = longmemeval.load(longmemeval_file, corpus_key=ORIGINAL)
+
+    assert {case.corpus_key for case in cleaned} == {CLEANED}
+    assert {case.corpus_key for case in original} == {ORIGINAL}
 
 
 def test_stratified_spreads_across_categories(longmemeval_file: Path) -> None:
-    cases = longmemeval.load(longmemeval_file)
+    cases = longmemeval.load(longmemeval_file, corpus_key=CLEANED)
 
     picked = longmemeval.stratified(cases, total=2, seed=1029)
 
@@ -292,7 +312,7 @@ def test_stratified_spreads_across_categories(longmemeval_file: Path) -> None:
 
 def test_stratified_is_reproducible_from_its_seed(longmemeval_file: Path) -> None:
     """A pre-registered slice has to be redrawable from the seed and the pinned file."""
-    cases = longmemeval.load(longmemeval_file)
+    cases = longmemeval.load(longmemeval_file, corpus_key=CLEANED)
 
     first = longmemeval.stratified(cases, total=1, seed=7)
     again = longmemeval.stratified(cases, total=1, seed=7)
@@ -302,7 +322,7 @@ def test_stratified_is_reproducible_from_its_seed(longmemeval_file: Path) -> Non
 
 def test_stratified_redistributes_when_a_category_runs_short(longmemeval_file: Path) -> None:
     """Asking for more than one category can supply still meets the total."""
-    cases = longmemeval.load(longmemeval_file) * 3
+    cases = longmemeval.load(longmemeval_file, corpus_key=CLEANED) * 3
 
     picked = longmemeval.stratified(cases, total=5, seed=1029)
 
@@ -312,14 +332,14 @@ def test_stratified_redistributes_when_a_category_runs_short(longmemeval_file: P
 def test_stratified_returns_everything_when_asked_for_more_than_exists(
     longmemeval_file: Path,
 ) -> None:
-    cases = longmemeval.load(longmemeval_file)
+    cases = longmemeval.load(longmemeval_file, corpus_key=CLEANED)
 
     assert len(longmemeval.stratified(cases, total=99, seed=1029)) == len(cases)
 
 
 def test_a_slice_round_trips_through_disk(longmemeval_file: Path, tmp_path: Path) -> None:
     """The 278 MiB parse is paid once; later runs read what this wrote."""
-    cases = longmemeval.load(longmemeval_file)
+    cases = longmemeval.load(longmemeval_file, corpus_key=CLEANED)
     path = tmp_path / "slice" / "cases.json"
 
     longmemeval.write_slice(cases, path)
@@ -331,7 +351,7 @@ def test_stratified_refuses_a_negative_total(longmemeval_file: Path) -> None:
     """The loop would otherwise never run and return no cases — a run that completes,
     writes a manifest and reports success having asked nothing. `first_questions`, this
     corpus's counterpart on the LoCoMo path, refuses the same value."""
-    cases = longmemeval.load(longmemeval_file)
+    cases = longmemeval.load(longmemeval_file, corpus_key=CLEANED)
 
     with pytest.raises(ValueError, match="cannot be negative"):
         longmemeval.stratified(cases, total=-1, seed=1029)
