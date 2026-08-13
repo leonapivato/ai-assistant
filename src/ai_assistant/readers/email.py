@@ -1,4 +1,4 @@
-"""The email reader: one local mbox file, read into attested envelope proposals.
+r"""The email reader: one local mbox file, read into attested envelope proposals.
 
 Leg 11's second concrete :class:`~ai_assistant.core.protocols.Reader`, and the
 second implementation ADR-0095 §3 said the shared conformance suite was waiting
@@ -101,6 +101,185 @@ violated it may observe a store no complete version ever held, and nothing here
 may be read as a guarantee that it cannot. What the reader does instead is skip
 what it cannot interpret, and the clauses that bound a violated write are §4's,
 which hold whatever the bytes turn out to be.
+
+**Deploying the fetcher, and why it is a script rather than a mature daemon**
+(§2). ADR-0095 rates co-located fetchers strongest because the pattern delegates
+credential handling, network failure and protocol drift to mature tools — and
+here that reason inverts halfway: ``offlineimap`` and ``mbsync`` are those tools
+and both write **incrementally**, which is the one discipline §2 forbids. So the
+delegation is kept where it is expensive and given up where it is cheap.
+``imap-tools`` owns IMAP and TLS (#664's survey, kept entire except the word
+*maildir*, §2); building a file and renaming it is a dozen lines, and it is the
+dozen lines that let §7's descriptor check and the kernel's inode semantics do
+the work three clauses would otherwise have to do badly. Install it on the hub
+box as a *tool*, never as a dependency of this project — ``uv tool install
+imap-tools`` — and give it a timer it owns (cron or a systemd timer). The shape
+below is verified against ``imap-tools`` 1.15.0; its retries, its schedule and
+its process model are its own and are governed nowhere here (§1)::
+
+    import imaplib
+    import os
+    import tempfile
+    import time
+    from datetime import UTC, datetime
+
+    from imap_tools import A, MailBox
+
+    KEEP = ("From", "Subject", "Date")
+    SEPARATOR = "From assistant-fetcher Thu Jan  1 00:00:00 1970"
+
+
+    # Every message newer than `retention`, as one envelope-only mbox frame each.
+    def frames(host, user, password, retention):
+        since = (datetime.now(UTC) - retention).date()
+        with MailBox(host).login(user, password) as box:
+            box.folder.set("INBOX", readonly=True)
+            for message in box.fetch(A(date_gte=since), headers_only=True, mark_seen=False):
+                status, data = box.client.uid("FETCH", message.uid, "(INTERNALDATE)")
+                if status != "OK":
+                    continue
+                local = imaplib.Internaldate2tuple(data[0])
+                delivered = datetime.fromtimestamp(time.mktime(local), UTC)
+                stamp = format(delivered, "%Y-%m-%dT%H:%M:%SZ")
+                lines = [SEPARATOR, "X-Assistant-Delivered-At: " + stamp]
+                for name in KEEP:
+                    for value in message.obj.get_all(name, []):
+                        lines.append(name + ": " + " ".join(value.splitlines()))
+                yield ("\n".join(lines) + "\n\n").encode()
+
+
+    # Build the whole store beside its target, then move it into place.
+    def publish(path, blocks):
+        handle, staged = tempfile.mkstemp(dir=os.path.dirname(path))
+        try:
+            with os.fdopen(handle, "wb") as store:
+                for block in blocks:
+                    store.write(block)
+                store.flush()
+                os.fsync(store.fileno())
+            os.replace(staged, path)
+        except BaseException:
+            os.unlink(staged)
+            raise
+
+**Six requirements, and every one of them is discharged by a specific line
+above** — §13 states them as a list, and a list is what a deployment silently
+half-implements.
+
+- **Header blocks and no bodies** (§5). ``headers_only=True`` with
+  ``mark_seen=False`` is what makes the IMAP command ``BODY.PEEK[HEADER]``: the
+  first half leaves the body on the server, and the second is the ``.PEEK`` — with
+  ``mark_seen`` left at its **default of ``True``** the same call is ``BODY[HEADER]``
+  and sets ``\Seen`` on every message it touches. That is a *write* to the user's
+  mailbox, from the network half of a seam that is read-only by construction
+  (ADR-0093 §1), which is why ``readonly=True`` on the folder select is beside it
+  rather than instead of it. Only ``KEEP``'s three fields are then emitted, so
+  minimisation happens at the source rather than in the reader, which is what
+  makes the reader's uniform ``PERSONAL`` tier honest.
+- **Exactly one ``X-Assistant-Delivered-At``, and every copy the message carried
+  stripped** (§5). Stripped **by construction**: the block is *built* from
+  ``KEEP`` rather than filtered, so a header the sender wrote under our own name
+  is never in a position to be forgotten. The value is the server's
+  ``INTERNALDATE``, which is the only instant on our side of the file — ``Date``
+  is the sender's clock and the thing an attacker controls (§5), and the search
+  term is ``date_gte`` rather than a sent-date term for exactly that reason:
+  IMAP's ``SINCE`` selects on ``INTERNALDATE`` too, so retention and membership
+  are decided on one clock.
+- **In the closed subset and nothing wider** (§5, :data:`_DELIVERED_AT_VALUE`).
+  The ``%Y-%m-%dT%H:%M:%SZ`` spelling lands inside it by construction.
+  ``datetime.isoformat`` also lands inside it **when the value is UTC-aware** —
+  it writes ``+00:00``, which the subset admits, and up to six fractional digits,
+  which it also admits — and lands outside it the moment the value is **naive**,
+  because there is then no offset at all and the message is silently skipped
+  rather than dated. That is the failure mode to expect from a fetcher that
+  reaches for the obvious call.
+- **No header value carrying a bare line break, and the separator escaped**
+  (§13). ``" ".join(value.splitlines())`` puts each value on one physical line,
+  which discharges both: a value that cannot break the line cannot smuggle a
+  ``From `` at one, and with every emitted line either the separator or
+  ``Name: value``, no other line can begin the framing sequence. A fetcher that
+  keeps bodies loses that argument and owes the ``>``-prefix escape instead — one
+  more reason not to keep them.
+- **Replaced whole by ``rename(2)`` on the same filesystem** (§2).
+  ``mkstemp(dir=...)`` stages the replacement in the target's **own directory**,
+  which is what makes it the same filesystem, and ``os.replace`` is ``rename(2)``.
+  A read already in flight keeps the old inode and completes against bytes that
+  were whole. Staging in ``/tmp`` and moving across is the one substitution that
+  looks equivalent and is not: a cross-device move is a copy, and a copy is
+  visible half-written.
+- **A retention exceeding the reader's window, and a credential that never
+  enters the hub** (§13, §11). ``retention`` is the fetcher's and must exceed
+  ``ASSISTANT_EMAIL_WINDOW_PAST`` below, because §3 leaves no cursor: a message
+  that leaves the store before a read sees it is lost to ingestion permanently.
+  It must also stay inside ``ASSISTANT_EMAIL_MAX_MESSAGES``, which refuses rather
+  than truncates — a retention that outgrows the cap takes the source offline
+  rather than reading the recent tail (§12). The credential is the fetcher's
+  process and the operator's secret store; nothing puts it in this one, and
+  ``secret_store/`` is exactly where a later lane will be tempted to (§11).
+
+**Arming the read** is two settings, and the hub reads nothing on the strength of
+them::
+
+    ASSISTANT_EMAIL_SOURCE_PATH=/home/you/.mail/assistant.mbox
+    ASSISTANT_EMAIL_READER_INTERVAL=PT15M
+
+The path must be absolute — a relative one is refused at load, since it would
+resolve against each process's working directory — and ``~`` is expanded. The two
+are a matrix ``Settings`` refuses to leave incoherent: an interval with no path
+fails at load, while a **path with no interval is coherent and deliberately
+allowed**, being the facet-only state where a request-path assembly may read the
+store while nothing ingests from it on a schedule (§12). The five remaining
+fields — ``ASSISTANT_EMAIL_WINDOW_PAST`` (7 days), ``ASSISTANT_EMAIL_MAX_MESSAGES``
+(2,000), ``ASSISTANT_EMAIL_MAX_BYTES`` (8 MiB), ``ASSISTANT_EMAIL_READ_TIMEOUT``
+(10 s) and ``ASSISTANT_EMAIL_MAX_CONTENT_BYTES`` (4 MiB) — carry §12's defaults
+and are what an operator changes only against a measured store.
+
+**Every duration setting here takes either an ISO-8601 duration or a two-digit
+``HH:MM:SS`` clock string**: ``PT15M``, ``PT30S``, ``00:15:00`` and ``P7D`` all
+load. Two spellings are worth knowing before they cost an afternoon. A bare
+number of seconds is **refused** — ``900`` fails at load with a parse error
+naming a ``"day"`` identifier nobody typed, which is pydantic's message and the
+same for every duration setting in this project (#981). And ``15:00`` **loads**,
+as *fifteen hours* rather than fifteen minutes, while ``5:00`` is refused
+outright because the hours field is two digits — so the wrong-by-a-factor form is
+the one that starts cleanly.
+
+**The grant is a separate act, and configuration is not consent** (§9, ADR-0097
+§5). Until the user grants the source through a client the store is not
+resolved, not opened and not parsed, and the scheduler's job fails every tick
+with ``SourceNotGrantedError`` rather than reading::
+
+    assistant sources                                 # what is offered, and from where
+    assistant grant email --scope facet --scope ingest
+    assistant amend email --scope ingest              # narrow or widen; two acts, both recorded
+    assistant revoke email                            # prospective (ADR-0097 §6)
+
+The source is **positional**; there is no ``--source`` option. A source holds one
+grant at a time, so changing what one covers is ``assistant amend``, which is a
+withdrawal followed by a fresh grant and says how each half went — or the same
+two acts run by hand. ``--scope notify`` is accepted and buys nothing yet: §9
+mints no producer for this source, so nothing reads that member until one exists.
+§13 makes the composition-root registration its own deliverable — with
+``email_source_path`` set the source is offered under the declared identity
+``email`` and its consumers are wired on **separate** ``EmailReader`` instances;
+with it unset, none of them is registered at all, because a source with nothing
+to read is I/O on personal data in exchange for nothing.
+
+**What revoking does not do, and it is not the calendar's situation** (§9). It
+stops this system's read. It does not stop, start, describe or bear on the
+fetcher: a process the operator launched holds a credential and pulls mail onto
+the box whether or not any grant exists, so "your email is no longer being read"
+is true and "we are no longer collecting your email" is false. No surface may say
+the second. Nor does revoking remove the store from disk, and nothing here
+retires what is already believed — ``assistant beliefs`` and ``assistant forget``
+are that remedy.
+
+**And a fetcher that stops running is invisible from here** (§1, §7). The reader
+cannot tell a stale store from a quiet week: it reads the same messages, proposes
+the same beliefs and reports health. That blindness is accepted rather than
+patched, and §7's refusal to declare coverage is what keeps it from becoming a
+*wrong* belief instead of merely a stale one — the fetcher is monitored where the
+operator monitors processes, never through this system's surfaces.
 """
 
 from __future__ import annotations
