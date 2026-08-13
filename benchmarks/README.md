@@ -24,9 +24,14 @@ read as scores. So:
 - every run is `RunMode.SMOKE` unless `--mode scored` is asked for;
 - a scored run is refused unless `--preregistration-final` is also passed;
 - and refused again unless the rest of the configuration makes the word true: whole
-  histories (no `--max-sessions`), the on-device embedder, and the model judge. Each of
-  those would otherwise produce artifacts labelled `scored` that measure something
-  else;
+  histories (no `--max-sessions`), the on-device embedder, the model judge, and **no
+  injected seam** — `execute_run` accepts overrides for the answering, distillation and
+  grading seams so tests can drive the pipeline without a model call, and the manifest
+  records the *configured* routes, which an override makes false. A scored run builds
+  all three from `Settings`. Each of those would otherwise produce artifacts labelled
+  `scored` that measure something else;
+- the gate runs at `execute_run`, the boundary that writes the manifest, as well as at
+  the command line, so a caller reaching the API directly cannot skip it;
 - the mode is written into every run's `manifest.json`.
 
 "Has a scored run happened?" is therefore a question about files on disk.

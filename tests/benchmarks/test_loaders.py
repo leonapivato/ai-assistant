@@ -325,3 +325,13 @@ def test_a_slice_round_trips_through_disk(longmemeval_file: Path, tmp_path: Path
     longmemeval.write_slice(cases, path)
 
     assert longmemeval.read_slice(path) == cases
+
+
+def test_stratified_refuses_a_negative_total(longmemeval_file: Path) -> None:
+    """The loop would otherwise never run and return no cases — a run that completes,
+    writes a manifest and reports success having asked nothing. `first_questions`, this
+    corpus's counterpart on the LoCoMo path, refuses the same value."""
+    cases = longmemeval.load(longmemeval_file)
+
+    with pytest.raises(ValueError, match="cannot be negative"):
+        longmemeval.stratified(cases, total=-1, seed=1029)

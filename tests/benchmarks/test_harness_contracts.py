@@ -130,6 +130,7 @@ def test_a_fully_eligible_scored_run_is_allowed() -> None:
         preregistration_final=True,
         embedder=EmbedderKind.ON_DEVICE,
         grader_kind="model",
+        injected_seams=(),
     )
 
 
@@ -155,6 +156,20 @@ def test_a_scored_run_with_the_exact_grader_is_refused() -> None:
             embedder=EmbedderKind.ON_DEVICE,
             grader_kind="exact",
         )
+
+
+def test_a_rejected_url_leaves_no_staging_file_behind(tmp_path: Path) -> None:
+    """`mkstemp` creates the file before the download is even attempted, so every exit
+    that is not a successful publish has to remove it — including the ones that raise
+    before a byte is written."""
+    file = CorpusFile(
+        name="corpus.json", url="http://example.invalid/x", sha256="a" * 64, size_bytes=1
+    )
+
+    with pytest.raises(CorpusFetchError, match="non-https"):
+        ensure_file(file, cache=tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.integration

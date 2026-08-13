@@ -84,7 +84,17 @@ def stratified(cases: Sequence[BenchCase], *, total: int, seed: int) -> tuple[Be
 
     Returns:
         The selected cases, ordered by question id so a run's order is stable.
+
+    Raises:
+        ValueError: If ``total`` is negative. Refused rather than treated as zero,
+            because the loop below would otherwise never run and return no cases at
+            all — a run that completes, writes a manifest and reports success having
+            asked nothing. ``first_questions``, this corpus's counterpart on the
+            LoCoMo path, refuses the same value.
     """
+    if total < 0:
+        msg = f"a question total cannot be negative, got {total}"
+        raise ValueError(msg)
     by_category: dict[str, list[BenchCase]] = defaultdict(list)
     for case in cases:
         by_category[case.questions[0].category].append(case)

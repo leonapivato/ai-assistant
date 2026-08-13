@@ -25,14 +25,7 @@ from ai_assistant.app import ensure_model_credentials
 from ai_assistant.app.composition import CONFLICT_LIMIT, RETRIEVAL_LIMIT
 from ai_assistant.core.config import EmbedderKind, Settings
 from benchmarks.memory.answer import ANSWER_SYSTEM_PROMPT, answer_question
-from benchmarks.memory.grade import (
-    JUDGE_PROMPT,
-    MODEL_JUDGE_PREFIX,
-    ExactGrader,
-    Grading,
-    ModelGrader,
-    Verdict,
-)
+from benchmarks.memory.grade import JUDGE_PROMPT, ExactGrader, Grading, ModelGrader, Verdict
 from benchmarks.memory.ingest import exchanges_of, ingest_case
 from benchmarks.memory.records import (
     QuestionRecord,
@@ -151,6 +144,28 @@ def plan_run(corpus: Corpus, cases: Sequence[BenchCase], *, batch_size: int) -> 
     )
 
 
+def build_grader(settings: Settings, *, kind: str) -> Grader:
+    """Build the grader named by ``kind``.
+
+    Args:
+        settings: Loaded application settings.
+        kind: ``"exact"`` or ``"model"``.
+
+    Returns:
+        The grader.
+
+    Raises:
+        ValueError: If ``kind`` names neither.
+    """
+    if kind == "exact":
+        return ExactGrader()
+    if kind == "model":
+        route = settings.default_model
+        return ModelGrader(build_model_provider(settings, route), route=route)
+    msg = f"unknown grader {kind!r}; expected 'exact' or 'model'"
+    raise ValueError(msg)
+
+
 async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis of the experiment, and bundling them into a config object would hide which ones a caller left at a default
     plan: RunPlan,
     *,
@@ -159,6 +174,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     corpus_digests: dict[str, str],
     settings: Settings | None = None,
     grader: Grader | None = None,
+    grader_kind: str = "exact",
     model: ModelProvider | None = None,
     observer: Observer | None = None,
     preregistration_final: bool = False,
@@ -191,8 +207,13 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
             manifest.
         settings: Loaded application settings; loaded from the environment when
             ``None``.
-        grader: How to judge. Defaults to :class:`~benchmarks.memory.grade.ExactGrader`,
-            which makes no model call — a default a scored run overrides deliberately.
+        grader: Override the grading seam. Refused for a scored run, like the other
+            two — a manifest that records a configured judge while an injected one
+            graded is a manifest that is wrong.
+        grader_kind: Which grader to build when none is injected: ``"exact"`` (no model
+            call, the default) or ``"model"``. This is what the gate checks, because it
+            names what the harness is about to construct rather than what a caller
+            called it.
         model: Override the answering seam. Tests supply one; a live run does not.
         observer: Override the distillation seam, likewise.
         slice_seed: The seed a stratified slice was drawn with, for the manifest.
@@ -207,17 +228,22 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         The manifest, already written to ``<output_root>/<run_id>/manifest.json``.
     """
     resolved = settings if settings is not None else Settings()
-    judge = grader if grader is not None else ExactGrader()
+    injected = tuple(
+        name
+        for name, seam in (("grader", grader), ("model", model), ("observer", observer))
+        if seam is not None
+    )
     refuse_ineligible_scored_run(
         mode,
         preregistration_final=preregistration_final,
         max_sessions=max_sessions,
         embedder=resolved.embedder,
-        # Read off the grader that will actually judge, rather than trusting a caller's
-        # description of it: what the manifest records and what the gate inspects are
-        # then the same object.
-        grader_kind="model" if judge.name.startswith(MODEL_JUDGE_PREFIX) else judge.name,
+        grader_kind=grader_kind,
+        injected_seams=injected,
     )
+    # Built after the gate, so a scored run's judge is one this function constructed
+    # from `Settings` and never one it was handed.
+    judge = grader if grader is not None else build_grader(resolved, kind=grader_kind)
     if model is None:
         # The public startup gate (issue #530, ADR-0083 §3). A missing credential is a
         # configuration fault, and without this it would surface as ~2,000 identical
@@ -345,13 +371,14 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     return manifest
 
 
-def refuse_ineligible_scored_run(
+def refuse_ineligible_scored_run(  # noqa: PLR0913 — one parameter per precondition, and bundling them into a config object would hide which ones a caller left at a default
     mode: RunMode,
     *,
     preregistration_final: bool,
     max_sessions: int = 0,
     embedder: EmbedderKind = EmbedderKind.ON_DEVICE,
     grader_kind: str = "model",
+    injected_seams: Sequence[str] = (),
 ) -> None:
     """Refuse a scored run that is not entitled to be one.
 
@@ -373,6 +400,14 @@ def refuse_ineligible_scored_run(
        an LLM judge, and :class:`~benchmarks.memory.grade.ExactGrader` is a normalised
        substring match — deliberately poor, and not comparable to the published
        numbers this pilot is positioned against.
+    5. **No seam may be injected.** ``execute_run`` accepts overrides for the
+       answering, distillation and grading seams so tests can drive the whole pipeline
+       without a model call — and the manifest records the *configured* routes, which
+       an injected seam makes false. A scored run therefore builds all three from
+       ``Settings`` and refuses any override, which is what makes the manifest true by
+       construction rather than by the caller's good behaviour. It is also the only
+       one of the five that can be checked without trusting anything a caller says: an
+       override is present or it is not.
 
     **``episode_retention`` is deliberately *not* here**, and the omission is the rule
     working rather than a gap. A finite horizon is the product's own default and a
@@ -387,7 +422,10 @@ def refuse_ineligible_scored_run(
         max_sessions: The session bound the cases were shortened to; ``0`` means whole
             histories.
         embedder: The configured embedder.
-        grader_kind: Which grader was asked for.
+        grader_kind: Which grader will be built. Named rather than inspected off a
+            grader object, because a display name is something a caller controls and
+            this has to be the kind the harness itself is about to construct.
+        injected_seams: The names of any seams the caller overrode.
 
     Raises:
         PermissionError: If a scored run was asked for without the pre-registration
@@ -421,25 +459,11 @@ def refuse_ineligible_scored_run(
             f"--grader model."
         )
         raise ValueError(msg)
-
-
-def build_grader(settings: Settings, *, kind: str) -> Grader:
-    """Build the grader named by ``kind``.
-
-    Args:
-        settings: Loaded application settings.
-        kind: ``"exact"`` or ``"model"``.
-
-    Returns:
-        The grader.
-
-    Raises:
-        ValueError: If ``kind`` names neither.
-    """
-    if kind == "exact":
-        return ExactGrader()
-    if kind == "model":
-        route = settings.default_model
-        return ModelGrader(build_model_provider(settings, route), route=route)
-    msg = f"unknown grader {kind!r}; expected 'exact' or 'model'"
-    raise ValueError(msg)
+    if injected_seams:
+        named = ", ".join(sorted(injected_seams))
+        msg = (
+            f"a scored run cannot take an injected seam ({named}): the manifest records "
+            f"the routes the settings name, and a seam supplied by the caller makes that "
+            f"record false. A scored run builds every seam from Settings."
+        )
+        raise ValueError(msg)
