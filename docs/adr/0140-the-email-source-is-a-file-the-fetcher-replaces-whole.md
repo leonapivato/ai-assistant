@@ -732,12 +732,26 @@ different in kind and are stated differently: the base's three stamp fields are
 reserved against redefinition, and `kind` is reserved against acquiring a second,
 payload meaning while each concrete type is *required* to declare it.
 
-**ADR-0096 §5's other three clauses bind this facet unchanged and are not
-restated as though they were new**: the facet's stamp is the reading's, the model
-validator refuses a facet stamped otherwise, and the `context/` adapter
+**ADR-0096 §5's other four clauses bind this facet unchanged and are not
+restated as though they were new**: the facet's stamp is the reading's; the model
+validator refuses a facet stamped otherwise; the `context/` adapter
 contributes under the field it was wired for and raises `ContextError` on a type
-mismatch. The last of those acquires a second instance here for the first time,
-which is exactly the wiring bug it was written against.
+mismatch; and the adapter and the ingestion stage are injected with **separate**
+`Reader` instances for one source, neither sharing the other's. The third
+acquires a second instance here for the first time, which is exactly the wiring
+bug it was written against.
+
+**The fourth is the one this ADR has to carry into `app/` rather than merely
+inherit, and an earlier draft of this paragraph counted three and dropped it.**
+§5's ground for it is ADR-0093 §7's one-outstanding-worker reservation, which is
+per instance — and §13's reader bullet binds this reader to exactly that
+reservation. So a composition root injecting one `EmailReader` into both
+consumers gives a scheduled ingestion read the power to suppress the request-path
+facet for as long as it runs: the second `read()` raises `ReaderError`, the
+assembler degrades, and `CurrentContext.email` is absent for reasons the user
+cannot see and no grant explains. §13 names the registration deliverable and its
+test at that instance, because "both consumers are wired" is satisfied by the
+shared-instance arrangement §5 forbids.
 
 **The facet's job is the one thing the beliefs cannot answer at request time, and
 for email that is volume rather than presence.** ADR-0096 §6 chose the calendar's
@@ -1180,7 +1194,8 @@ carries is to **pass** the existing suite, not to write one.
 >   first clause true of a running hub rather than of a fixture: with
 >   `email_source_path` set, the source is offered by `grantable_sources()` under
 >   the reader's declared identity `"email"` and both consumers above are wired
->   into the engine; with it unset, none of the three is registered at all,
+>   into the engine on **separate** `EmailReader` instances, neither sharing the
+>   other's (ADR-0096 §5, §6); with it unset, none of the three is registered at all,
 >   because a source with nothing to read is "I/O on personal data in exchange for
 >   nothing" — which is what §9 already binds this reader to ADR-0093 **§7's**
 >   disabled-by-default clause for, and §12's default is `None`. This is named as
@@ -1372,8 +1387,15 @@ carries is to **pass** the existing suite, not to write one.
 >   - **The configured source is registered and the unconfigured one is not
 >     (§9).** With `email_source_path` set, `grantable_sources()` offers the
 >     source under the identity `"email"`, and the built engine reaches **both**
->     consumers this ADR adds — the facet adapter and the ingestion driver; with
->     it unset, none of the three is registered. This is the only item that
+>     consumers this ADR adds — the facet adapter and the ingestion driver — on
+>     reader instances asserted **not to be the same object**; with it unset, none
+>     of the three is registered. The instance assertion is the half that is not
+>     redundant with the presence one: ADR-0096 §5 forbids the two consumers to
+>     share a reader, ADR-0093 §7 bounds each instance at one outstanding worker,
+>     and a root that injects one reader into both wires a hub in which a running
+>     scheduled ingest makes the request-path facet raise `ReaderError` and vanish
+>     — passing every presence check while breaching a ratified clause. This is
+>     the only item that
 >     observes the composition root, and it is owed because §9's first clause —
 >     granted, revoked, reported by `standing_grants` and rendered by a client
 >     "exactly as every other source is" — is satisfied by no test of a reader,
@@ -1490,7 +1512,9 @@ change here is a stacked addition or a deferral discharged on its own terms.
   second concrete type joins that annotation"). Doing what a clause instructs is
   not amending it: a reader holding only ADR-0096 §5 and confronted with a second
   facet reaches §6's answer, and every sentence of §5 stays true — including its
-  three clauses this ADR does not touch, which §6 records as binding unchanged.
+  four clauses this ADR does not touch, which §6 records as binding unchanged and
+  the last of which — separate reader instances per consumer — §13 carries into
+  the composition-root deliverable rather than merely restating.
   Adding a defaulted `kind` to `CalendarFacet` is the mechanical consequence §5
   called "one more line in the change that ADR authorises". **Addition, and a
   clause discharged at its own stated trigger.**
