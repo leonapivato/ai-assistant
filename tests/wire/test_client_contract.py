@@ -52,14 +52,17 @@ sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "orchestration"
 
 from assistant_engine_contract import (
     _NOT_CANONICAL,
+    _OVERFULL_GRANTS,
     _SOURCE,
     _TINY_LIMIT,
+    _UNHELD_SOURCE,
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
     AssistantEngineContract,
     backwards_clock,
 )
 
+from ai_assistant.core.types import GrantScope
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import (
     ENVELOPE_RESERVE_BYTES,
@@ -204,6 +207,40 @@ class TestHubEngineClientContract(AssistantEngineContract):
         backing.hold_source(_SOURCE, location="/srv/calendar.ics")
         backing.grant_clock = backwards_clock()
         async with serving(backing, tmp_path / "hub.sock") as client:
+            yield client
+
+    @pytest.fixture
+    async def disagreeing_engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """A client of a hub whose two grant answers disagree (ADR-0139 §1).
+
+        Arranged entirely hub-side, as it arises: the store is the hub's and a
+        client has no way to put a grant in it for a source no reader declares.
+        What the binding proves is that the disagreement survives the wire — that
+        ``standing_grants`` carries a record whose source is absent from the
+        enumeration, rather than being filtered on its way out.
+        """
+        backing = FakeAssistantEngine()
+        backing.hold_source(_SOURCE, location="/srv/calendar.ics")
+        backing.hold_grant(_UNHELD_SOURCE, scope=(GrantScope.INGEST,))
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield client
+
+    @pytest.fixture
+    async def overfull_granting_engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """A client of a tiny-framed hub whose live set does not fit the frame.
+
+        **ADR-0139 §8 requires this case against the wire implementation as well**,
+        and this is why: the refusal has to arrive as a typed error frame a client
+        renders as a refusal. An unmeasured result here would be a set too large for
+        the frame, which the transport turns into a dropped connection rather than
+        into an answer — a client left unable to distinguish "too big to say" from
+        "the hub went away", which is the same failure the no-paging clause refuses
+        one layer down.
+        """
+        backing = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
+        for index in range(_OVERFULL_GRANTS):
+            backing.hold_grant(f"source-{index}", scope=(GrantScope.FACET,))
+        async with serving(backing, tmp_path / "hub.sock", max_frame_bytes=_TINY_FRAME) as client:
             yield client
 
     @pytest.fixture

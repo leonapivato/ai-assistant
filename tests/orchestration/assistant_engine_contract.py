@@ -126,6 +126,21 @@ _UNWRITABLE_LOCATION = "/srv/\udce9notes.md"
 #: is what makes the refusal reachable rather than theoretical.
 _NOT_CANONICAL = "  mail  "
 
+#: A source with a **live grant and no held reader** — the state ADR-0139 §1 is
+#: about, and the whole reason ``standing_grants`` exists. Reached by an operator
+#: unsetting a configured path, or by a reader leaving the tree, and it is not a
+#: defect: ADR-0097 §9 records that "a grant whose reader later disappears is not a
+#: defect", and ADR-0102 §4 keeps such a grant revocable on purpose. What was
+#: missing was any operation that would *name* it.
+_UNHELD_SOURCE = "journal"
+
+#: How many live grants the oversized fixture holds. Six, because the canonical
+#: encoding of one ``SourceGrant`` runs about 120 bytes and :data:`_TINY_LIMIT` is
+#: 512 — so the set is comfortably over the bound while any single record is
+#: comfortably under it, which is what keeps the case about the *set* being refused
+#: rather than about a record nothing could ever return.
+_OVERFULL_GRANTS = 6
+
 
 def _feedback(content: str) -> FeedbackEvent:
     """One piece of feedback, as an adapter hands it over."""
@@ -204,6 +219,42 @@ class AssistantEngineContract(ABC):
         reach the state ADR-0097 §4 explicitly permits is to hand an implementation
         a clock that has been corrected backwards, which is exactly the deployment
         the clause is about.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def disagreeing_engine(self) -> AssistantEngine:
+        """A subject whose two grant answers **disagree**, which is legitimate (ADR-0139 §1).
+
+        It holds :data:`_SOURCE` as a grantable reader with **no grant on it**, and
+        a **live grant on** :data:`_UNHELD_SOURCE`, which no held reader declares.
+        So ``grantable_sources`` names one source and ``standing_grants`` names the
+        other, and the two sets are disjoint.
+
+        **A fixture because no sequence of surface calls reaches it.** ``grant``
+        admits only a held reader's declared name (ADR-0102 §4) and nothing on the
+        surface unholds one, so a grant on a source the hub does not hold can only
+        be handed to the suite — which is exactly how it arises in a deployment,
+        through a configuration edit rather than through a request.
+
+        It is the state the whole operation exists for: before it, such a grant was
+        live, read-authorising, revocable, and reported by nothing.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def overfull_granting_engine(self) -> AssistantEngine:
+        """A subject at :data:`_TINY_LIMIT` holding :data:`_OVERFULL_GRANTS` live grants.
+
+        Enough that the live set does not fit the contract limit, and small enough
+        that each individual record does — so the refusal under test is about the
+        **set**, which is the only thing that distinguishes a complete answer from
+        a paged one (ADR-0139 §2).
+
+        A fixture for :attr:`granting_engine`'s reason and one of its own: granting
+        six sources through the surface would need six held readers *and* would run
+        each ``grant``'s own result past the same bound, so the setup would be
+        refused before the case began.
         """
 
     @pytest.fixture
@@ -1073,6 +1124,132 @@ class AssistantEngineContract(ABC):
         by_id = sorted(page, key=lambda record: record.id)
         assert list(page) == sorted(by_id, key=lambda record: record.decided_at, reverse=True)
 
+    # --- ADR-0139 §1 and §2: what is authorised, read from the store ---------
+
+    async def test_standing_grants_carries_a_grant_no_held_reader_declares(
+        self, disagreeing_engine: AssistantEngine
+    ) -> None:
+        """The hole ADR-0139 exists to close, asserted from both sides at once.
+
+        ``grantable_sources`` is keyed on the composition root, so a grant whose
+        reader the hub no longer builds is **absent** from it; before this operation
+        that grant was live, read-authorising and revocable, with nothing that would
+        tell the user its name. The two answers here are disjoint, which is a
+        legitimate state rather than a fault (ADR-0139 §1) — and an implementation
+        that reconciled them, or that answered this from the held readers, would
+        drop the one record the operation was added for.
+        """
+        offered = await disagreeing_engine.grantable_sources()
+        standing = await disagreeing_engine.standing_grants()
+
+        assert [each.source for each in offered] == [_SOURCE]
+        assert [each.source for each in standing] == [_UNHELD_SOURCE]
+
+    async def test_standing_grants_is_a_tuple_and_neither_answer_is_derived(
+        self, disagreeing_engine: AssistantEngine
+    ) -> None:
+        """ADR-0139 §1: no implementation may derive either answer from the other.
+
+        The property is stated over what a *caller* can observe, which is all a
+        conformance suite can reach: a source enumerated as grantable and ungranted
+        is not in the standing set, and a standing grant is not offered as something
+        to grant. An implementation that merged the two would fail one of these
+        whichever direction it merged in.
+        """
+        standing = await disagreeing_engine.standing_grants()
+
+        assert isinstance(standing, tuple)
+        assert _SOURCE not in {each.source for each in standing}
+        assert _UNHELD_SOURCE not in {
+            each.source for each in await disagreeing_engine.grantable_sources()
+        }
+
+    async def test_standing_grants_holds_one_record_per_source_and_drops_a_revoked_one(
+        self, granting_engine: AssistantEngine
+    ) -> None:
+        """Every live grant, one per source, and nothing revoked (ADR-0139 §2).
+
+        Driven across a full amend cycle — grant, revoke, grant again — because
+        that is where the three properties come apart. After the second grant the
+        source has **two granting records** on file and one live grant, so an
+        implementation answering from the history rather than from the ``revokes``
+        relation returns two rows for one source; one answering from the newest
+        record per source returns one and gets the revoked case wrong. The count is
+        asserted alongside ``recent_grants``' three, which is what pins that
+        revocation retired nothing (ADR-0097 §6).
+        """
+        assert await granting_engine.standing_grants() == ()
+
+        await granting_engine.grant(_SOURCE, scope=[GrantScope.FACET])
+        assert [each.source for each in await granting_engine.standing_grants()] == [_SOURCE]
+
+        await granting_engine.revoke(_SOURCE)
+        assert await granting_engine.standing_grants() == ()
+
+        await granting_engine.grant(_SOURCE, scope=[GrantScope.INGEST])
+        standing = await granting_engine.standing_grants()
+        assert [(each.source, each.scope) for each in standing] == [(_SOURCE, (GrantScope.INGEST,))]
+        assert len(await granting_engine.recent_grants()) == 3
+
+    async def test_standing_grants_states_liveness_rather_than_deriving_it(
+        self, back_dated_engine: AssistantEngine
+    ) -> None:
+        """ADR-0139 §8's marked clause, and **nothing else in this list reaches it**.
+
+        Its sibling one section up pins the same property for
+        ``GrantableSource.live``; this pins it for the set, and the reason it is a
+        separate case rather than a second assertion is that the failure mode is
+        different in shape. Every other clause about ``standing_grants`` is about
+        *membership* — is this record in the set — and an implementation computing
+        the live set by walking records in ``decided_at`` order, taking the newest
+        per source, passes all of them. It fails only where a revocation is
+        timestamped **before** the grant it revokes, which ADR-0097 §4 permits
+        explicitly and which arrives on any host whose clock was corrected
+        backwards.
+
+        Both halves are asserted, as they are for the page: the set is empty **and**
+        both records are still on file, because an implementation that had deleted
+        the revoked grant would otherwise satisfy the first.
+        """
+        granted = await back_dated_engine.grant(_SOURCE, scope=[GrantScope.FACET])
+        withdrawn = await back_dated_engine.revoke(_SOURCE)
+        assert withdrawn is not None
+        assert withdrawn.decided_at < granted.decided_at
+
+        assert await back_dated_engine.standing_grants() == ()
+        assert {record.id for record in await back_dated_engine.recent_grants()} == {
+            granted.id,
+            withdrawn.id,
+        }
+
+    async def test_standing_grants_refuses_an_oversized_set_rather_than_truncating_it(
+        self, overfull_granting_engine: AssistantEngine
+    ) -> None:
+        """ADR-0139 §8's second marked clause: refusal over completion.
+
+        **Refusing rather than truncating is the whole of what distinguishes this
+        operation**, and it is the one property no other case reaches. An
+        implementation that returned the store's result unmeasured — skipping the
+        size check the engine applies to its other operations — passes every
+        membership, revocation and corrupt-store case in the list and fails only at
+        a size an ordinary test never constructs. ADR-0085 §8's bound and ADR-0139
+        §2's clause both already forbid it; what is missing without this case is any
+        test that would notice.
+
+        The refusal is typed, so a client renders it as a refusal and cannot mistake
+        it for an empty set — which is the whole reason a page was declined. And the
+        remedy stays available at the same limit: ``revoke``'s request and result
+        are two small values (ADR-0102 §10), so a user who knows a source's name can
+        still withdraw it through a frame too small to list what they authorise.
+        """
+        with pytest.raises(OversizedValueError):
+            await overfull_granting_engine.standing_grants()
+
+        # The bound is per-method, so the neighbouring reads still answer: a case
+        # that only asserted the raise would pass against an implementation whose
+        # limit was simply too small for anything at all.
+        assert await overfull_granting_engine.recent_grants(limit=1) != ()
+
     # --- §2a and §10: the local refusals -----------------------------------
 
     @pytest.mark.parametrize("blank", ["", "   ", "\t"])
@@ -1148,6 +1325,7 @@ class AssistantEngineContract(ABC):
         """ADR-0085 §3b: a caller that mutated a returned page changed nothing."""
         assert isinstance(await granting_engine.grantable_sources(), tuple)
         assert isinstance(await granting_engine.recent_grants(), tuple)
+        assert isinstance(await granting_engine.standing_grants(), tuple)
 
 
 def backwards_clock() -> Callable[[], datetime]:

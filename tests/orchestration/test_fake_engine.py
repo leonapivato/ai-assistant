@@ -21,8 +21,10 @@ from typing import TYPE_CHECKING
 import pytest
 from assistant_engine_contract import (
     _NOT_CANONICAL,
+    _OVERFULL_GRANTS,
     _SOURCE,
     _TINY_LIMIT,
+    _UNHELD_SOURCE,
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
     AssistantEngineContract,
@@ -37,6 +39,7 @@ from ai_assistant.core.types import (
     BeliefSummary,
     ContinuationToken,
     ConversationSummary,
+    GrantScope,
     MemoryKind,
     QuestionState,
     TurnOutcome,
@@ -85,6 +88,27 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         engine = FakeAssistantEngine()
         engine.hold_source(_SOURCE, location="/srv/calendar.ics")
         engine.grant_clock = backwards_clock()
+        return engine
+
+    @pytest.fixture
+    def disagreeing_engine(self) -> AssistantEngine:
+        """One grantable-and-ungranted source, one live grant on a source not held.
+
+        ``hold_grant`` applies no admission check, which is what makes the state
+        reachable at all: nothing on the surface unholds a reader, so a grant on a
+        source the hub no longer builds has to be seeded (ADR-0139 §8).
+        """
+        engine = FakeAssistantEngine()
+        engine.hold_source(_SOURCE, location="/srv/calendar.ics")
+        engine.hold_grant(_UNHELD_SOURCE, scope=(GrantScope.INGEST,))
+        return engine
+
+    @pytest.fixture
+    def overfull_granting_engine(self) -> AssistantEngine:
+        """A tiny-limit fake whose live set does not fit that limit."""
+        engine = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
+        for index in range(_OVERFULL_GRANTS):
+            engine.hold_grant(f"source-{index}", scope=(GrantScope.FACET,))
         return engine
 
     @pytest.fixture
