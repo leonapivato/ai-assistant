@@ -1,6 +1,6 @@
 # 141. A notification measure counts rulings, and the ruling seam emits the trace it is counted from
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-12
 - **This decision adds contract surface, and it is one member.** `TraceKind`
   gains `NOTIFICATION` (§2). That is a `core/types.py` change, so golden rule 5
@@ -13,8 +13,10 @@
   `Settings` field appears, no `AssistantEngine` method, wire operation or CLI
   command is created, and no other enumeration gains a member.
 - **This ADR's ratification.** It decides a contract surface, so the required set
-  is adversarial **and** architecture. Both returned clean on one `Proposed` tree
-  and the status flipped only then, with both re-run on the flipped tree —
+  is adversarial **and** architecture. A finding on the first flipped tree
+  returned it to `Proposed` and it re-entered the sequence, so it is ratified on
+  its **second** flip: both lenses returned clean on one corrected `Proposed`
+  tree, the status flipped only then, and both were re-run on the flipped tree —
   `CONTRIBUTING.md` → "Finishing an ADR PR: `Proposed` through the reviews,
   `Accepted` on the way out", whose sequence this PR's round record carries.
   Nothing implements against §10 until this has merged.
@@ -316,10 +318,27 @@ kinds. §13e's price is one ADR, and this is it.
 > or changes its disposition because a trace could not be written, and no trace
 > is written inside the ruling transaction.
 
-> **Normative.** A crossing that raised before ruling still emits its trace,
-> carrying its outcome and its fault class and **none** of the metric keys §4
-> defines. Under ADR-0119 §3's observation rule their absence says the ruling was
-> not reached.
+> **Normative.** A crossing that raised an `Exception` before ruling still emits
+> its trace, carrying its outcome and its fault class and **none** of the metric
+> keys §4 defines. Under ADR-0119 §3's observation rule their absence says the
+> ruling was not reached.
+
+> **Normative.** A **cancellation is never classified and emits nothing.** An
+> externally delivered `CancelledError` is re-raised before any outcome or fault
+> class is decided, and no trace records it — ADR-0119 §3's clause, on ADR-0060
+> §1, applied here rather than excepted.
+
+**The cancellation carve-out is stated rather than inherited, because this seam
+is the one most likely to meet one.** ADR-0119 §3 makes it general —
+"A cancellation is never classified… so no trace records one" — and
+`fault_class_of` takes an `Exception` rather than a `BaseException` precisely so
+a `CancelledError` cannot reach a `fault_class` at all. The clause above would
+otherwise read as an unconditional obligation over *every* raise, which is how a
+lane ends up emitting a `FAULT` trace for a shutdown and putting a spurious
+incomplete ruling in a window. `SqliteNotificationStore` already absorbs
+cancellation at a physical boundary for the ruling transaction's sake, so the
+crossing this ADR traces is exactly a place the two rules meet. Architecture
+review found the contradiction on the fifth round.
 
 > **Normative.** The trace carries `refs[TraceRef.CORRELATION]` on ADR-0119 §4's
 > clause, read from the ambient value as every other emitter reads it. No measure
