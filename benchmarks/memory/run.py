@@ -228,6 +228,10 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         The manifest, already written to ``<output_root>/<run_id>/manifest.json``.
     """
     resolved = settings if settings is not None else Settings()
+    # Normalised here as well as inside the gate, so the manifest and the gate cannot
+    # disagree about what this run is — see the gate for why a `StrEnum` makes that a
+    # real hazard rather than a hypothetical one.
+    mode = RunMode(mode)
     injected = tuple(
         name
         for name, seam in (("grader", grader), ("model", model), ("observer", observer))
@@ -244,12 +248,18 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     # Built after the gate, so a scored run's judge is one this function constructed
     # from `Settings` and never one it was handed.
     judge = grader if grader is not None else build_grader(resolved, kind=grader_kind)
-    if model is None:
-        # The public startup gate (issue #530, ADR-0083 §3). A missing credential is a
-        # configuration fault, and without this it would surface as ~2,000 identical
-        # per-question failures the loop below dutifully records — which is exactly the
-        # shape a "keep going" policy must not turn a misconfiguration into. Skipped
-        # when a seam is injected, because a test's fake needs no credential.
+    # The public startup gate (issue #530, ADR-0083 §3). A missing credential is a
+    # configuration fault, and without this it would surface as identical per-question
+    # failures the loop below dutifully records — which is exactly the shape a "keep
+    # going" policy must not turn a misconfiguration into.
+    #
+    # **The condition is "will any configured provider be reached", not "was the
+    # answering seam injected".** Every seam that is *not* injected is one this
+    # function builds from `Settings`, and the model judge is one of them: a run with
+    # fake answering and distillation seams but a real judge reaches a provider on
+    # every answerable question, and skipping the check there turns a missing
+    # credential into a completed run of `ungraded` rows.
+    if model is None or observer is None or (grader is None and grader_kind == "model"):
         ensure_model_credentials(resolved)
     run_id = uuid4().hex[:12]
     run_dir = output_root / run_id
@@ -433,7 +443,7 @@ def refuse_ineligible_scored_run(  # noqa: PLR0913 — one parameter per precond
             — this is a refusal on a rule, not a bad argument — and nothing catches it.
         ValueError: If a scored run was asked for under any of the other three.
     """
-    if mode is not RunMode.SCORED:
+    if RunMode(mode) is not RunMode.SCORED:
         return
     if not preregistration_final:
         raise PermissionError(PREREGISTRATION_REFUSAL)

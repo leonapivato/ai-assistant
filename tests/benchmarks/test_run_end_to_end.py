@@ -27,7 +27,7 @@ from benchmarks.memory.records import QuestionRecord, RunManifest, RunMode, read
 from benchmarks.memory.run import execute_run, plan_run
 
 from ai_assistant.core.config import EmbedderKind, Settings
-from ai_assistant.core.errors import ModelUnavailableError
+from ai_assistant.core.errors import ConfigurationError, ModelUnavailableError
 from ai_assistant.core.types import Message, Role
 from ai_assistant.testing import FakeModelProvider, FakeObserver
 
@@ -527,3 +527,65 @@ async def test_execute_run_names_every_injected_seam_in_its_refusal(
         )
 
     assert "grader, model, observer" in str(caught.value)
+
+
+async def test_the_gate_is_not_bypassed_by_the_mode_s_bare_string(tmp_path: Path) -> None:
+    """`RunMode` is a `StrEnum`, so `"scored"` equals `RunMode.SCORED` and is not it —
+    an identity test on an unnormalised argument would return early on exactly the
+    value it exists to catch, while the manifest coerced the same string happily."""
+    with pytest.raises(PermissionError):
+        await execute_run(
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            output_root=tmp_path / "runs",
+            mode="scored",  # type: ignore[arg-type]  # the point of the test: a caller outside mypy's reach
+            corpus_digests={},
+            settings=_settings(tmp_path),
+            model=FakeModelProvider("a dog"),
+            observer=FakeObserver(max_batch_size=BATCH),
+        )
+
+    assert not (tmp_path / "runs").exists()
+
+
+async def test_an_unknown_mode_is_refused_rather_than_written(tmp_path: Path) -> None:
+    """Normalising through the enum rejects a mode nobody defined, as a bonus."""
+    with pytest.raises(ValueError, match="not a valid RunMode"):
+        await execute_run(
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            output_root=tmp_path / "runs",
+            mode="provisional",  # type: ignore[arg-type]  # as above
+            corpus_digests={},
+            settings=_settings(tmp_path),
+            model=FakeModelProvider("a dog"),
+            observer=FakeObserver(max_batch_size=BATCH),
+        )
+
+
+async def test_a_real_judge_beside_fake_seams_still_checks_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every seam not injected is one this function builds from `Settings`, and the
+    model judge is one of them. Skipping the check here would turn a missing credential
+    into a completed run of `ungraded` rows."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("PYDANTIC_AI_GATEWAY_API_KEY", raising=False)
+
+    with pytest.raises(ConfigurationError):
+        await execute_run(
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            output_root=tmp_path / "runs",
+            mode=RunMode.SMOKE,
+            corpus_digests={},
+            settings=_settings(tmp_path),
+            grader_kind="model",
+            model=FakeModelProvider("a dog"),
+            observer=FakeObserver(max_batch_size=BATCH),
+        )
+
+
+async def test_wholly_injected_seams_need_no_credential(tmp_path: Path) -> None:
+    """The complement, and what keeps this suite runnable with no key configured."""
+    manifest, _ = await _run(tmp_path)
+
+    assert manifest.judge == "exact"
