@@ -211,6 +211,13 @@ dev = [
     "import-linter>=2.0",
     "pip-audit>=2.7",
     "types-python-dateutil>=2.9.0.20260716",
+    # `jsonschema` ships no `py.typed` (ADR-0145 §10 adopts it for `core`), so
+    # under `mypy --strict` its every symbol would otherwise be `Any` behind an
+    # `ignore_missing_imports` waiver. The stub package is the narrower answer:
+    # `ValidationError.validator`, `.validator_value` and `.absolute_path` are the
+    # three schema-side facts §8 permits a violation to carry, and they are checked
+    # rather than assumed.
+    "types-jsonschema>=4.25",
     # The independent age implementation ADR-0123 §4's interop clause requires:
     # "an artifact written by this tool is decrypted and unpacked by an
     # independent implementation of the age format, and an artifact written by
