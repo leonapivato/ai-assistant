@@ -296,7 +296,14 @@ python_version = "3.14"
 # Python that agents read and change, and it was outside the strict check purely
 # by omission. It passed on the day it was added with no edit to the two scripts
 # already there.
-files = ["src", "tests", "scripts", "hatch_build.py"]
+#
+# `benchmarks` is here by that same precedent, and it earns the check more than
+# `scripts` does: the memory benchmark harness lives outside `src/` and outside
+# the wheel (hatch's `packages` list above decides that), but it is the first
+# non-`src` tree that *imports* `ai_assistant` — so a signature change in the
+# package becomes a type error here rather than a surprise at the first run that
+# spends money.
+files = ["src", "tests", "scripts", "benchmarks", "hatch_build.py"]
 strict = true
 warn_unreachable = true
 warn_redundant_casts = true
@@ -330,6 +337,14 @@ disallow_untyped_calls = false
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
+# The repository root on `sys.path`, so `tests/benchmarks/` can import the
+# `benchmarks` harness the way its own entry point does. pytest's default import
+# mode prepends each test file's own directory and never the root, and `tests/` is
+# on the path — so without this, `import benchmarks` resolves to the *test*
+# directory as a PEP 420 namespace package and the harness is silently untested.
+# A regular package wins that scan wherever it sits (PEP 420: `__init__.py` ends
+# the search immediately), so this is deterministic rather than order-dependent.
+pythonpath = ["."]
 addopts = "-ra --strict-markers --strict-config"
 asyncio_mode = "auto"
 markers = [
