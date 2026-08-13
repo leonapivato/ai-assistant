@@ -461,6 +461,20 @@ hygiene.
 > **skipped**, as is a message the reader cannot otherwise interpret. Nothing is
 > substituted for a fact the source did not make, and a skip raises nothing.
 
+> **Normative.** `Date` is read under that same rule, because it is the other
+> field carrying an instant. A message with **no** `Date`, with more than one, or
+> with a `Date` the reader cannot resolve to a determinate instant — RFC 5322's
+> `-0000` and an absent zone alike — is **skipped**. The delivery instant is
+> never substituted for it, the reader never selects among several `Date` values,
+> and `reported_at` is never defaulted, omitted, or filled from any other field.
+
+> **Normative.** The sender and the subject are **not** read under that rule and
+> are never on their own a reason to skip. A message with no `Subject`, or with
+> more than one, is proposed with the subject **empty** and no selection made
+> among the candidates; the sender is treated identically. Neither field carries
+> an instant, neither is an identity (§4), and a message that legitimately
+> carries no subject is ordinary mail rather than a fault.
+
 > **Normative.** The reader acquires the store's bytes whole and bounded, and
 > traverses its framing, exactly as ADR-0093 §7's byte cap requires. Nothing in
 > this section restricts which bytes it reads or scans past.
@@ -1142,7 +1156,7 @@ carries is to **pass** the existing suite, not to write one.
   `rename(2)` on the same filesystem; that its retention exceeds the reader's
   window; and that its credential never enters the hub. This is documentation and
   not `src/`, and §1's second clause is why: the fetcher is not ours to ship.
-- Tests for the clauses a lane can satisfy in prose and breach in code — five,
+- Tests for the clauses a lane can satisfy in prose and breach in code — six,
   each named by the breach it catches:
 
   - **The body never leaves the reader (§5).** A message carrying a body still
@@ -1165,13 +1179,22 @@ carries is to **pass** the existing suite, not to write one.
     owed on §5's terms rather than as a side effect of the stdlib's narrowness.
   - **`Date` is never a delivery instant (§5).** A store whose messages carry
     only a `Date` header proposes nothing.
+  - **`Date` is required and singular, and the delivery instant is never
+    substituted for it (§5).** A message with a valid in-window
+    `X-Assistant-Delivered-At` but no `Date`, two `Date` headers, or a `Date`
+    whose zone is `-0000` or absent is **skipped** — not proposed with the
+    delivery instant standing in as `reported_at`, which is the substitution a
+    reader reaches for precisely because it has a usable instant in hand. The
+    converse is asserted in the same test so the skip is not quietly generalised
+    to every absent field: a message with no `Subject` still proposes, with the
+    subject empty.
   - **The cap is applied at the framing (§12).** A store of
     `email_max_messages + 1` framed messages **none** of which carries a valid
     `X-Assistant-Delivered-At` **refuses** rather than returning a successful
     empty reading. This is the cap's *ordering* rather than its figure, and it is
     the one §12 property every test above passes while breached: an
     implementation that skips invalid messages first and counts what survives
-    satisfies all four others and still turns a busted cap into a quiet week.
+    satisfies all five others and still turns a busted cap into a quiet week.
 
 ### 14. Deferred, by name, each with the condition that fires it
 
