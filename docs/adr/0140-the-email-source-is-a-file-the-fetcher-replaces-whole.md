@@ -1,0 +1,1016 @@
+# 140. The email source is a file the fetcher replaces whole, and the reader proposes envelopes, never bodies
+
+- Status: Proposed
+- Date: 2026-08-12
+
+## Context
+
+Leg 11's second half is source breadth, and email is the source the corpus has
+been writing toward since leg 6. ADR-0095 §Context names the arrangement it
+expects — "an RSS-to-maildir daemon running *on the hub box*, with the reader
+reading their output" — and #664's library survey records the candidate stack:
+`imap-tools` in a co-located fetcher, the reader parsing with stdlib `mailbox`,
+`watchfiles` for noticing writes. **#664 is a survey of candidates and says so in
+its own words** — "These are **candidates, not decisions** — each adoption that
+touches a contract or the dependency set goes through its own change (and ADR
+where owed)" — so nothing in it binds this decision, and the arrangement below
+departs from it in one respect and says why.
+
+### What is already decided, read rather than remembered
+
+The seam exists and is exercised. `Reader` is a `core` Protocol with a
+conformance suite and a canonical fake (ADR-0095 §3); `SourceReading` is a frozen
+`core` type; `CalendarReader` is the one implementation; `GrantScope` carries
+three members; `standing_grants` reads the store. What this ADR adds is a
+*second* implementation of a settled contract, plus the facet field and the
+figures that implementation needs, plus the four rulings the corpus has left
+open specifically against email's arrival.
+
+- **ADR-0093** rules what a reader is and what it may propose: attested beliefs,
+  never an episode, never an absence (§4); a bound that is a function of the
+  clock, configuration and the source's content, enforced by refusing and never
+  by truncating (§5); a filesystem source opened non-blockingly and checked on
+  the descriptor to be a regular file (§7); a read that either completes or
+  raises (§8).
+- **ADR-0095** renames the seam and re-tests its placement, and leaves every
+  other ADR-0093 ruling standing under the substituted names (§5).
+- **ADR-0096** fixes what a facet is and what an absent one means, and rules that
+  the calendar facet carries no entry text (§6).
+- **ADR-0097** makes a grant a recorded user act keyed on a reader's declared
+  identity (§1), scoped by use (§2), gating the read by construction (§5);
+  **ADR-0133** adds `NOTIFY`; **ADR-0139** makes the standing set readable from
+  the store and fixes what a surface may present (§3).
+- **ADR-0098** rules ingested content data-never-instruction with the blast
+  radius bounded by construction, and states honestly what it cannot enforce
+  (§5).
+- **ADR-0110** makes coverage the thing that warrants an absence (§2, §3);
+  **ADR-0117** puts an entry's position in an extent rather than in the envelope
+  validity window, and rules what generalises (§8).
+
+### The three questions this decision cannot start without
+
+**#649 — a maildir is a directory and ADR-0093 §7 refuses one.** The issue is
+open, its firing condition is "any co-located fetcher whose natural output is a
+directory (an RSS-to-maildir daemon is one, and maildir is a directory by
+definition)", and it enumerates what widening §7 would reopen: whether the byte
+cap is per file or summed, whether §7b's single acquisition instant survives a
+directory walk, and mid-read mutation — "a fetcher writing into the directory
+while the reader walks it can produce a reading that corresponds to no state the
+directory ever held". The calendar escaped by using `vdirsyncer`'s `singlefile`
+storage. Email has no such off-the-shelf escape, so this ADR either finds one or
+supersedes §7.
+
+**#668 — ingested email is attacker-authored input to model calls.** ADR-0098 is
+the answer the corpus gave, and it was written while the only source was a
+calendar file. #668 asks whether that posture suffices *before email
+specifically*. Two facts bear on how it is read today. First, ADR-0098 as
+**ratified** already carries both corrections #674 raised against its `Proposed`
+text: §5's mis-grounding on ADR-0075 §2 is corrected in place ("**It would
+not.**", with the three real grounds enumerated), and §12's mixed-origin trigger
+is "written as fired rather than as pending". So #674's first two items are
+discharged on `main`, and only its third — consolidation as an unnamed §12
+trigger — is live. Second, ADR-0098 §5 states plainly what it cannot enforce:
+"on the live chain of the Context, externality is not recoverable at all", and
+§12 defers the seam that would make it recoverable.
+
+**Coverage and absence.** ADR-0110 §2 makes a declared coverage the only thing
+that warrants an absence; ADR-0117 §5 rules that an unaccounted read declares
+none, and §8 rules what generalises — "where a source's entries have a position
+in that source's world, that position is producer testimony and is carried by the
+extent". **#837** is open against ADR-0117 §5: its coverage withholding is
+reading-wide, so one uninterpretable entry suppresses demotion for a whole
+reading. #837 is not this ADR's to resolve, and this ADR states its relation to
+it rather than leaning on either outcome (§8).
+
+### The clause the brief for this lane did not name, and it is the larger one
+
+ADR-0093 §5 does not merely leave a mailbox undecided. It rules on it:
+
+> **Normative.** The `Sensor` contract carries no cursor and no durable
+> per-source state, and a conforming sensor may not introduce one. A source that
+> cannot be re-read in full within its bound — an append-only feed, a paginated
+> API, **a mailbox** — is out of this contract's scope and owes its own decision.
+
+and §11 defers it by name — "**A source that cannot be re-read in full** — a
+feed, a paginated API, a mailbox — and therefore the cursor. §5 scopes this
+contract to re-readable sources; ADR-0083 §13's upgrade-with-state discipline
+governs whoever takes it." **This ADR is that deferral's decision**, and §3 below
+is where it is taken. Both sentences lead with the *predicate* and put the
+examples in a dash, which is what makes the answer available: the question is not
+whether a thing is called a mailbox, it is whether the source the reader opens
+can be re-read in full within its bound.
+
+ADR-0093 §7a's closing paragraph also predicts, in unmarked prose, that "a
+mailbox's [dimensions] would not be a time window". §12 finds otherwise. Under
+ADR-0089 §3 unmarked text in a marked ADR supplies no obligation, so nothing is
+superseded by disagreeing with it — but it is a prediction this ADR contradicts
+and it is answered rather than passed over (§3).
+
+### An honest statement of what this ADR is not allowed to settle
+
+- **ADR-0098's posture.** It is ratified. §10 rules whether it suffices for email
+  and narrows what email contributes; it re-decides no clause of it.
+- **#837.** §8 states the relation and takes neither side.
+- **#649 in general.** §2 removes email as a forcing case for a directory source.
+  Whether a reader may ever read a directory is still #649's, unchanged.
+- **The prompt assembler.** ADR-0098 §2 and §9 own it and it is still unbuilt
+  (#672). This ADR adds spans it must escape; it does not build it.
+- **A source registry, a display label, an instance-distinguishing identity.**
+  ADR-0093 §11 defers all three at the third source and the second instance. This
+  is the second source and the first instance of its type, so none fires.
+- **Sending email.** An actuator, governed by ADR-0017 §1 and ADR-0021 §6, and
+  categorically not reachable from a read-only seam.
+
+## Decision
+
+Marked under ADR-0089: every obligation this ADR imposes is a marked clause, and
+unmarked text supplies none.
+
+### 1. The arrangement is three parts, and the file is the boundary between them
+
+> **Normative.** The email source is a **co-located fetcher** that holds the
+> account credential and writes a local store, and an `EmailReader` in `readers/`
+> that opens that store and returns a `SourceReading`. The two share no process,
+> no memory and no state but the store file.
+
+> **Normative.** The fetcher is a **deployment component and not part of this
+> system**. No Protocol describes it, no `Settings` field configures it, nothing
+> in `src/` starts, stops, supervises or health-checks it, and no ADR governs its
+> internals.
+
+> **Normative.** The reader treats everything the store contains as **external
+> content** under ADR-0098 §1, and treats the store's completeness as
+> unverifiable. It may not derive any claim about the mail account from the store,
+> and may not treat the fetcher's behaviour as an input to any bound it declares.
+
+**The boundary is where it is because that is what buys every other result in
+this ADR.** ADR-0095 §2 already argued the placement from this shape — "the
+fetcher does the network, the reader reads its output off disk" — and rejected
+`tools/` partly on the strength of it. Naming the boundary as the *file* rather
+than as a vaguer co-location makes three later sections mechanical rather than
+argued: §3's re-readability is a property of a file, §7's refusal to declare
+coverage is a property of not being the fetcher, and §11's "no network call" is a
+property of the reader having no other input.
+
+**The fetcher being outside the system is a real cost and is not hidden.** It
+means a fetcher that stops running produces a store that goes stale, and the
+reader cannot tell a stale store from a quiet week — it will read the same
+messages and propose the same beliefs, reporting health. That is the same class
+of blindness ADR-0096 §4 accepts for an absent facet and ADR-0093 §8 accepts for
+an empty reading, and the remedy is the operator's: the fetcher is monitored where
+the operator monitors processes, not through this system's surfaces. §7's refusal
+to declare coverage is what keeps that blindness from becoming a *wrong* belief
+rather than merely a stale one.
+
+### 2. The store is one regular file the fetcher replaces whole — ADR-0093 §7 is satisfied as ruled, not superseded
+
+> **Normative.** The store is a **single regular file** in the mbox family,
+> readable by stdlib `mailbox`. The email source is not a directory, and no
+> clause of ADR-0093 §7 is narrowed, widened or excepted by this ADR.
+
+> **Normative.** The fetcher writes the store by building a complete replacement
+> and moving it into place with `rename(2)` on the same filesystem. It does not
+> append to the store in place and does not edit it in place. This is a
+> **requirement of the arrangement**, stated so a deployment can meet it; the
+> reader cannot verify it and may not assume it has been met.
+
+> **Normative.** Where the requirement above is violated and the reader observes a
+> torn message, that message is **skipped** under §6's skip rule. A torn store
+> degrades a reading by losing messages from it and may never produce a proposal
+> the store's intact content did not support.
+
+**This is #649's escape, and it is the same escape the calendar took, found
+rather than inherited.** #649's own text names `vdirsyncer`'s `singlefile`
+storage as the shape that "satisfies §7 exactly as ratified", and observes that
+the concrete calendar lane therefore "owes nothing here". Email's version of that
+shape is an mbox the fetcher replaces whole, and it satisfies §7 for the same
+three reasons #649 enumerates as the ones a directory would reopen:
+
+- **The byte cap is unambiguous.** One file, one `calendar_max_bytes`-shaped
+  figure (§12's `email_max_bytes`), enforced on the read itself at most one byte
+  past the cap, exactly as ADR-0093 §7's second clause requires. There is no
+  per-file-versus-summed question because there is one file.
+- **§7b's single acquisition instant is real.** One `open`, one bounded read, and
+  `read_at` captured once at the instant the bytes are acquired. Every membership
+  test in the read is evaluated against that one instant, which is what §7b's
+  truthfulness argument requires and what a directory walk cannot supply.
+- **Mid-read mutation is closed by the kernel rather than by a rule.** The reader
+  holds an open descriptor; a `rename(2)` over the path leaves that descriptor
+  pointing at the old inode, so the read completes against a file that was
+  complete when it was opened. This is the property #649 identifies as the one a
+  single file has and a directory does not — "A single file has no equivalent
+  hazard: it is one `open` and one bounded read" — and it is why the atomicity
+  requirement is on the *replacement* rather than on the fetcher's manners.
+
+**Maildir is declined, and the survey's premise survives the decline intact.**
+#664's candidate is "imap-tools … in a co-located fetcher writing a maildir,
+reader parses with stdlib `mailbox`". Both halves of that are kept except the
+word *maildir*: `imap-tools` still holds IMAP and TLS, and stdlib `mailbox` still
+parses, because `mailbox.mbox` is the same module. What is given up is maildir's
+per-file delivery atomicity — which is real, and which is atomicity of *each
+file* and says nothing about the *set*, so it does not answer #649's third bullet
+at all. A fetcher delivering into `new/` while the reader walks the directory
+still produces a reading corresponding to no state the directory held.
+
+**And the atomicity requirement is why the fetcher is a small script rather than a
+mature daemon, which inverts one of ADR-0095's own reasons and is worth stating.**
+ADR-0095 rates co-located fetchers strongest because the pattern "delegates
+credential handling, network failure and protocol drift to mature tools instead of
+to a connector this project would write and then own". `offlineimap` and `mbsync`
+are those mature tools and both write incrementally, which is precisely the
+discipline the clause above forbids. So the delegation is kept where it is
+expensive — `imap-tools` owns IMAP, TLS and protocol drift — and given up where it
+is cheap: building a file and renaming it is a dozen lines, and it is the dozen
+lines that make §7's descriptor check and the kernel's inode semantics do the work
+three clauses would otherwise have to do badly.
+
+**#649 is narrowed and not closed.** What this ADR removes is #649's premise that
+the strongest pattern *requires* a directory: for email it does not, and the
+single-file arrangement is better on grounds that have nothing to do with §7
+compliance. #649's general question — whether a reader may ever read a directory
+source, and what happens to the three clauses if it does — is untouched and still
+fires on the first source whose natural output really is a directory.
+
+### 3. Re-readability: this is ADR-0093 §5's deferred decision, and the answer is still no cursor
+
+> **Normative.** The `EmailReader` carries **no cursor and no durable per-source
+> state**, and ADR-0093 §5's prohibition binds it unchanged. It is not out of
+> ADR-0093's scope, because the source it opens is re-readable in full within its
+> bound.
+
+> **Normative.** The reader's bound is a **clock-relative window over arrival
+> instants**: it proposes from the messages the store holds whose delivery instant
+> lies in `[read_at - email_window_past, read_at)`, half-open, evaluated against
+> the single `read_at` of ADR-0093 §7b.
+
+> **Normative.** The window is the **reader's own** bound. The reader makes no
+> claim about messages the store does not hold, may not assume the fetcher retains
+> any interval, and may not widen or narrow its window on anything the fetcher
+> does.
+
+**The unboundedness is real and it is on the fetcher's side of the file.** A mail
+account grows forever, which is why ADR-0093 §5 named a mailbox among the sources
+that cannot be re-read in full. What §5's clause actually predicates on is the
+source *the reader opens*, and here that is a file the fetcher replaces whole
+containing the recent traffic. A read of it is one `open` and one bounded read,
+and every read gets everything the file then holds. So the predicate is satisfied
+and the clause does not reach this source — not because a mailbox has been
+reclassified, but because the mailbox is not what the reader reads.
+
+**§5's own argument transfers, clause for clause, and this is the check that
+matters.** §5 removes the cursor by showing that observation's two failures do
+not arise for a clock-relative window:
+
+- **The coverage failure.** §5's calendar argument is that "the window *moves with
+  the clock*, so every run's window is recomputed from scratch and an entry inside
+  it is read whether or not any previous run read it. There is no accumulating
+  backlog for a cursor to track." That holds here with one added condition, stated
+  rather than assumed: it is true for as long as the fetcher's retention exceeds
+  the reader's window, and its window exceeds its interval. Where it does not — a
+  hub down for a week against three days of retention — messages are lost to
+  ingestion permanently. **That is exactly the cost §5 already accepted** ("An
+  entry that falls outside the window before any run reads it is never proposed …
+  the price of not carrying a cursor"), arriving here through the fetcher rather
+  than through the clock, and the operator's remedy is the same one: lengthen the
+  retention or shorten the interval, knowingly.
+- **The cost failure.** §5's second half is that a reader "reads a file and parses
+  it" rather than spending a model call. Unchanged, and cheaper here than for the
+  calendar: §5's own worked hazard is recurrence expansion, and a mailbox has no
+  generator — a message is a message.
+
+**A cursor would also be the wrong instrument even if it were permitted**, and
+saying so is what keeps a later lane from adding one as an optimisation. What a
+cursor would buy is reaching a message that fell out of the window, and it cannot:
+the message is not in the store either, because the fetcher's retention is what
+removed it. A cursor over a store the reader does not control is a durable record
+of where we were in a file somebody else rewrites, which is ADR-0083 §13's
+upgrade-with-state discipline paid for nothing.
+
+**ADR-0093 §7a's prediction is answered rather than ignored.** Its closing
+paragraph says "A second sensor names its own dimensions — a mailbox's would not
+be a time window — and inherits the obligation, not the table." The prediction is
+unmarked prose and binds nothing (ADR-0089 §3), and it is wrong for a reason worth
+recording: it supposed the reader would face the account. Facing a
+retention-windowed file instead, a time window is not merely available, it is the
+only bound that satisfies §5's requirement that the bound be "a function of the
+clock, its configuration and the source's own content, and of nothing else" — a
+message *count* would make what a read sees depend on how much arrived, and a
+cursor is forbidden. §12's table is genuinely derived from that and is not the
+calendar's copied: it has one window edge rather than two, and no expansion
+budget.
+
+### 4. Nothing the store says is authenticated, and no field of a message is an identity
+
+> **Normative.** No component of this system treats any header field of a message
+> as authenticated. A sender address, a display name, a `Message-ID` or any other
+> field is **what the store says**, never a verified fact, and no band,
+> confidence, precedence, permission, grant, routing or ranking decision may be
+> made on the strength of one.
+
+> **Normative.** An address or display name drawn from a message is **never an
+> identity** in this system. It may not be matched against the user, against a
+> `SourceGrant`, against a spoke's enrolment (ADR-0124), or against any other
+> subject, and may not be used to raise what a proposal drawn from that message
+> may become.
+
+> **Normative.** A reader mints its own id per proposal, opaque to the source
+> (ADR-0092 §6). A message's `Message-ID` may not be used as, or derived into, a
+> record id.
+
+**This is the clause that makes the format choice safe rather than merely
+defensible, and it is stated before the format's weakness is named.** An mbox
+delimits messages with an in-band `From ` line, and a writer that fails to escape
+a body line beginning `From ` splits one message into two — at which point the
+second fragment's apparent headers are text the message's author chose. So an
+attacker can manufacture a store entry that appears to come from someone else.
+
+**That attack gains the attacker nothing, and the reason is the reason the clause
+is general.** Anyone who can send mail can already put any `From:` they like on a
+real message; SMTP has never authenticated it, and no system that reads a mailbox
+may assume otherwise. The mbox splitting hazard therefore adds volume, not
+capability — and the defence against both is the same clause, which is why it is
+written about *every* field rather than about mbox. The `ATTESTED` band is exactly
+the right home for this: its whole standing is that somebody else said it
+(ADR-0093 §1), and a belief that the store attributes to Alice is a belief about
+what the store said, ruled on by the gate like every other.
+
+**The escaping requirement still belongs on the fetcher, as defence in depth and
+for one honest reason beyond it.** A split message inflates §6's facet count and
+consumes §12's message cap, both of which are our own claims about what the reader
+parsed. §6 states them as exactly that and never as claims about the account, so a
+splitting attack costs accuracy in a Tier-2 figure and nothing else. Under
+ADR-0098 §6 no bound in this corpus may be bought from a filter, and none is
+bought here: the clauses above are total, and the escaping is hygiene stated as
+hygiene.
+
+### 5. What the reader proposes: the envelope, and no body span at all
+
+> **Normative.** For each in-window message the store holds, the `EmailReader`
+> proposes **one** attested belief drawn from a fixed field set: the sender as the
+> store gives it, the subject as the store gives it, and the message's delivery
+> instant. Every proposal is in the `ATTESTED` band and carries
+> `sensitivity=DataTier.PERSONAL`, stated and never defaulted (ADR-0093 §4).
+
+> **Normative.** `Attestation.reported_at` carries the message's own `Date`
+> header — the sender's clock, which is what a report time is (ADR-0092 §3). The
+> **delivery instant** the store records is a different fact and is what §3's
+> window membership is decided on. The two are never merged and neither is
+> substituted for the other.
+
+> **Normative.** A message whose delivery instant the store does not supply, or
+> which the reader cannot otherwise interpret, is **skipped**. Nothing is
+> substituted for a fact the source did not make, and a skip raises nothing.
+
+> **Normative.** The reader materialises **no span of a message body** into a
+> proposal, into a facet, or into any value that leaves it. No body span reaches a
+> model call by any path this ADR opens.
+
+> **Normative.** The store the arrangement requires contains **envelopes only** —
+> per message, the header fields above and what the format needs to delimit it.
+> This is a requirement of the arrangement in §2's sense; the clause above binds
+> the reader whether or not it is met.
+
+**Two clocks, and the security half is why they are separated rather than merely
+distinguished.** `Date:` is the sender's claim, which is precisely
+`Attestation.reported_at`'s meaning and precisely the thing an attacker controls.
+Deciding window membership on it would let a sender hold a message in every future
+window by writing a future date, or drop out of every window by writing a past
+one. The delivery instant is written by the fetcher from what the server recorded;
+it is not a field the message's author sets. The corpus already keeps two clocks
+apart at the reading level — `read_at` and `as_of`, "two different clocks and …
+never merged" — and this is the same discipline one level down, taken for a
+second reason.
+
+**Envelopes only, and the argument is minimisation before it is injection.** Three
+things follow from the body never being present, and each is a bound obtained by
+construction rather than by a rule someone must remember:
+
+- **The tier stays honest.** `sensitivity` is chosen for what the source holds
+  (ADR-0093 §4), and a mailbox's bodies hold everything from a newsletter to a
+  password-reset link — Tier 0 by ADR-0004's own classification. No per-message
+  classifier could tell them apart, and #659 records that a `SECRET`-tier ruling
+  made on the ingestion path reaches no surface, so a wrong classification would
+  also be an invisible one. An envelope is `PERSONAL` and is uniformly
+  `PERSONAL`.
+- **The byte cap becomes a bound rather than a lottery.** A single 25 MiB
+  attachment would exceed any figure a table could defend, and ADR-0093 §5 makes a
+  cap refuse rather than truncate — so one large message would take the whole
+  source offline until an operator intervened. Two thousand envelopes are a few
+  megabytes.
+- **§10's narrowing is structural.** There is no body in the store to read, so the
+  deferral in §14 is not a discipline the next lane must hold; it is a shape.
+
+**What is deliberately left out of the field set.** `To:` and `Cc:` are not
+carried: they multiply Tier-1 addresses by every recipient of every mailing list,
+and the useful question they would answer — *was this addressed to me* — needs the
+user's own addresses, which the reader does not have and must not guess.
+`Message-ID` is not carried into content and may not become an id, per §4's third
+clause. Threading headers are not carried, because reconstructing a conversation
+from `References` is an inference and ADR-0093 §2 rules that "a reader infers
+nothing: it reads a file and reports what the file says". §14 defers each with its
+condition.
+
+**A skip rather than a refusal, and the line is ADR-0117 §5's.** A message with no
+delivery instant is an entry the source holds and the read cannot account for.
+`CalendarReader` skips exactly this shape — an occurrence whose `DTSTAMP` is
+absent, "because ADR-0092 §3 permits no substitute for a report time the source
+did not make" — and withholds coverage on the strength of it. The email reader
+skips for the same reason and withholds nothing, because §7 gives it no coverage
+to withhold.
+
+**Re-reading duplicates rather than folds, and the reader inherits that unchanged.**
+ADR-0093 §5's honest half applies: a proposal is minted at an id opaque to the
+source, so an unchanged message re-read is folded by *similarity* at the gate and
+not by identity (#631). Email is the friendlier case — a delivered message is
+immutable, so the rewrite arm of #631 has no subject here — but the guarantee this
+ADR relies on is the narrower one §5 relies on: a re-read destroys nothing.
+
+### 6. What the reader facets: two scalars, and no span of a message
+
+> **Normative.** `CurrentContext` gains `email: EmailFacet | None = None`.
+> `EmailFacet` extends `ContextFacet` with two fields: `arrived_in_window`, a
+> non-negative `int` counting the messages the read proposed from; and
+> `covers_from`, a `UtcInstant` being the inclusive lower edge of the arrival
+> window the reading covered.
+
+> **Normative.** The email facet carries **no span of any message**. It carries no
+> sender, address, display name, subject, body, identifier or per-message instant.
+
+> **Normative.** `arrived_in_window` is a count of what **this reader parsed from
+> the store**. It is not a claim about the account, is never presented as one, and
+> no consumer may read it as a count of mail received.
+
+**The facet's job is the one thing the beliefs cannot answer at request time, and
+for email that is volume rather than presence.** ADR-0096 §6 chose the calendar's
+three scalars by asking what a scan of stored beliefs could not cheaply supply —
+*is something happening right now, and when is the next thing*. The email analogue
+is *how much has arrived lately*, and the reason it is worth a field is that a
+turn's answer changes with it: "you have had two messages today" and "you have had
+ninety" are different situations, and neither is legible from a belief the
+retrieval budget may not have selected.
+
+**`covers_from` is `covers_until`'s mirror and exists for the identical reason.**
+ADR-0096 §6 carries `covers_until` because "`next_starts_at` being `None` means
+nothing to a consumer who does not know how far ahead we looked — and a consumer
+of `CurrentContext` does not read `Settings`, so the horizon has to travel with
+the value or not exist". A count of zero is exactly the same shape from the other
+side: it means nothing without the interval it counted over. ADR-0117 §8
+anticipated the symmetry when it observed that "a backward-looking source would
+have hit the same collision from the other side"; this is that source, and only
+the one edge is carried because email has only the one.
+
+**No entry text, and the rule is stronger here than ADR-0096 §6 needed it to be.**
+That section kept titles and locations out of the calendar facet because
+`CurrentContext` is rendered into every prompt and those are "the most disclosing
+thing it holds". A subject line is that and one thing more: it is attacker-chosen
+text on the advisory path, where a failure is silent and where ADR-0098 §2's
+escaping obligation falls on an assembler that does not yet exist (#672). Two
+scalars need no content budget, no truncation rule and no escaping at all, which
+is what makes the facet safe to ship before the assembler lands. §14 leaves the
+additive door ADR-0096 §6 left, with the condition that opens it.
+
+**A count rather than a boolean, for ADR-0096 §6's reason exactly.** `busy: bool`
+failed there because deciding what counts as busy is a judgement about the user's
+day; `has_new_mail: bool` fails here because deciding what counts as new is a
+judgement about the user's attention, and the reader holds no read/unread state
+and must not infer one. A count is a fact about what was parsed.
+
+### 7. The reader declares no coverage, and no email belief is ever absence-demotable
+
+> **Normative.** The `EmailReader` declares **no coverage** under ADR-0110 §2 and
+> **no extent** under ADR-0117 §2. No reading it produces warrants an absence, and
+> no belief it proposes is absence-demotable.
+
+> **Normative.** No later lane may give this source a coverage on the fetcher's
+> testimony — on a retention setting, on a manifest the fetcher writes, or on any
+> other statement by a component outside the read.
+
+**Coverage is what a read *exhausted*, and this read exhausts a file rather than a
+world.** ADR-0110 §2 is explicit that a coverage "is never widened to what the
+reader was configured to cover, to what the source is presumed to hold". The
+reader exhausts the store; whether the store holds every message that arrived in
+any interval is the fetcher's property, and the reader has no way to check it. A
+coverage declared here would be a claim about the mail account made on testimony,
+which is the one thing §2 forbids. §1's third clause is where that unverifiability
+is fixed, and this is the section that spends it.
+
+**And the demotion it would buy is not wanted, which is the decisive half.** This
+is mechanical rather than philosophical. The fetcher's retention window guarantees
+that **every message eventually leaves the store**. Under a coverage-declaring
+email reader, ADR-0110 §3's conditions would then be met for every belief the
+reader ever proposed, one retention period after it was proposed, and ordinary
+retention would retire the entire email half of memory on a schedule. Nothing
+about that is a truth the system learned; it is a fetcher's disk-space setting
+reaching through the seam and closing windows.
+
+**The asymmetry with the calendar is real and it is worth naming, because it is
+why one source wants demotion and the other does not.** A calendar entry is a
+standing claim about the world that can be *withdrawn* — a meeting is cancelled,
+and the entry's disappearance is the source telling us so. A delivered message is a
+**completed event**: it arrived, and it said what it said. Deleting it from a
+mailbox does not make it untrue that it arrived, so its absence from a later
+reading is evidence of nothing at all — which is ADR-0093 §4's original rule
+("An entry missing from a later reading is not evidence that the entry was
+withdrawn") holding here in the unnarrowed form, rather than in the exception
+ADR-0110 §3 carved for a covered reading.
+
+**No extent, and ADR-0117 §6 supplies the precedent rather than this ADR inventing
+one.** A message's position in the source's world is an instant, not a span, and
+an extent is a half-open interval in which a zero-width value "would be contained
+by every coverage and would make such a record demotable by any reading at all,
+which is the unsound direction". ADR-0117 §6 met that shape in the zero-duration
+occurrence and ruled that the proposal declares no extent and "is simply never
+absence-demotable". The same answer arrives here for the same reason, and it costs
+nothing that §7's first clause has not already declined. A later ADR that gives
+this source a coverage owes the point-position convention with it.
+
+**This is ADR-0117 §8's rule applied and its judgement honoured, not stretched.**
+§8 rules that whether a source's entries have a position worth stating "belongs to
+the lane that holds the source, which is the lane that can say whether 'absent'
+means anything for it at all", and that a source which declares none "is not
+thereby deficient". This is that lane, and the answer is that "absent" means
+nothing for email.
+
+### 8. #837 is neither engaged nor resolved, and this ADR is evidence in it for neither side
+
+#837 is open against ADR-0117 §5: coverage withholding is reading-wide, so one
+entry the calendar reader cannot interpret suppresses demotion for a whole
+reading. It asks for evidence that real sources carry such entries routinely, and
+for a decision about what a finer-grained coverage would mean.
+
+**The mechanism has no subject here.** §7 gives the email reader no coverage at
+all, so §5's withholding never runs: there is nothing to withhold, and §5's
+reading-wide coarseness costs this source nothing. The message §5 would have
+withheld on — one the reader cannot interpret — is simply skipped under §5's third
+clause above.
+
+**So this ADR must not be read as evidence in #837 in either direction.** It is
+not a case of the withholding biting, because nothing withholds. It is not a case
+of the withholding being harmless, because nothing was at stake. And a resolution
+of #837 in either direction — a set-valued coverage, a position-scoped withholding,
+or a decision to leave §5 as it stands — changes nothing decided here, because §7's
+refusal is grounded in the fetcher's unverifiability and in retention eating the
+memory, and neither of those is a coverage-granularity question. A lane taking
+#837 gains one datum and it is a negative one: the second source in the corpus
+turned out not to want a coverage, so the evidence #837 asks for still has to come
+from the calendar.
+
+### 9. The grant is on the read, the fetcher is not granted, and refusing it does not stop the mail
+
+> **Normative.** The email source is one grantable source whose subject is the
+> reader's declared identity, `"email"` (ADR-0097 §1). It is granted, revoked,
+> reported by `standing_grants` and rendered by a client exactly as every other
+> source is, and this ADR adds no grant mechanism, no scope member and no
+> exception.
+
+> **Normative.** Where no live grant names the use, the store is **not opened** —
+> not resolved, not opened, not parsed (ADR-0097 §5, ADR-0133 §2).
+
+> **Normative.** A grant on this source authorises **this system's read of the
+> store**. It does not authorise, describe, start, stop or bear on the fetcher,
+> and no surface may present a grant as a statement about whether mail is being
+> fetched, retained or deleted.
+
+> **Normative.** Withdrawing the grant stops the reading and does not stop the
+> fetcher. No surface may state or imply that revoking it prevents mail arriving
+> on the box or removes the store from disk.
+
+**The three scopes each mean something here, which is what keeps this from being a
+member with no consumer.** `FACET` authorises §6's two scalars at assembly time;
+`INGEST` authorises §5's proposals into memory; `NOTIFY` is available and this ADR
+mints no producer that uses it, so nothing reads it for this source until one
+exists (ADR-0133 §7's last bullet governs a fourth member and ADR-0130 §10 governs
+which producers exist). A user who grants `FACET` alone gets a count and no
+durable belief, which is exactly the sentence ADR-0097 §2 says the axis exists to
+make sayable.
+
+**The fourth clause is the one this arrangement makes newly necessary, and it is
+not the calendar's situation.** For a local `.ics` file, revoking the grant left a
+file the user already had. Here a *process the operator started* holds a
+credential and pulls mail onto the box whether or not any grant exists — so a
+surface that says "revoked: your email is no longer being read" is true and a
+surface that says "revoked: we are no longer collecting your email" is false. This
+is ADR-0133 §2's shape exactly — "The guarantee is over the **read**, and it is not
+a guarantee that nothing the user is ever told can be traced back to that source" —
+applied to a source whose collection happens outside the boundary. ADR-0139 §3's
+fourth clause already forbids presenting configuration state as part of a grant,
+and this clause is that rule reaching one step further out, to a component
+`grantable_sources` cannot even see.
+
+**Configuration is not a grant, and here it is not even ours.** ADR-0093 §7's
+clause — "Configuration is not a grant, and no surface may present it as one" —
+holds with more force rather than less: `email_source_path` being set means an
+operator pointed the hub at a file, and the fetcher running means an operator
+started a process, and neither is a user act through a client (ADR-0097 §3). The
+disabled-by-default rule (ADR-0093 §7) binds this reader unchanged, and §12's
+default is `None`.
+
+**One account, and the deferrals that would change that do not fire.** A grant
+keys on a declared identity that "is not yet instance-distinguishing" (ADR-0097
+§9a), and ADR-0093 §11 defers a source registry "at the third source" and an
+instance-distinguishing identity "at the second instance of one source type". This
+is the second source and the first instance of its type, so a second mail account
+is not configurable and the deferrals stand untouched. That is a real limitation
+and §14 records it as one.
+
+### 10. The injection posture: ADR-0098 governs unchanged, and what email changes is volume rather than mechanism
+
+> **Normative.** Every span the `EmailReader` draws from the store is **external
+> content** under ADR-0098 §1 — the sender, the display name, the address and the
+> subject alike — and every clause of ADR-0098 binds a consumer of it unchanged.
+
+> **Normative.** Until ADR-0098 §12's externality-recoverable seam is ratified and
+> implemented, the email source contributes to memory only through §5's envelope
+> field set, and contributes to `CurrentContext` only through §6's two scalars.
+
+> **Normative.** A lane rendering an email-derived span into a prompt owes ADR-0098
+> §2 and §9's marked test for its assembler's own container syntax. This ADR adds
+> spans to that obligation and discharges no part of it.
+
+**#668 asks whether ADR-0098's posture suffices before email, and the answer is
+that it suffices for what email contributes here — with the reason stated against
+#668's own list rather than asserted.** #668 asks for five things and ADR-0098
+rules on all five: provenance through the prompt (§2, non-forgeably), a band
+ceiling on what external evidence may become (§4), instructions-are-data and the
+no-authority-for-an-action rule (§3), detection explicitly not being the plan
+(§6), and audit legibility (§8). Nothing in email changes what any of those
+decides. Each is a **total** rule — a function of recorded origin, a band that is
+a total function of `MemorySource`, a prohibition on a span — and none of them is a
+rate, a threshold or a heuristic, so none degrades as the input grows.
+
+**Three things email genuinely changes, named precisely so the fourth is
+believable.**
+
+- **Volume.** An attacker can send arbitrarily many messages. A crafted invite
+  requires a calendar the attacker can write to; a crafted email requires an
+  address.
+- **Unsolicited reach.** Anyone who learns the address can put text on the box
+  with no prior relationship, whereas a calendar invite implies a channel the user
+  established.
+- **Selection.** The attacker chooses arrival time and may retry indefinitely,
+  which turns a probabilistic weakness into one they can grind at.
+
+**What all three move is the probability that ADR-0098 §5's stated residual gets
+exercised, and not the enforceability of anything.** §5's residual is precise:
+"on the live chain of the Context, externality is not recoverable at all" — an
+attacker's sentence reaches a durable belief through a plan rationale our own
+model authored and the engine recorded truthfully, and "there is no field to
+read". §5 argues that adding one is deferred on three grounds, of which the live
+one is that ADR-0073 §4 wants it decided "with a producer in hand". **Nothing about
+email makes that field obtainable**, so re-ruling §5 here would be re-arguing an
+unobtainability with no new fact — and ADR-0098 §12 already carries the seam with
+its trigger.
+
+**So the honest move is the second clause above: bound what email may reach until
+that seam exists, rather than re-decide a posture that has not become wrong.** The
+narrowing is not caution added to ADR-0098 — it is ADR-0098 §6's own construction
+posture applied to a new source. What §5 cannot bound is a *body* of arbitrary
+attacker-composed prose reaching a model and steering it; an envelope is a sender
+string, a subject string and two instants, so the payload an attacker gets to
+place is a subject line inside a rendered sentence in the `ATTESTED` band, with
+§4's ceilings and §3's data-not-instruction rule over it and the user able to see
+and kill it (ADR-0073 §5). That is not a claim that a subject line is harmless. It
+is a claim that the surface is small, fixed and legible, and that widening it to
+bodies is a decision to take when there is something to recover externality with —
+which is exactly the trade §14 records with its condition.
+
+**And the narrowing is structural rather than remembered**, per §5's last clause:
+the store the arrangement requires has no bodies in it. A lane that ignored the
+prohibition would have to change the fetcher's contract to find the text.
+
+**#668 does not close.** Its subject is the posture, ADR-0098 is the posture, and
+this ADR neither ratifies nor amends it — it rules the posture sufficient for one
+source's bounded contribution and records the residual it is relying on. #668's own
+framing ("this wants an ADR-shaped decision **before the second reader lands**")
+is met by ADR-0098 having landed; what stays live in it is ADR-0098 §12's seam,
+which is tracked there.
+
+### 11. This system makes no network call, and no credential enters it
+
+> **Normative.** Nothing in `src/` opens a network connection for this source.
+> `EmailReader` speaks no IMAP, POP or SMTP, resolves no host, and has no input
+> but the store file and the clock.
+
+> **Normative.** The account credential is the **operator's and the fetcher's**. It
+> is not a `Settings` field, is not written to or read from `secret_store/`, is not
+> passed to the hub by any means, and no `core` type carries it.
+
+> **Normative.** ADR-0093 §11's networked-source deferral is untouched. A reader
+> that itself spoke a mail protocol would engage ADR-0017 §1 and would owe that
+> decision; this ADR does not reach it and may not be cited as having.
+
+**This is the whole reason the arrangement is worth its awkwardness.** ADR-0093
+§11 rules that a networked source "cannot be reached by changing a path to a URL",
+because it "transmits a credential and a request, so it engages [ADR-0017] §1".
+Everything in that sentence is true of talking to an IMAP server, and none of it
+is true of this system, because the process that does it is not this system (§1).
+What the hub does is open a file, which is what it already does for a calendar.
+
+**The credential clause is written because the helpful mistake is obvious.** A
+later lane looking at `secret_store/` and at an email source will see a natural
+home for an IMAP password, and putting it there would move the network into the
+hub by the shortest available path — the hub would then need to *use* it, which
+means speaking IMAP, which is the deferral above. The credential staying outside
+is not an inconvenience to be tidied up; it is what makes the boundary in §1 a
+boundary rather than a diagram.
+
+### 12. Configuration and figures, named here rather than left to the lane
+
+ADR-0093 §5 invokes ADR-0074 §9.3's rule that a bounded default with no figure is
+two conforming implementations diverging while each believes it conforms, so the
+figures are named. **Seven fields, and the table is derived from this source
+rather than copied from the calendar's nine** — which §3 is the argument for.
+
+| Field | Default | Range | What it bounds |
+| --- | --- | --- | --- |
+| `email_source_path` | `None` | absolute path | the source; `None` is disabled |
+| `email_reader_interval` | `None` | `> 0` | the cadence; `None` is disabled (ADR-0093 §7) |
+| `email_window_past` | 7 days | `(0, 3650 days]` | how far back the clock-relative arrival window reaches |
+| `email_max_messages` | 2,000 | `[1, 2**63)` | in-window messages, and so proposals |
+| `email_max_bytes` | 8 MiB | `> 0` | the store read **before** parsing |
+| `email_read_timeout` | 10 s | `> 0` | the reader's deadline on its own read (ADR-0093 §7) |
+| `email_max_content_bytes` | 4 MiB | `> 0` | proposal content materialised across the whole read |
+
+> **Normative.** A configuration with `email_reader_interval` set and
+> `email_source_path` unset is refused at load with a `ConfigurationError`, on
+> ADR-0093 §7a's rule for the equivalent pair.
+
+> **Normative.** All four caps refuse rather than truncate, and exceeding any
+> raises under ADR-0093 §8 (ADR-0093 §5).
+
+> **Normative.** The email source ships **disabled by default** — both nullable
+> fields `None` — and the reason is ADR-0093 §7's: nothing may read a user's
+> personal files because a default said so.
+
+**Four of the seven are decisions rather than numbers.**
+
+- **One window edge, not two.** A calendar is asymmetric because the future is
+  what the assistant needs; a mailbox has no future, so `email_window_future` would
+  bound nothing. The remaining edge may **not** be zero, for ADR-0093 §7a's reason
+  applied unchanged: a zero-width window is a reader that reads nothing while
+  reporting health. It is bounded above at ten years for §7b's overflow reason —
+  `read_at - email_window_past` must be a representable instant, and saturation
+  under §7b covers the rest.
+- **No expansion budget.** `calendar_max_expansion` exists because one `VEVENT`
+  can generate hundreds of thousands of occurrences, so neither the byte cap nor
+  the entry cap bounds the work of finding them. A mailbox has no generator: the
+  messages in the store are the messages, so the byte cap bounds the parse and the
+  message cap bounds the output, and a third figure would bound nothing the first
+  two do not.
+- **`email_max_bytes` is separate from `email_max_messages` and is the one that
+  must exist**, on ADR-0093 §7a's ordering argument unchanged: a message cap can
+  only be applied after parsing, so a cap on messages alone lets a 2 GiB store be
+  fully parsed before anything refuses it. It is enforced on the read itself, at
+  most the cap plus one byte consumed (ADR-0093 §7).
+- **`email_max_content_bytes` bounds the output, which none of the others do.**
+  A subject header may be folded across many lines, and 2,000 of them inside every
+  other cap can still materialise more content than any consumer wants. It is a
+  single accumulator across the read, checked before each proposal is
+  materialised, exactly as `calendar_max_content_bytes` is and for the same
+  reason.
+
+**The default window is seven days rather than the calendar's one**, and the
+asymmetry is deliberate: a calendar's past is wanted only so "this morning" stays
+in view, while a mailbox's whole content is its past, and a window shorter than the
+gap between two runs of a hub that is occasionally off loses mail permanently (§3).
+Seven days is small enough to be a bounded payload of Tier 1 data — ADR-0093 §7a's
+posture, "a bound nobody argued is a payload nobody measured" — and large enough
+that the §3 loss needs a week of downtime to reach.
+
+**The reader's identity is declared and is not in the table.** It is `"email"`,
+never the account. ADR-0093 §7 and `Reader.name`'s own docstring use exactly this
+source as the worked counter-example — a reader "names *itself* (`"calendar"`),
+never the data it holds (`"alice@example.com calendar"`)" — and here the mistake
+would be one keystroke away in a `Settings` field, which is why there is no field.
+
+### 13. The contract surface owed, and what the implementing lanes owe
+
+**New surface in `core` — a breaking change (golden rule 5), implemented by a
+later lane after this ADR merges:**
+
+- **`core/types.py`** gains `EmailFacet` and the optional field
+  `CurrentContext.email` (§6). Additive, and every existing construction site
+  stays valid, which is ADR-0008 §1's pattern and ADR-0096 §1's.
+- **`core/config.py`** gains §12's seven `Settings` fields with their ranges and
+  the load-time refusal.
+
+**No new Protocol is minted and no triad is owed**, and that is worth stating
+because a lane may reach for one by analogy. `Reader` already describes this seam
+member for member, and ADR-0095 §3 anticipated this exact lane when it argued the
+triad's value: "A synced-vault reader and a co-located maildir reader are two
+implementations of one behaviour, which is precisely and only what a shared
+conformance suite is for … Two implementations is the condition under which that
+suite starts paying." This is that second implementation, so the obligation it
+carries is to **pass** the existing suite, not to write one.
+
+**What the implementing lanes owe:**
+
+- The `EmailReader` concrete in `readers/`, conforming to the shared suite, with
+  ADR-0093 §7's whole discipline held rather than re-derived: the non-blocking
+  open, the descriptor check, the byte cap on the read itself, the whole read off
+  the event loop on a terminable worker the reader owns, the deadline, the
+  one-outstanding-worker reservation released on the worker, no lifecycle method,
+  and `ReaderError` with a **payload-free message** carrying the identity and the
+  failure's class and never the path.
+- The `context/` adapter contributing §6's facet, gated on a live `FACET` grant.
+- The ingestion wiring, gated on a live `INGEST` grant, and the scheduler job as
+  an `Engine` call holding no reader (ADR-0083 §8).
+- **Deployment documentation for the fetcher** — what it must write, that it must
+  replace the store by `rename(2)`, that it must escape the format's separator,
+  that its retention must exceed the reader's window, and that its credential
+  never enters the hub. This is documentation and not `src/`, and §1's second
+  clause is why: the fetcher is not ours to ship.
+- A test that a message body present in a store the reader is pointed at reaches
+  **no** proposal and **no** facet (§5), because that is the clause a lane can
+  satisfy in prose and breach in code.
+
+### 14. Deferred, by name, each with the condition that fires it
+
+- **Message bodies, in any form — full, truncated, summarised or embedded.**
+  Fires when ADR-0098 §12's externality-recoverable seam is ratified and
+  implemented, which is what §10's second clause conditions on. A lane taking it
+  owes the byte and tier consequences §5 enumerates, not only the injection one.
+- **Attachments, and a reader over them.** #664's `Docling` candidate is the
+  natural home and the batch that briefed this lane deferred it explicitly. Fires
+  with that lane, and it inherits the body deferral above rather than routing
+  around it.
+- **`To:`, `Cc:` and "was this addressed to me".** Fires when the system holds the
+  user's own addresses as something other than a guess — which is a user-model
+  question, not a reader's.
+- **Threading and conversation reconstruction.** Fires with a consumer that needs
+  it, and it must argue past ADR-0093 §2's "a reader infers nothing" or move the
+  work to a producer that is allowed to infer.
+- **A second mail account.** Fires with ADR-0093 §11's source registry (at the
+  third source) and its instance-distinguishing identity (at the second instance
+  of one source type). Neither fires here (§9).
+- **A coverage, an extent, and therefore absence-demotion for email.** Fires only
+  if an arrangement exists whose completeness over an interval the reader can
+  verify **without** the fetcher's testimony. §7's second clause forecloses the
+  cheap route deliberately, and this deferral is recorded in the expectation that
+  its condition may never be met.
+- **Event-driven reading.** #664 lists `watchfiles` for "the hub noticing fetcher
+  writes". This reader is scheduler-driven per ADR-0093 §6. Fires with a decision
+  about read cadence, which is a different question from this source and would
+  reach every reader.
+- **Sending email.** An actuator. ADR-0017 §1 and ADR-0021 §6 govern, a read-only
+  seam cannot reach it, and it is named here only so nothing reads this ADR as a
+  step toward it.
+
+### 15. This ADR classified under ADR-0070 §1 and ADR-0082 §1
+
+ADR-0082 §1 puts the judgement in the later ADR's text, where it is reviewed, and
+fixes the test: *would a reader holding only the earlier ADR now act differently,
+or read one of its clauses more widely than it now holds?* Applied clause by
+clause to the ADRs this one leans on hardest, **the answer is that no earlier
+ADR's `Status` line is edited and no dated note is owed on any of them.** Every
+change here is a stacked addition or a deferral discharged on its own terms.
+
+- **ADR-0093 §7** — the regular-file clause. §2 supplies a source that satisfies
+  it as ratified. A reader holding only §7 opens the store, checks the descriptor,
+  finds a regular file and proceeds — identically before and after. **Addition,
+  and #649 is narrowed rather than answered by a supersession.**
+- **ADR-0093 §5** — the no-cursor clause and its out-of-scope sentence. This is
+  the clause where the classification has to be made carefully rather than
+  asserted, because ADR-0093's own header records ADR-0110 losing this argument on
+  §4. The distinction is that ADR-0110 put a case *inside* a rule §4 excluded,
+  narrowing it by exception; §3 puts nothing inside §5. §5's sentence predicates on
+  a source that **cannot be re-read in full within its bound**, and §3's source
+  can, so the sentence is as true after this ADR as before and a reader applying
+  its predicate reaches this ADR's answer. The dash-list naming "a mailbox" is
+  illustration: both §5 and §11 lead with the bolded predicate and put the
+  examples after a dash, and §11 states the operative rule in its own words — "§5
+  scopes this contract to re-readable sources". **Addition.** The no-cursor
+  prohibition itself is not merely unamended, it is restated and bound in §3's
+  first clause.
+- **ADR-0093 §11's fifth deferral** — "A source that cannot be re-read in full …
+  and therefore the cursor." This ADR **discharges** it, and a discharge is not a
+  supersession: §11 defers work and qualifies no rule, and its own entry says such
+  a source "owes its own decision". The precedent is ADR-0096 §4 on ADR-0093 §7a's
+  reserved state — "Nothing in §7a is edited or narrowed — its clause names the
+  event that ends the reservation, and this ADR is that event." **Addition.**
+- **ADR-0093 §7a** — its unmarked prediction that a mailbox's dimensions "would
+  not be a time window". Unmarked text in a marked ADR supplies no obligation
+  (ADR-0089 §3), so there is no clause to fail the test. §3 answers it in text so
+  the disagreement is legible. **No record owed, and none available.**
+- **ADR-0093 §4** — attested beliefs, never an episode, never an absence. §5
+  proposes in the `ATTESTED` band and §7 declares no coverage, so §4's absence
+  refusal binds this reader in its **unnarrowed** form rather than in ADR-0110
+  §3's exception. Nothing is read more widely. **Addition, and the narrowest
+  possible use of a clause that has an exception available.**
+- **ADR-0096 §1 and §6** — one optional `CurrentContext` field per facet, every
+  facet a `ContextFacet`, no entry text in the calendar facet. §6 adds a second
+  facet in exactly that shape and states the no-text rule for its own payload. §6's
+  sentences are about the *calendar* facet and stay true of it. **Addition.**
+- **ADR-0097 §1, §2, §5 and ADR-0133 §1** — the grant model. §9 adds a source to
+  it and adds no member, no mechanism and no exception. §9's fourth clause is a new
+  obligation on a *surface*, stated about a component ADR-0097 could not see; it
+  contradicts no sentence of ADR-0097 or ADR-0133, both of which are silent about
+  anything outside the process. **Addition.**
+- **ADR-0139 §3** — what a client may present. §9's fourth clause is §3's fourth
+  clause read one step further out. §3's own sentences — about configuration state
+  and about whether a read happened — are untouched and still bind. **Addition.**
+- **ADR-0098** — the whole of it. §10's first clause enrols this source's spans in
+  §1's class, which §1 already does by its own terms ("Membership of the class is
+  decided by **recorded origin**"). §10's second clause bounds what *this source*
+  contributes and imposes nothing on any consumer of ADR-0098. No ceiling is
+  relaxed, no clause is narrowed, and §5's residual is cited as it stands rather
+  than re-argued. **Addition.**
+- **ADR-0110 §2 and ADR-0117 §2, §5, §6, §8** — coverage, extent, and what
+  generalises. §7 declines both, which every one of those sections expressly
+  permits: ADR-0110 §2 makes coverage optional and its absence meaningful,
+  ADR-0117 §6 rules an unexpressible extent as none, and §8 rules that a source
+  declaring none "is not thereby deficient". **Addition, and §8's judgement
+  exercised rather than stretched.**
+- **ADR-0117 §5 and #837.** §8 states the relation and rules on nothing. #837 is
+  an open issue and not an ADR; nothing here is a record against ADR-0117.
+
+**This ADR is marked under ADR-0089** and is in the marked regime: its unmarked
+prose supplies no obligation and exists to determine what the marked clauses mean
+(ADR-0089 §3). It follows the practice ADR-0098 §11 records — marks stated while
+#622's question about ADR-0089's own status is open — and resolves nothing there.
+
+**This branch touches one file**, which is the mechanical consequence of the
+paragraphs above.
+
+## Consequences
+
+- **The email source is buildable against a settled contract.** No Protocol
+  changes, no triad is owed, and `Reader`'s conformance suite gets the second
+  implementation ADR-0095 §3 said it was waiting for.
+- **#649 stops blocking email and stays open for what it is actually about.** The
+  single-file arrangement satisfies ADR-0093 §7 as ratified, and it is chosen on
+  three correctness properties rather than on compliance, so the choice survives
+  any later widening of §7.
+- **ADR-0093 §5's mailbox deferral is discharged without a cursor**, and the
+  reason is transferable: the unboundedness sits with the fetcher, and the reader's
+  source is a re-readable file. The next source that looks unbounded should be
+  asked the same question before it is granted durable state.
+- **Email is never absence-demotable, permanently in practice.** That is the
+  correct answer for a completed-event source and it is also the one that stops a
+  disk-space setting from retiring beliefs. It costs the ability to notice that a
+  message was deleted, which is not a fact this system wants.
+- **The injection surface for email is a subject line and a sender string.** That
+  is small, fixed, legible, and bounded by ADR-0098's existing construction rules;
+  it is not zero, and §10 says so rather than claiming a prevention.
+- **The credential and the network stay outside the hub**, which keeps ADR-0017
+  §1 and ADR-0093 §11's networked-source deferral untouched and keeps `secret_store/`
+  free of an account password a later lane would otherwise have put there.
+- **The operator owns a small script.** ADR-0095 preferred co-located fetchers
+  partly to avoid owning a connector, and §2 gives back a dozen lines of that in
+  exchange for atomic replacement. The protocol work — the expensive, drifting
+  half — still belongs to `imap-tools`.
+- **The blindness is named.** A stopped fetcher looks like a quiet week, and
+  nothing in this system can tell the difference. §7's refusal to declare coverage
+  is what keeps that from becoming a wrong belief, and monitoring the fetcher is
+  the operator's.
+- **#668 does not close and #649 does not close.** #668's subject is ADR-0098's
+  posture and its live residual is ADR-0098 §12's seam; #649's is whether a reader
+  may read a directory. Both are recorded here with what changed.
+
+## Alternatives considered
+
+- **Read a maildir and supersede ADR-0093 §7.** The route the batch's brief
+  anticipated. Rejected because #649's three consequences are real and only one of
+  them is about the descriptor check: the byte cap acquires a per-file-versus-summed
+  question, §7b's single acquisition instant has no meaning across a directory walk,
+  and mid-read mutation is unclosable — maildir's atomicity is per file, and the
+  reader reads a set. Paying a partial supersession of a ratified clause to acquire
+  three problems, when a `rename(2)` closes all of them, is the wrong trade. #649
+  keeps the question for a source that has no alternative.
+- **Read the account directly over IMAP.** Rejected on ADR-0093 §11, which
+  forecloses it in as many words: a networked source "cannot be reached by changing
+  a path to a URL" and owes its own decision engaging ADR-0017 §1. It would also
+  put a credential in the hub (§11) and put protocol drift in `src/`.
+- **Give the reader a cursor over an append-only store.** The shape ADR-0093 §5
+  and §11 assumed a mailbox would need. Rejected because it buys nothing: the
+  message a cursor would reach is gone from the store, removed by the retention the
+  fetcher enforces, so the durable state would record a position in a file somebody
+  else rewrites. §3 argues it in full.
+- **Declare a coverage from the fetcher's retention setting.** Tempting because it
+  is one configuration field away and would make email absence-demotable. Rejected
+  twice over: it is a claim about the account made on testimony from outside the
+  read, which ADR-0110 §2 forbids in its own words; and if it worked it would retire
+  every email belief one retention period after it was proposed (§7). §7's second
+  clause forecloses it explicitly rather than leaving it to be re-tried.
+- **Propose from message bodies now, with ADR-0098's ceilings as the bound.**
+  Rejected on ADR-0098 §5's own residual: the ceilings bound what a *proposal*
+  becomes and do not bound a steered model's plan rationale, and §5 says externality
+  is "not recoverable at all" on that chain. Deferring bodies until §12's seam
+  exists costs a capability; shipping them costs a bound nobody can state. §14
+  carries it with the condition.
+- **Carry the subject in the facet.** Rejected on ADR-0096 §6's ground and one
+  more: `CurrentContext` reaches every prompt, the assembler that would escape it
+  does not exist yet (#672), and a subject line is attacker-chosen text. Two scalars
+  need no escaping at all.
+- **`has_new_mail: bool` instead of a count.** Rejected for ADR-0096 §6's
+  `busy: bool` reason: deciding what counts as *new* is a judgement about the user's
+  attention, and the reader holds no read/unread state and may not infer one.
+- **Key the window on the `Date:` header.** Rejected because it is the one clock in
+  the message the sender controls, so a sender could hold a message in every future
+  window or keep it out of all of them. The delivery instant the store records is
+  not attacker-set, and §5 keeps the two apart as two facts rather than choosing
+  between them.
+- **Use `Message-ID` as the record id.** Rejected on ADR-0092 §6, which rules that
+  an import proposes "each record at an id it mints, opaque to the source" and may
+  never use the source's own key. §4's third clause states it for this source
+  because the header is unusually inviting.
