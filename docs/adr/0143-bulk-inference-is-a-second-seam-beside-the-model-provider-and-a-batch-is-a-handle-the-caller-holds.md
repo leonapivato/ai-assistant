@@ -296,21 +296,43 @@ carries no caller-supplied field, and `list` filters only by batch id — so
 nothing ties a caller's key to an accepted batch, and an implementation could
 only have satisfied the clause by guessing.
 
-What is left is the honest bound, and it is the one ADR-0060 already licenses.
-Its cancellation rule "is cooperative and is stated in the weaker, true form: no
-seam can stop work that declines to be cancelled. What the rule buys is that the
-*resource* is safe and the cancellation *arrives*, not that the work stops" —
-and its third paragraph fixes the caller's position exactly: "**A cancelled
-call's effect is indeterminate to the caller.** … The caller may assume neither."
-A one-round-trip acceptance window is precisely that case, not an exception to
-it. So the fourth clause does the only two things a seam can do here: it moves
-every refusable check to the near side of the window, making the window as
-narrow as a single request; and it states the residue plainly instead of
-papering over it. The three-member split still removes the *large* orphaning
-window — the hours of waiting a hidden await would hold open — and reduces the
-residue from "a whole run" to "one request", which against this vendor surface
-is the best a contract can honestly offer. §11 records what would let a later
-lane close the rest.
+**Which of ADR-0060's limbs governs this, stated rather than left to be
+inferred.** ADR-0060 has two that could be read onto it, and they land on
+different objects.
+
+Its **resource** limb binds what the *method* holds: "If a method acquires
+anything whose safety outlives the coroutine — a connection, a lock, a spawned
+task, a file handle, a transaction — then at the moment ``CancelledError``
+leaves that method, every such resource is either released, or still held
+exclusively by work the method started and can observe finishing." Every item in
+that enumeration is a thing in this process, and the limb is discharged here in
+the ordinary way: `submit` holds no lock, spawns no task, and its HTTP
+connection is released by the client on the way out. Nothing is left held with
+nothing running to release it.
+
+Its **effect** limb binds what the call *did*, and this is the limb a remote
+batch falls under: "**A cancelled call's effect is indeterminate to the
+caller.** A cancelled write may or may not have committed. The caller may assume
+neither, and in particular may not assume the write did not land." A batch
+created but unreported is a write that may have landed. That is not an exception
+ADR-0060 tolerates grudgingly — it is the case it names, and it is the position
+**every write seam in this tree is already in**: a cancelled `MemoryStore.add`
+may have committed, and no ADR asks `add` to be recoverable afterwards by a key
+the caller minted. A reading on which `submit` must be recoverable would oblige
+every one of them to be, which is not what ADR-0060 says and not what the
+corpus implements.
+
+What is genuinely different here is *cost*, not ownership: an orphaned batch
+bills, where an orphaned row does not. ADR-0060 does not speak to cost, so this
+ADR does not pretend it discharges the concern — it bounds it instead. The
+fourth clause does the only two things a seam can do: it moves every refusable
+check to the near side of the window, making the window as narrow as a single
+request; and it states the residue plainly instead of papering over it. The
+three-member split still removes the *large* orphaning window — the hours of
+waiting a hidden await would hold open — and reduces the residue from "a whole
+run" to "one request", which against this vendor surface is the best a contract
+can honestly offer. §11 records the primitive that would let a later lane close
+the rest, and Consequences records the cost of not having closed it.
 
 The one-event-loop rule cuts the same way rather than the other. A suspended
 coroutine is cheap, so hiding a multi-hour wait would not by itself stall the
@@ -535,6 +557,23 @@ forbidden thing the easy one.
 > `BatchFailureKind` (§5's seven members); and `BatchItemFailure` (`kind`,
 > `detail`). No other public name is added to `core/types.py` by that lane.
 
+> **Normative.** The annotations are fixed here rather than left to the lane,
+> and reuse `core/types.py`'s existing vocabulary. `item_id`, `batch_key`,
+> `batch_id` and `issuer` are `Identifier`. `submitted_at` and
+> `results_expire_at` are `UtcInstant`, the second optional. `detail` is
+> `EncodableText`. `item_count` is a positive `int` and `settled` a non-negative
+> one. `BatchRequest.messages` and `submit`'s items are `Sequence`s, spelled as
+> `ModelProvider.complete` spells its own `Sequence[Message]`, and `fetch`
+> returns a `Sequence[BatchItemOutcome]`. No field is typed `Any`, and no type
+> in `models/` or any vendor package is named by any annotation.
+
+> **Normative.** `BatchStatus` binds `state` to `settled`: `0 <= settled <=
+> handle.item_count`, and `state` is `COMPLETE` if and only if `settled ==
+> handle.item_count`. An implementation whose provider reports no in-flight
+> progress reports `settled` as `0` until the batch completes, which satisfies
+> the invariant and is not a defect. `fetch` is defined only for a `COMPLETE`
+> batch and raises for a `PENDING` one.
+
 > **Normative.** `BatchItemOutcome` binds its optional fields to its kind: a
 > `message` is present if and only if the kind is `SUCCEEDED`, and a `failure`
 > is present if and only if the kind is `FAILED`. The binding is validated by
@@ -545,10 +584,8 @@ forbidden thing the easy one.
 > `FakeBatchCompleter` in `ai_assistant.testing` with its `Test…Contract`
 > subclass — rides in **one lane and one PR together with its primary
 > production implementation**, which is the vendor-backed `BatchCompleter` in
-> `models/` and is also the consumer whose demands shape this contract in
-> ADR-0137 §2's sense. The memory-benchmark harness of #1029/#1034 is a
-> **follow-on consumer group** under ADR-0137 §4, briefed only after the paired
-> lane merges.
+> `models/`. The memory-benchmark harness of #1029/#1034 is a **follow-on
+> consumer group** under ADR-0137 §4, briefed only after the paired lane merges.
 
 The naming is not free choice: `tests/core/test_protocol_triad.py` derives the
 suite and fake names from the Protocol's, so `BatchCompleter` fixes
@@ -557,29 +594,43 @@ location follows the sibling seams' — `tests/models/model_provider_contract.py
 and `tests/models/embedder_contract.py` — and §13's table is where that lane's
 obligations are enumerated.
 
-**The harness is not the consumer whose demands shape this contract, and saying
-otherwise would misapply ADR-0137 §2 rather than satisfy it.** §2 pairs the
-triad with "its primary production implementation", and defines primary as "the
-consumer whose demands shape the contract, not the one that is cheapest to
-write". Read against what is actually above: the harness contributes exactly one
-demand — bulk completion at a discount — and that demand is discharged by the
-seam existing at all. Every clause that was *hard* to write was forced by
-something else. §2's shape was forced by ADR-0060; §3's whole-batch refusal and
-§5's dispositions by ADR-0066 and `core/errors.py`; §4's four kinds, §4's
-unordered results, §6's two distinct expiries and §7's refusable size bound by
-the vendor surface — which is to say, by the thing the `models/` implementation
-is made of. That implementation is the first and hardest test of every one of
-them, and it is what stress-tests the contract while the contract is still soft.
+**ADR-0137's operative noun is "implementation", and that is what is paired
+here.** The point deserves the argument because ADR-0137 §2's own wording
+invites the opposite reading: it pairs the triad with "its primary **production
+implementation**", then glosses the adjective as "Primary means the consumer
+whose demands shape the contract, not the one that is cheapest to write" —
+qualifying a noun the gloss does not repeat. Two things settle which noun the
+pairing takes.
 
-The pairing is also the only one available. A consumer cannot substitute for the
+**§4 uses the phrase itself, and contrasts consumers against it**: "Every
+consumer of the contract other than **the primary implementation** is briefed
+only after the paired lane has merged." A rule that separates "consumers" from
+"the primary implementation" is not one on which the paired half is a consumer.
+This ADR follows §2's and §4's operative nouns; the gloss's looseness is
+ADR-0137's own to tidy, and is filed as #1051 rather than argued here.
+
+**And the alternative is not available.** A consumer cannot substitute for the
 implementation in the paired lane, because a triad with no production
-implementation gives the consumer nothing to call — the harness lane would ship
-against `FakeBatchCompleter` and discover nothing. So the live question was
-never *which* of the two to pair, but whether the harness rides **as well**; it
-does not, because it lives outside `ai_assistant` entirely and adding it would
-put a `core` contract, a vendor-SDK implementation and a new tree of harness
-machinery in one review — the compounding ADR-0137 §1 exists to stop. It follows
-under §4.
+implementation gives the consumer nothing to call: a harness paired with the
+triad alone would run against `FakeBatchCompleter`, which agrees with the
+contract by construction and so can discover nothing about it. Pairing the
+harness *instead* would harden the contract against a double and call it
+contact. So the live question was never which of the two to pair, but whether
+the harness rides **as well** — and it does not, because it lives outside
+`ai_assistant` entirely and adding it would put a `core` contract, a vendor-SDK
+implementation and a new tree of harness machinery into one review, the
+compounding ADR-0137 §1 exists to stop. It follows under §4.
+
+That leaves the concern behind the objection — a contract hardening before a
+real caller exercises it — which is worth answering on its merits rather than
+on ADR-0137's grammar. It does not arise here, because the harness is not where
+this contract's demands come from. It contributes exactly one — bulk completion
+at a discount — and that is discharged by the seam existing at all. Every clause
+that was *hard* was forced elsewhere: §2's shape by ADR-0060, §3's whole-batch
+refusal and §5's dispositions by ADR-0066 and `core/errors.py`, and §4's four
+kinds, §4's unordered results, §6's two distinct expiries and §7's refusable
+bound by the vendor surface — which is what the `models/` implementation is made
+of. It is the hardest exercise this contract has, and it rides with it.
 
 ### 10. What this seam does not promise
 
@@ -686,7 +737,7 @@ widely than it now holds?
 
 The table below is the audit. Every normative clause of §1–§10 appears in it
 exactly once, and every row names something a reviewer can run. The count is
-25 rows against the 27 marked clauses in this ADR; the remaining two sit below
+27 rows against the 29 marked clauses in this ADR; the remaining two sit below
 the table, are obligations *about* the table and the suite that satisfies it,
 and so have no rows of their own.
 
@@ -714,6 +765,8 @@ and so have no rows of their own.
 | §8 (no contract edit) | `pyproject.toml`'s `[tool.importlinter]` untouched | The lane's diff contains no `pyproject.toml` importlinter hunk |
 | §8 (not the hub) | No `service`/`app` wiring | A test asserts `ai_assistant.service` holds no `BatchCompleter` |
 | §9 (eight types) | The eight names in `core/types.py` | A test asserts exactly those eight names are added and each is exported as the file's conventions require |
+| §9 (annotations) | The exact annotations on all eight types and three members | A test asserts each field's annotation, that none is `Any`, and that no annotation names a `models/` or vendor type |
+| §9 (state/settled) | `BatchStatus` validator | Contract cases: `settled` stays within bounds; `COMPLETE` iff fully settled; a provider reporting no in-flight progress is accepted; `fetch` on a `PENDING` batch raises |
 | §9 (kind/payload binding) | `BatchItemOutcome` validator | A test asserts each of the four kinds rejects the wrong payload combination |
 | §9 (triad + primary) | `BatchCompleterContract`, `FakeBatchCompleter`, `Test…Contract`, and the `models/` implementation, in one PR | `test_protocol_triad.py` is the mechanical check; the suite runs against both the fake and the real implementation |
 | §10 (no promises) | Docstring clauses stating each exclusion | A test asserts a `Role.TOOL` turn in an item is refused, matching `complete`'s position |
