@@ -201,10 +201,15 @@ instead. §7 states what this costs, honestly.
 
 ### 3. The surviving claim: system-selected Tier 0 is only ever a credential, to the service it authenticates this system to
 
-> **Normative.** No component selects for transmission a span it holds as Tier 0
-> to any recipient other than **the service that credential authenticates this
+> **Normative.** No component **selects as the recipient** of a span it holds as
+> Tier 0 any party other than **the service that credential authenticates this
 > system to** — the audience it was obtained for and presented against, which is
 > not necessarily the party that issued it.
+
+> **Normative.** The clause above constrains the recipient a component *selects*
+> and states nothing about whether the transport delivers to that recipient. No
+> lane cites it as closing #83's unpinned transport endpoint or cross-host
+> redirect, or as substituting for ADR-0017 §3's transport-pinning condition.
 
 > **Normative.** A user-authored span is never a route by which this system
 > discloses Tier 0 it holds. No component places a value it holds as Tier 0 into
@@ -232,9 +237,9 @@ stated on the audience instead. The property the bound is protecting is unchange
 a credential goes to exactly one place, decided when the credential was obtained,
 and never to a recipient chosen later.
 
-**It holds today at all three boundaries ADR-0124 §1 names, which is what makes it
-worth ratifying now.** `models/` sends the provider credential to the configured
-provider (ADR-0017 §2's declaration of what it transmits). A designated `tools/`
+**The selection rule holds today at all three boundaries ADR-0124 §1 names, which
+is what makes it worth ratifying now.** `models/` selects the configured provider
+as the recipient of the provider credential (ADR-0017 §2's declaration of what it transmits). A designated `tools/`
 seam would read an integration's credential through `Secrets` (ADR-0004 §3 as
 replaced by ADR-0125) and present it to the service that credential authenticates
 it to. The remote transport's client presents its enrolment credential to the hub
@@ -243,12 +248,27 @@ frame §7 requires, and the request it was asked to make"). Everything else the
 system selects and sends is Tier 1 or Tier 2. There is no fourth case, and a lane
 that finds itself wanting one is looking at a bug.
 
+**Selection is the whole subject, and the second clause says so because the first
+draft did not.** ADR-0017 §2 records that at `models/` "nothing pins its transport
+endpoint, so a hostile base URL or cross-host redirect would carry conversation
+*and* credential elsewhere" (**#83**) — so a bound stated over where the credential
+*arrives* would be false of `main` today, would sit against §6's clause that
+`models/` acquires no precondition from this ADR, and would have this ADR quietly
+claiming to close a gap ADR-0017 §2 deliberately named and left open. Adversarial
+review found that reading on round 3. The repair is to say what the rule is about
+rather than to weaken it: **which recipient a component may choose** is a
+classification question and is this ADR's; **whether the bytes reach the chosen
+recipient** is a transport question, and it is #83's at `models/` and ADR-0017
+§3's transport-pinning condition at `tools/`. Both remain open and neither is
+touched here. This is the same discipline §7 applies to detection — state the
+bound the system can actually hold, and name what it does not.
+
 **Where the audience is not determinable, the clause bites rather than lapses.** A
 credential whose audience nobody recorded has no permitted recipient under this
 clause, which is the fail-closed direction and the same default §2 takes for a
 span with no recorded provenance. It is not licence to pick a plausible one.
 
-**The second clause closes the bypass the first would otherwise leave open.**
+**The third clause closes the bypass the first would otherwise leave open.**
 Without it, a component holding a credential could embed it in the outbound
 rendering of the user's turn and inherit the user's provenance for it — the
 laundering of §1's first clause, performed in the other direction. Provenance
@@ -516,7 +536,7 @@ anyone's argument that a clause here is satisfied.
 
 **What does bound the undetected case, honestly enumerated.** The value reaches
 only providers the user explicitly configured (ADR-0004 §2 as amended, ADR-0013
-§6). It is never disclosed to a third party without §4's second clause routing
+§6). It is never disclosed to a third party without §4's third clause routing
 that through ADR-0017 §3's recipient authorisation, where a per-call approver sees
 the destination. It is subject to the user's own delete right (ADR-0004 §6) and to
 the offline destruction ADR-0126 provides. And the user, who is the only party who
@@ -573,8 +593,8 @@ stated only in a list item obliges nobody.
 > treats it as tier-cleared. A test asserting only that the span is present does
 > not satisfy this clause.
 
-- **The lane that designates the `tools/` seam** owes §6 in full, owes §4's second
-  clause its enforcement point in the per-call authorisation, and owes the choice
+- **The lane that designates the `tools/` seam** owes §6 in full, owes §4's third
+  and fourth clauses their enforcement point in the per-call authorisation, and owes the choice
   between a caller-stamped and a producer-declared provenance marker an argument
   against ADR-0094 §5's rule that a producer may not declare its own standing.
 - **The prompt-assembly lane** (ADR-0072 §6's, ADR-0098 §9's, filed as **#672**)
