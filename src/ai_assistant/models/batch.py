@@ -432,6 +432,21 @@ class AnthropicBatchCompleter:
     async def fetch(self, handle: BatchHandle) -> Sequence[BatchItemOutcome]:
         """Read a settled batch's results file: one outcome per submitted item.
 
+        **Which of ADR-0143 §4's three clauses this can enforce, stated rather
+        than implied.** "No more" and "no fewer" are checkable here: the results
+        file's line count is compared against the provider's own ``total``, and its
+        ids are counted distinctly, so neither a short file nor one answering an
+        item twice can be read as a batch of expiries. The third — "none for an
+        ``item_id`` that was not submitted" — is **not**, and the reason is
+        structural rather than an omission: a handle carries four fields and §2
+        forbids a fifth that a later ``fetch`` would have to agree with, while §2's
+        resumption clause means the completer that fetches is routinely not the one
+        that submitted. So the submitted set is the caller's, and §4 puts the match
+        there: "A caller matches an outcome to its request by ``item_id`` and never
+        by position." A caller doing that sees a substituted id at once — a missing
+        one fails its lookup, an extra one is not in its set. Issue #1072 records
+        the question and what closing it would cost.
+
         Raises:
             ModelError: If the handle is not this issuer's, if the batch has not
                 settled, if its results retention has lapsed, or if the exchange
@@ -597,6 +612,7 @@ class AnthropicBatchCompleter:
                 msg = f"item_id {item.item_id!r} appears twice; ids must be unique within a batch"
                 raise ModelError(msg)
             seen.add(item.item_id)
+            _refuse_unusable_handle_text(item.item_id, what=f"item_id {item.item_id!r}")
             _refuse_malformed_history(item)
 
 

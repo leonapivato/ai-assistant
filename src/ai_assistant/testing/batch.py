@@ -411,6 +411,7 @@ class FakeBatchCompleter:
                 msg = f"item_id {item.item_id!r} appears twice; ids must be unique within a batch"
                 raise ModelError(msg)
             seen.add(item.item_id)
+            _refuse_unusable_handle_text(item.item_id, what=f"item_id {item.item_id!r}")
             _refuse_malformed_history(item)
 
 

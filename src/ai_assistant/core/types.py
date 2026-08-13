@@ -572,6 +572,17 @@ class BatchRequest(BaseModel):
     pydantic holds it as a mutable ``list`` beneath a frozen model exactly as
     :class:`MemoryWrite` holds a mutable :class:`MemoryRecord`.
 
+    **Mutable therefore means mutable-and-validated**, which is what
+    ``validate_assignment`` buys: without it a caller could assign a blank
+    ``item_id`` after construction and hold a model that no longer satisfies its
+    own annotation, and ``submit``'s deep copy would faithfully carry the invalid
+    value to the provider. Being unfrozen is a decision about *when* the value may
+    change, never about whether the type's rules apply to what it changes to. It is
+    not a complete guard and does not pretend to be — ``model_construct`` bypasses
+    validation by design — which is why ``submit`` re-checks each snapshotted
+    ``item_id`` on the near side of the acceptance window rather than trusting the
+    type alone (ADR-0143 §2, §3).
+
     Attributes:
         item_id: The caller's own id for this item, unique within its batch and
             carried back unchanged on the item's outcome.
@@ -580,7 +591,7 @@ class BatchRequest(BaseModel):
             containing no ``Role.TOOL`` turn (ADR-0143 §10).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     item_id: NonBlankEncodableText = Field(
         description="The caller's id for this item, unique within its batch, never rewritten."

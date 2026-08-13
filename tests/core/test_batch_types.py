@@ -236,6 +236,18 @@ class TestTheAnnotationsAreTheOnesRatified:
         with pytest.raises(ValueError, match="blank"):
             BatchRequest(item_id="   ", messages=[_a_turn()])
 
+    def test_a_request_is_mutable_but_never_into_a_value_its_own_type_refuses(self) -> None:
+        # Unfrozen is a decision about *when* a value may change, never about
+        # whether the type's rules apply to what it changes to. `BatchRequest` is
+        # the one model here that is not frozen — ADR-0143 §13's observation row
+        # needs three distinct mid-flight mutations to be writable — so it is also
+        # the one that has to validate assignment.
+        item = BatchRequest(item_id="ok", messages=[_a_turn()])
+        item.item_id = "renamed"
+        assert item.item_id == "renamed"
+        with pytest.raises(ValueError, match="blank"):
+            item.item_id = "   "
+
     @pytest.mark.parametrize("field", ["batch_key", "batch_id", "issuer"])
     def test_a_blank_handle_field_is_still_refused(self, field: str) -> None:
         # `NonBlankEncodableText` drops `Identifier`'s *normalising* half and keeps
