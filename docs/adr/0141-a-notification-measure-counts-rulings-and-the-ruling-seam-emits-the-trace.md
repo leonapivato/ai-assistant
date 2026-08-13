@@ -1,6 +1,6 @@
 # 141. A notification measure counts rulings, and the ruling seam emits the trace it is counted from
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-12
 - **This decision adds contract surface, and it is one member.** `TraceKind`
   gains `NOTIFICATION` (§2). That is a `core/types.py` change, so golden rule 5
@@ -15,12 +15,13 @@
 - **This ADR's ratification.** It decides a contract surface, so the required set
   is adversarial **and** architecture, and it is ratified only on a tree where
   both are green — `CONTRIBUTING.md` → "Finishing an ADR PR: `Proposed` through
-  the reviews, `Accepted` on the way out". A blocker on the first flipped tree
-  returned it to `Proposed` under that section's recovery clause, so it takes the
-  route that clause describes and is ratified on its **second** flip. This PR's
-  round record carries every round and both lenses' outcomes; the `Status` line
-  above states where the sequence has reached. Nothing implements against §10
-  until this has merged.
+  the reviews, `Accepted` on the way out". A blocker recorded on a flipped tree
+  returns it to `Proposed` under that section's recovery clause and the reviews
+  run again; that has happened here, and it is ratified on whichever flip both
+  lenses leave green. This PR's round record carries every round, both lenses'
+  outcomes and every recovery the route took; the `Status` line above states
+  where the sequence has reached. Nothing implements against §10 until this has
+  merged.
 - **It answers #980 by ruling the measure's definition, and it does not close
   it.** #980 asks for an instrument in the tree. This ADR supplies what an
   instrument needs before it can be written — what is counted, out of what, and
@@ -849,13 +850,25 @@ contributes exactly what a ruling made on the first day does. Bolting a settling
 period on anyway would withhold figures for no reason and would suggest a bias
 that is not there.
 
-**The partition still matters, and more here than for the memory measures.**
-`service/configuration.py`'s allowlist is what ADR-0120 §8 partitions on, and the
-notification chassis's `Settings` figures — the store's cap, its retention and the
-reconsideration interval (ADR-0130 §9) — change what these rates mean when they
-move. The standing settings of ADR-0130 §6 are **not** in `Settings` and emit no
-`CONFIGURATION` trace, so a reach level raised or a budget widened does not
-partition a window. That is a real discontinuity in the series and §9 states it
+**The partition matters more here than for the memory measures, and this ADR is
+what creates it.** ADR-0120 §8 partitions on `service/configuration.py`'s
+allowlist, and the notification chassis's `Settings` figures — the store's cap,
+its retention and the reconsideration interval (ADR-0130 §9) — change what these
+rates mean when they move. **As merged, none of the three is on that allowlist.**
+`_allowlisted` records the scheduler, observation, embedding, retention and
+cardinality figures and no notification figure at all, so today two startups
+differing only in the cap emit identical `CONFIGURATION` metric mappings, no
+boundary is created, and the clause above would silently state one figure across
+rulings made under different caps. **§10 is what closes that**, by requiring the
+three onto the list; the partition this section relies on is a thing this ADR
+creates rather than a property it inherits, and without §10's clause the clause
+above would be unsatisfiable for exactly the settings that matter most to it.
+
+The standing settings of ADR-0130 §6 are the different case, and §10 does not
+reach them: they are **not** in `Settings` at all, so they emit no
+`CONFIGURATION` trace and no allowlist that reads `Settings` can carry them. A
+reach level raised or a budget widened therefore does not partition a window.
+That is a real discontinuity in the series and §9 states it
 as a limit rather than proposing a marker for it, on ADR-0121 §7's precedent:
 "partitioning on arbitrary code changes is not something the trace stream can
 see, and inventing a marker for it is a bigger decision than this one".
@@ -947,6 +960,15 @@ named rather than approximated.
 > the window it already takes is this report's window, and §8 rules that the
 > settling argument bounds ADR-0120 §4 alone.
 
+> **Normative.** The three notification `Settings` figures ADR-0130 §9 already
+> added — `notification_queue_limit`, `notification_retention` and
+> `notification_reconsider_interval` — join `service/configuration.py`'s
+> `_allowlisted`, each under its own metric-key literal declared in that module
+> and in the shape its existing entries take: the cap as a number, the two
+> nullable durations through `_pair`. The test that pins the declared allowlist
+> against what a deployment produces is extended to expect them. This names three
+> fields that already exist and adds none, so the clause above is untouched.
+
 > **Normative.** The lane's restated literals are pinned against the emitter's
 > own constants, in the shape `tests/evaluation/test_measures_vocabulary.py`
 > already takes — `evaluation` may import only `core`, so the emitter's keys are
@@ -969,13 +991,31 @@ of the merged tree rather than of this decision; it is filed, not settled here.
 Adversarial review found the gap on the eighth round, reasoning from a premise
 about the classifier's location that the tree does not bear out.
 
-**The lane is one subsystem plus its tests, twice, and that is admissible rather
-than a widening.** The emitter is `memory`, the reader is `evaluation`, and
-`CLAUDE.md`'s one-subsystem rule bites. ADR-0119's own emitter lanes are the
-precedent: a trace's producer and its consumer are two changes, and a measure
-whose emitter does not exist yet is a measure over nothing. The honest sequencing
-is the emitter first — it is inert until something walks the stream — and the
-measure second, and nothing here requires them to be one change.
+**The allowlist entry is what makes §8's partition real, and it is why the three
+belong on the list.** Without it the trace stream cannot see a cap, a retention
+horizon or a reconsideration interval move, and §8's clause requiring every
+figure per part of a partitioned window would state one figure across rulings
+made under different ones. Each of the three meets the list's own stated
+inclusion test — it shapes the accumulation these measures are computed over: the
+cap bounds what `condition_at_cap` can mean, the retention bounds how long a
+record stays actionable and therefore `condition_duplicate`, and the
+reconsideration interval bounds how many reconsideration rulings (§3) exist to
+count at all. ADR-0119 §9 states the allowlist's *property* and leaves its roster
+to the lane that needs an entry — "A later change that needs one adds it", in
+`service/configuration.py`'s own words — so this is the route that clause
+provides for and §11's test finds no record owed against it.
+
+**The lane is one subsystem plus its tests, three times, and that is admissible
+rather than a widening.** The allowlist entry is `service`, the emitter is
+`memory`, the reader is `evaluation`, and `CLAUDE.md`'s one-subsystem rule bites
+at each seam. ADR-0119's own emitter lanes are the precedent: a trace's producer
+and its consumer are two changes, and a measure whose emitter does not exist yet
+is a measure over nothing. The honest sequencing puts the allowlist entry no
+later than the emitter — a notification trace recorded while the three figures
+are off the list lies in a stretch of stream no boundary divides, and no later
+change recovers the boundary that startup did not record — then the emitter,
+which is inert until something walks the stream, then the measure. Nothing here
+requires any two of the three to be one change.
 
 ### 11. What this records against earlier ADRs, under ADR-0082 §1
 
@@ -1126,10 +1166,10 @@ supported the wrong reading for as long as the defaults stood.
 **What becomes harder: adding a producer without moving the numbers.** Every rate
 here is pooled across notification classes (§9), so a new producer changes the
 denominator of both measures and the incidence of every condition. A window
-spanning a producer's arrival is not internally comparable, and unlike a
-`Settings` change it does not partition. Whoever adds the second producer inherits
-that, and the honest remedy is the per-class decomposition §9 files rather than a
-rule nobody can enforce.
+spanning a producer's arrival is not internally comparable, and unlike a move in
+one of §10's allowlisted figures it does not partition. Whoever adds the second
+producer inherits that, and the honest remedy is the per-class decomposition §9
+files rather than a rule nobody can enforce.
 
 ## Alternatives considered
 
