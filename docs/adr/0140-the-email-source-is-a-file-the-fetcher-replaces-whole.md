@@ -1138,9 +1138,13 @@ carries is to **pass** the existing suite, not to write one.
   window; and that its credential never enters the hub. This is documentation and
   not `src/`, and §1's second clause is why: the fetcher is not ours to ship.
 - Tests for the four clauses a lane can satisfy in prose and breach in code: that
-  a body present in a store the reader is pointed at reaches **no** proposal and
-  **no** facet (§5); that a message with zero, two, or an unparseable
-  `X-Assistant-Delivered-At` is skipped rather than dated by any fallback (§5);
+  a message carrying a body **still yields its envelope proposal and is still
+  counted in the facet**, while no byte of that body reaches that proposal, the
+  facet, or any other value leaving the reader (§5) — the sentinel must be absent
+  and the envelope present, because a test asserting only the absence is passed
+  by a reader that drops the message entirely; that a message with zero, two, or
+  an unparseable `X-Assistant-Delivered-At` is skipped rather than dated by any
+  fallback (§5);
   that a store whose messages carry only a `Date` header proposes nothing; and
   that a store of `email_max_messages + 1` framed messages **none** of which
   carries a valid `X-Assistant-Delivered-At` **refuses** rather than returning a
