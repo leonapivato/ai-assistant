@@ -1,7 +1,20 @@
 # 146. Outbound content is classified by its discloser, and provenance never moves a tier
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-13
+- **Note (2026-08-13): ratified.** `Proposed` → `Accepted`, after **both**
+  required reviews came back green on one tree — adversarial **APPROVE with no
+  findings** and architecture **APPROVE with no findings**, both at tree
+  `6aeb21420568`, round 5, churn ratio 1.2 — and with both re-run on the flipped
+  tree for coverage. That is the outcome ADR-0070 §1 requires the ratifying edit
+  to record, and the route `CONTRIBUTING.md` → "Finishing an ADR PR" fixes
+  (ADR-0130 §12 and ADR-0136 §7 are the worked precedents). **What the ratifying commit
+  edits:** the `Status` line, this note, and §11's unmarked record of the route
+  and of the five rounds — nothing else, and **no normative clause acquires,
+  loses or alters an obligation**, which is ADR-0070 §1's own test applied to the
+  ratifying edit first. §11 is unmarked prose under this ADR's own ADR-0089
+  regime, so it supplied no obligation before the edit and supplies none after. **ADR-0070 §1's no-rewrite rule now protects this
+  text**, so any later correction is an appended dated note.
 - **Decides a classification and adds no `core` surface.** No Protocol, no type,
   no field. One seam this classification will need — a marker that carries a
   span's discloser provenance to an egress boundary — is deferred in §8 with its
@@ -698,13 +711,23 @@ supplies nothing. ADR-0089 §5 makes marking forward-only, so nothing this ADR
 cites is retro-marked and the unmarked ADRs it reads bind as prose exactly as
 before.
 
-It is **drafted, reviewed and revised while `Proposed`**, and its status is
+It was **drafted, reviewed and revised while `Proposed`**, and its status was
 flipped only once **both** required reviews — adversarial and architecture, the
-set the header bullet declares — have returned clean on one tree, with both
+set the header bullet declares — had returned clean on one tree, with both
 re-run on the flipped tree for coverage. `CONTRIBUTING.md` → "Finishing an ADR
 PR" owns that sequence and ADR-0130 §12 and ADR-0136 §7 are the worked
-precedents; this section names the route and does not re-argue it. The ratifying
-edit records the outcome (ADR-0070 §1).
+precedents; this section names the route and does not re-argue it. The header
+note records the outcome (ADR-0070 §1).
+
+**Five rounds, four of them producing blockers, and every one was found by the
+reviewer rather than by the author.** Two were the same shape as ADR-0098 §7
+records for itself — a clause stated over something this system cannot obtain:
+bounding Tier 0 on where the bytes *arrive* rather than on the recipient a
+component *selects* (round 3), and requiring a tier for a value whose field
+establishes none (round 4). One was the marked-regime failure ADR-0089 §3 exists
+to cause — a rule that mattered written in prose the document's own regime
+discards (round 2). Recorded rather than quietly fixed, because the pull toward
+each of them is a property of writing about this subject.
 
 ## Consequences
 
