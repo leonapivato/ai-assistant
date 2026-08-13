@@ -1,4 +1,4 @@
-"""ADR-0120's three measures, computed offline over the retained trace stream.
+"""ADR-0120's three measures and ADR-0141's two, computed offline over the stream.
 
 `docs/roadmap.md`'s leg 8 exits when *"is the user model getting more accurate?"
 is answered by data, not opinion*, and names three of ``VISION.md``'s success
@@ -24,6 +24,16 @@ route ADR-0083 §10 already names for an offline tool.
 **One capability of the store is used** (§9): :meth:`TraceStore.walk`. Nothing
 here emits a trace, purges one, or opens any store but the trace store, and no
 figure it states is derived from anything but retained traces (§10).
+
+**Leg 10's instrument rides in the same walk** (ADR-0141). Its §6 adds the
+interruption share and the duplicate share, §7 five diagnostics beside them, and §5
+the classifier that decides which rulings any of them is over. Its §10 reuses
+ADR-0120 §9's placement "whole" and narrows none of it: same package, same console
+script, same window, no new argument and no ``Settings`` field. The one thing it
+needed that ADR-0120 could not supply is a ``CONFIGURATION`` boundary the
+notification chassis's own tunings move, which its §10 bought by putting three
+``Settings`` figures on ``service/configuration.py``'s allowlist — so §8's partition
+here is a thing ADR-0141 *created* rather than one it inherited.
 
 **What the measures cannot see is stated rather than approximated** (§11, §12).
 Five emitter gaps bite here — most of all that no emitter populates
@@ -52,6 +62,8 @@ from ai_assistant.evaluation._figures import (
     SeamLatency,
     StreamHealth,
 )
+from ai_assistant.evaluation._notifications import Tally
+from ai_assistant.evaluation._notifications import read as read_ruling
 from ai_assistant.evaluation._stream import (
     SeamClass,
     attribution,
@@ -81,6 +93,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import TraceStore
     from ai_assistant.core.types import EvaluationTrace
+    from ai_assistant.evaluation._figures import NotificationFigures
     from ai_assistant.evaluation._stream import Extent, Index
 
 __all__ = ["MeasureReader", "MeasureReport"]
@@ -364,6 +377,7 @@ class _Collector:
         self._cuts = _partition(stream, start=start, end=end)
         self._bounds = tuple(zip((start, *self._cuts), (*self._cuts, end), strict=True))
         self._totals = [_Totals() for _ in self._bounds]
+        self._rulings = [Tally() for _ in self._bounds]
         self._health = _Health()
         self._reads: list[_Read] = []
         self._overturns: defaultdict[str, list[_Overturn]] = defaultdict(list)
@@ -375,7 +389,10 @@ class _Collector:
         A trace **outside** the window is not ignored: §3 resolves attribution
         over the whole retained stream, and §4's candidate window reaches
         ``settling`` past a read, so a write after the window's end can still
-        overturn a surfacing inside it.
+        overturn a surfacing inside it. ADR-0141's figures are the other case —
+        every one of them is a rate over rulings that happened inside the window,
+        joined to nothing outside it, so a notification trace outside contributes
+        nowhere.
 
         Args:
             ordinal: Its position in the store's total insertion order.
@@ -385,6 +402,17 @@ class _Collector:
         if inside:
             self._health.walked += 1
             self._health.by_kind[trace.kind] = self._health.by_kind.get(trace.kind, 0) + 1
+        if trace.kind is TraceKind.NOTIFICATION:
+            # ADR-0141 §5 is the sole classifier of a notification trace: its four
+            # states are "disjoint and exhaustive by construction", so a second
+            # classifier reaching one would be a way for the exclusion counts to
+            # double. Decided ahead of ADR-0120 §2's tests, which are stated over
+            # the memory emitters' keys — a roster no notification trace carries,
+            # so today the two cannot meet and this keeps that true by structure
+            # rather than by the two rosters happening to stay disjoint.
+            if inside:
+                self._rulings[self._part_of(trace.occurred_at)].add(trace, read_ruling(trace))
+            return
         if is_malformed(trace):
             if inside:
                 self._health.malformed += 1
@@ -497,6 +525,9 @@ class _Collector:
         whole_totals = _Totals()
         for totals in self._totals:
             whole_totals += totals
+        whole_rulings = Tally()
+        for tally in self._rulings:
+            whole_rulings.absorb(tally)
         whole = self._part(
             (self._start, self._end),
             whole_totals,
@@ -514,6 +545,29 @@ class _Collector:
                 for seam in sorted(self._latency)
             ),
             health=self._stream_health(whole.user.ambiguous),
+            notifications=whole_rulings.figures(start=self._start, end=self._end),
+            notification_parts=self._notification_parts(),
+        )
+
+    def _notification_parts(self) -> tuple[NotificationFigures, ...]:
+        """ADR-0141 §8's per-part figures, over the cuts ADR-0120 §8 already made.
+
+        Empty where the window has one part, matching :attr:`MeasureReport.parts`:
+        a single part is the window entire, and stating it twice says nothing.
+
+        §8 is what *creates* this partition for these figures rather than
+        inheriting it. The notification chassis's three ``Settings`` figures — the
+        cap, the retention horizon and the reconsideration interval — reached
+        ``service/configuration.py``'s allowlist only with ADR-0141 §10, and until
+        they did, "two startups differing only in the cap emit identical
+        ``CONFIGURATION`` metric mappings, no boundary is created", and one figure
+        would be stated across rulings made under different caps.
+        """
+        if len(self._bounds) <= 1:
+            return ()
+        return tuple(
+            tally.figures(start=start, end=end)
+            for tally, (start, end) in zip(self._rulings, self._bounds, strict=True)
         )
 
     def _part(
