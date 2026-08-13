@@ -9,6 +9,13 @@
 - Records for ratification: dated notes on ADR-0016, ADR-0029 and ADR-0037,
   whose exact forms are in §12. No `Status` line moves, for the reason ADR-0029
   §9 gives.
+- **Composes with ADR-0144, which merged ahead of this and legislated for it.**
+  ADR-0144 §7 sets one normative clause about *this* decision's landing — a
+  candidate whose schema the step's parameters do not satisfy is **ineligible**
+  and is removed before any ordering key is applied — and it also discharged
+  ADR-0016 §7's ranking deferral and partially superseded ADR-0037 §1's
+  several-candidates row. §2 and §4 below are written to that clause; §14 records
+  that ranking is no longer this ADR's neighbour but a decided rule.
 - Does **not** discharge ADR-0017 §3's "per-call gating that runs before
   transmission" condition, and §11 says why the adjacency is not a discharge.
 
@@ -223,6 +230,22 @@ owes.
 > there are any. The validator in §1 is the backstop for a caller that does not,
 > never a substitute for this obligation.
 
+**Where in the stage, now that ADR-0144 has fixed the stage's order.** ADR-0144
+§7 legislated for this landing in advance: *"a candidate whose schema the step's
+parameters do not satisfy is **ineligible** and is removed from the candidate set
+before any key of §2 through §4 is applied. It is never a key, a penalty or a
+tie-break term."* That is the order this decision runs in and it needs no
+adjustment here, because the reason ADR-0144 gives is this ADR's own — argument
+fit answers a question about eligibility, and folding it into an ordering would
+let a candidate that cannot accept the arguments outrank one that can. So the
+obligation above binds **candidate-wise and before the ranking cut**: the
+violations are computed for each capable candidate, the ones with any are
+dropped, and ADR-0144's ordering runs over what survives. A permission ruling is
+therefore requested only for a tool whose schema the arguments satisfy, which is
+the pre-ruling boundary this section is about, reached through ADR-0144's
+sequence rather than around it. What the filter does when it empties the set is
+§4's.
+
 The function is the ordinary path: the selection stage calls it before
 constructing the request, so it gets a structured answer and a disposition (§4)
 rather than an exception it would have to classify — and, because it is an
@@ -294,10 +317,32 @@ arguments, which is a different request.
 ### 4. `Disposition` gains `INVALID_PARAMETERS`, and the step stays `PENDING`
 
 > **Normative.** `Disposition` gains one member, `INVALID_PARAMETERS`, returned
-> when the selected tool's schema rejects the step's parameters. It commits
-> nothing: no ruling is requested, no audit record is written, no claim is made,
-> and the step stays `PENDING`. It is terminal for the turn that met it and for
-> nothing beyond it.
+> when the step's parameters are not established as acceptable to any tool that
+> could have run them. It has **one definition and two causes**: the evaluation
+> reported violations for every capable candidate, so ADR-0144 §7's eligibility
+> filter left the set empty; or an evaluation raised rather than reporting
+> anything, which §7 makes a refusal of the step. It commits nothing: no ruling
+> is requested, no audit record is written, no claim is made, and the step stays
+> `PENDING`. It is terminal for the turn that met it and for nothing beyond it.
+
+**One definition rather than two dispositions, and the reason is that the
+pipeline's answer is the same.** Both causes end the turn having disclosed
+nothing, asked nobody, written nothing and claimed nothing, and both are
+corrected the same way — by different arguments, which is a different request.
+A second member would be a distinction visible to a client that cannot act on it
+differently, and §8 forbids the failure path from saying more about *why*
+anyway. What separates them is what is reported alongside: violations for the
+first cause, none for the second (§7).
+
+**Where the filter empties the set, `INVALID_PARAMETERS` is what it returns, and
+not a `SkipReason`.** ADR-0144 §7 removes an unfitting candidate rather than
+selecting it, so in the several-candidates case there is no "selected tool" whose
+schema rejected anything — there is a `find` that returned capable candidates and
+an eligibility filter that removed all of them. The argument below is what
+forbids reporting that as `NO_CAPABLE_TOOL`: the tools were capable and the
+arguments were not, and writing that falsehood into durable state is exactly what
+ADR-0014 §4's table exists to prevent. Where the filter leaves at least one
+candidate, ADR-0144's ordering runs and this disposition does not arise.
 
 This is `AMBIGUOUS_CAPABILITY`'s shape, and ADR-0037 §1's argument for that
 shape transfers without adjustment: "No `SkipReason` is true of it" —
@@ -587,6 +632,50 @@ exists to prevent, reached through the validator instead of through the seam.
 > **Normative.** A schema evaluation that raises rather than returning
 > violations refuses the request. No evaluation failure is ever read as a pass.
 
+> **Normative.** That refusal happens **at the selection stage**, before the
+> policy is consulted, before the trail is written and before the step is
+> claimed, and the stage returns `Disposition.INVALID_PARAMETERS` with nothing
+> committed and the step still `PENDING`. No exception from an evaluation
+> escapes the stage. A raise refuses the **step**, not merely the candidate that
+> raised: ADR-0144 §7's ineligibility clause is about a candidate whose schema
+> the parameters *do not satisfy*, and a raise establishes no such fact, so
+> continuing to rank over the remainder would be selecting under an unknown.
+
+> **Normative.** An evaluation failure is **never** a `ParameterViolation` and
+> is never composed with one. The violations it yields are none rather than
+> partial, and nothing derived from the exception is rendered, logged or stored
+> — not `str()`, not `repr()`, not `args`, not `__cause__`, not `__notes__`. The
+> exception's **type** may be named, as ADR-0029 §3 permits for the seam's own
+> synthesised message; nothing else about it may be.
+
+**Why the same disposition rather than an error of its own.** The pipeline's
+answer is identical — the arguments were not established as acceptable, so
+nothing is asked, recorded or claimed — and §4's durable effect is already
+"none". Inventing a second disposition would put a distinction on the wire that
+no consumer can act on differently, and inventing an exception would hand
+`StepRunner` something to classify at precisely the point this ADR is removing
+classification from. This is §3's shape applied to the failure path: a value that
+does not get built, reported to its caller in-process.
+
+**Why nothing derived from the exception is rendered, which is §8 and not a
+second rule.** The hazard §8 documents is that the reference implementation
+interpolates the instance into its own text; an exception raised mid-evaluation
+is the same hazard through a different door, since a `ValidationError`'s `str()`
+carries the fragments the walk was holding and a `RecursionError` unwinds a
+traceback through frames that hold them. A failure path exempted from §8 would be
+the one path on which an untrusted schema could make the leak happen on demand —
+publish a schema that raises, and the argument values arrive in the log. So the
+clause is stated here rather than left to be inferred from §8's scope.
+
+**This is the window §6 named, given a stated outcome.** §6 records that a
+sufficiently deep instance can survive `_deep_freeze` and still exhaust the stack
+during evaluation, and calls the resulting refusal the weakest guarantee in this
+document. The clauses above are what make it a *guarantee* rather than a
+direction: the refusal has a disposition, a place in the pipeline, and a bound on
+what it may say. It remains an ugly refusal — a handler running on almost no
+stack — and #1107 is still what closes the window properly for every holder of
+the type.
+
 ### 8. No message renders any part of the arguments
 
 > **Normative.** No message, log record or durable value this decision produces
@@ -747,8 +836,11 @@ are the shape the tool declared. It rules on nobody's authority, resolves no
 recipient, classifies no tier, and cannot refuse a call on safety grounds — a
 perfectly well-formed payload addressed to an unauthorised recipient passes it
 without comment. §3's condition asks for a *permission* decision on the actual
-call, which is `permissions/`'s to make, on inputs #57 and #94 have to design
-first.
+call, which is `permissions/`'s to make, on inputs that have to be designed
+first. One of those inputs has since arrived: ADR-0146 settles #94's
+outbound-payload classification, which is a *different* §3 condition and
+discharges nothing of this one — it says how a span is classified, not whether
+this call may be made. #57's payload manifest is still owed.
 
 What this does contribute is a precondition rather than a discharge: a per-call
 analysis that reads arguments needs them to be the shape their schema declares
@@ -777,7 +869,9 @@ status update to an ADR that *changes* a past decision, and each of the three
 deferred this question rather than deciding it. A later ADR taking a deferral up
 is that deferral working as designed.
 
-- **A dated note appended to ADR-0016's header, after the existing note:**
+- **A dated note appended to ADR-0016's header, after the existing notes** —
+  the later of which is ADR-0144's, discharging the ranking deferral, which is
+  why this one's closing list no longer carries it:
 
   `Note (<ratification date>): §7's **parameter-schema validation** deferral is
   discharged by ADR-0145, which settles the runtime dependency §7 names as the
@@ -789,9 +883,10 @@ is that deferral working as designed.
   requiring retrieval, no reference cycle, and a bounded nesting depth — all
   refused at ToolDefinition construction (ADR-0145 §5, §6). §1's no-defaults
   rule is untouched: the schema keeps its default, and an empty schema declares
-  no constraint (ADR-0145 §9). §7's remaining deferrals — per-call data reach
-  (#57), ranking and selection (#241), persistence, enablement, namespacing,
-  transacted cost — are unaffected and remain deferred.`
+  no constraint (ADR-0145 §9). §7's still-remaining deferrals — per-call data
+  reach (#57), persistence, enablement, namespacing, transacted cost — are
+  unaffected and remain deferred; ranking and selection is not among them, having
+  been discharged by ADR-0144 in the note directly above.`
 
 - **A dated note appended to ADR-0029's header, after the existing amendment
   notes:**
@@ -812,7 +907,9 @@ is that deferral working as designed.
   refused there by step 1 as the ToolBindingError §2 already specifies,
   unchanged. §7's remaining scope-outs are unaffected.`
 
-- **A dated note appended to ADR-0037's header, after `Date`:**
+- **A dated note appended to ADR-0037's header, after ADR-0144's supersession
+  entry** — this is a note and not a supersession, so it follows the entry that
+  is one:
 
   `Note (<ratification date>): §1's "Rejected: validating step.parameters
   against tool.parameters_schema" is discharged in its premise by ADR-0145. That
@@ -820,12 +917,17 @@ is that deferral working as designed.
   pending a JSON Schema runtime dependency" — and ADR-0145 settles the
   dependency and takes the deferral up, so §1's following sentence, "The
   parameters flow into the ActionRequest unvalidated", no longer describes the
-  system. StepRunner checks them against the selected tool's schema before
-  requesting a ruling and returns the new Disposition.INVALID_PARAMETERS, which
+  system. StepRunner checks them against each capable candidate's schema before
+  requesting a ruling — as ADR-0144 §7's eligibility filter, ahead of its
+  ordering — and where that leaves no candidate it returns the new
+  Disposition.INVALID_PARAMETERS, which
   commits nothing and leaves the step PENDING — §1's AMBIGUOUS_CAPABILITY shape,
-  reached by §1's own argument that no SkipReason is true of it. Everything else
-  in §1 stands: find's one-candidate rule, the several-candidates refusal, and
-  the absence of a ranking rule (#241).`
+  reached by §1's own argument that no SkipReason is true of it. This note
+  touches nothing else in §1: find's one-candidate rule stands as written, and
+  the several-candidates row stands as the supersession entry directly above
+  leaves it — ADR-0144 both supplied the ranking rule §1 recorded as absent and
+  narrowed the refusal to the residue of genuine ties. ADR-0145 reaches neither;
+  a step that never selects a tool never reaches a schema.`
 
 - **No other ADR is edited.** ADR-0021 §3 records that `ActionRequest.parameters`
   is carried and unread *by the policy*, which stays true — no rule in
@@ -875,6 +977,17 @@ is owed is the evidence for the claims above that a signature does not show.
   shown to be *safe* rather than merely enforced — a schema at the bound
   evaluated against an instance of comparable depth completes — because a bound
   nobody checked against the recursion limit is a number, not a guarantee.
+- **The evaluation-failure path, as a stage outcome and not an escaping
+  exception** (§7): a fake evaluator that raises is shown to yield
+  `INVALID_PARAMETERS` with **no ruling requested, no audit record written, no
+  claim committed, the step still `PENDING`**, and no exception escaping the
+  selection stage — asserted for a step with several capable candidates as well
+  as one, since a raise refuses the step rather than the candidate. The outcome
+  it produces must carry **no `ParameterViolation`** and no text derived from the
+  exception beyond its type: the fixture raises an exception whose `str()`,
+  `args` and `__notes__` each contain a distinctive argument value, and none of
+  the three may appear in the disposition, the rendering or the log record. That
+  is §8's test applied to the path §8 would otherwise be assumed to cover.
 - **No I/O, as a test that cannot pass by accident** (§7): separately from the
   construction refusal, an evaluator built by the `core` seam is shown to raise
   rather than retrieve when handed an external reference, so the belt is tested
@@ -943,7 +1056,10 @@ so deleting them changes a recorded outcome and the tests that pin it.
 - **Per-call data reach and the payload manifest** (#57), **recipient
   authorisation** (#68), and every other ADR-0017 §3 condition (§11).
 - **Ranking among several capable tools** (#241) — ADR-0037 §1's other refusal,
-  which is a sibling lane's.
+  **decided by ADR-0144**, which merged ahead of this. It is out of scope here
+  because it is settled elsewhere rather than because it is open: this ADR adds
+  no ordering key and reads none, and §2 runs argument fit as ADR-0144 §7's
+  eligibility predicate ahead of that ordering.
 
 ## Consequences
 
