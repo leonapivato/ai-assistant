@@ -22,9 +22,13 @@ system, and the numbers would not be about this one.
   evidence about the *pipeline* and not about the driver's own bookkeeping.
 * *P8 — retrieval-miss versus reader-error.* Each record actually placed in the
   prompt is recorded by id, and so is what the store returned; the same traces carry
-  ``returned`` ids, ``limit``, ``fetch_k``, ``candidates`` and ``capped``. That is
-  enough to ask "was the evidence in context?" of every wrong answer, which is the
-  split P8 predicts.
+  ``returned`` ids, ``limit``, ``fetch_k``, ``candidates`` and ``capped``. **Ids alone
+  do not make the split**, which is what #1074 found: a question's evidence is a
+  *corpus* pointer and a retrieved id is a *generated* one, and nothing retained
+  joined the two id spaces. So each retrieved record's own citations travel with it
+  (:attr:`AnswerAttempt.retrieved_evidence`), and ingestion records which episode each
+  cited corpus turn became; the intersection of those two is "was the evidence in
+  context?", asked of every wrong answer, from the run's own records.
 
 **One thing #1029 assumes that the tree does not provide, recorded here because a
 reader will look for it.** ADR-0119's retrieval trace names four per-predicate
@@ -101,6 +105,20 @@ class AnswerAttempt:
         answer: What the model said.
         retrieved_ids: The records placed in the prompt, in prompt order.
         retrieved_kinds: Each record's ``kind``, aligned with ``retrieved_ids``.
+        retrieved_evidence: The **episode ids** each retrieved record cites, aligned
+            with ``retrieved_ids``. This is the retrieval half of #1074's join: the
+            corpus names its evidence by turn, ingestion records which episode each
+            cited turn became, and this says which episodes stand behind the beliefs
+            that actually reached the prompt. Read off ``provenance.evidence``, the
+            producer's own citation list, which outlives the episode it names — so the
+            join survives a finite ``episode_retention`` that already expired the
+            episode itself.
+        retrieved_evidence_elided: ``provenance.evidence_elided`` per retrieved
+            record, aligned with ``retrieved_ids``. Non-zero means the belief has
+            **stopped carrying** some of its citations (ADR-0086 §4), so an empty
+            intersection against a question's evidence reads "cannot tell" rather than
+            "the evidence was never retrieved". Carried because that is precisely the
+            distinction P8 is, and the one an elision silently corrupts.
         context: The rendered context block, exactly as the model saw it.
         asked_at: The instant the clock was set to while answering.
         failure: The class name of the provider error that stopped this answer, or
@@ -114,6 +132,8 @@ class AnswerAttempt:
     answer: str
     retrieved_ids: tuple[str, ...]
     retrieved_kinds: tuple[str, ...]
+    retrieved_evidence: tuple[tuple[str, ...], ...]
+    retrieved_evidence_elided: tuple[int, ...]
     context: str
     asked_at: str
     failure: str | None = None
@@ -203,6 +223,8 @@ async def answer_question(harness: Harness, question: BenchQuestion) -> AnswerAt
         answer=answer,
         retrieved_ids=tuple(record.id for record in records),
         retrieved_kinds=tuple(record.kind for record in records),
+        retrieved_evidence=tuple(tuple(record.provenance.evidence) for record in records),
+        retrieved_evidence_elided=tuple(record.provenance.evidence_elided for record in records),
         context=context,
         asked_at=asked_at,
         failure=failure,

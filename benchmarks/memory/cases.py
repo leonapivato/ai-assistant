@@ -32,6 +32,19 @@ class BenchTurn(BaseModel):
             corpus turn belongs on decides what the episode text looks like — and
             #1029's P6 is precisely the open question of whether assistant-side
             content survives ingestion symmetrically with user assertions.
+        evidence_key: The corpus's own pointer to **this turn**, in the *same id
+            space* as :attr:`BenchQuestion.evidence` — LoCoMo's ``dia_id``
+            (``"D1:1"``), LongMemEval's answering session id. It is carried on the
+            turn rather than derived downstream because it is the only place the two
+            id spaces #1074 describes can be joined: a question's evidence names
+            corpus turns, a retrieval returns generated record ids, and the bridge is
+            "which captured episode did this corpus turn become". Ingestion knows
+            that, and nothing later does.
+
+            ``None`` where the corpus supplies no pointer for a turn — an honest
+            absence rather than a synthesised key, because a fabricated pointer would
+            join to a question's evidence by accident and report a retrieval that
+            never happened.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -39,6 +52,7 @@ class BenchTurn(BaseModel):
     speaker: str
     text: str
     user_side: bool
+    evidence_key: str | None = None
 
 
 class BenchSession(BaseModel):
@@ -75,7 +89,9 @@ class BenchQuestion(BaseModel):
         evidence: The corpus's pointers to the supporting turns, where it gives them
             — LoCoMo's ``dia_id`` list, LongMemEval's answering session ids. Carried
             through untouched because P8's retrieval-miss-versus-reader-error split
-            is computed against them.
+            is computed against them. Each pointer is joined to what was actually
+            ingested through :attr:`BenchTurn.evidence_key`, which names the same
+            pointers on the turns themselves (#1074).
         asked_at: When the question is posed, where the corpus says. LongMemEval
             gives one; LoCoMo does not, and ``None`` is the honest answer rather than
             a stand-in.

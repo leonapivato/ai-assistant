@@ -28,6 +28,22 @@ one half, and a session that opens on the assistant side has that run recorded a
 turn of its own with no user half. Neither case is silently smoothed: both are
 counted in the summary, because a corpus where they were common would be one whose
 ingestion is not saying what a reader assumes.
+
+**Ingestion is the only place a corpus evidence pointer and a captured episode id are
+both in hand, so this is where the two are written down** (#1074). A question's
+``evidence`` names corpus turns; a retrieval returns generated record ids; and the
+bridge between the two id spaces is "which episode did this corpus turn become",
+which capture reports once, here, and nowhere afterwards.
+:attr:`IngestionSummary.evidence_episodes` keeps it, so P8's "the evidence was
+retrieved and the reader failed" versus "the evidence was never retrieved" is
+computable from the run's own records rather than from stores a default run deletes.
+
+**Every ``ASK_USER`` ruling is counted, and none is answered.** Benchmark ingestion is
+headless: the policy's deferrals become questions nobody will ever be asked, so the
+belief is not written and the retrieval that would have found it cannot. That is a
+property of the *harness*, not of the pipeline under test, so it is measured rather
+than worked around — see :attr:`IngestionSummary.proposals_deferred` for why
+auto-answering was rejected outright.
 """
 
 from __future__ import annotations
@@ -35,8 +51,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from ai_assistant.core.types import LearnDecision
+
 if TYPE_CHECKING:
-    from benchmarks.memory.cases import BenchCase, BenchSession
+    from collections.abc import Sequence
+
+    from benchmarks.memory.cases import BenchCase, BenchSession, BenchTurn
     from benchmarks.memory.wiring import Harness
 
 __all__ = ["Exchange", "IngestionSummary", "exchanges_of", "ingest_case"]
@@ -53,11 +73,18 @@ class Exchange:
         user_led: Whether ``content`` is genuinely the user's side. ``False`` marks
             the orphan case: an assistant run with no user turn before it, recorded
             in the user half because that is the only half capture requires.
+        evidence_keys: The corpus pointers of every turn folded into this exchange,
+            in order and without repeats. **Plural because the fold is many-to-one**:
+            consecutive same-side utterances join into one half, and the two halves
+            are two runs, so one episode can be several cited turns at once. Every
+            one of them maps to the single episode this exchange becomes, which is
+            the honest resolution — the harness cannot cite half an episode.
     """
 
     content: str
     outcome: str | None
     user_led: bool
+    evidence_keys: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -77,8 +104,32 @@ class IngestionSummary:
         discarded_unusable: Relayed from the producer.
         discarded_over_limit: Relayed from the producer.
         dropped_unsupported: Proposals the write path refused for unresolved evidence.
+        proposals_deferred: Proposals the memory policy ruled ``ASK_USER`` on.
+
+            **The declared disposition is: counted, and never answered.** Benchmark
+            ingestion is headless, so a deferral's question is parked in a queue no
+            one reads and the belief is never written — and the queue is bounded
+            (``ASSISTANT_DEFERRAL_QUEUE_LIMIT``, 50 by default), so past the cap even
+            the question is refused. Auto-answering them was considered and rejected:
+            the harness would then be ruling on proposals it also produced, which is
+            precisely the separation ADR-0005 §3 keeps ("the model proposes, a
+            deterministic policy disposes"), and any rule for answering would be a
+            *policy change* whose effect would be reported as a result of the pilot.
+            So the artifact is measured instead of removed, and #1029's P3 and P5 are
+            read against :attr:`ask_rate` — a depressed recall over a case with a
+            non-zero ask rate is attributable here rather than to retrieval.
+
+            This counts **rulings**, not queue admissions, exactly as
+            ``IngestionReport.deferred`` does and for the same reason: three write
+            outcomes rule ``ASK_USER`` and enqueue nothing, so saying "a question is
+            waiting" would be false for them.
         observation_routes: Every model route that read episodes. More than one means
             the configuration moved mid-run, which invalidates the case.
+        evidence_episodes: Each corpus evidence pointer this case ingested, mapped to
+            the captured episode ids it became, in capture order (#1074). A pointer
+            absent from the mapping never became an episode in this run — it named a
+            turn outside the ingested slice (``--max-sessions``), or its capture
+            degraded, or the corpus gave the turn no pointer at all.
     """
 
     conversation_id: str
@@ -91,7 +142,9 @@ class IngestionSummary:
     discarded_unusable: int = 0
     discarded_over_limit: int = 0
     dropped_unsupported: int = 0
+    proposals_deferred: int = 0
     observation_routes: set[str] = field(default_factory=set)
+    evidence_episodes: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def episodes_reobserved(self) -> int:
@@ -106,9 +159,60 @@ class IngestionSummary:
         """
         return max(0, self.episodes_read - self.turns_captured)
 
+    @property
+    def proposals_ruled(self) -> int:
+        """Proposals a policy actually ruled on.
+
+        Everything the observer returned, minus the ones the write path refused for
+        unresolved evidence before any policy saw them (ADR-0077 §5). That is the
+        population an ask rate is a rate *of*: a dropped proposal was never eligible
+        to be deferred, so leaving it in the denominator would understate the ask rate
+        by exactly the amount the run was already degraded.
+
+        Returns:
+            The count.
+        """
+        return max(0, self.proposals - self.dropped_unsupported)
+
+    @property
+    def ask_rate(self) -> float:
+        """The share of ruled proposals the policy wanted a human answer for.
+
+        Zero when nothing was ruled on, which is the honest reading: a case that
+        proposed nothing did not ask anything either, and a rate over an empty
+        population would be undefined rather than zero if anyone divided it.
+
+        **It is not a score and cannot be read as one.** It measures the harness's own
+        headlessness — how much of what the observer proposed went unwritten because
+        nobody was there to answer — and says nothing about whether an answer was
+        right. #1029's ground rule 1 is about the latter.
+
+        Returns:
+            The rate, in ``[0, 1]``.
+        """
+        ruled = self.proposals_ruled
+        return self.proposals_deferred / ruled if ruled else 0.0
+
+    @property
+    def evidence_keys_captured(self) -> int:
+        """How many distinct corpus evidence pointers became at least one episode.
+
+        The denominator a reader needs before believing an empty join: a case whose
+        pointers all failed to map has a P8 split that is missing rather than
+        negative.
+
+        Returns:
+            The count.
+        """
+        return len(self.evidence_episodes)
+
 
 def exchanges_of(session: BenchSession) -> tuple[Exchange, ...]:
     """Fold a session's utterances into the exchanges capture records.
+
+    Each exchange carries the evidence keys of **every** turn that went into it, both
+    halves included: the fold is many-to-one, so a citation to any of those turns is a
+    citation to the one episode they become (#1074).
 
     Args:
         session: The session.
@@ -116,30 +220,104 @@ def exchanges_of(session: BenchSession) -> tuple[Exchange, ...]:
     Returns:
         The exchanges, in order. Empty for a session with no turns.
     """
-    runs: list[tuple[bool, list[str]]] = []
+    runs: list[_Run] = []
     for turn in session.turns:
-        if runs and runs[-1][0] == turn.user_side:
-            runs[-1][1].append(turn.text)
+        if runs and runs[-1].user_side == turn.user_side:
+            runs[-1].add(turn)
         else:
-            runs.append((turn.user_side, [turn.text]))
+            runs.append(_Run.of(turn))
 
     built: list[Exchange] = []
     index = 0
     while index < len(runs):
-        user_side, texts = runs[index]
-        joined = "\n".join(texts)
-        if not user_side:
+        run = runs[index]
+        if not run.user_side:
             # An assistant run with nothing before it. Recorded rather than dropped:
             # LongMemEval's assistant turns carry evidence (#1029's P6), and losing
             # them would answer P6 by construction instead of by measurement.
-            built.append(Exchange(content=joined, outcome=None, user_led=False))
+            built.append(
+                Exchange(
+                    content=run.text,
+                    outcome=None,
+                    user_led=False,
+                    evidence_keys=_distinct(run.keys),
+                )
+            )
             index += 1
             continue
         following = runs[index + 1] if index + 1 < len(runs) else None
-        outcome = "\n".join(following[1]) if following is not None else None
-        built.append(Exchange(content=joined, outcome=outcome, user_led=True))
+        built.append(
+            Exchange(
+                content=run.text,
+                outcome=following.text if following is not None else None,
+                user_led=True,
+                evidence_keys=_distinct(
+                    run.keys + (following.keys if following is not None else [])
+                ),
+            )
+        )
         index += 2 if following is not None else 1
     return tuple(built)
+
+
+@dataclass(slots=True)
+class _Run:
+    """Consecutive utterances from one side, accumulated as they are folded.
+
+    A named accumulator rather than a tuple of parallel lists: the fold now carries
+    three things per run and a positional triple is where a reader stops being able to
+    tell which list is which.
+    """
+
+    user_side: bool
+    texts: list[str]
+    keys: list[str]
+
+    @classmethod
+    def of(cls, turn: BenchTurn) -> _Run:
+        """Start a run at ``turn``.
+
+        Args:
+            turn: The first utterance of the run.
+
+        Returns:
+            The run.
+        """
+        run = cls(user_side=turn.user_side, texts=[], keys=[])
+        run.add(turn)
+        return run
+
+    def add(self, turn: BenchTurn) -> None:
+        """Fold one more utterance of the same side in.
+
+        Args:
+            turn: The utterance.
+        """
+        self.texts.append(turn.text)
+        if turn.evidence_key is not None:
+            self.keys.append(turn.evidence_key)
+
+    @property
+    def text(self) -> str:
+        """The run's utterances, joined as capture takes them."""
+        return "\n".join(self.texts)
+
+
+def _distinct(keys: Sequence[str]) -> tuple[str, ...]:
+    """The keys in first-seen order, without repeats.
+
+    Order-preserving rather than ``sorted(set(...))``: the mapping this feeds is read
+    as "the episodes this pointer became, in capture order", and a pointer set
+    reordered per exchange would make that claim about the wrong sequence.
+
+    Args:
+        keys: The keys, possibly with repeats.
+
+    Returns:
+        The distinct keys.
+    """
+    seen: dict[str, None] = dict.fromkeys(keys)
+    return tuple(seen)
 
 
 async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> IngestionSummary:
@@ -199,6 +377,13 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
                 summary.turns_captured += 1
                 if not exchange.user_led:
                     summary.assistant_led_turns += 1
+                # #1074's join, written at the only moment both halves exist. A
+                # degraded capture is deliberately *not* recorded above: it has no
+                # episode id to point at, and an entry mapping a pointer to nothing
+                # would read as "retrieved nothing" where the truth is "was never
+                # stored".
+                for key in exchange.evidence_keys:
+                    summary.evidence_episodes.setdefault(key, []).append(report.episode_id)
             if pending == batch_size:
                 await _observe(harness, conversation.id, summary)
                 pending = 0
@@ -224,5 +409,11 @@ async def _observe(harness: Harness, conversation_id: str, summary: IngestionSum
     summary.discarded_unusable += report.discarded_unusable
     summary.discarded_over_limit += report.discarded_over_limit
     summary.dropped_unsupported += report.dropped_unsupported
+    # Read off the ruling the write path returned, never off the deferral queue: the
+    # queue is bounded and a refused admission is still an `ASK_USER`, so counting
+    # admissions would report an ask rate that falls as the queue fills.
+    summary.proposals_deferred += sum(
+        1 for proposal in report.proposals if proposal.decision is LearnDecision.DEFERRED
+    )
     if report.route is not None:
         summary.observation_routes.add(report.route)

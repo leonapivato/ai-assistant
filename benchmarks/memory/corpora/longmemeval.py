@@ -185,7 +185,10 @@ def _case(entry: Any, *, corpus_key: str) -> BenchCase:
         BenchSession(
             session_key=str(session_id),
             occurred_at=_instant(stamp, question_id=question_id),
-            turns=tuple(_turn(turn, question_id=question_id) for turn in session),
+            turns=tuple(
+                _turn(turn, question_id=question_id, session_key=str(session_id))
+                for turn in session
+            ),
         )
         for session, stamp, session_id in zip(sessions, dates, ids, strict=True)
     ]
@@ -229,12 +232,22 @@ def _question(entry: dict[str, Any], *, question_id: str) -> BenchQuestion:
     )
 
 
-def _turn(entry: Any, *, question_id: str) -> BenchTurn:
-    """Build one utterance.
+def _turn(entry: Any, *, question_id: str, session_key: str) -> BenchTurn:
+    """Build one utterance, keyed to the session a question would cite it by.
+
+    **LongMemEval's evidence is session-level, so every turn of a session carries
+    that session's id.** ``answer_session_ids`` names haystack *sessions*, not
+    utterances, and the corpus offers nothing finer; so the honest pointer for a turn
+    is the session it belongs to, and #1074's join is correspondingly coarse on this
+    corpus — "was any episode from an answering session retrieved" rather than "was
+    *the* answering turn retrieved". Recording the finer question would mean inventing
+    a pointer the corpus does not publish.
 
     Args:
         entry: One element of a session's list.
         question_id: For error messages.
+        session_key: The haystack session id this turn belongs to, in the same space
+            as :attr:`~benchmarks.memory.cases.BenchQuestion.evidence`.
 
     Returns:
         The turn.
@@ -246,7 +259,12 @@ def _turn(entry: Any, *, question_id: str) -> BenchTurn:
         msg = f"{question_id}: expected each turn to be an object"
         raise LongMemEvalFormatError(msg)
     role = _string(entry, "role")
-    return BenchTurn(speaker=role, text=_string(entry, "content"), user_side=role == "user")
+    return BenchTurn(
+        speaker=role,
+        text=_string(entry, "content"),
+        user_side=role == "user",
+        evidence_key=session_key,
+    )
 
 
 def _instant(stamp: object, *, question_id: str) -> datetime:
