@@ -105,10 +105,27 @@ shown a `reason` about. Everything downstream of it is either a ruling on those
 arguments or an execution of them.
 
 > **Normative.** An `ActionRequest` whose `parameters` do not satisfy its
-> `tool.parameters_schema` does not exist: the pairing is refused at
-> construction. This holds for every `ActionRequest`, however constructed, and
-> has no exception for a request built for a confirmation resume, for a replay,
-> or for a test.
+> `tool.parameters_schema` is refused at construction. This holds for every
+> validated construction, with no exception for a request built for a
+> confirmation resume, for a replay, or for a test.
+
+> **Normative.** No component may obtain an `ActionRequest` by a route that
+> bypasses validation — `model_construct`, or mutation after construction — and
+> a component holding a request it did not build through validation revalidates
+> it before ruling on it, recording it or acting on it.
+
+**The bypass is inside the threat model, and the clauses above are scoped so
+they do not claim otherwise.** ADR-0029 §2 is explicit that `frozen=True` does
+not survive a `__dict__` write and that "`model_construct` bypasses every
+validator", and it answers that not by asserting a stronger invariant but by
+re-running the check at the seam. The same division holds here, in ADR-0029
+§2's own words: the validator "catches the honest mistake at the point it is
+made", and the seam is what holds "against a deliberate one". A request built by
+a bypass is still refused before the callable — ADR-0029 §2's step 1 revalidates
+the whole call and therefore re-runs this validator — but it is refused *there*,
+having already cost the prompt and the claim. That is the residue, and it is the
+same residue every other invariant on these types carries rather than a new one
+this ADR introduces.
 
 **Before the ruling, not after it, and the ordering is the substance of this
 clause.** Four things happen in `StepRunner.run` between the request and the
@@ -131,9 +148,13 @@ taken back:
   arguments *as given*. Validating afterwards can only report on what was already
   authorised.
 
-Checking at construction reaches all four at once, because a value that cannot
-be constructed cannot be ruled on, recorded, claimed or digested. Nothing has to
-be sequenced correctly for that to hold.
+Checking at construction reaches all four together, because a request that was
+never built cannot be ruled on, recorded, claimed or digested — and it reaches
+them without anything being sequenced correctly, which is the property a rule
+placed later would not have. What it does not do is reach them for a caller that
+declined to build the request through validation at all; §2's clause on the
+selection stage is the obligation that covers that caller, and the paragraph
+above is what happens when it is broken.
 
 **ADR-0016 §7 said "at selection time", and the request is what selection
 produces.** A `PlanStep` names a capability, not a tool (ADR-0014 §2), so there
@@ -195,15 +216,23 @@ These are shapes rather than implementations, as every contract ADR in this
 repository has written them (ADR-0029 §3); §13 says what the implementation PR
 owes.
 
-**Both a function and a validator, and each is doing a different job.** The
-function is the ordinary path: `StepRunner` calls it before constructing the
-request, so it gets a structured answer and a disposition (§4) instead of an
-exception it would have to classify. The validator is the guarantee — it is what
-makes §1's clause true of *every* `ActionRequest` rather than of the ones a
-caller remembered to check. ADR-0029 §2 took the same two-placement shape for the
-opposite reason and stated the principle: a rule an executor can forget, "in a
-codebase whose ADR-0026 Context documents the same convention being remembered at
-one site and missed one file over".
+**Both a function and a validator, and each is doing a different job.**
+
+> **Normative.** The stage that binds a tool to a step's arguments computes the
+> violations before it requests a permission ruling, and requests no ruling when
+> there are any. The validator in §1 is the backstop for a caller that does not,
+> never a substitute for this obligation.
+
+The function is the ordinary path: the selection stage calls it before
+constructing the request, so it gets a structured answer and a disposition (§4)
+rather than an exception it would have to classify — and, because it is an
+obligation on the stage rather than a consequence of a type, the pre-ruling
+boundary holds even for a request the stage obtained some other way. The
+validator is what makes §1's refusal true of every request built through
+validation rather than of the ones a caller remembered to check. ADR-0029 §2
+took the same two-placement shape and stated the principle: a rule an executor
+can forget, "in a codebase whose ADR-0026 Context documents the same convention
+being remembered at one site and missed one file over".
 
 **`ParameterViolation` carries no field that could hold an argument value**, and
 that is the enforcement of §8 rather than a description of it. `path` is
@@ -315,10 +344,35 @@ under semantics its author did not use.
 
 > **Normative.** `ToolDefinition` construction refuses a `parameters_schema`
 > that is not a valid draft 2020-12 schema, that declares a `$schema` other than
-> draft 2020-12, that would require retrieving a resource it does not carry
-> (§7), or whose root constrains the instance to a type that excludes a JSON
-> object. Schema validity is established once, at construction, and is never
-> re-established at registration, at request construction or at call time.
+> draft 2020-12, that breaches the reference model below, or whose root
+> constrains the instance to a type that excludes a JSON object. Schema validity
+> is established once, at construction, and is never re-established at
+> registration, at request construction or at call time.
+
+**The reference model is stated rather than left to "does it need retrieval",
+because that question is not decidable from the syntax alone.** An external
+`$ref` is a perfectly valid 2020-12 schema, so meta-validation accepts it and
+the failure surfaces only when something tries to resolve it — at call time,
+which is precisely what this section promises never happens. So the permitted
+set is fixed by construction and checked by resolution:
+
+> **Normative.** In a `parameters_schema`, every `$ref` value begins with `#`
+> and resolves within the schema document itself; `$id` appears at the root or
+> not at all; and `$dynamicRef` and `$dynamicAnchor` do not appear. `$anchor` is
+> permitted. Construction resolves every reference against a registry containing
+> that one document and nothing else, and refuses the schema when any reference
+> does not resolve.
+
+Each exclusion is a case where a `#`-prefixed reference stops meaning
+"somewhere in this document": a subschema `$id` re-bases resolution, so a
+reference that reads local resolves elsewhere; and a dynamic reference is
+resolved against the dynamic scope at evaluation time, so what it points at is
+not a property of the document a reviewer is reading. Neither is needed to
+describe a tool's arguments, and refusing both keeps "the schema is
+self-contained" a fact a reader can check by looking at it. Resolving at
+construction rather than merely pattern-matching is what makes a dangling
+fragment — `#/$defs/Absent` — a definition that does not load instead of a call
+that fails.
 
 **At construction, which is what makes every later stage total.** ADR-0018 §4
 already requires that "what a registry stores must be valid and detached", and
@@ -354,8 +408,8 @@ out.
 ### 7. Evaluation performs no I/O and modifies nothing
 
 > **Normative.** No schema evaluation performs any I/O. The evaluator is
-> constructed with no capability to retrieve a resource, so a reference the
-> schema does not carry cannot be fetched even where §6's construction check
+> constructed with no capability to retrieve a resource, so a reference outside
+> the schema document cannot be fetched even where §6's construction check
 > failed to refuse it.
 
 **A validator that fetches is an egress.** ADR-0004 §2 as amended by ADR-0017 §1
@@ -638,10 +692,12 @@ None of this is built here (ADR-0015 §5). `ParameterViolation` and
 is owed is the evidence for the claims above that a signature does not show.
 
 - **The placement, as a refusal**: an `ActionRequest` whose parameters violate
-  its tool's schema is unconstructable, and the refusal is shown to happen
-  *before* `ActionPolicy.decide` is reached — asserted as no audit record
-  written, no claim committed, and the step still `PENDING`, not merely as an
-  exception raised.
+  its tool's schema is refused at construction, and the selection stage's
+  obligation (§2) is shown to bite *before* `ActionPolicy.decide` is reached —
+  asserted as no ruling requested, no audit record written, no claim committed,
+  and the step still `PENDING`, not merely as an exception raised. Both halves
+  are needed: a test that only asserts the construction refusal proves nothing
+  about where in the pipeline the stage stopped.
 - **The seam inherits it without a fourth check**: a call whose parameters are
   swapped through `__dict__` after construction is refused by ADR-0029 §2's
   existing checks with the tool never reached, and `invoke` grows no schema step.
@@ -653,10 +709,17 @@ is owed is the evidence for the claims above that a signature does not show.
   And the fail-open case that motivates the refusal, pinned as a *rejection*
   rather than argued: a draft-07 schema whose bound is `additionalItems` does not
   load, so it cannot be read permissively.
-- **No I/O, as a test that cannot pass by accident** (§7): a schema carrying a
-  remote `$ref` is refused at construction, and — separately — an evaluator built
-  by the `core` seam is shown to raise rather than retrieve when handed one, so
-  the belt is tested without the brace.
+- **The reference model, as refusals** (§6): an external `$ref`, a non-root
+  `$id`, a `$dynamicRef`, and a *dangling* same-document fragment
+  (`#/$defs/Absent`) each refuse the definition at construction — the last is the
+  one that distinguishes resolving from pattern-matching, and a check that only
+  inspects `$ref` strings passes without it. A same-document `$ref` and an
+  `$anchor` are accepted, so the model is shown to be usable and not merely
+  restrictive.
+- **No I/O, as a test that cannot pass by accident** (§7): separately from the
+  construction refusal, an evaluator built by the `core` seam is shown to raise
+  rather than retrieve when handed an external reference, so the belt is tested
+  without the brace.
 - **Nothing is modified** (§7): a schema declaring `default` for a missing
   property leaves the parameters unchanged, and the digest before and after
   validation is equal.
