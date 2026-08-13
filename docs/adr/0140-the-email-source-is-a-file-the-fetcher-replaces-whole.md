@@ -582,9 +582,16 @@ ADR relies on is the narrower one §5 relies on: a re-read destroys nothing.
 > `CalendarFacet` gains `kind: Literal["calendar"]` and `EmailFacet` declares
 > `kind: Literal["email"]`. Every facet type added later carries one.
 
-> **Normative.** `kind` is defaulted to its type's own tag, so no existing
-> construction site of `CalendarFacet` changes and no fixture, fake or persisted
-> value is invalidated.
+> **Normative.** `kind` is defaulted to its type's own tag, so every existing
+> construction site of `CalendarFacet` is unchanged and every existing fixture and
+> fake stays valid.
+
+> **Normative.** The default does **not** make a *serialised* facet payload
+> lacking `kind` loadable, and no clause here may be read as claiming it does: a
+> discriminated union extracts its tag from the input before it selects a member,
+> so the default never runs. A lane that gives `SourceReading` or `CurrentContext`
+> a persisted or wire-carried form owes the compatibility step with it, and owes it
+> in a shape that cannot mask a genuinely invalid payload.
 
 > **Normative.** The name `kind` is **reserved for the discriminator** across the
 > facet hierarchy. Declaring it as a `Literal` tag is what a concrete facet type
@@ -616,6 +623,22 @@ produced the value, `kind` says which payload shape it is. Defaulting `kind` is
 what keeps the widening additive, which is ADR-0008 §1's pattern and the property
 §5 relied on when it called this "one more line in the change that ADR
 authorises".
+
+**What the default buys is bounded, and the bound is stated because an earlier
+draft over-claimed it.** That draft said no "fixture, fake or **persisted** value"
+is invalidated. The first two are true and the third was a claim about a class of
+value that does not exist, asserted as though it had been checked. It has now been
+checked: no store writes a `SourceReading` or a `CurrentContext` and no wire frame
+carries one — both are in-process values passed from a reader to `orchestration`
+and to the ingest, and the only `model_validate` calls on them are tests
+round-tripping a payload their own run just dumped. **So there is no legacy
+payload to invalidate.** The clause is nonetheless worth its second half, because
+the underlying pydantic behaviour is real and counter-intuitive: tag extraction
+precedes member selection, so a model-field default cannot rescue an input that
+omits the discriminator. Adversarial review raised this as a compatibility break;
+the break does not exist, and the sentence that implied it had been ruled out for
+a *general* class of value is the defect. A later lane that persists one of these
+types will hit it, and now finds it written down rather than in a stack trace.
 
 **The reservation is worded over the *name's meaning* rather than over
 redefinition, because the obvious wording contradicts the clause above it.** An
