@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
+from pydantic import TypeAdapter, ValidationError
+
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
     BatchFailureKind,
@@ -58,6 +60,11 @@ DEFAULT_BATCH_ISSUER: Final = "fake-batch-account"
 DEFAULT_BATCH_REPLY: Final = "fake batch reply"
 
 _DEFAULT_FAILURE_DETAIL: Final = "fake batch failure"
+
+#: The handle's own rule for its identity fields, reached as the type rather than
+#: re-implemented — see ``models/batch.py`` for why the check has to happen before
+#: the exchange rather than at handle construction.
+_HANDLE_TEXT: Final[TypeAdapter[str]] = TypeAdapter(NonBlankEncodableText)
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +289,8 @@ class FakeBatchCompleter:
                 the provider call. Neither retryable nor routable (ADR-0066 §3).
         """
         snapshot = tuple(item.model_copy(deep=True) for item in items)
+        _refuse_unusable_handle_text(batch_key, what=f"batch_key {batch_key!r}")
+        _refuse_unusable_handle_text(self._issuer, what=f"issuer {self._issuer!r}")
         self._refuse_unacceptable(snapshot)
 
         await self.provider.exchange()
@@ -403,6 +412,24 @@ class FakeBatchCompleter:
                 raise ModelError(msg)
             seen.add(item.item_id)
             _refuse_malformed_history(item)
+
+
+def _refuse_unusable_handle_text(value: str, *, what: str) -> None:
+    """Refuse a value the handle would reject, before anything is submitted.
+
+    Mirrors ``AnthropicBatchCompleter``'s own check, and for the reason the fake
+    mirrors every other refusal: a value that this fake accepts and the real
+    implementation rejects lets a consumer built against the fake behave in a way
+    production does not (ADR-0143 §2's acceptance window).
+
+    Raises:
+        ModelError: If ``value`` is blank or has no UTF-8 encoding.
+    """
+    try:
+        _HANDLE_TEXT.validate_python(value)
+    except ValidationError as exc:
+        msg = f"{what} cannot be carried on a BatchHandle: {exc.errors()[0]['msg']}"
+        raise ModelError(msg) from exc
 
 
 def _refuse_malformed_history(item: BatchRequest) -> None:

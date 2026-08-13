@@ -29,8 +29,10 @@ from typing import TYPE_CHECKING, Final
 
 from anthropic import APIConnectionError, APIStatusError, APITimeoutError
 from anthropic.types import TextBlock
+from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.errors import (
+    ConfigurationError,
     ModelError,
     ModelResponseError,
     ModelTimeoutError,
@@ -96,6 +98,15 @@ DEFAULT_MAX_TOKENS: Final = 4096
 #: Exhaustive over what the SDK's ``ErrorObject`` union can discriminate to; a
 #: type outside it is deliberately ``UNKNOWN`` rather than guessed at, because
 #: misclassifying something as retryable is worse than not classifying it.
+#: The handle's own rule for its four identity fields, reached as the *type*
+#: rather than re-implemented. ADR-0143 §2 requires every refusable check to land
+#: on the near side of the acceptance window, and a caller-supplied value the
+#: handle would later reject is exactly such a check — so it has to be made
+#: before the provider is contacted. Validating through the field's own adapter is
+#: what keeps the early check and the late one from ever disagreeing.
+_HANDLE_TEXT: Final[TypeAdapter[str]] = TypeAdapter(NonBlankEncodableText)
+
+
 _FAILURE_KIND_BY_ERROR_TYPE: Final[dict[str, BatchFailureKind]] = {
     "authentication_error": BatchFailureKind.AUTHENTICATION,
     "permission_error": BatchFailureKind.AUTHENTICATION,
@@ -107,6 +118,22 @@ _FAILURE_KIND_BY_ERROR_TYPE: Final[dict[str, BatchFailureKind]] = {
     "invalid_request_error": BatchFailureKind.INVALID_REQUEST,
     "not_found_error": BatchFailureKind.INVALID_REQUEST,
 }
+
+
+def _refuse_unusable_handle_text(value: str, *, what: str) -> None:
+    """Refuse a value the handle would reject, before anything is submitted.
+
+    Raises:
+        ModelError: If ``value`` is blank or has no UTF-8 encoding. A caller error
+            with ADR-0066 §3's disposition, and one that must be caught *here*:
+            raised after the provider accepted the batch, it would leave a paid job
+            whose only identifier never came back (ADR-0143 §2).
+    """
+    try:
+        _HANDLE_TEXT.validate_python(value)
+    except ValidationError as exc:
+        msg = f"{what} cannot be carried on a BatchHandle: {exc.errors()[0]['msg']}"
+        raise ModelError(msg) from exc
 
 
 def _classify(exc: Exception) -> ModelError:
@@ -293,6 +320,16 @@ class AnthropicBatchCompleter:
             max_items: The item count to refuse above, or ``None`` to declare no
                 bound, which ADR-0143 §7 permits.
         """
+        # An issuer the handle would reject is a *configuration* fault rather than
+        # a routing one, so it is refused at construction and not at submission:
+        # a `ModelError` carries `retryable`/`routable`, and neither flag means
+        # anything about a label the operator mistyped. Refusing here also makes
+        # the failure arrive where the mistake was made.
+        try:
+            _HANDLE_TEXT.validate_python(issuer)
+        except ValidationError as exc:
+            msg = f"issuer {issuer!r} cannot be carried on a BatchHandle: {exc.errors()[0]['msg']}"
+            raise ConfigurationError(msg) from exc
         self._client = client
         self._issuer = issuer
         self._default_model = default_model
@@ -342,6 +379,7 @@ class AnthropicBatchCompleter:
         """
         snapshot = tuple(item.model_copy(deep=True) for item in items)
         vendor_model = self._vendor_model(model)
+        _refuse_unusable_handle_text(batch_key, what=f"batch_key {batch_key!r}")
         self._refuse_unacceptable(snapshot)
         requests = [self._request_for(item, vendor_model) for item in snapshot]
 
@@ -350,12 +388,25 @@ class AnthropicBatchCompleter:
         except Exception as exc:
             raise _classify(exc) from exc
 
-        return BatchHandle(
-            batch_key=batch_key,
-            batch_id=batch.id,
-            issuer=self._issuer,
-            submitted_at=batch.created_at,
-        )
+        try:
+            return BatchHandle(
+                batch_key=batch_key,
+                batch_id=batch.id,
+                issuer=self._issuer,
+                submitted_at=batch.created_at,
+            )
+        except ValidationError as exc:
+            # Everything a *caller* supplied was checked before the exchange, so
+            # reaching here means the provider itself answered with something a
+            # handle cannot carry. The batch exists and is billable, so the one
+            # useful thing left is to name it: an error that swallowed `batch.id`
+            # would turn a provider defect into an untraceable charge.
+            msg = (
+                f"provider accepted batch {batch.id!r} but answered with values no "
+                f"handle can carry ({exc}); the batch exists under issuer "
+                f"{self._issuer!r} and can be addressed by a hand-built handle"
+            )
+            raise ModelResponseError(msg) from exc
 
     async def poll(self, handle: BatchHandle) -> BatchStatus:
         """Retrieve the batch's counts and report them, without waiting for it."""
@@ -410,6 +461,20 @@ class AnthropicBatchCompleter:
             raise ModelResponseError(msg)
 
         outcomes = await self._read_results(handle)
+        distinct = {outcome.item_id for outcome in outcomes}
+        if len(distinct) != len(outcomes):
+            # A line count that matches the total is not the same claim as one
+            # outcome per item: a file answering 'a', 'a', 'c' for a three-item
+            # batch counts three and silently drops 'b'. ADR-0143 §4 promises
+            # "exactly one ... per submitted item", and a caller keying by id would
+            # simply not find the missing one — the same silent mis-scoring §6
+            # refuses for a short read, one level down.
+            msg = (
+                f"batch {handle.batch_id!r} answered {len(outcomes)} results under "
+                f"{len(distinct)} distinct item ids; a duplicate answer means some "
+                f"submitted item has none"
+            )
+            raise ModelResponseError(msg)
         if len(outcomes) != total:
             msg = (
                 f"batch {handle.batch_id!r} reports {total} items but its results file "
