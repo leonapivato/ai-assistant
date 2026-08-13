@@ -1,6 +1,6 @@
 # 141. A notification measure counts rulings, and the ruling seam emits the trace it is counted from
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-12
 - **This decision adds contract surface, and it is one member.** `TraceKind`
   gains `NOTIFICATION` (§2). That is a `core/types.py` change, so golden rule 5
