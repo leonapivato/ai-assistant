@@ -13,6 +13,7 @@ two test modules with one basename collide at collection.
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -242,3 +243,68 @@ class TestSettlingArgument:
     def test_hours_become_the_settling_period(self) -> None:
         assert measures._settling("48") == timedelta(days=2)
         assert measures._settling("0") == timedelta(0)
+
+
+def _help_text(capsys: pytest.CaptureFixture[str]) -> str:
+    """What ``--help`` prints, as one line.
+
+    Whitespace is collapsed because ``argparse`` wraps an argument's help to the
+    terminal width, so a reference this test looks for can arrive split across two
+    lines at a space it does not choose.
+    """
+    with pytest.raises(SystemExit):
+        measures.main(["--help"])
+    return " ".join(capsys.readouterr().out.split())
+
+
+class TestHelpText:
+    """``--help`` is the operator's door, and it drifted behind the report (#1084).
+
+    ADR-0141 §10 reaches an operator "through the existing ``ai-assistant-measures``
+    console script" and needed no change to this module to do it, because nothing
+    here enumerates a measure — so the help text went on describing leg 8's three
+    measures while the report printed ADR-0141's figures beside them, and the
+    leg-11 QA pass (#1081) found the notification measures undiscoverable from the
+    tool itself.
+
+    Pinned as *derived* properties rather than as wording, which is the point: a
+    test asserting the current sentences would have passed on the stale text as
+    readily as on this one, and would be edited by the same lane that lets the
+    help rot next.
+    """
+
+    def test_the_help_names_every_adr_whose_figures_the_report_prints(
+        self, settings: Settings, data_dir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The door describes whatever comes through it, not what once did.
+
+        The expected set is read off the *rendered report* rather than written
+        down here, so a later ADR's figures reaching the report fail this test
+        until the help mentions them. That is #1084 and #1078's failure made
+        mechanical: this module cannot notice a new measure, and a count of
+        measures in its description is what cannot notice hardest.
+        """
+        _seed(data_dir, _operation("start", _START))
+        measures.main(_ARGS)
+        cited = set(re.findall(r"ADR-\d{4}", capsys.readouterr().out))
+
+        helped = _help_text(capsys)
+
+        assert cited, "the report cited no ADR, so this test would prove nothing"
+        assert cited <= set(re.findall(r"ADR-\d{4}", helped))
+
+    def test_the_settling_argument_is_documented_as_bounding_one_figure(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """ADR-0141 §8: "the settling argument bounds ADR-0120 §4 alone".
+
+        §8 is normative that no figure it defines takes a settling period or is
+        withheld for want of one, and that ADR-0120 §8's withholding clause
+        "reaches no figure of this ADR". The behaviour was already right — the
+        notification figures print at ``--settling-hours 0`` — but the help
+        described the argument as bounding "the window's figures", which is the
+        one thing §8 decided it does not.
+        """
+        helped = _help_text(capsys)
+
+        assert "ADR-0120 §4" in helped[helped.index("--settling-hours") :]
