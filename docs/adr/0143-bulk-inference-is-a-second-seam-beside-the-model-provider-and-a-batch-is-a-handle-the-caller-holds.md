@@ -559,13 +559,27 @@ forbidden thing the easy one.
 
 > **Normative.** The annotations are fixed here rather than left to the lane,
 > and reuse `core/types.py`'s existing vocabulary. `item_id`, `batch_key`,
-> `batch_id` and `issuer` are `Identifier`. `submitted_at` and
+> `batch_id` and `issuer` are `NonBlankEncodableText` and **not** `Identifier`:
+> each must compare equal to the bytes it was minted from, and `Identifier`
+> strips the value it accepts. `submitted_at` and
 > `results_expire_at` are `UtcInstant`, the second optional. `detail` is
 > `EncodableText`. `item_count` is a positive `int` and `settled` a non-negative
 > one. `BatchRequest.messages` and `submit`'s items are `Sequence`s, spelled as
 > `ModelProvider.complete` spells its own `Sequence[Message]`, and `fetch`
 > returns a `Sequence[BatchItemOutcome]`. No field is typed `Any`, and no type
 > in `models/` or any vendor package is named by any annotation.
+
+`NonBlankEncodableText` rather than `Identifier` is the one annotation worth a
+sentence, because `Identifier` is the obvious choice and is wrong here.
+`Identifier`'s validator "reject[s] a blank identifier, returning it stripped",
+so `Identifier` would silently rewrite an `item_id` of `" a "` to `"a"` — and
+§3 forbids rewriting one, §2 requires `batch_key` carried unchanged, and §4 has
+the caller matching outcomes to requests by `item_id`, which a normalisation on
+one side of the round trip quietly breaks. `NonBlankEncodableText` exists for
+exactly this and says so: "Text that is neither blank nor unwritable, and is
+**never normalised** … ADR-0096 §2 needs it because a value copied between two
+fields must compare equal to its" source. `batch_id` and `issuer` take it for
+the same reason one step out: both are compared, not read.
 
 > **Normative.** `BatchStatus` binds `state` to `settled`: `0 <= settled <=
 > handle.item_count`, and `state` is `COMPLETE` if and only if `settled ==
@@ -765,7 +779,7 @@ and so have no rows of their own.
 | §8 (no contract edit) | `pyproject.toml`'s `[tool.importlinter]` untouched | The lane's diff contains no `pyproject.toml` importlinter hunk |
 | §8 (not the hub) | No `service`/`app` wiring | A test asserts `ai_assistant.service` holds no `BatchCompleter` |
 | §9 (eight types) | The eight names in `core/types.py` | A test asserts exactly those eight names are added and each is exported as the file's conventions require |
-| §9 (annotations) | The exact annotations on all eight types and three members | A test asserts each field's annotation, that none is `Any`, and that no annotation names a `models/` or vendor type |
+| §9 (annotations) | The exact annotations on all eight types and three members | A test asserts each field's annotation, that none is `Any`, and that no annotation names a `models/` or vendor type; a case round-trips an `item_id` and a `batch_key` carrying leading and trailing whitespace and asserts both survive byte-for-byte, which `Identifier` would have silently stripped |
 | §9 (state/settled) | `BatchStatus` validator | Contract cases: `settled` stays within bounds; `COMPLETE` iff fully settled; a provider reporting no in-flight progress is accepted; `fetch` on a `PENDING` batch raises |
 | §9 (kind/payload binding) | `BatchItemOutcome` validator | A test asserts each of the four kinds rejects the wrong payload combination |
 | §9 (triad + primary) | `BatchCompleterContract`, `FakeBatchCompleter`, `Test…Contract`, and the `models/` implementation, in one PR | `test_protocol_triad.py` is the mechanical check; the suite runs against both the fake and the real implementation |
