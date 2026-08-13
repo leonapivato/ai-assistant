@@ -1,4 +1,13 @@
-"""Leg 8's offline measure report: its own console script (ADR-0120 §9).
+"""The offline measure report: its own console script (ADR-0120 §9).
+
+**One door, and every measure this deployment defines comes through it.** ADR-0120
+§9 built it for leg 8's memory measures; ADR-0141 §10 reuses it whole — "the
+report reaches an operator through the existing ``ai-assistant-measures`` console
+script" — and reuses it *without touching this module*, because nothing here
+enumerates a measure. The report is asked for and printed. A later ADR's figures
+arrive the same way, which is why the help text below describes what the report
+covers in terms of the ADRs that define it rather than by counting figures: a
+count is the one thing this module cannot notice going stale (#1084, #1078).
 
 §9 rules that "the measures are computed by a **reporting tool that runs while
 the hub is stopped**, in its own process, and never by the hub", and that "its
@@ -58,17 +67,23 @@ if TYPE_CHECKING:
     from ai_assistant.core.config import Settings
 
 _DESCRIPTION = """
-Report leg 8's three measures over this deployment's trace stream (ADR-0120):
-memory precision, the correction rate and the repeated-explanation rate, with the
-diagnostics that travel with them.
+Report this deployment's measures over its retained trace stream, with the
+diagnostics that travel with them: ADR-0120's memory measures, which are rates
+over the records the assistant wrote and surfaced, and ADR-0141's notification
+measures, which are rates over the rulings the notification chassis made. Both
+sets are stated for the window entire and, where the configuration moved across
+it, for each part of the partitioned window.
 
 Run it with the hub stopped: it takes the same instance lock, so it cannot run
 beside one. It reads the trace store and writes nothing, anywhere.
 
 A measure is a rate over an explicit half-open window of when events occurred,
-and — where it looks forward from an event — an explicit settling period. Both
-are part of the figure, so both are required: two windows are comparable only
-when their settling agrees. No figure carries a threshold, a target or a verdict.
+and the window is part of every figure rather than a view onto it. The settling
+period is part of one figure: it bounds ADR-0120 §4's memory precision, the only
+measure whose numerator lies in its own subject's future, and no other figure
+takes it or is withheld for want of it (ADR-0141 §8). All three arguments are
+required all the same, because two windows are comparable only when their
+settling agrees. No figure carries a threshold, a target or a verdict.
 """
 
 _EPILOG = """
@@ -172,8 +187,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         type=_settling,
         required=True,
         help=(
-            "how long a surfaced record is given to be overturned before the window's "
-            "figures are read. Part of the measure, not a tuning knob"
+            "how long a surfaced record is given to be overturned before ADR-0120 §4's "
+            "memory precision is read. Part of that figure, not a tuning knob — and it "
+            "bounds that figure alone (ADR-0141 §8)"
         ),
     )
     return parser.parse_args(argv)
