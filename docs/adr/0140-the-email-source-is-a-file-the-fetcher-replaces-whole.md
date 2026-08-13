@@ -922,7 +922,7 @@ rather than copied from the calendar's nine** — which §3 is the argument for.
 | `email_source_path` | `None` | absolute path | the source; `None` is disabled |
 | `email_reader_interval` | `None` | `> 0` | the cadence; `None` is disabled (ADR-0093 §7) |
 | `email_window_past` | 7 days | `(0, 3650 days]` | how far back the clock-relative arrival window reaches |
-| `email_max_messages` | 2,000 | `[1, 2**63)` | in-window messages, and so proposals |
+| `email_max_messages` | 2,000 | `[1, 2**63)` | framed messages in the store, and so proposals |
 | `email_max_bytes` | 8 MiB | `> 0` | the store read **before** parsing |
 | `email_read_timeout` | 10 s | `> 0` | the reader's deadline on its own read (ADR-0093 §7) |
 | `email_max_content_bytes` | 4 MiB | `> 0` | proposal content materialised across the whole read |
@@ -933,6 +933,11 @@ rather than copied from the calendar's nine** — which §3 is the argument for.
 
 > **Normative.** All four caps refuse rather than truncate, and exceeding any
 > raises under ADR-0093 §8 (ADR-0093 §5).
+
+> **Normative.** `email_max_messages` counts the messages the store's framing
+> yields, counted **as they are framed** — before any header is interpreted,
+> before the window is applied, and before §5's skip rule runs. A store yielding
+> more than the cap raises, whatever the reader would later have made of them.
 
 > **Normative.** The email source ships **disabled by default** — both nullable
 > fields `None` — and the reason is ADR-0093 §7's: nothing may read a user's
@@ -958,6 +963,23 @@ rather than copied from the calendar's nine** — which §3 is the argument for.
   only be applied after parsing, so a cap on messages alone lets a 2 GiB store be
   fully parsed before anything refuses it. It is enforced on the read itself, at
   most the cap plus one byte consumed (ADR-0093 §7).
+- **`email_max_messages` counts framed messages rather than in-window ones, and
+  the ordering is the point rather than the wording.** The obvious spelling —
+  "in-window messages" — cannot be enforced, because deciding whether a message is
+  in the window means reading its delivery header, which is the very step §5's
+  skip rule turns on. A store of 2,001 messages none of which carries a valid
+  `X-Assistant-Delivered-At` would then be skipped message by message and returned
+  as a **successful empty reading**: a busted cap wearing the clothes of a quiet
+  week, which is exactly what ADR-0093 §5's refuse-don't-truncate rule exists to
+  prevent and exactly the ordering ADR-0117 §5 records the calendar taking, "so
+  that a source that busts its cap cannot be turned into a successful 'your
+  calendar is clear'". Counting at the framing is the only point before
+  interpretation at which a message exists to be counted. It still bounds
+  proposals, transitively and strictly, and it bounds the *work* besides — an
+  over-large store is refused whether or not its messages parse. The cost is that
+  a reader pointed at a large archive refuses rather than reading the recent tail
+  of it; that is the loud direction, and the operator's remedy is to shorten the
+  fetcher's retention or raise the cap, knowingly (ADR-0093 §5).
 - **`email_max_content_bytes` bounds the output, which none of the others do.**
   A subject header may be folded across many lines, and 2,000 of them inside every
   other cap can still materialise more content than any consumer wants. It is a
