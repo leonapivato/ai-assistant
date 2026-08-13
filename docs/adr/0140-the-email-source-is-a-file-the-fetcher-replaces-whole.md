@@ -421,18 +421,20 @@ hygiene.
 
 > **Normative.** The delivery instant is carried in **one** header the fetcher
 > writes, `X-Assistant-Delivered-At`, whose value is a single RFC 3339 timestamp
-> with an explicit UTC offset and nothing else. The fetcher writes it from what
-> the server recorded, and **strips every copy the message itself carried** before
-> writing its own.
+> and nothing else. Its offset is **determinate**: `Z`, or a numeric `+HH:MM` or
+> `-HH:MM` that is not `-00:00`. The fetcher writes it from what the server
+> recorded, and **strips every copy the message itself carried** before writing
+> its own.
 
 > **Normative.** The reader decides membership on that header and on nothing else.
 > It never derives a delivery instant from the mbox `From ` line, from a
 > `Received` header, from `Date`, or from the file's modification time.
 
 > **Normative.** A message carrying no `X-Assistant-Delivered-At`, more than one,
-> or one whose value does not parse as a single RFC 3339 instant is **skipped**,
-> as is a message the reader cannot otherwise interpret. Nothing is substituted
-> for a fact the source did not make, and a skip raises nothing.
+> or one whose value is not exactly a timestamp in the form the clause above
+> fixes — determinate offset included — is **skipped**, as is a message the reader
+> cannot otherwise interpret. Nothing is substituted for a fact the source did not
+> make, and a skip raises nothing.
 
 > **Normative.** The reader acquires the store's bytes whole and bounded, and
 > traverses its framing, exactly as ADR-0093 §7's byte cap requires. Nothing in
@@ -482,9 +484,18 @@ be decided and are:
   written by machines the sender may control; `Date` is the sender's own. A header
   the *fetcher* writes is the only one whose author is on our side of the file.
 - **Its syntax**, because "a timestamp" admits a dozen parsers that disagree about
-  offsets, and the corpus's one instant type is tz-aware. RFC 3339 with an
-  explicit offset is what a fetcher can emit in one line and a reader can parse
-  without a policy.
+  offsets, and the corpus's one instant type is tz-aware. RFC 3339 is what a
+  fetcher can emit in one line and a reader can parse without a policy — **with
+  `-00:00` excluded**, which is the one value inside the grammar that reintroduces
+  the divergence the grammar was chosen to remove. The reason is not the one it
+  looks like: RFC 3339 §4.3 makes `-00:00` a *determinate* UTC instant whose
+  offset to local time is merely unknown, so the value does establish a delivery
+  time. What it does not establish is agreement — `datetime.fromisoformat` reads
+  it as UTC while `email.utils.parsedate_to_datetime` treats the `-0000` form as
+  carrying no usable zone at all, so two conforming lanes admit and exclude the
+  same message at a window edge. That is ADR-0103 §9's test failed by a single
+  literal, and excluding it costs an honest fetcher nothing, because a fetcher
+  that knows the instant can write `Z`.
 - **What happens to a message-supplied copy**, because a header the fetcher writes
   is a header an attacker can also write. The fetcher strips; the reader skips on
   a duplicate rather than picking one. **Skipping is fail-closed and is the whole
@@ -1070,7 +1081,8 @@ carries is to **pass** the existing suite, not to write one.
   an `Engine` call holding no reader (ADR-0083 §8).
 - **Deployment documentation for the fetcher** — that it writes header blocks and
   no bodies; that it writes exactly one `X-Assistant-Delivered-At` per message in
-  RFC 3339 with an explicit offset, from the server's own record, after stripping
+  RFC 3339 with a determinate offset (`Z` or numeric, never `-00:00`), from the
+  server's own record, after stripping
   every copy the message carried; that it emits no header value containing a bare
   line break and escapes the format's separator; that it replaces the store by
   `rename(2)` on the same filesystem; that its retention exceeds the reader's
