@@ -119,6 +119,7 @@ its process model are its own and are governed nowhere here (§1)::
 
     import imaplib
     import os
+    import re
     import ssl
     import tempfile
     import time
@@ -130,15 +131,19 @@ its process model are its own and are governed nowhere here (§1)::
     SEPARATOR = "From assistant-fetcher Thu Jan  1 00:00:00 1970"
 
 
-    # The one INTERNALDATE among a response's items, or None if it is not there.
-    def delivered_at(items):
+    # This uid's INTERNALDATE among a response's items, or None if it is not there.
+    def delivered_at(items, uid):
         for item in items:
             if isinstance(item, tuple):
                 item = item[0]
-            if isinstance(item, bytes) and b"INTERNALDATE" in item:
-                local = imaplib.Internaldate2tuple(item)
-                if local is not None:
-                    return datetime.fromtimestamp(time.mktime(local), UTC)
+            if not isinstance(item, bytes):
+                continue
+            found = re.search(rb"\bUID (\d+)", item)
+            if found is None or found.group(1).decode() != uid:
+                continue
+            local = imaplib.Internaldate2tuple(item)
+            if local is not None:
+                return datetime.fromtimestamp(time.mktime(local), UTC)
         return None
 
 
@@ -150,10 +155,12 @@ its process model are its own and are governed nowhere here (§1)::
         with MailBox(host, ssl_context=context).login(user, password) as box:
             box.folder.set("INBOX", readonly=True)
             for message in box.fetch(A(date_gte=since), headers_only=True, mark_seen=False):
-                status, data = box.client.uid("FETCH", message.uid, "(INTERNALDATE)")
+                if message.uid is None:
+                    continue
+                status, data = box.client.uid("FETCH", message.uid, "(UID INTERNALDATE)")
                 if status != "OK":
                     continue
-                delivered = delivered_at(data)
+                delivered = delivered_at(data, message.uid)
                 if delivered is None:
                     continue
                 stamp = format(delivered, "%Y-%m-%dT%H:%M:%SZ")
@@ -261,17 +268,25 @@ from.
   half would defeat and what it would not: forged envelopes are still bounded by
   §4, which holds whatever the bytes turn out to be, because nothing the store
   says is authenticated *anyway*.
-- **The ``INTERNALDATE`` is selected from the response rather than indexed out
-  of it.** IMAP may interleave untagged and unsolicited responses, so
-  ``data[0]`` is not reliably the item asked for;
-  ``imaplib.Internaldate2tuple`` returns ``None`` rather than raising when its
-  pattern does not match, and ``time.mktime(None)`` then raises ``TypeError``
-  out of the generator — aborting the whole run *before* ``publish``, so the
-  previous store stays in place. The reader cannot tell that store from a
-  current one (§1, §7), which turns one odd response into a silent staleness
-  rather than a loud failure. Selecting the item and skipping the message when
-  there is none keeps the failure per-message, which is the same shape §5 gives
-  the reader for a header it cannot use.
+- **The ``INTERNALDATE`` is matched to its UID rather than indexed out of the
+  response**, and the two halves of that are separate mistakes. IMAP may
+  interleave untagged and unsolicited responses, so ``data[0]`` is not reliably
+  the item asked for — and ``imaplib.Internaldate2tuple`` returns ``None``
+  rather than raising when its pattern does not match, so ``time.mktime(None)``
+  raises ``TypeError`` out of the generator, aborting the run *before*
+  ``publish`` and leaving the previous store in place. The reader cannot tell
+  that store from a current one (§1, §7), so one odd response becomes silent
+  staleness rather than a loud failure. **Selecting the first item that merely
+  contains an ``INTERNALDATE`` fixes the crash and keeps a worse bug**: an
+  unsolicited ``FETCH`` for another message would then stamp *this* message's
+  envelope with *that* message's delivery instant, which is a §5 violation
+  reaching all the way into window membership — the proposal lands in the wrong
+  window, and nothing downstream can see that it did. So the item is matched on
+  the UID. Asking for ``(UID INTERNALDATE)`` makes that explicit, though RFC
+  3501 §6.4.8 has the server include the UID in any ``UID FETCH`` response
+  whether or not it was requested. A message with no resolvable UID and a
+  response with no matching item are both skipped, which keeps the failure
+  per-message — the same shape §5 gives the reader for a header it cannot use.
 
 **Arming the read** is two settings, and the hub reads nothing on the strength of
 them::
