@@ -303,7 +303,7 @@ def test_a_typed_grant_is_what_the_ingest_gate_reads(hub: _Hub, console_output: 
     at all. Neither is visible in the output or in the store; both are visible here.
     """
     with pytest.raises(SourceNotGrantedError):
-        hub.run(hub.engine.ingest())
+        hub.run(hub.engine.ingest_calendar())
 
     granted = CliRunner().invoke(
         cli.app, ["grant", CALENDAR_READER_NAME, "--scope", "facet", "--scope", "ingest", "--yes"]
@@ -311,7 +311,7 @@ def test_a_typed_grant_is_what_the_ingest_gate_reads(hub: _Hub, console_output: 
     assert granted.exit_code == 0
     assert "Granted" in console_output.getvalue()
     assert hub.received == ["grantable_sources", "grant"]
-    assert hub.run(hub.engine.ingest()).stored == 1
+    assert hub.run(hub.engine.ingest_calendar()).stored == 1
 
     # No `--yes`, and none is accepted: ADR-0102 §4 puts nothing between a user and
     # their remedy, so a revocation that prompted would hang here rather than pass.
@@ -324,7 +324,7 @@ def test_a_typed_grant_is_what_the_ingest_gate_reads(hub: _Hub, console_output: 
     # been unconfigured.
     assert hub.received == ["revoke"]
     with pytest.raises(SourceNotGrantedError):
-        hub.run(hub.engine.ingest())
+        hub.run(hub.engine.ingest_calendar())
 
 
 def test_revoking_retires_nothing_the_granted_read_produced(
@@ -341,7 +341,7 @@ def test_revoking_retires_nothing_the_granted_read_produced(
     CliRunner().invoke(
         cli.app, ["grant", CALENDAR_READER_NAME, "--scope", "facet", "--scope", "ingest", "--yes"]
     )
-    assert hub.run(hub.engine.ingest()).stored == 1
+    assert hub.run(hub.engine.ingest_calendar()).stored == 1
     CliRunner().invoke(cli.app, ["revoke", CALENDAR_READER_NAME])
 
     console_output.truncate(0)

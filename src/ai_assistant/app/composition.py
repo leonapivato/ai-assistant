@@ -787,7 +787,8 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
             # **`None` when no source is configured, which is the default** (§7).
             # A reader ships disabled because "nothing may read a user's personal
             # files because a default said so", so the ordinary deployment builds
-            # no stage at all and `Engine.ingest` refuses rather than reporting an
+            # no stage at all and `Engine.ingest_calendar` refuses rather than
+            # reporting an
             # empty success. Nothing calls it in that state anyway: the scheduler
             # arms the job only on a configured interval, and `Settings` refuses an
             # interval whose path is unset (§7a).
@@ -807,7 +808,7 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
             #
             # Its **own** reader, never the one the context source holds
             # (ADR-0096 §5).
-            ingestion=(
+            calendar_ingestion=(
                 None
                 if ingestion_reader is None
                 else IngestionStage(reader=ingestion_reader, writes=writes, grants=grants)

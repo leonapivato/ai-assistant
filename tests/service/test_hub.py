@@ -112,7 +112,7 @@ class FakeEngine:
         self.observed += 1
         _marker.info("fake_engine_observed")
 
-    async def ingest(self) -> None:
+    async def ingest_calendar(self) -> None:
         # Leg 6's read-only ingestion (ADR-0093 §6). Present whether or not a
         # deployment arms the job, because `jobs_for` builds §7's whole table
         # before filtering it by interval — a stand-in missing a method the real
@@ -121,7 +121,7 @@ class FakeEngine:
         _marker.info("fake_engine_ingested")
 
     async def consolidate(self) -> None:
-        # Leg 7's chunked walk (ADR-0106, ADR-0111). Present for `ingest`'s reason:
+        # Leg 7's chunked walk (ADR-0106, ADR-0111). Present for `ingest_calendar`'s reason:
         # `jobs_for` builds §7's whole table before filtering it by interval, so a
         # stand-in missing a method the real façade carries fails the hub's
         # *startup* rather than only the job it would have armed.
@@ -129,9 +129,9 @@ class FakeEngine:
         _marker.info("fake_engine_consolidated")
 
     async def notice_upcoming_events(self) -> int:
-        # ADR-0132's upcoming-event producer. Present for ``ingest``'s reason
+        # ADR-0132's upcoming-event producer. Present for ``ingest_calendar``'s reason
         # exactly — ``jobs_for`` builds §7's whole table before filtering it by
-        # interval — and disabled for ``ingest``'s reason too: nothing may read a
+        # interval — and disabled for ``ingest_calendar``'s reason too: nothing may read a
         # user's personal files because a default said so (ADR-0093 §7, ADR-0132
         # §4), so ``calendar_upcoming_interval`` is ``None`` until an operator sets
         # it and this method exists only so the table can be built.

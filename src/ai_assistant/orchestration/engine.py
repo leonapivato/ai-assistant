@@ -42,20 +42,25 @@ default** until the observation cursor lands (ADR-0083 §7, §13).
 
 Beside those sits the **maintenance surface** ADR-0083 §8 adds for that scheduler:
 :meth:`Engine.start`'s sweeps, :meth:`Engine.purge_expired`,
-:meth:`Engine.ingest` and :attr:`Engine.drain_phase`. New *concrete* surface on
-this class rather than ``core`` contract surface — the scheduler holds this object
-from inside the hub, not the ``AssistantEngine`` Protocol a client sees, whose
-fifteen methods ADR-0085 §1 fixes and none of these is among.
+:meth:`Engine.ingest_calendar`, :meth:`Engine.ingest_email` and
+:attr:`Engine.drain_phase`. New *concrete* surface on this class rather than
+``core`` contract surface — the scheduler holds this object from inside the hub,
+not the ``AssistantEngine`` Protocol a client sees, whose fifteen methods
+ADR-0085 §1 fixes and none of these is among.
 
-:meth:`Engine.ingest` is that surface's second scheduled operation and leg 6's
-(ADR-0093 §6): it reads the injected :class:`~ai_assistant.core.protocols.Reader`
-once and puts every belief the reading proposes through the same write path
-``learn`` and ``observe`` use, because ADR-0093 §1 declines the capture exemption
-to a reader and a third party's report is the last thing that should reach the
-store unmediated. It is **optional collaborator, required behaviour**: a reader
-ships disabled by default (§7), so an engine wired without one is the ordinary
-deployment — and asking it to ingest is then a wiring fault it refuses rather than
-an empty success it reports.
+:meth:`Engine.ingest_calendar` is that surface's second scheduled operation and
+leg 6's (ADR-0093 §6); :meth:`Engine.ingest_email` is ADR-0140's, added beside it
+rather than through it. **One operation per ingestion source, and no ingestion
+operation takes a source** (ADR-0142 §4): each reads the injected
+:class:`~ai_assistant.core.protocols.Reader` once and puts every belief the
+reading proposes through the same write path ``learn`` and ``observe`` use,
+because ADR-0093 §1 declines the capture exemption to a reader and a third
+party's report is the last thing that should reach the store unmediated. Each is
+**optional collaborator, required behaviour**: a reader ships disabled by default
+(§7), so an engine wired without one is the ordinary deployment — and asking it
+to ingest that source is then a wiring fault it refuses rather than an empty
+success it reports, per source and naming that source's own configuration
+(ADR-0142 §6).
 
 **Scope today.** ``respond`` "still ends at the plan" and the multi-step
 plan-driving stage — ordering, dependencies and cancellation across a plan's
@@ -886,7 +891,7 @@ class Engine:
         observation: ObservationStage,
         questions: QuestionStage,
         grant_operations: GrantOperations,
-        ingestion: IngestionStage | None = None,
+        calendar_ingestion: IngestionStage | None = None,
         upcoming: UpcomingEventStage | None = None,
         consolidation: ConsolidationStage | None = None,
         notifications: NotificationStore | None = None,
@@ -1044,7 +1049,7 @@ class Engine:
                 argument validation, the size measurement and the drain-tracking
                 every other method on the surface gets.
 
-                **Required, where ``ingestion`` below is optional, and the
+                **Required, where ``calendar_ingestion`` below is optional, and the
                 asymmetry is the Protocol.** These four are ``AssistantEngine``
                 methods and the shared conformance suite runs against this class,
                 so an engine that could be built without them is one whose surface
@@ -1059,7 +1064,8 @@ class Engine:
                 in this package, and ADR-0102 §2 records that reusing a word for a
                 different type one constructor over is how two things come to be
                 confused at a glance.
-            ingestion: The read-only ingestion stage (ADR-0093 §6), or ``None``
+            calendar_ingestion: The calendar's read-only ingestion stage (ADR-0093
+                §6), or ``None``
                 where this deployment configured no source. It writes through the
                 *same* write stage the learn leg and ``observation`` use — the
                 composition-root obligation ADR-0078 §3 puts on every producer, so
@@ -1074,13 +1080,13 @@ class Engine:
                 with no reader is not a half-built engine, it is the default
                 deployment, and requiring the stage would make every caller
                 manufacture a reader for a source the operator never configured.
-                What is *not* optional is what :meth:`ingest` does about it: it
+                What is *not* optional is what :meth:`ingest_calendar` does about it: it
                 refuses rather than reporting an empty success, because a job that
                 reports health while ingesting nothing is the failure mode this
                 corpus keeps naming (ADR-0022 §4a).
             upcoming: ADR-0132's upcoming-event producer, or ``None`` where this
                 deployment configured no calendar source. **Its own reader
-                instance, and not ``ingestion``'s** (ADR-0132 §3): the two consumers
+                instance, and not ``calendar_ingestion``'s** (ADR-0132 §3): the two consumers
                 read at their own cadence and neither derives its answer from the
                 other's reading, and ADR-0093 §7's one-outstanding-worker
                 reservation is per instance, so a shared reader would let one job's
@@ -1093,7 +1099,7 @@ class Engine:
                 (ADR-0028 §4) — because ADR-0130 §1 puts the seam with the producer
                 and this façade is not one.
 
-                Optional for ``ingestion``'s reason exactly, and
+                Optional for ``calendar_ingestion``'s reason exactly, and
                 :meth:`notice_upcoming_events` refuses rather than reporting an
                 empty success for the same one.
             consolidation: The chunked consolidation stage (ADR-0106, ADR-0111), or
@@ -1105,7 +1111,7 @@ class Engine:
                 instance** ``memory`` names, or it would propose beliefs citing
                 records the write path cannot resolve.
 
-                **Optional for ``ingestion``'s reason**, one job over: the
+                **Optional for ``calendar_ingestion``'s reason**, one job over: the
                 consolidation job ships disabled, so an engine without the stage is
                 an ordinary deployment rather than a half-built one. And
                 :meth:`consolidate` refuses rather than reporting an empty success,
@@ -1116,7 +1122,7 @@ class Engine:
                 the contract surface ahead of a store to serve it. The five
                 ``AssistantEngine`` methods behind it refuse with
                 :class:`~ai_assistant.core.errors.ConfigurationError` in that
-                state, on ``ingest``'s shape: "no store is wired" and "no
+                state, on ``ingest_calendar``'s shape: "no store is wired" and "no
                 notifications are held" are different facts, and answering an
                 empty page would report the second while the first is true.
             notification_outbox: ADR-0131 §3's durable delivery queue, or ``None``
@@ -1239,7 +1245,7 @@ class Engine:
         self._observation = observation
         self._questions = questions
         self._grants = grant_operations
-        self._ingestion = ingestion
+        self._calendar_ingestion = calendar_ingestion
         self._upcoming = upcoming
         self._consolidation = consolidation
         if (notifications is None) != (notification_policy is None):
@@ -1535,7 +1541,7 @@ class Engine:
         except ClockReadingError as exc:
             raise TraceStoreError(str(exc)) from exc
 
-    async def ingest(self) -> IngestionReport:
+    async def ingest_calendar(self) -> IngestionReport:
         """Read the configured source once and propose what it read (ADR-0093 §6).
 
         The **maintenance surface**'s second scheduled operation, and leg 6's:
@@ -1629,7 +1635,7 @@ class Engine:
             DeferralStoreError: If a deferred question could not be parked.
         """
         self._reject_if_closing()
-        if self._ingestion is None:
+        if self._calendar_ingestion is None:
             msg = (
                 "no ingestion stage is wired, so there is nothing to ingest; it "
                 "needs a configured source (ASSISTANT_CALENDAR_READER_PATH, "
@@ -1637,7 +1643,7 @@ class Engine:
                 "whether it may be read, and neither stands in for the other"
             )
             raise ConfigurationError(msg)
-        return await self._tracked(self._ingestion.ingest(), "ingest", _ingested)
+        return await self._tracked(self._calendar_ingestion.ingest(), "ingest_calendar", _ingested)
 
     async def notice_upcoming_events(self) -> int:
         """Notice what is about to start, and offer a candidate for each (ADR-0132).
@@ -1651,7 +1657,7 @@ class Engine:
         surface", so this is not a member of ``AssistantEngine``: no client asks for
         it and no interface adapter may drive it.
 
-        **Takes no argument, deliberately** — ``ingest``'s reason unchanged: the
+        **Takes no argument, deliberately** — ``ingest_calendar``'s reason unchanged: the
         reader is given its own source and its own bound, so a caller able to widen
         the read is a caller able to defeat the bound. It is also what makes this a
         legal ``JobBody``.
@@ -1727,7 +1733,7 @@ class Engine:
         promoted ``AssistantEngine`` Protocol at fifteen *request* methods with
         lifecycle deliberately off it — "a Protocol constrains what an
         implementation must have, not what it may not". :meth:`purge_expired` and
-        :meth:`ingest` are the standing proof, and ADR-0114 §9 records this as a
+        :meth:`ingest_calendar` are the standing proof, and ADR-0114 §9 records this as a
         non-decision so the implementing lane does not relitigate it.
 
         **Takes no argument, deliberately**, which is what makes it a legal
@@ -1758,7 +1764,7 @@ class Engine:
                 as *stop* rather than as a job failure (ADR-0083 §8), which is what
                 :data:`ENGINE_SHUTTING_DOWN` exists for.
             ConfigurationError: If this engine was built with no consolidation
-                stage, for :meth:`ingest`'s reason: an empty report would be
+                stage, for :meth:`ingest_calendar`'s reason: an empty report would be
                 indistinguishable from material that justified nothing, so a
                 deployment whose stage failed to wire would look healthy forever
                 while consolidating nothing — the shape ADR-0022 §4a refuses.
@@ -2699,7 +2705,7 @@ class Engine:
             The store.
 
         Raises:
-            ConfigurationError: If none is wired, in :meth:`ingest`'s shape — a
+            ConfigurationError: If none is wired, in :meth:`ingest_calendar`'s shape — a
                 deployment that has composed no notification store has no held
                 notifications, and saying so is different from answering "none".
         """

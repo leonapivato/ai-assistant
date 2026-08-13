@@ -1162,12 +1162,12 @@ async def test_build_engine_wires_both_drivers_on_a_configured_path(
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        assert engine._ingestion is not None
+        assert engine._calendar_ingestion is not None
         assert len(_calendar_sources(engine)) == 1
         # ADR-0097 §8: an installation that has been reading a source stops
         # reading it until the user grants. Nothing is minted from configuration.
         with pytest.raises(SourceNotGrantedError):
-            await engine.ingest()
+            await engine.ingest_calendar()
         assert (await engine._loop._context.assemble()).calendar is None
     finally:
         await engine.aclose()
@@ -1261,7 +1261,7 @@ async def test_the_notification_surface_answers_instead_of_refusing(
     """ADR-0130 §9's five methods work on a composed hub (#948).
 
     Until this wiring existed every one of them raised ``ConfigurationError`` in
-    ``Engine.ingest``'s shape — and "no store is composed" and "nothing is held"
+    ``Engine.ingest_calendar``'s shape — and "no store is composed" and "nothing is held"
     are different facts, so answering an empty page would have reported the second
     while the first was true. The read, the preferences and the maintenance drain
     are asserted together because it is exactly the *pairing* the engine refuses
@@ -1627,7 +1627,7 @@ async def test_the_drivers_and_the_grant_operations_share_one_store(
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        stage = engine._ingestion
+        stage = engine._calendar_ingestion
         assert stage is not None
         (facet_source,) = _calendar_sources(engine)
         assert stage._grants is engine._grants._store
@@ -1657,14 +1657,14 @@ async def test_a_granted_source_becomes_readable_and_a_revocation_stops_it(
     engine = build_engine(settings, data_dir=tmp_path)
     try:
         with pytest.raises(SourceNotGrantedError):
-            await engine.ingest()
+            await engine.ingest_calendar()
 
         await _grant_the_calendar(engine)
-        assert (await engine.ingest()).stored == 1
+        assert (await engine.ingest_calendar()).stored == 1
 
         assert await engine.revoke(CALENDAR_READER_NAME) is not None
         with pytest.raises(SourceNotGrantedError):
-            await engine.ingest()
+            await engine.ingest_calendar()
         assert len(await engine.beliefs()) == 1
     finally:
         await engine.aclose()
@@ -1785,7 +1785,7 @@ async def test_the_two_consumers_hold_separate_reader_instances(
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        stage = engine._ingestion
+        stage = engine._calendar_ingestion
         assert stage is not None
         (facet_source,) = _calendar_sources(engine)
         assert stage._reader is not facet_source._reader
@@ -1806,9 +1806,9 @@ async def test_build_engine_wires_no_reader_when_no_source_is_configured(
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        assert engine._ingestion is None
+        assert engine._calendar_ingestion is None
         with pytest.raises(ConfigurationError):
-            await engine.ingest()
+            await engine.ingest_calendar()
     finally:
         await engine.aclose()
 
@@ -1832,7 +1832,7 @@ async def test_build_engine_wires_the_ingestion_stage_over_the_one_memory_store(
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        stage = engine._ingestion
+        stage = engine._calendar_ingestion
         assert stage is not None
         assert stage._writes is engine._loop._writes
     finally:
@@ -1857,7 +1857,7 @@ async def test_an_ingested_belief_is_readable_through_the_surface_the_user_has(
     engine = build_engine(settings, data_dir=tmp_path)
     try:
         await _grant_the_calendar(engine)
-        report = await engine.ingest()
+        report = await engine.ingest_calendar()
 
         assert report.source == "calendar"
         assert report.proposed == 1
@@ -1887,14 +1887,14 @@ async def test_a_configured_but_missing_source_fails_at_run_time_and_not_at_buil
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        assert engine._ingestion is not None
+        assert engine._calendar_ingestion is not None
         # Granted first, so the failure this reaches is the *read* rather than the
         # gate: ADR-0097 §5 refuses before the source is resolved, so an ungranted
         # engine would raise ``SourceNotGrantedError`` and prove nothing about a
         # missing file.
         await _grant_the_calendar(engine)
         with pytest.raises(ReaderError):
-            await engine.ingest()
+            await engine.ingest_calendar()
     finally:
         await engine.aclose()
 
@@ -2481,7 +2481,7 @@ async def test_the_three_calendar_consumers_hold_separate_reader_instances(
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
-        ingestion = engine._ingestion
+        ingestion = engine._calendar_ingestion
         producer = engine._upcoming
         assert ingestion is not None
         assert producer is not None

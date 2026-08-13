@@ -97,7 +97,7 @@ def _candidate(key: str, *, expires: datetime | None = None) -> NotificationCand
     ids=["read", "dismiss", "forget", "preferences", "write", "reconsider"],
 )
 async def test_an_unwired_surface_refuses_legibly(call: object) -> None:
-    """``ingest``'s shape, and for its reason.
+    """``ingest_calendar``'s shape, and for its reason.
 
     "No notification store is composed" and "nothing is held" are different
     facts, and a surface answering an empty page for the first reports the second

@@ -422,7 +422,7 @@ class Harness:
             conversations=self.conversations,
             observation=self.observation,
             questions=self.questions,
-            ingestion=self.ingestion,
+            calendar_ingestion=self.ingestion,
             closers=tuple(closers),  # type: ignore[arg-type]
             id_factory=lambda: next(self.handles),
             # The whole harness runs at one instant, so the horizon the sweep
@@ -1829,7 +1829,7 @@ async def test_ingest_reads_the_configured_source_and_reports_what_it_proposed()
     reader = FakeReader()
     harness = Harness(reader=reader)
 
-    report = await harness.engine.ingest()
+    report = await harness.engine.ingest_calendar()
 
     # The producer's own declared identity, relayed unchanged (ADR-0093 §7, §10).
     assert report.source == reader.name
@@ -1849,7 +1849,7 @@ async def test_ingest_takes_no_argument_so_the_scheduler_can_bind_it() -> None:
     """
     harness = Harness(reader=FakeReader())
 
-    assert inspect.signature(harness.engine.ingest).parameters == {}
+    assert inspect.signature(harness.engine.ingest_calendar).parameters == {}
 
 
 async def test_ingest_refuses_when_no_reader_is_configured() -> None:
@@ -1866,7 +1866,7 @@ async def test_ingest_refuses_when_no_reader_is_configured() -> None:
     harness = Harness()
 
     with pytest.raises(ConfigurationError):
-        await harness.engine.ingest()
+        await harness.engine.ingest_calendar()
 
 
 async def test_a_source_failure_reaches_the_scheduler_as_the_readers_own_error() -> None:
@@ -1880,7 +1880,7 @@ async def test_a_source_failure_reaches_the_scheduler_as_the_readers_own_error()
     harness = Harness(reader=FakeReader(failure=FileNotFoundError("no such file")))
 
     with pytest.raises(ReaderError) as raised:
-        await harness.engine.ingest()
+        await harness.engine.ingest_calendar()
 
     assert isinstance(raised.value.__cause__, FileNotFoundError)
 
@@ -1905,7 +1905,7 @@ async def test_ingest_is_tracked_so_shutdown_drains_its_write() -> None:
     harness = Harness(reader=reader, closers=(close,))
     gate = reader.suspend_next()
 
-    ingesting = asyncio.ensure_future(harness.engine.ingest())
+    ingesting = asyncio.ensure_future(harness.engine.ingest_calendar())
     await gate.reached()
     closing = asyncio.ensure_future(harness.engine.aclose())
     # Several turns, so the drain task is scheduled and runs as far as it can. An
@@ -1933,7 +1933,7 @@ async def test_ingest_is_refused_once_shutdown_has_begun() -> None:
     await harness.engine.aclose()
 
     with pytest.raises(RuntimeError) as raised:
-        await harness.engine.ingest()
+        await harness.engine.ingest_calendar()
 
     assert str(raised.value) == ENGINE_SHUTTING_DOWN
 
@@ -1950,7 +1950,7 @@ async def test_a_shutting_down_engine_refuses_before_it_reads_the_source() -> No
     await harness.engine.aclose()
 
     with pytest.raises(RuntimeError):
-        await harness.engine.ingest()
+        await harness.engine.ingest_calendar()
 
     assert reader.call_count == 0
 
@@ -4102,7 +4102,7 @@ async def test_a_maintenance_report_is_not_measured_against_the_payload_limit() 
     """``checked`` is per operation, and the four maintenance ones are exempt.
 
     ADR-0085 §1 fixes the promoted ``AssistantEngine`` surface and none of
-    ``start``/``purge_expired``/``ingest``/``consolidate`` is on it: their reports
+    ``start``/``purge_expired``/``ingest_calendar``/``consolidate`` is on it: their reports
     go to the hub's scheduler in-process and never cross a wire (ADR-0083 §8). They
     were never measured before this lane and they are not measured now — the flag
     exists so that stays a stated fact rather than an accident of which call site
