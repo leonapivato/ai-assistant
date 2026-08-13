@@ -447,7 +447,9 @@ hygiene.
 > it is well-formed, and reaches the skip rule below. The reader never
 > **normalises a value onto the subset**: it does not roll a leap second to the
 > following instant, case-fold a separator, or drop precision to make a value
-> acceptable.
+> acceptable. It checks the spelling against the subset itself and **does not
+> delegate acceptance to a more permissive parser**, whose accepting a value is
+> not this clause's test.
 
 > **Normative.** The reader decides membership on that header and on nothing else.
 > It never derives a delivery instant from the mbox `From ` line, from a
@@ -1013,8 +1015,11 @@ rather than copied from the calendar's nine** — which §3 is the argument for.
 > `email_source_path` unset is refused at load with a `ConfigurationError`, on
 > ADR-0093 §7a's rule for the equivalent pair.
 
-> **Normative.** All four caps refuse rather than truncate, and exceeding any
-> raises under ADR-0093 §8 (ADR-0093 §5).
+> **Normative.** The caps are `email_max_bytes`, `email_max_messages` and
+> `email_max_content_bytes`, named rather than counted. Each refuses rather than
+> truncates, and exceeding any raises under ADR-0093 §8 (ADR-0093 §5).
+> `email_read_timeout` is a deadline and not one of them; `email_window_past` is
+> a window edge and bounds nothing.
 
 > **Normative.** `email_max_messages` counts the messages the store's framing
 > yields, counted **as they are framed** — before any header is interpreted,
@@ -1137,22 +1142,36 @@ carries is to **pass** the existing suite, not to write one.
   `rename(2)` on the same filesystem; that its retention exceeds the reader's
   window; and that its credential never enters the hub. This is documentation and
   not `src/`, and §1's second clause is why: the fetcher is not ours to ship.
-- Tests for the four clauses a lane can satisfy in prose and breach in code: that
-  a message carrying a body **still yields its envelope proposal and is still
-  counted in the facet**, while no byte of that body reaches that proposal, the
-  facet, or any other value leaving the reader (§5) — the sentinel must be absent
-  and the envelope present, because a test asserting only the absence is passed
-  by a reader that drops the message entirely; that a message with zero, two, or
-  an unparseable `X-Assistant-Delivered-At` is skipped rather than dated by any
-  fallback (§5);
-  that a store whose messages carry only a `Date` header proposes nothing; and
-  that a store of `email_max_messages + 1` framed messages **none** of which
-  carries a valid `X-Assistant-Delivered-At` **refuses** rather than returning a
-  successful empty reading. The last is the cap's *ordering* rather than its
-  figure, and it is listed because it is the one property in §12 that every test
-  above passes while breached: an implementation that skips invalid messages
-  first and counts what survives satisfies all three others and still turns a
-  busted cap into a quiet week.
+- Tests for the clauses a lane can satisfy in prose and breach in code — five,
+  each named by the breach it catches:
+
+  - **The body never leaves the reader (§5).** A message carrying a body still
+    yields its envelope proposal and is still counted in the facet, while no byte
+    of that body reaches that proposal, the facet, or any other value leaving the
+    reader. Both halves are asserted, because a test checking only the sentinel's
+    absence is passed by a reader that drops the message entirely.
+  - **An unusable delivery header is skipped, never defaulted (§5).** A message
+    with zero, two, or an unparseable `X-Assistant-Delivered-At` is skipped
+    rather than dated by any fallback.
+  - **A *parseable* value outside §5's closed subset is skipped on the same
+    terms**, tested in both directions of the seam, because the accept/reject
+    boundary has to be the subset rather than whichever library a lane reached
+    for. A space separator, a comma fractional separator, an offset carrying
+    seconds, an omitted `SS` and a `+0000` written without its colon are each
+    **accepted** by `datetime.fromisoformat`, so a reader that delegates
+    acceptance to it passes the test above and still admits what §5 excludes. A
+    lower-case `t` or `z` and a leap second are each **accepted** by a parser
+    conforming to RFC 3339 while `fromisoformat` rejects them, so the skip is
+    owed on §5's terms rather than as a side effect of the stdlib's narrowness.
+  - **`Date` is never a delivery instant (§5).** A store whose messages carry
+    only a `Date` header proposes nothing.
+  - **The cap is applied at the framing (§12).** A store of
+    `email_max_messages + 1` framed messages **none** of which carries a valid
+    `X-Assistant-Delivered-At` **refuses** rather than returning a successful
+    empty reading. This is the cap's *ordering* rather than its figure, and it is
+    the one §12 property every test above passes while breached: an
+    implementation that skips invalid messages first and counts what survives
+    satisfies all four others and still turns a busted cap into a quiet week.
 
 ### 14. Deferred, by name, each with the condition that fires it
 
