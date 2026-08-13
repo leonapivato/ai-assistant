@@ -219,7 +219,11 @@ def _select(
         # ingestion instead of ten.
         selected = first_questions(cases, limit)
     else:
-        selected = longmemeval.load(next(iter(paths.values())))
+        # `corpus.key`, never a literal: one loader parses both LongMemEval variants,
+        # and a case carries its corpus into every `QuestionRecord`. Passing the key
+        # that was actually asked for is what keeps `records.jsonl` and `manifest.json`
+        # naming the same corpus.
+        selected = longmemeval.load(next(iter(paths.values())), corpus_key=corpus.key)
         if limit:
             selected = longmemeval.stratified(selected, total=limit, seed=seed)
     return corpus, first_sessions(selected, max_sessions), digests
