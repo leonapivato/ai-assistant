@@ -1,6 +1,6 @@
 # 143. Bulk inference is a second seam beside the model provider, and a batch is a handle the caller holds
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-13
 - **Durability clause.** Every quotation below — from an ADR, from
   `core/protocols.py`, from `core/errors.py`, from `pyproject.toml`, or from an
@@ -258,8 +258,10 @@ issued by one provider is meaningless to another (§2).
 > configured `issuer` onto every handle it mints, unchanged.
 
 > **Normative.** A `BatchHandle` is an **address, not a capability**. It carries
-> only what names the batch and the account it lives in, and no field a later
-> `poll` or `fetch` would have to agree with — in particular no count. A handle
+> what names the batch and the account it lives in — `batch_id` and `issuer` —
+> together with the caller's own `batch_key` and the `submitted_at` record,
+> neither of which the implementation reads back, and **no field a later `poll`
+> or `fetch` would have to agree with**, in particular no count. A handle
 > a caller assembles by hand, naming a real batch under its own `issuer`, is a
 > valid address for that batch and is answered for it; the seam neither
 > authenticates handles nor pretends to, and holding one confers nothing the
@@ -419,7 +421,12 @@ that "a ``Sequence`` argument is a container the caller may still be holding"
 and that "A frozen argument is not a discharge on its own". `submit` takes such
 a container, validates it, and then suspends on a network call — so without a
 snapshot, a caller appending an item mid-flight could have a batch validated
-over one set and transmitted over another. §12 records that this ADR corrected its own earlier reading of
+over one set and transmitted over another. The snapshot must also be **deep
+enough to cover everything the call goes on to read**, which is ADR-0065's own
+requirement rather than an addition here: a shallow copy of the outer sequence
+leaves a caller free to mutate a `BatchRequest` still in it, or that request's
+`messages`, between validation and transmission — the same divergence one level
+down. §13's row tests all three. §12 records that this ADR corrected its own earlier reading of
 ADR-0065 as vacuous here.
 
 ### 4. Every item ends in exactly one of four outcomes, matched by id
@@ -794,12 +801,13 @@ widely than it now holds?
   (ADR-0015 §1). The ratification sequence is `CONTRIBUTING.md` → "Finishing an
   ADR PR": drafted, reviewed and revised as `Proposed`, both lenses returning
   clean on one tree, the status flipped to `Accepted` on one physical line, and
-  both lenses re-run on the flipped tree. **This ADR is ratified on its second
-  flip.** Findings arrived on the first post-flip round — §5's `fetch` clause
-  contradicted §9's `PENDING` raise, and §9 left four annotations to inference
-  against its own promise that they are fixed here — and were *fixed* rather
-  than waived, so the ADR returned to `Proposed` and re-entered at step 1, the
-  route that step 3 prescribes and that ADR-0127 and ADR-0133 each took. Nothing implements against this ADR
+  both lenses re-run on the flipped tree. A blocker recorded on a flipped tree
+  returns it to `Proposed` under that section's recovery clause and the reviews
+  run again; **that has happened here, and this ADR is ratified on whichever
+  flip both lenses leave green** — the route ADR-0127, ADR-0133 and ADR-0141
+  each took. This PR's round record carries every round, both lenses' outcomes
+  and every recovery the route took; the `Status` line above states where the
+  sequence has reached. Nothing implements against this ADR
   until it has merged.
 
 ### 13. The work order: what the implementing lane owes
@@ -823,7 +831,7 @@ binds the dispatching brief rather than the lane the table is addressed to.
 | §3 (well-formedness) | Pre-contact validation of every item | Contract cases: an empty history, a history ending on `Role.ASSISTANT`, and a history containing a `Role.TOOL` turn each refuse the whole batch with nothing submitted |
 | §3 (empty batch) | An empty-sequence refusal ahead of the provider call | Contract case: `submit` with no items raises, neither `retryable` nor `routable`, and the recording transport shows no request was sent |
 | §3 (unique ids) | Duplicate-`item_id` refusal | Contract case: a duplicate refuses; a test asserts `item_id`s round-trip unrewritten |
-| §3 (one observation) | A first-line snapshot of the items in `submit` | Contract case: a caller mutates the sequence it passed while `submit` is suspended on the provider call; what was validated and what was transmitted describe one version |
+| §3 (one observation) | A first-line snapshot of the items in `submit`, deep enough to cover everything the call goes on to read (ADR-0065) | Contract cases: while `submit` is suspended on the provider call, a caller appends to the sequence it passed, mutates a `BatchRequest` already in it, and mutates that request's own `messages`; in each, what was validated and what was transmitted describe one version |
 | §4 (one per item) | Outcome assembly keyed by `item_id` | Contract case: a mixed batch returns exactly one outcome per item and none extra |
 | §4 (four kinds) | `BatchOutcomeKind` and its payload rules | Contract cases: one case per kind, asserting the carried payload |
 | §4 (order) | — | Contract case: the fake returns outcomes in a shuffled order and the suite still passes, proving no positional assumption |
