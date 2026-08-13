@@ -8,6 +8,7 @@ caught by a type check, so each has a test.
 from __future__ import annotations
 
 import hashlib
+import urllib.request
 from typing import TYPE_CHECKING
 from unittest import mock
 
@@ -224,6 +225,56 @@ def test_a_non_https_url_is_refused_before_anything_is_written(tmp_path: Path) -
     with pytest.raises(CorpusFetchError, match="non-https"):
         ensure_file(file, cache=tmp_path)
 
+    assert not (tmp_path / "corpus.json").exists()
+
+
+class _StalledResponse:
+    """A peer that completed the handshake and then delivers nothing.
+
+    `urlopen(timeout=…)` arms the socket, so a stall surfaces from the *read* as
+    `TimeoutError` rather than from the connect — which is why this raises there and
+    not from the constructor.
+    """
+
+    def __enter__(self) -> _StalledResponse:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def read(self, _size: int = -1) -> bytes:
+        msg = "the read operation timed out"
+        raise TimeoutError(msg)
+
+
+def test_a_stalled_transfer_fails_instead_of_hanging(tmp_path: Path) -> None:
+    """Without an explicit timeout `urlopen` inherits the global default of `None`, so
+    a server that accepts and then sends nothing blocks `fetch` — and with it `run` —
+    forever, with no output and no exception path ever reached."""
+    file = CorpusFile(
+        name="corpus.json", url="https://example.invalid/x", sha256="a" * 64, size_bytes=1
+    )
+    seen: dict[str, object] = {}
+
+    def _fake_urlopen(request: object, *, timeout: float | None = None) -> _StalledResponse:
+        seen["timeout"] = timeout
+        return _StalledResponse()
+
+    with (
+        # Patched on `urllib.request` itself, which is where `_download` resolves the
+        # name at call time.
+        mock.patch.object(urllib.request, "urlopen", _fake_urlopen),
+        pytest.raises(CorpusFetchError) as raised,
+    ):
+        ensure_file(file, cache=tmp_path)
+
+    # The bound is passed and finite: a `None` here is exactly the defect, and it would
+    # otherwise be invisible because the fake never blocks.
+    assert isinstance(seen["timeout"], float)
+    assert seen["timeout"] > 0
+    # Surfaced as this module's error with the stall preserved, rather than escaping as
+    # a bare `TimeoutError` from inside a download.
+    assert isinstance(raised.value.__cause__, TimeoutError)
     assert not (tmp_path / "corpus.json").exists()
 
 
