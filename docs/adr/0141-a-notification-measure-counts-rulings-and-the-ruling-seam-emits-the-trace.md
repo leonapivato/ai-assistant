@@ -319,24 +319,29 @@ kinds. §13e's price is one ADR, and this is it.
 > or changes its disposition because a trace could not be written, and no trace
 > is written inside the ruling transaction.
 
-> **Normative.** The trace's `occurred_at` is the **ruling instant**: the single
-> clock reading taken inside ADR-0130 §3's atomic act, the same one §4 subtracts
-> `admitted_at` from. It is never the instant of emission. A crossing that raised
-> before ruling has no ruling instant and stamps the instant the fault was
-> observed.
+> **Normative.** The trace's `occurred_at` is the **single clock reading taken
+> inside ADR-0130 §3's atomic act** — the ruling instant, the one §4 subtracts
+> `admitted_at` from — and never the instant of emission. The store takes that
+> reading first, so every crossing that emits at all carries it, whether or not
+> the ruling was reached.
 
-> **Normative.** A crossing that raised an `Exception` before ruling still emits
-> its trace, carrying its outcome and its fault class and **none** of the metric
-> keys §4 defines. Under ADR-0119 §3's observation rule their absence says the
-> ruling was not reached.
+> **Normative.** A crossing that raised an `Exception` **before the ruling
+> committed** still emits its trace, carrying its outcome and its fault class and
+> **none** of the metric keys §4 defines. This binds on both sides of the ruling:
+> a fault before `NotificationPolicy.rule` was called, and a write or a commit
+> that failed after it returned. A disposition the transaction rolled back is not
+> a ruling — no record was written and no unit of budget was spent — so it enters
+> no population and its keys are not emitted. Under ADR-0119 §3's observation
+> rule their absence says the ruling was not reached, which is what "not reached"
+> must mean for an act that is atomic.
 
 > **Normative.** A crossing whose **clock reading itself fails** emits nothing.
 > The store reads its clock first, inside the act, and `checked_clock` raises on
 > a reading it will not vouch for; `occurred_at` is required and there is no
 > instant to stamp, so no trace can be constructed. It is logged as a lost trace
 > under ADR-0119 §5, exactly as any other trace that could not be recorded, and
-> **no wall-clock fallback is introduced**. Every other pre-ruling fault has the
-> instant already in hand and the clause above binds unconditionally.
+> **no wall-clock fallback is introduced**. Every other fault before the commit
+> has the instant already in hand and the clause above binds unconditionally.
 
 > **Normative.** A **cancellation is never classified and emits nothing.** An
 > externally delivered `CancelledError` is re-raised before any outcome or fault
@@ -377,6 +382,21 @@ above it. And the reconsideration path does not pass through the writer stage at
 all — the engine's maintenance operation drives `NotificationStore.reconsider`
 directly — so a writer-sited emitter would miss every ruling that is not a first
 offer, which is most of the interesting ones.
+
+**The fault path is bounded by the commit rather than by the ruling, because a
+rolled-back disposition is not an event.** The window between
+`NotificationPolicy.rule` returning and the transaction committing is real —
+the write and the `COMMIT` are both in it — and a fault there leaves every metric
+input computed and the ruling undone. Three readings fit a clause bounded at "the
+ruling": emit the completed keys, emit an empty fault trace, or emit nothing, and
+they report three different interruption shares from one stream. The clause is
+bounded at the commit instead, and the reason is ADR-0130 §5's own: a unit of
+budget is spent "exactly when an `INTERRUPT` is recorded", so a disposition that
+never committed cost the user nothing and reached nobody. Counting it would put
+an interruption in the numerator that no record reflects — the measure would be
+about what the policy decided rather than about what happened to the user, which
+is the opposite of §1's unit. So the trace is emitted, is honest about the fault,
+and carries no keys. Adversarial review found it on the eleventh round.
 
 **The one crossing that emits nothing is the one that cannot say when.** The
 fault-path clause is otherwise unconditional and should be: a store fault after
@@ -538,8 +558,8 @@ from a distance; §9 records why they may not travel and files the question.
 > **Normative.** A trace is **incomplete** when it carries **none of the metric
 > keys §4 defines** — none of the three disposition keys, none of the eight
 > condition keys and no `held_seconds`. It records a crossing that raised before
-> ruling (§3), it enters no population, and the report counts it apart from the
-> two faults below because it is not one.
+> the ruling committed (§3), it enters no population, and the report counts it
+> apart from the two faults below because it is not one.
 
 > **Normative.** A trace is **malformed** when any of the following holds: it
 > does not carry all three disposition keys; a key §4 reads as a count carries a
@@ -620,10 +640,11 @@ nobody could see". No emitter in this tree can produce one; counting it is cheap
 and makes the assumption checkable.
 
 **Incomplete is named rather than folded into malformed, because it is the
-ordinary fault path.** ADR-0119 §8 requires a crossing that raised before ruling
-to emit its trace anyway, and §3 above requires it to carry none of §4's keys. So
-a trace carrying none of them is the design working, not a defect, and counting
-it beside two genuine faults would make an outage look like an emitter bug.
+ordinary fault path.** ADR-0119 §8 requires a crossing that raised to emit its
+trace anyway, and §3 above requires every crossing that raised before the ruling
+committed to carry none of §4's keys — a rolled-back disposition included. So a
+trace carrying none of them is the design working, not a defect, and counting it
+beside two genuine faults would make an outage look like an emitter bug.
 
 **Incomplete is defined over §4's whole key set, and malformed's first disjunct
 widened to catch what that released.** Defined over the disposition keys alone,
