@@ -1161,7 +1161,7 @@ carries is to **pass** the existing suite, not to write one.
   `rename(2)` on the same filesystem; that its retention exceeds the reader's
   window; and that its credential never enters the hub. This is documentation and
   not `src/`, and §1's second clause is why: the fetcher is not ours to ship.
-- Tests for the clauses a lane can satisfy in prose and breach in code — nine,
+- Tests for the clauses a lane can satisfy in prose and breach in code — ten,
   each named by the breach it catches:
 
   - **The body never leaves the reader (§5).** A message carrying a body still
@@ -1203,8 +1203,26 @@ carries is to **pass** the existing suite, not to write one.
     lower-case `t` or `z` and a leap second are each **accepted** by a parser
     conforming to RFC 3339 while `fromisoformat` rejects them, so the skip is
     owed on §5's terms rather than as a side effect of the stdlib's narrowness.
+    The **accepting** direction is asserted in the same test and is not
+    redundant: a value sitting on each of the subset's own boundaries — second
+    `59`, one fractional digit and six, an upper-case `Z`, and a `+00:00` that
+    is the excluded `-00:00`'s mirror — is proposed. Every skip clause in this
+    list is satisfied by a reader that skips everything, so without this
+    direction the subset is pinned only from outside and its inside is a
+    lane's guess.
   - **`Date` is never a delivery instant (§5).** A store whose messages carry
     only a `Date` header proposes nothing.
+  - **Membership is decided on the delivery instant while `reported_at` carries
+    `Date`, with both present and disagreeing (§5).** A message whose `Date` is
+    far outside the window but whose `X-Assistant-Delivered-At` is inside it
+    **is** proposed; a message whose `Date` is inside the window but whose
+    delivery instant is outside it is **not**; and in the proposed case
+    `Attestation.reported_at` is the `Date` and not the delivery instant. §5
+    separates the two clocks as a security property before a modelling one — a
+    sender who can move the window by writing a future `Date` holds a message in
+    every window there will ever be — and every other test in this list is
+    passed by a reader that reads both fields into one variable, because on
+    honest mail they agree.
   - **`Date` is required and singular, and the delivery instant is never
     substituted for it (§5).** A message with a valid in-window
     `X-Assistant-Delivered-At` but no `Date`, two `Date` headers, or a `Date`
@@ -1212,8 +1230,14 @@ carries is to **pass** the existing suite, not to write one.
     delivery instant standing in as `reported_at`, which is the substitution a
     reader reaches for precisely because it has a usable instant in hand. The
     converse is asserted in the same test so the skip is not quietly generalised
-    to every absent field: a message with no `Subject` still proposes, with the
-    subject empty.
+    to every field the rule does not reach: a message with **no** `Subject` and
+    a message with **two** both still propose, with the subject empty in each
+    and no selection made among the candidates, and the sender is asserted on
+    the same terms. The duplicate is the case a lane breaches while passing the
+    absent one, because `email.message.Message`'s own mapping returns the
+    *first* occurrence of a repeated header and says nothing — which is exactly
+    the selection §5 forbids, reaching the opposite outcome from the duplicate
+    `Date` immediately above it.
   - **Every cap §12 names owes a refusal test, one each (§12).**
     `email_max_bytes`, on a store larger than the cap, refusing on the read
     itself rather than after parsing; and `email_max_content_bytes`, on an
@@ -1229,7 +1253,7 @@ carries is to **pass** the existing suite, not to write one.
     empty reading. This is the cap's *ordering* rather than its figure, and it is
     the one §12 property every test above passes while breached: an
     implementation that skips invalid messages first and counts what survives
-    satisfies all eight others and still turns a busted cap into a quiet week.
+    satisfies all nine others and still turns a busted cap into a quiet week.
 
 ### 14. Deferred, by name, each with the condition that fires it
 
