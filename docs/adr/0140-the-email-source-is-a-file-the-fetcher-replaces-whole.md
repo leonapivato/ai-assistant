@@ -1187,7 +1187,7 @@ carries is to **pass** the existing suite, not to write one.
 >   window; and that its credential never enters the hub. This is documentation and
 >   not `src/`, and §1's second clause is why: the fetcher is not ours to ship.
 > - Tests for the clauses a lane can satisfy in prose and breach in code —
->   thirteen, each named by the breach it catches. The list is scoped to **every
+>   fourteen, each named by the breach it catches. The list is scoped to **every
 >   deliverable named above** and not to the reader alone, which is stated because
 >   for several rounds it read as the reader's list while the `context/` adapter,
 >   the ingestion wiring and the widened type owed nothing at all. A deliverable
@@ -1306,7 +1306,7 @@ carries is to **pass** the existing suite, not to write one.
 >     empty reading. This is the cap's *ordering* rather than its figure, and it is
 >     the one §12 property every other test in this list passes while breached: an
 >     implementation that skips invalid messages first and counts what survives
->     satisfies all twelve others and still turns a busted cap into a quiet week.
+>     satisfies all thirteen others and still turns a busted cap into a quiet week.
 >   - **No grant, no read — and the whole of ADR-0097 §5a's lifecycle, on the
 >     adapter and on the ingestion path separately (§9).** §9's second clause is
 >     "not resolved, not opened, not parsed", so the first thing asserted is a spy
@@ -1335,6 +1335,25 @@ carries is to **pass** the existing suite, not to write one.
 >     because none of them leaves the reader. The calendar's two modules are the
 >     shape to follow and are not coverage: this is new wiring and they do not
 >     reach it.
+>   - **A granted read's facet reaches the field the adapter was wired for, and no
+>     other (§6).** Under a live `FACET` grant, an adapter handed a reading
+>     carrying an `EmailFacet` contributes it under `email` and the assembled
+>     `CurrentContext.email` **is** that facet; a reading whose facet is of some
+>     other type raises `ContextError` rather than being contributed under either
+>     field. The **accepting** direction is the load-bearing half, and is why this
+>     is a separate item from the one above rather than a clause inside it: every
+>     assertion there is a refusal or a call count, so an adapter that reads under
+>     a live grant and then contributes nothing — or contributes the facet under
+>     `calendar` — satisfies the whole grant lifecycle while
+>     `CurrentContext.email` is permanently absent. The wrong-key shape is not
+>     hypothetical: the calendar adapter in `src/ai_assistant/context/sources.py`
+>     writes its field as a literal in the mapping it returns, so a lane copying
+>     that module and changing only the reader ships it. §6 records ADR-0096 §5's
+>     contribute-and-raise clause acquiring "a second instance here for the first
+>     time, which is exactly the wiring bug it was written against" — and without
+>     this item that observation is made in prose and tested nowhere.
+>     `tests/context/test_calendar_context_source.py` carries the shape for the
+>     calendar and, as with the item above, is not coverage for this one.
 >   - **The facet union discriminates at validation, not by declaration (§6).** A
 >     tagged calendar payload and a tagged email payload each resolve through
 >     `SourceReading` to their own type; a payload carrying `kind: "email"` **and**
