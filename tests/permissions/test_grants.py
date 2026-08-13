@@ -661,6 +661,38 @@ async def test_a_revocation_still_stops_the_read_after_a_restart(tmp_path: Path)
 
 
 @pytest.mark.integration
+async def test_the_live_enumeration_still_answers_after_a_restart(tmp_path: Path) -> None:
+    """ADR-0139 §2's answer is durable, which is the half no fake can show.
+
+    The enumeration is what tells a user the *name* of a grant whose reader has
+    gone, and the deployment where that matters is one where the hub was restarted
+    with a different configuration. An answer that lived only in the process that
+    recorded the grants would be exactly no help there.
+
+    The revoked source is seeded too, because a reopened store recomputing liveness
+    from the ``revokes`` relation and one recomputing it from row order both return
+    the live grant; only the revoked one separates them.
+    """
+    path = tmp_path / "grants.db"
+    withdrawn = source_grant("gone", grant_id="g-2")
+    first = SqliteSourceGrantStore(path=path)
+    try:
+        await first.record(source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET,)))
+        await first.record(withdrawn)
+        await first.record(revocation_of(withdrawn, grant_id="r-1"))
+    finally:
+        first.close()
+
+    second = SqliteSourceGrantStore(path=path)
+    try:
+        standing = await second.standing()
+        assert [held.id for held in standing] == ["g-1"]
+        assert standing[0].scope == (GrantScope.FACET,)
+    finally:
+        second.close()
+
+
+@pytest.mark.integration
 async def test_the_write_once_rule_survives_a_restart(tmp_path: Path) -> None:
     """History cannot be rewritten by replaying a write into a new process."""
     path = tmp_path / "grants.db"
