@@ -1161,7 +1161,7 @@ carries is to **pass** the existing suite, not to write one.
   `rename(2)` on the same filesystem; that its retention exceeds the reader's
   window; and that its credential never enters the hub. This is documentation and
   not `src/`, and §1's second clause is why: the fetcher is not ours to ship.
-- Tests for the clauses a lane can satisfy in prose and breach in code — seven,
+- Tests for the clauses a lane can satisfy in prose and breach in code — nine,
   each named by the breach it catches:
 
   - **The body never leaves the reader (§5).** A message carrying a body still
@@ -1169,6 +1169,27 @@ carries is to **pass** the existing suite, not to write one.
     of that body reaches that proposal, the facet, or any other value leaving the
     reader. Both halves are asserted, because a test checking only the sentinel's
     absence is passed by a reader that drops the message entirely.
+  - **The window's edges are asserted, not implied (§3).** Against a fixed clock,
+    a message delivered exactly at `read_at - email_window_past` **is** proposed
+    and a message delivered exactly at `read_at` is **not** — §3's window is
+    closed at the bottom and open at the top, and the ADR states that once. §6's
+    `arrived_in_window` is asserted beside the proposals in both cases, because a
+    reader can decide membership correctly and count it wrongly, and
+    `covers_from` is asserted equal to the lower edge itself. The lower edge is
+    the direction that matters: a reader admitting only `lower < delivered_at`
+    loses the edge message **permanently** rather than late, because by the next
+    run the window has moved past it and §3 leaves no cursor to notice.
+  - **The window arithmetic saturates rather than raising (§3).** With a
+    `read_at` close enough to the minimum representable instant that
+    `read_at - email_window_past` is not representable, the read **completes**:
+    the window's lower edge and `covers_from` are both the minimum representable
+    instant, and nothing raises. §12's ten-year ceiling makes this unreachable
+    from configuration alone, so it is reachable only from configuration *and* a
+    clock — the case a lane that builds the window as a bare subtraction never
+    runs and never sees, whose failure escapes ADR-0093 §8's two outcomes
+    entirely rather than arriving as a `ReaderError`. There is no upward
+    direction to test: email has the one edge, and `read_at` is representable by
+    construction.
   - **An unusable delivery header is skipped, never defaulted (§5).** A message
     with zero, two, or an unparseable `X-Assistant-Delivered-At` is skipped
     rather than dated by any fallback.
@@ -1208,7 +1229,7 @@ carries is to **pass** the existing suite, not to write one.
     empty reading. This is the cap's *ordering* rather than its figure, and it is
     the one §12 property every test above passes while breached: an
     implementation that skips invalid messages first and counts what survives
-    satisfies all six others and still turns a busted cap into a quiet week.
+    satisfies all eight others and still turns a busted cap into a quiet week.
 
 ### 14. Deferred, by name, each with the condition that fires it
 
