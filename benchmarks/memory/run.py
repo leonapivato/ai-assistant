@@ -38,6 +38,7 @@ from benchmarks.memory.records import (
     now_iso,
     write_jsonl_line,
 )
+from benchmarks.memory.select import CaseSelection
 from benchmarks.memory.wiring import build_embedder, build_harness, build_model_provider
 
 if TYPE_CHECKING:
@@ -116,6 +117,13 @@ class RunPlan:
     Attributes:
         corpus: The corpus.
         cases: The cases selected.
+        max_sessions: The bound the selection shortened those cases' histories to —
+            ``0`` where they are whole, and ``None`` where the cases arrived carrying
+            no record of how they were selected. This is where the session bound comes
+            from now: ``execute_run`` writes it to the manifest and hands it to the
+            gate, so a caller cannot shorten the histories in selection and declare
+            something else at execution (#1052). ``None`` is not "whole" — it is "not
+            recorded", and a scored run is refused on it.
         question_count: Questions across those cases.
         turn_count: Exchanges capture would record.
         observation_calls: Model calls distillation would make — one per full batch
@@ -128,6 +136,7 @@ class RunPlan:
 
     corpus: Corpus
     cases: tuple[BenchCase, ...]
+    max_sessions: int | None
     question_count: int
     turn_count: int
     observation_calls: int
@@ -145,7 +154,12 @@ def plan_run(corpus: Corpus, cases: Sequence[BenchCase], *, batch_size: int) -> 
 
     Args:
         corpus: The corpus the cases came from.
-        cases: The cases selected.
+        cases: The cases selected. A
+            :class:`~benchmarks.memory.select.CaseSelection` — what
+            :func:`~benchmarks.memory.select.first_sessions` returns — also says what
+            the shortening did, and the plan carries that through to the manifest and
+            the gate. A bare sequence says nothing about its own provenance, so the
+            plan records ``None`` rather than assuming the histories are whole.
         batch_size: The observation batch size the run would use.
 
     Returns:
@@ -185,6 +199,11 @@ def plan_run(corpus: Corpus, cases: Sequence[BenchCase], *, batch_size: int) -> 
     return RunPlan(
         corpus=corpus,
         cases=tuple(cases),
+        # Read off the selection, never off an argument: the whole point of #1052 is
+        # that the code which shortened the histories is the only thing that knows it
+        # did. `tuple(cases)` above deliberately drops the subclass, so a plan cannot
+        # be re-planned into provenance it never had.
+        max_sessions=cases.max_sessions if isinstance(cases, CaseSelection) else None,
         question_count=questions,
         turn_count=turns,
         observation_calls=observations,
@@ -275,7 +294,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     observer: Observer | None = None,
     preregistration_final: bool = False,
     slice_seed: int | None = None,
-    max_sessions: int = 0,
+    max_sessions: int | None = None,
     notes: str = "",
     keep_stores: bool = False,
 ) -> RunManifest:
@@ -315,10 +334,17 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         model: Override the answering seam. Tests supply one; a live run does not.
         observer: Override the distillation seam, likewise.
         slice_seed: The seed a stratified slice was drawn with, for the manifest.
-        max_sessions: The session bound the cases were shortened to, for the manifest.
-            ``0`` means the histories are whole. Recorded rather than inferred: a
-            shortened history is a *different* memory, so a record set that cannot say
-            which bound produced it cannot be reproduced or compared.
+        max_sessions: **Not what is recorded, and not what the gate reads.** The bound
+            comes from ``plan.max_sessions`` — set by the code that actually shortened
+            the histories — because taking it from here let a caller truncate in
+            selection and declare ``0`` at execution, which the gate then permitted
+            while the manifest claimed whole histories (#1052). What this now is: a
+            declaration, kept because the command line makes one, refused when it
+            disagrees with a bound the plan actually applied, and used as the manifest's
+            value only for a plan that recorded no selection at all. ``None``, the
+            default, declares nothing — which is always safe, and is what a caller that
+            planned through :func:`~benchmarks.memory.select.first_sessions` should
+            pass, because the plan already knows.
         notes: Attached to the manifest.
         keep_stores: Keep every case's databases rather than only its traces.
 
@@ -338,10 +364,35 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     refuse_ineligible_scored_run(
         mode,
         preregistration_final=preregistration_final,
-        max_sessions=max_sessions,
+        max_sessions=plan.max_sessions,
         embedder=resolved.embedder,
         grader_kind=grader_kind,
         injected_seams=injected,
+    )
+    # The declaration is cross-checked against the plan rather than silently overridden:
+    # a caller who believes the histories are whole while the plan says they were cut to
+    # two has a bug wherever that belief came from, and a smoke run that quietly
+    # corrected it would leave the bug in place for the scored run. The exemption is a
+    # plan that shortened nothing: `--max-sessions 99` over a 3-session corpus really
+    # did leave the histories whole, so a declaration of 99 against a derived 0 is a
+    # lever that missed rather than a contradiction.
+    if plan.max_sessions and max_sessions is not None and max_sessions != plan.max_sessions:
+        msg = (
+            f"the plan's cases were shortened to {plan.max_sessions} sessions but this "
+            f"run declares max_sessions={max_sessions}: the bound is derived from the "
+            f"plan (#1052), so a declaration that disagrees with it is refused rather "
+            f"than silently corrected. Omit the argument."
+        )
+        raise ValueError(msg)
+    # A plan whose `max_sessions` is `None` arrived with no record of how its cases were
+    # selected. A scored run never reaches here — the gate above refuses it — so this is
+    # a smoke run, whose manifest is explicitly not a measurement, and the caller's word
+    # is the only thing anyone has; where it said nothing either, `0` is what the field
+    # has always meant by default.
+    recorded_max_sessions = (
+        plan.max_sessions
+        if plan.max_sessions is not None
+        else (max_sessions if max_sessions is not None else 0)
     )
     # Built after the gate, so a scored run's judge is one this function constructed
     # from `Settings` and never one it was handed.
@@ -368,7 +419,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         case_count=len(plan.cases),
         question_count=plan.question_count,
         slice_seed=slice_seed,
-        max_sessions=max_sessions,
+        max_sessions=recorded_max_sessions,
         answer_route=resolved.default_model,
         observer_route=(
             resolved.observer_model
@@ -476,7 +527,7 @@ def refuse_ineligible_scored_run(  # noqa: PLR0913 — one parameter per precond
     mode: RunMode,
     *,
     preregistration_final: bool,
-    max_sessions: int = 0,
+    max_sessions: int | None = None,
     embedder: EmbedderKind = EmbedderKind.ON_DEVICE,
     grader_kind: str = "model",
     injected_seams: Sequence[str] = (),
@@ -492,8 +543,15 @@ def refuse_ineligible_scored_run(  # noqa: PLR0913 — one parameter per precond
 
     1. **The pre-registration must be final** — #1029's ground rule 1, which is the
        whole reason the mode exists.
-    2. **Histories must be whole.** A shortened history is a different memory, so the
-       questions are about a conversation that did not happen.
+    2. **Histories must be whole, and the plan must be in a position to say so.** A
+       shortened history is a different memory, so the questions are about a
+       conversation that did not happen. The bound is read off the plan — set by
+       :func:`~benchmarks.memory.select.first_sessions`, which is what does the
+       shortening — rather than declared by the caller, because those were two separate
+       inputs and a caller could truncate in selection and declare nothing at execution
+       (#1052). ``None``, meaning the cases carry no record of how they were selected,
+       is refused alongside a non-zero bound: nobody having written it down is not
+       evidence that the histories are whole.
     3. **The embedder must be on-device.** ``hashing`` is non-semantic, so retrieval
        under it is not the retrieval the pilot is measuring (#1029's configuration
        block requires "the real embedder, not the QA-run hashing embedder").
@@ -506,9 +564,9 @@ def refuse_ineligible_scored_run(  # noqa: PLR0913 — one parameter per precond
        without a model call — and the manifest records the *configured* routes, which
        an injected seam makes false. A scored run therefore builds all three from
        ``Settings`` and refuses any override, which is what makes the manifest true by
-       construction rather than by the caller's good behaviour. It is also the only
-       one of the five that can be checked without trusting anything a caller says: an
-       override is present or it is not.
+       construction rather than by the caller's good behaviour. Like clause 2 since
+       #1052, it is checked without trusting anything a caller says: an override is
+       present or it is not.
 
     **``episode_retention`` is deliberately *not* here**, and the omission is the rule
     working rather than a gap. A finite horizon is the product's own default and a
@@ -520,8 +578,12 @@ def refuse_ineligible_scored_run(  # noqa: PLR0913 — one parameter per precond
         mode: The mode asked for.
         preregistration_final: Whether the operator stated the pre-registration is
             final.
-        max_sessions: The session bound the cases were shortened to; ``0`` means whole
-            histories.
+        max_sessions: The session bound the plan's cases were shortened to; ``0`` means
+            whole histories and ``None`` — the default, so the unknown is the direction
+            that needs no argument — means nothing recorded what the selection did.
+            :func:`execute_run` passes ``plan.max_sessions`` here; the command line
+            passes its own flag, one screen before the corpus is fetched, so an
+            ineligible scored run is refused in a second rather than after a download.
         embedder: The configured embedder.
         grader_kind: Which grader will be built. Named rather than inspected off a
             grader object, because a display name is something a caller controls and
@@ -532,7 +594,7 @@ def refuse_ineligible_scored_run(  # noqa: PLR0913 — one parameter per precond
         PermissionError: If a scored run was asked for without the pre-registration
             being stated final. The class is chosen for what it reads as at a terminal
             — this is a refusal on a rule, not a bad argument — and nothing catches it.
-        ValueError: If a scored run was asked for under any of the other three.
+        ValueError: If a scored run was asked for under any of the others.
     """
     if RunMode(mode) is not RunMode.SCORED:
         return
@@ -543,11 +605,22 @@ def refuse_ineligible_scored_run(  # noqa: PLR0913 — one parameter per precond
         # "false" as confirmation of the one rule that must never be confirmed by
         # accident.
         raise PermissionError(PREREGISTRATION_REFUSAL)
+    if max_sessions is None:
+        msg = (
+            "a scored run cannot be planned from cases that carry no record of how "
+            "they were selected: the session bound is derived from the plan, not "
+            "declared, so that a caller cannot shorten the histories and say nothing "
+            "about it (#1052). Plan the run from "
+            "benchmarks.memory.select.first_sessions(cases, limit) — limit 0 for the "
+            "whole histories a scored run needs."
+        )
+        raise ValueError(msg)
     if max_sessions:
         msg = (
-            f"a scored run cannot use --max-sessions ({max_sessions}): a shortened "
-            f"history is a different memory, so its answers are about a conversation "
-            f"that did not happen. It is a plumbing lever for smoke runs."
+            f"a scored run cannot be made over histories shortened to {max_sessions} "
+            f"sessions: a shortened history is a different memory, so its answers are "
+            f"about a conversation that did not happen. --max-sessions is a plumbing "
+            f"lever for smoke runs."
         )
         raise ValueError(msg)
     if embedder is not EmbedderKind.ON_DEVICE:

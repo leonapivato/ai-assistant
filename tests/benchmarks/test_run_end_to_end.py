@@ -26,6 +26,7 @@ from benchmarks.memory.grade import ExactGrader
 from benchmarks.memory.ingest import ingest_case
 from benchmarks.memory.records import QuestionRecord, RunManifest, RunMode, read_jsonl
 from benchmarks.memory.run import case_dir_name, execute_run, plan_run
+from benchmarks.memory.select import first_sessions
 from benchmarks.memory.wiring import build_harness
 
 from ai_assistant.core.config import EmbedderKind, Settings
@@ -539,7 +540,9 @@ async def test_a_failed_answer_keeps_the_retrieval_it_actually_made(
 
 async def test_the_manifest_records_a_session_bound(tmp_path: Path) -> None:
     """A record set that cannot say which bound produced it can be neither reproduced
-    nor compared."""
+    nor compared. This plan was built from a bare tuple, which records no selection —
+    the one case where the caller's declaration is all anyone has, and reachable only
+    by a smoke run because the gate refuses a scored one planned that way."""
     manifest = await execute_run(
         plan_run(LOCOMO, (_case(),), batch_size=BATCH),
         output_root=tmp_path / "runs",
@@ -556,6 +559,113 @@ async def test_the_manifest_records_a_session_bound(tmp_path: Path) -> None:
 
 async def test_a_whole_history_records_a_zero_bound(tmp_path: Path) -> None:
     manifest, _ = await _run(tmp_path)
+
+    assert manifest.max_sessions == 0
+
+
+async def test_a_scored_run_cannot_truncate_in_selection_and_declare_nothing(
+    tmp_path: Path,
+) -> None:
+    """#1052, in the shape the issue records it: the shortening happens in selection and
+    the bound used to be a separate argument to this function, so a caller could cut the
+    histories to two sessions, pass `max_sessions=0`, and have the gate wave through a
+    run whose manifest claimed whole histories while every answer came from a truncated
+    memory. The bound now comes from the plan, so the declaration cannot be the thing
+    that is checked."""
+    settings = _settings(tmp_path).model_copy(update={"embedder": EmbedderKind.ON_DEVICE})
+    plan = plan_run(LOCOMO, first_sessions((_case(),), 1), batch_size=BATCH)
+
+    with pytest.raises(ValueError, match="different memory"):
+        await execute_run(
+            plan,
+            output_root=tmp_path / "runs",
+            mode=RunMode.SCORED,
+            corpus_digests={},
+            settings=settings,
+            grader_kind="model",
+            preregistration_final=True,
+            max_sessions=0,
+        )
+
+    assert not (tmp_path / "runs").exists()
+
+
+async def test_a_scored_run_is_refused_when_the_plan_records_no_selection(
+    tmp_path: Path,
+) -> None:
+    """The complement of the bypass: cases handed in as a bare tuple say nothing about
+    what was done to them, and "nobody wrote it down" is not evidence of a whole
+    history. Refusing it is what stops the derivation from being sidestepped by simply
+    not using the selection layer."""
+    settings = _settings(tmp_path).model_copy(update={"embedder": EmbedderKind.ON_DEVICE})
+
+    with pytest.raises(ValueError, match="no record of how"):
+        await execute_run(
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            output_root=tmp_path / "runs",
+            mode=RunMode.SCORED,
+            corpus_digests={},
+            settings=settings,
+            grader_kind="model",
+            preregistration_final=True,
+        )
+
+
+async def test_the_manifest_records_a_bound_no_caller_declared(tmp_path: Path) -> None:
+    """The figure comes from the selection that applied it, so it reaches the manifest
+    with no declaration made anywhere — which is the whole of #1052: the record and the
+    data can no longer be two separate inputs that disagree."""
+    manifest = await execute_run(
+        plan_run(LOCOMO, first_sessions((_case(),), 1), batch_size=BATCH),
+        output_root=tmp_path / "runs",
+        mode=RunMode.SMOKE,
+        corpus_digests={},
+        settings=_settings(tmp_path),
+        model=FakeModelProvider("a dog"),
+        observer=FakeObserver(max_batch_size=BATCH),
+    )
+
+    assert manifest.max_sessions == 1
+
+
+async def test_a_declaration_that_disagrees_with_the_plan_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A smoke run is not a measurement and the derived bound is what lands in the
+    manifest either way, so nothing recorded here would be false. It is refused anyway:
+    the caller believes something about its own data that is not true, and quietly
+    correcting that on the smoke run leaves the belief in place for the scored one."""
+    with pytest.raises(ValueError, match="declares max_sessions=0"):
+        await execute_run(
+            plan_run(LOCOMO, first_sessions((_case(),), 1), batch_size=BATCH),
+            output_root=tmp_path / "runs",
+            mode=RunMode.SMOKE,
+            corpus_digests={},
+            settings=_settings(tmp_path),
+            model=FakeModelProvider("a dog"),
+            observer=FakeObserver(max_batch_size=BATCH),
+            max_sessions=0,
+        )
+
+    assert not (tmp_path / "runs").exists()
+
+
+async def test_a_bound_the_selection_never_reached_is_no_contradiction(
+    tmp_path: Path,
+) -> None:
+    """`--max-sessions 99` over a two-session case shortened nothing, so the histories
+    are whole, the manifest says `0`, and the declaration is not treated as a
+    disagreement. Refusing it would fail a run that is entirely legitimate."""
+    manifest = await execute_run(
+        plan_run(LOCOMO, first_sessions((_case(),), 99), batch_size=BATCH),
+        output_root=tmp_path / "runs",
+        mode=RunMode.SMOKE,
+        corpus_digests={},
+        settings=_settings(tmp_path),
+        model=FakeModelProvider("a dog"),
+        observer=FakeObserver(max_batch_size=BATCH),
+        max_sessions=99,
+    )
 
     assert manifest.max_sessions == 0
 
@@ -582,10 +692,11 @@ async def test_execute_run_refuses_a_scored_run_on_the_hashing_embedder(
     tmp_path: Path,
 ) -> None:
     """Confirmed, whole histories — and still refused, because `_settings` selects the
-    QA embedder and the exact grader."""
+    QA embedder and the exact grader. `first_sessions(..., 0)` is how "whole" is stated
+    to the gate now: the bound comes from the plan's own selection."""
     with pytest.raises(ValueError, match="non-semantic"):
         await execute_run(
-            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            plan_run(LOCOMO, first_sessions((_case(),), 0), batch_size=BATCH),
             output_root=tmp_path / "runs",
             mode=RunMode.SCORED,
             corpus_digests={},
@@ -606,7 +717,7 @@ async def test_execute_run_refuses_a_scored_run_judged_by_the_exact_grader(
 
     with pytest.raises(ValueError, match="LLM judge"):
         await execute_run(
-            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            plan_run(LOCOMO, first_sessions((_case(),), 0), batch_size=BATCH),
             output_root=tmp_path / "runs",
             mode=RunMode.SCORED,
             corpus_digests={},
@@ -628,7 +739,7 @@ async def test_execute_run_refuses_a_scored_run_with_an_injected_seam(
 
     with pytest.raises(ValueError, match="injected seam"):
         await execute_run(
-            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            plan_run(LOCOMO, first_sessions((_case(),), 0), batch_size=BATCH),
             output_root=tmp_path / "runs",
             mode=RunMode.SCORED,
             corpus_digests={},
@@ -648,7 +759,7 @@ async def test_execute_run_names_every_injected_seam_in_its_refusal(
 
     with pytest.raises(ValueError, match="injected seam") as caught:
         await execute_run(
-            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            plan_run(LOCOMO, first_sessions((_case(),), 0), batch_size=BATCH),
             output_root=tmp_path / "runs",
             mode=RunMode.SCORED,
             corpus_digests={},

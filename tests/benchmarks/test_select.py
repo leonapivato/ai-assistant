@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from benchmarks.memory.cases import BenchCase, BenchQuestion, BenchSession, BenchTurn
-from benchmarks.memory.select import first_questions, first_sessions
+from benchmarks.memory.select import CaseSelection, first_questions, first_sessions
 
 FIRST = datetime(2023, 5, 8, 13, 56, tzinfo=UTC)
 
@@ -114,3 +114,54 @@ def test_a_negative_question_limit_is_refused() -> None:
 
     with pytest.raises(ValueError, match="cannot be negative"):
         first_questions(cases, -1)
+
+
+def test_the_selection_records_the_bound_it_applied() -> None:
+    """The bound travels with the cases because the run's gate reads it there rather
+    than from a caller (#1052) — and this is the code that knows, because it is the code
+    that did the shortening."""
+    cases = (_case("a", sessions=19, questions=2), _case("b", sessions=4, questions=2))
+
+    assert first_sessions(cases, 2).max_sessions == 2
+
+
+def test_a_selection_that_shortened_nothing_records_a_whole_history() -> None:
+    """Derived from what was done, not from what was asked: a limit above every case
+    left every history whole, and a manifest reporting `99` would describe an experiment
+    nobody ran. It also decides a refusal — a scored run over this is eligible."""
+    cases = (_case("a", sessions=3, questions=2), _case("b", sessions=1, questions=2))
+
+    assert first_sessions(cases, 99).max_sessions == 0
+
+
+def test_a_selection_shortening_only_some_cases_records_the_bound() -> None:
+    """The complement: one case reaching the limit is a shortened history, whatever the
+    rest of the corpus did."""
+    cases = (_case("a", sessions=9, questions=2), _case("b", sessions=1, questions=2))
+
+    assert first_sessions(cases, 3).max_sessions == 3
+
+
+def test_a_zero_limit_records_a_whole_history() -> None:
+    cases = (_case("a", sessions=3, questions=2),)
+
+    assert first_sessions(cases, 0).max_sessions == 0
+
+
+def test_a_selection_is_the_case_sequence_everything_downstream_reads() -> None:
+    """The provenance rides on a tuple so that every seam taking a `Sequence[BenchCase]`
+    carries it without being told — which is what lets `plan_run` see it."""
+    cases = (_case("a", sessions=3, questions=2),)
+
+    selection = first_sessions(cases, 2)
+
+    assert isinstance(selection, tuple)
+    assert [len(case.sessions) for case in selection] == [2]
+
+
+def test_a_negative_bound_cannot_be_stamped_on_a_selection() -> None:
+    """The gate reads `0` as "whole" and anything truthy as "shortened", so a negative
+    bound would be a shortened history that reports as one — and a nonsense figure in
+    the manifest."""
+    with pytest.raises(ValueError, match="cannot be negative"):
+        CaseSelection((), max_sessions=-1)
