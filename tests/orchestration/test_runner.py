@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+import structlog.testing
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
@@ -51,7 +52,7 @@ from ai_assistant.orchestration import (
 from ai_assistant.testing import FakeActionPolicy, FakeAuditTrail, FakePlanStore, FakeToolInvoker
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import ExecutionState, StepExecution
@@ -68,6 +69,13 @@ CAPABILITY = "send_email"
 
 #: The id ``Harness`` mints for the first decision of a test.
 FIRST_DECISION = "d-1"
+
+#: A declared schema every ``plan_step()`` violates: it names no property and
+#: forbids the ones it did not name, while the step carries ``to``. A tool
+#: declaring it is genuinely *capable* of the step's capability, which is what
+#: makes a refusal here a statement about the arguments rather than about
+#: selection (ADR-0144 §7, ADR-0145 §2).
+STRICT_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 
 
 # --- builders -----------------------------------------------------------
@@ -399,6 +407,7 @@ class Harness:
         now: Clock | None = None,
         confirmation_ttl: timedelta | None = None,
         id_prefix: str = "d",
+        tool_preference: Sequence[str] = (),
     ) -> None:
         """Wire the stage over canonical fakes.
 
@@ -406,6 +415,11 @@ class Harness:
         decision ids — the trail refuses a duplicate, so a restarted or
         reconfigured runner answering a question the first one parked needs its
         own series.
+
+        ``tool_preference`` is ADR-0144 §4's sequence, which the composition root
+        supplies at construction. A test that wants a *different* one builds a
+        **second** harness, because the snapshot is taken once and never re-read
+        (ADR-0144 §5).
         """
         self.plans = plans if plans is not None else FakePlanStore(now=lambda: AT)
         # One object as both registry and invoker, as ADR-0029 §8 requires of
@@ -426,6 +440,7 @@ class Harness:
             now=(lambda: next(ticks)) if now is None else now,
             id_factory=lambda: next(self.ids),
             confirmation_ttl=confirmation_ttl,
+            tool_preference=tool_preference,
         )
 
 
@@ -531,8 +546,20 @@ async def test_a_synonym_whose_target_is_unregistered_skips_no_capable_tool() ->
     assert harness.invoker.invocations == []
 
 
-async def test_several_candidates_commit_nothing_and_leave_the_step_pending() -> None:
-    """No rule chooses, so no rule is invented and no falsehood is written."""
+async def test_candidates_tied_under_the_whole_key_commit_nothing_and_name_themselves() -> None:
+    """The residue ADR-0144 §6 narrows ``AMBIGUOUS_CAPABILITY`` to.
+
+    Two declarations identical field for field, with no preference sequence, tie
+    under every key including key 6 — and a tie is a genuine outcome rather than
+    a case the implementation absorbs, because "take the first minimum" would
+    resolve it by ``find``'s ``id`` ordering, which is the alphabetical accident
+    ADR-0037 §1 refused to decide side effects on.
+
+    What is *new* since ADR-0037 is what the disposition means and what it
+    carries: the tied candidates are now known to be equal on every axis
+    ADR-0021 §5 constrains a policy over, plus cost basis and latency, and their
+    ids ride back on the frozen dataclass (§6) so an operator can name one.
+    """
     harness = Harness(tools=(tool("a-sender"), tool("b-sender")))
     step = plan_step()
     state = await an_execution(harness.plans, step)
@@ -540,6 +567,9 @@ async def test_several_candidates_commit_nothing_and_leave_the_step_pending() ->
     result = await harness.runner.run(state, STEP, timeout=PATIENT)
 
     assert result.disposition is Disposition.AMBIGUOUS_CAPABILITY
+    assert result.tied_candidates == ("a-sender", "b-sender")
+    assert result.tool_id is None
+    assert result.decision_id is None
     # Value-equal to the input: nothing was committed. It is the private snapshot
     # `run` detaches on entry, not the caller's object by identity.
     assert result.state == state
@@ -548,6 +578,371 @@ async def test_several_candidates_commit_nothing_and_leave_the_step_pending() ->
     assert stored.skip_reason is None
     assert harness.policy.requests == []
     assert harness.invoker.invocations == []
+    assert await harness.trail.export() == []
+
+
+async def test_several_candidates_the_rule_separates_run_the_least_severe_one() -> None:
+    """The stall ADR-0037 §1 accepted ends for every case the rule can decide.
+
+    Before ADR-0144 this returned ``AMBIGUOUS_CAPABILITY`` on the length of
+    ``find``'s result alone. Now the ordering runs, and what it hands the policy
+    and the seam is one declaration — the same object, which is what keeps
+    ADR-0037 §2's decide → record → read back → claim order intact.
+    """
+    harness = Harness(
+        tools=(tool("risky", risk_level=RiskLevel.HIGH), tool("safe")),
+    )
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+
+    result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert result.disposition is Disposition.EXECUTED
+    assert result.tool_id == "safe"
+    assert result.tied_candidates == ()
+    assert [request.tool.id for request in harness.policy.requests] == ["safe"]
+    assert [call.decision.tool.id for call in harness.invoker.invocations] == ["safe"]
+
+
+async def test_the_selected_candidate_does_not_depend_on_the_order_find_returned() -> None:
+    """§1's order-independence, through the stage rather than the rule (ADR-0144 §8).
+
+    ``FakeToolInvoker`` answers ``find`` in registration order, so presenting the
+    same set the other way round is a real change to what the stage reads — and
+    the rule is required to be a total function of the declarations, not of the
+    presentation.
+    """
+    least = tool("z-safe")
+    worse = tool("a-risky", risk_level=RiskLevel.MEDIUM)
+
+    for candidates in ((least, worse), (worse, least)):
+        harness = Harness(tools=candidates)
+        state = await an_execution(harness.plans, plan_step())
+
+        result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+        assert result.tool_id == "z-safe"
+
+
+async def test_a_tie_is_selected_afresh_by_a_later_run_on_the_same_stage() -> None:
+    """An ambiguity binds the step to nothing, so a second ``run`` re-selects (§5).
+
+    ADR-0144 §5's "once per step" clause is about a selection that was *acted
+    on*; an ``AMBIGUOUS_CAPABILITY`` commits nothing and records nothing, so
+    there is no earlier selection for a later one to contradict. Reading it the
+    other way would make §6's residue permanently unexecutable, which is the
+    opposite of what the ADR is for — a finding the ADR's own review raised.
+    """
+    harness = Harness(tools=(tool("a-sender"), tool("b-sender")))
+    state = await an_execution(harness.plans, plan_step())
+
+    first = await harness.runner.run(state, STEP, timeout=PATIENT)
+    second = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert first.disposition is Disposition.AMBIGUOUS_CAPABILITY
+    assert second.disposition is Disposition.AMBIGUOUS_CAPABILITY
+    assert second.tied_candidates == first.tied_candidates
+    assert (await stored_step(harness.plans, state)).status is StepStatus.PENDING
+
+
+async def test_a_newly_constructed_stage_naming_a_tied_id_runs_that_candidate() -> None:
+    """The recovery ADR-0144 §5 makes available, and its cost (§4, §8).
+
+    The snapshot is taken and validated at construction and never re-read, so a
+    changed preference reaches only a **newly built** stage — in practice the
+    next process life. That restart is a real cost the ADR states rather than
+    smooths over: making a live stage see a changed sequence would mean
+    re-reading the caller's object, which is the aliasing §4 refuses.
+    """
+    tied = (tool("a-sender"), tool("b-sender"))
+    stalled = Harness(tools=tied)
+    state = await an_execution(stalled.plans, plan_step())
+    assert (await stalled.runner.run(state, STEP, timeout=PATIENT)).tied_candidates == (
+        "a-sender",
+        "b-sender",
+    )
+
+    # The operator reads the ids off that outcome, names one, and restarts. The
+    # plan store is shared so this is the *same* still-`PENDING` step.
+    restarted = Harness(tools=tied, plans=stalled.plans, tool_preference=("b-sender",))
+    reloaded = await restarted.plans.get_execution(state.id)
+    assert reloaded is not None
+
+    result = await restarted.runner.run(reloaded, STEP, timeout=PATIENT)
+
+    assert result.disposition is Disposition.EXECUTED
+    assert result.tool_id == "b-sender"
+
+
+async def test_the_preference_never_promotes_a_candidate_over_the_severity_block() -> None:
+    """Key 6 is consulted only at key 6 (ADR-0144 §4, §8).
+
+    Every candidate the preference can select is equal to every other on keys 1
+    through 3 — the axes ADR-0021 §5 constrains a conforming policy over — so no
+    value of it moves a candidate past one the ordering prefers on severity.
+    That is the property that makes it configuration rather than a ranker.
+    """
+    harness = Harness(
+        tools=(tool("tame"), tool("severe", risk_level=RiskLevel.CRITICAL)),
+        tool_preference=("severe", "tame"),
+    )
+    state = await an_execution(harness.plans, plan_step())
+
+    result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert result.tool_id == "tame"
+
+
+async def test_a_preference_sequence_naming_a_tool_twice_is_refused_at_construction() -> None:
+    """Refused where it is supplied, rather than resolved by a rule (ADR-0144 §4)."""
+    with pytest.raises(ValueError, match="more than once"):
+        Harness(tools=(tool("a-sender"),), tool_preference=("a-sender", "a-sender"))
+
+
+async def test_mutating_the_sequence_mid_selection_changes_nothing() -> None:
+    """The snapshot survives a mutation made while a selection is suspended (§4, §8).
+
+    ``run`` awaits ``find`` between construction and the ordering, which is
+    exactly the window §4 names — "including while ``run`` is suspended at
+    ``find``'s ``await``". A stage that re-read the caller's object would see a
+    sequence nothing validated, and the duplicate check would be a check that did
+    not stay checked.
+    """
+    supplied = ["a-sender"]
+    harness = Harness(tools=(tool("a-sender"), tool("b-sender")), tool_preference=supplied)
+    state = await an_execution(harness.plans, plan_step())
+
+    original = harness.invoker.find
+
+    async def find_then_mutate(capability: str) -> list[ToolDefinition]:
+        found = await original(capability)
+        # The caller rewrites what it passed, mid-await: it now prefers the other
+        # candidate, and names it twice for good measure.
+        supplied[:] = ["b-sender", "b-sender"]
+        return found
+
+    harness.invoker.find = find_then_mutate  # type: ignore[method-assign]  # a mid-await mutation has no other seam
+
+    result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert result.tool_id == "a-sender"
+    assert supplied == ["b-sender", "b-sender"]  # the mutation really happened
+
+
+# --- argument fit, ahead of the ordering (ADR-0144 §7, ADR-0145 §2) ------
+
+
+async def test_a_candidate_the_arguments_do_not_fit_is_dropped_before_the_ordering() -> None:
+    """Fit is eligibility, and the ordering runs over what survives (ADR-0144 §7).
+
+    The unfitting candidate is the one the *ordering* prefers — quicker at key 5,
+    and the only one the preference sequence names at key 6 — so a fit term
+    folded in as a penalty rather than a filter would have to outweigh both to
+    reach the right answer. ADR-0145 §2 binds the obligation candidate-wise and
+    ahead of the ranking cut, which is why the surviving candidate is the one
+    ruled on.
+    """
+    harness = Harness(
+        tools=(
+            tool("strict", parameters_schema=STRICT_SCHEMA, latency=timedelta(milliseconds=1)),
+            tool("lax", latency=timedelta(seconds=5)),
+        ),
+        tool_preference=("strict",),
+    )
+    step = plan_step()  # its parameters carry `to`, which `strict` forbids
+    state = await an_execution(harness.plans, step)
+
+    result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert result.disposition is Disposition.EXECUTED
+    assert result.tool_id == "lax"
+    assert [request.tool.id for request in harness.policy.requests] == ["lax"]
+
+
+async def test_the_fit_filter_emptying_the_set_asks_nobody_and_writes_nothing() -> None:
+    """ADR-0145 §4's first cause, and §13's "both halves" evidence.
+
+    The assertion that matters is not that a refusal happened but **where in the
+    pipeline the stage stopped**: no ruling requested, no audit record written,
+    no claim committed, the step still ``PENDING``. A test that only pinned an
+    exception would prove none of that — and the exception is exactly what
+    #1115 records escaping today.
+
+    ``NO_CAPABLE_TOOL`` would be the tidier return value and it would be a lie:
+    the tool *was* capable and the arguments were not, and writing that falsehood
+    into durable state is what ADR-0014 §4's legal-skip table exists to prevent.
+    """
+    harness = Harness(tools=(tool("strict", parameters_schema=STRICT_SCHEMA),))
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+
+    result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert result.disposition is Disposition.INVALID_PARAMETERS
+    assert result.tool_id is None
+    assert result.decision_id is None
+    assert result.state == state
+    assert result.violations  # §4: violations for this cause
+    stored = await stored_step(harness.plans, state)
+    assert stored.status is StepStatus.PENDING
+    assert stored.skip_reason is None
+    assert stored.approval_ref is None
+    assert stored.bound_tool is None
+    assert harness.policy.requests == []  # no ruling requested (ADR-0145 §1)
+    assert await harness.trail.export() == []  # no audit record written
+    assert harness.invoker.invocations == []
+
+
+async def test_every_candidate_failing_the_fit_is_invalid_parameters_not_ambiguity() -> None:
+    """Several capable candidates, none of which can take the arguments (§4).
+
+    With the set emptied there is no "selected tool" whose schema rejected
+    anything — there is a ``find`` that returned capable candidates and an
+    eligibility filter that removed all of them — so the ordering never runs and
+    ``AMBIGUOUS_CAPABILITY`` is not the answer either.
+    """
+    harness = Harness(
+        tools=(
+            tool("strict-a", parameters_schema=STRICT_SCHEMA),
+            tool("strict-b", parameters_schema=STRICT_SCHEMA),
+        )
+    )
+    state = await an_execution(harness.plans, plan_step())
+
+    result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert result.disposition is Disposition.INVALID_PARAMETERS
+    assert result.tied_candidates == ()
+    assert (await stored_step(harness.plans, state)).status is StepStatus.PENDING
+    assert harness.policy.requests == []
+    assert await harness.trail.export() == []
+
+
+async def test_arguments_the_schema_accepts_reach_the_ruling_unchanged() -> None:
+    """The filter is transparent on the ordinary path (ADR-0145 §7).
+
+    Nothing here modifies the parameters — no ``default`` is applied and no value
+    is coerced — so the mapping the policy rules on and the digest binds is the
+    one the planner composed.
+    """
+    accepting = {
+        "type": "object",
+        "properties": {"to": {"type": "string"}, "cc": {"type": "string", "default": "nobody"}},
+        "required": ["to"],
+    }
+    harness = Harness(tools=(tool("smtp", parameters_schema=accepting),))
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+
+    result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert result.disposition is Disposition.EXECUTED
+    assert [dict(request.parameters) for request in harness.policy.requests] == [
+        dict(step.parameters)
+    ]
+
+
+# --- the evaluation-failure path (ADR-0145 §7, §8, §13) -----------------
+
+#: A value the fake evaluator's exception carries in three different places.
+#: None of the three may reach the disposition, the rendering or a log record —
+#: ADR-0145 §7 permits the exception's **type** and nothing else, because a
+#: ``ValidationError``'s text carries the instance fragments the walk was
+#: holding, and a schema that raises on demand would otherwise be the one path
+#: on which an untrusted document makes the argument values arrive in the log.
+LEAKED = "alice@example.com"
+
+
+def _exploding_evaluator(*_args: object, **_kwargs: object) -> tuple[()]:
+    """An evaluator that raises, carrying ``LEAKED`` in ``str()``, ``args`` and notes.
+
+    Patched over the name the stage imported rather than injected: ADR-0145 §2
+    forbids a consumer substituting its own evaluator for the ``core`` one, so a
+    seam for this would breach the clause the test exists to prove. Nor can a
+    *constructible* schema raise — every route to one (a self-reference, a
+    ``$defs`` cycle, over-deep nesting) is refused at ``ToolDefinition``
+    construction by §6.
+    """
+    error = RuntimeError(LEAKED)
+    error.add_note(f"while evaluating {LEAKED}")
+    raise error
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        pytest.param((tool("only"),), id="one-candidate"),
+        pytest.param((tool("a-sender"), tool("b-sender")), id="several-candidates"),
+    ],
+)
+async def test_an_evaluation_that_raises_refuses_the_step_and_leaks_nothing(
+    tools: tuple[ToolDefinition, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0145 §7's refusal, asserted at the stage and for both cardinalities.
+
+    **A raise refuses the step, not the candidate that raised.** ADR-0144 §7's
+    ineligibility clause is about a candidate whose schema the parameters *do
+    not satisfy*, and a raise establishes no such fact — so ranking the
+    remainder would be selecting under an unknown. That is why the
+    several-candidate case is asserted alongside the single one rather than
+    assumed to follow.
+
+    Everything §13 asks for is here together: the disposition rather than an
+    escaping exception, nothing committed, the step still ``PENDING``, **no**
+    ``ParameterViolation`` on the outcome, and none of the exception's three
+    carriers of a distinctive value reaching the disposition, its rendering or
+    any log record.
+    """
+    harness = Harness(tools=tools)
+    state = await an_execution(harness.plans, plan_step())
+    monkeypatch.setattr(
+        "ai_assistant.orchestration.selection.parameter_violations", _exploding_evaluator
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert result.disposition is Disposition.INVALID_PARAMETERS
+    assert result.violations == ()  # none, rather than partial (§7)
+    assert result.tool_id is None
+    assert result.decision_id is None
+    stored = await stored_step(harness.plans, state)
+    assert stored.status is StepStatus.PENDING  # no claim committed
+    assert stored.skip_reason is None
+    assert harness.policy.requests == []  # no ruling requested
+    assert await harness.trail.export() == []  # no audit record written
+    assert harness.invoker.invocations == []
+
+    # The type may be named; nothing else about the exception may be.
+    refusal = next(
+        entry for entry in captured if entry["event"] == "step_parameter_evaluation_failed"
+    )
+    assert refusal["error_type"] == "RuntimeError"
+    assert LEAKED not in repr(result)
+    assert LEAKED not in repr(captured)
+
+
+async def test_a_raising_evaluation_does_not_let_the_exception_escape_the_stage() -> None:
+    """ "No exception from an evaluation escapes the stage" (ADR-0145 §7).
+
+    Stated separately from the assertions above because it is the half #1115
+    records as live on ``main`` today: the refusal reaches the caller as a
+    ``ValidationError`` out of ``StepRunner.run`` rather than as a disposition,
+    which is a turn that ended in an error where the ADR ruled a turn that ends
+    in a value.
+    """
+    harness = Harness(tools=(tool("only"),))
+    state = await an_execution(harness.plans, plan_step())
+
+    monkey = pytest.MonkeyPatch()
+    with monkey.context() as patched:
+        patched.setattr(
+            "ai_assistant.orchestration.selection.parameter_violations", _exploding_evaluator
+        )
+        # No `pytest.raises`: the point is that this returns at all.
+        result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert isinstance(result.disposition, Disposition)
 
 
 async def test_the_single_candidate_is_the_tool_ruled_on_and_run() -> None:

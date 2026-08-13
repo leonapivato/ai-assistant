@@ -17,7 +17,6 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.types import (
@@ -344,16 +343,13 @@ async def test_an_unexpected_argument_never_reaches_the_tool() -> None:
     )
     state = await _execution_for(plans, step)
 
-    # **The one assertion here that is expected to change.** ADR-0145 §1 refuses
-    # the `ActionRequest` at construction, and `StepRunner` does not yet catch
-    # that — the stage that turns it into `Disposition.INVALID_PARAMETERS` with
-    # nothing committed is lane D of batch #1096 (ADR-0145 §4, §7). Pinning the
-    # raise is what makes this test honest *today*; when that lane lands, this
-    # line becomes an assertion on the returned disposition. Everything below it
-    # is the durable fact and holds under both.
-    with pytest.raises(ValidationError):
-        await runner.run(state, "step-1", timeout=PATIENT)
+    # The line this test was written expecting to change, now changed: the
+    # selection stage turns the refusal into a disposition rather than letting
+    # `ActionRequest`'s validator raise out of `run` (#1115, ADR-0145 §4, §7).
+    # Everything below it is the durable fact and held under both.
+    result = await runner.run(state, "step-1", timeout=PATIENT)
 
+    assert result.disposition is Disposition.INVALID_PARAMETERS
     assert spy.calls == 0  # the callable is never reached (ADR-0145 §3)
     stored = (await plans.get_execution(state.id)).step("step-1")  # type: ignore[union-attr]
     assert stored is not None
