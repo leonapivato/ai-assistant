@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -34,11 +35,14 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.selection import (
     _COST_ORDER,
     _TIER_ORDER,
+    Preference,
     eligible_candidates,
     select,
     selection_key,
-    validated_preference,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 CAPABILITY = "send_email"
 
@@ -80,9 +84,10 @@ def tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
     return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
-def preferred(*candidates: ToolDefinition, preference: tuple[str, ...] = ()) -> str:
+def preferred(*candidates: ToolDefinition, preference: Sequence[str] | Preference = ()) -> str:
     """The id ``select`` returns for ``candidates``, asserting it chose one."""
-    chosen = select(candidates, preference).tool
+    snapshot = preference if isinstance(preference, Preference) else Preference(preference)
+    chosen = select(candidates, snapshot).tool
     assert chosen is not None, "expected a unique minimum, got a tie"
     return chosen.id
 
@@ -218,11 +223,11 @@ def test_key_4_never_compares_amounts_across_or_within_a_currency() -> None:
         "foreign", cost=ToolCost(basis=CostBasis.PER_CALL, amount=Decimal(3), currency="EUR")
     )
 
-    assert selection_key(cheap, ()) == selection_key(dear, ())
-    assert selection_key(cheap, ()) == selection_key(foreign, ())
+    assert selection_key(cheap, Preference()) == selection_key(dear, Preference())
+    assert selection_key(cheap, Preference()) == selection_key(foreign, Preference())
     # Equal under the whole key with an empty preference, so it is a tie and not
     # a silent win for whichever was listed first.
-    assert select((cheap, dear, foreign), ()).tied == ("cheap", "dear", "foreign")
+    assert select((cheap, dear, foreign), Preference()).tied == ("cheap", "dear", "foreign")
 
 
 def test_key_5_prefers_the_lower_declared_latency() -> None:
@@ -347,7 +352,7 @@ def test_a_tie_selects_nothing_and_names_the_tied_candidates() -> None:
     ``find`` listed, which is by ``id`` — the alphabetical accident ADR-0037 §1
     refused to decide side effects on.
     """
-    outcome = select((tool("b-sender"), tool("a-sender"), tool("c-sender")), ())
+    outcome = select((tool("b-sender"), tool("a-sender"), tool("c-sender")), Preference())
 
     assert outcome.tool is None
     assert outcome.tied == ("a-sender", "b-sender", "c-sender")
@@ -355,7 +360,7 @@ def test_a_tie_selects_nothing_and_names_the_tied_candidates() -> None:
 
 def test_a_tie_names_only_the_candidates_that_actually_tied() -> None:
     """A candidate the ordering ranked below the tie is not reported as tied."""
-    outcome = select((tool("a"), tool("b"), tool("worse", risk_level=RiskLevel.HIGH)), ())
+    outcome = select((tool("a"), tool("b"), tool("worse", risk_level=RiskLevel.HIGH)), Preference())
 
     assert outcome.tool is None
     assert outcome.tied == ("a", "b")
@@ -365,7 +370,7 @@ def test_a_preference_naming_one_tied_candidate_resolves_the_tie() -> None:
     """§6's residue is what is left when the user has expressed no preference."""
     tied = (tool("alpha"), tool("beta"))
 
-    assert select(tied, ()).tool is None
+    assert select(tied, Preference()).tool is None
     assert preferred(*tied, preference=("beta",)) == "beta"
 
 
@@ -378,7 +383,7 @@ def test_selecting_from_an_empty_set_is_the_callers_to_dispose_of() -> None:
     legal-skip table exists to prevent.
     """
     with pytest.raises(ValueError, match="at least one candidate"):
-        select((), ())
+        select((), Preference())
 
 
 # --- the preference snapshot (ADR-0144 §4, §8) ---------------------------
@@ -393,7 +398,7 @@ def test_a_duplicated_id_is_refused_where_the_sequence_is_supplied() -> None:
     better, on ADR-0016 §1's posture that a malformed declaration does not load.
     """
     with pytest.raises(ValueError, match="more than once"):
-        validated_preference(("tool-a", "tool-a", "tool-b"))
+        Preference(("tool-a", "tool-a", "tool-b"))
 
 
 def test_an_unregistered_id_is_accepted_and_matches_nothing() -> None:
@@ -403,12 +408,31 @@ def test_an_unregistered_id_is_accepted_and_matches_nothing() -> None:
     an id may name a tool this run does not hold. Refusing on that would fail a
     deployment for naming a preference it turned out not to need.
     """
-    snapshot = validated_preference(("absent", "present"))
+    snapshot = Preference(("absent", "present"))
 
-    assert snapshot == ("absent", "present")
+    assert snapshot.ids == ("absent", "present")
     assert preferred(tool("present"), tool("other"), preference=snapshot) == "present"
     # The absent id contributes no position to anything registered.
     assert select((tool("other"), tool("elsewhere")), snapshot).tool is None
+
+
+def test_the_snapshot_answers_key_6_from_a_lookup_rather_than_a_scan() -> None:
+    """``rank`` is the position, and an unnamed id ranks after every named one.
+
+    The positions are held as a mapping rather than searched for per candidate:
+    a scan would make selection cost the product of the candidate count and the
+    sequence length, with no ``await`` between the first comparison and the last,
+    which is a synchronous stall on the path every tool call takes. The mapping
+    is exact rather than approximate precisely because a duplicate is refused —
+    with each id appearing at most once, its position in the mapping *is* its
+    index in the sequence, which is what ``ids`` round-tripping shows.
+    """
+    snapshot = Preference(["gamma", "alpha", "beta"])
+
+    assert snapshot.ids == ("gamma", "alpha", "beta")
+    assert [snapshot.rank(one) for one in snapshot.ids] == [0, 1, 2]
+    assert snapshot.rank("unnamed") == 3
+    assert Preference().rank("anything") == 0  # an empty sequence ranks all equal
 
 
 def test_mutating_the_sequence_after_construction_changes_no_later_selection() -> None:
@@ -420,12 +444,12 @@ def test_mutating_the_sequence_after_construction_changes_no_later_selection() -
     nothing in the declarations having changed.
     """
     supplied = ["alpha"]
-    snapshot = validated_preference(supplied)
+    snapshot = Preference(supplied)
 
     supplied.append("beta")
     supplied.append("beta")
 
-    assert snapshot == ("alpha",)
+    assert snapshot.ids == ("alpha",)
     assert preferred(tool("alpha"), tool("beta"), preference=snapshot) == "alpha"
 
 

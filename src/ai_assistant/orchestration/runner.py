@@ -67,11 +67,7 @@ from ai_assistant.core.types import (
     ToolCall,
 )
 from ai_assistant.orchestration.capability_alias import resolve_capability
-from ai_assistant.orchestration.selection import (
-    eligible_candidates,
-    select,
-    validated_preference,
-)
+from ai_assistant.orchestration.selection import Preference, eligible_candidates, select
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -341,7 +337,7 @@ class StepRunner:
         its own declaration before anything runs (ADR-0016 §3).
 
         The sequence is **snapshotted and validated here, and never re-read**
-        (:func:`~ai_assistant.orchestration.selection.validated_preference`). A
+        (:class:`~ai_assistant.orchestration.selection.Preference`). A
         mutation the caller makes to what it passed — before, between or during a
         selection — changes no later selection, which is what keeps §1's
         order-independence true and the duplicate check a check that stays
@@ -363,7 +359,7 @@ class StepRunner:
         if confirmation_ttl is not None and confirmation_ttl <= timedelta(0):
             msg = f"confirmation_ttl must be strictly positive, got {confirmation_ttl}"
             raise ValueError(msg)
-        self._preference = validated_preference(tool_preference)
+        self._preference = Preference(tool_preference)
         self._plans = plans
         self._registry = registry
         self._policy = policy
