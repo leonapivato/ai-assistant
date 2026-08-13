@@ -330,6 +330,12 @@ correctly: an estimate nobody gave cannot beat an estimate somebody gave.
 > rule about which occurrence counts. An id naming no registered tool is
 > permitted and simply matches nothing.
 
+> **Normative.** The selection stage takes an **immutable snapshot** of the
+> sequence at construction, validates that snapshot, and consults nothing else
+> thereafter. It never retains the caller's own object, and no mutation a caller
+> makes to what it passed — before, between or during a selection — changes any
+> subsequent selection.
+
 The duplicate clause is §1's totality requirement paid where it comes due. A
 sequence `(tool_a, tool_a, tool_b)` gives `tool_a` two positions, and an
 implementation taking the first would order it before `tool_b` while one taking
@@ -339,6 +345,20 @@ different tools from one candidate set, which is precisely the order-dependence
 it better: a duplicated id is a mistake in the deployment's configuration, and
 ADR-0016 §1's posture on the type this stage consumes is that a malformed
 declaration does not load rather than being silently interpreted.
+
+The snapshot clause is what makes the duplicate clause worth anything, and
+without it "refused where it is supplied" is a check on a value that does not
+stay checked. A caller passing a list and mutating it afterwards — including
+while `run` is suspended at `find`'s `await` — would hand the stage a sequence it
+never validated: an implementation that re-read the caller's object would see
+duplicates nothing refused, and the first/last ambiguity §1 forbids would be back
+by a second route. It would also break §1's order-independence outright, since
+two selections over one candidate set could then differ with nothing in the
+declarations having changed. The corpus makes this move everywhere it matters —
+`PlanStep` deep-freezes its parameters *"before storing"* because
+`frozen=True` *"does not freeze what a field contains"* (ADR-0014 §2), and
+ADR-0016 §4 freezes `ToolCost` in its own right against the same aliasing — so
+taking the snapshot is the established shape rather than a new precaution.
 
 Unstated ids are the opposite case and are deliberately admitted. A sequence is
 written against tools the deployment expects, and a registry is populated at
@@ -613,7 +633,9 @@ Each is scoped out with its reason, because scoping something out is a decision.
 > currencies; an undeclared `latency` losing to every declared one; a preference
 > sequence failing to promote a candidate the severity block ranks lower; a
 > sequence carrying a duplicate id refused where it is supplied, and one naming
-> an unregistered id accepted and matching nothing; a tie
+> an unregistered id accepted and matching nothing; a caller mutating the
+> sequence object it passed — both between selections and while one is suspended
+> at an `await` — changing neither the selection nor the duplicate check; a tie
 > under the whole key producing `AMBIGUOUS_CAPABILITY` with nothing committed
 > and the tied ids on the returned `StepDisposition`; a second `run` against a
 > step left `PENDING` by an ambiguity selecting afresh, and selecting differently
