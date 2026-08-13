@@ -262,7 +262,8 @@ material it assembled.
 > the recipient was **determined by an act of the user** — the user directing this
 > exchange to it, or the user having explicitly configured it as a recipient for
 > exchanges of this kind — and **not** determined from content this system
-> selected.
+> selected. This clause is subject to the third clause below, and at the `tools/`
+> seam it dispenses with nothing.
 
 > **Normative.** Sending a user-authored span to a model provider the user has
 > explicitly configured (ADR-0004 §2 as amended 2026-07-19) is such a
@@ -270,13 +271,16 @@ material it assembled.
 > included** (ADR-0013 §6), and a credential the user pasted into it does not make
 > the call non-compliant.
 
+> **Normative.** No clause of this ADR excuses a transmission from the `tools/`
+> seam from the recipient authorisation ADR-0017 §3 conditions that seam on —
+> whatever determined the recipient, and a configured endpoint, a destination that
+> first appeared in the user's own words, and a destination the arguments select
+> alike.
+
 > **Normative.** User-authored provenance is **not transitive** to a recipient
 > determined from content this system selected. At the `tools/` seam the recipient
 > is the semantic recipient the arguments select, so a user-authored span
-> forwarded there is disclosed by this system in respect of that recipient, and
-> its transmission needs the recipient authorisation ADR-0017 §3 already
-> conditions the seam on — including where the destination first appeared in the
-> user's own words, a case §3's condition governs and this ADR does not.
+> forwarded there is disclosed by this system in respect of that recipient.
 
 **Provenance answers who discloses the *content*; authorisation answers who chose
 the *recipient*. The conduit argument is the conjunction of the two, and it is
@@ -323,8 +327,24 @@ which is what a payload description and an approver need in order to be truthful
 (§5) — and nothing about *who may receive them*. The recipient half stays exactly
 where ADR-0017 §3 put it.
 
+**The third clause is a precedence rule, and it is marked because an earlier draft
+left the precedence to be inferred.** With the first clause admitting a *standing*
+user act, a user who configures a fixed endpoint for a class of exchange has
+determined that recipient by a user act — so the first clause read alone calls a
+`tools/` send to it a user disclosure, while the last clause calls it a system
+disclosure needing ADR-0017 §3 authorisation. An implementation is then free to
+take the permissive reading and send with no authorisation bound to the resolved
+destination, which is the outcome §3's condition exists to prevent. Adversarial
+review found the conflict on round 2. The precedence now sits in a clause of its
+own rather than in the prose, because under §11's marked regime prose settles
+nothing: **at the `tools/` seam, authorisation is owed on every call.** The
+alternative repair — confining the standing-act limb to the model-provider set —
+was declined, because it would have made the first clause a `models/` special case
+rather than a rule about disclosure, and the third boundary (ADR-0124 §1) would
+then have had no clause at all.
+
 **The user naming a destination out loud does not collapse the two boundaries,
-and the third clause says where that case is decided.** A user who types *email
+and the fourth clause says where that case is decided.** A user who types *email
 bob@example.com the paragraph below* has performed a user act about a recipient —
 but what reaches the seam is an argument a model produced, and by §2 a destination
 this system extracted from a span is content it selected, not a recorded user act.
@@ -357,6 +377,16 @@ without prohibiting calls the product already makes."
 
 ### 5. The pasted credential is classified, not exempted: a user-authored free-text span asserts no tier
 
+> **Normative.** A span is **free text** for the purposes of this ADR only where
+> the implementation places it into no field whose semantics establish its tier.
+> A value placed into such a field — a recipient address, an account identifier, a
+> credential reference, or any other argument whose meaning the implementation
+> knows — is **not** free text, whoever authored it, and surrounding it with prose
+> does not make it so.
+
+> **Normative.** A value that is not free text is classified and described at its
+> tier under ADR-0004 §1 as usual, and this ADR's no-tier rule does not reach it.
+
 > **Normative.** A payload description or an audit record states **no tier** for a
 > user-authored free-text span. It states the span's provenance and its extent,
 > and it does not report the span as Tier 1.
@@ -366,7 +396,7 @@ without prohibiting calls the product already makes."
 
 **This is the direct answer to the failure ADR-0017 §3 names**, and it answers it
 by removing the claim the failure runs on rather than by exempting anything. The
-attack in §3's own words is: "an implementation could classify a pasted OAuth
+attack in ADR-0017 §3's own words is: "an implementation could classify a pasted OAuth
 token as Tier 1 because it arrived in conversation, **pass inspection**, and
 disclose a credential under weaker policy." Each step is now blocked, and the
 middle one is the load-bearing block:
@@ -379,7 +409,7 @@ middle one is the load-bearing block:
   words, verbatim, N characters, to <destination>*.
 - It therefore cannot **pass inspection**, because it never acquires a tier claim
   to pass inspection with. A policy keyed on tier has nothing to key on, and the
-  second clause says so explicitly rather than leaving it to be inferred from the
+  fourth clause says so explicitly rather than leaving it to be inferred from the
   absence.
 
 **"Classified, not exempted" is exactly what this is, and the distinction is worth
@@ -390,18 +420,29 @@ for system-held Tier 0 (§3). What it is not is *tiered*, and a description that
 invented a tier for it would be the exemption wearing a classification's clothes.
 
 **The decision that remains is the user's, taken against a truthful description.**
-Only the user can tell whether their own paste contained a key. §3's "named
-approver able to refuse" is the surface where that is decidable, and a description
+Only the user can tell whether their own paste contained a key. ADR-0017 §3's
+"named approver able to refuse" is the surface where that is decidable, and a description
 saying *your words, to this recipient* puts the question where it can be answered.
 That is containment, not prevention, and §7 says so in those words.
 
-**A structured argument field is a different case, and this clause does not reach
-it.** Where an implementation places a value into a named argument whose meaning
-it knows — a recipient address, an account identifier, a credential reference —
-the tier is determined by ADR-0004 §1 as usual and is described as usual. The
-no-tier rule is about **free text**, which is the case where the system holds no
-knowledge of the contents. Saying otherwise would let an implementation escape
-tiering by wrapping a known value in prose.
+**The structured-field exclusion is marked, and it had to become marked.** An
+earlier draft stated it in the prose beside the no-tier clause, which under §11's
+regime obliges nobody: ADR-0089 §3 rules that in a marked ADR "unmarked text is
+read to determine what a marked clause *means*" and "never supplies an
+obligation". With "free text" undefined in any clause, a lane could describe
+*bob@example.com* sitting in a named recipient field as a user-authored free-text
+span, record no tier, and conform — which reopens ADR-0017 §3's "at what tiers"
+condition from the other end, having closed it at the first. Adversarial review
+found it on round 2, and it is the same failure ADR-0098 §9 records fixing in its
+own §9: a rule that mattered was written where the document's own regime discards
+it. The definition now carries its scope inside the clause, which is what ADR-0089
+§2 asks of every mark.
+
+**The line the definition draws is knowledge, not shape.** Free text is the case
+where the system holds no knowledge of the contents; a named argument is the case
+where it does. That is why the no-tier rule cannot be escaped by wrapping a known
+value in prose, and equally why it cannot be extended to cover a field the
+implementation itself gave a meaning to.
 
 ### 6. What must be recorded so an audit can tell the two apart
 
