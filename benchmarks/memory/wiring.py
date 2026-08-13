@@ -59,7 +59,12 @@ from ai_assistant.memory import (
 # Not a package export, so it is imported from its own module — the same line
 # `app/composition.py` carries, for the same reason.
 from ai_assistant.memory.conversation_store import SqliteConversationStore
-from ai_assistant.models import BoundedEmbedder, HashingEmbedder, PydanticAIProvider
+from ai_assistant.models import (
+    BoundedEmbedder,
+    HashingEmbedder,
+    PydanticAIProvider,
+    ensure_vendor_available,
+)
 from ai_assistant.models.retry import RetryingProvider, RetryPolicy
 from ai_assistant.orchestration import (
     ConversationLifecycle,
@@ -170,13 +175,25 @@ def build_embedder(settings: Settings) -> Embedder:
 def build_model_provider(settings: Settings, spec: str) -> ModelProvider:
     """One route, with retry and without routing.
 
+    ``ensure_vendor_available`` is called first, exactly as
+    ``_build_observer_provider`` calls it and for the reason ADR-0062 §2 gives: an
+    unresolvable spec would otherwise surface at the first completion as a bare
+    non-retryable ``ModelError``, which on this seam means at the first question of a
+    paid run. It is key-free and offline — it resolves the provider *class* and reads
+    no credential — so it costs nothing and blocks nothing.
+
     Args:
         settings: Loaded application settings — the resilience knobs only.
         spec: The ``"provider:model"`` spec to use.
 
     Returns:
         The provider.
+
+    Raises:
+        ConfigurationError: If ``spec`` names a vendor unknown to pydantic-ai or whose
+            optional package is not installed.
     """
+    ensure_vendor_available(spec)
     return RetryingProvider(PydanticAIProvider(spec), policy=RetryPolicy.from_settings(settings))
 
 

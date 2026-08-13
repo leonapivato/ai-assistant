@@ -22,7 +22,11 @@ from benchmarks.memory.corpora.fetch import (
 )
 from benchmarks.memory.corpora.provenance import CorpusFile
 from benchmarks.memory.records import RunMode
-from benchmarks.memory.run import PREREGISTRATION_REFUSAL, refuse_ineligible_scored_run
+from benchmarks.memory.run import (
+    PREREGISTRATION_REFUSAL,
+    check_credentials_for,
+    refuse_ineligible_scored_run,
+)
 from benchmarks.memory.wiring import build_harness
 
 if TYPE_CHECKING:
@@ -30,6 +34,7 @@ if TYPE_CHECKING:
 
 from ai_assistant.app import composition
 from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.memory import traces as memory_traces
 from ai_assistant.testing import FakeModelProvider, FakeObserver
 
@@ -264,3 +269,49 @@ def test_two_fetches_of_one_corpus_do_not_share_a_staging_path(tmp_path: Path) -
     assert len(staged) == 2
     assert staged[0] != staged[1]
     assert not list(tmp_path.glob("*.partial"))
+
+
+def test_a_configured_but_unreached_fallback_needs_no_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The harness builds one fixed route per seam and disables routing, so checking
+    the router's whole preference order — as `app.ensure_model_credentials` does, and
+    rightly, for the hub — would refuse a valid benchmark over a vendor it never
+    constructs."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "present-for-the-route-that-is-used")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    settings = Settings(
+        data_dir=tmp_path,
+        embedder=EmbedderKind.HASHING,
+        default_model="anthropic:claude-opus-4-8",
+        fallback_models=("openai:gpt-4o",),
+    )
+
+    check_credentials_for(settings, answering=True, distillation=True, judging=True)
+
+
+def test_the_observer_route_is_checked_even_when_it_repeats_the_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`observer_model` defaults to `default_model`, so a mapping keyed by spec would
+    have one entry overwrite the other and check nothing."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    settings = Settings(
+        data_dir=tmp_path,
+        embedder=EmbedderKind.HASHING,
+        default_model="anthropic:claude-opus-4-8",
+    )
+
+    with pytest.raises(ConfigurationError):
+        check_credentials_for(settings, answering=False, distillation=True, judging=False)
+
+
+def test_no_route_is_checked_when_every_seam_is_injected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fake needs no credential, which is what keeps this suite runnable with no key
+    configured at all."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    settings = Settings(data_dir=tmp_path, embedder=EmbedderKind.HASHING)
+
+    check_credentials_for(settings, answering=False, distillation=False, judging=False)

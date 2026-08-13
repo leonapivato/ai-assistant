@@ -589,3 +589,23 @@ async def test_wholly_injected_seams_need_no_credential(tmp_path: Path) -> None:
     manifest, _ = await _run(tmp_path)
 
     assert manifest.judge == "exact"
+
+
+@pytest.mark.parametrize("confirmation", ["false", "no", 1, 0.0, [], "True"])
+async def test_a_non_boolean_confirmation_does_not_admit_a_scored_run(
+    tmp_path: Path, confirmation: object
+) -> None:
+    """`not "false"` is False, so a truthiness test reads the string "false" as
+    confirmation of the one rule that must never be confirmed by accident. The
+    parameters are what a shell wrapper or a config file produces."""
+    with pytest.raises(PermissionError):
+        await execute_run(
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            output_root=tmp_path / "runs",
+            mode=RunMode.SCORED,
+            corpus_digests={},
+            settings=_settings(tmp_path),
+            model=FakeModelProvider("a dog"),
+            observer=FakeObserver(max_batch_size=BATCH),
+            preregistration_final=confirmation,  # type: ignore[arg-type]  # the point of the test
+        )
