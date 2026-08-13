@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from ai_assistant.core.types import (
     EvaluationTrace,
+    NotificationDispositionKind,
     RecordIdSet,
     TraceKind,
     TraceOutcome,
@@ -203,6 +204,89 @@ def configuration(
         elapsed=None,
         outcome=TraceOutcome.OK,
         metrics={"observation_batch_size": 25} if metrics is None else metrics,
+    )
+
+
+#: ADR-0141 §3's two ruling seams, as the emitter labels them.
+ADMIT = "notification_admit"
+RECONSIDER = "notification_reconsider"
+
+_INTERRUPT_CONDITIONS = (
+    "condition_perishable",
+    "condition_reach_interrupt",
+    "condition_quiet_window",
+    "condition_budget",
+)
+
+
+def ruled(  # noqa: PLR0913 — one keyword per key ADR-0141 §4 defines
+    kind: NotificationDispositionKind,
+    *,
+    expired: int = 0,
+    reach_off: int = 0,
+    duplicate: int = 0,
+    at_cap: int | None = None,
+    perishable: int | None = None,
+    reach_interrupt: int = 1,
+    quiet_window: int = 1,
+    budget: int = 1,
+) -> dict[str, int]:
+    """ADR-0141 §4's keys for one completed ruling, defaulting to a consistent one.
+
+    Each default is what the merged policy would have written for that kind, so a
+    suite wanting a shape the emitter cannot produce has to say so explicitly: an
+    ``INTERRUPT`` holds all four interrupt conditions, a ``HOLD`` fails
+    ``perishable`` alone — the ordinary case, a candidate declaring no expiry — and
+    a ``DROP`` is at the cap and carries none of the interrupt half.
+    """
+    if at_cap is None:
+        at_cap = int(kind is NotificationDispositionKind.DROP)
+    if perishable is None:
+        perishable = int(kind is not NotificationDispositionKind.HOLD)
+    metrics = {
+        "ruled_interrupt": int(kind is NotificationDispositionKind.INTERRUPT),
+        "ruled_hold": int(kind is NotificationDispositionKind.HOLD),
+        "ruled_drop": int(kind is NotificationDispositionKind.DROP),
+        "condition_expired": expired,
+        "condition_reach_off": reach_off,
+        "condition_duplicate": duplicate,
+        "condition_at_cap": at_cap,
+    }
+    if kind is not NotificationDispositionKind.DROP:
+        metrics |= dict(
+            zip(
+                _INTERRUPT_CONDITIONS,
+                (perishable, reach_interrupt, quiet_window, budget),
+                strict=True,
+            )
+        )
+    return metrics
+
+
+def notification(
+    *,
+    when: datetime,
+    seam: str = ADMIT,
+    metrics: Mapping[str, int | float | bool] | None = None,
+    outcome: TraceOutcome = TraceOutcome.OK,
+    correlation: str | None = "c1",
+) -> EvaluationTrace:
+    """One ``NOTIFICATION`` trace, as ``memory/notification_traces.py`` emits it.
+
+    No ``elapsed``: ADR-0141 §4 gives a notification trace ``held_seconds`` as its
+    one duration, and the emitter observes no duration of the crossing at all.
+    """
+    return EvaluationTrace(
+        kind=TraceKind.NOTIFICATION,
+        seam=seam,
+        occurred_at=when,
+        elapsed=None,
+        outcome=outcome,
+        fault_class="RuntimeError"
+        if outcome in (TraceOutcome.FAULT, TraceOutcome.REFUSED)
+        else None,
+        refs={} if correlation is None else {TraceRef.CORRELATION: correlation},
+        metrics={} if metrics is None else metrics,
     )
 
 

@@ -3,9 +3,13 @@
 ADR-0120 defines every measure over metric keys and seam labels the emitters
 already write: ``memory/traces.py``'s retrieval and decision counts,
 ``Engine._tracked``'s operation seams, and ``service/configuration.py``'s startup
-seam. None of those modules is importable from here — ``evaluation`` "may import
-``core`` and nothing else in ``ai_assistant``", enforced by ``lint-imports`` — so
-the strings are duplicated, in the shape ``memory/traces.py`` already duplicates
+seam. ADR-0141 adds a fourth to that list, ``memory/notification_traces.py``, and
+its §10 requires exactly this treatment of it: "``evaluation`` may import only
+``core``, so the emitter's keys are duplicated by construction and the test is what
+keeps the two copies honest". None of those modules is importable from here —
+``evaluation`` "may import ``core`` and nothing else in ``ai_assistant``", enforced
+by ``lint-imports`` — so the strings are duplicated, in the shape
+``memory/traces.py`` already duplicates
 :data:`~ai_assistant.memory.traces.TRACE_NOT_RECORDED` from this package and for
 the same reason.
 
@@ -24,7 +28,17 @@ should."
 
 from __future__ import annotations
 
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+from ai_assistant.core.types import (
+    DROP_CONDITIONS,
+    INTERRUPT_CONDITIONS,
+    NotificationCondition,
+    NotificationDispositionKind,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 # --- retrieval metric keys (`memory/traces.py`) -------------------------------
 
@@ -114,6 +128,90 @@ DIRECT_SEAMS: Final = frozenset({"learn", "answer"})
 #: re-reading the same episodes".
 OBSERVE_SEAM: Final = "observe"
 
+# --- notification ruling seams and keys (`memory/notification_traces.py`) -----
+
+#: ADR-0141 §3's two ruling seams, ``NotificationStore.admit`` and
+#: ``NotificationStore.reconsider`` — "ADR-0130 §3's atomic act, in both the shapes
+#: it takes". §5 makes them an allowlist for the same reason ADR-0120 §3 makes the
+#: operation seams one: "a later lane may add a third ruling seam, and defaulting
+#: an unrecognised one into the offer or the reconsideration population would
+#: silently absorb it into a diagnostic. The count that rises is the prompt to
+#: classify it."
+NOTIFICATION_ADMIT_SEAM: Final = "notification_admit"
+NOTIFICATION_RECONSIDER_SEAM: Final = "notification_reconsider"
+
+#: §4's three disposition keys, one per :class:`NotificationDispositionKind`. A
+#: completed ruling carries **all three**, each ``0`` or ``1``, "written by one
+#: statement so they are observed and lost together" — which is what satisfies
+#: ADR-0119 §5's denominator rule without an external count: §6's numerator and its
+#: denominator come from one statement, so one loss takes both.
+NOTIFICATION_DISPOSITION_KEYS: Final[Mapping[NotificationDispositionKind, str]] = {
+    NotificationDispositionKind.INTERRUPT: "ruled_interrupt",
+    NotificationDispositionKind.HOLD: "ruled_hold",
+    NotificationDispositionKind.DROP: "ruled_drop",
+}
+
+#: §4's eight condition keys, one per :class:`NotificationCondition`. Each carries
+#: ``1`` when the proposition its member names held at the ruling instant — "the
+#: enumeration's own propositions, not their negations", which is why ``EXPIRED``
+#: and ``PERISHABLE`` are both ``0`` on a candidate declaring no expiry at all
+#: rather than being opposites.
+#:
+#: Keyed on the enumeration rather than listed as bare strings, because §4 and §5
+#: state the roster's **two halves** over ``DROP_CONDITIONS`` and
+#: ``INTERRUPT_CONDITIONS`` by name — a drop key is carried by every completed
+#: ruling and an interrupt key by every non-``DROP`` one. Deriving the split from
+#: ``core``'s own tuples, which this package may import, means it is not a second
+#: grouping to keep honest against ADR-0130 §5; only the *strings* are duplicated,
+#: which is the whole of what golden rule 1 forces.
+NOTIFICATION_CONDITION_KEYS: Final[Mapping[NotificationCondition, str]] = {
+    NotificationCondition.EXPIRED: "condition_expired",
+    NotificationCondition.REACH_OFF: "condition_reach_off",
+    NotificationCondition.DUPLICATE: "condition_duplicate",
+    NotificationCondition.AT_CAP: "condition_at_cap",
+    NotificationCondition.PERISHABLE: "condition_perishable",
+    NotificationCondition.REACH_INTERRUPT: "condition_reach_interrupt",
+    NotificationCondition.QUIET_WINDOW: "condition_quiet_window",
+    NotificationCondition.BUDGET: "condition_budget",
+}
+
+#: The four keys §4 requires on **every** completed ruling, in ADR-0130 §5's order.
+DROP_CONDITION_KEYS: Final = tuple(
+    NOTIFICATION_CONDITION_KEYS[condition] for condition in DROP_CONDITIONS
+)
+
+#: The four keys §4 requires on every ruling that was **not** ``DROP``, and forbids
+#: on one that was, in ADR-0130 §5's order.
+INTERRUPT_CONDITION_KEYS: Final = tuple(
+    NOTIFICATION_CONDITION_KEYS[condition] for condition in INTERRUPT_CONDITIONS
+)
+
+#: How long the record had been held when a reconsideration interrupted it (§4).
+#: **Not a count**, and §4 says so explicitly: a finite, non-negative ``int`` or
+#: ``float`` that is not a ``bool``, where every other key here is a count. So
+#: §5's count rule does not reach it and :data:`NOTIFICATION_COUNT_KEYS` excludes it.
+HELD_SECONDS: Final = "held_seconds"
+
+#: Every key §4 reads as a **count**: the three disposition keys and the eight
+#: condition keys. §5's malformed rule is stated over exactly these — "a key §4
+#: reads as a count carries a value that is not a non-negative integer, or is a
+#: ``bool``" — and ADR-0120 §2's own count predicate serves both ADRs, "so one
+#: predicate serves both".
+NOTIFICATION_COUNT_KEYS: Final = (
+    *NOTIFICATION_DISPOSITION_KEYS.values(),
+    *NOTIFICATION_CONDITION_KEYS.values(),
+)
+
+#: **All twelve** keys §4 defines, which is the set §5's *incomplete* state is
+#: decided over: a trace carrying none of them "records a crossing that raised
+#: before the ruling committed". Defined over the disposition keys alone the state
+#: would match more than the path it names — a trace bearing a corrupt condition
+#: value and no disposition would be decided there and never reach the tests that
+#: would have called it malformed, "so emitter corruption would be reported as an
+#: ordinary pre-ruling fault and stream health could not tell an outage from a
+#: defect" (§5, seventh round).
+NOTIFICATION_METRIC_KEYS: Final = (*NOTIFICATION_COUNT_KEYS, HELD_SECONDS)
+
 __all__ = [
     "CANDIDATES",
     "COUNT_KEYS",
@@ -121,14 +219,23 @@ __all__ = [
     "DECISIONS_SUPERSEDE",
     "DECISION_KEYS",
     "DIRECT_SEAMS",
+    "DROP_CONDITION_KEYS",
     "EXCLUDED_BAND",
     "EXCLUDED_KIND",
     "EXCLUDED_RETENTION",
     "EXCLUDED_WINDOW",
     "EXCLUSION_KEYS",
     "FETCH_K",
+    "HELD_SECONDS",
+    "INTERRUPT_CONDITION_KEYS",
     "LIMIT",
     "MACHINE_SEAMS",
+    "NOTIFICATION_ADMIT_SEAM",
+    "NOTIFICATION_CONDITION_KEYS",
+    "NOTIFICATION_COUNT_KEYS",
+    "NOTIFICATION_DISPOSITION_KEYS",
+    "NOTIFICATION_METRIC_KEYS",
+    "NOTIFICATION_RECONSIDER_SEAM",
     "OBSERVE_SEAM",
     "RETRIEVAL_COUNT_KEYS",
     "RETURNED",

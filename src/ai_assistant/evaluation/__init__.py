@@ -51,6 +51,18 @@ process, while the hub is stopped, behind the hub's own instance lock, driven by
 the console script in :mod:`ai_assistant.service.measures`. Nothing about the
 prohibition above is narrowed by its existence — the pipeline still holds no seam
 carrying the walk, and no measure is an input to anything the system does.
+
+**Leg 10's instrument is that same reader's second half** (ADR-0141). Its §10 reuses
+ADR-0120 §9's placement whole rather than opening a route: the interruption share and
+the duplicate share, and the five diagnostics beside them, are computed by that same
+walk and reach an operator through that same console script. What ADR-0141 added
+*outside* this package is a kind — ``TraceKind.NOTIFICATION`` — and an emitter at
+``NotificationStore``'s two ruling seams, because "what the stores hold is the
+present state of a set of records; what a measure of proactivity needs is a record of
+the rulings that produced it, and the two differ by exactly the events the question
+is about". So this package reads ``notifications.db`` no more than it reads
+``memory.db``: ADR-0120 §10's one-store rule is obeyed and ADR-0141 "opens no seventh
+door".
 """
 
 from __future__ import annotations

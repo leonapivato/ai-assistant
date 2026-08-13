@@ -14,7 +14,9 @@ reads like a quiet system rather than like a broken instrument.
 
 from __future__ import annotations
 
+from ai_assistant.core.types import DROP_CONDITIONS, INTERRUPT_CONDITIONS, NotificationCondition
 from ai_assistant.evaluation import _vocabulary as vocabulary
+from ai_assistant.memory import notification_traces as ruling_emitter
 from ai_assistant.memory import traces as emitters
 from ai_assistant.orchestration.engine import Engine
 
@@ -72,3 +74,50 @@ class TestSeamSets:
         """The content originates with the user; the act is the observation stage's."""
         assert vocabulary.OBSERVE_SEAM in vocabulary.USER_SEAMS
         assert vocabulary.OBSERVE_SEAM not in vocabulary.DIRECT_SEAMS
+
+
+class TestNotificationLiterals:
+    """ADR-0141 §10's last clause: the restated literals against the emitter's own.
+
+    "``evaluation`` may import only ``core``, so the emitter's keys are duplicated by
+    construction and the test is what keeps the two copies honest." A rename on
+    either side has to fail here — a measure over a key nobody writes is *undefined*
+    or zero, which reads like a quiet chassis rather than like a broken instrument.
+    """
+
+    def test_the_two_ruling_seams_match(self) -> None:
+        assert vocabulary.NOTIFICATION_ADMIT_SEAM == ruling_emitter.SEAM_ADMIT
+        assert vocabulary.NOTIFICATION_RECONSIDER_SEAM == ruling_emitter.SEAM_RECONSIDER
+
+    def test_the_three_disposition_keys_are_exactly_the_emitters(self) -> None:
+        """Keyed by member, so a key bound to the wrong disposition fails too."""
+        assert vocabulary.NOTIFICATION_DISPOSITION_KEYS == ruling_emitter.DISPOSITION_METRICS
+
+    def test_the_eight_condition_keys_are_exactly_the_emitters(self) -> None:
+        assert vocabulary.NOTIFICATION_CONDITION_KEYS == ruling_emitter.CONDITION_METRICS
+
+    def test_the_condition_roster_is_total_over_the_enumeration(self) -> None:
+        """§4 defines a key per member, so a member added later must fail loudly."""
+        assert set(vocabulary.NOTIFICATION_CONDITION_KEYS) == set(NotificationCondition)
+
+    def test_held_seconds_matches_and_is_not_read_as_a_count(self) -> None:
+        """§4: ``held_seconds`` "is **not** a count and the clause above does not reach it"."""
+        assert vocabulary.HELD_SECONDS == ruling_emitter.HELD_SECONDS
+        assert vocabulary.HELD_SECONDS not in vocabulary.NOTIFICATION_COUNT_KEYS
+        assert vocabulary.HELD_SECONDS in vocabulary.NOTIFICATION_METRIC_KEYS
+
+    def test_the_two_condition_halves_are_cores_own_groups_in_order(self) -> None:
+        """§4 states the split over ``DROP_CONDITIONS`` and ``INTERRUPT_CONDITIONS``."""
+        keys = vocabulary.NOTIFICATION_CONDITION_KEYS
+        assert tuple(keys[c] for c in DROP_CONDITIONS) == vocabulary.DROP_CONDITION_KEYS
+        assert tuple(keys[c] for c in INTERRUPT_CONDITIONS) == vocabulary.INTERRUPT_CONDITION_KEYS
+        assert not set(vocabulary.DROP_CONDITION_KEYS) & set(vocabulary.INTERRUPT_CONDITION_KEYS)
+
+    def test_the_count_keys_are_the_eleven_and_the_metric_keys_the_twelve(self) -> None:
+        """§5's two rosters: the count rule reads eleven, *incomplete* reads twelve."""
+        assert len(vocabulary.NOTIFICATION_COUNT_KEYS) == 11
+        assert len(set(vocabulary.NOTIFICATION_METRIC_KEYS)) == 12
+
+    def test_no_notification_key_collides_with_a_memory_key(self) -> None:
+        """The two rosters are disjoint, which is what lets one walk classify both."""
+        assert not set(vocabulary.NOTIFICATION_METRIC_KEYS) & set(vocabulary.COUNT_KEYS)

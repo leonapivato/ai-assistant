@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from datetime import datetime, timedelta
 
-    from ai_assistant.core.types import TraceKind
+    from ai_assistant.core.types import NotificationCondition, TraceKind
 
 _UNDEFINED = "undefined (denominator is zero)"
 _UNRENDERABLE = "too large to state as a decimal"
@@ -344,6 +344,163 @@ class StreamHealth:
 
 
 @dataclass(frozen=True, slots=True)
+class ConditionIncidence:
+    """One ADR-0141 condition key's §7 incidence over the well-formed population.
+
+    §7 states "the count of **well-formed** traces in the ruling population carrying
+    it, the count carrying it as ``1``, and their ratio", and requires each
+    condition's own carrying count beside its ratio, "never dividing one condition's
+    numerator by another's population". The four interrupt keys are absent from every
+    ``DROP``, "so their denominators are the non-``DROP`` rulings and not the ruling
+    population" — which falls out of counting carriers per key rather than needing a
+    second population.
+
+    Attributes:
+        condition: The member whose proposition this is.
+        key: The metric key the emitter writes it under.
+        carried: Well-formed traces carrying the key at all.
+        held: Those carrying it as ``1`` — the proposition held at the ruling.
+    """
+
+    condition: NotificationCondition
+    key: str
+    carried: int
+    held: int
+
+    @property
+    def rate(self) -> Rate:
+        """The share of the carriers on which the proposition held."""
+        return Rate(numerator=self.held, denominator=self.carried)
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationHealth:
+    """ADR-0141 §7's notification stream-health counts, over one window or part.
+
+    Not a completeness claim, for ADR-0120 §7's reason: a trace lost to an emission
+    failure is logged and never counted (ADR-0141 §9). These are the exclusions
+    ADR-0141's own rules caused.
+
+    Attributes:
+        walked: ``NOTIFICATION`` traces whose ``occurred_at`` lies in the window.
+        well_formed: §5's fourth state.
+        incomplete: §5's first — the ordinary pre-ruling fault path. Stated apart
+            from the two genuine faults "because it is not one": counting it beside
+            them "would make an outage look like an emitter bug".
+        malformed: §5's second.
+        counter_inconsistent: §5's third.
+        unclassified: In the ruling population, on neither of §5's two seams.
+        unclassified_seams: Each such seam, named so it can be classified.
+        misplaced_held_seconds: §7's misplacement count.
+        not_ok: Traces carrying an outcome other than ``OK``. Stated and never used
+            as a population test: §5 decides membership "by which keys a trace
+            carries and never by its ``TraceOutcome``".
+    """
+
+    walked: int
+    well_formed: int
+    incomplete: int
+    malformed: int
+    counter_inconsistent: int
+    unclassified: int
+    unclassified_seams: tuple[str, ...]
+    misplaced_held_seconds: int
+    not_ok: int
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationFigures:
+    """ADR-0141 §6's two measures and §7's five diagnostics, over a window or part.
+
+    §8 states every figure ADR-0141 defines "for each part of a partitioned window as
+    well as for the window entire", and says *figure* where ADR-0120 §8 says
+    *measure* — so the diagnostics cross the partition with the measures, which is
+    what §7's own preamble has them do anyway.
+
+    **No settling applies to any of these** (§8). "Nothing here looks forward from
+    its event": a ruling's numerator is the ruling itself, so a ruling made one
+    second before the window closed contributes exactly what one made on the first
+    day does, and no figure is withheld for want of a settling period.
+
+    Attributes:
+        start: The part's inclusive start.
+        end: The part's exclusive end.
+        interruption: §6's interruption share, over §5's ruling population.
+        duplicate: §6's duplicate share, over the well-formed offers alone.
+        interrupts: §7's disposition mix — the sum of ``ruled_interrupt``.
+        holds: The sum of ``ruled_hold``.
+        drops: The sum of ``ruled_drop``.
+        incidence: §7's condition incidence, in ADR-0130 §5's condition order.
+        held_latency: §7's held-to-interruption latency, in seconds.
+        held_first: §7's held-first share.
+        health: §7's notification stream-health counts.
+    """
+
+    start: datetime
+    end: datetime
+    interruption: Rate
+    duplicate: Rate
+    interrupts: int
+    holds: int
+    drops: int
+    incidence: tuple[ConditionIncidence, ...]
+    held_latency: Distribution
+    held_first: Rate
+    health: NotificationHealth
+
+    def rendered(self, label: str) -> list[str]:
+        """One block of notification figures, headed by which window it is over.
+
+        Args:
+            label: Which window this block is over.
+
+        Returns:
+            The lines, without a trailing blank.
+        """
+        return [
+            f"{label}  [{self.start:%Y-%m-%dT%H:%M:%S%z}, {self.end:%Y-%m-%dT%H:%M:%S%z})",
+            f"  interruption share (§6)     {self.interruption.rendered()}",
+            f"  duplicate share (§6)        {self.duplicate.rendered()}",
+            "  diagnostics — none of these is a measure",
+            f"    disposition mix (§7)      interrupt {self.interrupts}"
+            f"  hold {self.holds}  drop {self.drops}",
+            f"    held-first share (§7)     {self.held_first.rendered()}",
+            f"    held-to-interruption, s   {self.held_latency.rendered(places=3)}",
+            "    condition incidence (§7) — each ratio is over its own carrying count",
+            *(f"      {entry.key:<25} {entry.rate.rendered()}" for entry in self.incidence),
+            *_notification_health_lines(self.health),
+        ]
+
+
+def _notification_health_lines(health: NotificationHealth) -> list[str]:
+    """ADR-0141 §7's counts, each under the rule that produced it."""
+    lines = [
+        f"    notification traces walked  {health.walked}",
+        f"      well-formed (§5)          {health.well_formed}",
+        f"      incomplete (§5)           {health.incomplete}"
+        "  — raised before its ruling committed, not a defect",
+        f"      malformed (§5)            {health.malformed}",
+        f"      counter-inconsistent (§5) {health.counter_inconsistent}",
+        f"      unclassified seam (§5)    {health.unclassified}",
+        f"      misplaced held_seconds    {health.misplaced_held_seconds}",
+        f"      outcome other than ok     {health.not_ok}",
+    ]
+    if health.unclassified_seams:
+        lines.append(f"      unclassified seams met    {', '.join(health.unclassified_seams)}")
+    return lines
+
+
+#: ADR-0141 §9's second normative clause: "The report states, beside the measures,
+#: that no figure it carries is evidence about whether contact was welcome."
+_WELCOME_LIMIT = (
+    "no figure above is evidence about whether contact was welcome (ADR-0141 §9). Each is",
+    "a rate over rulings the system made: what was proposed, what was let through, and",
+    "what stopped the rest. Whether a notification was delivered, was read, or was wanted",
+    "is recorded nowhere in this tree, and no figure here approximates it.",
+)
+
+
+@dataclass(frozen=True, slots=True)
 class MeasureReport:
     """What one run of the reporting tool produced.
 
@@ -364,6 +521,12 @@ class MeasureReport:
             Empty when the configuration never moved.
         latency: §7's per-seam operation latency, in seam order.
         health: §7's stream-health counts, or ``None``.
+        notifications: ADR-0141's figures over the window entire, or ``None`` on a
+            refusal or an empty stream. ADR-0141 §8 adopts ADR-0120 §8's window
+            rules "unchanged", so the refusal and the empty-stream statement reach
+            these figures exactly as they reach the measures above.
+        notification_parts: The same per part of a partitioned window, over the
+            same cuts as :attr:`parts`. Empty when the configuration never moved.
     """
 
     refusal: str | None = None
@@ -374,6 +537,8 @@ class MeasureReport:
     parts: tuple[Part, ...] = ()
     latency: tuple[SeamLatency, ...] = ()
     health: StreamHealth | None = None
+    notifications: NotificationFigures | None = None
+    notification_parts: tuple[NotificationFigures, ...] = ()
 
     def render(self) -> str:
         """The whole report as text the entry point prints.
@@ -397,7 +562,33 @@ class MeasureReport:
         for ordinal, part in enumerate(self.parts, start=1):
             lines += ["", *_part_lines(part, f"part {ordinal} of {len(self.parts)}")]
         lines += ["", *self._diagnostic_lines()]
+        lines += self._notification_lines()
         return "\n".join(lines)
+
+    def _notification_lines(self) -> list[str]:
+        """ADR-0141's section: §6's measures, §7's diagnostics, §9's limit.
+
+        Its own section rather than folded into :meth:`_part_lines`, so each ADR's
+        figure set reads as the text that defines it and the two share one
+        *partition* rather than one block. §8's per-part requirement is met by
+        restating the section for each part, over the same cuts.
+
+        Empty where no figures were computed. That is the report a refusal and an
+        empty stream produce — both of which :meth:`render` has already returned
+        before reaching here — and the one a caller constructing a
+        :class:`MeasureReport` by hand produces. A zero notification population is
+        *not* that case: it computes, and every rate over it is stated as
+        **undefined** rather than omitted, which is ADR-0120 §1's rule and the one
+        ADR-0141 §6 restates for its own.
+        """
+        if self.notifications is None:
+            return []
+        lines = ["", "notification measures (ADR-0141) — rates over rulings, not over records"]
+        lines += ["", *self.notifications.rendered("the window entire")]
+        for ordinal, part in enumerate(self.notification_parts, start=1):
+            label = f"part {ordinal} of {len(self.notification_parts)}"
+            lines += ["", *part.rendered(label)]
+        return [*lines, "", *_WELCOME_LIMIT]
 
     def _heading(self) -> list[str]:
         """The window, the settling, and what the numbers are not."""
