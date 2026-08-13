@@ -23,8 +23,11 @@ from enum import StrEnum
 from hashlib import sha256
 from math import isfinite
 from typing import Annotated, Any, Final, Literal, assert_never
+from urllib.parse import unquote
 from uuid import uuid4
 
+from jsonschema.exceptions import SchemaError, ValidationError
+from jsonschema.validators import Draft202012Validator
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -5058,6 +5061,523 @@ type TierReach = Annotated[tuple[DataTier, ...], AfterValidator(_ordered_tiers)]
 """Data tiers a tool may touch: sorted most-sensitive-first, de-duplicated."""
 
 
+# --- tool argument schemas: one dialect, read once (ADR-0145) ----------------
+# `ToolDefinition.parameters_schema` is the only schema this system reads, and
+# ADR-0145 §5 fixes its dialect at JSON Schema draft 2020-12. Both halves of the
+# rule live here on ADR-0016 §2's intrinsic test: the answer is computable from
+# the schema and the arguments alone, independent of policy, configuration,
+# context and clock, and the same for every consumer. `orchestration` needs it to
+# decide whether to ask for a ruling at all and `tools` needs it to hold at the
+# seam; golden rule 1 forbids either importing the other, so one implementation
+# here is the only one that cannot become two free to disagree.
+#
+# Every walk below is **iterative**. The documents are authored by whoever wrote
+# the tool — under leg 12, by a server this repository does not control — and a
+# recursive walk is the first thing a deeply nested one exhausts, before the
+# bound that exists to refuse it has been measured (ADR-0145 §6).
+
+
+_SCHEMA_DIALECT: Final = "https://json-schema.org/draft/2020-12/schema"
+"""The one dialect read, and the ``$schema`` value that may declare it.
+
+ADR-0145 §5: a schema carrying no ``$schema`` is read as 2020-12, and one naming
+any other dialect is refused rather than reinterpreted. The empty-fragment
+spelling is accepted alongside the bare URI because it is the *same* URI and so
+declares the same dialect — accepting it reinterprets nothing.
+"""
+
+_MAX_SCHEMA_DEPTH: Final = 64
+"""How deeply a ``parameters_schema`` may nest (ADR-0145 §6).
+
+One constant, not configurable and not per-tool, fixed low enough that a schema
+at the bound evaluated against an instance of comparable depth completes well
+inside the interpreter's recursion limit — evaluation costs roughly two Python
+frames per level against a limit of 1000, and
+``test_a_schema_at_the_depth_bound_evaluates_within_the_recursion_limit`` is what
+keeps that a measurement rather than a claim. Real tool schemas nest well under
+ten levels, so the bound is headroom rather than a ceiling anyone meets.
+
+The **instance** half is deliberately unbounded here: a deep parameter mapping
+exhausts the stack in :func:`_deep_freeze` on the way in, before any schema
+evaluation exists to bound it, and fixing that reaches every holder of a
+:data:`FrozenJsonMapping` (issue #1107, ADR-0145 §14).
+"""
+
+_MAX_REPORTED_VIOLATIONS: Final = 100
+"""How many violations :func:`parameter_violations` reports before truncating."""
+
+_TRUNCATION_KEYWORD: Final = "<truncated>"
+"""The reserved :attr:`ParameterViolation.keyword` that states a truncation.
+
+ADR-0145 §8 requires that "any truncation is stated in what is reported rather
+than performed silently", so the report says so in its own vocabulary. No JSON
+Schema keyword can collide with it: keywords are bare identifiers and this is
+not one.
+"""
+
+_ELIDED_SEGMENT: Final = "<elided>"
+"""What stands in a violation path for a key the schema does not name (§8)."""
+
+_REFUSAL_DETAIL_LIMIT: Final = 3
+"""How many violations a construction refusal names before saying "and N more"."""
+
+
+def _json_nodes(value: object) -> Iterator[tuple[tuple[str | int, ...], object]]:
+    """Yield every node of a JSON document with its location, without recursing.
+
+    The location is a tuple of mapping keys and sequence indices, in the same
+    form :func:`_resolve_local_reference` produces, so a resolved reference and a
+    walked node are comparable without a second spelling of "where".
+    """
+    stack: list[tuple[tuple[str | int, ...], object]] = [((), value)]
+    while stack:
+        path, item = stack.pop()
+        yield path, item
+        if isinstance(item, Mapping):
+            stack.extend(((*path, str(key)), child) for key, child in item.items())
+        elif isinstance(item, Sequence) and not isinstance(item, str):
+            stack.extend(((*path, index), child) for index, child in enumerate(item))
+
+
+def _json_depth(value: object, limit: int) -> int:
+    """Return how deeply ``value`` nests containers, stopping once past ``limit``.
+
+    A scalar is depth 0 and ``{}`` is depth 1, so the figure counts containers
+    rather than levels of anything else. Breadth-first with an explicit frontier,
+    for the reason the section header gives.
+    """
+    depth = 0
+    frontier: list[object] = [value]
+    while frontier and depth <= limit:
+        children: list[object] = []
+        holds_container = False
+        for item in frontier:
+            if isinstance(item, Mapping):
+                holds_container = True
+                children.extend(item.values())
+            elif isinstance(item, Sequence) and not isinstance(item, str):
+                holds_container = True
+                children.extend(item)
+        if not holds_container:
+            break
+        depth += 1
+        frontier = children
+    return depth
+
+
+def _pointer_step(current: object, token: str) -> tuple[str | int, object] | None:
+    """Take one RFC 6901 step through ``current``, or ``None`` if it does not exist."""
+    if isinstance(current, Mapping):
+        if token in current:
+            return token, current[token]
+        return None
+    if isinstance(current, Sequence) and not isinstance(current, str):
+        if token.isascii() and token.isdigit() and int(token) < len(current):
+            return int(token), current[int(token)]
+        return None
+    return None
+
+
+def _resolve_local_reference(
+    document: Mapping[str, FrozenJson],
+    reference: str,
+    anchors: Mapping[str, tuple[str | int, ...]],
+) -> tuple[str | int, ...] | None:
+    """Resolve a same-document ``$ref`` to the location it names, or ``None``.
+
+    This *is* ADR-0145 §6's "registry containing that one document and nothing
+    else": the only thing a reference can name is a location in ``document``, so
+    resolution has no reachable path that could retrieve anything (§7). A
+    reference naming a location that does not exist, or one holding something
+    that is not a schema, returns ``None`` — which §6 turns into a definition
+    that does not load rather than a call that fails.
+    """
+    fragment = unquote(reference[1:])
+    if not fragment:
+        return ()
+    if not fragment.startswith("/"):
+        return anchors.get(fragment)
+    path: list[str | int] = []
+    current: object = document
+    for raw in fragment.split("/")[1:]:
+        step = _pointer_step(current, raw.replace("~1", "/").replace("~0", "~"))
+        if step is None:
+            return None
+        key, current = step
+        path.append(key)
+    if not isinstance(current, Mapping | bool):
+        return None
+    return tuple(path)
+
+
+def _reference_cycle(
+    targets: Mapping[tuple[str | int, ...], tuple[str | int, ...]],
+) -> bool:
+    """Report whether the reference graph contains a cycle (ADR-0145 §6).
+
+    A plain reachability walk over ``$ref`` targets, which is what §6 chose over
+    classifying keywords as instance-consuming or not: it is decidable, total and
+    has no subtle case to get wrong, at the cost of refusing a genuinely
+    recursive argument along with the divergent ones.
+
+    The nodes are the root and every reference *target*; there is an edge from a
+    node to every target named by a ``$ref`` lying at or below it. The root lies
+    above everything, so every node is reachable from it and one walk sees the
+    whole graph.
+    """
+    nodes = {(), *targets.values()}
+    edges = {
+        node: {target for location, target in targets.items() if location[: len(node)] == node}
+        for node in nodes
+    }
+    grey: set[tuple[str | int, ...]] = set()
+    black: set[tuple[str | int, ...]] = set()
+    for start in nodes:
+        if start in black:
+            continue
+        stack = [(start, iter(edges[start]))]
+        grey.add(start)
+        while stack:
+            node, remaining = stack[-1]
+            child = next(remaining, None)
+            if child is None:
+                stack.pop()
+                grey.discard(node)
+                black.add(node)
+            elif child in grey:
+                return True
+            elif child not in black:
+                grey.add(child)
+                stack.append((child, iter(edges[child])))
+    return False
+
+
+def _keyword_placement_defect(
+    path: tuple[str | int, ...],
+    item: Mapping[str, object],
+    anchors: dict[str, tuple[str | int, ...]],
+) -> str | None:
+    """Check one subschema's identity keywords, recording any ``$anchor`` it declares.
+
+    Each exclusion is a case where a ``#``-prefixed reference stops meaning
+    "somewhere in this document" (ADR-0145 §6): a subschema ``$id`` re-bases
+    resolution, so a reference that reads local resolves elsewhere, and a dynamic
+    reference is resolved against the dynamic scope at evaluation time, so what it
+    points at is not a property of the document a reviewer is reading. Neither is
+    needed to describe a tool's arguments, and refusing both keeps
+    "self-contained" a fact a reader can check by looking.
+
+    A repeated ``$anchor`` is refused for a different reason: nothing decides
+    which of the two a reference names, and an ambiguous resolution is not a
+    resolution.
+    """
+    if "$dynamicRef" in item or "$dynamicAnchor" in item:
+        return "a dynamic reference is resolved against the evaluation scope, so it is refused"
+    if "$id" in item and path != ():
+        return "a subschema $id re-bases resolution, so $id is permitted only at the root"
+    anchor = item.get("$anchor")
+    if isinstance(anchor, str):
+        if anchor in anchors:
+            return "two subschemas declare the same $anchor, so a reference to it is ambiguous"
+        anchors[anchor] = path
+    return None
+
+
+def _reference_model_defect(document: Mapping[str, FrozenJson]) -> str | None:
+    """Return how ``document`` breaches ADR-0145 §6's reference model, or ``None``.
+
+    Every ``$ref`` begins with ``#`` and resolves inside the document, ``$id``
+    appears at the root or not at all, ``$dynamicRef``/``$dynamicAnchor`` do not
+    appear, ``$anchor`` is permitted, and the reference graph is acyclic.
+
+    **The scan treats these keys as keywords wherever they appear**, including
+    inside a ``const`` or an ``enum`` value that happens to be shaped like a
+    schema. Telling the two apart means implementing 2020-12's keyword structure
+    inside the very check whose job is to be trustworthy about documents from
+    untrusted servers, and the over-approximation fails closed: the cost is that
+    a tool whose ``const`` contains a ``$ref``-shaped object does not load, and
+    §9's rule for an adapter meeting one is to restate the schema or refuse it.
+    """
+    anchors: dict[str, tuple[str | int, ...]] = {}
+    references: list[tuple[tuple[str | int, ...], str]] = []
+    for path, item in _json_nodes(document):
+        if not isinstance(item, Mapping):
+            continue
+        placement = _keyword_placement_defect(path, item, anchors)
+        if placement is not None:
+            return placement
+        reference = item.get("$ref")
+        if reference is None:
+            continue
+        if not isinstance(reference, str) or not reference.startswith("#"):
+            return "every $ref must begin with '#', so nothing outside this document is named"
+        references.append((path, reference))
+    targets: dict[tuple[str | int, ...], tuple[str | int, ...]] = {}
+    for location, reference in references:
+        target = _resolve_local_reference(document, reference, anchors)
+        if target is None:
+            return "a $ref names no schema in this document"
+        targets[location] = target
+    if _reference_cycle(targets):
+        return "the reference graph contains a cycle, so evaluating it would not terminate"
+    return None
+
+
+def _root_type_defect(document: Mapping[str, FrozenJson]) -> str | None:
+    """Return why the root ``type`` excludes an object, or ``None`` (ADR-0145 §6).
+
+    Deliberately syntactic, and deliberately not a satisfiability rule.
+    :attr:`ActionRequest.parameters` is a mapping, so a root saying
+    ``"type": "string"`` is a definition no call could ever satisfy — the mistake
+    an adapter makes by pasting the wrong schema, caught by one keyword lookup at
+    the moment the definition is built. What it does not decide is whether *some*
+    object satisfies the schema, which no construction check can answer in
+    general: ``{"not": {}}`` — the object spelling of ``false`` — loads, and fails
+    visibly on the first call.
+    """
+    declared = document.get("type")
+    if declared is None:
+        return None
+    if isinstance(declared, str):
+        admits_object = declared == "object"
+    elif isinstance(declared, Sequence):
+        admits_object = "object" in declared
+    else:  # pragma: no cover - meta-validation has already refused this shape
+        admits_object = False
+    if admits_object:
+        return None
+    return "its root `type` does not admit an object, so no call could satisfy it"
+
+
+def _unreadable_schema_reason(schema: Mapping[str, FrozenJson], /) -> str | None:
+    """Return why ``schema`` cannot be read as draft 2020-12, or ``None`` if it can.
+
+    ADR-0145 §6's construction check, in one place: schema validity "is a
+    ``ToolDefinition`` construction check and nothing else", so it runs wherever a
+    definition is constructed — including the defensive rebuilds ADR-0018 §4,
+    :func:`_detached_tool` and ADR-0029 §2's step 1 already perform — and no later
+    stage adds a schema check of its own.
+
+    **The order is load-bearing.** Depth is measured first, iteratively, because
+    every check after it walks the document recursively and would exhaust the
+    stack on a document deep enough to matter. The declared dialect comes next,
+    because a draft-07 schema must be *refused* rather than meta-validated as
+    2020-12 and silently read under semantics its author did not use. Only then is
+    the document meta-validated, which is what lets the reference and root-type
+    checks assume a well-formed ``$ref``, ``$anchor`` and ``type``.
+
+    Every reason returned describes the *schema*, which is Tier 2 configuration
+    authored by the tool's provider; nothing here reads a call's arguments, so
+    §8's rule about rendering them is not in play.
+
+    Args:
+        schema: A candidate ``parameters_schema``, frozen or plain.
+
+    Returns:
+        A short reason, or ``None`` when the schema is readable.
+    """
+    if _json_depth(schema, _MAX_SCHEMA_DEPTH) > _MAX_SCHEMA_DEPTH:
+        return f"it nests deeper than {_MAX_SCHEMA_DEPTH} levels"
+    declared = schema.get("$schema")
+    if declared is not None and declared not in (_SCHEMA_DIALECT, f"{_SCHEMA_DIALECT}#"):
+        return "it declares a $schema other than JSON Schema draft 2020-12"
+    try:
+        Draft202012Validator.check_schema(_thaw_json(schema))
+    except SchemaError as exc:
+        return f"it is not a valid draft 2020-12 schema (at {exc.json_path})"
+    return _reference_model_defect(schema) or _root_type_defect(schema)
+
+
+class ParameterViolation(BaseModel):
+    """One way a call's arguments fail the tool's declared schema (ADR-0145 §2).
+
+    **It carries no field that could hold an argument value, and that is the
+    enforcement of ADR-0145 §8 rather than a description of it.** A renderer that
+    wanted to interpolate the instance would have to obtain it from somewhere
+    other than a violation. The reference implementation puts the instance into
+    its own message text — ``'alice@example.com' is not of type 'integer'``, and
+    ``Additional properties are not allowed ('X-Secret' was unexpected)`` — and
+    ``core/logging.py`` redacts by *key*, so a rendered message is a leak with no
+    downstream catcher (ADR-0029 §3). Nothing derived from that text reaches this
+    type.
+
+    The accepted cost is a thinner diagnostic: an ``additionalProperties``
+    violation says *where* and *which keyword*, not which key. The producer of the
+    arguments already holds them; what it lacked was the constraint, which the
+    three fields below supply exactly.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: EncodableText = Field(
+        description="RFC 6901 JSON Pointer to the failing location; '' is the root.",
+    )
+    keyword: EncodableText = Field(description="The schema keyword that failed.")
+    schema_value: FrozenJsonValue = Field(
+        description="The schema's own value for that keyword.",
+    )
+
+
+def _schema_named_properties(document: object) -> frozenset[str]:
+    """Collect the property names the schema itself names (ADR-0145 §8).
+
+    §8 permits a violation path to carry "property names the schema itself
+    names", and requires a key the schema does not name to be elided rather than
+    reproduced — because a mapping the schema does not describe can be keyed by an
+    address or an identifier. This is the positive half of that rule, and it is
+    stated as a property rather than as an enumeration: **a path segment is
+    rendered only when the string occurs in the schema document**, so whatever
+    reaches a log was already Tier 2 configuration.
+
+    ``patternProperties`` keys are deliberately absent: they are regular
+    expressions, and a key matching one is not a key the schema named.
+    """
+    names: set[str] = set()
+    for _path, item in _json_nodes(document):
+        if not isinstance(item, Mapping):
+            continue
+        for keyword in ("properties", "dependentSchemas", "dependentRequired"):
+            named = item.get(keyword)
+            if isinstance(named, Mapping):
+                names.update(key for key in named if isinstance(key, str))
+        required = item.get("required")
+        if isinstance(required, Sequence) and not isinstance(required, str):
+            names.update(entry for entry in required if isinstance(entry, str))
+        dependent = item.get("dependentRequired")
+        if isinstance(dependent, Mapping):
+            for listed in dependent.values():
+                if isinstance(listed, Sequence) and not isinstance(listed, str):
+                    names.update(entry for entry in listed if isinstance(entry, str))
+    return frozenset(names)
+
+
+def _violation_path(location: Sequence[str | int], named: frozenset[str]) -> str:
+    """Compose ADR-0145 §8's path: indices, named properties, and elisions."""
+    segments: list[str] = []
+    for part in location:
+        if isinstance(part, int):
+            segments.append(str(part))
+        elif part in named:
+            segments.append(part.replace("~", "~0").replace("/", "~1"))
+        else:
+            segments.append(_ELIDED_SEGMENT)
+    return "".join(f"/{segment}" for segment in segments)
+
+
+def _violation_of(error: ValidationError, named: frozenset[str]) -> ParameterViolation:
+    """Turn one library error into the three schema-side facts §8 permits."""
+    keyword = error.validator if isinstance(error.validator, str) else "schema"
+    # `validator_value` is the schema's own value for the failing keyword, and it
+    # came out of the thawed document — so it is JSON by construction. The one
+    # exception is the library's "unset" sentinel, carried by an error synthesised
+    # without a keyword; that is not a schema value and is reported as `None`
+    # rather than guessed at or rendered.
+    declared: object = error.validator_value
+    schema_value: FrozenJson = (
+        declared if isinstance(declared, str | bool | int | float | Mapping | Sequence) else None
+    )
+    return ParameterViolation(
+        path=_violation_path(list(error.absolute_path), named),
+        keyword=keyword,
+        schema_value=schema_value,
+    )
+
+
+def _violation_order(violation: ParameterViolation) -> tuple[str, str, bytes]:
+    """Order violations totally, so the same call reports the same list twice.
+
+    The library yields errors in whatever order it walked the instance, and for
+    ``additionalProperties`` that walk is over a set. ADR-0145 §8 requires a
+    deterministic order, so one is imposed here rather than inherited.
+    """
+    return (
+        violation.path,
+        violation.keyword,
+        _canonical_bytes(_thaw_json(violation.schema_value)),
+    )
+
+
+def parameter_violations(
+    schema: Mapping[str, FrozenJson], parameters: Mapping[str, FrozenJson], /
+) -> tuple[ParameterViolation, ...]:
+    """Report every way ``parameters`` fails ``schema`` (ADR-0145 §2).
+
+    The ordinary path: a stage computes the violations *before* it constructs an
+    :class:`ActionRequest` and before it requests a permission ruling, so it gets
+    a structured answer rather than an exception it would have to classify
+    (ADR-0145 §2, §4). :meth:`ActionRequest.parameters_satisfy_the_schema` is the
+    backstop for a caller that does not; it is never a substitute for the
+    obligation on the stage.
+
+    **An empty schema declares no constraint** and every mapping satisfies it
+    (ADR-0145 §9). That is today's behaviour for a tool that declares nothing, it
+    is not an error, and it is not a claim that the arguments were checked.
+
+    **Nothing is modified and nothing is retrieved.** No ``default`` is applied
+    and no value is coerced, so the mapping evaluated is the same canonical form
+    :attr:`ActionRequest.parameters_digest` is taken over — filling a default
+    would change the arguments after the caller chose them and before the digest
+    binds them. The evaluator is built with no retriever, which is the library's
+    own default, so a reference outside the document raises rather than fetching:
+    a validator that fetched would be an unauthorised egress performed from
+    ``core`` (ADR-0004 §2, ADR-0017 §1) and would make what a call may contain
+    depend on a document a third party can change between one call and the next.
+
+    **The schema is assumed readable, and its validity is never re-established
+    here** (ADR-0145 §6): a :class:`ToolDefinition` in hand was built by some
+    construction, and every construction runs
+    :func:`_unreadable_schema_reason`. Handed an unreadable schema anyway, this
+    raises rather than reporting — which ADR-0145 §7 makes a refusal of the step
+    at the selection stage, never a pass.
+
+    Args:
+        schema: The tool's declared ``parameters_schema``.
+        parameters: The arguments proposed for the call.
+
+    Returns:
+        The violations, in a deterministic order, capped at
+        ``_MAX_REPORTED_VIOLATIONS``. Where the cap bit, a final violation whose
+        :attr:`~ParameterViolation.keyword` is ``"<truncated>"`` carries the total
+        number found, so a truncation is stated rather than performed silently
+        (ADR-0145 §8).
+
+    Raises:
+        Exception: Whatever the evaluation raised. Callers must treat that as a
+            refusal and may name the exception's **type** and nothing else —
+            ADR-0145 §7 forbids rendering, logging or storing its ``str()``,
+            ``args``, ``__cause__`` or ``__notes__``, because a schema that raises
+            on demand would otherwise be the one path on which an untrusted
+            document makes the argument values arrive in the log.
+    """
+    if not schema:
+        return ()
+    document = _thaw_json(schema)
+    named = _schema_named_properties(document)
+    validator = Draft202012Validator(document)
+    found = sorted(
+        (_violation_of(error, named) for error in validator.iter_errors(_thaw_json(parameters))),
+        key=_violation_order,
+    )
+    if len(found) <= _MAX_REPORTED_VIOLATIONS:
+        return tuple(found)
+    truncation = ParameterViolation(path="", keyword=_TRUNCATION_KEYWORD, schema_value=len(found))
+    return (*found[:_MAX_REPORTED_VIOLATIONS], truncation)
+
+
+def _refused_parameters(violations: Sequence[ParameterViolation]) -> str:
+    """Say which constraints the arguments missed, naming no argument (§8).
+
+    Only the schema-side facts a :class:`ParameterViolation` carries reach this
+    string, and only the first few of them: the message is a refusal, not a
+    report, and the caller that wants the whole list calls
+    :func:`parameter_violations` for it.
+    """
+    limit = _REFUSAL_DETAIL_LIMIT
+    shown = ", ".join(f"{one.keyword} at {one.path or '/'}" for one in violations[:limit])
+    more = "" if len(violations) <= limit else f", and {len(violations) - limit} more"
+    return f"parameters do not satisfy the tool's parameters_schema: {shown}{more}"
+
+
 # --- tools: the declaration a permission decision rules on (ADR-0016 §1) -----
 # States facts and draws no conclusions — `permissions` does that (ADR-0016
 # §3). Every field a decision depends on is required, because a default is a
@@ -5108,7 +5628,7 @@ class ToolDefinition(BaseModel):
     )
     parameters_schema: FrozenJsonMapping = Field(
         default=_EMPTY_PARAMS,
-        description="JSON Schema for the call's arguments; carried, not yet enforced.",
+        description="JSON Schema (draft 2020-12) for the call's arguments; enforced by ADR-0145.",
     )
 
     @field_validator("description")
@@ -5264,6 +5784,42 @@ class ToolDefinition(BaseModel):
             raise ValueError(self._unstorable(exc)) from exc
         if not _is_encodable(rendered):
             raise ValueError(self._unstorable(None))
+        return self
+
+    @model_validator(mode="after")
+    def _schema_is_readable(self) -> ToolDefinition:
+        """Refuse a ``parameters_schema`` this repository cannot read (ADR-0145 §6).
+
+        Fail-closed, in ADR-0016 §1's direction: "a tool that does not declare its
+        reach does not load", because a construction error beats a silent
+        under-protection. A schema nobody can evaluate is a declaration nobody can
+        check, and it gets the same answer.
+
+        **One check on the type, inherited by every stage that rebuilds one.** The
+        repository already revalidates a definition wherever it could have been
+        tampered with — ADR-0018 §4's registry rebuild, :func:`_detached_tool` on
+        the way into an :class:`ActionRequest`, and ADR-0029 §2's step 1 at the
+        seam — so putting it here places it at all of them at once, with no
+        per-stage rule to keep in step and no ``ToolRegistrationError`` case added.
+        That is also what closes the corruption route: a definition mutated through
+        ``object.__setattr__`` into carrying a remote ``$ref`` is refused by the
+        revalidation those clauses already mandate rather than surviving to
+        evaluation. A ``model_validator`` specifically, for the reason
+        :meth:`_is_storable` gives — pydantic re-runs an ``after`` model validator
+        when an existing instance is assigned to a model-typed field, and does not
+        re-run field validators.
+
+        What follows for every later stage is that it may assume a readable schema:
+        evaluating a call's arguments never re-establishes the validity of the
+        document it evaluates against.
+
+        Raises:
+            ValueError: If the schema is not a readable draft 2020-12 schema.
+        """
+        reason = _unreadable_schema_reason(self.parameters_schema)
+        if reason is not None:
+            msg = f"parameters_schema cannot be read: {reason}"
+            raise ValueError(msg)
         return self
 
     @property
@@ -5468,7 +6024,17 @@ class ActionRequest(BaseModel):
     credential is a weakened copy of it, not an absence of one.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    # `hide_input_in_errors` is ADR-0145 §8's rule applied to the envelope rather
+    # than only to the message inside it: "no message ... renders any part of the
+    # parameters — neither a value nor a key", and pydantic otherwise appends
+    # `input_value=` to every validation error it raises about this model, which
+    # is the whole payload. That exposure pre-dates this decision — a non-finite
+    # float in `parameters` already renders them — but ADR-0145 puts a refusal
+    # that reads the arguments on a path that runs constantly, so a clean message
+    # inside a leaking envelope would be no rule at all. What is lost is the
+    # input echo on this model's *other* errors; what is kept is the field name,
+    # the error type and the message, which is what names the defect anyway.
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     tool: Annotated[ToolDefinition, AfterValidator(_detached_tool)] = Field(
         description="The declaration being ruled on, by value."
@@ -5515,6 +6081,68 @@ class ActionRequest(BaseModel):
         every decision about that request unconstructable, at the gate.
         """
         return sha256(_canonical_json(self.parameters)).hexdigest()
+
+    @model_validator(mode="after")
+    def _parameters_satisfy_the_schema(self) -> ActionRequest:
+        """Refuse arguments the tool's declared schema rejects (ADR-0145 §1).
+
+        **Before the ruling, not after it, and the ordering is the substance.**
+        ``tool.parameters_schema`` and ``parameters`` first sit on one object here,
+        and that is not a coincidence of layout: an :class:`ActionRequest` *is* the
+        pairing of a chosen tool with the arguments proposed for it, and everything
+        downstream of it is either a ruling on those arguments or an execution of
+        them. Four things happen between the request and the call, and each spends
+        something a later check cannot take back — the user is asked, the
+        append-only Tier 1 trail is written, the step is claimed ``RUNNING``, and
+        :attr:`PermissionDecision.parameters_digest` binds the payload as given. A
+        request that was never built cannot be ruled on, recorded, claimed or
+        digested, so checking at construction reaches all four *without anything
+        being sequenced correctly*.
+
+        **This holds for every validated construction**, with no exception for a
+        confirmation resume, a replay or a test.
+
+        **The bypass is inside the threat model and this clause does not claim
+        otherwise.** ``model_construct`` skips every validator and ``frozen=True``
+        does not survive a ``__dict__`` write, exactly as ADR-0029 §2 records — and
+        the answer is the same one that ADR gives: the validator "catches the honest
+        mistake at the point it is made", and the seam holds against a deliberate
+        one, because ADR-0029 §2's step 1 revalidates the whole call through
+        ADR-0018 §4's dump/validate idiom and therefore re-runs this validator. So
+        ``invoke`` gains no fourth check; a call reaching a callable with arguments
+        its schema rejects is unreachable without defeating both.
+
+        **This is the backstop, not the obligation.** ADR-0145 §2 puts the duty on
+        the stage that binds a tool to a step's arguments: it computes the
+        violations first and requests no ruling when there are any (as ADR-0144 §7's
+        eligibility filter, ahead of any ordering key). This makes §1's refusal true
+        of every request built through validation rather than of the ones a caller
+        remembered to check.
+
+        **An evaluation that raises is a refusal, and may say only the exception's
+        type.** ADR-0145 §7 forbids rendering, logging or storing anything else
+        derived from it — not ``str()``, not ``args``, not ``__cause__``, not
+        ``__notes__`` — because a ``ValidationError``'s text carries the instance
+        fragments the walk was holding, and a schema that raises on demand would
+        otherwise be the one path on which an untrusted document makes the argument
+        values arrive in the log. Hence ``from None``: the chain is dropped
+        deliberately, not lost.
+
+        Raises:
+            ValueError: If the arguments violate the schema, or the evaluation
+                raised rather than reporting.
+        """
+        try:
+            violations = parameter_violations(self.tool.parameters_schema, self.parameters)
+        except Exception as exc:
+            msg = (
+                "the tool's parameters_schema could not be evaluated, so the arguments are "
+                f"refused ({type(exc).__name__})"
+            )
+            raise ValueError(msg) from None
+        if violations:
+            raise ValueError(_refused_parameters(violations))
+        return self
 
 
 class PermissionRuling(BaseModel):
@@ -6319,14 +6947,20 @@ class Confirmation(BaseModel):
 class Disposition(StrEnum):
     """What became of one plan step at the runner stage (ADR-0037 §1, §4, §5).
 
-    Five members, and the two that commit nothing are as much a result as the
+    Six members, and the three that commit nothing are as much a result as the
     three that do: a step the stage declines to act on is a fact its caller has to
     be told, not an error.
 
-    **Relocating an enum is not redefining it** (ADR-0084 §4). It keeps its five
-    members and everything ADR-0037 ratified about them, including §8's refusal of
-    a ``FAILED`` member, and the ``StrEnum`` base is unchanged so every existing
+    **Relocating an enum is not redefining it** (ADR-0084 §4). It kept its members
+    and everything ADR-0037 ratified about them, including §8's refusal of a
+    ``FAILED`` member, and the ``StrEnum`` base is unchanged so every existing
     value string is byte-identical on the wire.
+
+    ``INVALID_PARAMETERS`` is ADR-0145 §4's addition, and adding a member is
+    additive on the wire for the same reason (ADR-0084 §4): the values are
+    ``StrEnum`` strings a client reads, and the exposure is bounded by deployment
+    rather than by a compatibility rule, since the hub is loopback-only and ships
+    with its client from one install.
     """
 
     EXECUTED = "executed"
@@ -6348,6 +6982,31 @@ class Disposition(StrEnum):
     AMBIGUOUS_CAPABILITY = "ambiguous_capability"
     """Several tools advertise it and no rule chooses between them (ADR-0037 §1,
     #241). Nothing is committed and the step stays ``PENDING``."""
+
+    INVALID_PARAMETERS = "invalid_parameters"
+    """The step's parameters were not established as acceptable to any tool that
+    could have run them (ADR-0145 §4).
+
+    **One definition and two causes.** Either the evaluation reported violations
+    for every capable candidate, so ADR-0144 §7's eligibility filter left the set
+    empty; or an evaluation *raised* rather than reporting anything, which ADR-0145
+    §7 makes a refusal of the step rather than of the candidate that raised —
+    continuing to rank over the remainder would be selecting under an unknown. What
+    separates them is what is reported alongside: violations for the first, none
+    for the second. They are one member because the pipeline's answer is identical
+    and both are corrected the same way, by different arguments — which is a
+    different request. A second member would be a distinction a client cannot act
+    on differently.
+
+    **It commits nothing:** no ruling is requested, no audit record is written, no
+    claim is made, and the step stays ``PENDING``. It is terminal for the turn that
+    met it and for nothing beyond it. This is ``AMBIGUOUS_CAPABILITY``'s shape and
+    ADR-0037 §1's argument for it transfers unchanged — no ``SkipReason`` is true
+    of it, because ``NO_CAPABLE_TOOL`` is a lie when the tools were capable and the
+    arguments were not, and writing a falsehood into durable state to tidy a return
+    value is what ADR-0014 §4's legal-skip table exists to prevent. It is likewise
+    not the ``FAILED`` member ADR-0037 refused: it asserts nothing about the step's
+    status and writes nothing."""
 
 
 class StepOutcome(BaseModel):
