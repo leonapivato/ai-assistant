@@ -28,8 +28,11 @@ rejection the deployment change makes *more* load-bearing rather than less — a
 co-located fetcher is the pattern that most resembles a connector, and it is not
 one. The fetcher does the network; the reader reads its output off disk.
 
-The one reader here is :class:`~ai_assistant.readers.calendar.CalendarReader`, and
-a reading of it has the **two consumers ADR-0093 §3 gives one, reading at their
+The readers here are :class:`~ai_assistant.readers.calendar.CalendarReader` and
+:class:`~ai_assistant.readers.email.EmailReader` — two implementations of one
+behaviour, which ADR-0095 §3 named as "precisely and only what a shared
+conformance suite is for" and as the condition under which that suite starts
+paying. Each reading has the **two consumers ADR-0093 §3 gives one, reading at their
 own cadences**: the ``context/`` facet reads at assembly time, ingestion reads on
 its schedule, and neither derives its answer from the other's reading. The two are
 not meant to agree — a facet read at 10:00 and a belief written from an 09:00 run
@@ -65,6 +68,18 @@ from ai_assistant.readers.calendar import (
     MAX_CALENDAR_WINDOW,
     CalendarReader,
 )
+from ai_assistant.readers.email import (
+    DEFAULT_EMAIL_MAX_BYTES,
+    DEFAULT_EMAIL_MAX_CONTENT_BYTES,
+    DEFAULT_EMAIL_MAX_MESSAGES,
+    DEFAULT_EMAIL_READ_TIMEOUT,
+    DEFAULT_EMAIL_WINDOW_PAST,
+    DELIVERED_AT_HEADER,
+    EMAIL_READER_NAME,
+    MAX_EMAIL_COUNT,
+    MAX_EMAIL_WINDOW,
+    EmailReader,
+)
 
 __all__ = [
     "CALENDAR_READER_NAME",
@@ -75,7 +90,17 @@ __all__ = [
     "DEFAULT_CALENDAR_READ_TIMEOUT",
     "DEFAULT_CALENDAR_WINDOW_FUTURE",
     "DEFAULT_CALENDAR_WINDOW_PAST",
+    "DEFAULT_EMAIL_MAX_BYTES",
+    "DEFAULT_EMAIL_MAX_CONTENT_BYTES",
+    "DEFAULT_EMAIL_MAX_MESSAGES",
+    "DEFAULT_EMAIL_READ_TIMEOUT",
+    "DEFAULT_EMAIL_WINDOW_PAST",
+    "DELIVERED_AT_HEADER",
+    "EMAIL_READER_NAME",
     "MAX_CALENDAR_COUNT",
     "MAX_CALENDAR_WINDOW",
+    "MAX_EMAIL_COUNT",
+    "MAX_EMAIL_WINDOW",
     "CalendarReader",
+    "EmailReader",
 ]
