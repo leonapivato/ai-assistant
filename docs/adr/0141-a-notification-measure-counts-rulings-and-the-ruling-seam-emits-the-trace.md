@@ -448,7 +448,8 @@ from a distance; §9 records why they may not travel and files the question.
 > `condition_perishable` are both `1`; or `ruled_interrupt` is `1` while any
 > interrupt-condition key is `0`; or `ruled_drop` is `1` while every
 > drop-condition key is `0`; or `ruled_hold` is `1` while every
-> interrupt-condition key is `1`.
+> interrupt-condition key is `1`; or the ruling is **not** `DROP` while any
+> drop-condition key is `1`.
 
 > **Normative.** A trace in none of those three states is **well-formed**.
 
@@ -470,6 +471,15 @@ from a distance; §9 records why they may not travel and files the question.
 > **Normative.** The report states, separately from one another, how many
 > `NOTIFICATION` traces it met as incomplete, as malformed, as
 > counter-inconsistent and as unclassified.
+
+**The last counter-inconsistency clause is ADR-0130 §5's ordering read as an
+invariant, and it is the one a reader is most likely to leave out.** That section
+evaluates the four drop conditions **first**, "each yielding `DROP` naming
+itself", so a satisfied drop condition and a ruling of `INTERRUPT` cannot both
+have happened — a duplicate that interrupted is not a policy this tree can run.
+Without the clause such a trace passes every other test, enters the ruling
+population as well-formed, and counts a refusal as an interruption, moving the
+one measure §6 exists for. Adversarial review found it on the second round.
 
 **Ordered and disjoint, because two overlapping predicates are two
 implementations that disagree.** A trace carrying `ruled_interrupt = 2` satisfies
@@ -596,9 +606,16 @@ counter-inconsistent trace is untrustworthy about.
 > denominators are the non-`DROP` rulings and not the ruling population.
 
 > **Normative.** The **held-to-interruption latency** over `W` is the
-> distribution of `held_seconds` over the members of §5's ruling population in
-> `W` carrying it as a value §4 admits. It is a distribution and not a ratio, so the undefined rule
-> does not reach it; over an empty sample the report says the sample is empty.
+> distribution of `held_seconds` over the members of §5's **reconsideration**
+> sub-population whose `ruled_interrupt` is `1` and which carry `held_seconds` as
+> a value §4 admits — the placement §4 requires, and no other. It is a
+> distribution and not a ratio, so the undefined rule does not reach it; over an
+> empty sample the report says the sample is empty.
+
+> **Normative.** A trace carrying `held_seconds` where §4 forbids it, or carrying
+> an inadmissible value or none where §4 requires it, is **misplaced** for this
+> diagnostic. A misplaced value is never read as a latency, its trace stays in
+> every other population, and the report counts it.
 
 > **Normative.** The **held-first share** over `W` is the sum of
 > `ruled_interrupt` over the reconsideration population, divided by the sum of
@@ -606,9 +623,8 @@ counter-inconsistent trace is untrustworthy about.
 
 > **Normative.** The **notification stream-health counts** over `W` are the
 > `NOTIFICATION` traces walked, §5's four state counts, the count met as
-> unclassified with each such seam named, the count excluded from the latency
-> distribution for an inadmissible `held_seconds` (§4), and the count carrying an
-> outcome other than `OK`.
+> unclassified with each such seam named, the count of misplaced `held_seconds`,
+> and the count carrying an outcome other than `OK`.
 
 **The condition incidence is what makes a share of zero readable, and without it
 the measure is a trap.** ADR-0130 §6 ships every class at reach `hold`, so a hub
@@ -638,8 +654,10 @@ rate, so ADR-0119 §5's denominator rule has nothing to bind.
 > trace, and the empty-stream statement that precedes every other clause.
 
 > **Normative.** No measure or diagnostic defined here takes a settling period,
-> and none is withheld for want of one. The report states the notification
-> figures for a window whose end is the newest retained trace's instant.
+> and no figure defined here is withheld — for want of one, or because the
+> retained stream does not extend past the window's end. The window is the one
+> the operator asked for, whatever its end, and ADR-0120 §8's clause withholding
+> a memory-precision figure reaches no figure of this ADR.
 
 > **Normative.** Every figure defined here is stated for each part of a
 > partitioned window as well as for the window entire, on ADR-0120 §8's clause.
