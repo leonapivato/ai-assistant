@@ -1162,8 +1162,13 @@ carries is to **pass** the existing suite, not to write one.
   `rename(2)` on the same filesystem; that its retention exceeds the reader's
   window; and that its credential never enters the hub. This is documentation and
   not `src/`, and §1's second clause is why: the fetcher is not ours to ship.
-- Tests for the clauses a lane can satisfy in prose and breach in code — eleven,
-  each named by the breach it catches:
+- Tests for the clauses a lane can satisfy in prose and breach in code —
+  thirteen, each named by the breach it catches. The list is scoped to **every
+  deliverable named above** and not to the reader alone, which is stated because
+  for several rounds it read as the reader's list while the `context/` adapter,
+  the ingestion wiring and the widened type owed nothing at all. A deliverable
+  this section names owes its item here; an omission is a defect rather than a
+  scoping choice.
 
   - **The body never leaves the reader (§5).** A message carrying a body still
     yields its envelope proposal and is still counted in the facet, while no byte
@@ -1275,9 +1280,36 @@ carries is to **pass** the existing suite, not to write one.
     `email_max_messages + 1` framed messages **none** of which carries a valid
     `X-Assistant-Delivered-At` **refuses** rather than returning a successful
     empty reading. This is the cap's *ordering* rather than its figure, and it is
-    the one §12 property every test above passes while breached: an
+    the one §12 property every other test in this list passes while breached: an
     implementation that skips invalid messages first and counts what survives
-    satisfies all ten others and still turns a busted cap into a quiet week.
+    satisfies all twelve others and still turns a busted cap into a quiet week.
+  - **No grant, no read — asserted on the adapter and on the ingestion path
+    separately (§9).** §9's second clause is "not resolved, not opened, not
+    parsed", so what is asserted is a spy reader's **call count** rather than
+    the reading it returns: with no grant, and with a live grant naming the
+    other scope, the count stays at zero on both paths; `FACET` admits the
+    `context/` adapter's read and `INGEST` the ingestion wiring's, and neither
+    scope satisfies the other's path. This is the breach with the worst
+    consequence in the document — an adapter that reads first and checks the
+    grant afterwards opens and parses a user's mail under no grant at all — and
+    every other test in this list passes while it happens, because none of them
+    leaves the reader. The calendar's equivalents in
+    `tests/context/test_calendar_context_source.py` and
+    `tests/orchestration/test_ingestion.py` are the shape to follow and are not
+    coverage: this is new wiring and they do not reach it.
+  - **The facet union discriminates at validation, not by declaration (§6).** A
+    tagged calendar payload and a tagged email payload each resolve through
+    `SourceReading` to their own type; a payload carrying `kind: "email"` **and**
+    calendar-shaped fields resolves to `EmailFacet`; and a payload carrying no
+    `kind` is **rejected** rather than inferred, which is the half §6 spends a
+    paragraph on because the field's default cannot rescue it. The static
+    property `tests/core/test_facet_coverage.py` gains is necessary and not
+    sufficient: it proves each concrete type declares a distinct `Literal`, and
+    an ordinary union satisfies that while the annotation carries no
+    `Field(discriminator="kind")` and pydantic resolves by inference. That is
+    §6's own stated defect — "two facets that differ only in a scalar could parse
+    as each other, quietly" — surviving the check written against it.
+    `MemoryRecord` is the corpus's worked shape for the annotation.
 
 ### 14. Deferred, by name, each with the condition that fires it
 
