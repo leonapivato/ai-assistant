@@ -1,7 +1,23 @@
 # 37. Joining selection, the permission check and execution
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0144 (§1's several-candidates refusal)
 - Date: 2026-07-22
+- **Partially superseded: 2026-08-13 by ADR-0144** — §1's several-candidates row
+  only, and nothing else. A step is no longer refused whenever
+  `ToolRegistry.find` returns more than one candidate: ADR-0144 §1 fixes the
+  ordering the selection stage applies and runs the unique minimum, discharging
+  ADR-0016 §7's deferral that §1 below declined to answer.
+  `Disposition.AMBIGUOUS_CAPABILITY` is **retained, narrowed** (ADR-0144 §6) to
+  the residue where two or more candidates are equal under that whole ordering,
+  and in that residue the durable effect stated below is unchanged — nothing is
+  committed, no policy is consulted, and the step stays `PENDING`. §1's reasoning
+  is not overturned but is why the residue exists: a tie broken by `id` would
+  still be a ranking by name, and ADR-0144 §1 declines to read `find`'s order for
+  exactly that reason. Everything else here stands unchanged — §2's
+  decide → record → read back → claim order, §3's read-back and identity check,
+  §4's parking and `resume`, §5's one-commit denial and §6's entry rule — and
+  selection still runs upstream of the gate, handing the policy exactly one
+  declaration exactly once per step.
 - **Not a contract change.** No Protocol is added or altered, no `core` type
   moves, and `core/config.py` is untouched. Every contract this needs —
   `ToolRegistry`, `ActionPolicy`, `AuditTrail`, `PlanStore`, `ToolInvoker` — was
