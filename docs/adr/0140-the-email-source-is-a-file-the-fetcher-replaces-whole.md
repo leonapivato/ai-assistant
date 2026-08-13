@@ -1020,15 +1020,23 @@ two conforming implementations diverging while each believes it conforms, so the
 figures are named. **Seven fields, and the table is derived from this source
 rather than copied from the calendar's nine** — which §3 is the argument for.
 
-| Field | Default | Range | What it bounds |
-| --- | --- | --- | --- |
-| `email_source_path` | `None` | absolute path | the source; `None` is disabled |
-| `email_reader_interval` | `None` | `> 0` | the cadence; `None` is disabled (ADR-0093 §7) |
-| `email_window_past` | 7 days | `(0, 3650 days]` | how far back the clock-relative arrival window reaches |
-| `email_max_messages` | 2,000 | `[1, 2**63)` | framed messages in the store, and so proposals |
-| `email_max_bytes` | 8 MiB | `> 0` | the store read **before** parsing |
-| `email_read_timeout` | 10 s | `> 0` | the reader's deadline on its own read (ADR-0093 §7) |
-| `email_max_content_bytes` | 4 MiB | `> 0` | proposal content materialised across the whole read |
+> **Normative.** `Settings` carries exactly these seven fields, with these
+> defaults and these ranges, and refuses a value outside its range at load. The
+> table is the clause and not an illustration of one: ADR-0089 §3 makes unmarked
+> text incapable of supplying an obligation, so figures left beside a marked
+> clause rather than inside it would name no default any lane owed — which is
+> the divergence ADR-0074 §9.3 is invoked above to prevent, reintroduced by the
+> marking.
+>
+> | Field | Default | Range | What it bounds |
+> | --- | --- | --- | --- |
+> | `email_source_path` | `None` | absolute path | the source; `None` is disabled |
+> | `email_reader_interval` | `None` | `> 0` | the cadence; `None` is disabled (ADR-0093 §7) |
+> | `email_window_past` | 7 days | `(0, 3650 days]` | how far back the clock-relative arrival window reaches |
+> | `email_max_messages` | 2,000 | `[1, 2**63)` | framed messages in the store, and so proposals |
+> | `email_max_bytes` | 8 MiB | `> 0` | the store read **before** parsing |
+> | `email_read_timeout` | 10 s | `> 0` | the reader's deadline on its own read (ADR-0093 §7) |
+> | `email_max_content_bytes` | 4 MiB | `> 0` | proposal content materialised across the whole read |
 
 > **Normative.** A configuration with `email_reader_interval` set and
 > `email_source_path` unset is refused at load with a `ConfigurationError`, on
@@ -1110,26 +1118,41 @@ would be one keystroke away in a `Settings` field, which is why there is no fiel
 
 ### 13. The contract surface owed, and what the implementing lanes owe
 
-**New surface in `core` — a breaking change (golden rule 5), implemented by a
-later lane after this ADR merges:**
+> **Normative.** The lane implementing this ADR adds this surface to `core` and
+> no other. It is a breaking change under golden rule 5 and lands after this ADR
+> merges.
+>
+> - **`core/types.py`** gains `EmailFacet` and the optional field
+>   `CurrentContext.email` (§6).
+> - **`core/types.py`** widens `SourceReading.facet` to
+>   `CalendarFacet | EmailFacet | None`, made an explicitly **discriminated** union
+>   on a new `kind` field, and adds `kind` to `CalendarFacet` with its tag as the
+>   default (§6, ADR-0096 §5). **This is a change to a ratified type and is the one
+>   place this ADR touches an existing shape**; it is additive and defaulted, so
+>   every existing construction site stays valid, which is ADR-0008 §1's pattern and
+>   the property ADR-0096 §5 was counting on.
+> - **`tests/core/test_facet_coverage.py`** grows a second property beside the
+>   reserved-name one it already enforces for `source`, `read_at` and `as_of`: that
+>   every concrete facet type declares a `kind` whose `Literal` value is distinct
+>   across the union, and that no facet gives the name a payload meaning (§6). It is
+>   the file-level check ADR-0096 §1 chose over a convention held by review, applied
+>   to the field that makes the union resolvable.
+> - **`core/config.py`** gains §12's seven `Settings` fields with their ranges and
+>   the load-time refusal.
 
-- **`core/types.py`** gains `EmailFacet` and the optional field
-  `CurrentContext.email` (§6).
-- **`core/types.py`** widens `SourceReading.facet` to
-  `CalendarFacet | EmailFacet | None`, made an explicitly **discriminated** union
-  on a new `kind` field, and adds `kind` to `CalendarFacet` with its tag as the
-  default (§6, ADR-0096 §5). **This is a change to a ratified type and is the one
-  place this ADR touches an existing shape**; it is additive and defaulted, so
-  every existing construction site stays valid, which is ADR-0008 §1's pattern and
-  the property ADR-0096 §5 was counting on.
-- **`tests/core/test_facet_coverage.py`** grows a second property beside the
-  reserved-name one it already enforces for `source`, `read_at` and `as_of`: that
-  every concrete facet type declares a `kind` whose `Literal` value is distinct
-  across the union, and that no facet gives the name a payload meaning (§6). It is
-  the file-level check ADR-0096 §1 chose over a convention held by review, applied
-  to the field that makes the union resolvable.
-- **`core/config.py`** gains §12's seven `Settings` fields with their ranges and
-  the load-time refusal.
+**Both work orders in this section sit inside marked clauses, and so does §12's
+table, because otherwise this ADR obligates almost nothing it was written to
+obligate.** §15 puts this document in ADR-0089's marked regime, where unmarked
+text "never supplies an obligation" — and §13 carried no mark at all, so the
+`core` surface, the drivers, the fetcher documentation and every owed test bound
+nobody, while §12 named its caps in a marked clause and left all seven figures in
+a table beside it. That is exactly the case ADR-0089 §3's second clause names:
+"Where the surrounding argument is what establishes *that* an obligation exists,
+or how far it reaches, the marking is not finished." A work order is the
+obligation rather than the argument for one, so it goes inside the mark; the
+paragraphs around it say what the clauses mean and stay outside. **ADR-0093 §7a's
+equivalent table is unmarked and is not thereby defective** — its own ADR governs
+it, nothing here reaches it, and §15 records that no note is owed on it.
 
 **No new Protocol is minted and no triad is owed**, and that is worth stating
 because a lane may reach for one by analogy. `Reader` already describes this seam
@@ -1140,190 +1163,191 @@ conformance suite is for … Two implementations is the condition under which th
 suite starts paying." This is that second implementation, so the obligation it
 carries is to **pass** the existing suite, not to write one.
 
-**What the implementing lanes owe:**
-
-- The `EmailReader` concrete in `readers/`, conforming to the shared suite, with
-  ADR-0093 §7's whole discipline held rather than re-derived: the non-blocking
-  open, the descriptor check, the byte cap on the read itself, the whole read off
-  the event loop on a terminable worker the reader owns, the deadline, the
-  one-outstanding-worker reservation released on the worker, no lifecycle method,
-  and `ReaderError` with a **payload-free message** carrying the identity and the
-  failure's class and never the path.
-- The `context/` adapter contributing §6's facet, gated on a live `FACET` grant.
-- The ingestion wiring, gated on a live `INGEST` grant, and the scheduler job as
-  an `Engine` call holding no reader (ADR-0083 §8).
-- **Deployment documentation for the fetcher** — that it writes header blocks and
-  no bodies; that it writes exactly one `X-Assistant-Delivered-At` per message in
-  the closed RFC 3339 subset §5 fixes — upper-case `T` and `Z`, second `00`–`59`,
-  at most microsecond precision, and a determinate offset that is never `-00:00`
-  — from the server's own record, after stripping
-  every copy the message carried; that it emits no header value containing a bare
-  line break and escapes the format's separator; that it replaces the store by
-  `rename(2)` on the same filesystem; that its retention exceeds the reader's
-  window; and that its credential never enters the hub. This is documentation and
-  not `src/`, and §1's second clause is why: the fetcher is not ours to ship.
-- Tests for the clauses a lane can satisfy in prose and breach in code —
-  thirteen, each named by the breach it catches. The list is scoped to **every
-  deliverable named above** and not to the reader alone, which is stated because
-  for several rounds it read as the reader's list while the `context/` adapter,
-  the ingestion wiring and the widened type owed nothing at all. A deliverable
-  this section names owes its item here; an omission is a defect rather than a
-  scoping choice.
-
-  - **The body never leaves the reader (§5).** A message carrying a body still
-    yields its envelope proposal and is still counted in the facet, while no byte
-    of that body reaches that proposal, the facet, or any other value leaving the
-    reader. Both halves are asserted, because a test checking only the sentinel's
-    absence is passed by a reader that drops the message entirely.
-  - **The window's edges are asserted, not implied (§3).** Against a fixed clock,
-    a message delivered exactly at `read_at - email_window_past` **is** proposed
-    and a message delivered exactly at `read_at` is **not** — §3's window is
-    closed at the bottom and open at the top, and the ADR states that once. §6's
-    `arrived_in_window` is asserted beside the proposals in both cases, because a
-    reader can decide membership correctly and count it wrongly, and
-    `covers_from` is asserted equal to the lower edge itself. The lower edge is
-    the direction that matters: a reader admitting only `lower < delivered_at`
-    loses the edge message **permanently** rather than late, because by the next
-    run the window has moved past it and §3 leaves no cursor to notice.
-  - **The window arithmetic saturates rather than raising (§3).** With a
-    `read_at` close enough to the minimum representable instant that
-    `read_at - email_window_past` is not representable, the read **completes**:
-    the window's lower edge and `covers_from` are both the minimum representable
-    instant, and nothing raises. §12's ten-year ceiling makes this unreachable
-    from configuration alone, so it is reachable only from configuration *and* a
-    clock — the case a lane that builds the window as a bare subtraction never
-    runs and never sees, whose failure escapes ADR-0093 §8's two outcomes
-    entirely rather than arriving as a `ReaderError`. There is no upward
-    direction to test: email has the one edge, and `read_at` is representable by
-    construction.
-  - **An unusable delivery header is skipped, never defaulted (§5).** A message
-    with zero, two, or an unparseable `X-Assistant-Delivered-At` is skipped
-    rather than dated by any fallback.
-  - **A *parseable* value outside §5's closed subset is skipped on the same
-    terms**, tested in both directions of the seam, because the accept/reject
-    boundary has to be the subset rather than whichever library a lane reached
-    for. A space separator, a comma fractional separator, an offset carrying
-    seconds, an omitted `SS` and a `+0000` written without its colon are each
-    **accepted** by `datetime.fromisoformat`, so a reader that delegates
-    acceptance to it passes the test above and still admits what §5 excludes. A
-    lower-case `t` or `z` and a leap second are each **accepted** by a parser
-    conforming to RFC 3339 while `fromisoformat` rejects them, so the skip is
-    owed on §5's terms rather than as a side effect of the stdlib's narrowness.
-    The **accepting** direction is asserted in the same test and is not
-    redundant: a value sitting on each of the subset's own boundaries — second
-    `59`, one fractional digit and six, an upper-case `Z`, and a `+00:00` that
-    is the excluded `-00:00`'s mirror — is proposed. Every skip clause in this
-    list is satisfied by a reader that skips everything, so without this
-    direction the subset is pinned only from outside and its inside is a
-    lane's guess.
-  - **`Date` is never a delivery instant (§5).** A store whose messages carry
-    only a `Date` header proposes nothing.
-  - **Membership is decided on the delivery instant while `reported_at` carries
-    `Date`, with both present and disagreeing (§5).** A message whose `Date` is
-    far outside the window but whose `X-Assistant-Delivered-At` is inside it
-    **is** proposed; a message whose `Date` is inside the window but whose
-    delivery instant is outside it is **not**; and in the proposed case
-    `Attestation.reported_at` is the `Date` and not the delivery instant. §5
-    separates the two clocks as a security property before a modelling one — a
-    sender who can move the window by writing a future `Date` holds a message in
-    every window there will ever be — and every other test in this list is
-    passed by a reader that reads both fields into one variable, because on
-    honest mail they agree.
-  - **`Date` is required and singular, and the delivery instant is never
-    substituted for it (§5).** A message with a valid in-window
-    `X-Assistant-Delivered-At` but no `Date`, or two `Date` headers, or a `Date`
-    **the reader cannot resolve to a determinate instant**, is **skipped** — not
-    proposed with the delivery instant standing in as `reported_at`, which is
-    the substitution a reader reaches for precisely because it has a usable
-    instant in hand. That third arm is tested at §5's predicate rather than at
-    the two values §5 offers to illustrate it, because they are not the whole of
-    it and are the easier half: `-0000` and an absent zone both *parse* and then
-    resolve to nothing usable, while a malformed or impossible `Date` does not
-    parse at all — so a lane that handles only the illustrations reaches either
-    the fallback or an escaping parser error, and the second breaches §5's rule
-    that a skip raises nothing while every other test here still passes. The
-    delivery-header item above already reads its own clause this way, and the
-    two are the same rule. The
-    converse is asserted in the same test so the skip is not quietly generalised
-    to every field the rule does not reach: a message with **no** `Subject` and
-    a message with **two** both still propose, with the subject empty in each
-    and no selection made among the candidates, and the sender is asserted on
-    the same terms. The duplicate is the case a lane breaches while passing the
-    absent one, because `email.message.Message`'s own mapping returns the
-    *first* occurrence of a repeated header and says nothing — which is exactly
-    the selection §5 forbids, reaching the opposite outcome from the duplicate
-    `Date` immediately above it.
-  - **§12's table is refused where §12 says it is, and the calendar's is where a
-    lane gets it wrong (§12).** Three directions, each named: both nullable
-    fields default to `None`, so a fresh install reads no mail; an
-    `email_reader_interval` set with `email_source_path` unset raises
-    `ConfigurationError` at load; and a figure outside its stated range is
-    refused at load. The range worth the test is `email_window_past`'s **open**
-    lower bound — `calendar_window_past` may be zero and
-    `tests/readers/test_calendar_settings.py` asserts that it is accepted, while
-    this one may not be, so a lane that reaches for the neighbouring field
-    declaration inherits a `ge=0` and ships §12's reader that reads nothing while
-    reporting health. Nothing else in this list observes the configuration layer
-    at all.
-  - **Every cap §12 names owes a refusal test, one each (§12).**
-    `email_max_bytes`, on a store larger than the cap, refusing on the read
-    itself rather than after parsing; and `email_max_content_bytes`, on an
-    in-window message whose folded `Subject` materialises past a deliberately
-    small aggregate budget, asserted to fail **before** the over-budget proposal
-    is materialised. A reader that never charges the content accumulator, or
-    enforces the byte cap only after reading the whole store, passes every other
-    test in this list. `email_max_messages` is the third cap and its refusal is
-    the item below, which pins the cap's *ordering* in the same assertion. The
-    rule is stated per cap rather than per figure so that a cap added later
-    arrives owing its test.
-  - **The cap is applied at the framing (§12).** A store of
-    `email_max_messages + 1` framed messages **none** of which carries a valid
-    `X-Assistant-Delivered-At` **refuses** rather than returning a successful
-    empty reading. This is the cap's *ordering* rather than its figure, and it is
-    the one §12 property every other test in this list passes while breached: an
-    implementation that skips invalid messages first and counts what survives
-    satisfies all twelve others and still turns a busted cap into a quiet week.
-  - **No grant, no read — and the whole of ADR-0097 §5a's lifecycle, on the
-    adapter and on the ingestion path separately (§9).** §9's second clause is
-    "not resolved, not opened, not parsed", so the first thing asserted is a spy
-    reader's **call count** rather than the reading it returns. That is the entry
-    case and not the item: what the two drivers this ADR adds owe is the set
-    ADR-0097 §5a's clauses form, which
-    `tests/context/test_calendar_context_source.py` and
-    `tests/orchestration/test_ingestion.py` already carry case by case — no
-    grant, and a live grant naming the other scope, each leave the count at
-    zero; a `live()` that raises **before** the read opens nothing and lets the
-    `GrantError` propagate rather than becoming a silent empty result; a
-    revocation landing between the gate's check and `read()` returning
-    **discards** the reading, with the count at one and nothing proposed or
-    contributed from it; an unanswerable **re-check** discards it on the same
-    terms; and the granted case reads, without which the refusals prove nothing.
-    The two paths refuse differently and both are asserted: an ungranted
-    ingestion pass raises `SourceNotGrantedError` and is never a successful pass
-    (ADR-0097 §5), while an ungranted facet is simply **absent** and says nothing
-    about why, and on the facet path a `GrantError` propagates from the adapter
-    with the assembler being what leaves the facet absent. ADR-0097 §5a states
-    these as obligations on a driver rather than as owed tests; they are owed
-    *here* because this ADR is what adds the drivers, and an item naming only the
-    entry case would ship a gate that authorises the read and then ignores the
-    revocation landing inside it. This is the breach with the worst consequence
-    in the document, and every other test in this list passes while it happens,
-    because none of them leaves the reader. The calendar's two modules are the
-    shape to follow and are not coverage: this is new wiring and they do not
-    reach it.
-  - **The facet union discriminates at validation, not by declaration (§6).** A
-    tagged calendar payload and a tagged email payload each resolve through
-    `SourceReading` to their own type; a payload carrying `kind: "email"` **and**
-    calendar-shaped fields resolves to `EmailFacet`; and a payload carrying no
-    `kind` is **rejected** rather than inferred, which is the half §6 spends a
-    paragraph on because the field's default cannot rescue it. The static
-    property `tests/core/test_facet_coverage.py` gains is necessary and not
-    sufficient: it proves each concrete type declares a distinct `Literal`, and
-    an ordinary union satisfies that while the annotation carries no
-    `Field(discriminator="kind")` and pydantic resolves by inference. That is
-    §6's own stated defect — "two facets that differ only in a scalar could parse
-    as each other, quietly" — surviving the check written against it.
-    `MemoryRecord` is the corpus's worked shape for the annotation.
+> **Normative.** The lanes implementing this ADR owe each of the following, and
+> the test list is part of the obligation rather than advice about it.
+>
+> - The `EmailReader` concrete in `readers/`, conforming to the shared suite, with
+>   ADR-0093 §7's whole discipline held rather than re-derived: the non-blocking
+>   open, the descriptor check, the byte cap on the read itself, the whole read off
+>   the event loop on a terminable worker the reader owns, the deadline, the
+>   one-outstanding-worker reservation released on the worker, no lifecycle method,
+>   and `ReaderError` with a **payload-free message** carrying the identity and the
+>   failure's class and never the path.
+> - The `context/` adapter contributing §6's facet, gated on a live `FACET` grant.
+> - The ingestion wiring, gated on a live `INGEST` grant, and the scheduler job as
+>   an `Engine` call holding no reader (ADR-0083 §8).
+> - **Deployment documentation for the fetcher** — that it writes header blocks and
+>   no bodies; that it writes exactly one `X-Assistant-Delivered-At` per message in
+>   the closed RFC 3339 subset §5 fixes — upper-case `T` and `Z`, second `00`–`59`,
+>   at most microsecond precision, and a determinate offset that is never `-00:00`
+>   — from the server's own record, after stripping
+>   every copy the message carried; that it emits no header value containing a bare
+>   line break and escapes the format's separator; that it replaces the store by
+>   `rename(2)` on the same filesystem; that its retention exceeds the reader's
+>   window; and that its credential never enters the hub. This is documentation and
+>   not `src/`, and §1's second clause is why: the fetcher is not ours to ship.
+> - Tests for the clauses a lane can satisfy in prose and breach in code —
+>   thirteen, each named by the breach it catches. The list is scoped to **every
+>   deliverable named above** and not to the reader alone, which is stated because
+>   for several rounds it read as the reader's list while the `context/` adapter,
+>   the ingestion wiring and the widened type owed nothing at all. A deliverable
+>   this section names owes its item here; an omission is a defect rather than a
+>   scoping choice.
+>
+>   - **The body never leaves the reader (§5).** A message carrying a body still
+>     yields its envelope proposal and is still counted in the facet, while no byte
+>     of that body reaches that proposal, the facet, or any other value leaving the
+>     reader. Both halves are asserted, because a test checking only the sentinel's
+>     absence is passed by a reader that drops the message entirely.
+>   - **The window's edges are asserted, not implied (§3).** Against a fixed clock,
+>     a message delivered exactly at `read_at - email_window_past` **is** proposed
+>     and a message delivered exactly at `read_at` is **not** — §3's window is
+>     closed at the bottom and open at the top, and the ADR states that once. §6's
+>     `arrived_in_window` is asserted beside the proposals in both cases, because a
+>     reader can decide membership correctly and count it wrongly, and
+>     `covers_from` is asserted equal to the lower edge itself. The lower edge is
+>     the direction that matters: a reader admitting only `lower < delivered_at`
+>     loses the edge message **permanently** rather than late, because by the next
+>     run the window has moved past it and §3 leaves no cursor to notice.
+>   - **The window arithmetic saturates rather than raising (§3).** With a
+>     `read_at` close enough to the minimum representable instant that
+>     `read_at - email_window_past` is not representable, the read **completes**:
+>     the window's lower edge and `covers_from` are both the minimum representable
+>     instant, and nothing raises. §12's ten-year ceiling makes this unreachable
+>     from configuration alone, so it is reachable only from configuration *and* a
+>     clock — the case a lane that builds the window as a bare subtraction never
+>     runs and never sees, whose failure escapes ADR-0093 §8's two outcomes
+>     entirely rather than arriving as a `ReaderError`. There is no upward
+>     direction to test: email has the one edge, and `read_at` is representable by
+>     construction.
+>   - **An unusable delivery header is skipped, never defaulted (§5).** A message
+>     with zero, two, or an unparseable `X-Assistant-Delivered-At` is skipped
+>     rather than dated by any fallback.
+>   - **A *parseable* value outside §5's closed subset is skipped on the same
+>     terms**, tested in both directions of the seam, because the accept/reject
+>     boundary has to be the subset rather than whichever library a lane reached
+>     for. A space separator, a comma fractional separator, an offset carrying
+>     seconds, an omitted `SS` and a `+0000` written without its colon are each
+>     **accepted** by `datetime.fromisoformat`, so a reader that delegates
+>     acceptance to it passes the test above and still admits what §5 excludes. A
+>     lower-case `t` or `z` and a leap second are each **accepted** by a parser
+>     conforming to RFC 3339 while `fromisoformat` rejects them, so the skip is
+>     owed on §5's terms rather than as a side effect of the stdlib's narrowness.
+>     The **accepting** direction is asserted in the same test and is not
+>     redundant: a value sitting on each of the subset's own boundaries — second
+>     `59`, one fractional digit and six, an upper-case `Z`, and a `+00:00` that
+>     is the excluded `-00:00`'s mirror — is proposed. Every skip clause in this
+>     list is satisfied by a reader that skips everything, so without this
+>     direction the subset is pinned only from outside and its inside is a
+>     lane's guess.
+>   - **`Date` is never a delivery instant (§5).** A store whose messages carry
+>     only a `Date` header proposes nothing.
+>   - **Membership is decided on the delivery instant while `reported_at` carries
+>     `Date`, with both present and disagreeing (§5).** A message whose `Date` is
+>     far outside the window but whose `X-Assistant-Delivered-At` is inside it
+>     **is** proposed; a message whose `Date` is inside the window but whose
+>     delivery instant is outside it is **not**; and in the proposed case
+>     `Attestation.reported_at` is the `Date` and not the delivery instant. §5
+>     separates the two clocks as a security property before a modelling one — a
+>     sender who can move the window by writing a future `Date` holds a message in
+>     every window there will ever be — and every other test in this list is
+>     passed by a reader that reads both fields into one variable, because on
+>     honest mail they agree.
+>   - **`Date` is required and singular, and the delivery instant is never
+>     substituted for it (§5).** A message with a valid in-window
+>     `X-Assistant-Delivered-At` but no `Date`, or two `Date` headers, or a `Date`
+>     **the reader cannot resolve to a determinate instant**, is **skipped** — not
+>     proposed with the delivery instant standing in as `reported_at`, which is
+>     the substitution a reader reaches for precisely because it has a usable
+>     instant in hand. That third arm is tested at §5's predicate rather than at
+>     the two values §5 offers to illustrate it, because they are not the whole of
+>     it and are the easier half: `-0000` and an absent zone both *parse* and then
+>     resolve to nothing usable, while a malformed or impossible `Date` does not
+>     parse at all — so a lane that handles only the illustrations reaches either
+>     the fallback or an escaping parser error, and the second breaches §5's rule
+>     that a skip raises nothing while every other test here still passes. The
+>     delivery-header item above already reads its own clause this way, and the
+>     two are the same rule. The
+>     converse is asserted in the same test so the skip is not quietly generalised
+>     to every field the rule does not reach: a message with **no** `Subject` and
+>     a message with **two** both still propose, with the subject empty in each
+>     and no selection made among the candidates, and the sender is asserted on
+>     the same terms. The duplicate is the case a lane breaches while passing the
+>     absent one, because `email.message.Message`'s own mapping returns the
+>     *first* occurrence of a repeated header and says nothing — which is exactly
+>     the selection §5 forbids, reaching the opposite outcome from the duplicate
+>     `Date` immediately above it.
+>   - **§12's table is refused where §12 says it is, and the calendar's is where a
+>     lane gets it wrong (§12).** Three directions, each named: both nullable
+>     fields default to `None`, so a fresh install reads no mail; an
+>     `email_reader_interval` set with `email_source_path` unset raises
+>     `ConfigurationError` at load; and a figure outside its stated range is
+>     refused at load. The range worth the test is `email_window_past`'s **open**
+>     lower bound — `calendar_window_past` may be zero and
+>     `tests/readers/test_calendar_settings.py` asserts that it is accepted, while
+>     this one may not be, so a lane that reaches for the neighbouring field
+>     declaration inherits a `ge=0` and ships §12's reader that reads nothing while
+>     reporting health. Nothing else in this list observes the configuration layer
+>     at all.
+>   - **Every cap §12 names owes a refusal test, one each (§12).**
+>     `email_max_bytes`, on a store larger than the cap, refusing on the read
+>     itself rather than after parsing; and `email_max_content_bytes`, on an
+>     in-window message whose folded `Subject` materialises past a deliberately
+>     small aggregate budget, asserted to fail **before** the over-budget proposal
+>     is materialised. A reader that never charges the content accumulator, or
+>     enforces the byte cap only after reading the whole store, passes every other
+>     test in this list. `email_max_messages` is the third cap and its refusal is
+>     the item below, which pins the cap's *ordering* in the same assertion. The
+>     rule is stated per cap rather than per figure so that a cap added later
+>     arrives owing its test.
+>   - **The cap is applied at the framing (§12).** A store of
+>     `email_max_messages + 1` framed messages **none** of which carries a valid
+>     `X-Assistant-Delivered-At` **refuses** rather than returning a successful
+>     empty reading. This is the cap's *ordering* rather than its figure, and it is
+>     the one §12 property every other test in this list passes while breached: an
+>     implementation that skips invalid messages first and counts what survives
+>     satisfies all twelve others and still turns a busted cap into a quiet week.
+>   - **No grant, no read — and the whole of ADR-0097 §5a's lifecycle, on the
+>     adapter and on the ingestion path separately (§9).** §9's second clause is
+>     "not resolved, not opened, not parsed", so the first thing asserted is a spy
+>     reader's **call count** rather than the reading it returns. That is the entry
+>     case and not the item: what the two drivers this ADR adds owe is the set
+>     ADR-0097 §5a's clauses form, which
+>     `tests/context/test_calendar_context_source.py` and
+>     `tests/orchestration/test_ingestion.py` already carry case by case — no
+>     grant, and a live grant naming the other scope, each leave the count at
+>     zero; a `live()` that raises **before** the read opens nothing and lets the
+>     `GrantError` propagate rather than becoming a silent empty result; a
+>     revocation landing between the gate's check and `read()` returning
+>     **discards** the reading, with the count at one and nothing proposed or
+>     contributed from it; an unanswerable **re-check** discards it on the same
+>     terms; and the granted case reads, without which the refusals prove nothing.
+>     The two paths refuse differently and both are asserted: an ungranted
+>     ingestion pass raises `SourceNotGrantedError` and is never a successful pass
+>     (ADR-0097 §5), while an ungranted facet is simply **absent** and says nothing
+>     about why, and on the facet path a `GrantError` propagates from the adapter
+>     with the assembler being what leaves the facet absent. ADR-0097 §5a states
+>     these as obligations on a driver rather than as owed tests; they are owed
+>     *here* because this ADR is what adds the drivers, and an item naming only the
+>     entry case would ship a gate that authorises the read and then ignores the
+>     revocation landing inside it. This is the breach with the worst consequence
+>     in the document, and every other test in this list passes while it happens,
+>     because none of them leaves the reader. The calendar's two modules are the
+>     shape to follow and are not coverage: this is new wiring and they do not
+>     reach it.
+>   - **The facet union discriminates at validation, not by declaration (§6).** A
+>     tagged calendar payload and a tagged email payload each resolve through
+>     `SourceReading` to their own type; a payload carrying `kind: "email"` **and**
+>     calendar-shaped fields resolves to `EmailFacet`; and a payload carrying no
+>     `kind` is **rejected** rather than inferred, which is the half §6 spends a
+>     paragraph on because the field's default cannot rescue it. The static
+>     property `tests/core/test_facet_coverage.py` gains is necessary and not
+>     sufficient: it proves each concrete type declares a distinct `Literal`, and
+>     an ordinary union satisfies that while the annotation carries no
+>     `Field(discriminator="kind")` and pydantic resolves by inference. That is
+>     §6's own stated defect — "two facets that differ only in a scalar could parse
+>     as each other, quietly" — surviving the check written against it.
+>     `MemoryRecord` is the corpus's worked shape for the annotation.
 
 ### 14. Deferred, by name, each with the condition that fires it
 
@@ -1442,6 +1466,15 @@ change here is a stacked addition or a deferral discharged on its own terms.
   exercised rather than stretched.**
 - **ADR-0117 §5 and #837.** §8 states the relation and rules on nothing. #837 is
   an open issue and not an ADR; nothing here is a record against ADR-0117.
+
+- **ADR-0089 §3 — applied to this ADR's own marks, and reaching no other ADR.**
+  §12's figures table and §13's two work orders sit inside marked clauses,
+  because a marked ADR that leaves its defaults and its owed tests in unmarked
+  prose obligates neither, which is §3's second clause failing on this document
+  rather than on any earlier one. It is this ADR finishing its own marking and
+  not a rule proposed for others: ADR-0093 §7a's table is unmarked, nothing here
+  edits or narrows it, and a reader holding only ADR-0093 acts exactly as
+  before. **No record owed, and none available.**
 
 **This ADR is marked under ADR-0089** and is in the marked regime: its unmarked
 prose supplies no obligation and exists to determine what the marked clauses mean
