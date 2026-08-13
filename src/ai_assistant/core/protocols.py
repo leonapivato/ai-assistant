@@ -114,6 +114,10 @@ if TYPE_CHECKING:
         ActionPlan,
         ActionRequest,
         AnswerOutcome,
+        BatchHandle,
+        BatchItemOutcome,
+        BatchRequest,
+        BatchStatus,
         Belief,
         BeliefBand,
         BeliefSummary,
@@ -272,6 +276,250 @@ class Embedder(Protocol):
 
     async def embed(self, texts: Sequence[str]) -> list[Embedding]:
         """Embed a batch of texts, returning one vector per input, in order."""
+        ...
+
+
+@runtime_checkable
+class BatchCompleter(Protocol):
+    """Bulk completion: submit many conversations, poll, then fetch the answers.
+
+    A **sibling** of :class:`ModelProvider`, not a widening of it (ADR-0143 §1).
+    Nothing here is added to ``ModelProvider``, this Protocol does not inherit
+    from it, and an object may implement both without anything requiring that it
+    does. The ground is ``Embedder``'s exact one, one step stronger: bulk
+    inference is a capability a provider may not offer — the library the model
+    seam is built on exposes no batch surface at all, and the vendor endpoint that
+    does is not available on every platform a ``default_model`` string may name. A
+    member on ``ModelProvider`` would assert of *every* route a capability most
+    routes cannot honour, and would oblige ``RetryingProvider`` and
+    ``RoutingProvider`` to forward an operation neither one's policy fits: retrying
+    a job measured in hours is not what a retry means, and routing a batch to a
+    fallback is incoherent because a handle issued by one provider is meaningless
+    to another.
+
+    **Three members, and none of them waits.** Each performs a bounded exchange
+    with the provider and returns; no implementation may satisfy :meth:`poll` or
+    :meth:`fetch` by sleeping, retrying, or otherwise blocking until the batch
+    settles. How many requests one exchange costs is the implementation's business
+    and is not fixed here. Waiting is the caller's loop, over :meth:`poll`.
+
+    **The split is decided by this module's cancellation clause, not by taste.**
+    The nicer call site is one awaitable that hides the polling — and it fails
+    ADR-0060. A submitted batch is a resource that is remote, outlives the
+    coroutine, is being billed, and cannot be released by returning; a single
+    awaitable that is cancelled orphans a paid job whose only identifier existed
+    inside the frame that just unwound, and there is no shape of a bare awaitable
+    that hands the identifier back on the cancellation path. Three members put the
+    handle in the caller's hands **before any waiting begins**, so the worst a
+    cancellation of the *wait* costs is the wait.
+
+    **Splitting the wait out shrinks the orphaning window; it does not close it,
+    and this contract says so rather than claiming otherwise.** A cancellation
+    landing inside :meth:`submit` — after the provider accepted the batch, before
+    the handle came back — orphans that batch. ADR-0060's effect limb governs it
+    unamended: "a cancelled call's effect is indeterminate to the caller", so a
+    caller cancelled there may assume neither that a batch exists nor that one does
+    not. What the seam does is make the window as narrow as one round trip, by
+    moving every refusable check to the near side of it (:meth:`submit`), and state
+    the residue plainly. An idempotency promise on ``batch_key`` was drafted and
+    **withdrawn**: the primary vendor surface transmits no idempotency key, carries
+    no caller-supplied field on the batch, and filters no list by one, so an
+    implementation could only have satisfied it by guessing (ADR-0143 §2, §11).
+
+    **A handle is an address, not a capability** (ADR-0143 §2). An implementation
+    accepts a :class:`~ai_assistant.core.types.BatchHandle` whose ``issuer`` equals
+    its own configured one and rejects any other as a caller error, raising
+    ``ModelError`` with the disposition ADR-0066 §3 fixes for a malformed argument
+    — neither ``retryable`` nor ``routable`` — rather than returning an outcome.
+    **Object identity is not the test:** a handle persisted to disk and presented
+    to a freshly constructed implementation of equal ``issuer`` is valid, and that
+    is what makes resumption across a process restart possible. The scope is
+    deliberately the *account* and not the model route: reachability is a property
+    of the credential's account, so a run resumed against the same
+    ``"provider:model"`` string but a different account cannot fetch the first
+    account's batch, and a route-only test would have called that handle valid and
+    sent the caller to a failure it had been promised would not happen.
+
+    ``issuer`` itself is **supplied by the composition root that constructs the
+    implementation** and never derived from the credential. That is a concession
+    the vendor surface forces: the client exposes an API key and no account
+    identifier at all, and the obvious substitute is worse — a credential
+    fingerprint changes on a routine rotation, so it would reject a handle that is
+    still perfectly reachable, while still not distinguishing two credentials
+    issued against one account. The cost is stated plainly: a misconfigured
+    ``issuer`` can accept a handle for the wrong account and the seam cannot detect
+    it. What it buys is that the failure is a visible configuration error rather
+    than an invented one.
+
+    **What this seam does not promise** (ADR-0143 §10), and no implementation may
+    be relied on for: streaming — a batch is non-streaming by construction, and
+    partial results before the terminal state are not offered; tool use — each item
+    inherits :meth:`ModelProvider.complete`'s position that nothing at the model
+    seam promises tool support, and a ``Role.TOOL`` turn is not representable in an
+    item; prompt-cache behaviour across items or across batches; **cancelling** a
+    submitted batch; a per-item model override; ordering; a size bound; or a
+    handle's meaning to any provider other than its issuer.
+
+    The absent ``cancel`` is worth its own sentence, because
+    :class:`~ai_assistant.core.types.BatchOutcomeKind` keeps a ``CANCELLED``
+    outcome and a reader will ask why the verb is missing. A cancel here could
+    promise only that we asked: work already in flight is billed, the vendor's own
+    cancel is a best-effort transition rather than a stop, and the caller's real
+    remedy — stop polling and let the window close — costs nothing and is already
+    available. A member whose only honest guarantee is "the request was sent" is
+    weaker than no member, because it reads as a stop.
+
+    How :meth:`submit` observes the items it is handed is governed by this
+    module's input-observation clause (ADR-0065), which has real bite here and is
+    **not** discharged by the items being frozen: ``submit`` takes a caller-owned
+    ``Sequence``, validates it, then suspends on a network call.
+    """
+
+    async def submit(
+        self,
+        batch_key: NonBlankEncodableText,
+        items: Sequence[BatchRequest],
+        *,
+        model: str | None = None,
+    ) -> BatchHandle:
+        """Hand a whole batch to the provider and return the handle that names it.
+
+        **Every check that can refuse a batch happens before the provider is
+        contacted**, and nothing happens after the provider accepts except
+        returning (ADR-0143 §2). Each item's ``messages`` must satisfy the same
+        precondition :meth:`ModelProvider.complete` states on its own — non-empty,
+        not ending on a ``Role.ASSISTANT`` turn — read as that docstring states it:
+        a **necessary condition, not a sufficient one**, admitting nothing by
+        omission, so a history containing a ``Role.TOOL`` turn is refused although
+        the clause does not name it.
+
+        **A failing item refuses the whole batch**, never the well-formed subset.
+        That costs something and is taken deliberately: a partially-submitted batch
+        is a paid job the caller did not ask for and cannot describe, and the
+        caller's own record of what it submitted would be wrong. Validating before
+        contact is what makes the refusal free.
+
+        ``batch_key`` is **never interpreted**. It is carried unchanged onto the
+        returned handle so the caller can correlate its own durable record of an
+        intended batch with the handle it got back. It is not an idempotency key:
+        ``submit`` does not deduplicate on it, and two calls carrying one
+        ``batch_key`` create two batches.
+
+        The items are observed **at one instant, before the first ``await``**, by
+        one of ADR-0065's three discharges, and the snapshot is deep enough to
+        cover everything the call goes on to read — a shallow copy of the outer
+        sequence would leave a caller free to mutate a
+        :class:`~ai_assistant.core.types.BatchRequest` still in it, or that
+        request's own ``messages``, between validation and transmission. A caller
+        that mutates what it passed while ``submit`` is suspended can make the call
+        act on the wrong version, but can never make one batch describe two.
+
+        This seam fixes **no** size bound (ADR-0143 §7). An implementation *may*
+        refuse an over-large batch, and when it does it states the bound it
+        applied; a caller is obliged to be prepared to split. A number in the
+        contract would be one vendor's limit written into a model-agnostic seam,
+        wrong for the next implementation on the day it landed.
+
+        Args:
+            batch_key: The caller's own key for this batch. Carried unchanged onto
+                the handle and never interpreted.
+            items: The batch's items, each carrying a caller-minted ``item_id``
+                unique within the batch. Must be non-empty.
+            model: Optional ``"provider:model"`` override for the whole batch;
+                falls back to the configured default when ``None``. There is no
+                per-item override (ADR-0143 §10).
+
+        Returns:
+            The batch's :class:`~ai_assistant.core.types.BatchHandle`, carrying
+            ``batch_key`` unchanged and the implementation's configured ``issuer``.
+
+        Raises:
+            ModelError: If ``items`` is empty, if any item's ``messages`` fails the
+                precondition above, if two items share an ``item_id``, or if the
+                implementation refuses the batch as over-large. Every one of these
+                is refused before the provider is contacted, and what binds is the
+                *disposition*: neither ``retryable`` nor ``routable``, because a
+                malformed argument reproduces identically on every attempt from
+                every route (ADR-0066 §3). A provider failure is narrowed to the
+                most specific subclass.
+        """
+        ...
+
+    async def poll(self, handle: BatchHandle) -> BatchStatus:
+        """Ask the provider where a batch has got to, and return without waiting.
+
+        One bounded exchange. A batch that has not settled is reported as
+        :attr:`~ai_assistant.core.types.BatchState.PENDING`; ``poll`` never blocks
+        until it settles, and a caller that wants to wait writes the loop.
+
+        ``total`` is read from the provider on **every** call, beside the
+        ``settled`` it must agree with, because nothing on the handle can be
+        trusted as a count (ADR-0143 §9). An implementation whose provider reports
+        no in-flight progress reports ``settled`` as ``0`` until the batch
+        completes; that satisfies the invariant and is not a defect.
+
+        Args:
+            handle: The batch to ask about. Its ``issuer`` must equal this
+                implementation's configured one; object identity is not the test.
+
+        Returns:
+            The batch's :class:`~ai_assistant.core.types.BatchStatus`.
+
+        Raises:
+            ModelError: If ``handle``'s ``issuer`` is not this implementation's —
+                a caller error, neither ``retryable`` nor ``routable`` (ADR-0066
+                §3) — or if the exchange with the provider fails, narrowed to the
+                most specific subclass.
+        """
+        ...
+
+    async def fetch(self, handle: BatchHandle) -> Sequence[BatchItemOutcome]:
+        """Read a settled batch's outcomes: exactly one per submitted item.
+
+        Defined only for a batch whose :meth:`poll` has reported
+        :attr:`~ai_assistant.core.types.BatchState.COMPLETE`; a
+        ``PENDING`` batch raises rather than being waited for. It returns one
+        :class:`~ai_assistant.core.types.BatchItemOutcome` per submitted item — no
+        more, no fewer, and none for an ``item_id`` that was not submitted.
+
+        **The order is unspecified** and an implementation is not required to make
+        it stable. A caller matches an outcome to its request by ``item_id`` and
+        never by position: the vendor's results arrive unordered, and the seam
+        admits kinds that carry no message, so ordering would be a convenience it
+        cannot honestly provide.
+
+        **A single item's failure is returned, never raised.** ``fetch`` raises
+        only for a fault of the fetch itself — the handle, the transport, the
+        results-retention window, or a batch that is not yet ``COMPLETE`` — and
+        never because some items failed. A batch's whole point is that one item's
+        refusal must not destroy the other results, and an exception is not a
+        container that can hold them.
+
+        **Retention is not the processing window, and a lapsed fetch raises.** The
+        processing window is per item and surfaces as the ``EXPIRED`` outcome; the
+        results retention is per batch and is reported as
+        :attr:`~ai_assistant.core.types.BatchStatus.results_expire_at`. A ``fetch``
+        against a batch whose retention has lapsed raises: it never returns an
+        empty or short set of outcomes, and it never reports a lapsed item as
+        ``EXPIRED``. Conflating the two is the failure this clause exists to
+        prevent, and the dangerous direction is the silent one — a short return
+        would read as a run of expired items and be scored as though it had
+        happened.
+
+        Args:
+            handle: The batch to read. Its ``issuer`` must equal this
+                implementation's configured one; object identity is not the test.
+
+        Returns:
+            One outcome per submitted item, in unspecified order.
+
+        Raises:
+            ModelError: If ``handle``'s ``issuer`` is not this implementation's, if
+                the batch has not settled, if its results retention has lapsed, or
+                if the exchange with the provider fails. The first two are caller
+                errors and carry ADR-0066 §3's disposition; a provider failure is
+                narrowed to the most specific subclass.
+        """
         ...
 
 
