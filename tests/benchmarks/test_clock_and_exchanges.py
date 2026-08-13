@@ -126,3 +126,74 @@ def test_every_exchange_carries_non_blank_content() -> None:
     )
 
     assert all(exchange.content.strip() for exchange in built)
+
+
+def _keyed(*turns: tuple[str, bool, str | None]) -> BenchSession:
+    """Build a session from (text, user_side, evidence_key) triples.
+
+    Args:
+        turns: The utterances.
+
+    Returns:
+        The session.
+    """
+    return BenchSession(
+        session_key="s",
+        occurred_at=WHEN,
+        turns=tuple(
+            BenchTurn(speaker="u" if user else "a", text=text, user_side=user, evidence_key=key)
+            for text, user, key in turns
+        ),
+    )
+
+
+def test_an_exchange_carries_the_keys_of_both_its_halves() -> None:
+    """The fold is many-to-one, so a citation to *either* half is a citation to the one
+    episode the exchange becomes (#1074)."""
+    built = exchanges_of(_keyed(("hello", True, "D1:1"), ("hi", False, "D1:2")))
+
+    assert built[0].evidence_keys == ("D1:1", "D1:2")
+
+
+def test_joined_same_side_turns_contribute_every_key_they_carry() -> None:
+    """Two utterances joined into one half are two cited turns inside one episode."""
+    built = exchanges_of(
+        _keyed(
+            ("one", True, "D1:1"),
+            ("two", True, "D1:2"),
+            ("reply", False, "D1:3"),
+            ("more", False, "D1:4"),
+        )
+    )
+
+    assert len(built) == 1
+    assert built[0].evidence_keys == ("D1:1", "D1:2", "D1:3", "D1:4")
+
+
+def test_a_repeated_key_is_carried_once_in_first_seen_order() -> None:
+    """LongMemEval keys every turn of a session alike, so a session folds onto one key
+    rather than onto one entry per turn."""
+    built = exchanges_of(_keyed(("hello", True, "s_late"), ("hi", False, "s_late")))
+
+    assert built[0].evidence_keys == ("s_late",)
+
+
+def test_an_unkeyed_turn_contributes_nothing_rather_than_a_blank() -> None:
+    built = exchanges_of(_keyed(("hello", True, None), ("hi", False, "D1:2")))
+
+    assert built[0].evidence_keys == ("D1:2",)
+
+
+def test_an_orphan_assistant_run_keeps_its_own_keys() -> None:
+    """It is recorded as a turn of its own, so its citations ride with it."""
+    built = exchanges_of(_keyed(("good morning", False, "D1:1"), ("morning", True, "D1:2")))
+
+    assert built[0].evidence_keys == ("D1:1",)
+    assert built[1].evidence_keys == ("D1:2",)
+
+
+def test_an_exchange_has_no_keys_where_the_corpus_supplies_none() -> None:
+    """The default: a turn built without a pointer contributes none."""
+    built = exchanges_of(_session(("hello", True), ("hi", False)))
+
+    assert built[0].evidence_keys == ()
