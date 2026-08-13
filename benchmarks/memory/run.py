@@ -17,7 +17,10 @@ their price, which is a vendor's number and not the harness's to guess.
 
 from __future__ import annotations
 
+import re
+from collections import Counter
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -51,6 +54,7 @@ __all__ = [
     "PREREGISTRATION_REFUSAL",
     "RunPlan",
     "build_grader",
+    "case_dir_name",
     "check_credentials_for",
     "execute_run",
     "plan_run",
@@ -71,6 +75,38 @@ PREREGISTRATION_REFUSAL = (
 
 #: Where runs are written, beside the harness and ignored by git.
 DEFAULT_RUNS_DIR = "runs"
+
+#: Everything a case directory name does not keep verbatim.
+_UNSAFE_IN_DIR_NAME = re.compile(r"[^A-Za-z0-9._-]")
+
+#: How much of the sanitised key survives into a case directory name.
+_DIR_NAME_PREFIX_CHARS = 64
+
+#: How much of the key's digest is appended to it.
+_DIR_NAME_DIGEST_CHARS = 12
+
+
+def case_dir_name(case_key: str) -> str:
+    """Name the directory a case's stores live in, injectively.
+
+    **Sanitising a key is not an injective mapping, and per-case store isolation
+    needs one.** ``"a/b"`` and ``"a_b"`` both sanitise to ``a_b``, and two cases
+    sharing a directory share their memory, conversations and deferral stores — so
+    one case's beliefs can answer another's questions, which is the property
+    :func:`execute_run` exists to keep. The name is therefore a sanitised prefix of
+    the key *plus a digest of the whole key*: the prefix keeps the directory
+    recognisable, which is what ``--keep-stores`` is for, and the digest is what
+    makes distinct keys distinct directories.
+
+    Args:
+        case_key: The case's key, as its corpus gives it.
+
+    Returns:
+        One path component, unique to ``case_key``.
+    """
+    prefix = _UNSAFE_IN_DIR_NAME.sub("_", case_key)[:_DIR_NAME_PREFIX_CHARS]
+    digest = sha256(case_key.encode("utf-8")).hexdigest()[:_DIR_NAME_DIGEST_CHARS]
+    return f"{prefix}-{digest}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,10 +152,22 @@ def plan_run(corpus: Corpus, cases: Sequence[BenchCase], *, batch_size: int) -> 
         The plan.
 
     Raises:
-        ValueError: If ``batch_size`` is not positive.
+        ValueError: If ``batch_size`` is not positive, or if two cases share a
+            ``case_key``.
     """
     if batch_size < 1:
         msg = f"batch_size must be positive, got {batch_size}"
+        raise ValueError(msg)
+    # Two cases under one key is a mistake whatever the directories do — the records
+    # they write cannot be told apart afterwards. Refusing it in the planner means both
+    # CLI commands report it before a store is opened or a model call is made, and it
+    # is the half of case isolation `case_dir_name` cannot supply: a digest is a
+    # function of the key, so one key is one directory however it is computed.
+    duplicated = sorted(
+        key for key, count in Counter(case.case_key for case in cases).items() if count > 1
+    )
+    if duplicated:
+        msg = f"cases must have distinct case_key values; duplicated: {', '.join(duplicated)}"
         raise ValueError(msg)
     turns = 0
     observations = 0
@@ -235,7 +283,9 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
 
     Each case gets its own data directory and its own harness: a benchmark case is a
     whole memory, and two cases sharing a store would let one case's beliefs answer
-    another's questions. The stores are removed after each case unless asked for,
+    another's questions. :func:`case_dir_name` is what makes that true rather than
+    merely intended — distinct keys get distinct directories even when they sanitise
+    alike. The stores are removed after each case unless asked for,
     because a LoCoMo case's ``memory.db`` carries thousands of vectors and ten of them
     is a lot of disk for something nothing reads. ``traces.db`` is always kept: it is
     the ADR-0119 record P8's analysis is defined over, and it is small.
@@ -345,7 +395,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     (run_dir / "manifest.json").write_text(manifest.model_dump_json(indent=1), encoding="utf-8")
 
     for case in plan.cases:
-        case_dir = run_dir / "cases" / case.case_key.replace("/", "_")
+        case_dir = run_dir / "cases" / case_dir_name(case.case_key)
         harness = build_harness(resolved, data_dir=case_dir, model=model, observer=observer)
         try:
             summary = await ingest_case(harness, case, batch_size=resolved.observation_batch_size)

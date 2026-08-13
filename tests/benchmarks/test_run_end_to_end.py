@@ -24,7 +24,7 @@ from benchmarks.memory.cases import BenchCase, BenchQuestion, BenchSession, Benc
 from benchmarks.memory.corpora.provenance import LOCOMO
 from benchmarks.memory.grade import ExactGrader
 from benchmarks.memory.records import QuestionRecord, RunManifest, RunMode, read_jsonl
-from benchmarks.memory.run import execute_run, plan_run
+from benchmarks.memory.run import case_dir_name, execute_run, plan_run
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError, ModelUnavailableError
@@ -41,15 +41,18 @@ FIRST = datetime(2023, 5, 8, 13, 56, tzinfo=UTC)
 BATCH = 2
 
 
-def _case() -> BenchCase:
+def _case(key: str = "conv-test") -> BenchCase:
     """A two-session case with two questions, one of them unanswerable.
+
+    Args:
+        key: The case key, and the prefix its question ids take.
 
     Returns:
         The case.
     """
     return BenchCase(
         corpus_key="locomo",
-        case_key="conv-test",
+        case_key=key,
         sessions=(
             BenchSession(
                 session_key="session_1",
@@ -72,18 +75,55 @@ def _case() -> BenchCase:
         ),
         questions=(
             BenchQuestion(
-                question_id="conv-test#0",
+                question_id=f"{key}#0",
                 category="1",
                 question="What did Ada adopt?",
                 answer="a dog",
                 evidence=("D1:1",),
             ),
             BenchQuestion(
-                question_id="conv-test#1",
+                question_id=f"{key}#1",
                 category="5",
                 question="Did Ada adopt a cat?",
                 answer="No such information",
                 unanswerable=True,
+            ),
+        ),
+    )
+
+
+def _cat_case() -> BenchCase:
+    """A case keyed `a_b` — what `"a/b"` sanitises to — about nobody in `_case`.
+
+    Every belief it can produce is distilled from these turns, so a record id it
+    retrieves that also appears under the other case is a shared store and nothing
+    else.
+
+    Returns:
+        The case.
+    """
+    return BenchCase(
+        corpus_key="locomo",
+        case_key="a_b",
+        sessions=(
+            BenchSession(
+                session_key="session_1",
+                occurred_at=FIRST,
+                turns=(
+                    BenchTurn(speaker="Cy", text="Cy: I moved to Lisbon.", user_side=True),
+                    BenchTurn(speaker="Di", text="Di: How is the weather?", user_side=False),
+                    BenchTurn(speaker="Cy", text="Cy: Warm all winter.", user_side=True),
+                    BenchTurn(speaker="Di", text="Di: Enviable.", user_side=False),
+                ),
+            ),
+        ),
+        questions=(
+            BenchQuestion(
+                question_id="a_b#0",
+                category="1",
+                question="Where did Cy move?",
+                answer="Lisbon",
+                evidence=("D1:1",),
             ),
         ),
     )
@@ -285,7 +325,7 @@ async def test_the_traces_survive_the_run_and_the_stores_do_not(tmp_path: Path) 
     is thousands of vectors nothing reads afterwards."""
     _, run_dir = await _run(tmp_path)
 
-    case_dir = run_dir / "cases" / "conv-test"
+    case_dir = run_dir / "cases" / case_dir_name("conv-test")
     assert (case_dir / "traces.db").exists()
     assert not (case_dir / "memory.db").exists()
     assert not (case_dir / "conversations.db").exists()
@@ -307,7 +347,55 @@ async def test_keeping_the_stores_is_available(tmp_path: Path) -> None:
         keep_stores=True,
     )
 
-    assert (root / manifest.run_id / "cases" / "conv-test" / "memory.db").exists()
+    kept = root / manifest.run_id / "cases" / case_dir_name("conv-test")
+    assert (kept / "memory.db").exists()
+    assert kept.name.startswith("conv-test-")  # recognisable, which is what the flag is for
+
+
+def test_keys_that_sanitise_alike_still_name_different_directories() -> None:
+    """The collision the digest exists to close: `"a/b"` and `"a_b"` both sanitise to
+    `a_b`, and a case directory is a memory."""
+    assert case_dir_name("a/b") != case_dir_name("a_b")
+    assert case_dir_name("a/b").startswith("a_b-")
+    assert case_dir_name("conv-26") == case_dir_name("conv-26")
+
+
+def test_a_plan_refuses_two_cases_under_one_key() -> None:
+    """No naming scheme separates a key from itself, so the refusal is the only
+    place this can be caught — and it is caught before anything is spent."""
+    with pytest.raises(ValueError, match="distinct case_key"):
+        plan_run(LOCOMO, (_case(), _case()), batch_size=BATCH)
+
+
+async def test_colliding_keys_get_their_own_stores(tmp_path: Path) -> None:
+    """Two cases whose keys sanitise alike each keep their own memory: sharing one
+    directory would let the dog case's beliefs answer the cat case's questions."""
+    plan = plan_run(LOCOMO, (_case(key="a/b"), _cat_case()), batch_size=BATCH)
+    root = tmp_path / "runs"
+
+    manifest = await execute_run(
+        plan,
+        output_root=root,
+        mode=RunMode.SMOKE,
+        corpus_digests={},
+        settings=_settings(tmp_path),
+        model=FakeModelProvider("a dog"),
+        observer=FakeObserver(max_batch_size=BATCH),
+        keep_stores=True,
+    )
+
+    run_dir = root / manifest.run_id
+    names = {case_dir_name("a/b"), case_dir_name("a_b")}
+    assert {path.name for path in (run_dir / "cases").iterdir()} == names
+    assert all((run_dir / "cases" / name / "memory.db").exists() for name in names)
+
+    retrieved: dict[str, set[str]] = {}
+    for record in read_jsonl(run_dir / "records.jsonl", QuestionRecord):
+        retrieved.setdefault(record.case_key, set()).update(record.retrieved_ids)
+    assert retrieved.keys() == {"a/b", "a_b"}
+    assert retrieved["a/b"]
+    assert retrieved["a_b"]
+    assert not retrieved["a/b"] & retrieved["a_b"]
 
 
 async def test_a_run_grades_the_unanswerable_question_on_abstention(
