@@ -42,7 +42,7 @@ from ai_assistant.core.types import (
     TraceOutcome,
     TraceRef,
 )
-from ai_assistant.memory import notification_traces, traces
+from ai_assistant.memory import notification_store, notification_traces, traces
 from ai_assistant.memory.notification_policy import DefaultNotificationPolicy
 from ai_assistant.memory.notification_store import SqliteNotificationStore
 from ai_assistant.memory.notification_traces import (
@@ -584,6 +584,37 @@ async def test_a_sink_that_raises_costs_the_trace_and_never_the_ruling(
 
 
 # --- what travels, and what may not ------------------------------------------
+
+
+async def test_a_reading_that_raises_costs_the_trace_and_never_the_ruling(
+    make_store: Callable[..., SqliteNotificationStore],
+    sink: FakeTraceSink,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§3's subordination reaches a bug in this package's own reading.
+
+    ADR-0119 §5 admits no exception for first-party code, and the whole trace is
+    lost rather than a keyless one recorded: §5 of ADR-0141 reads a trace carrying
+    none of §4's keys as a crossing that never reached its ruling, and this one
+    did.
+    """
+
+    def raising(**kwargs: object) -> dict[str, int | float]:
+        msg = "the reading is broken"
+        raise ZeroDivisionError(msg)
+
+    # Patched where the store *reads* it: the seam imported the name, so
+    # rebinding it in the emitting module would leave the call site untouched.
+    monkeypatch.setattr(notification_store, "ruling_metrics", raising)
+    store = make_store()
+
+    with structlog.testing.capture_logs() as captured:
+        ruling = await store.admit(candidate(), policy=DefaultNotificationPolicy())
+
+    assert ruling.kind is NotificationDispositionKind.HOLD
+    assert len(await store.held()) == 1
+    assert sink.recorded == ()
+    assert [record["event"] for record in captured] == [traces.TRACE_NOT_RECORDED]
 
 
 async def test_the_correlation_is_carried_where_there_is_one(

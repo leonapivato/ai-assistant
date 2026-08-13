@@ -58,7 +58,7 @@ from ai_assistant.core.types import (
 from ai_assistant.memory.traces import REFUSALS, dropped
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
     from datetime import datetime
 
     from ai_assistant.core.protocols import TraceSink
@@ -244,15 +244,34 @@ class NotificationTraces:
         self._sink = sink
 
     async def ruled(
-        self, seam: str, *, occurred_at: datetime, metrics: Mapping[str, int | float]
+        self,
+        seam: str,
+        *,
+        occurred_at: datetime,
+        observe: Callable[[], Mapping[str, int | float]],
     ) -> None:
         """Record a ruling that committed.
+
+        **The reading is taken behind the guard, not in front of it.**
+        :func:`ruling_metrics` is first-party code in this package, so a raise
+        there is a bug rather than an environmental failure — but ADR-0119 §5
+        admits no exception for first-party bugs, and failing a committed ruling
+        because its counters would not convert is exactly the inversion that
+        clause forbids. It costs the whole trace rather than a keyless one: a
+        trace carrying none of §4's keys is §5's **incomplete** state, which means
+        "the ruling was not reached", and this ruling was.
 
         Args:
             seam: Which crossing this is — a literal constant above.
             occurred_at: The ruling instant, read inside the atomic act.
-            metrics: §4's keys, as :func:`ruling_metrics` read them.
+            observe: How to read the committed ruling into §4's keys.
         """
+        try:
+            metrics = observe()
+        # Broad by design: §3 lets no reading bug reach the ruling it observes.
+        except Exception as error:
+            dropped(TraceKind.NOTIFICATION, seam, error)
+            return
         await self._record(seam, occurred_at=occurred_at, outcome=TraceOutcome.OK, metrics=metrics)
 
     async def failed(self, seam: str, *, occurred_at: datetime | None, error: Exception) -> None:
