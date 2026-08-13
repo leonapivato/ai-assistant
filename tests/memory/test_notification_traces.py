@@ -91,6 +91,42 @@ def _interrupting(*, quiet: bool = False) -> NotificationPreferences:
     )
 
 
+class _BreakingClock(MutableClock):
+    """A clock a case can break *after* it has already been read successfully.
+
+    The store fixes its clock at construction, so a case about a reading that
+    fails on the **second** ruling — the reconsideration of a record the first
+    one admitted — cannot express itself with a clock that was broken all along.
+    """
+
+    def __init__(self, at: datetime = NOW) -> None:
+        """Start readable.
+
+        Args:
+            at: The first reading.
+        """
+        super().__init__(at)
+        #: What the invocation raises once set — ``checked_clock`` lets this past
+        #: unwrapped, including a ``BaseException``.
+        self.failure: BaseException | None = None
+        #: Whether the reading is naive, which the guard refuses as its own error.
+        self.naive = False
+
+    def __call__(self) -> datetime:
+        """Read the clock, or fail in whichever way the case asked for.
+
+        Returns:
+            The current reading, naive where the case asked for one.
+
+        Raises:
+            BaseException: Whatever the case set, unwrapped.
+        """
+        if self.failure is not None:
+            raise self.failure
+        reading = super().__call__()
+        return reading.replace(tzinfo=None) if self.naive else reading
+
+
 def _only(sink: FakeTraceSink) -> EvaluationTrace:
     """The one notification trace the sink holds — §3's one-crossing rule, as a test."""
     recorded = sink.recorded
@@ -588,6 +624,58 @@ async def test_a_crossing_that_obtained_no_reading_emits_nothing_and_is_logged(
     (record,) = captured
     assert record["kind"] == TraceKind.NOTIFICATION
     assert record["seam"] == SEAM_ADMIT
+
+
+async def test_a_reconsideration_that_obtained_no_reading_emits_nothing_and_is_logged(
+    make_store: Callable[..., SqliteNotificationStore], sink: FakeTraceSink
+) -> None:
+    """§3's no-reading clause reaches the second seam, on its own label.
+
+    The store reads its clock first and inside the act on both seams, so a
+    reconsideration that cannot obtain an instant is in exactly the position an
+    admission is: nothing to stamp, and a lost trace rather than a silent drop or
+    a fabricated instant.
+    """
+    clock = _BreakingClock()
+    store = make_store(now=clock)
+    ruling = await _held_behind_a_quiet_window(store, clock)
+    assert ruling.notification_id is not None
+    clock.naive = True
+
+    with structlog.testing.capture_logs() as captured, pytest.raises(NotificationStoreError):
+        await store.reconsider(ruling.notification_id, policy=DefaultNotificationPolicy())
+
+    assert [trace.seam for trace in sink.recorded] == [SEAM_ADMIT]
+    assert [record["event"] for record in captured] == [traces.TRACE_NOT_RECORDED]
+    (record,) = captured
+    assert record["seam"] == SEAM_RECONSIDER
+
+
+async def test_a_cancellation_arriving_as_a_clock_read_writes_nothing_at_all(
+    make_store: Callable[..., SqliteNotificationStore], sink: FakeTraceSink
+) -> None:
+    """§3: cancellation outranks the no-reading clause where the two meet.
+
+    ``checked_clock`` lets a ``BaseException`` from the invocation propagate along
+    with everything else, so a shutdown can arrive at this seam as a clock read
+    that produced nothing. Read without the precedence clause the two rules
+    collide: the no-reading clause says log a lost trace, ADR-0119 §5 says that
+    record names the failure's class, and ADR-0119 §3 forbids deriving one from a
+    cancellation — so an operator's log would carry a notification-seam failure
+    every time the hub stops. Nothing is written for it, and it costs nothing,
+    because a cancelled read has no event to be lost.
+    """
+    clock = _BreakingClock()
+    store = make_store(now=clock)
+    ruling = await _held_behind_a_quiet_window(store, clock)
+    assert ruling.notification_id is not None
+    clock.failure = asyncio.CancelledError()
+
+    with structlog.testing.capture_logs() as captured, pytest.raises(asyncio.CancelledError):
+        await store.reconsider(ruling.notification_id, policy=DefaultNotificationPolicy())
+
+    assert [trace.seam for trace in sink.recorded] == [SEAM_ADMIT]
+    assert captured == []
 
 
 async def test_a_cancellation_writes_neither_a_trace_nor_a_lost_trace_record(
