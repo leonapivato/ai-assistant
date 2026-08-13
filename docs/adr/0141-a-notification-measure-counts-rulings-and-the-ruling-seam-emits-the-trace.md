@@ -12,6 +12,12 @@
   that the member is the whole of the addition: no Protocol changes, no
   `Settings` field appears, no `AssistantEngine` method, wire operation or CLI
   command is created, and no other enumeration gains a member.
+- **This ADR's ratification.** It decides a contract surface, so the required set
+  is adversarial **and** architecture. Both returned clean on one `Proposed` tree
+  and the status flipped only then, with both re-run on the flipped tree —
+  `CONTRIBUTING.md` → "Finishing an ADR PR: `Proposed` through the reviews,
+  `Accepted` on the way out", whose sequence this PR's round record carries.
+  Nothing implements against §10 until this has merged.
 - **It answers #980 by ruling the measure's definition, and it does not close
   it.** #980 asks for an instrument in the tree. This ADR supplies what an
   instrument needs before it can be written — what is counted, out of what, and
