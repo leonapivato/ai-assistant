@@ -36,6 +36,7 @@ from itertools import count
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.errors import (
+    GrantError,
     InvalidGrantError,
     NotificationBudgetError,
     UngrantableSourceError,
@@ -723,6 +724,46 @@ class FakeAssistantEngine:
         ordered = sorted(by_id, key=lambda record: record.decided_at, reverse=True)
         return self._checked(tuple(ordered[:limit]), "recent_grants")
 
+    async def standing_grants(self) -> tuple[SourceGrant, ...]:
+        """List every grant that is live right now, whatever sources are held.
+
+        **Answered from the recorded history and never from** :attr:`sources_held`
+        (ADR-0139 §1): a grant on a source this engine no longer holds is *in* this
+        set, which is the state the whole operation exists for and the one an
+        implementation deriving the answer from ``grantable_sources`` would drop.
+
+        The order is :meth:`recent_grants`' and carries no meaning (ADR-0139 §2) —
+        chosen so this fake answers the same question the same way twice, which is
+        a display convention rather than a contract clause a test may pin.
+
+        Raises:
+            GrantError: If any source has more than one live grant, which
+                :meth:`hold_grant` is the only way in — refusing the whole call
+                rather than the affected source, as the contract requires.
+            OversizedValueError: If the live set does not fit the contract limit.
+                Refused whole rather than truncated, which is what distinguishes
+                this operation from a paged one.
+        """
+        self.calls.append(("standing_grants", {}))
+        revoked = {record.revokes for record in self.grants_recorded if record.revokes is not None}
+        live = [
+            record
+            for record in self.grants_recorded
+            if record.revokes is None and record.id not in revoked
+        ]
+        seen: set[str] = set()
+        for record in live:
+            if record.source in seen:
+                msg = (
+                    f"the grant store holds more than one live grant for source "
+                    f"{record.source!r}, where ADR-0097 §4 allows one; the store is corrupt"
+                )
+                raise GrantError(msg)
+            seen.add(record.source)
+        by_id = sorted(live, key=lambda record: record.id)
+        ordered = sorted(by_id, key=lambda record: record.decided_at, reverse=True)
+        return self._checked(tuple(ordered), "standing_grants")
+
     def _live_grant(self, source: str) -> SourceGrant | None:
         """The grant on ``source`` no recorded revocation names (ADR-0097 §4).
 
@@ -875,8 +916,19 @@ class FakeAssistantEngine:
         permits explicitly and which an implementation deriving liveness from a
         time-ordered page gets wrong.
 
+        **No admission check and no one-live-grant check**, which is what makes two
+        further states reachable — both of them states a real hub can be in and
+        neither reachable through the surface (ADR-0139 §8). A grant on an
+        ``identity`` this engine does not hold is the whole subject of
+        ``standing_grants``: an operator unsets a reader's path and the grant stays
+        live while disappearing from ``grantable_sources``. And **calling this
+        twice for one source** seeds the corrupt store ADR-0139 §2 requires
+        ``standing_grants`` to refuse — the state ``record``'s atomic check makes
+        unreachable through any writer, so a suite that could not script it would
+        leave an implementation returning both grants passing every case.
+
         Args:
-            identity: The source the record is about.
+            identity: The source the record is about. Not required to be held.
             scope: The uses. On a revoking record this must transcribe the revoked
                 grant's scope verbatim, which is the store's own invariant.
             decided_at: When the user decided; defaults to this engine's logical

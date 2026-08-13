@@ -92,7 +92,19 @@ from ai_assistant.wire.errors import (
 #: twenty-five methods and this number still moves; ADR-0124 §9 makes that
 #: compliance a **review obligation** on the change and decides no mechanical
 #: check, and #891 carries the check that does not exist.
-PROTOCOL_VERSION: Final[int] = 5
+#:
+#: **6 since ADR-0139 §2**, which adds ``standing_grants`` — what the user
+#: currently authorises, read from the grant store rather than from the readers the
+#: hub holds, and the twenty-sixth method on the promoted surface. Back under
+#: ADR-0124 §9's *first* limb, "any change to the promoted surface's method set",
+#: which ADR-0139 §8 restates in its own words and which §9 states again in
+#: ADR-0124's: "Adding a method bumps, and that is the honest consequence rather
+#: than an oversight." The half-finished upgrade is ``next_notification``'s
+#: unchanged — a ``standing_grants`` call from a new client to an old hub is a
+#: method that build's engine surface does not declare, so ``_dispatch`` closes the
+#: connection with no reply — and the bump is what turns that into §3's message
+#: naming both versions.
+PROTOCOL_VERSION: Final[int] = 6
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

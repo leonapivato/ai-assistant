@@ -319,6 +319,54 @@ class _GrantLog:
         revoked = {held.revokes for held in self._records if held.revokes is not None}
         return [held for held in self._records if held.revokes is None and held.id not in revoked]
 
+    def standing(self) -> list[SourceGrant]:
+        """Detached copies of every live grant, refusing two for one source.
+
+        The enumeration ADR-0139 §2 adds, computed from the same
+        :meth:`_live_grants` the per-source answer uses — which is the point of the
+        log being shared: an enumeration free to compute liveness its own way is
+        free to disagree with the gate, and the one that disagreed would still pass
+        its own suite.
+
+        **Refuses the whole call rather than the affected source**, as a real store
+        does: :meth:`append` makes two live grants for one source unreachable
+        through the writer, so this state arrives only through
+        :meth:`FakeSourceGrantStore.hold_conflicting_grants` — and an
+        implementation that returned both would show the user two standing
+        authorisations where revoking one leaves the other live.
+
+        Raises:
+            GrantError: If any source has more than one live grant.
+        """
+        live = self._live_grants()
+        seen: set[str] = set()
+        for held in live:
+            if held.source in seen:
+                msg = (
+                    f"the grant store holds more than one live grant for source "
+                    f"{held.source!r}, where ADR-0097 §4 allows one; the store is corrupt"
+                )
+                raise GrantError(msg)
+            seen.add(held.source)
+        return [held.model_copy(deep=True) for held in live]
+
+    def force(self, grant: SourceGrant) -> None:
+        """Append ``grant`` with **none** of :meth:`append`'s invariants applied.
+
+        The one way into a state a conforming store's writer refuses, and it exists
+        for exactly one of them: two live grants for one source (ADR-0139 §8's
+        marked clause). Every record a conformance suite can create goes through
+        ``record``, whose atomic one-live-grant check refuses the second — so
+        without this the refusal ADR-0139 §2 states is a clause nothing exercises,
+        and an implementation returning both grants would pass the whole suite.
+
+        This is ADR-0097 §10's requirement that these fakes be scriptable into a
+        raising ``live()``, applied to the second state a writer makes unreachable.
+        It is not a second write path: nothing in either fake's contract behaviour
+        calls it, and a test that wants a *valid* history uses :meth:`append`.
+        """
+        self._records.append(grant)
+
     def live(self, source: str, use: GrantScope) -> SourceGrant | None:
         """The live grant covering ``source`` for ``use``, detached, or ``None``.
 
@@ -326,9 +374,27 @@ class _GrantLog:
         case-fold. A store that normalised here would change what a grant covers,
         which is the one place a store could be "helpful" and be wrong
         (ADR-0097 §9).
+
+        **Two live grants for that source are refused rather than resolved**, as
+        ``SqliteSourceGrantStore.live`` refuses them: picking one would answer the
+        gate from a store that cannot say what the user granted. The state is
+        unreachable through :meth:`append` and arrives only through :meth:`force`,
+        so this costs nothing on any ordinary history — but a fake that quietly
+        answered where the durable store raises would leave the two disagreeing
+        about the one state ADR-0139 §2 is written about.
+
+        Raises:
+            GrantError: If ``source`` has more than one live grant.
         """
-        for held in self._live_grants():
-            if held.source == source and use in held.scope:
+        covering = [held for held in self._live_grants() if held.source == source]
+        if len(covering) > 1:
+            msg = (
+                f"the grant store holds {len(covering)} live grants for source "
+                f"{source!r}, where ADR-0097 §4 allows one; the store is corrupt"
+            )
+            raise GrantError(msg)
+        for held in covering:
+            if use in held.scope:
                 return held.model_copy(deep=True)
         return None
 
@@ -648,6 +714,47 @@ class FakeSourceGrantStore:
             raise GrantError(msg) from self._live_failure
         async with self._resource.held():
             return self._log.live(source, use)
+
+    async def standing(self) -> list[SourceGrant]:
+        """Return every live grant, detached (ADR-0139 §2).
+
+        Read inside the modelled resource, like every other method, and computed
+        from the same shared log the per-source answer uses — so this fake cannot
+        agree with the gate about one source and disagree about the set.
+
+        Raises:
+            GrantError: If a failure is scripted (:meth:`fail_live`), or if the
+                store holds two live grants for one source
+                (:meth:`hold_conflicting_grants`).
+        """
+        if self._live_failure is not None:
+            msg = "fake: the grant store could not be read"
+            raise GrantError(msg) from self._live_failure
+        async with self._resource.held():
+            return self._log.standing()
+
+    def hold_conflicting_grants(self, first: SourceGrant, second: SourceGrant) -> None:
+        """Seed the **two live grants for one source** state ``record`` refuses.
+
+        ADR-0139 §8's marked clause: the canonical fakes are scriptable into this
+        state so that §2's refusal is reachable from a test. Nothing else can reach
+        it — ``record``'s atomic one-live-grant check is what makes the invariant
+        true, so every history a conformance suite can build through the writer is
+        a history in which the clause cannot fire, and an implementation returning
+        both grants would pass the whole suite.
+
+        The records go in **unchecked**, which is what a corrupted or hand-edited
+        file looks like from the store's side; the durable store's own tests reach
+        the same state by seeding rows.
+
+        Args:
+            first: The first live grant.
+            second: A second live grant, expected to name ``first``'s source —
+                nothing here checks it, because checking is the thing being
+                bypassed.
+        """
+        self._log.force(first)
+        self._log.force(second)
 
     async def recent(self, *, limit: int = 50) -> list[SourceGrant]:
         """Return up to ``limit`` records, newest first, ties broken by id.

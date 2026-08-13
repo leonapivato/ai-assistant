@@ -274,7 +274,8 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     ADR-0085 §1's fifteen, plus ADR-0102 §1's four, plus ADR-0130 §9's five —
     a read of the held notifications, a dismissal, a per-notification delete, and
     a read and a write of the standing preferences — plus ADR-0131 §4's one, the
-    long poll a notification travels on. **Reconsideration is not among
+    long poll a notification travels on, plus ADR-0139 §2's one, what the user
+    currently authorises read from the grant store. **Reconsideration is not among
     them and may not become one**: ADR-0130 §5 puts it on the concrete
     ``orchestration`` engine, where ADR-0083 §8 puts a maintenance surface, and
     states that "no client asks for it and no interface adapter may drive it".
@@ -286,7 +287,7 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     check, since a method nobody bound to the shared contract is a method no
     implementation is held to.
     """
-    assert len(_method_names()) == 25
+    assert len(_method_names()) == 26
 
 
 def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None:
@@ -305,7 +306,9 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ADR-0133 §6 fires it for the ``NOTIFY`` member of ``GrantScope``, taking the
     version to 5 with the method set unmoved at twenty-five. So a mismatch here
     is not evidence of a fault in either direction: it is a lane being made to
-    look at ADR-0124 §9 and say which limb it is under.
+    look at ADR-0124 §9 and say which limb it is under. ADR-0139 §2's
+    ``standing_grants`` is back under the **first** limb, and takes the surface to
+    twenty-six and the version to 6.
 
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
@@ -315,7 +318,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (25, 5), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (26, 6), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

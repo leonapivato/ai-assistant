@@ -629,6 +629,22 @@ class HubClient:
         positive_page_argument(limit, name="limit")
         return await self._call("recent_grants", limit=limit)  # type: ignore[no-any-return]
 
+    async def standing_grants(self) -> tuple[SourceGrant, ...]:
+        """Every grant the user currently authorises, read hub-side from the store.
+
+        **No local refusal to add**, because the method takes no argument
+        (ADR-0139 §8): there is nothing to validate before the round trip, so this
+        is a bare ``_call``. The refusal that matters is the hub's — a live set too
+        large for the frame comes back as ``OversizedValueError`` rather than as a
+        truncated set (ADR-0139 §2), and it arrives as a typed error frame like any
+        other.
+
+        Returns:
+            Every live grant, whatever readers the hub currently holds. The order
+            carries no meaning.
+        """
+        return await self._call("standing_grants")  # type: ignore[no-any-return]
+
     # --- the wire ----------------------------------------------------------
 
     async def _page(self, method: str, *, limit: int, offset: int) -> Any:
