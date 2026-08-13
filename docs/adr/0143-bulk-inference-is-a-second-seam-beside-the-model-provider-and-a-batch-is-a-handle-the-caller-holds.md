@@ -199,21 +199,39 @@ issued by one provider is meaningless to another (§2).
 ### 2. The seam is submit / poll / fetch, and the handle is the caller's
 
 > **Normative.** `BatchCompleter` declares exactly three `async` members:
-> `submit`, which takes the batch's items and an optional `"provider:model"`
-> override and returns a `BatchHandle`; `poll`, which takes a `BatchHandle` and
-> returns a `BatchStatus`; and `fetch`, which takes a `BatchHandle` and returns
-> the batch's `BatchItemOutcome`s. No fourth member is declared.
+> `submit`, which takes a caller-minted `batch_key`, the batch's items and an
+> optional `"provider:model"` override, and returns a `BatchHandle`; `poll`,
+> which takes a `BatchHandle` and returns a `BatchStatus`; and `fetch`, which
+> takes a `BatchHandle` and returns the batch's `BatchItemOutcome`s. No fourth
+> member is declared.
 
 > **Normative.** None of the three members waits for the batch to finish. Each
 > returns after one round trip to the provider, and no implementation may
 > satisfy `poll` or `fetch` by sleeping until the batch settles. Waiting is the
 > caller's loop, over `poll`.
 
-> **Normative.** A `BatchHandle` is valid only against the `BatchCompleter`
-> instance that issued it. Presenting a handle to any other instance is a caller
-> error, and an implementation that detects it raises `ModelError` with the
-> disposition ADR-0066 §3 fixes for a malformed argument — neither `retryable`
-> nor `routable` — rather than returning an outcome.
+> **Normative.** `submit` is **idempotent on `batch_key`**: a `submit` repeated
+> with a `batch_key` already accepted against this route returns the handle of
+> the batch accepted for that key and creates no second batch. An implementation
+> that cannot determine whether a key was already accepted raises rather than
+> submitting, so the ambiguous case never becomes a duplicate paid batch.
+
+> **Normative.** ADR-0060's resource clause is discharged at this seam by that
+> idempotency and not by any attempt to un-create a batch. A cancelled `submit`
+> may or may not have created one — ADR-0060's "a cancelled call's effect is
+> indeterminate to the caller" stands unamended and unweakened here — and the
+> caller's remedy is to re-`submit` under the same `batch_key`, which either
+> creates the batch it never created or returns the handle to the one it did.
+
+> **Normative.** A `BatchHandle` is meaningful only to a `BatchCompleter`
+> configured against the same route that issued it, and carries that route so a
+> mismatch is detectable. Presenting a handle to an implementation on a
+> different route is a caller error, and an implementation that detects it
+> raises `ModelError` with the disposition ADR-0066 §3 fixes for a malformed
+> argument — neither `retryable` nor `routable` — rather than returning an
+> outcome. Object identity is **not** the test: a handle persisted to disk and
+> presented to a freshly constructed `BatchCompleter` on the same route is
+> valid, and that is what makes resumption across a process restart possible.
 
 **This is the clause that was genuinely open, and cancellation decides it.**
 The alternative — one awaitable that hides the polling, `await
@@ -231,15 +249,31 @@ awaitable that is cancelled — by a deadline, a `KeyboardInterrupt`, or a worke
 process dying — orphans a paid job whose only identifier existed inside the
 frame that just unwound. There is no shape of a bare awaitable that hands the
 identifier back on the cancellation path. Three members put the handle in the
-caller's hands **before any waiting begins**, so the worst a cancellation costs
-is the wait.
+caller's hands **before any waiting begins**, so the worst a cancellation of the
+*wait* costs is the wait.
+
+**Splitting the wait out does not by itself close the hole, and the third and
+fourth clauses are what do.** A cancellation landing inside `submit` itself —
+after the provider accepted the batch, before the handle came back — orphans the
+batch just as thoroughly as the hidden-await shape would, and it is not a
+hypothetical: it is what a worker dying mid-submit looks like. Nothing at this
+seam can un-create that batch, and an implementation that tried would be
+promising a stop it cannot deliver (§10). What closes it is making the *identity*
+the caller's rather than the provider's: the caller mints `batch_key` and writes
+it down **before** calling, so an indeterminate `submit` has a determinate
+remedy. Re-submitting under the same key is safe by construction — it either
+creates the batch that was never created, or returns the handle to the one that
+was — which is the only shape that avoids both losing a paid job and buying a
+second one.
 
 The one-event-loop rule cuts the same way rather than the other. A suspended
 coroutine is cheap, so hiding a multi-hour wait would not by itself stall the
 loop — but it would make the wait un-restartable across a process boundary,
 and #1029's consumer is a long-running harness that will be interrupted and
-resumed. A handle that survives in a file is what makes the resumption possible,
-and the provider's own bounded results retention is what makes a later `fetch`
+resumed. A handle that survives in a file is what makes the resumption possible
+— which is why the fifth clause scopes handle validity to the **route** and not
+to the object, since a restarted process necessarily builds a new one — and the
+provider's own bounded results retention is what makes a later `fetch`
 meaningful.
 
 ### 3. An item is well-formed on `complete`'s terms, and identified by the caller
@@ -402,8 +436,11 @@ forbidden thing the easy one.
 > **Normative.** The implementing lane adds exactly **eight** public names to
 > `core/types.py`, as pydantic models or `StrEnum`s per `CLAUDE.md`'s
 > convention, spelled to the conventions already in that file: `BatchRequest`
-> (`item_id`, `messages`); `BatchHandle` (`batch_id`, `submitted_at`,
-> `item_count`); `BatchState` (`PENDING`, `COMPLETE`); `BatchStatus` (`handle`,
+> (`item_id`, `messages`); `BatchHandle` (`batch_key`, `batch_id`, `route`,
+> `submitted_at`, `item_count` — where `route` is the `"provider:model"` string
+> in the spelling `ModelProvider.complete`'s `model` argument already uses, and
+> is a plain `core` value, never a reference to any type in `models/`);
+> `BatchState` (`PENDING`, `COMPLETE`); `BatchStatus` (`handle`,
 > `state`, `settled`, `results_expire_at`); `BatchOutcomeKind` (§4's four
 > members); `BatchItemOutcome` (`item_id`, `kind`, `message`, `failure`);
 > `BatchFailureKind` (§5's seven members); and `BatchItemFailure` (`kind`,
@@ -418,10 +455,11 @@ forbidden thing the easy one.
 > the shared `BatchCompleterContract` conformance suite, and the canonical
 > `FakeBatchCompleter` in `ai_assistant.testing` with its `Test…Contract`
 > subclass — rides in **one lane and one PR together with its primary
-> production implementation**, which is the Anthropic-backed `BatchCompleter`
-> in `models/`. The primary *consumer* whose demands shape the contract is the
-> memory-benchmark harness of #1029/#1034, and it is a **follow-on consumer
-> group** under ADR-0137 §4, briefed only after the paired lane merges.
+> production implementation**, which is the vendor-backed `BatchCompleter` in
+> `models/` and is also the consumer whose demands shape this contract in
+> ADR-0137 §2's sense. The memory-benchmark harness of #1029/#1034 is a
+> **follow-on consumer group** under ADR-0137 §4, briefed only after the paired
+> lane merges.
 
 The naming is not free choice: `tests/core/test_protocol_triad.py` derives the
 suite and fake names from the Protocol's, so `BatchCompleter` fixes
@@ -430,15 +468,29 @@ location follows the sibling seams' — `tests/models/model_provider_contract.py
 and `tests/models/embedder_contract.py` — and §13's table is where that lane's
 obligations are enumerated.
 
-Naming the primary implementation rather than the primary consumer as the
-paired half is a deliberate reading of ADR-0137 §2, and it is the reading the
-tree forces. §2 pairs the triad with "the consumer whose demands shape the
-contract"; here that consumer lives outside `ai_assistant` entirely, so pairing
-it into the triad's lane would put the contract, the vendor implementation and a
-new harness subsystem in one review — the compounding ADR-0137 §1 exists to
-stop. The vendor-backed implementation in `models/` is the first real caller of
-every clause above and is what stress-tests the contract while it is still soft;
-the harness follows under §4.
+**The harness is not the consumer whose demands shape this contract, and saying
+otherwise would misapply ADR-0137 §2 rather than satisfy it.** §2 pairs the
+triad with "its primary production implementation", and defines primary as "the
+consumer whose demands shape the contract, not the one that is cheapest to
+write". Read against what is actually above: the harness contributes exactly one
+demand — bulk completion at a discount — and that demand is discharged by the
+seam existing at all. Every clause that was *hard* to write was forced by
+something else. §2's shape was forced by ADR-0060; §3's whole-batch refusal and
+§5's dispositions by ADR-0066 and `core/errors.py`; §4's four kinds, §4's
+unordered results, §6's two distinct expiries and §7's refusable size bound by
+the vendor surface — which is to say, by the thing the `models/` implementation
+is made of. That implementation is the first and hardest test of every one of
+them, and it is what stress-tests the contract while the contract is still soft.
+
+The pairing is also the only one available. A consumer cannot substitute for the
+implementation in the paired lane, because a triad with no production
+implementation gives the consumer nothing to call — the harness lane would ship
+against `FakeBatchCompleter` and discover nothing. So the live question was
+never *which* of the two to pair, but whether the harness rides **as well**; it
+does not, because it lives outside `ai_assistant` entirely and adding it would
+put a `core` contract, a vendor-SDK implementation and a new tree of harness
+machinery in one review — the compounding ADR-0137 §1 exists to stop. It follows
+under §4.
 
 ### 10. What this seam does not promise
 
@@ -458,6 +510,12 @@ the vendor's own cancel is a best-effort transition rather than a stop, and the
 caller's real remedy — stop polling and let the window close — costs nothing and
 is already available. A contract member whose only honest guarantee is "the
 request was sent" is weaker than no member, because it reads as a stop.
+
+Note precisely what §2's idempotency does and does not buy here, since the two
+are easy to conflate. It makes an interrupted `submit` **recoverable** — the
+caller can always find out which batch it owns — and it does **not** make a
+batch **stoppable**. Those are different guarantees, and the seam offers exactly
+the first.
 
 ### 11. Deferred, by name, each with the condition that fires it
 
@@ -527,7 +585,7 @@ widely than it now holds?
 
 The table below is the audit. Every normative clause of §1–§10 appears in it
 exactly once, and every row names something a reviewer can run. The count is
-21 rows against the 23 marked clauses in this ADR; the remaining two sit below
+23 rows against the 25 marked clauses in this ADR; the remaining two sit below
 the table, are obligations *about* the table and the suite that satisfies it,
 and so have no rows of their own.
 
@@ -536,7 +594,9 @@ and so have no rows of their own.
 | §1 | `BatchCompleter` in `core/protocols.py`; `ModelProvider` byte-unchanged | `test_protocol_triad.py` passes for the new Protocol; a test asserts `ModelProvider`'s member set is unchanged |
 | §2 (members) | `submit`/`poll`/`fetch`, all `async`, and no fourth member | Contract case: the Protocol's member set is exactly those three |
 | §2 (no waiting) | Each member returns after one round trip | Contract case: `poll` against a still-pending batch returns `PENDING` promptly rather than blocking |
-| §2 (handle ownership) | Foreign-handle detection in the implementation | Contract case: a handle from a second instance raises, neither `retryable` nor `routable` |
+| §2 (idempotent submit) | `batch_key` on `submit`, and key-to-batch resolution against the route | Contract cases: a repeated `submit` under one key returns the first handle and creates no second batch; an implementation that cannot resolve the key raises instead of submitting |
+| §2 (ADR-0060 discharge) | Recovery documented at the seam; no un-create attempted | Contract case: a `submit` cancelled after acceptance is recovered by re-`submit` under the same key, yielding one batch |
+| §2 (handle route validity) | `route` on `BatchHandle`; mismatch detection | Contract cases: a handle presented to a **freshly constructed** implementation on the same route is accepted; one presented on a different route raises, neither `retryable` nor `routable` |
 | §3 (well-formedness) | Pre-contact validation of every item | Contract cases: an empty history, a history ending on `Role.ASSISTANT`, and a history containing a `Role.TOOL` turn each refuse the whole batch with nothing submitted |
 | §3 (unique ids) | Duplicate-`item_id` refusal | Contract case: a duplicate refuses; a test asserts `item_id`s round-trip unrewritten |
 | §4 (one per item) | Outcome assembly keyed by `item_id` | Contract case: a mixed batch returns exactly one outcome per item and none extra |
