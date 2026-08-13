@@ -298,6 +298,7 @@ class Harness:
         feedback: object | None = None,
         observer: object | None = None,
         reader: object | None = None,
+        email_reader: object | None = None,
         queue_limit: int = 50,
         drain_timeout: timedelta | None = None,
         traces: FakeTraceRetention | None = None,
@@ -358,19 +359,35 @@ class Harness:
         # than about ADR-0097 §5's gate: an ungranted default would make every
         # ingestion case here refuse before reaching the code under test. The
         # gate's own five cases live in `test_ingestion.py`, against the stage.
+        # The **second source**, on the same terms and derived from nothing the
+        # first decides (ADR-0142 §1, §3). It is its own parameter rather than a
+        # sequence, because the engine holds one stage per source and this harness
+        # should not be able to express a shape the engine cannot.
+        self.email_reader = email_reader
         self.grants = FakeSourceGrants(
-            []
-            if reader is None
-            # `reader` is deliberately `object` here — the duck-typed fakes this
-            # module wires are not all `Reader`s — so the identity the grant has to
-            # cover is read the same way the stage reads it.
-            else [source_grant(str(reader.name))]  # type: ignore[attr-defined]
+            [
+                # `reader` is deliberately `object` here — the duck-typed fakes this
+                # module wires are not all `Reader`s — so the identity the grant has
+                # to cover is read the same way the stage reads it.
+                source_grant(str(source.name))  # type: ignore[attr-defined]
+                for source in (reader, email_reader)
+                if source is not None
+            ]
         )
         self.ingestion = (
             None
             if reader is None
             else IngestionStage(
                 reader=reader,  # type: ignore[arg-type]  # a duck-typed fake stands in for the Protocol
+                writes=self.writes,
+                grants=self.grants,
+            )
+        )
+        self.email_ingestion = (
+            None
+            if email_reader is None
+            else IngestionStage(
+                reader=email_reader,  # type: ignore[arg-type]  # a duck-typed fake stands in for the Protocol
                 writes=self.writes,
                 grants=self.grants,
             )
@@ -423,6 +440,7 @@ class Harness:
             observation=self.observation,
             questions=self.questions,
             calendar_ingestion=self.ingestion,
+            email_ingestion=self.email_ingestion,
             closers=tuple(closers),  # type: ignore[arg-type]
             id_factory=lambda: next(self.handles),
             # The whole harness runs at one instant, so the horizon the sweep
@@ -1867,6 +1885,89 @@ async def test_ingest_refuses_when_no_reader_is_configured() -> None:
 
     with pytest.raises(ConfigurationError):
         await harness.engine.ingest_calendar()
+
+
+async def test_each_ingestion_source_emits_its_own_trace_seam() -> None:
+    """ADR-0142 §9 test 10: two sources, two seams, and neither under the other's.
+
+    **The property §4 chose the whole shape for.** ``Engine._tracked``'s ``seam`` is
+    ADR-0119 §8's one wiring point for the ``OPERATION`` trace, and it is a literal
+    written at the call site. So an implementation that adds ``ingest_email`` and
+    routes it through the *first* operation's seam string passes every other test in
+    ADR-0142 §9's list — the stage is separate, the row is separate, the refusals
+    name their own sources — while leaving no ``OPERATION`` record able to say which
+    source ran or which one is failing.
+
+    **And no smaller repair exists**, which is why this is a test rather than a
+    review note. The obvious one is to put the source in the trace instead;
+    :func:`~ai_assistant.orchestration.engine._ingested` records that
+    ``IngestionReport.source`` "is deliberately left off" because ADR-0119 §2 admits
+    no runtime-read string into a trace. Distinct literal seams are what buys the
+    observability back, and asserting *both directions* — each seam present, and
+    neither operation emitting under the other's — is what pins it.
+    """
+    harness = Harness(
+        reader=FakeReader(name="calendar"),
+        email_reader=FakeReader(name="email"),
+    )
+
+    await harness.engine.ingest_calendar()
+    await harness.engine.ingest_email()
+
+    seams = [trace.seam for trace in harness.trace_sink.recorded]
+    assert seams == ["ingest_calendar", "ingest_email"]
+    assert "ingest" not in seams, "the pre-rename seam is gone, not carried alongside"
+
+
+async def test_each_ingestion_operation_takes_no_argument_at_all() -> None:
+    """ADR-0142 §9 test 5, engine half: ``self`` and nothing else, per source.
+
+    §4 is marked: "No ingestion operation takes a source argument, a source name, or
+    any argument at all." Asserted over **both** operations rather than the new one,
+    because the clause is about the shape of the family and a lane that gave only
+    the second one a selector would satisfy a test of the first.
+
+    The reason is ADR-0093 §10's, unchanged by there now being two: the reader is
+    given its own source and its own bound, so "a caller able to widen the read is a
+    caller able to defeat the bound". A source selector cannot widen a bound, but it
+    moves the choice of *what is read* from the wiring to the call site — and it
+    moves a wiring fault from ``mypy`` strict to the first tick, in a job whose
+    failure is logged and retried forever.
+    """
+    harness = Harness(reader=FakeReader(), email_reader=FakeReader(name="email"))
+
+    assert inspect.signature(harness.engine.ingest_calendar).parameters == {}
+    assert inspect.signature(harness.engine.ingest_email).parameters == {}
+
+
+async def test_neither_ingestion_operation_stands_in_for_the_other() -> None:
+    """ADR-0142 §6 at the engine: each refusal is its own source's, and only its own.
+
+    Both halves of §6's marked clause, in the two arrangements that separate them.
+    With only the calendar wired, ``ingest_email`` refuses and ``ingest_calendar``
+    **succeeds** — so the refusal is not "no ingestion is wired" being reported by an
+    engine that ingests every hour, which is §6's named trap and the state in which
+    "an operator told the wrong one looks in the wrong place". With only email
+    wired, the mirror.
+
+    The message is asserted rather than the type alone, because one shared message
+    passes every test that asserts only ``ConfigurationError``.
+    """
+    calendar_only = Harness(reader=FakeReader(name="calendar"))
+
+    assert (await calendar_only.engine.ingest_calendar()).source == "calendar"
+    with pytest.raises(ConfigurationError) as refused:
+        await calendar_only.engine.ingest_email()
+    assert "ASSISTANT_EMAIL_SOURCE_PATH" in str(refused.value)
+    assert "CALENDAR" not in str(refused.value)
+
+    email_only = Harness(email_reader=FakeReader(name="email"))
+
+    assert (await email_only.engine.ingest_email()).source == "email"
+    with pytest.raises(ConfigurationError) as refused:
+        await email_only.engine.ingest_calendar()
+    assert "ASSISTANT_CALENDAR_READER_PATH" in str(refused.value)
+    assert "EMAIL" not in str(refused.value)
 
 
 async def test_a_source_failure_reaches_the_scheduler_as_the_readers_own_error() -> None:
