@@ -112,6 +112,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from email.parser import BytesParser
 from email.policy import compat32
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Final, final
 from uuid import uuid4
 
@@ -139,7 +140,6 @@ from ai_assistant.readers._source import OneWorker, acquire
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from email.message import Message
-    from pathlib import Path
 
     from ai_assistant.core.clock import Clock
 
@@ -363,21 +363,14 @@ class EmailReader:
             ValueError: If ``path`` is not absolute or any figure is outside
                 ADR-0140 §12's range.
         """
-        if not path.is_absolute():
-            msg = (
-                f"the email source must be an absolute path, got {str(path)!r}; a "
-                f"relative value resolves against each process's working directory "
-                f"(ADR-0093 §7)"
-            )
-            raise ValueError(msg)
-
+        source = _checked_path(path)
         _check_window("email_window_past", window_past)
         _check_count("email_max_messages", max_messages)
         _check_positive_int("email_max_bytes", max_bytes)
         _check_positive_int("email_max_content_bytes", max_content_bytes)
         _check_duration("email_read_timeout", read_timeout)
 
-        self._path = path
+        self._path = source
         self._now = checked_clock(now, owner="EmailReader")
         self._window_past = window_past
         self._max_messages = max_messages
@@ -1002,6 +995,45 @@ def _check_duration(field: str, value: timedelta) -> None:
     if value <= timedelta(0):
         msg = f"{field} must be > 0, got {value!r}"
         raise ValueError(msg)
+
+
+def _checked_path(value: object) -> Path:
+    """The configured store as an absolute ``Path``, or a refusal naming the field.
+
+    **Typed before it is called into**, which is this constructor's rule for every
+    argument rather than a guard bolted onto one: a ``str`` has no ``is_absolute``
+    and ``None`` has no attributes at all, so an unguarded call turns a caller's
+    mistake into an ``AttributeError`` naming a *method* instead of the
+    ``ValueError`` naming the field this seam documents.
+
+    Typed ``object`` and returning the narrowed value, for
+    :func:`_refuse_a_non_duration`'s reason: a ``Path`` annotation would make the
+    refusal statically unreachable, which is the reasoning that let the value
+    through. ``type(value).__name__`` rather than ``repr`` — a hostile
+    ``__repr__`` must not raise past a guard, which is the discipline
+    :func:`_mint` already keeps.
+
+    ``Settings`` refuses a non-path at load and ``mypy`` refuses one at a
+    type-checked call site; what is left is the direct caller ADR-0093 §10 names —
+    "a test or a second composition root" — for whom the refusal is the only
+    description of the rule they broke.
+
+    Raises:
+        ValueError: If ``value`` is not a ``Path``, or is not absolute. Absoluteness
+            is the *shape* checked here; existence is a property of the world at an
+            instant and is checked at run time, where it degrades under ADR-0093 §8.
+    """
+    if not isinstance(value, Path):
+        msg = f"the email source must be a Path, got {type(value).__name__}"
+        raise ValueError(msg)
+    if not value.is_absolute():
+        msg = (
+            f"the email source must be an absolute path, got {str(value)!r}; a "
+            f"relative value resolves against each process's working directory "
+            f"(ADR-0093 §7)"
+        )
+        raise ValueError(msg)
+    return value
 
 
 def _refuse_a_non_duration(field: str, value: object) -> None:

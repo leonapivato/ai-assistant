@@ -219,6 +219,20 @@ def test_the_constructor_refuses_a_relative_path() -> None:
         EmailReader(Path("inbox.mbox"))
 
 
+@pytest.mark.parametrize("value", [None, "/srv/mail/inbox.mbox", 3, b"/srv/mail/inbox.mbox"])
+def test_the_constructor_refuses_a_source_that_is_not_a_path(value: object) -> None:
+    """The type is checked before anything is called on it.
+
+    A ``str`` has no ``is_absolute`` and ``None`` has no attributes at all, so an
+    unguarded call turns a direct caller's mistake into an ``AttributeError``
+    naming a *method* rather than the ``ValueError`` naming the field. The string
+    case is the one a second composition root actually writes — it is the one
+    value that looks correct.
+    """
+    with pytest.raises(ValueError, match="must be a Path"):
+        EmailReader(value)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
