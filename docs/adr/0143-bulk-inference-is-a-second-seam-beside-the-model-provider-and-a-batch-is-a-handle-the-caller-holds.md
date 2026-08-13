@@ -1,6 +1,6 @@
 # 143. Bulk inference is a second seam beside the model provider, and a batch is a handle the caller holds
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-13
 - **Durability clause.** Every quotation below — from an ADR, from
   `core/protocols.py`, from `core/errors.py`, from `pyproject.toml`, or from an
