@@ -415,6 +415,25 @@ subordinate to the work it observes".
 > `NotificationCondition` member names held at the ruling instant, and `0` when
 > it did not. The propositions are the enumeration's own, not their negations.
 
+> **Normative.** The two groups have **different provenances**, and both are in
+> the emitter's hand inside the atomic act. The four **drop** conditions are
+> observed by the store: `condition_duplicate` and `condition_at_cap` are the
+> `duplicate` and `at_cap` booleans it computed and passed to
+> `NotificationPolicy.rule`; `condition_expired` is the candidate's `expires_at`
+> against the ruling instant; and `condition_reach_off` is
+> `NotificationPreferences.reach_for` on the candidate's `notification_class`
+> being `NotificationReach.OFF`. Each is read from an argument the store handed
+> the policy, which ADR-0130 §9's determinism clause makes the ruling a function
+> of, so the store's reading and the policy's are the same reading.
+
+> **Normative.** The four **interrupt** conditions are read off the disposition
+> and never recomputed. An `INTERRUPT` carries `1` for all four, because ADR-0130
+> §5 rules that kind exactly when every one of them holds. A `HOLD` carries `0`
+> for each member of the disposition's `failed` and `1` for every other, because
+> `NotificationDisposition` refuses at construction any `HOLD` whose `failed` is
+> not the whole ordered set that failed. A `DROP` carries none of them. No
+> implementation reads `Settings.timezone` or evaluates a quiet window to emit.
+
 > **Normative.** A trace at `notification_reconsider` whose ruling was
 > `INTERRUPT` carries `held_seconds`: the ruling instant less the record's
 > `admitted_at`, in seconds. No other trace carries it.
@@ -439,6 +458,26 @@ evaluates all four, because ADR-0130 §5 requires a `HOLD` to carry "the **whole
 set** of conditions that failed at its ruling, not the first alone". The clauses
 above are that behaviour written down, which is what makes "does it carry the
 key" the same question as "was the quantity observed" (ADR-0119 §3).
+
+**Each half's provenance is stated, because the roster is wider than either
+source alone and reaching for the wrong one hits a wall.** The disposition
+carries `reason` and `failed`, not the drop conditions' truth values, so a `DROP`
+naming `EXPIRED` says nothing about the reach level that comes *after* it in
+`DROP_CONDITIONS` order — the ruling stopped at the first. And the store cannot
+evaluate a quiet window at all: `Settings.timezone` is a construction-time
+property of the **policy** (ADR-0130 §4) and never crosses the seam, so an
+emitter that tried to observe the interrupt half would have to duplicate the
+policy's local-time arithmetic and could still disagree with it. Split as the
+clauses above split it, every one of the eight has exactly one source and neither
+side needs the other's: the store reports what it computed, and the disposition
+reports what only the policy could see. The interrupt half is recoverable because
+`NotificationDisposition`'s own validator makes it so — a `HOLD` whose `failed`
+is not the complete ordered failing set is refused at construction, and any other
+kind carrying failures is refused too — so the recovery rests on the *contract*
+and holds for a custom `NotificationPolicy`, not merely for
+`DefaultNotificationPolicy`. This is also why no clause here needs a wider
+disposition or a moved emitter. Adversarial review found the gap on the ninth
+round, having reconstructed only the harder half.
 
 **The propositions are taken as the enumeration states them, and two of them are
 not opposites.** `NotificationCondition.EXPIRED` is "declares an expiry not later
