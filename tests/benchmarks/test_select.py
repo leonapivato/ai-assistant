@@ -105,3 +105,12 @@ def test_a_negative_session_limit_is_refused() -> None:
 
     with pytest.raises(ValueError, match="cannot be negative"):
         first_sessions(cases, -1)
+
+
+def test_a_negative_question_limit_is_refused() -> None:
+    """The loop would otherwise break immediately and return no cases — a run that
+    completes, writes a manifest and reports success having asked nothing."""
+    cases = (_case("a", sessions=1, questions=2),)
+
+    with pytest.raises(ValueError, match="cannot be negative"):
+        first_questions(cases, -1)

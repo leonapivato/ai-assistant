@@ -21,10 +21,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from ai_assistant.app import ensure_model_credentials
 from ai_assistant.app.composition import CONFLICT_LIMIT, RETRIEVAL_LIMIT
 from ai_assistant.core.config import Settings
-from benchmarks.memory.answer import ANSWER_SYSTEM_PROMPT, answer_question
-from benchmarks.memory.grade import JUDGE_PROMPT, ExactGrader, ModelGrader
+from ai_assistant.core.errors import ModelError
+from benchmarks.memory.answer import ANSWER_SYSTEM_PROMPT, answer_question, failed_attempt
+from benchmarks.memory.grade import JUDGE_PROMPT, ExactGrader, Grading, ModelGrader, Verdict
 from benchmarks.memory.ingest import exchanges_of, ingest_case
 from benchmarks.memory.records import (
     QuestionRecord,
@@ -154,6 +156,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     model: ModelProvider | None = None,
     observer: Observer | None = None,
     slice_seed: int | None = None,
+    max_sessions: int = 0,
     notes: str = "",
     keep_stores: bool = False,
 ) -> RunManifest:
@@ -179,6 +182,10 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         model: Override the answering seam. Tests supply one; a live run does not.
         observer: Override the distillation seam, likewise.
         slice_seed: The seed a stratified slice was drawn with, for the manifest.
+        max_sessions: The session bound the cases were shortened to, for the manifest.
+            ``0`` means the histories are whole. Recorded rather than inferred: a
+            shortened history is a *different* memory, so a record set that cannot say
+            which bound produced it cannot be reproduced or compared.
         notes: Attached to the manifest.
         keep_stores: Keep every case's databases rather than only its traces.
 
@@ -187,6 +194,13 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     """
     resolved = settings if settings is not None else Settings()
     judge = grader if grader is not None else ExactGrader()
+    if model is None:
+        # The public startup gate (issue #530, ADR-0083 §3). A missing credential is a
+        # configuration fault, and without this it would surface as ~2,000 identical
+        # per-question failures the loop below dutifully records — which is exactly the
+        # shape a "keep going" policy must not turn a misconfiguration into. Skipped
+        # when a seam is injected, because a test's fake needs no credential.
+        ensure_model_credentials(resolved)
     run_id = uuid4().hex[:12]
     run_dir = output_root / run_id
     records_path = run_dir / "records.jsonl"
@@ -203,6 +217,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         case_count=len(plan.cases),
         question_count=plan.question_count,
         slice_seed=slice_seed,
+        max_sessions=max_sessions,
         answer_route=resolved.default_model,
         observer_route=(
             resolved.observer_model
@@ -249,8 +264,25 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
             }
             cursor = TraceCursor(harness.traces)
             for question in case.questions:
-                attempt = await answer_question(harness, question)
-                grading = await judge.grade(question, attempt.answer)
+                # A per-question provider failure is recorded and stepped over rather
+                # than allowed to end the run. On a ~2,000-question paid run, dying at
+                # question 400 loses the 1,586 after it *and* every later case, which
+                # is a far worse outcome than a handful of `ungraded` rows a reader can
+                # exclude. `ensure_model_credentials` above is what keeps this from
+                # papering over a misconfiguration: a bad credential fails at startup,
+                # so what reaches here is a transient fault or a refused prompt.
+                try:
+                    attempt = await answer_question(harness, question)
+                except ModelError as error:
+                    attempt = failed_attempt(harness, question, error)
+                    grading = Grading(
+                        verdict=Verdict.UNGRADED,
+                        abstained=False,
+                        judge=judge.name,
+                        detail=f"answering failed: {type(error).__name__}",
+                    )
+                else:
+                    grading = await judge.grade(question, attempt.answer)
                 write_jsonl_line(
                     records_path,
                     QuestionRecord(
@@ -285,21 +317,41 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     return manifest
 
 
-def refuse_unconfirmed_scored_run(mode: RunMode, *, preregistration_final: bool) -> None:
-    """Refuse a scored run that has not confirmed #1029's ground rule 1.
+def refuse_unconfirmed_scored_run(
+    mode: RunMode, *, preregistration_final: bool, max_sessions: int = 0
+) -> None:
+    """Refuse a scored run that is not entitled to be one.
+
+    Two conditions, and they refuse for different reasons. The first is #1029's ground
+    rule 1: the pre-registration is finalised before any scored evaluation. The second
+    is that a shortened history is a **different memory**, so questions asked of one
+    are questions about a conversation that did not happen — legitimate for a plumbing
+    check and not a thing a pre-registered prediction can be scored against. The bound
+    is recorded in the manifest either way; this is what stops it being recorded on a
+    run that should never have carried it.
 
     Args:
         mode: The mode asked for.
         preregistration_final: Whether the operator stated the pre-registration is
             final.
+        max_sessions: The session bound the cases were shortened to; ``0`` means whole
+            histories.
 
     Raises:
         PermissionError: If a scored run was asked for without that statement. The
             class is chosen for what it reads as at a terminal — this is a refusal on
             a rule, not a bad argument — and nothing catches it.
+        ValueError: If a scored run was asked for over shortened histories.
     """
     if mode is RunMode.SCORED and not preregistration_final:
         raise PermissionError(PREREGISTRATION_REFUSAL)
+    if mode is RunMode.SCORED and max_sessions:
+        msg = (
+            f"a scored run cannot use --max-sessions ({max_sessions}): a shortened "
+            f"history is a different memory, so its answers are about a conversation "
+            f"that did not happen. It is a plumbing lever for smoke runs."
+        )
+        raise ValueError(msg)
 
 
 def build_grader(settings: Settings, *, kind: str) -> Grader:

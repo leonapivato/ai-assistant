@@ -37,7 +37,17 @@ def first_questions(cases: Sequence[BenchCase], limit: int) -> tuple[BenchCase, 
     Returns:
         Cases whose question lists sum to ``limit`` — or all of them, where the corpus
         holds fewer questions than that.
+
+    Raises:
+        ValueError: If ``limit`` is negative. Refused rather than treated as zero,
+            because the loop below would otherwise break on its first iteration and
+            return no cases at all — a run that completes, writes a manifest and
+            reports success having asked nothing. Its sibling below refuses the
+            analogous value, and an asymmetry there is a trap.
     """
+    if limit < 0:
+        msg = f"a question limit cannot be negative, got {limit}"
+        raise ValueError(msg)
     if not limit:
         return tuple(cases)
     taken: list[BenchCase] = []
