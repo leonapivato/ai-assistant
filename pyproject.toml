@@ -104,6 +104,26 @@ dependencies = [
     # alternatives, so `ai_assistant.secret_store` selects against an allow-list of
     # backends the operating system protects and raises where none is usable.
     "keyring>=25.7.0",
+    # The JSON Schema evaluator ADR-0145 §10 adopts, for `ToolDefinition`'s
+    # `parameters_schema` and for nothing else. It is imported only by
+    # `ai_assistant/core/`, which a contract below confines it to — §10's marked
+    # clause, in the form the `keyring` and `icalendar` contracts already use.
+    #
+    # ADR-0003's dependency rule is satisfied by that ADR rather than by this
+    # comment: three ratified ADRs (ADR-0016 §7, ADR-0029 §7, ADR-0037 §1) deferred
+    # a declared field's enforcement *pending exactly this choice*, and no
+    # evaluator exists in the tree — `pydantic` emits JSON Schema and does not
+    # validate against an arbitrary one.
+    #
+    # #664's Python 3.14 wheel filter is cleared and did not decide it:
+    # `jsonschema` is `py3-none-any` with `requires-python >=3.10`, and its one
+    # compiled transitive dependency, `rpds-py`, publishes `cp314` wheels for
+    # manylinux x86_64/aarch64, macOS and Windows. ADR-0145 §10 records the
+    # measurement and rejects `fastjsonschema` (partial 2020-12, first-error-only,
+    # and code generation over documents authored by remote MCP servers) and
+    # `jsonschema-rs` (pre-1.0 API in the most shared module in the tree, thinner
+    # error detail than §8's rule needs).
+    "jsonschema>=4.26.0",
 ]
 
 [project.scripts]
@@ -1117,3 +1137,52 @@ source_modules = [
     "ai_assistant.testing",
 ]
 forbidden_modules = ["ai_assistant.memory.health"]
+
+[[tool.importlinter.contracts]]
+# ADR-0145 §10's marked clause, in the form it asks for: the evaluator "is
+# imported only by `ai_assistant.core`, and an `import-linter` contract in
+# `pyproject.toml` pins that confinement, in the form ADR-0125 §8 uses for
+# `keyring` and the readers' contract uses for `icalendar`."
+#
+# This is golden rule 4's shape applied to a fourth external dependency, and it is
+# what makes §2's "no subsystem implements, re-implements, or configures its own
+# schema evaluation" mechanical rather than review-checked. Without it a subsystem
+# could build its own `Draft202012Validator` with an asserted `format` checker or a
+# retriever attached — the two configurations §7 and §2 exist to forbid — and pass
+# every check in the gate.
+#
+# `ai_assistant.core` is the one absence, and the absence is the whole point. Every
+# other package is enumerated rather than relying on `ai_assistant` wholesale, in
+# the discipline the `service`, `wire`, `readers`, `evaluation`, `secret_store` and
+# `keyring` contracts established: a new top-level package is a deliberate addition
+# here rather than something that silently escapes.
+#
+# **Direct imports only**, which is the provider-SDK contract's own idiom and means
+# the same thing here: the ban is "do not `import jsonschema`; call
+# `parameter_violations`". Every package imports `core`, and `core` imports the
+# library, so without the flag this contract would forbid the one composition it
+# exists to make the only available one.
+name = "the jsonschema library is confined to core"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    "ai_assistant.orchestration",
+    "ai_assistant.interfaces",
+    "ai_assistant.app",
+    "ai_assistant.service",
+    "ai_assistant.wire",
+    "ai_assistant.readers",
+    "ai_assistant.evaluation",
+    "ai_assistant.secret_store",
+    # The canonical fakes stand in for the real implementations at this seam and
+    # have no more business building an evaluator than a subsystem does.
+    "ai_assistant.testing",
+]
+forbidden_modules = ["jsonschema"]
