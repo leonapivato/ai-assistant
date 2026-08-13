@@ -227,6 +227,27 @@ _LIVE_FOR_SOURCE = (
     "AND NOT EXISTS (SELECT 1 FROM grants AS r WHERE r.revokes = g.id)"
 )
 
+#: Every live grant in the store: :data:`_LIVE_FOR_SOURCE` **with its source
+#: predicate dropped**, which is ADR-0139 §2's whole account of this member — "the
+#: store's existing live anti-join with its source predicate dropped, over rows the
+#: shipped schema already holds and already indexes", so no new database and no
+#: schema version bump ride with it. Written out rather than assembled from the
+#: other statement, for :meth:`SqliteSourceGrantStore._ordered_sync`'s reason: a
+#: query built from a variable is how a static statement stops being one.
+#:
+#: The ``ORDER BY`` is :data:`_ORDERED`'s and is a **display convention rather than
+#: a contract clause** — ADR-0139 §2 rules that "the order in which
+#: ``standing_grants`` returns its records carries no meaning". It is here so that
+#: one store answers the same question the same way twice, which an unordered
+#: ``SELECT`` does not promise. Liveness is still the anti-join and nothing else:
+#: no instant appears in the *predicate*, and sorting by one decides nothing.
+_LIVE_EVERYWHERE = (
+    "SELECT data FROM grants AS g "
+    "WHERE g.revokes IS NULL "
+    "AND NOT EXISTS (SELECT 1 FROM grants AS r WHERE r.revokes = g.id) "
+    "ORDER BY g.decided_at_us DESC, g.id ASC"
+)
+
 
 def _sort_key(instant: datetime) -> int:
     """Return ``instant`` as whole microseconds since the epoch.
@@ -652,6 +673,46 @@ class SqliteSourceGrantStore:
             raise GrantError(msg)
         return [str(row[0]) for row in rows]
 
+    async def standing(self) -> list[SourceGrant]:
+        """Return every live grant in the store (ADR-0139 §2).
+
+        :meth:`live`'s anti-join with its source predicate dropped, which is why
+        no new table, no new index and no schema version bump ride with it: the
+        rows are the ones the shipped schema already holds and already indexes.
+
+        **Unbounded, and that is the decision rather than an oversight.** Every
+        other read of a Tier 1 store in this corpus is bounded (ADR-0021 §4), and
+        :meth:`recent` keeps its ``limit`` for that reason — its row count grows
+        with grant *churn*. This one does not: ADR-0097 §4 allows one live grant
+        per source, so the result is bounded by the number of distinct identities
+        ever granted. A page here could omit an authorisation while reading as
+        complete, which is the failure ADR-0139 §2 refuses; the engine measures
+        the result against the frame instead and refuses whole.
+
+        Raises:
+            GrantError: If the store cannot be read, holds a record that no longer
+                validates, or holds two live grants for one source.
+        """
+        async with self._lock:
+            rows = await _run_to_completion(self._standing_sync)
+        return _one_per_source([_decode(row) for row in rows])
+
+    def _standing_sync(self) -> Sequence[str]:
+        """Read every live row (ADR-0139 §2).
+
+        The duplicate check is **not** here, and not in SQL either: what the store
+        persists is one JSON column, and a ``GROUP BY`` over the shadow ``source``
+        column would be checking a second copy of the value rather than the one
+        every read answers from. It runs over the decoded records instead, once,
+        in :func:`_one_per_source`.
+        """
+        try:
+            rows = self._conn.execute(_LIVE_EVERYWHERE).fetchall()
+        except sqlite3.Error as exc:
+            msg = f"failed to read the live grants: {exc}"
+            raise GrantError(msg) from exc
+        return [str(row[0]) for row in rows]
+
     async def recent(self, *, limit: int = 50) -> list[SourceGrant]:
         """Return up to ``limit`` records, newest first, ties broken by id ascending.
 
@@ -828,6 +889,40 @@ def _decode(data: str) -> SourceGrant:
     except ValidationError as exc:
         msg = f"the grant store holds a record that no longer validates: {exc}"
         raise GrantError(msg) from exc
+
+
+def _one_per_source(records: list[SourceGrant]) -> list[SourceGrant]:
+    """Return ``records`` unchanged, or refuse a source holding two live grants.
+
+    ADR-0097 §4 guarantees at most one live grant per source and ``record``'s
+    atomic check is what keeps it true, so two can only arrive in a corrupted or
+    hand-edited file. ``SqliteSourceGrantStore.live`` already refuses that state
+    one query over, reasoning that "picking one of them would answer the gate from
+    a store that cannot say what the user granted" — and ADR-0139 §2 restates the
+    invariant over the store-wide query precisely because an enumeration written
+    as the same anti-join with its source predicate dropped would otherwise return
+    both silently, losing it at the point the query stops naming a source.
+
+    **The whole call is refused rather than the affected source omitted.** Two live
+    grants make that source's authorisation unstatable — the user would be shown
+    two standing grants where revoking one leaves the other live — and returning
+    the rest is a set that reads as complete and is not, which is the failure the
+    no-paging clause exists to prevent. A declared ``GrantError`` cannot be
+    mistaken for an empty set, and failing closed is ADR-0097 §5a's direction.
+
+    Raises:
+        GrantError: If any source has more than one live grant.
+    """
+    seen: set[str] = set()
+    for record in records:
+        if record.source in seen:
+            msg = (
+                f"the grant store holds more than one live grant for source "
+                f"{record.source!r}, where ADR-0097 §4 allows one; the store is corrupt"
+            )
+            raise GrantError(msg)
+        seen.add(record.source)
+    return records
 
 
 __all__ = ["SqliteSourceGrantStore"]

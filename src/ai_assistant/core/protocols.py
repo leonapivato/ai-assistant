@@ -2702,6 +2702,59 @@ class SourceGrantStore(Protocol):
         """
         ...
 
+    async def standing(self) -> list[SourceGrant]:
+        """Every live grant in the store (ADR-0139 §2).
+
+        :meth:`live`'s enumeration, and it is a *separate* member rather than a
+        widening of anything: :class:`SourceGrants` stays at one member, because a
+        driver asks about the one source it is about to read and a driver that
+        could enumerate the store is one that could log or leak the set
+        (ADR-0097 §3).
+
+        **Answers a question no other member on either seam can.**
+        ``AssistantEngine.grantable_sources`` enumerates the readers the *hub*
+        holds, so a grant whose reader was unconfigured is absent from it;
+        :meth:`recent` returns records and ADR-0102 §3 forbids deriving liveness
+        from them; :meth:`live` needs the source's name before it can be asked.
+        So without this a user can hold a live grant no surface reports, on a
+        source they must already know the name of to withdraw.
+
+        **Liveness is the ``revokes`` relation and nothing else** (ADR-0097 §4),
+        exactly as :meth:`live` computes it. No implementation may derive it from
+        ``decided_at``, from :meth:`recent`'s ordering, or from anything outside
+        the store.
+
+        **Complete or nothing.** It takes no argument, is not paged, admits no
+        ``limit`` and no ``offset``, and no implementation may truncate, sample or
+        elide its result: a page of what the user authorises reads as complete
+        while omitting an authorisation, which is the failure ADR-0102 §3 refused
+        one query over. The set is bounded by one live grant per source (ADR-0097
+        §4) and by the number of distinct identities ever granted, and it grows
+        with those rather than with grant churn — which is the difference from
+        :meth:`recent` and the reason :meth:`recent` keeps its ``limit``.
+
+        **A store holding two live grants for one source answers with
+        ``GrantError`` and answers nothing else**, as :meth:`live` already does
+        for that source. It does not return both, does not choose between them,
+        and does not return the sources it *could* answer for: two live grants
+        make that source's authorisation unstatable, and a set with it omitted
+        reads as complete and is not. A declared failure cannot be mistaken for
+        an empty set, which is ADR-0097 §5a's fail-closed direction applied to an
+        enumeration.
+
+        Returns:
+            A detached snapshot of every live grant, as every other query on this
+            seam returns (ADR-0097 §4). **The order carries no meaning** — no
+            caller may read a precedence, a recency claim or a liveness claim off
+            a record's position — and an empty list means the store holds no live
+            grant, never that it could not be read.
+
+        Raises:
+            GrantError: If the store cannot be read, holds a record that no longer
+                validates, or holds two live grants for one source.
+        """
+        ...
+
     async def recent(self, *, limit: int = 50) -> list[SourceGrant]:
         """Return the most recent records, newest first.
 
@@ -5070,7 +5123,7 @@ class AssistantEngine(Protocol):
     * the concrete engine keeps both methods and stays substitutable, because a
       Protocol constrains what an implementation must have, not what it may not.
 
-    **One argument convention, applied to all nineteen methods** (ADR-0085 §2, and
+    **One argument convention, applied to all twenty-six methods** (ADR-0085 §2, and
     ADR-0102 §2 for the four grant operations): the
     *subject* of a call — the one thing it acts on — is positional, and every other
     argument is keyword-only. A keyword-only modifier can be joined by another
@@ -5119,7 +5172,7 @@ class AssistantEngine(Protocol):
        ADR-0084 §11 makes that the client lane's prerequisite. Tracked in #570.
 
     :class:`~ai_assistant.core.errors.OversizedValueError` is therefore declared by
-    **every** method below and is not repeated in nineteen ``Raises`` blocks. No
+    **every** method below and is not repeated in twenty-six ``Raises`` blocks. No
     method is provably inside the bound: :data:`~ai_assistant.core.types.Identifier`
     carries no maximum length, so even ``forget`` can be handed an oversized
     argument, and every enumerating method's result grows with ``limit``. ADR-0102
@@ -6004,6 +6057,85 @@ class AssistantEngine(Protocol):
             TypeError: If ``limit`` is not an integer, or is a ``bool``. The type is
                 checked before the range for :meth:`beliefs`' reason.
             GrantError: If the grant store could not be read.
+        """
+        ...
+
+    async def standing_grants(self) -> tuple[SourceGrant, ...]:
+        """List every grant the user currently authorises (ADR-0139 §2).
+
+        **The surface answers two questions and keeps them apart** (ADR-0139 §1).
+        *What may I grant?* is :meth:`grantable_sources`, answered from the
+        readers this engine holds. *What do I currently authorise?* is this,
+        answered from the grant store. **Neither answer is derivable from the
+        other and no surface may present one as the other**: the two may
+        legitimately disagree — a source may be grantable and ungranted, granted
+        and not currently held, or both — and no implementation may reconcile
+        them, suppress an entry of one because it is absent from the other, or
+        refuse an answer because they differ.
+
+        Without it there is a state in which a user holds a live grant and no
+        operation reports it: ``grantable_sources`` is keyed on the composition
+        root, so an operator who unsets a reader's configured path makes the grant
+        on it invisible while leaving it live and read-authorising. It stays
+        revocable — :meth:`revoke` applies no admission check, deliberately
+        (ADR-0102 §4) — and this is what tells the user its name.
+
+        **One read of the store, so the answer is a snapshot.** No source appears
+        twice, none is missing because another was being written, and the set is
+        internally consistent. It is the grants live *at the moment the response
+        was computed*, which is :attr:`GrantableSource.live`'s own bound: it is
+        not a claim that stays true afterwards, and no client may present it as
+        one.
+
+        **Complete or refused, never truncated.** It takes no argument, is not
+        paged, and admits no ``limit`` and no ``offset``. Where the result does not
+        fit the contract limit it raises
+        :class:`~ai_assistant.core.errors.OversizedValueError` and reports
+        nothing — a refusal a client renders as one, whose remedy is
+        ``hub_max_frame_bytes`` exactly as for :meth:`grantable_sources` — because
+        a page of what you authorise reads as complete while omitting an
+        authorisation. Withdrawal survives a frame too small to list: ``revoke``'s
+        request and result are two small values (ADR-0102 §10).
+
+        **Liveness is the store's ``revokes`` relation alone** (ADR-0097 §4). No
+        implementation may derive it from ``decided_at``, from
+        :meth:`recent_grants`' ordering, or from which readers this engine holds.
+        A ``GrantError`` from a store holding two live grants for one source is
+        propagated rather than converted.
+
+        **What a client presents, and what it may never present** (ADR-0139 §3).
+        A surface presenting this set presents it whole: it may not omit a record
+        because no held reader declares its source, may not merge the set into an
+        enumeration of grantable sources, and may not present a standing grant as
+        a source the user may grant. It renders exactly the uses each grant names,
+        adding none and omitting none, and never as a partial scope in need of the
+        members it leaves out — while a surface *offering* a choice among uses
+        carries every member of
+        :class:`~ai_assistant.core.types.GrantScope`, named in words. No surface
+        presents a source's configuration state as part of a grant, and none
+        presents a grant as a statement about whether a source is being read: what
+        a grant says is what the user authorised, and whether a read happened is
+        not a question this surface answers.
+
+        **Amending a grant stays two acts and no method here performs both**
+        (ADR-0139 §4). A client composes :meth:`revoke` then :meth:`grant`, in
+        that order, which is what puts the intermediate state where a surface can
+        report it. Such a surface reports each act as one of exactly three
+        outcomes — it landed, it is known not to have landed, or its outcome is
+        **not known** — and never infers the *source's* state from an act's
+        outcome; this method is what states that instead.
+
+        Returns:
+            Every grant live when the response was computed, whatever this engine
+            holds. **The order carries no meaning**: no client may read a
+            precedence, a recency claim or a liveness claim off a record's
+            position, and an implementation's chosen order is a display convention
+            rather than a contract clause. Empty means nothing is authorised,
+            which is not an error.
+
+        Raises:
+            GrantError: If the grant store could not be read, or holds two live
+                grants for one source.
         """
         ...
 

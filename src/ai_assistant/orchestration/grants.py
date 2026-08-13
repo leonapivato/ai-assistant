@@ -423,6 +423,41 @@ class GrantOperations:
         """
         return tuple(await self._store.recent(limit=limit))
 
+    # --- what is granted ----------------------------------------------------
+
+    async def standing_grants(self) -> tuple[SourceGrant, ...]:
+        """Return every grant that is live right now (ADR-0139 §2).
+
+        **Read from the store and from nothing else**, which is the whole of
+        ADR-0139 §1: :meth:`grantable_sources` above is keyed on the readers this
+        object was built with, so a grant whose reader the composition root no
+        longer builds is absent from it while staying live and read-authorising.
+        The two answers may disagree, a disagreement is a legitimate state rather
+        than a fault, and nothing here reconciles them — ``self._sources`` is not
+        consulted at all.
+
+        **One read of the store, so the answer is a snapshot.** The completeness
+        this delegates to — every live grant, one per source, no page — is the
+        store's own, and it is a single call rather than a sweep for the reason
+        ADR-0139 §2 gives: a walk that another coroutine's ``record`` interleaved
+        with could double a source or drop one, and the hub owns this database on
+        one event loop (ADR-0083 ruling 4), so one read forecloses the interleaving
+        that is actually reachable.
+
+        **A ``GrantError`` is propagated rather than converted**, including the one
+        a store holding two live grants for a source raises: this reports neither
+        both records nor the sources it could have answered for.
+
+        Returns:
+            Every live grant, in whatever order the store answered. The order
+            carries no meaning and no caller may read one off it.
+
+        Raises:
+            GrantError: If the store could not be read, or holds two live grants
+                for one source.
+        """
+        return tuple(await self._store.standing())
+
     # --- the sweep the liveness answer rests on -----------------------------
 
     async def _live(self, source: str) -> SourceGrant | None:

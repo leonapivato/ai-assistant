@@ -3239,6 +3239,33 @@ class Engine:
             self._grants.recent_grants(limit=limit), "recent_grants", checked=True
         )
 
+    async def standing_grants(self) -> tuple[SourceGrant, ...]:
+        """List every grant the user currently authorises (ADR-0139 §2).
+
+        Delegated whole to the grant operations; what this layer adds is the drain
+        tracking and the result measurement, as it does for every other read here.
+
+        **The measurement is the operation's distinguishing property, not
+        boilerplate.** ADR-0139 §2 refuses a paged answer — a page of what you
+        authorise reads as complete while omitting an authorisation — so a live set
+        that does not fit the frame is an ``OversizedValueError`` and no set at
+        all. An implementation that returned the store's result unmeasured would
+        pass every membership, revocation and corrupt-store case and fail only at a
+        size no ordinary test constructs. ``hub_max_frame_bytes`` is the operator's
+        remedy and the only one offered, exactly as for ``grantable_sources``; a
+        frame too small to list what you authorise still lets you withdraw what you
+        know about, because ``revoke``'s request and result are two small values
+        (ADR-0102 §10).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            GrantError: If the grant store cannot be read, or holds two live grants
+                for one source.
+            OversizedValueError: If the live set does not fit the contract limit.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._grants.standing_grants(), "standing_grants", checked=True)
+
     async def aclose(self) -> None:
         """Stop accepting work, drain what is in flight, then close owned resources.
 
