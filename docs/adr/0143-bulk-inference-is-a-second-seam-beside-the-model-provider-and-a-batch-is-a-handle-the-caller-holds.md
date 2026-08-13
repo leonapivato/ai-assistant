@@ -228,8 +228,10 @@ issued by one provider is meaningless to another (§2).
 > member is declared.
 
 > **Normative.** None of the three members waits for the batch to finish. Each
-> returns after one round trip to the provider, and no implementation may
-> satisfy `poll` or `fetch` by sleeping until the batch settles. Waiting is the
+> performs a bounded exchange with the provider and returns, and no
+> implementation may satisfy `poll` or `fetch` by sleeping, retrying, or
+> otherwise blocking until the batch settles. How many requests an exchange
+> costs is the implementation's business and is not fixed here. Waiting is the
 > caller's loop, over `poll`.
 
 > **Normative.** `batch_key` is minted by the caller, carried unchanged on the
@@ -247,18 +249,21 @@ issued by one provider is meaningless to another (§2).
 > governs `submit` unamended, and a caller that is cancelled there may assume
 > neither that a batch exists nor that one does not.
 
-> **Normative.** A `BatchHandle` carries an `issuer`: the implementation's own
-> stable, **non-secret** identity for everything that determines whether the
-> batch is reachable — at minimum the provider and the account or workspace its
-> credential authenticates, plus the model route where a provider scopes batches
-> by it. An `issuer` never contains a credential or any part of one. A
-> `BatchCompleter` accepts a handle whose `issuer` equals the one it would mint
-> from its own configuration now, and rejects any other as a caller error,
-> raising `ModelError` with the disposition ADR-0066 §3 fixes for a malformed
-> argument — neither `retryable` nor `routable` — rather than returning an
-> outcome. Object identity is **not** the test: a handle persisted to disk and
-> presented to a freshly constructed `BatchCompleter` of equal `issuer` is
-> valid, and that is what makes resumption across a process restart possible.
+> **Normative.** A `BatchHandle` carries an `issuer`: a **non-secret** label
+> naming the provider account or workspace the batch is reachable from. It is
+> **supplied to the implementation by the composition root that constructs it**
+> and never derived from the credential; it is required to be stable across
+> rotation of that credential and distinct across accounts; and it never
+> contains a credential or any part of one. An implementation carries its
+> configured `issuer` onto every handle it mints, unchanged.
+
+> **Normative.** A `BatchCompleter` accepts a handle whose `issuer` equals its
+> own configured one and rejects any other as a caller error, raising
+> `ModelError` with the disposition ADR-0066 §3 fixes for a malformed argument —
+> neither `retryable` nor `routable` — rather than returning an outcome. Object
+> identity is **not** the test: a handle persisted to disk and presented to a
+> freshly constructed `BatchCompleter` of equal `issuer` is valid, and that is
+> what makes resumption across a process restart possible.
 
 **This is the clause that was genuinely open, and cancellation decides it.**
 The alternative — one awaitable that hides the polling, `await
@@ -315,18 +320,34 @@ resumed. A handle that survives in a file is what makes the resumption possible,
 and the provider's own bounded results retention is what makes a later `fetch`
 meaningful.
 
-That is why the fifth clause scopes validity to the `issuer` rather than to the
-object: a restarted process necessarily builds a new `BatchCompleter`, so
+That is why the last two clauses scope validity to the `issuer` rather than to
+the object: a restarted process necessarily builds a new `BatchCompleter`, so
 object identity would reject exactly the case the shape exists to support. The
 scope is deliberately *not* the model route alone, which was an earlier and
 wrong version of this clause. Reachability is a property of the credential's
 account, not of the model name: a run resumed against the same
 `"provider:model"` string but a different account cannot fetch the first
 account's batch, and a route-only test would have called that handle valid and
-sent the caller to a failure it had been promised would not happen. `issuer` is
-opaque to `core` on purpose — only `models/` knows what makes a batch reachable
-for a given vendor — and it is required to be non-secret because a handle is
-written to disk by the very consumers this shape is for.
+sent the caller to a failure it had been promised would not happen.
+
+**`issuer` is configured rather than derived, and that is a concession the
+vendor surface forces.** The installed client exposes an API key or auth token
+and no organization, workspace or account identifier at all, and offers no
+offline way to obtain one — so there is nothing to derive a stable identity
+*from*. The obvious substitute makes things worse: a fingerprint of the
+credential changes on a routine key rotation, so it would reject a handle that
+is still perfectly reachable, and it would still not distinguish two credentials
+issued against the same account. Requiring the composition root to supply the
+label puts the assertion where the knowledge actually is — whoever configured
+the credential knows which account it belongs to — and it survives rotation by
+construction, which a derived value cannot.
+
+The cost is stated plainly because it is real: a misconfigured `issuer` can
+accept a handle for the wrong account, and the seam cannot detect that. What it
+buys is that the failure is a visible configuration error rather than an
+invented one, and the alternative on offer was not a stronger guarantee but a
+weaker one dressed as a proof. `issuer` is non-secret because handles are
+written to disk by the very consumers this shape exists for.
 
 ### 3. An item is well-formed on `complete`'s terms, and identified by the caller
 
@@ -506,9 +527,8 @@ forbidden thing the easy one.
 > `core/types.py`, as pydantic models or `StrEnum`s per `CLAUDE.md`'s
 > convention, spelled to the conventions already in that file: `BatchRequest`
 > (`item_id`, `messages`); `BatchHandle` (`batch_key`, `batch_id`, `issuer`,
-> `submitted_at`, `item_count` — where `issuer` is §2's opaque non-secret
-> reachability identity, a plain `core` string value whose derivation belongs to
-> `models/` and which is never a reference to any type there);
+> `submitted_at`, `item_count` — where `issuer` is §2's non-secret,
+> composition-root-supplied account label, a plain `core` string value);
 > `BatchState` (`PENDING`, `COMPLETE`); `BatchStatus` (`handle`,
 > `state`, `settled`, `results_expire_at`); `BatchOutcomeKind` (§4's four
 > members); `BatchItemOutcome` (`item_id`, `kind`, `message`, `failure`);
@@ -666,7 +686,7 @@ widely than it now holds?
 
 The table below is the audit. Every normative clause of §1–§10 appears in it
 exactly once, and every row names something a reviewer can run. The count is
-24 rows against the 26 marked clauses in this ADR; the remaining two sit below
+25 rows against the 27 marked clauses in this ADR; the remaining two sit below
 the table, are obligations *about* the table and the suite that satisfies it,
 and so have no rows of their own.
 
@@ -674,10 +694,11 @@ and so have no rows of their own.
 |---|---|---|
 | §1 | `BatchCompleter` in `core/protocols.py`; `ModelProvider` byte-unchanged | `test_protocol_triad.py` passes for the new Protocol; a test asserts `ModelProvider`'s member set is unchanged |
 | §2 (members) | `submit`/`poll`/`fetch`, all `async`, and no fourth member | Contract case: the Protocol's member set is exactly those three |
-| §2 (no waiting) | Each member returns after one round trip | Contract case: `poll` against a still-pending batch returns `PENDING` promptly rather than blocking |
+| §2 (no waiting) | A bounded exchange per member, no settle-waiting | Contract cases: `poll` against a still-pending batch returns `PENDING` rather than blocking; `fetch` against one raises rather than waiting for it to settle |
 | §2 (`batch_key` uninterpreted) | `batch_key` on `submit`, carried unchanged onto the handle | Contract cases: the handle echoes the key byte-for-byte; two `submit`s under one key yield two distinct `batch_id`s, so no caller can mistake it for deduplication |
 | §2 (acceptance window) | Every refusable check moved to the near side of the provider call | Contract cases: each of §3's and §7's refusals leaves the provider uncontacted (asserted against a transport that records calls); no work follows acceptance except returning |
-| §2 (handle issuer validity) | `issuer` on `BatchHandle`, minted from provider, account and route; mismatch detection | Contract cases: a handle presented to a **freshly constructed** implementation of equal `issuer` is accepted; one whose account or route differs raises, neither `retryable` nor `routable`; a test asserts no credential material appears in `issuer` |
+| §2 (issuer supplied) | `issuer` taken from the composition root and stamped on every handle | Contract cases: the handle carries the configured label unchanged; rotating the credential without changing the label leaves previously-minted handles valid; a test asserts no credential material reaches `issuer` |
+| §2 (issuer compared) | Mismatch detection against the configured value | Contract cases: a handle presented to a **freshly constructed** implementation of equal `issuer` is accepted; one carrying a different `issuer` raises, neither `retryable` nor `routable` |
 | §3 (well-formedness) | Pre-contact validation of every item | Contract cases: an empty history, a history ending on `Role.ASSISTANT`, and a history containing a `Role.TOOL` turn each refuse the whole batch with nothing submitted |
 | §3 (unique ids) | Duplicate-`item_id` refusal | Contract case: a duplicate refuses; a test asserts `item_id`s round-trip unrewritten |
 | §3 (one observation) | A first-line snapshot of the items in `submit` | Contract case: a caller mutates the sequence it passed while `submit` is suspended on the provider call; what was validated, what was transmitted and the handle's `item_count` all describe one version |
@@ -751,6 +772,13 @@ and so have no rows of their own.
   `source_modules` already exclude `models/` — but it is a real widening of what
   that package touches, and it means a vendor-SDK upgrade can now break a second
   surface.
+- **Handle validity rests on an operator's assertion, not on a proof.** §2's
+  `issuer` is configured rather than derived, because the vendor client exposes
+  no account identity to derive it from and a credential fingerprint would break
+  on rotation while still not distinguishing accounts. A deployment that
+  mislabels two accounts alike gets a handle accepted against the wrong one. The
+  composition root gains a value it must get right, and the seam gains a
+  guarantee that is only as good as that value.
 - **Eight new public types in `core/types.py`** on a file that is already large.
   Accepted because every one of them crosses a subsystem boundary and
   `CLAUDE.md`'s convention leaves no other home; §9 caps the count so the lane
