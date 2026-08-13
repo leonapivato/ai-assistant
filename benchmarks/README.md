@@ -36,6 +36,12 @@ uv run python -m benchmarks.memory plan locomo        # what a run would cost â€
 uv run python -m benchmarks.memory run locomo         # smoke: 5 questions, offline grader
 ```
 
+Two levers narrow a run, and they are not the same lever. `--limit` bounds **how many
+questions** are asked â€” a smaller sample of the same experiment. `--max-sessions`
+bounds **how much conversation** is ingested first, which is a *different* memory and
+therefore a different experiment: it is a plumbing lever for keeping a live smoke run
+to cents, never a measurement one.
+
 `plan` is the one to run before spending. It reports cases, questions, captured turns
 and model calls split by what makes them, and warns when the configuration will
 quietly distort what is measured.
