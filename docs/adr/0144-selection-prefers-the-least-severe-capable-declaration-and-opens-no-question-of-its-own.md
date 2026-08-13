@@ -1,6 +1,6 @@
 # 144. Selection prefers the least severe capable declaration, and opens no question of its own
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-13
 - **Not a contract change, and it ships alone anyway.** No Protocol is added or
   altered, no `core` type gains or loses a member, and `core/config.py` is
@@ -692,9 +692,22 @@ This ADR was drafted, reviewed and revised while `Proposed`, and flipped to
 `Accepted` only once the whole required set came back green on one tree, with
 that set re-run on the flipped tree. `CONTRIBUTING.md` → "Finishing an ADR PR:
 `Proposed` through the reviews, `Accepted` on the way out" owns that sequence and
-is the pointer rather than a re-derivation of it. The set run was **adversarial
-and architecture**, both required here for the reason the header gives. Nothing
-implements against this ADR until it has merged (ADR-0015 §5, golden rule 5).
+is the pointer rather than a re-derivation of it. Nothing implements against this
+ADR until it has merged (ADR-0015 §5, golden rule 5).
+
+The set run was **adversarial and architecture**, both required here for the
+reason the header gives, and both returned **APPROVE with no findings** on tree
+`7a728cd2fbcb` — round 8, 819 lines net across 8 commits, churn `1.2×` (977
+touched). Getting there cost seven findings across five rounds, every one of them
+checked against the text before it was acted on and every one of them real. Three
+are worth naming here because the decision reads differently for having had them:
+key 3 was ordered *"under `DataTier`'s declaration order"* by symmetry with keys 1
+and 2, which inverted the disclosure comparison in the safety direction — the same
+shape as the trap ADR-0016 §2 disarmed on the type, arriving through prose; §5's
+"selection happens once per step" would have made §6's residue permanently
+unexecutable; and §4's safety claim was twice stated wider than ADR-0021 §5
+actually licenses. The first is why §8 requires the implementing lane to pin the
+*direction* of key 3 and not only its shape.
 
 ## Consequences
 
