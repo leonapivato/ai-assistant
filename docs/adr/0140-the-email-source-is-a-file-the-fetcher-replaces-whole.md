@@ -1176,6 +1176,18 @@ carries is to **pass** the existing suite, not to write one.
 > - The `context/` adapter contributing §6's facet, gated on a live `FACET` grant.
 > - The ingestion wiring, gated on a live `INGEST` grant, and the scheduler job as
 >   an `Engine` call holding no reader (ADR-0083 §8).
+> - **The composition-root registration in `app/`**, which is what makes §9's
+>   first clause true of a running hub rather than of a fixture: with
+>   `email_source_path` set, the source is offered by `grantable_sources()` under
+>   the reader's declared identity `"email"` and both consumers above are wired
+>   into the engine; with it unset, none of the three is registered at all,
+>   because a source with nothing to read is "I/O on personal data in exchange for
+>   nothing" — which is what §9 already binds this reader to ADR-0093 **§7's**
+>   disabled-by-default clause for, and §12's default is `None`. This is named as
+>   its own deliverable rather than left implicit in the two above because they are
+>   *objects* and this is the wiring that puts them in the engine — a different
+>   thing to omit, and the one omission that leaves a fully conforming
+>   `EmailReader` a module nothing calls.
 > - **Deployment documentation for the fetcher** — that it writes header blocks and
 >   no bodies; that it writes exactly one `X-Assistant-Delivered-At` per message in
 >   the closed RFC 3339 subset §5 fixes — upper-case `T` and `Z`, second `00`–`59`,
@@ -1187,7 +1199,7 @@ carries is to **pass** the existing suite, not to write one.
 >   window; and that its credential never enters the hub. This is documentation and
 >   not `src/`, and §1's second clause is why: the fetcher is not ours to ship.
 > - Tests for the clauses a lane can satisfy in prose and breach in code —
->   fourteen, each named by the breach it catches. The list is scoped to **every
+>   fifteen, each named by the breach it catches. The list is scoped to **every
 >   deliverable named above** and not to the reader alone, which is stated because
 >   for several rounds it read as the reader's list while the `context/` adapter,
 >   the ingestion wiring and the widened type owed nothing at all. A deliverable
@@ -1287,8 +1299,9 @@ carries is to **pass** the existing suite, not to write one.
 >     `tests/readers/test_calendar_settings.py` asserts that it is accepted, while
 >     this one may not be, so a lane that reaches for the neighbouring field
 >     declaration inherits a `ge=0` and ships §12's reader that reads nothing while
->     reporting health. Nothing else in this list observes the configuration layer
->     at all.
+>     reporting health. The only other item here that observes the configuration
+>     layer is the registration one below, and it reads whether a value is *set*
+>     rather than whether the layer refuses one.
 >   - **Every cap §12 names owes a refusal test, one each (§12).**
 >     `email_max_bytes`, on a store larger than the cap, refusing on the read
 >     itself rather than after parsing; and `email_max_content_bytes`, on an
@@ -1306,7 +1319,7 @@ carries is to **pass** the existing suite, not to write one.
 >     empty reading. This is the cap's *ordering* rather than its figure, and it is
 >     the one §12 property every other test in this list passes while breached: an
 >     implementation that skips invalid messages first and counts what survives
->     satisfies all thirteen others and still turns a busted cap into a quiet week.
+>     satisfies all fourteen others and still turns a busted cap into a quiet week.
 >   - **No grant, no read — and the whole of ADR-0097 §5a's lifecycle, on the
 >     adapter and on the ingestion path separately (§9).** §9's second clause is
 >     "not resolved, not opened, not parsed", so the first thing asserted is a spy
@@ -1331,8 +1344,10 @@ carries is to **pass** the existing suite, not to write one.
 >     *here* because this ADR is what adds the drivers, and an item naming only the
 >     entry case would ship a gate that authorises the read and then ignores the
 >     revocation landing inside it. This is the breach with the worst consequence
->     in the document, and every other test in this list passes while it happens,
->     because none of them leaves the reader. The calendar's two modules are the
+>     in the document, and every other test in this list passes while it happens:
+>     most never leave the reader at all, and the two below that do assert the
+>     **granted** path, where a revocation landing inside the read never arises.
+>     The calendar's two modules are the
 >     shape to follow and are not coverage: this is new wiring and they do not
 >     reach it.
 >   - **A granted read's facet reaches the field the adapter was wired for, and no
@@ -1354,6 +1369,22 @@ carries is to **pass** the existing suite, not to write one.
 >     this item that observation is made in prose and tested nowhere.
 >     `tests/context/test_calendar_context_source.py` carries the shape for the
 >     calendar and, as with the item above, is not coverage for this one.
+>   - **The configured source is registered and the unconfigured one is not
+>     (§9).** With `email_source_path` set, `grantable_sources()` offers the
+>     source under the identity `"email"`, and the built engine reaches **both**
+>     consumers this ADR adds — the facet adapter and the ingestion driver; with
+>     it unset, none of the three is registered. This is the only item that
+>     observes the composition root, and it is owed because §9's first clause —
+>     granted, revoked, reported by `standing_grants` and rendered by a client
+>     "exactly as every other source is" — is satisfied by no test of a reader,
+>     an adapter or a driver a fixture handed to itself. Every other item here
+>     constructs its subject directly, so every one of them passes on an engine
+>     that wires none of them, and the reader this ADR spends most of this list
+>     specifying is then a module nothing calls. `tests/app/test_composition.py`
+>     carries the calendar's cases at this exact boundary — including the
+>     unconfigured direction, which is the half a lane omits because a hub with
+>     no mail configured looks like nothing to assert — and, as with the two
+>     items above, is not coverage for this one.
 >   - **The facet union discriminates at validation, not by declaration (§6).** A
 >     tagged calendar payload and a tagged email payload each resolve through
 >     `SourceReading` to their own type; a payload carrying `kind: "email"` **and**
