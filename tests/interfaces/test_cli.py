@@ -27,8 +27,10 @@ from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import (
     ConfigurationError,
     DeferralStoreError,
+    InvalidGrantError,
     MemoryStoreError,
     PlanningError,
+    UngrantableSourceError,
 )
 from ai_assistant.core.types import (
     ActionPlan,
@@ -113,13 +115,14 @@ from ai_assistant.testing import (
     FakeTraceRetention,
     FakeTraceSink,
 )
+from ai_assistant.wire import TransportError
 from ai_assistant.wire.address import sun_path_limit
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
+    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, SourceGrant
 
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
 
@@ -3485,8 +3488,11 @@ def test_grants_lists_both_acts_and_points_liveness_elsewhere(
     Both acts are on the record because revoking is an **append**, and the listing
     must not be read as a standing: ADR-0097 §4 permits a revocation timestamped
     before the grant it revokes, so a page ordered by ``decided_at`` can put the two
-    out of order. Pointing at ``assistant sources`` is what keeps that a display
-    oddity rather than a wrong answer.
+    out of order. Pointing elsewhere is what keeps that a display oddity rather than
+    a wrong answer, and ADR-0139 §3's last clause is why the pointer is now
+    ``assistant granted``: ``sources`` answers what *may* be granted, so it misses a
+    live grant on a source the hub holds no reader for — exactly the record a reader
+    of this page most needs to be sent to.
     """
     engine = _granting_engine()
     granted = engine.hold_grant("calendar", scope=[GrantScope.FACET])
@@ -3498,7 +3504,7 @@ def test_grants_lists_both_acts_and_points_liveness_elsewhere(
     rendered = output.getvalue()
     assert "granted" in rendered
     assert "withdrew" in rendered
-    assert "assistant sources" in rendered
+    assert "assistant granted" in rendered
 
 
 def test_a_non_positive_grants_limit_is_a_usage_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3513,6 +3519,415 @@ def test_a_non_positive_grants_limit_is_a_usage_error(monkeypatch: pytest.Monkey
 
     result = CliRunner().invoke(cli.app, ["grants", "--limit", "0"])
     assert result.exit_code == 2
+
+
+# --- what is authorised, and amending it (ADR-0139 §3, §4, §5) ---------------
+# ADR-0139's client lane. Every case below is deterministic rather than a timing
+# test, which is worth saying because "lose the response" and "cancel mid-call"
+# both read like flakes: the scripted engine below *records* the act and then
+# raises, which is the stub-hub shape one layer in — the ADR's own note that "what
+# is being tested throughout is the client's report, not the socket".
+
+
+class _ScriptedGrantEngine(FakeAssistantEngine):
+    """A hub whose grant acts can be made to fail in each way ADR-0139 §4 names.
+
+    Three arms, because three outcomes have to be reachable and the canonical fake
+    reaches only two on its own. ``commit_then_lose`` is the one that could not be
+    written any other way: the record lands and the answer does not, which is
+    ADR-0085 §8e's residual (#570) and the whole reason the third outcome exists.
+    """
+
+    def __init__(self) -> None:
+        """Create the engine with nothing scripted."""
+        super().__init__()
+        #: Raised instead of answering ``revoke``, after nothing has been recorded.
+        self.revoke_raises: BaseException | None = None
+        #: Raised instead of answering ``grant``.
+        self.grant_raises: BaseException | None = None
+        #: Whether ``grant`` records its grant *before* raising — the hub having
+        #: committed and the client having lost the answer.
+        self.commit_then_lose = False
+        #: Run on the hub once ``revoke`` has done its work, which is where a
+        #: **second connected client**'s act lands: between our two calls, on the
+        #: hub's side, exactly as ADR-0102 §5 says two clients may.
+        self.after_revoke: Callable[[], None] | None = None
+
+    async def revoke(self, source: str) -> SourceGrant | None:
+        """Withdraw, or raise what was scripted before touching anything."""
+        if self.revoke_raises is not None:
+            self.calls.append(("revoke", {"source": source}))
+            raise self.revoke_raises
+        withdrawn = await super().revoke(source)
+        if self.after_revoke is not None:
+            self.after_revoke()
+        return withdrawn
+
+    async def grant(self, source: str, *, scope: Sequence[GrantScope]) -> SourceGrant:
+        """Record and answer, record and lose the answer, or refuse outright."""
+        if self.grant_raises is not None:
+            self.calls.append(("grant", {"source": source}))
+            if self.commit_then_lose:
+                self.hold_grant(source, scope=scope)
+            raise self.grant_raises
+        return await super().grant(source, scope=scope)
+
+
+def _amendable_engine() -> _ScriptedGrantEngine:
+    """A hub holding one grantable source, already granted for one use."""
+    engine = _ScriptedGrantEngine()
+    engine.hold_source("calendar", location="/srv/calendar.ics")
+    engine.hold_grant("calendar", scope=[GrantScope.FACET, GrantScope.INGEST])
+    return engine
+
+
+def test_granted_lists_a_grant_whose_source_the_hub_no_longer_holds(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0139 §1 and §3: the set is presented whole, from the store.
+
+    The whole point of the command in one case. ``journal`` has a live grant and no
+    held reader — an operator unset its path — so it is absent from
+    ``grantable_sources`` and was reported by nothing. A client that annotated this
+    list against the enumeration, or dropped what the enumeration did not carry,
+    would hide it again, so the assertion is that **one** call goes out and the
+    unheld source is in what comes back.
+    """
+    engine = _granting_engine()
+    engine.hold_grant("journal", scope=[GrantScope.INGEST])
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["granted"])
+    assert result.exit_code == 0
+    assert [call[0] for call in engine.calls] == ["standing_grants"]
+    rendered = output.getvalue()
+    assert "journal" in rendered
+    assert "durably remembering what it says" in rendered
+
+
+def test_granted_renders_exactly_the_uses_a_grant_names(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0139 §3's third clause, which is the half a well-meaning view gets wrong.
+
+    A ``FACET``-only grant renders as ``FACET`` and **nothing else**: adding the
+    members it leaves out — greyed out, or listed as not yet allowed — presents the
+    user's decision as a half-filled form, which is a nudge toward a wider grant on
+    the one surface whose subject is what they actually decided. The whole
+    vocabulary belongs in the *choice* context, which is ``--scope``'s help, and
+    that is asserted separately below.
+    """
+    engine = _granting_engine()
+    engine.hold_grant("calendar", scope=[GrantScope.FACET])
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["granted"])
+    assert result.exit_code == 0
+    rendered = output.getvalue()
+    assert "looking at it while answering" in rendered
+    assert "durably remembering" not in rendered
+    assert "raise things with you unprompted" not in rendered
+
+
+def test_granted_says_nothing_about_configuration_or_about_reads(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0139 §3's fourth clause and §6's second.
+
+    "Your calendar is not being read" is the sentence a person writes and it is a
+    true sentence about the wrong axis — the source's *configuration* state
+    presented where consent is being decided, which ADR-0093 §7 exists to keep
+    apart. So no configured location appears here at all, and nothing claims a read
+    happened or did not. Both are asserted negatively because both are what an
+    author adds when the list looks sparse.
+    """
+    engine = _granting_engine()
+    engine.hold_grant("calendar", scope=[GrantScope.FACET])
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["granted"])
+    assert result.exit_code == 0
+    rendered = output.getvalue()
+    assert "/srv/calendar.ics" not in rendered
+    assert "not being read" not in rendered
+    assert "last read" not in rendered
+
+
+def test_granted_on_an_empty_store_offers_nothing_as_already_granted(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty set is an answer, and it is not the other question's answer.
+
+    ADR-0139 §3 forbids presenting a standing grant as a source the user may grant;
+    the mirror error on an empty set is to fill the space with the grantable list,
+    which would answer "what may I grant" under a heading that asked something else.
+    Pointing at the command that does answer it is the whole of what is offered.
+    """
+    _wire(monkeypatch, _granting_engine())
+
+    result = CliRunner().invoke(cli.app, ["granted"])
+    assert result.exit_code == 0
+    rendered = output.getvalue()
+    assert "have not granted anything" in rendered
+    assert "assistant sources" in rendered
+    assert "calendar" not in rendered
+
+
+def test_amend_renders_the_location_before_it_asks_and_before_it_revokes(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0139 §5 over ADR-0102 §6, and §4's sixth clause in the same case.
+
+    Two orderings are asserted at once and both are the point. The **location** is
+    on screen when the question is asked, because the granting half of an amendment
+    is a ``grant`` and §6's disclosure applies to it unchanged — an amendment is
+    exactly where a client author reasons that the user already consented and skips
+    it. And **nothing has been withdrawn** at that moment: a surface that revoked
+    first and then asked would put the interactive part of the flow inside the
+    ungranted window, so a user who hesitates has withdrawn their grant by starting
+    to think.
+
+    Read from inside the approver, which is the only vantage point from which
+    "before" is observable at all.
+    """
+    engine = _amendable_engine()
+    _wire(monkeypatch, engine)
+    seen: list[tuple[str, list[str]]] = []
+
+    def approve(source: object) -> bool:
+        seen.append((output.getvalue(), [call[0] for call in engine.calls]))
+        return True
+
+    monkeypatch.setattr(cli, "_confirm_amendment", approve)
+
+    result = CliRunner().invoke(cli.app, ["amend", "calendar", "--scope", "notify"])
+    assert result.exit_code == 0
+    assert len(seen) == 1
+    at_prompt, calls_so_far = seen[0]
+    assert "/srv/calendar.ics" in at_prompt
+    assert "revoke" not in calls_so_far
+    assert "grant" not in calls_so_far
+
+
+def test_amend_issues_the_two_acts_in_order_and_reports_each(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0139 §4's first two clauses: two acts, two records, two reports.
+
+    No compound operation is sent — ADR-0102 §1 refuses one and §4 re-refuses it —
+    and the state between them is reported rather than hidden, which is the reason
+    the composition is the client's in the first place. The closing statement of
+    what the source is now allowed comes from ``standing_grants``, never from
+    either act's return value (§4's third clause).
+    """
+    engine = _amendable_engine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["amend", "calendar", "--scope", "notify", "--yes"])
+    assert result.exit_code == 0
+    assert [call[0] for call in engine.calls] == [
+        "grantable_sources",
+        "revoke",
+        "grant",
+        "standing_grants",
+    ]
+    rendered = output.getvalue()
+    assert "withdrawal landed" in rendered
+    assert "grant landed" in rendered
+    assert "raise things with you unprompted" in rendered
+
+
+def test_amend_reports_a_refused_grant_as_failed_and_reads_the_state(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0139 §4's second and third clauses, on the branch that is *known*.
+
+    A hub that answered with a refusal wrote nothing, so the act is known not to
+    have landed — and that is still not a statement about the **source**. The user
+    is in the state the whole section exists for: their grant is gone and the new
+    one did not arrive, and being told so is what makes it recoverable in one
+    command.
+    """
+    engine = _amendable_engine()
+    engine.grant_raises = UngrantableSourceError("no source by that name can be granted")
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["amend", "calendar", "--scope", "notify", "--yes"])
+    assert result.exit_code == 1
+    assert [call[0] for call in engine.calls] == [
+        "grantable_sources",
+        "revoke",
+        "grant",
+        "standing_grants",
+    ]
+    rendered = output.getvalue()
+    assert "known not to have landed" in rendered
+    assert "allowed nothing" in rendered  # read, not inferred
+
+
+def test_amend_states_the_source_from_the_re_read_when_another_client_raced_it(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0139 §4's third clause, on the case that makes the inference false.
+
+    An earlier draft of that ADR said a grant known not to have landed means the
+    source is ungranted. It does not: ADR-0102 §5 lets two clients be connected at
+    once and makes the store the arbiter, so an ``InvalidGrantError`` is raised
+    *because another client's grant is live* — and "the source is now ungranted" is
+    false in the one case that produced the refusal.
+
+    Here the other client's grant is already in the store when ours is refused, so
+    a client reasoning from the refusal says the wrong thing and a client that reads
+    says the right one.
+    """
+    engine = _amendable_engine()
+    engine.grant_raises = InvalidGrantError("the source already has a live grant")
+
+    # The competing act lands **between** our two calls, which is the only placement
+    # that produces the case: earlier and our own revocation withdraws it again.
+    def another_client_grants() -> None:
+        engine.hold_grant("calendar", scope=[GrantScope.INGEST])
+
+    engine.after_revoke = another_client_grants
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["amend", "calendar", "--scope", "notify", "--yes"])
+    assert result.exit_code == 1
+    rendered = output.getvalue()
+    assert "known not to have landed" in rendered
+    assert "durably remembering what it says" in rendered
+    assert "nothing is granted on it" not in rendered
+
+
+def test_amend_reports_a_lost_grant_response_as_not_known(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0139 §4's second clause, and the outcome a two-outcome report cannot say.
+
+    The hub commits the record and the answer is lost on the way back — ADR-0085
+    §8e's residual, tracked as #570. "It failed" is false and "it worked" is
+    unknowable, so the honest report is that the outcome is not known, and the
+    re-read is what resolves it. The re-read is asserted to find the grant, because
+    a report that said "not known" and then stopped would leave the user exactly
+    where the clause is trying to get them out of.
+    """
+    engine = _amendable_engine()
+    engine.grant_raises = TransportError("the hub closed the connection")
+    engine.commit_then_lose = True
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["amend", "calendar", "--scope", "notify", "--yes"])
+    assert result.exit_code == 1
+    rendered = output.getvalue()
+    assert "not known" in rendered
+    assert "known not to have landed" not in rendered
+    assert "raise things with you unprompted" in rendered  # the committed grant, read back
+
+
+def test_amend_sends_no_grant_when_the_revocations_outcome_is_not_known(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0139 §4's fourth clause: stop, and resolve by reading rather than writing.
+
+    A client whose revocation is unresolved could send the grant anyway and reason
+    backwards — refused means the revocation did not land, accepted means it did.
+    That is the inference the third clause forbids and for the same reason: a
+    refusal is equally consistent with another client having granted in between. One
+    read settles it; a second write does not.
+    """
+    engine = _amendable_engine()
+    engine.revoke_raises = TransportError("the hub closed the connection")
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["amend", "calendar", "--scope", "notify", "--yes"])
+    assert result.exit_code == 1
+    assert [call[0] for call in engine.calls] == [
+        "grantable_sources",
+        "revoke",
+        "standing_grants",
+    ]
+    rendered = output.getvalue()
+    assert "not known" in rendered
+    assert "sent no new grant" in rendered
+
+
+@pytest.mark.parametrize("act", ["revoke", "grant"])
+def test_a_cancelled_amendment_reports_the_act_starts_nothing_and_propagates(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, act: str
+) -> None:
+    """ADR-0139 §4's fifth clause, written once per act as §8 requires.
+
+    Three assertions rather than one, because the clause has three limbs and the
+    natural implementations breach a different one each. ``CancelledError`` is a
+    ``BaseException``, so an ``except Exception`` around the two calls does not see
+    it and the client exits reporting nothing — the limb the **report** covers.
+    Catching it and carrying on to print leaves a task the caller believes it
+    cancelled, which ADR-0060 forbids — the limb the **propagation** covers. And
+    reaching for the state in order to report it is the same breach by a kinder
+    route: ADR-0060 permits deferring a cancellation only while a method makes its
+    resources safe, and a read performed to present a state is not that — the limb
+    **no further call** covers.
+    """
+    engine = _amendable_engine()
+    setattr(engine, f"{act}_raises", asyncio.CancelledError())
+    _wire(monkeypatch, engine)
+
+    # It reaches the caller rather than being reported and swallowed. ``CliRunner``
+    # catches ``Exception`` and nothing wider, so a ``BaseException`` arriving here
+    # *is* the propagation ADR-0060 requires — and a client that caught it in order
+    # to print would fail this line rather than the ones below.
+    with pytest.raises(asyncio.CancelledError):
+        CliRunner().invoke(cli.app, ["amend", "calendar", "--scope", "notify", "--yes"])
+
+    assert "standing_grants" not in [call[0] for call in engine.calls]
+    rendered = output.getvalue()
+    assert "not known" in rendered
+    assert "not read what" in rendered
+
+
+def test_amend_is_refused_for_a_source_the_enumeration_does_not_carry(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0139 §5: a client that cannot show the location does not send ``grant``.
+
+    And therefore does not revoke either, because revoking here would leave the
+    user strictly worse off than not running the command: the old grant gone and
+    no new one possible. The remedy is named instead — ``revoke`` applies no
+    admission check (ADR-0102 §4), so the user's whole remedy is untouched by a
+    source having stopped being offered.
+    """
+    engine = _ScriptedGrantEngine()
+    engine.hold_source("calendar", location="/srv/calendar.ics")
+    engine.hold_grant("journal", scope=[GrantScope.INGEST])
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["amend", "journal", "--scope", "facet", "--yes"])
+    assert result.exit_code == 1
+    assert [call[0] for call in engine.calls] == ["grantable_sources"]
+    rendered = output.getvalue()
+    assert "cannot amend" in rendered
+    assert "assistant revoke journal" in rendered
+
+
+def test_the_amend_scope_option_names_every_use_the_type_admits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0139 §3's second clause, over ADR-0133 §6's CLI obligation.
+
+    Wherever a surface offers, enumerates or explains the uses a user may choose
+    among, it carries **every** member of ``GrantScope``, named in words. An
+    amendment is a choice context, and a help string enumerating two of three uses
+    is a surface disagreeing with the vocabulary — deciding on the user's behalf
+    what they may permit, which is what ADR-0097 §8 forbids.
+    """
+    _wire(monkeypatch, _amendable_engine())
+
+    result = CliRunner().invoke(cli.app, ["amend", "--help"])
+    assert result.exit_code == 0
+    help_text = re.sub(r"\s+", " ", result.output)
+    assert "facet" in help_text
+    assert "ingest" in help_text
+    assert "notify" in help_text
 
 
 # --- id arguments refuse at the parse boundary (ADR-0042 §7, ADR-0085 §3c) ---
