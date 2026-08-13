@@ -1,7 +1,21 @@
 # 147. An MCP server describes tools; this repository declares them
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-13
+- **Note (2026-08-13): ratified.** `Proposed` → `Accepted`, after **both**
+  required reviews came back green on one tree — adversarial **APPROVE with no
+  findings** and architecture **APPROVE with no findings**, both at tree
+  `d77e7d67acc7`, round 5, churn ratio 1.3 — and with both re-run on the flipped
+  tree for coverage. That is the outcome ADR-0070 §1 requires the ratifying edit to
+  record, and the route `CONTRIBUTING.md` → "Finishing an ADR PR" fixes (ADR-0130
+  §12, ADR-0136 §7 and ADR-0146's own note are the worked precedents). **What the
+  ratifying commit edits:** the `Status` line, this note, and §13's unmarked record
+  of the route and the rounds — nothing else, and **no normative clause acquires,
+  loses or alters an obligation**, which is ADR-0070 §1's own test applied to the
+  ratifying edit first. §13 is unmarked prose under this ADR's own ADR-0089 regime,
+  so it supplied no obligation before the edit and supplies none after.
+  **ADR-0070 §1's no-rewrite rule now protects this text**, so any later correction
+  is an appended dated note.
 - **Decides the integration shape** `docs/roadmap.md` item 12 is built on: how a
   tool a server describes becomes a `ToolDefinition` under ADR-0016 §1, what an
   MCP server is to the egress model, what happens to a schema and to a result,
@@ -1092,6 +1106,41 @@ form).
   question for sources, and ADR-0094 §10 already expects that decision and #441's
   release ladder to be one decision; a tool-side surface is adjacent enough that
   guessing its shape here would prejudge it.
+
+### 13. Marking, review and ratification
+
+**Marked under ADR-0089**, so this ADR is in the marked regime: its unmarked prose
+supplies no obligation and exists to determine what the marked clauses mean (§3
+there). Marking is forward-only (§5), and nothing ratified before it is drawn into
+the regime by it.
+
+**The required set was adversarial *and* architecture**, declared rather than
+compelled for the reasons in the header bullet, and it was run while the ADR stood
+`Proposed` so that a finding could still change the decision. Four adversarial
+invocations and two architecture ones; both lenses returned **APPROVE with no
+findings** on one tree, and the status flipped only then, with both re-run on the
+flipped tree for coverage. `CONTRIBUTING.md` → "Finishing an ADR PR" owns that
+sequence and this section points at it rather than re-deriving it.
+
+**Three findings changed the decision rather than its wording, and each is recorded
+where it bit rather than only here.** Both lenses independently found that §4's
+first draft admitted an unisolated stdio server on an operator's declared empty
+`discloses`; §4 now connects to no server of any transport before a ratified
+authorisation, and says in its own text what the earlier draft got wrong and why.
+Architecture found that §7's leading id segment plus §6's "reachable from
+`ToolDefinition.id`" together reserved a semantic namespace in a shared `core`
+value; the segment now buys disjointness only and the provenance fact lives in the
+declaration set. Adversarial then found that the declaration set does not survive a
+restart for a retained `StepExecution.output`; §6 gained the fail-closed default and
+named the projection under ADR-0098 §7's third clause. **The first of those is the
+one worth remembering**: the draft stated a hazard in its prose and admitted the
+thing anyway two paragraphs later, which is the shape ADR-0098 §7 records about
+itself — reaching past what the tree or its own definitions supply — arrived at
+independently in a document that had read that ADR closely.
+
+**Issues filed:** #1112 (isolating an admitted stdio server) and #1114 (a durable
+origin for a retained tool result). Both are inputs to §4's authorising ADR rather
+than conditions this ADR invents.
 
 ## Consequences
 
