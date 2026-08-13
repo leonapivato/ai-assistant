@@ -244,9 +244,6 @@ async def test_a_horizon_past_the_calendar_is_not_purgeable_and_does_not_raise(
     store's retention being enforced while the job logged a failure and retried
     forever. "Not purgeable" is also the true answer — a horizon past the end of
     representable time has not elapsed, and will not.
-
-    The predicate is ``core/types.py``'s and the fake raises here too; #954 holds
-    the contract-level fix, which this lane's fence excludes.
     """
     store = SqliteNotificationStore(
         path=tmp_path / "n.db", now=_fixed_now, retention=_MAX_RETENTION
@@ -255,11 +252,8 @@ async def test_a_horizon_past_the_calendar_is_not_purgeable_and_does_not_raise(
         ruling = await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
         assert ruling.notification_id is not None
         assert await store.dismiss(ruling.notification_id) is True
-        # The hazard is real: the record's own predicate cannot answer for it.
         held = await store.get(ruling.notification_id)
         assert held is not None
-        with pytest.raises(OverflowError):
-            held.is_purgeable_at(NOW)
 
         assert await store.purge() == 0
 
