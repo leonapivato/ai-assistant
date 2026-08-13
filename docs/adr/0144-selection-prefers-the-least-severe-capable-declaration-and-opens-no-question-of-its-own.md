@@ -205,10 +205,39 @@ floors: a non-empty `discloses` *"may not receive `ALLOW` with `authorised_by`
 unset"*, and *"An `UNKNOWN` cost is never auto-granted"*. `ThresholdActionPolicy`
 reads `request.tool` and nothing else, so the policy's domain and this ordering's
 domain are the same object. The consequence is structural: **where one candidate
-is less severe than another on every key of this block, no conforming policy
-rules on it more restrictively.** Selection therefore never hands the gate a
-candidate that a dominated alternative would have got past more easily, and it
-does so without calling anything.
+is less severe than another on one of keys 1, 2 or 3 and equal on everything
+else, no conforming policy rules on it more restrictively.** That is ADR-0021
+§5's hypothesis exactly — *"with everything else held equal"* — so the conclusion
+is its clause and not an extension of it. Selection gets that guarantee without
+calling anything.
+
+**Two limits on it, stated rather than glossed, because a guarantee is worth what
+its hypothesis is worth.**
+
+*It composes across keys 1–3 only where the intermediate declarations exist.*
+Dominance on several axes at once follows by moving one axis at a time, each step
+holding the others equal — but ADR-0016 §3's consistency rules make some
+intermediates unrepresentable (a tool that discloses is side-effecting; a tool
+that is not side-effecting is `REVERSIBLE`), and where no valid intermediate
+exists ADR-0021 §5 says nothing about the pair. For a policy of ADR-0036 §1's
+shape — a maximum of clauses each monotone in one field — it composes
+unconditionally, which is what the only implementation in the tree is.
+
+> **Normative.** Key 4 carries **no monotonicity guarantee** in its lower half
+> and no clause of this ADR may be read as resting on one. ADR-0021 §5 constrains
+> a policy over `risk_level`, `reversibility` and `discloses`, and over cost it
+> fixes one floor only — `UNKNOWN` is never auto-granted. A conforming policy may
+> rule `CONFIRM` on a `FREE` candidate and `ALLOW` on an otherwise identical
+> `PER_CALL` one, and selection prefers the `FREE` one anyway.
+
+The last sentence is the honest statement of what key 4's lower half is: a plain
+economic preference this ADR asserts on its own authority, not a policy fact.
+Only its top end — a candidate that declared a cost before one that did not —
+traces to a ratified clause, and that is the half worth having, since an
+`UNKNOWN`-cost candidate is one no policy may auto-grant. Widening ADR-0021 §5's
+monotonicity to cover cost would remove the gap and is not this ADR's to do: it
+is a change to a ratified obligation on every policy, which needs its own ADR and
+its own PR.
 
 Keys 1 and 2 lead because they are the axes ADR-0014 §2 and ADR-0016 §7 both name
 as the point of having a selection stage at all, and because `risk_level` is the
@@ -376,20 +405,43 @@ what this ADR exists to have already done.
 
 Retrying the next candidate is the tempting fallback and it breaks the ceiling
 directly: a user who refused one tool is asked again about a second, for one
-step, having said no once. It is also a misreading of the refusal. A `DENY` is
-the user's policy refusing an *action* whose severity it read off a declaration;
-the runner-up is a candidate the ordering already judged **at least as severe**,
-so under ADR-0021 §5 no conforming policy rules on it less restrictively. The
-fallback is a second prompt whose answer is knowable in advance.
+step, having said no once. **That is the whole ground, and it does not lean on a
+prediction about the runner-up.** An earlier draft added one — that the runner-up
+is at least as severe, so ADR-0021 §5 makes its ruling no less restrictive — and
+it is not sound: the runner-up may be behind only on key 4 or key 5, over neither
+of which any policy is constrained. Where the ordering did separate them on keys
+1–3 the prediction holds and merely restates the exit test's answer; where it did
+not, the second prompt might genuinely be answered differently, and the rule
+still refuses it. Asking twice about one step is the thing being forbidden, not
+asking twice pointlessly.
 
-> **Normative.** Selection happens once per step. `StepRunner.resume` does not
-> re-select: it rebuilds the request from the confirmation's own embedded
+> **Normative.** Once a candidate has been selected and a `PermissionDecision`
+> recorded against it, that step is not selected again. `StepRunner.resume` does
+> not re-select: it rebuilds the request from the confirmation's own embedded
 > declaration, as ADR-0037 §4 already requires.
 
-ADR-0037 §4 step 3 established that for the substitution reason — the tool that
-runs after a confirmation is *"the declaration the user was shown, read out of
-the record, never re-resolved through the registry"*. Under a selection rule that
-reason gains a second half: a registry populated differently between the prompt
+> **Normative.** An `AMBIGUOUS_CAPABILITY` disposition commits nothing and
+> records nothing (§6), so it binds no step to any candidate and a later `run`
+> against that still-`PENDING` step **selects afresh** — against the registry and
+> the preference sequence as they then stand. The clause above is about a
+> selection that was acted on, and there was none.
+
+The two clauses divide on whether anything was *committed*, which is the same line
+ADR-0037 draws and the reason the second one is not a loophole in the first. §1
+there says the ambiguous disposition *"is terminal for **this** turn only"*, and
+that `PENDING` *"is the state a real selection rule, or a user asked to choose,
+can still run it from"* — this ADR is that rule arriving, and a step it left
+`PENDING` is precisely what it was told it could run from. Nothing was recorded,
+so there is no earlier selection for a later one to contradict, no decision whose
+subject could be substituted, and no user who was asked. Reading "once per step"
+to cover an ambiguity would make the residue permanently unexecutable and strand
+every recovery §6 describes, which is the opposite of what this ADR is for.
+
+ADR-0037 §4 step 3 established the recorded-selection half for the substitution
+reason — the tool that runs after a confirmation is *"the declaration the user was
+shown, read out of the record, never re-resolved through the registry"*. Under a
+selection rule that reason gains a second half: a registry populated differently
+between the prompt
 and the answer could otherwise order the candidates differently, and the user's
 "yes" would authorise a tool they were not shown.
 
@@ -516,7 +568,9 @@ Each is scoped out with its reason, because scoping something out is a decision.
 > sequence carrying a duplicate id refused where it is supplied, and one naming
 > an unregistered id accepted and matching nothing; a tie
 > under the whole key producing `AMBIGUOUS_CAPABILITY` with nothing committed
-> and the tied ids on the returned `StepDisposition`;
+> and the tied ids on the returned `StepDisposition`; a second `run` against a
+> step left `PENDING` by an ambiguity selecting afresh, and selecting differently
+> once the preference sequence names one of the tied ids;
 > and — because §1's transitivity guarantee is the one an implementation is most
 > likely to lose — the same candidate selected from the same set presented in
 > reversed and shuffled orders.
@@ -590,8 +644,9 @@ implements against this ADR until it has merged (ADR-0015 §5, golden rule 5).
   the *first* half of making that recoverable, and only that: the ids stop at
   `orchestration`'s edge, `StepOutcome` has no field for them (#1103), and the
   preference itself has nowhere durable to live (#1101). So on the day this lands
-  the recovery is an operator reading a log line and editing the composition
-  root — which is a poor steady state, named here rather than implied.
+  the recovery is an operator reading a log line, editing the composition
+  root and re-running the still-`PENDING` step, which §5's second clause makes
+  explicitly available — a poor steady state, named here rather than implied.
 - **`StepRunner` gains one constructor argument and no collaborator.** The
   preference sequence joins `confirmation_ttl` as configuration the composition
   root supplies; no Protocol is injected for it, and there is nothing to fake.
