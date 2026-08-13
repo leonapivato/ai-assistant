@@ -283,6 +283,25 @@ class BatchCompleterContract:
                 "deliberately not sent to the provider, so nothing could find it"
             )
 
+    async def test_an_item_id_the_outcome_could_not_carry_is_refused_uncontacted(self) -> None:
+        async with self.world() as world:
+            before = world.provider_calls
+            # `model_construct` is the one path that still reaches `submit` with a
+            # value the type would refuse — `BatchRequest` validates assignment, so
+            # a plain `item.item_id = "   "` no longer builds this state. ADR-0143
+            # §2 puts the check in `submit` regardless of how the state arose: the
+            # id is what §4 has the caller matching outcomes by, so an unusable one
+            # discovered after acceptance costs the whole batch's answers.
+            malformed = BatchRequest.model_construct(
+                item_id="   ", messages=[Message(role=Role.USER, content="hi")]
+            )
+
+            with pytest.raises(ModelError) as caught:
+                await world.completer.submit("key-1", [a_request("fine"), malformed])
+
+            _assert_caller_error(caught.value)
+            assert world.provider_calls == before
+
     @pytest.mark.optional_obligation
     async def test_an_over_large_batch_is_refused_and_names_its_bound(self) -> None:
         async with self.world() as world:
