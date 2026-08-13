@@ -150,6 +150,10 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
 ) -> None:
     """Execute a run. Smoke by default; a scored run must be asked for and confirmed."""
     settings = Settings()
+    # Checked here as well as inside `execute_run`, and the duplication is the point:
+    # this one fires before a 278 MiB corpus is fetched, so an ineligible scored run is
+    # refused in a second rather than after a download. The one that decides is the
+    # other, at the boundary that writes the manifest.
     refuse_ineligible_scored_run(
         mode,
         preregistration_final=preregistration_final,
@@ -171,6 +175,7 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
             corpus_digests=digests,
             settings=settings,
             grader=build_grader(settings, kind=grader),
+            preregistration_final=preregistration_final,
             slice_seed=seed if limit else None,
             max_sessions=max_sessions,
             notes=notes,

@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import pytest
 from benchmarks.memory.cases import BenchCase, BenchQuestion, BenchSession, BenchTurn
 from benchmarks.memory.corpora.provenance import LOCOMO
+from benchmarks.memory.grade import ExactGrader
 from benchmarks.memory.records import QuestionRecord, RunManifest, RunMode, read_jsonl
 from benchmarks.memory.run import execute_run, plan_run
 
@@ -423,3 +424,60 @@ async def test_a_whole_history_records_a_zero_bound(tmp_path: Path) -> None:
     manifest, _ = await _run(tmp_path)
 
     assert manifest.max_sessions == 0
+
+
+async def test_execute_run_refuses_an_ineligible_scored_run_itself(tmp_path: Path) -> None:
+    """The gate lives at the boundary that writes the manifest, not only at the command
+    line: this function is exported, and a caller reaching it directly could otherwise
+    label an ineligible run `scored`."""
+    with pytest.raises(PermissionError):
+        await execute_run(
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            output_root=tmp_path / "runs",
+            mode=RunMode.SCORED,
+            corpus_digests={},
+            settings=_settings(tmp_path),
+            model=FakeModelProvider("a dog"),
+            observer=FakeObserver(max_batch_size=BATCH),
+        )
+
+    assert not (tmp_path / "runs").exists()
+
+
+async def test_execute_run_refuses_a_scored_run_on_the_hashing_embedder(
+    tmp_path: Path,
+) -> None:
+    """Confirmed, whole histories — and still refused, because `_settings` selects the
+    QA embedder and the exact grader."""
+    with pytest.raises(ValueError, match="non-semantic"):
+        await execute_run(
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            output_root=tmp_path / "runs",
+            mode=RunMode.SCORED,
+            corpus_digests={},
+            settings=_settings(tmp_path),
+            model=FakeModelProvider("a dog"),
+            observer=FakeObserver(max_batch_size=BATCH),
+            preregistration_final=True,
+        )
+
+
+async def test_execute_run_refuses_a_scored_run_judged_by_the_exact_grader(
+    tmp_path: Path,
+) -> None:
+    """Read off the grader that will actually judge, not off a caller's description of
+    it — here everything else is eligible and only the judge is not."""
+    settings = _settings(tmp_path).model_copy(update={"embedder": EmbedderKind.ON_DEVICE})
+
+    with pytest.raises(ValueError, match="LLM judge"):
+        await execute_run(
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            output_root=tmp_path / "runs",
+            mode=RunMode.SCORED,
+            corpus_digests={},
+            settings=settings,
+            grader=ExactGrader(),
+            model=FakeModelProvider("a dog"),
+            observer=FakeObserver(max_batch_size=BATCH),
+            preregistration_final=True,
+        )

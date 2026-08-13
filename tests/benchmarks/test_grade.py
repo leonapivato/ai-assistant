@@ -11,7 +11,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 from benchmarks.memory.cases import BenchQuestion
-from benchmarks.memory.grade import ExactGrader, ModelGrader, Verdict, is_abstention
+from benchmarks.memory.grade import (
+    MODEL_JUDGE_PREFIX,
+    ExactGrader,
+    ModelGrader,
+    Verdict,
+    is_abstention,
+)
 
 from ai_assistant.core.errors import ModelError, ModelRateLimitError
 from ai_assistant.testing import FakeModelProvider
@@ -192,3 +198,42 @@ async def test_a_judge_failure_records_the_class_and_never_the_message() -> None
 
     assert grading.detail is not None
     assert "secret internal detail" not in grading.detail
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ["CORRECT", "correct", "  Correct.  ", "CORRECT!", "**CORRECT**"],
+)
+async def test_a_bare_verdict_token_is_read_whatever_its_punctuation(reply: str) -> None:
+    """The prompt asks for one bare word and a model will add a full stop."""
+    grading = await ModelGrader(FakeModelProvider(reply), route="anthropic:x").grade(
+        ANSWERABLE, "a puppy"
+    )
+
+    assert grading.verdict is Verdict.CORRECT
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "CORRECTLY ANSWERED",
+        "CORRECT, but uncertain",
+        "CORRECT — the dates differ slightly",
+        "INCORRECTLY GRADED",
+        "The verdict is CORRECT",
+    ],
+)
+async def test_a_verdict_with_anything_attached_is_ungraded(reply: str) -> None:
+    """A prefix test reads a judge expressing doubt as certainty, which is a false
+    benchmark result produced by the grader rather than by the system."""
+    grading = await ModelGrader(FakeModelProvider(reply), route="anthropic:x").grade(
+        ANSWERABLE, "a puppy"
+    )
+
+    assert grading.verdict is Verdict.UNGRADED
+
+
+def test_a_model_judge_is_identifiable_from_its_name() -> None:
+    """The scored-run gate tells a model judge from any other by this prefix."""
+    assert ModelGrader(FakeModelProvider(), route="anthropic:x").name.startswith(MODEL_JUDGE_PREFIX)
+    assert not ExactGrader().name.startswith(MODEL_JUDGE_PREFIX)
