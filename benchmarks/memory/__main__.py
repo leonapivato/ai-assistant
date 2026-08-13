@@ -41,16 +41,16 @@ from benchmarks.memory.corpora import locomo, longmemeval
 from benchmarks.memory.corpora.fetch import DEFAULT_CACHE, digest_of, ensure_corpus
 from benchmarks.memory.corpora.provenance import CORPORA, Corpus, corpus_by_key
 from benchmarks.memory.records import RunMode
-
-if TYPE_CHECKING:
-    from benchmarks.memory.cases import BenchCase
-
 from benchmarks.memory.run import (
     build_grader,
     execute_run,
     plan_run,
     refuse_unconfirmed_scored_run,
 )
+from benchmarks.memory.select import first_questions, first_sessions
+
+if TYPE_CHECKING:
+    from benchmarks.memory.cases import BenchCase
 
 app = typer.Typer(
     add_completion=False,
@@ -103,11 +103,16 @@ def plan(
     corpus_key: Annotated[str, typer.Argument(help="Corpus key; see `corpora`.")],
     limit: Annotated[int, typer.Option(help="Questions to include; 0 means all.")] = 0,
     seed: Annotated[int, typer.Option(help="Seed for a stratified slice.")] = 1029,
+    max_sessions: Annotated[
+        int, typer.Option(help="Truncate each case to its first N sessions; 0 means all.")
+    ] = 0,
     cache: Annotated[Path | None, typer.Option(help="Cache root.")] = None,
 ) -> None:
     """Report what a run would cost. Contacts no provider and opens no store."""
     settings = Settings()
-    corpus, cases, _ = _select(corpus_key, limit=limit, seed=seed, cache=cache)
+    corpus, cases, _ = _select(
+        corpus_key, limit=limit, seed=seed, max_sessions=max_sessions, cache=cache
+    )
     computed = plan_run(corpus, cases, batch_size=settings.observation_batch_size)
 
     table = Table(title=f"{corpus.title}: what this run would do", show_header=False)
@@ -130,6 +135,9 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
     corpus_key: Annotated[str, typer.Argument(help="Corpus key; see `corpora`.")],
     limit: Annotated[int, typer.Option(help="Questions to include; 0 means all.")] = SMOKE_DEFAULT,
     seed: Annotated[int, typer.Option(help="Seed for a stratified slice.")] = 1029,
+    max_sessions: Annotated[
+        int, typer.Option(help="Truncate each case to its first N sessions; 0 means all.")
+    ] = 0,
     mode: Annotated[RunMode, typer.Option(help="smoke or scored.")] = RunMode.SMOKE,
     grader: Annotated[str, typer.Option(help="'exact' (no model call) or 'model'.")] = "exact",
     preregistration_final: Annotated[
@@ -143,7 +151,9 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
     """Execute a run. Smoke by default; a scored run must be asked for and confirmed."""
     refuse_unconfirmed_scored_run(mode, preregistration_final=preregistration_final)
     settings = Settings()
-    corpus, cases, digests = _select(corpus_key, limit=limit, seed=seed, cache=cache)
+    corpus, cases, digests = _select(
+        corpus_key, limit=limit, seed=seed, max_sessions=max_sessions, cache=cache
+    )
     computed = plan_run(corpus, cases, batch_size=settings.observation_batch_size)
     _warn_about_configuration(settings, computed.cases)
 
@@ -172,7 +182,7 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
 
 
 def _select(
-    corpus_key: str, *, limit: int, seed: int, cache: Path | None
+    corpus_key: str, *, limit: int, seed: int, max_sessions: int, cache: Path | None
 ) -> tuple[Corpus, tuple[BenchCase, ...], dict[str, str]]:
     """Fetch, load and select the cases a command will work on.
 
@@ -180,6 +190,7 @@ def _select(
         corpus_key: Which corpus.
         limit: How many questions; ``0`` means all.
         seed: Seed for the stratified draw.
+        max_sessions: Truncate each case to its first ``N`` sessions; ``0`` means all.
         cache: Cache root.
 
     Returns:
@@ -195,36 +206,12 @@ def _select(
         # limit on *cases* — taking 5 questions means ingesting one dialogue, not ten.
         # Truncating each case's question list is what makes a smoke run cost one
         # ingestion instead of ten.
-        return corpus, _truncate(cases, limit), digests
-
-    name = next(iter(paths))
-    loaded = longmemeval.load(paths[name])
-    if limit:
-        loaded = longmemeval.stratified(loaded, total=limit, seed=seed)
-    return corpus, loaded, digests
-
-
-def _truncate(cases: tuple[BenchCase, ...], limit: int) -> tuple[BenchCase, ...]:
-    """Take the first ``limit`` questions, from as few cases as they fit in.
-
-    Args:
-        cases: The corpus's cases.
-        limit: How many questions; ``0`` means all.
-
-    Returns:
-        Cases whose question lists sum to ``limit``.
-    """
-    if not limit:
-        return cases
-    taken: list[BenchCase] = []
-    remaining = limit
-    for case in cases:
-        if remaining <= 0:
-            break
-        questions = case.questions[:remaining]
-        remaining -= len(questions)
-        taken.append(case.model_copy(update={"questions": questions}))
-    return tuple(taken)
+        selected = first_questions(cases, limit)
+    else:
+        selected = longmemeval.load(next(iter(paths.values())))
+        if limit:
+            selected = longmemeval.stratified(selected, total=limit, seed=seed)
+    return corpus, first_sessions(selected, max_sessions), digests
 
 
 def _retention(settings: Settings) -> str:
