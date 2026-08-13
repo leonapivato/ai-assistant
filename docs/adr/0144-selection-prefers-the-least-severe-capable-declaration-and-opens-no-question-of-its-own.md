@@ -163,8 +163,17 @@ C`, and which candidate comes out minimal then depends on the traversal. §3 pay
 a small price in each key to keep this property, and says where.
 
 > **Normative.** The ordering does not read `ToolRegistry.find`'s `id` ordering,
-> and `id` is not a key at any position. ADR-0016 §5's ordering is unchanged and
+> and **no key orders candidates by the value of `id`** — not lexicographically,
+> not by any other function of the string. ADR-0016 §5's ordering is unchanged and
 > stays what it was ratified as — a specified total order carrying no meaning.
+
+That prohibition is about `id` as a *ranking value*, and §4's key 6 does not
+breach it: an `id` there is matched against a sequence the deployment stated, and
+what orders the candidates is the position in that sequence. Two ids adjacent in
+the alphabet get no relationship from it, and an id nobody named gets no position
+at all. The harm ADR-0037 §1 named — preferring `a_deleter` over `b_archiver`
+*"on an alphabetical accident"* — needs the string itself to carry the order, and
+under key 6 it never does.
 
 ### 2. The severity block: the axes a conforming policy already ranks, in the same direction
 
@@ -269,6 +278,29 @@ correctly: an estimate nobody gave cannot beat an estimate somebody gave.
 > sequence is ordered by its index; a candidate whose `id` does not appear is
 > ordered after every candidate whose `id` does. The sequence defaults to empty,
 > in which case key 6 ranks every candidate equally.
+
+> **Normative.** The preference sequence holds **no duplicate id**, and a
+> sequence that does is refused where it is supplied rather than resolved by a
+> rule about which occurrence counts. An id naming no registered tool is
+> permitted and simply matches nothing.
+
+The duplicate clause is §1's totality requirement paid where it comes due. A
+sequence `(tool_a, tool_a, tool_b)` gives `tool_a` two positions, and an
+implementation taking the first would order it before `tool_b` while one taking
+the last would order it after — two conforming implementations selecting
+different tools from one candidate set, which is precisely the order-dependence
+§1 forbids. Defining "first occurrence wins" would close it and refusing closes
+it better: a duplicated id is a mistake in the deployment's configuration, and
+ADR-0016 §1's posture on the type this stage consumes is that a malformed
+declaration does not load rather than being silently interpreted.
+
+Unstated ids are the opposite case and are deliberately admitted. A sequence is
+written against tools the deployment expects, and a registry is populated at
+startup from whatever registers (ADR-0016 §6); an id may name a tool this run
+does not hold, or one whose id was spent by a deregistration (ADR-0016 §5).
+Refusing on that would make a preference sequence a second registration manifest
+that has to be kept in step with the first, and it would fail the deployment for
+naming a preference it turned out not to need.
 
 > **Normative.** The preference sequence is consulted **only** at key 6. It can
 > never promote a candidate over one that the ordering prefers at keys 1 through
@@ -386,16 +418,31 @@ Keeping `AMBIGUOUS_CAPABILITY` for that is the honest reading of ADR-0037 §1's
 own argument rather than a leftover: *"No `SkipReason` is true of it"* remains
 true, `PENDING` remains *"already the truth about this step"*, and a tie broken by
 `id` would still be *"choosing between two side-effecting actions on an
-alphabetical accident"*. What changes is that the disposition now reports
-something a surface can do something about — the candidates are known to be
-equivalent on every axis the system can reason over, so the only outstanding
-question is which one the *user* prefers, and that is a question with a durable
-answer.
+alphabetical accident"*. What changes is what the disposition *means*: the tied
+candidates are now known to be equivalent on every axis the system can reason
+over, so the only outstanding question is which one the *user* prefers — a
+question with a durable answer, where "several tools are capable" was a question
+with no answer at all.
 
 > **Normative.** `StepDisposition` carries the ids of the tied candidates on an
 > `AMBIGUOUS_CAPABILITY` disposition. This is a field on the frozen dataclass in
-> `orchestration`, which ADR-0037 §4 states *"crosses no subsystem boundary"*; no
-> `core` type and no Protocol changes for it, and `Disposition` gains no member.
+> `orchestration/runner.py`, which ADR-0037 §4 states *"crosses no subsystem
+> boundary"*; no `core` type and no Protocol changes for it, and `Disposition`
+> gains no member.
+
+> **Normative.** That clause carries the ids **inside `orchestration` and no
+> further.** This ADR decides no route by which they reach an interface, and an
+> implementation may not invent one: `core.types.StepOutcome` is the public
+> carrier `Engine` converts a `StepDisposition` into, it has no tied-candidate
+> field, and giving it one is a `core` change with its own ADR and its own PR
+> (golden rule 5). §7 defers it.
+
+Being exact about that is worth a clause because the tempting sentence — "the
+disposition now tells a surface which tools tied" — is false today and would be
+false in a way nothing catches. What the field buys is where a future carrier
+*sources* from, which is the half that has to exist before the carrier can be
+designed; what it does not buy is the surface. Until #1103 lands, the ids reach a
+log line and the operator, and the recovery is #1101's composition-root sequence.
 
 ### 7. What this does not decide
 
@@ -421,14 +468,20 @@ Each is scoped out with its reason, because scoping something out is a decision.
   become real"*. This ADR does not close it and it makes it more urgent, which
   §Consequences states plainly rather than burying: before this rule a name
   collision stalled the step; after it, a collision resolves silently to the
-  less severe of two declarations that mean different things. Issue filed.
+  less severe of two declarations that mean different things. Issue **#1100**.
 - **A durable, user-facing tool preference.** §4's sequence is composition-root
   configuration, which is an operator's surface rather than a user's. Making a
   preference something the user states once and the system keeps needs durable
   per-user policy state with its own data-rights obligations — the same store
   ADR-0021 §6 defers for standing grants, and adjacent enough that settling them
-  together is likely right. Issue filed. Note what is *not* deferred: the rule
-  above works with an empty sequence, so nothing is blocked on it.
+  together is likely right. Issue **#1101**. Note what is *not* deferred: the
+  rule above works with an empty sequence, so nothing is blocked on it.
+- **A public carrier for the tied candidate ids.** §6 puts them on
+  `StepDisposition`, which stops at `orchestration`'s edge; `StepOutcome` is what
+  an interface sees and it has no field for them. Adding one is a `core` change
+  needing its own ADR, and the useful *shape* of that field depends on what a
+  preference surface turns out to need — so it follows the preference decision
+  rather than preceding it. Issue **#1103**, which says so and points at #1101.
 - **A learned preference.** Preferring the tool a user's past feedback favours is
   the project's own thesis pointed at this seam, and it is refused here for
   ADR-0036 §1's reason rather than out of caution: a learned ranker is a
@@ -459,8 +512,11 @@ Each is scoped out with its reason, because scoping something out is a decision.
 > sequence, with the empty tuple least and a proper prefix beating its extension;
 > two `PER_CALL` candidates equal under key 4 whatever their amounts and
 > currencies; an undeclared `latency` losing to every declared one; a preference
-> sequence failing to promote a candidate the severity block ranks lower; a tie
-> under the whole key producing `AMBIGUOUS_CAPABILITY` with nothing committed;
+> sequence failing to promote a candidate the severity block ranks lower; a
+> sequence carrying a duplicate id refused where it is supplied, and one naming
+> an unregistered id accepted and matching nothing; a tie
+> under the whole key producing `AMBIGUOUS_CAPABILITY` with nothing committed
+> and the tied ids on the returned `StepDisposition`;
 > and — because §1's transitivity guarantee is the one an implementation is most
 > likely to lose — the same candidate selected from the same set presented in
 > reversed and shuffled orders.
@@ -497,7 +553,7 @@ implements against this ADR until it has merged (ADR-0015 §5, golden rule 5).
   selection* against an honestly-declared peer, so a declaration that understates
   risk is rewarded twice over. Nothing mechanical detects it — verifying a
   declaration would need the per-call reach #57 defers, and even that reports
-  after the fact. It is filed rather than mitigated, and it is an argument for
+  after the fact. It is filed (#1102) rather than mitigated, and it is an argument for
   treating declaration provenance as a real question once tools arrive from
   third parties rather than from this repository.
 - **A capability-name collision now resolves silently instead of stalling.** Two
@@ -507,7 +563,8 @@ implements against this ADR until it has merged (ADR-0015 §5, golden rule 5).
   error is the conservative one — the ordering picks the less severe
   declaration, so a collision resolves toward the tool that discloses less and
   risks less — but it is still the wrong tool, and it is the strongest argument
-  yet for namespacing.
+  yet for namespacing (#1100). The deferral's own trigger now fires on a silent
+  failure rather than a loud one, which is a worse thing to wait for.
 - **Selection stays upstream of the gate and the gate is unchanged.** ADR-0037
   §2's decide → record → read back → claim order, §3's read-back and identity
   check, §4's parking and `resume`, §5's one-commit denial and §6's entry rule
@@ -530,9 +587,11 @@ implements against this ADR until it has merged (ADR-0015 §5, golden rule 5).
 - **A tie is still a stall, and it is now the *only* stall.** Where the user has
   expressed no preference between two indistinguishable tools, the step stays
   `PENDING` exactly as before. `StepDisposition` naming the tied candidates is
-  what makes that recoverable — a surface can ask once, ever, and record the
-  answer — but the surface and the record are both deferred, so on the day this
-  lands the recovery is an operator editing the composition root.
+  the *first* half of making that recoverable, and only that: the ids stop at
+  `orchestration`'s edge, `StepOutcome` has no field for them (#1103), and the
+  preference itself has nowhere durable to live (#1101). So on the day this lands
+  the recovery is an operator reading a log line and editing the composition
+  root — which is a poor steady state, named here rather than implied.
 - **`StepRunner` gains one constructor argument and no collaborator.** The
   preference sequence joins `confirmation_ttl` as configuration the composition
   root supplies; no Protocol is injected for it, and there is nothing to fake.
