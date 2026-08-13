@@ -123,6 +123,26 @@ CONFLICT_LIMIT: Final = 100
 #: figure an operator reads when truncated traces appear.
 _CONFLICT_PROBE_OVERSHOOT: Final = 2
 
+#: ADR-0144 §4's **preference sequence**: the ordered tool ids that break a tie
+#: ADR-0144's ordering has reached key 6 on — that is, between candidates the
+#: severity block and latency already found equal. It can promote nothing over a
+#: candidate keys 1 through 5 prefer, and it is **configuration, never consent**
+#: (§4): it grants nothing, authorises nothing, and whichever candidate it picks
+#: is still ruled on against its own declaration by ``permissions`` before
+#: anything runs.
+#:
+#: Empty by default, in which case key 6 ranks every candidate equally and a
+#: genuine tie stays ``AMBIGUOUS_CAPABILITY``. It lives here rather than in
+#: ``Settings`` because ADR-0144 §4 puts it at the composition root and §7 scopes
+#: a *user-facing* preference out — that needs durable per-user policy state with
+#: its own data-rights obligations, filed as #1101. Until then §5 names the
+#: recovery in full and it runs through this line: an operator reads the tied ids
+#: off the ``step_capability_ambiguous`` log record, names one here, **restarts**
+#: — the snapshot is taken at construction and never re-read — and re-runs the
+#: still-``PENDING`` step. An id naming no registered tool is permitted and
+#: matches nothing; naming one twice is refused at construction.
+TOOL_PREFERENCE: Final[tuple[str, ...]] = ()
+
 
 @dataclass(frozen=True, slots=True)
 class Composition:
@@ -730,6 +750,10 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
             # A parked confirmation's lifetime is a deployment value (#310); ``None``
             # (the default) keeps the pre-#243 behaviour of no lifetime.
             confirmation_ttl=settings.confirmation_ttl,
+            # ADR-0144 §4's preference sequence, supplied here because that is
+            # where the ADR puts it — an operator's surface, not a user's
+            # (:data:`TOOL_PREFERENCE`, #1101).
+            tool_preference=TOOL_PREFERENCE,
         )
         engine = Engine(
             loop=loop,
