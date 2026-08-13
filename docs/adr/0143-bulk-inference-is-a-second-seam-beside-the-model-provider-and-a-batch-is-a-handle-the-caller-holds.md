@@ -247,14 +247,17 @@ issued by one provider is meaningless to another (§2).
 > governs `submit` unamended, and a caller that is cancelled there may assume
 > neither that a batch exists nor that one does not.
 
-> **Normative.** A `BatchHandle` is meaningful only to a `BatchCompleter`
-> configured against the same route that issued it, and carries that route so a
-> mismatch is detectable. Presenting a handle to an implementation on a
-> different route is a caller error, and an implementation that detects it
-> raises `ModelError` with the disposition ADR-0066 §3 fixes for a malformed
+> **Normative.** A `BatchHandle` carries an `issuer`: the implementation's own
+> stable, **non-secret** identity for everything that determines whether the
+> batch is reachable — at minimum the provider and the account or workspace its
+> credential authenticates, plus the model route where a provider scopes batches
+> by it. An `issuer` never contains a credential or any part of one. A
+> `BatchCompleter` accepts a handle whose `issuer` equals the one it would mint
+> from its own configuration now, and rejects any other as a caller error,
+> raising `ModelError` with the disposition ADR-0066 §3 fixes for a malformed
 > argument — neither `retryable` nor `routable` — rather than returning an
 > outcome. Object identity is **not** the test: a handle persisted to disk and
-> presented to a freshly constructed `BatchCompleter` on the same route is
+> presented to a freshly constructed `BatchCompleter` of equal `issuer` is
 > valid, and that is what makes resumption across a process restart possible.
 
 **This is the clause that was genuinely open, and cancellation decides it.**
@@ -308,11 +311,22 @@ The one-event-loop rule cuts the same way rather than the other. A suspended
 coroutine is cheap, so hiding a multi-hour wait would not by itself stall the
 loop — but it would make the wait un-restartable across a process boundary,
 and #1029's consumer is a long-running harness that will be interrupted and
-resumed. A handle that survives in a file is what makes the resumption possible
-— which is why the fifth clause scopes handle validity to the **route** and not
-to the object, since a restarted process necessarily builds a new one — and the
-provider's own bounded results retention is what makes a later `fetch`
+resumed. A handle that survives in a file is what makes the resumption possible,
+and the provider's own bounded results retention is what makes a later `fetch`
 meaningful.
+
+That is why the fifth clause scopes validity to the `issuer` rather than to the
+object: a restarted process necessarily builds a new `BatchCompleter`, so
+object identity would reject exactly the case the shape exists to support. The
+scope is deliberately *not* the model route alone, which was an earlier and
+wrong version of this clause. Reachability is a property of the credential's
+account, not of the model name: a run resumed against the same
+`"provider:model"` string but a different account cannot fetch the first
+account's batch, and a route-only test would have called that handle valid and
+sent the caller to a failure it had been promised would not happen. `issuer` is
+opaque to `core` on purpose — only `models/` knows what makes a batch reachable
+for a given vendor — and it is required to be non-secret because a handle is
+written to disk by the very consumers this shape is for.
 
 ### 3. An item is well-formed on `complete`'s terms, and identified by the caller
 
@@ -329,10 +343,27 @@ meaningful.
 > terms and with the same disposition as the clause above. An implementation
 > never mints, rewrites or normalises an `item_id`.
 
+> **Normative.** `submit` observes its items at one instant, before its first
+> `await`, by one of ADR-0065's three discharges. Everything it derives from
+> them — what it validates, what it transmits, and the `item_count` the handle
+> reports — comes from that one observation, so a caller that mutates the
+> sequence it passed while `submit` is suspended can make the call act on the
+> wrong version but can never make one batch describe two.
+
 Refusing whole rather than partially is the choice that costs something and is
 taken deliberately: a partially-submitted batch is a paid job the caller did not
 ask for and cannot describe, and the caller's own record of what it submitted
 would be wrong. Validating before contact is what makes the refusal free.
+
+The observation clause is **not** discharged by the items being frozen, and this
+is the one seam in the ADR where ADR-0065 has real bite. Its text is explicit
+that "a ``Sequence`` argument is a container the caller may still be holding"
+and that "A frozen argument is not a discharge on its own". `submit` takes such
+a container, validates it, and then suspends on a network call — so without a
+snapshot, a caller appending an item mid-flight could have a batch validated
+over one set and transmitted over another, and a handle whose `item_count`
+matched neither. §12 records that this ADR corrected its own earlier reading of
+ADR-0065 as vacuous here.
 
 ### 4. Every item ends in exactly one of four outcomes, matched by id
 
@@ -474,10 +505,10 @@ forbidden thing the easy one.
 > **Normative.** The implementing lane adds exactly **eight** public names to
 > `core/types.py`, as pydantic models or `StrEnum`s per `CLAUDE.md`'s
 > convention, spelled to the conventions already in that file: `BatchRequest`
-> (`item_id`, `messages`); `BatchHandle` (`batch_key`, `batch_id`, `route`,
-> `submitted_at`, `item_count` — where `route` is the `"provider:model"` string
-> in the spelling `ModelProvider.complete`'s `model` argument already uses, and
-> is a plain `core` value, never a reference to any type in `models/`);
+> (`item_id`, `messages`); `BatchHandle` (`batch_key`, `batch_id`, `issuer`,
+> `submitted_at`, `item_count` — where `issuer` is §2's opaque non-secret
+> reachability identity, a plain `core` string value whose derivation belongs to
+> `models/` and which is never a reference to any type there);
 > `BatchState` (`PENDING`, `COMPLETE`); `BatchStatus` (`handle`,
 > `state`, `settled`, `results_expire_at`); `BatchOutcomeKind` (§4's four
 > members); `BatchItemOutcome` (`item_id`, `kind`, `message`, `failure`);
@@ -609,8 +640,12 @@ widely than it now holds?
 - **ADR-0060 and ADR-0065 — nothing owed, and both are inherited.** Both are
   stated in `core/protocols.py` as binding on "**every** Protocol below", so a
   new Protocol is covered on the day it lands and neither clause needs
-  amending. ADR-0060 is the clause §2 is decided *by*; ADR-0065 is largely
-  vacuous here, since every argument at this seam is an immutable pydantic model.
+  amending. ADR-0060 is the clause §2 is decided *by*, and §2's fourth clause
+  states its residue rather than claiming more than ADR-0060 grants. ADR-0065
+  is **not** vacuous here — an earlier draft of this ADR said it was, which was
+  wrong on ADR-0065's own words: `submit` takes a caller-owned `Sequence`, which
+  is exactly the argument shape ADR-0065 names, and freezing the items does not
+  discharge it. §3's third clause is where it is discharged.
 - **ADR-0066 — nothing owed.** Its §3 disposition is *cited* for §3, §6 and §7's
   refusals rather than altered; its clauses remain stated about `complete`.
 - **ADR-0137 — nothing owed, and §2 and §4 are applied.** §9 uses §2's pairing
@@ -631,7 +666,7 @@ widely than it now holds?
 
 The table below is the audit. Every normative clause of §1–§10 appears in it
 exactly once, and every row names something a reviewer can run. The count is
-23 rows against the 25 marked clauses in this ADR; the remaining two sit below
+24 rows against the 26 marked clauses in this ADR; the remaining two sit below
 the table, are obligations *about* the table and the suite that satisfies it,
 and so have no rows of their own.
 
@@ -642,9 +677,10 @@ and so have no rows of their own.
 | §2 (no waiting) | Each member returns after one round trip | Contract case: `poll` against a still-pending batch returns `PENDING` promptly rather than blocking |
 | §2 (`batch_key` uninterpreted) | `batch_key` on `submit`, carried unchanged onto the handle | Contract cases: the handle echoes the key byte-for-byte; two `submit`s under one key yield two distinct `batch_id`s, so no caller can mistake it for deduplication |
 | §2 (acceptance window) | Every refusable check moved to the near side of the provider call | Contract cases: each of §3's and §7's refusals leaves the provider uncontacted (asserted against a transport that records calls); no work follows acceptance except returning |
-| §2 (handle route validity) | `route` on `BatchHandle`; mismatch detection | Contract cases: a handle presented to a **freshly constructed** implementation on the same route is accepted; one presented on a different route raises, neither `retryable` nor `routable` |
+| §2 (handle issuer validity) | `issuer` on `BatchHandle`, minted from provider, account and route; mismatch detection | Contract cases: a handle presented to a **freshly constructed** implementation of equal `issuer` is accepted; one whose account or route differs raises, neither `retryable` nor `routable`; a test asserts no credential material appears in `issuer` |
 | §3 (well-formedness) | Pre-contact validation of every item | Contract cases: an empty history, a history ending on `Role.ASSISTANT`, and a history containing a `Role.TOOL` turn each refuse the whole batch with nothing submitted |
 | §3 (unique ids) | Duplicate-`item_id` refusal | Contract case: a duplicate refuses; a test asserts `item_id`s round-trip unrewritten |
+| §3 (one observation) | A first-line snapshot of the items in `submit` | Contract case: a caller mutates the sequence it passed while `submit` is suspended on the provider call; what was validated, what was transmitted and the handle's `item_count` all describe one version |
 | §4 (one per item) | Outcome assembly keyed by `item_id` | Contract case: a mixed batch returns exactly one outcome per item and none extra |
 | §4 (four kinds) | `BatchOutcomeKind` and its payload rules | Contract cases: one case per kind, asserting the carried payload |
 | §4 (order) | — | Contract case: the fake returns outcomes in a shuffled order and the suite still passes, proving no positional assumption |
