@@ -1,6 +1,6 @@
 # 140. The email source is a file the fetcher replaces whole, and the reader proposes envelopes, never bodies
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-12
 
 ## Context
