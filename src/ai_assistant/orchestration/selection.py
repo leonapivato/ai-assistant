@@ -41,6 +41,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.types import CostBasis, DataTier, parameter_violations
@@ -84,8 +85,8 @@ _COST_ORDER: Final[tuple[CostBasis, ...]] = tuple(CostBasis)
 SelectionKey = tuple[int, int, tuple[int, ...], int, tuple[int, timedelta], int]
 
 
-def validated_preference(preference: Sequence[str], /) -> tuple[str, ...]:
-    """Take ADR-0144 §4's construction-time snapshot of the preference sequence.
+class Preference:
+    """ADR-0144 §4's preference sequence, snapshotted and validated once.
 
     **The snapshot is what makes the duplicate check worth anything.** A caller
     passing a list and mutating it afterwards — including while ``run`` is
@@ -108,36 +109,69 @@ def validated_preference(preference: Sequence[str], /) -> tuple[str, ...]:
 
     **An id naming no registered tool is permitted and simply matches nothing**
     (§4). A sequence is written against the tools a deployment expects and a
-    registry is populated at startup from whatever registers, so refusing an
-    unmatched id would make the sequence a second registration manifest that has
-    to be kept in step with the first.
+    registry is populated at startup from whatever registers (ADR-0016 §6), so
+    refusing an unmatched id would make the sequence a second registration
+    manifest that has to be kept in step with the first — and would fail a
+    deployment for naming a preference it turned out not to need.
 
-    Args:
-        preference: The ordered tool ids the composition root supplies.
-
-    Returns:
-        The immutable snapshot every later selection reads.
-
-    Raises:
-        ValueError: If any id appears more than once.
+    **The positions are held as a lookup rather than searched for.** A scan per
+    candidate would make selection cost the product of the candidate count and
+    the sequence length, on a path every tool call takes and with no ``await``
+    between the first comparison and the last — so under roadmap item 12's
+    MCP-shaped breadth a large registry and a long sequence would stall the
+    shared event loop together. Building the lookup once here is exact rather
+    than approximate, because the duplicate refusal above is what makes a
+    mapping keyed by id lossless: with every id appearing at most once, its
+    position in the mapping *is* its index in the sequence.
     """
-    snapshot = tuple(preference)
-    seen: set[str] = set()
-    repeated: set[str] = set()
-    for entry in snapshot:
-        if entry in seen:
-            repeated.add(entry)
-        seen.add(entry)
-    if repeated:
-        msg = (
-            f"the tool preference sequence names {', '.join(repr(one) for one in sorted(repeated))}"
-            " more than once, so which occurrence ranks it is undefined; name each at most once"
+
+    __slots__ = ("_position",)
+
+    def __init__(self, ids: Sequence[str] = (), /) -> None:
+        """Copy ``ids``, refuse a repeat, and index what is left.
+
+        Args:
+            ids: The ordered tool ids the composition root supplies. Copied
+                immediately, so the caller keeps no handle on what is stored.
+
+        Raises:
+            ValueError: If any id appears more than once.
+        """
+        snapshot = tuple(ids)
+        seen: set[str] = set()
+        repeated: set[str] = set()
+        for entry in snapshot:
+            if entry in seen:
+                repeated.add(entry)
+            seen.add(entry)
+        if repeated:
+            msg = (
+                f"the tool preference sequence names "
+                f"{', '.join(repr(one) for one in sorted(repeated))} more than once, so which "
+                "occurrence ranks it is undefined; name each at most once"
+            )
+            raise ValueError(msg)
+        # `dict` preserves insertion order, so `ids` reconstructs from this
+        # exactly — which is why no second copy of the tuple is kept.
+        self._position: Mapping[str, int] = MappingProxyType(
+            {entry: index for index, entry in enumerate(snapshot)}
         )
-        raise ValueError(msg)
-    return snapshot
+
+    @property
+    def ids(self) -> tuple[str, ...]:
+        """The snapshot, in the order it was supplied."""
+        return tuple(self._position)
+
+    def rank(self, tool_id: str, /) -> int:
+        """Key 6 for ``tool_id``: its position, or after every id that has one."""
+        return self._position.get(tool_id, len(self._position))
+
+    def __repr__(self) -> str:
+        """Name the class and the ids, which are Tier 2 configuration."""
+        return f"{type(self).__name__}({self.ids!r})"
 
 
-def selection_key(candidate: ToolDefinition, preference: tuple[str, ...], /) -> SelectionKey:
+def selection_key(candidate: ToolDefinition, preference: Preference, /) -> SelectionKey:
     """The six keys of ADR-0144 §§2-4, in the order they are applied.
 
     Lower is preferred throughout, and the composition is lexicographic: an
@@ -157,7 +191,7 @@ def selection_key(candidate: ToolDefinition, preference: tuple[str, ...], /) -> 
        inverting the incentive ADR-0016 §1 built the type around; and ordered
        rather than incomparable because §1 forbids a partial key.
     6. The candidate's position in ``preference``, with an unnamed id after every
-       named one (§4).
+       named one (:meth:`Preference.rank`, §4).
 
     Keys 1 through 3 are the axes ADR-0021 §5 constrains every conforming policy
     over, which is what discharges ADR-0016 §7's "informed by ``permissions``"
@@ -180,7 +214,7 @@ def selection_key(candidate: ToolDefinition, preference: tuple[str, ...], /) -> 
         tuple(_TIER_ORDER.index(tier) for tier in candidate.discloses),
         _COST_ORDER.index(candidate.cost.basis),
         (1, _UNDECLARED_LATENCY) if latency is None else (0, latency),
-        preference.index(candidate.id) if candidate.id in preference else len(preference),
+        preference.rank(candidate.id),
     )
 
 
@@ -201,7 +235,7 @@ class Selection:
     tied: tuple[str, ...] = ()
 
 
-def select(candidates: Sequence[ToolDefinition], preference: tuple[str, ...], /) -> Selection:
+def select(candidates: Sequence[ToolDefinition], preference: Preference, /) -> Selection:
     """Order ``candidates`` and return the unique minimum, or the tie (ADR-0144 §1).
 
     **The result does not depend on the order ``candidates`` arrive in**, on how
@@ -215,7 +249,7 @@ def select(candidates: Sequence[ToolDefinition], preference: tuple[str, ...], /)
             to report, since only the caller knows whether the set was empty
             because ``find`` returned nothing or because the fit filter emptied
             it.
-        preference: The validated snapshot from :func:`validated_preference`.
+        preference: The validated snapshot the stage was constructed with.
 
     Returns:
         The selection, or the tie that ADR-0144 §6 leaves for
@@ -313,10 +347,10 @@ def eligible_candidates(
 
 __all__ = [
     "Eligibility",
+    "Preference",
     "Selection",
     "SelectionKey",
     "eligible_candidates",
     "select",
     "selection_key",
-    "validated_preference",
 ]
