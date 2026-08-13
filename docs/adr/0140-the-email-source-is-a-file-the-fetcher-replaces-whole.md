@@ -348,6 +348,17 @@ budget.
 > confidence, precedence, permission, grant, routing or ranking decision may be
 > made on the strength of one.
 
+> **Normative.** What the clause above forbids is granting a message **standing**
+> on the strength of a field — authority, identity, trust, precedence, or a claim
+> on any surface. It does not forbid deciding whether the reader looks at a
+> message at all, and §5's window membership is that decision and only that: it
+> is taken on `X-Assistant-Delivered-At` and confers nothing. A message admitted
+> to the window is proposed in the `ATTESTED` band under every clause of this
+> section, exactly as one the fetcher dated honestly. A message that forges the
+> header — reachable only where the fetcher's strip has failed — buys its own
+> admission to a window it could have reached by being sent again, which is not a
+> capability, and buys no other field's standing.
+
 > **Normative.** An address or display name drawn from a message is **never an
 > identity** in this system. It may not be matched against the user, against a
 > `SourceGrant`, against a spoke's enrolment (ADR-0124), or against any other
@@ -1126,11 +1137,18 @@ carries is to **pass** the existing suite, not to write one.
   `rename(2)` on the same filesystem; that its retention exceeds the reader's
   window; and that its credential never enters the hub. This is documentation and
   not `src/`, and §1's second clause is why: the fetcher is not ours to ship.
-- Tests for the three clauses a lane can satisfy in prose and breach in code: that
+- Tests for the four clauses a lane can satisfy in prose and breach in code: that
   a body present in a store the reader is pointed at reaches **no** proposal and
   **no** facet (§5); that a message with zero, two, or an unparseable
   `X-Assistant-Delivered-At` is skipped rather than dated by any fallback (§5);
-  and that a store whose messages carry only a `Date` header proposes nothing.
+  that a store whose messages carry only a `Date` header proposes nothing; and
+  that a store of `email_max_messages + 1` framed messages **none** of which
+  carries a valid `X-Assistant-Delivered-At` **refuses** rather than returning a
+  successful empty reading. The last is the cap's *ordering* rather than its
+  figure, and it is listed because it is the one property in §12 that every test
+  above passes while breached: an implementation that skips invalid messages
+  first and counts what survives satisfies all three others and still turns a
+  busted cap into a quiet week.
 
 ### 14. Deferred, by name, each with the condition that fires it
 
