@@ -257,6 +257,14 @@ issued by one provider is meaningless to another (§2).
 > contains a credential or any part of one. An implementation carries its
 > configured `issuer` onto every handle it mints, unchanged.
 
+> **Normative.** A `BatchHandle` is an **address, not a capability**. It carries
+> only what names the batch and the account it lives in, and no field a later
+> `poll` or `fetch` would have to agree with — in particular no count. A handle
+> a caller assembles by hand, naming a real batch under its own `issuer`, is a
+> valid address for that batch and is answered for it; the seam neither
+> authenticates handles nor pretends to, and holding one confers nothing the
+> caller's own credential did not already confer.
+
 > **Normative.** A `BatchCompleter` accepts a handle whose `issuer` equals its
 > own configured one and rejects any other as a caller error, raising
 > `ModelError` with the disposition ADR-0066 §3 fixes for a malformed argument —
@@ -383,10 +391,10 @@ written to disk by the very consumers this shape exists for.
 
 > **Normative.** `submit` refuses an **empty** item sequence, before contacting
 > any provider, raising `ModelError` with ADR-0066 §3's disposition. A batch of
-> nothing has no outcome the seam can describe: §9 requires `item_count` to be
-> positive, so no valid `BatchHandle` could be returned for one, and letting the
-> provider refuse it instead would breach §2's rule that every refusable check
-> happens on the near side of the acceptance window.
+> nothing has no outcome the seam can describe — §9 requires a batch's reported
+> `total` to be positive — and letting the provider refuse it instead would
+> breach §2's rule that every refusable check happens on the near side of the
+> acceptance window.
 
 > **Normative.** Every item carries a caller-minted `item_id`, unique within its
 > batch. `submit` refuses a batch containing a duplicate `item_id`, on the same
@@ -395,8 +403,8 @@ written to disk by the very consumers this shape exists for.
 
 > **Normative.** `submit` observes its items at one instant, before its first
 > `await`, by one of ADR-0065's three discharges. Everything it derives from
-> them — what it validates, what it transmits, and the `item_count` the handle
-> reports — comes from that one observation, so a caller that mutates the
+> them — what it validates and what it transmits — comes from that one
+> observation, so a caller that mutates the
 > sequence it passed while `submit` is suspended can make the call act on the
 > wrong version but can never make one batch describe two.
 
@@ -411,8 +419,7 @@ that "a ``Sequence`` argument is a container the caller may still be holding"
 and that "A frozen argument is not a discharge on its own". `submit` takes such
 a container, validates it, and then suspends on a network call — so without a
 snapshot, a caller appending an item mid-flight could have a batch validated
-over one set and transmitted over another, and a handle whose `item_count`
-matched neither. §12 records that this ADR corrected its own earlier reading of
+over one set and transmitted over another. §12 records that this ADR corrected its own earlier reading of
 ADR-0065 as vacuous here.
 
 ### 4. Every item ends in exactly one of four outcomes, matched by id
@@ -556,10 +563,10 @@ forbidden thing the easy one.
 > `core/types.py`, as pydantic models or `StrEnum`s per `CLAUDE.md`'s
 > convention, spelled to the conventions already in that file: `BatchRequest`
 > (`item_id`, `messages`); `BatchHandle` (`batch_key`, `batch_id`, `issuer`,
-> `submitted_at`, `item_count` — where `issuer` is §2's non-secret,
+> `submitted_at` — where `issuer` is §2's non-secret,
 > composition-root-supplied account label, a plain `core` string value);
 > `BatchState` (`PENDING`, `COMPLETE`); `BatchStatus` (`handle`,
-> `state`, `settled`, `results_expire_at`); `BatchOutcomeKind` (§4's four
+> `state`, `total`, `settled`, `results_expire_at`); `BatchOutcomeKind` (§4's four
 > members); `BatchItemOutcome` (`item_id`, `kind`, `message`, `failure`);
 > `BatchFailureKind` (§5's seven members); and `BatchItemFailure` (`kind`,
 > `detail`). No other public name is added to `core/types.py` by that lane.
@@ -570,11 +577,20 @@ forbidden thing the easy one.
 > each must compare equal to the bytes it was minted from, and `Identifier`
 > strips the value it accepts. `submitted_at` and
 > `results_expire_at` are `UtcInstant`, the second optional. `detail` is
-> `EncodableText`. `item_count` is a positive `int` and `settled` a non-negative
-> one. `BatchRequest.messages` and `submit`'s items are `Sequence`s, spelled as
+> `EncodableText`. `total` is a positive `int` and `settled` a non-negative
+> one, both on `BatchStatus`. `BatchRequest.messages` and `submit`'s items are `Sequence`s, spelled as
 > `ModelProvider.complete` spells its own `Sequence[Message]`, and `fetch`
 > returns a `Sequence[BatchItemOutcome]`. No field is typed `Any`, and no type
 > in `models/` or any vendor package is named by any annotation.
+
+Counts live on `BatchStatus` and not on the handle, which is what makes the
+address clause enforceable rather than aspirational. `BatchHandle` is a public
+`core` model, so anyone can build one; had it carried an `item_count`, a handle
+built with the wrong one would have put `poll` in an impossible position —
+report the provider's true `settled` and breach the bound, or report a false
+`settled` and agree with a number the caller invented. Nothing on the handle can
+be trusted that way, so nothing on it is depended on: `total` is read from the
+provider on every `poll`, beside the `settled` it must agree with.
 
 `NonBlankEncodableText` rather than `Identifier` is the one annotation worth a
 sentence, because `Identifier` is the obvious choice and is wrong here.
@@ -588,9 +604,10 @@ exactly this and says so: "Text that is neither blank nor unwritable, and is
 fields must compare equal to its" source. `batch_id` and `issuer` take it for
 the same reason one step out: both are compared, not read.
 
-> **Normative.** `BatchStatus` binds `state` to `settled`: `0 <= settled <=
-> handle.item_count`, and `state` is `COMPLETE` if and only if `settled ==
-> handle.item_count`. An implementation whose provider reports no in-flight
+> **Normative.** `BatchStatus` carries the batch's size as `total` and binds
+> `state` to it: `0 <= settled <= total`, and `state` is `COMPLETE` if and only
+> if `settled == total`. `total` is the provider's count, read on each `poll`,
+> and no count is carried on the handle. An implementation whose provider reports no in-flight
 > progress reports `settled` as `0` until the batch completes, which satisfies
 > the invariant and is not a defect. `fetch` is defined only for a `COMPLETE`
 > batch and raises for a `PENDING` one.
@@ -772,7 +789,7 @@ widely than it now holds?
 
 The table below is the audit. Every normative clause of §1–§10 appears in it
 exactly once, and every row names something a reviewer can run. The count is
-29 rows against the 32 marked clauses in this ADR; the remaining three have no
+30 rows against the 33 marked clauses in this ADR; the remaining three have no
 deliverable for that lane to own: two sit below the table and are obligations
 *about* the table and the suite that satisfies it, and §9's lane-shape clause
 binds the dispatching brief rather than the lane the table is addressed to.
@@ -789,7 +806,7 @@ binds the dispatching brief rather than the lane the table is addressed to.
 | §3 (well-formedness) | Pre-contact validation of every item | Contract cases: an empty history, a history ending on `Role.ASSISTANT`, and a history containing a `Role.TOOL` turn each refuse the whole batch with nothing submitted |
 | §3 (empty batch) | An empty-sequence refusal ahead of the provider call | Contract case: `submit` with no items raises, neither `retryable` nor `routable`, and the recording transport shows no request was sent |
 | §3 (unique ids) | Duplicate-`item_id` refusal | Contract case: a duplicate refuses; a test asserts `item_id`s round-trip unrewritten |
-| §3 (one observation) | A first-line snapshot of the items in `submit` | Contract case: a caller mutates the sequence it passed while `submit` is suspended on the provider call; what was validated, what was transmitted and the handle's `item_count` all describe one version |
+| §3 (one observation) | A first-line snapshot of the items in `submit` | Contract case: a caller mutates the sequence it passed while `submit` is suspended on the provider call; what was validated and what was transmitted describe one version |
 | §4 (one per item) | Outcome assembly keyed by `item_id` | Contract case: a mixed batch returns exactly one outcome per item and none extra |
 | §4 (four kinds) | `BatchOutcomeKind` and its payload rules | Contract cases: one case per kind, asserting the carried payload |
 | §4 (order) | — | Contract case: the fake returns outcomes in a shuffled order and the suite still passes, proving no positional assumption |
@@ -803,7 +820,8 @@ binds the dispatching brief rather than the lane the table is addressed to.
 | §8 (not the hub) | No `service`/`app` wiring | A test asserts `ai_assistant.service` holds no `BatchCompleter` |
 | §9 (eight types) | The eight names in `core/types.py` | A test asserts exactly those eight names are added and each is exported as the file's conventions require |
 | §9 (annotations) | The exact annotations on all eight types and three members | A test asserts each field's annotation, that none is `Any`, and that no annotation names a `models/` or vendor type; a case round-trips an `item_id` and a `batch_key` carrying leading and trailing whitespace and asserts both survive byte-for-byte, which `Identifier` would have silently stripped |
-| §9 (state/settled) | `BatchStatus` validator | Contract cases: `settled` stays within bounds; `COMPLETE` iff fully settled; a provider reporting no in-flight progress is accepted; `fetch` on a `PENDING` batch raises |
+| §9 (state/settled) | `BatchStatus` validator over its own `total` | Contract cases: `settled` stays within bounds; `COMPLETE` iff fully settled; `total` matches the number of outcomes `fetch` returns; a provider reporting no in-flight progress is accepted; `fetch` on a `PENDING` batch raises |
+| §2 (handle is an address) | Handle fields limited to what addresses the batch | Contract cases: a hand-built handle naming another of the account's batches returns that batch's status and outcomes rather than an error; no handle field is a count or any other value `poll` must agree with |
 | §9 (kind/payload binding) | `BatchItemOutcome` validator | A test asserts each of the four kinds rejects the wrong payload combination |
 | §9 (triad never alone) | `BatchCompleterContract`, `FakeBatchCompleter`, `Test…Contract`, and the `models/` implementation, in one PR | `test_protocol_triad.py` is the mechanical check; the suite runs against both the fake and the real implementation |
 | §9 (end-to-end contact) | A caller-shaped test driving `submit` → `poll` → `fetch` over the vendor binding | The test reaches a settled batch, reads outcomes back by `item_id`, and covers at least one non-`SUCCEEDED` kind |
