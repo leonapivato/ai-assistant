@@ -486,11 +486,28 @@ asking twice pointlessly.
 
 > **Normative.** An `AMBIGUOUS_CAPABILITY` disposition commits nothing and
 > records nothing (§6), so it binds no step to any candidate and a later `run`
-> against that still-`PENDING` step **selects afresh** — against the registry and
-> the preference sequence as they then stand. The clause above is about a
-> selection that was acted on, and there was none.
+> against that still-`PENDING` step **selects afresh**, against the registry as
+> it then stands. The clause above is about a selection that was acted on, and
+> there was none.
 
-The two clauses divide on whether anything was *committed*, which is the same line
+> **Normative.** A *changed preference sequence* takes effect only in a **newly
+> constructed** selection stage, because §4's snapshot is taken and validated at
+> construction and never re-read. A stage already constructed selects afresh from
+> the same preference it was built with, so recovering a tie by naming one of the
+> tied ids requires the composition root to build the stage again — in practice,
+> the next process life.
+
+The restart is a real cost and it is stated rather than smoothed over. Making a
+changed preference visible to a live stage would mean re-reading the caller's
+sequence, which is the aliasing §4 refuses, or a mutation seam on the stage,
+which is a second way to change a selection rule at runtime and the same
+give-away ADR-0037 §1 declined. It is also not the shape the eventual fix takes:
+a durable, user-stated preference (#1101) is read from a store rather than
+re-injected, and a store is re-read by construction. Until then the interim
+matches what is already true of the registry, which ADR-0016 §6 rebuilds each
+run — a deployment changing which tools exist restarts too.
+
+The first two clauses divide on whether anything was *committed*, which is the same line
 ADR-0037 draws and the reason the second one is not a loophole in the first. §1
 there says the ambiguous disposition *"is terminal for **this** turn only"*, and
 that `PENDING` *"is the state a real selection rule, or a user asked to choose,
@@ -662,8 +679,9 @@ Each is scoped out with its reason, because scoping something out is a decision.
 > at an `await` — changing neither the selection nor the duplicate check; a tie
 > under the whole key producing `AMBIGUOUS_CAPABILITY` with nothing committed
 > and the tied ids on the returned `StepDisposition`; a second `run` against a
-> step left `PENDING` by an ambiguity selecting afresh, and selecting differently
-> once the preference sequence names one of the tied ids;
+> step left `PENDING` by an ambiguity selecting afresh on the **same** stage, and
+> a **newly constructed** stage whose preference sequence names one of the tied
+> ids selecting that one;
 > and — because §1's transitivity guarantee is the one an implementation is most
 > likely to lose — the same candidate selected from the same set presented in
 > reversed and shuffled orders.
@@ -754,9 +772,11 @@ implements against this ADR until it has merged (ADR-0015 §5, golden rule 5).
   the *first* half of making that recoverable, and only that: the ids stop at
   `orchestration`'s edge, `StepOutcome` has no field for them (#1103), and the
   preference itself has nowhere durable to live (#1101). So on the day this lands
-  the recovery is an operator reading a log line, editing the composition
-  root and re-running the still-`PENDING` step, which §5's second clause makes
-  explicitly available — a poor steady state, named here rather than implied.
+  the recovery is an operator reading a log line, editing the composition root,
+  **restarting** — §4's snapshot is taken at construction, so a changed
+  preference reaches only a newly built stage (§5) — and re-running the
+  still-`PENDING` step, which §5 makes explicitly available. A poor steady state,
+  named here rather than implied, and the reason #1101 is worth landing.
 - **`StepRunner` gains one constructor argument and no collaborator.** The
   preference sequence joins `confirmation_ttl` as configuration the composition
   root supplies; no Protocol is injected for it, and there is nothing to fake.
