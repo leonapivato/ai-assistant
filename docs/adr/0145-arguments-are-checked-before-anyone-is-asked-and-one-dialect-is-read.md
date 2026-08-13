@@ -469,11 +469,24 @@ introduces rather than one it inherits, and an earlier draft of this paragraph
 claimed otherwise, on the strength of a limit that binds a cheaper walk.
 
 > **Normative.** A `parameters_schema` nested deeper than a fixed bound is
-> refused at construction, and a parameter mapping nested deeper than that same
-> bound is reported as a violation without being evaluated. The bound is one
-> constant in `core`, not configurable and not per-tool, and it is fixed low
-> enough that evaluating a schema and an instance both at the bound completes
-> well inside the interpreter's recursion limit.
+> refused at construction. A parameter mapping nested deeper than that same
+> bound refuses the request before evaluation, as a reason of its own and never
+> as a `ParameterViolation`. The bound is one constant in `core`, not
+> configurable and not per-tool, and it is fixed low enough that evaluating a
+> schema and an instance both at the bound completes well inside the
+> interpreter's recursion limit.
+
+**Its own reason, because it is not a violation of anything the schema says.**
+Arguments over the bound may satisfy their schema perfectly; what refuses them is
+this system declining to evaluate that deep. There is no failing keyword and no
+schema-owned value, so a `ParameterViolation` describing it could only be built
+by inventing both — and a fabricated keyword in the one type whose fields are
+the enforcement of §8 is exactly the wrong place to start making things up. It
+also composes with nothing: when the bound fires, no evaluation happened, so
+there are no other violations to report alongside it and none is guessed at.
+The refusal lands on the same path — the selection stage requests no ruling and
+returns `INVALID_PARAMETERS` (§4) — because from the pipeline's seat the answer
+is the same: these arguments do not go to this tool.
 
 **Checked before recursing, not caught after.** §7's clause makes an evaluation
 that raises a refusal, and a `RecursionError` is an `Exception`, so the *outcome*
@@ -609,9 +622,11 @@ the keyword, the schema's value and the location supply exactly. A schema is
 Tier 2 configuration authored by the tool's provider, so schema-side text is
 safe to render.
 
-> **Normative.** Where several violations are found, all are reported, in a
-> deterministic order, and any truncation is stated in what is reported rather
-> than performed silently.
+> **Normative.** Where evaluating a schema finds several violations, all are
+> reported, in a deterministic order, and any truncation is stated in what is
+> reported rather than performed silently. A refusal that prevents evaluation
+> from happening at all — §6's depth bound — reports itself alone, and this
+> clause does not require violations to be reported beside it.
 
 One violation at a time turns a correction into a sequence of round trips, each
 paying for a re-plan; a silently truncated list makes a caller believe it has
@@ -849,10 +864,12 @@ is owed is the evidence for the claims above that a signature does not show.
   the model is shown to be usable and not merely restrictive.
 - **The depth bound, measured rather than asserted** (§6): a schema at the bound
   constructs and a schema one level deeper is refused; a parameter mapping one
-  level deeper than the bound comes back as a violation without the evaluator
-  being entered. And the bound is shown to be *safe* rather than merely enforced
-  — a schema and an instance both at the bound evaluate to completion — because a
-  bound nobody checked against the recursion limit is a number, not a guarantee.
+  level deeper than the bound refuses the request with the evaluator never
+  entered, **and no `ParameterViolation` produced** — the assertion that the
+  refusal did not smuggle in a fabricated keyword. And the bound is shown to be
+  *safe* rather than merely enforced — a schema and an instance both at the bound
+  evaluate to completion — because a bound nobody checked against the recursion
+  limit is a number, not a guarantee.
 - **No I/O, as a test that cannot pass by accident** (§7): separately from the
   construction refusal, an evaluator built by the `core` seam is shown to raise
   rather than retrieve when handed an external reference, so the belt is tested
