@@ -392,15 +392,18 @@ candidates equal.
 required of a configuration surface** — and the claim has to be stated at exactly
 the width it holds, because the tempting wider one is false.
 
-> **Normative.** No value of the preference sequence can produce a **less
-> restrictive** permission outcome on any axis ADR-0021 §5 constrains, make a
-> conforming policy non-conforming, or reach a tool without the gate ruling on
-> it. The preference orders only candidates equal under keys 1 through 5, so it
-> moves no axis the contract constrains, and every candidate it can select is
-> still ruled on by `ActionPolicy` against its own declaration.
+> **Normative.** No value of the preference sequence can make a conforming policy
+> non-conforming, or reach a tool without `ActionPolicy` ruling on it. Every
+> candidate it can select is equal to every other on every axis ADR-0021 §5
+> constrains — keys 1 through 3 — so the preference moves none of them, and every
+> candidate it can select is ruled on against its own declaration before anything
+> runs.
 
-**What it does not claim is that the tied candidates are indistinguishable to
-every conforming policy, because they need not be.** ADR-0021 §5 constrains a
+**What the clause deliberately does not say is that the ruling is the same
+whichever candidate the preference picks, or that the tied candidates are
+indistinguishable to every conforming policy — because neither holds.** An
+earlier draft asserted the first as "no less restrictive outcome" and was
+contradicted by the paragraph it stood next to. ADR-0021 §5 constrains a
 policy over `risk_level`, `reversibility` and `discloses`, plus the two floors;
 it does not forbid a policy from reading `reads`, `writes`, `side_effecting` or
 `idempotency`. ADR-0036 §1 declined those clauses for `ThresholdActionPolicy` —
