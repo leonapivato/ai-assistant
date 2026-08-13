@@ -1,6 +1,6 @@
 # 142. Each ingestion source is its own stage, its own operation and its own row
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-12
 
 ## Context
