@@ -111,6 +111,28 @@ Read rather than assumed, because the shape of the contract turns on it:
 That last point is the same sentence `Embedder`'s docstring already uses about
 embedding, and it is the hinge of §1.
 
+**Three details of that surface were read off the installed SDK rather than
+assumed, because §2, §4 and §6 each turn on one.** In `anthropic` 0.117.0:
+
+- **`MessageBatch` has no caller-supplied field**, and `batches.list` filters
+  only by `after_id`, `before_id` and `limit`. `batches.create` accepts
+  `requests` and `user_profile_id` and no idempotency key; the SDK's generic
+  idempotency plumbing is inert for this client, whose `_idempotency_header` is
+  never set and so stays `None`. **Nothing ties a key the caller chose to a
+  batch the provider accepted** — the fact §2's fourth clause is written around
+  and §11's first deferral is waiting on.
+- **`results_url`'s own docstring says the ordering rule**: "Results in the file
+  are not guaranteed to be in the same order as requests. Use the `custom_id`
+  field to match results to requests." §4's ordering clause is that, stated as a
+  contract instead of as a caveat.
+- **The two bounds §6 separates are two separate fields on the batch**:
+  `expires_at`, "the time at which the Message Batch will expire and end
+  processing, which is 24 hours after creation", and `archived_at`, "the time at
+  which the Message Batch was archived and its results became unavailable". The
+  distinction §6 draws is not an invention of this ADR; it is already two fields
+  meaning two different things, which is also why conflating them is an easy
+  mistake for an implementation to make.
+
 ### What already binds, and is not relitigated here
 
 - **Golden rule 4** — provider SDKs live only in `models/`. The `provider SDKs
@@ -210,18 +232,20 @@ issued by one provider is meaningless to another (§2).
 > satisfy `poll` or `fetch` by sleeping until the batch settles. Waiting is the
 > caller's loop, over `poll`.
 
-> **Normative.** `submit` is **idempotent on `batch_key`**: a `submit` repeated
-> with a `batch_key` already accepted against this route returns the handle of
-> the batch accepted for that key and creates no second batch. An implementation
-> that cannot determine whether a key was already accepted raises rather than
-> submitting, so the ambiguous case never becomes a duplicate paid batch.
+> **Normative.** `batch_key` is minted by the caller, carried unchanged on the
+> `BatchHandle`, and **never interpreted** by the implementation. It correlates
+> the caller's own durable record of an intended batch with the handle it got
+> back. It is not an idempotency key: `submit` does not deduplicate on it, and
+> two `submit` calls carrying one `batch_key` create two batches.
 
-> **Normative.** ADR-0060's resource clause is discharged at this seam by that
-> idempotency and not by any attempt to un-create a batch. A cancelled `submit`
-> may or may not have created one — ADR-0060's "a cancelled call's effect is
-> indeterminate to the caller" stands unamended and unweakened here — and the
-> caller's remedy is to re-`submit` under the same `batch_key`, which either
-> creates the batch it never created or returns the handle to the one it did.
+> **Normative.** `submit` performs every check that can refuse a batch — §3's
+> item validation, §3's duplicate-`item_id` check, §7's size refusal — **before**
+> contacting the provider, and does nothing after the provider accepts except
+> return. The window in which a cancellation can leave a batch created but
+> unreported is therefore exactly one round trip, and the seam does not close
+> it: ADR-0060's "a cancelled call's effect is indeterminate to the caller"
+> governs `submit` unamended, and a caller that is cancelled there may assume
+> neither that a batch exists nor that one does not.
 
 > **Normative.** A `BatchHandle` is meaningful only to a `BatchCompleter`
 > configured against the same route that issued it, and carries that route so a
@@ -252,19 +276,33 @@ identifier back on the cancellation path. Three members put the handle in the
 caller's hands **before any waiting begins**, so the worst a cancellation of the
 *wait* costs is the wait.
 
-**Splitting the wait out does not by itself close the hole, and the third and
-fourth clauses are what do.** A cancellation landing inside `submit` itself —
-after the provider accepted the batch, before the handle came back — orphans the
-batch just as thoroughly as the hidden-await shape would, and it is not a
-hypothetical: it is what a worker dying mid-submit looks like. Nothing at this
-seam can un-create that batch, and an implementation that tried would be
-promising a stop it cannot deliver (§10). What closes it is making the *identity*
-the caller's rather than the provider's: the caller mints `batch_key` and writes
-it down **before** calling, so an indeterminate `submit` has a determinate
-remedy. Re-submitting under the same key is safe by construction — it either
-creates the batch that was never created, or returns the handle to the one that
-was — which is the only shape that avoids both losing a paid job and buying a
-second one.
+**Splitting the wait out shrinks the hole; it does not close it, and this ADR
+says so rather than claiming otherwise.** A cancellation landing inside `submit`
+itself — after the provider accepted the batch, before the handle came back —
+orphans that batch, and it is not a hypothetical: it is what a worker dying
+mid-submit looks like. An earlier draft of this section closed the gap by making
+`submit` idempotent on `batch_key`. **That promise is not implementable against
+the primary vendor surface and has been withdrawn**, on the evidence in Context:
+`create` takes no idempotency key and the SDK never transmits one, `MessageBatch`
+carries no caller-supplied field, and `list` filters only by batch id — so
+nothing ties a caller's key to an accepted batch, and an implementation could
+only have satisfied the clause by guessing.
+
+What is left is the honest bound, and it is the one ADR-0060 already licenses.
+Its cancellation rule "is cooperative and is stated in the weaker, true form: no
+seam can stop work that declines to be cancelled. What the rule buys is that the
+*resource* is safe and the cancellation *arrives*, not that the work stops" —
+and its third paragraph fixes the caller's position exactly: "**A cancelled
+call's effect is indeterminate to the caller.** … The caller may assume neither."
+A one-round-trip acceptance window is precisely that case, not an exception to
+it. So the fourth clause does the only two things a seam can do here: it moves
+every refusable check to the near side of the window, making the window as
+narrow as a single request; and it states the residue plainly instead of
+papering over it. The three-member split still removes the *large* orphaning
+window — the hours of waiting a hidden await would hold open — and reduces the
+residue from "a whole run" to "one request", which against this vendor surface
+is the best a contract can honestly offer. §11 records what would let a later
+lane close the rest.
 
 The one-event-loop rule cuts the same way rather than the other. A suspended
 coroutine is cheap, so hiding a multi-hour wait would not by itself stall the
@@ -511,17 +549,25 @@ caller's real remedy — stop polling and let the window close — costs nothing
 is already available. A contract member whose only honest guarantee is "the
 request was sent" is weaker than no member, because it reads as a stop.
 
-Note precisely what §2's idempotency does and does not buy here, since the two
-are easy to conflate. It makes an interrupted `submit` **recoverable** — the
-caller can always find out which batch it owns — and it does **not** make a
-batch **stoppable**. Those are different guarantees, and the seam offers exactly
-the first.
+The absence of a cancel is also why §2's acceptance window has no remedy at this
+seam and is stated instead: a batch that was created but never reported cannot
+be stopped *and* cannot be found, and offering a `cancel` would not have helped
+with either, since cancelling requires the very identifier the interrupted
+`submit` failed to return.
 
 ### 11. Deferred, by name, each with the condition that fires it
 
 Each of these is out of scope here and is a decision, not an oversight. None is
 normative; each names what would fire it.
 
+- **Closing §2's acceptance window.** Fires when a route's provider offers a
+  primitive that can resolve a caller-chosen key to an accepted batch — a
+  transmitted idempotency key, a caller-supplied field on the batch object, or a
+  list filter over one. None of the three exists on the primary vendor surface
+  today (Context), which is why §2's fourth clause states the window instead of
+  closing it. The `batch_key` §9 puts on the handle is deliberately the value
+  such a primitive would key on, so closing this later is a clause change and
+  not a type change.
 - **A `cancel` member (§10).** Fires if a consumer is found that must stop a
   batch it can still be billed for and cannot wait out the window — that is, if
   batch sizes grow enough that a wrong submission is worth money to abort.
@@ -594,8 +640,8 @@ and so have no rows of their own.
 | §1 | `BatchCompleter` in `core/protocols.py`; `ModelProvider` byte-unchanged | `test_protocol_triad.py` passes for the new Protocol; a test asserts `ModelProvider`'s member set is unchanged |
 | §2 (members) | `submit`/`poll`/`fetch`, all `async`, and no fourth member | Contract case: the Protocol's member set is exactly those three |
 | §2 (no waiting) | Each member returns after one round trip | Contract case: `poll` against a still-pending batch returns `PENDING` promptly rather than blocking |
-| §2 (idempotent submit) | `batch_key` on `submit`, and key-to-batch resolution against the route | Contract cases: a repeated `submit` under one key returns the first handle and creates no second batch; an implementation that cannot resolve the key raises instead of submitting |
-| §2 (ADR-0060 discharge) | Recovery documented at the seam; no un-create attempted | Contract case: a `submit` cancelled after acceptance is recovered by re-`submit` under the same key, yielding one batch |
+| §2 (`batch_key` uninterpreted) | `batch_key` on `submit`, carried unchanged onto the handle | Contract cases: the handle echoes the key byte-for-byte; two `submit`s under one key yield two distinct `batch_id`s, so no caller can mistake it for deduplication |
+| §2 (acceptance window) | Every refusable check moved to the near side of the provider call | Contract cases: each of §3's and §7's refusals leaves the provider uncontacted (asserted against a transport that records calls); no work follows acceptance except returning |
 | §2 (handle route validity) | `route` on `BatchHandle`; mismatch detection | Contract cases: a handle presented to a **freshly constructed** implementation on the same route is accepted; one presented on a different route raises, neither `retryable` nor `routable` |
 | §3 (well-formedness) | Pre-contact validation of every item | Contract cases: an empty history, a history ending on `Role.ASSISTANT`, and a history containing a `Role.TOOL` turn each refuse the whole batch with nothing submitted |
 | §3 (unique ids) | Duplicate-`item_id` refusal | Contract case: a duplicate refuses; a test asserts `item_id`s round-trip unrewritten |
@@ -649,6 +695,15 @@ and so have no rows of their own.
   to write against a `complete`-shaped seam, including choosing a poll interval.
   Accepted: the loop is a dozen lines, and the alternative orphans paid work
   under cancellation.
+- **A cancellation inside `submit` can still lose a batch, and the seam does not
+  fix it.** §2's fourth clause narrows the window to one round trip and then
+  states the residue rather than closing it, because the vendor surface offers
+  nothing to close it with (Context). The cost is real and bounded: an orphaned
+  batch is billed for what it processes and disappears at the provider's own
+  window, and a caller that cannot tolerate that must bound its exposure by
+  submitting smaller batches. This is the one place the seam is weaker than a
+  reader might assume from §2's cancellation argument, which is why it is
+  stated in the Decision and not only here.
 - **A triad for one real implementation.** §1 buys `Embedder`'s shape and pays
   `Embedder`'s cost — a conformance suite and a canonical fake for a Protocol
   with one production implementation. Accepted on the ADR-0042 §1 analysis in
