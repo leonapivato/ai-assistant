@@ -44,6 +44,11 @@ from ai_assistant.service.configuration import (
     EMBEDDING_TIMEOUT_SECONDS,
     EPISODE_RETENTION_FINITE,
     EPISODE_RETENTION_SECONDS,
+    NOTIFICATION_QUEUE_LIMIT,
+    NOTIFICATION_RECONSIDER_ARMED,
+    NOTIFICATION_RECONSIDER_SECONDS,
+    NOTIFICATION_RETENTION_FINITE,
+    NOTIFICATION_RETENTION_SECONDS,
     OBSERVATION_ARMED,
     OBSERVATION_BATCH_SIZE,
     OBSERVATION_MAX_PROPOSALS,
@@ -162,9 +167,9 @@ async def test_the_declared_allowlist_is_exactly_what_two_deployments_produce(
 ) -> None:
     """The other direction: no key is declared that nothing can emit.
 
-    Two opposite deployments are needed because six of the entries are pairs whose
-    numeric half appears only when the duration is set — so an armed hub and a
-    disarmed one each produce a strict subset, and only their union is the list.
+    Two opposite deployments are needed because eight of the entries are pairs
+    whose numeric half appears only when the duration is set — so an armed hub and
+    a disarmed one each produce a strict subset, and only their union is the list.
     A declared-but-unreachable key would otherwise sit here forever, describing a
     record no operator will ever meet.
     """
@@ -181,6 +186,8 @@ async def test_the_declared_allowlist_is_exactly_what_two_deployments_produce(
         observation_interval=None,
         episode_retention=None,
         trace_retention=None,
+        notification_retention=None,
+        notification_reconsider_interval=None,
     )
 
     keys = set((await _recorded(armed)).metrics) | set((await _recorded(disarmed)).metrics)
@@ -216,6 +223,11 @@ async def test_a_default_deployment_records_its_effective_figures(settings: Sett
         EMBEDDING_TIMEOUT_SECONDS: 30.0,
         RETRIEVAL_SEARCH_LIMIT: _RETRIEVAL_LIMIT,
         CONFLICT_SEARCH_LIMIT: _CONFLICT_LIMIT,
+        NOTIFICATION_QUEUE_LIMIT: 100,
+        NOTIFICATION_RETENTION_FINITE: True,
+        NOTIFICATION_RETENTION_SECONDS: timedelta(days=7).total_seconds(),
+        NOTIFICATION_RECONSIDER_ARMED: True,
+        NOTIFICATION_RECONSIDER_SECONDS: timedelta(minutes=5).total_seconds(),
     }
 
 
@@ -292,6 +304,55 @@ async def test_an_armed_observation_job_dates_the_arming(tmp_path: Path) -> None
     assert OBSERVATION_SECONDS not in before
     assert after[OBSERVATION_ARMED] is True
     assert after[OBSERVATION_SECONDS] == timedelta(hours=6).total_seconds()
+
+
+async def test_the_two_notification_nullables_take_the_word_their_null_means(
+    tmp_path: Path,
+) -> None:
+    """ADR-0141 §10's two ``_pair`` entries, on the off-branch that names them.
+
+    The three notification figures are on the list because ADR-0141 §8's partition
+    needs them, and two of the three are nullable in **opposite** senses. ``None``
+    on ``notification_retention`` is the user's "keep them" — an unbounded
+    lifetime, so ``finite``, like the two horizons. ``None`` on
+    ``notification_reconsider_interval`` disables the job — so ``armed``, like the
+    four intervals. Both states are pinned here rather than only the default one,
+    because the default deployment has both set and would let either word pass.
+    """
+    off = Settings(
+        data_dir=tmp_path / "hub-data",
+        notification_retention=None,
+        notification_reconsider_interval=None,
+    )
+
+    metrics = dict((await _recorded(off)).metrics)
+
+    assert metrics[NOTIFICATION_RETENTION_FINITE] is False
+    assert NOTIFICATION_RETENTION_SECONDS not in metrics
+    assert metrics[NOTIFICATION_RECONSIDER_ARMED] is False
+    assert NOTIFICATION_RECONSIDER_SECONDS not in metrics
+
+
+async def test_a_moved_notification_cap_moves_the_recorded_mapping(tmp_path: Path) -> None:
+    """ADR-0141 §8's partition is a thing this entry creates, not one it inherits.
+
+    §8 partitions a measurement window "at every ``CONFIGURATION`` trace whose
+    metric mapping differs from its predecessor's", and §10 records that before
+    this entry "two startups differing only in the cap emit identical
+    ``CONFIGURATION`` metric mappings, no boundary is created". This is that
+    sentence made false: the cap alone now moves the mapping, so the boundary
+    exists for a measure to find.
+    """
+    before = dict((await _recorded(Settings(data_dir=tmp_path / "hub-data"))).metrics)
+    after = dict(
+        (
+            await _recorded(Settings(data_dir=tmp_path / "hub-data", notification_queue_limit=5))
+        ).metrics
+    )
+
+    assert before[NOTIFICATION_QUEUE_LIMIT] == 100
+    assert after[NOTIFICATION_QUEUE_LIMIT] == 5
+    assert before != after
 
 
 async def test_the_two_cardinality_figures_come_from_the_caller(settings: Settings) -> None:

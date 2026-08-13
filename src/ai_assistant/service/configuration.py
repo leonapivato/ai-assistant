@@ -33,6 +33,18 @@ of its passes may read or propose, and the deadline every retrieval's embedding
 call is bound by. Two more are on it because §9 puts them there: the effective
 ``search`` limit of each cardinality control (below).
 
+**Three more are on it because ADR-0141 §10 requires them**, and they widen that
+test from one accumulation to two. The notification chassis's cap, its retention
+horizon and its reconsideration cadence shape the stream of *rulings* ADR-0141's
+measures are computed over: the cap bounds what its ``condition_at_cap`` can
+mean, the retention bounds how long a record stays actionable and therefore its
+``condition_duplicate``, and the interval bounds how many reconsideration rulings
+exist to count at all. Without them, two deployments differing only in the cap
+emit identical mappings, no boundary is created, and ADR-0141 §8's partition
+would state one figure across rulings made under different caps. ADR-0130 §6's
+standing settings are the different case and stay off: they are not ``Settings``
+fields at all, so no allowlist that reads ``Settings`` can carry them.
+
 **What is deliberately off it.** Paths and model identifiers, which §9's third
 clause excludes by name — ``data_dir``, ``embedder``, the model routes and their
 credentials. The transport's four figures, the four permission-gate thresholds,
@@ -224,6 +236,42 @@ RETRIEVAL_SEARCH_LIMIT: Final = "retrieval_search_limit"
 #: can."
 CONFLICT_SEARCH_LIMIT: Final = "conflict_search_limit"
 
+# --- the allowlist: the notification chassis's three tunings ------------------
+# ADR-0141 §10 requires all three by name, and its §8 is why: they are what a
+# ``CONFIGURATION`` boundary has to see for a notification measure to stay
+# readable across a change to any of them. Each meets this list's own inclusion
+# test — it shapes the accumulation the measures are computed over — and each is
+# a ``Settings`` field ADR-0130 §9 already added, so this names three that exist
+# and adds none.
+
+#: The most **actionable** held notifications the store keeps, beyond which a new
+#: candidate is dropped rather than an old one evicted (ADR-0130 §7). It bounds
+#: what ADR-0141 §4's ``condition_at_cap`` can mean: a ruling that hit a cap of
+#: 100 and one that hit a cap of 5 are different facts about the chassis, and the
+#: ruling itself records only that the cap bound.
+NOTIFICATION_QUEUE_LIMIT: Final = "notification_queue_limit"
+
+#: Whether a held notification is ever purged (ADR-0130 §7). ``None`` is the
+#: user's deliberate *keep them* — an unbounded lifetime rather than a job that
+#: never runs — so this takes the ``finite`` word the two horizons above take and
+#: not the ``armed`` word the four job intervals take.
+NOTIFICATION_RETENTION_FINITE: Final = "notification_retention_finite"
+
+#: How long one survives after it ceases to be actionable, present only when
+#: finite. It bounds how long a record stays available to be matched against, and
+#: so what share of offers ADR-0141 §6's duplicate share can find duplicates in.
+NOTIFICATION_RETENTION_SECONDS: Final = "notification_retention_seconds"
+
+#: Whether the reconsideration job is armed (ADR-0130 §5, on ADR-0083 §7's
+#: convention). ``None`` disables the job, which is the ``armed`` case and not the
+#: ``finite`` one — the two words are kept apart here for the reason stated above.
+NOTIFICATION_RECONSIDER_ARMED: Final = "notification_reconsider_interval_armed"
+
+#: How often it runs, present only when armed. It bounds how many reconsideration
+#: rulings exist to count at all — ADR-0141 §5's whole reconsideration
+#: sub-population, and every figure §7 computes over it.
+NOTIFICATION_RECONSIDER_SECONDS: Final = "notification_reconsider_interval_seconds"
+
 #: Every key the allowlist can produce, for the test that pins the list against
 #: this module rather than against a reviewer's memory. A key that is emitted and
 #: not here, or here and unreachable, is a list that has drifted from its own
@@ -249,6 +297,11 @@ ALLOWLIST_KEYS: Final[frozenset[str]] = frozenset(
         EMBEDDING_TIMEOUT_SECONDS,
         RETRIEVAL_SEARCH_LIMIT,
         CONFLICT_SEARCH_LIMIT,
+        NOTIFICATION_QUEUE_LIMIT,
+        NOTIFICATION_RETENTION_FINITE,
+        NOTIFICATION_RETENTION_SECONDS,
+        NOTIFICATION_RECONSIDER_ARMED,
+        NOTIFICATION_RECONSIDER_SECONDS,
     }
 )
 
@@ -386,6 +439,7 @@ class ConfigurationStamp:
             EMBEDDING_TIMEOUT_SECONDS: settings.embedding_timeout_seconds,
             RETRIEVAL_SEARCH_LIMIT: self._retrieval_search_limit,
             CONFLICT_SEARCH_LIMIT: self._conflict_search_limit,
+            NOTIFICATION_QUEUE_LIMIT: settings.notification_queue_limit,
         }
         _pair(
             metrics,
@@ -410,6 +464,18 @@ class ConfigurationStamp:
         _pair(
             metrics, EPISODE_RETENTION_FINITE, EPISODE_RETENTION_SECONDS, settings.episode_retention
         )
+        _pair(
+            metrics,
+            NOTIFICATION_RETENTION_FINITE,
+            NOTIFICATION_RETENTION_SECONDS,
+            settings.notification_retention,
+        )
+        _pair(
+            metrics,
+            NOTIFICATION_RECONSIDER_ARMED,
+            NOTIFICATION_RECONSIDER_SECONDS,
+            settings.notification_reconsider_interval,
+        )
         return metrics
 
 
@@ -422,7 +488,7 @@ def _pair(
     """Record a nullable duration as a boolean and, when set, a number.
 
     The one shape every nullable setting on the list takes, in one place so the
-    six cannot drift in how they say "not set".
+    eight cannot drift in how they say "not set".
 
     Args:
         metrics: The mapping under construction; mutated in place.
@@ -471,6 +537,11 @@ __all__ = [
     "EMBEDDING_TIMEOUT_SECONDS",
     "EPISODE_RETENTION_FINITE",
     "EPISODE_RETENTION_SECONDS",
+    "NOTIFICATION_QUEUE_LIMIT",
+    "NOTIFICATION_RECONSIDER_ARMED",
+    "NOTIFICATION_RECONSIDER_SECONDS",
+    "NOTIFICATION_RETENTION_FINITE",
+    "NOTIFICATION_RETENTION_SECONDS",
     "OBSERVATION_ARMED",
     "OBSERVATION_BATCH_SIZE",
     "OBSERVATION_MAX_PROPOSALS",
