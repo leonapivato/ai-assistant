@@ -420,21 +420,33 @@ hygiene.
 > decided on. The two are never merged and neither is substituted for the other.
 
 > **Normative.** The delivery instant is carried in **one** header the fetcher
-> writes, `X-Assistant-Delivered-At`, whose value is a single RFC 3339 timestamp
-> and nothing else. Its offset is **determinate**: `Z`, or a numeric `+HH:MM` or
+> writes, `X-Assistant-Delivered-At`, whose value is a single timestamp and
+> nothing else, drawn from **this closed subset of RFC 3339 and no wider**:
+> `YYYY-MM-DDTHH:MM:SS`, optionally followed by `.` and one to six digits, then a
+> **determinate** offset. The date-time separator is an upper-case `T`; `SS` is
+> `00` through `59`; and the offset is an upper-case `Z` or a numeric `+HH:MM` or
 > `-HH:MM` that is not `-00:00`. The fetcher writes it from what the server
 > recorded, and **strips every copy the message itself carried** before writing
 > its own.
+
+> **Normative.** That subset is the accepted value **in full**, and it is closed
+> by construction rather than by a list of exclusions. A value RFC 3339 admits
+> but the subset does not — a leap second, a lower-case `t` or `z`, a fractional
+> part finer than a microsecond — is not an accepted value here, whether or not
+> it is well-formed, and reaches the skip rule below. The reader never
+> **normalises a value onto the subset**: it does not roll a leap second to the
+> following instant, case-fold a separator, or drop precision to make a value
+> acceptable.
 
 > **Normative.** The reader decides membership on that header and on nothing else.
 > It never derives a delivery instant from the mbox `From ` line, from a
 > `Received` header, from `Date`, or from the file's modification time.
 
 > **Normative.** A message carrying no `X-Assistant-Delivered-At`, more than one,
-> or one whose value is not exactly a timestamp in the form the clause above
-> fixes — determinate offset included — is **skipped**, as is a message the reader
-> cannot otherwise interpret. Nothing is substituted for a fact the source did not
-> make, and a skip raises nothing.
+> or one whose value is not exactly a timestamp in the form the clauses above fix
+> — the closed subset in full, not merely a well-formed RFC 3339 timestamp — is
+> **skipped**, as is a message the reader cannot otherwise interpret. Nothing is
+> substituted for a fact the source did not make, and a skip raises nothing.
 
 > **Normative.** The reader acquires the store's bytes whole and bounded, and
 > traverses its framing, exactly as ADR-0093 §7's byte cap requires. Nothing in
@@ -483,19 +495,44 @@ be decided and are:
   never had one syntax; `Received` is a chain of hops whose earliest entries are
   written by machines the sender may control; `Date` is the sender's own. A header
   the *fetcher* writes is the only one whose author is on our side of the file.
-- **Its syntax**, because "a timestamp" admits a dozen parsers that disagree about
-  offsets, and the corpus's one instant type is tz-aware. RFC 3339 is what a
-  fetcher can emit in one line and a reader can parse without a policy — **with
-  `-00:00` excluded**, which is the one value inside the grammar that reintroduces
-  the divergence the grammar was chosen to remove. The reason is not the one it
-  looks like: RFC 3339 §4.3 makes `-00:00` a *determinate* UTC instant whose
-  offset to local time is merely unknown, so the value does establish a delivery
-  time. What it does not establish is agreement — `datetime.fromisoformat` reads
-  it as UTC while `email.utils.parsedate_to_datetime` treats the `-0000` form as
-  carrying no usable zone at all, so two conforming lanes admit and exclude the
-  same message at a window edge. That is ADR-0103 §9's test failed by a single
-  literal, and excluding it costs an honest fetcher nothing, because a fetcher
-  that knows the instant can write `Z`.
+- **Its syntax**, and pinned as a **closed subset** rather than as RFC 3339 minus
+  a list of exclusions — because the list did not stay closed. "A timestamp"
+  admits a dozen parsers that disagree about offsets, and the corpus's one instant
+  type is tz-aware, so RFC 3339 is the right base: it is what a fetcher can emit
+  in one line and a reader can parse without a policy. But three separate literals
+  sit *inside* that grammar, and each fails ADR-0103 §9's test on its own.
+
+  - **`-00:00`.** The reason is not the one it looks like: RFC 3339 §4.3 makes it
+    a *determinate* UTC instant whose offset to local time is merely unknown, so
+    the value does establish a delivery time. What it does not establish is
+    agreement — `datetime.fromisoformat` reads it as UTC while
+    `email.utils.parsedate_to_datetime` treats the `-0000` form as carrying no
+    usable zone at all, so two conforming lanes admit and exclude the same message
+    at a window edge.
+  - **A leap second.** RFC 3339 §5.6's `time-second` admits `60`, so
+    `2016-12-31T23:59:60Z` is well-formed and its offset is determinate. Python's
+    `datetime` cannot hold second 60 at all and both stdlib parsers raise on it,
+    so a lane built on either skips the message — while a lane whose parser
+    accepts the grammar as written is left to decide for itself whether to clamp
+    to `:59` or roll to the following second. Three incompatible outcomes, each
+    claiming compliance.
+  - **A lower-case `t` or `z`.** RFC 3339 §5.6 permits both spellings by name, so
+    a parser conforming to the grammar must accept `2016-12-31t23:59:59z`, and
+    `datetime.fromisoformat` raises on it. What diverges here is not a microsecond
+    at an edge: the message is present in one lane's reading and absent from
+    another's.
+
+  Three literals found one at a time, the second only after the first had been
+  excluded and the third only when the second was being fixed, is the shape that
+  says the **list** is the defect rather than any entry on it. So the
+  clause states the admissible set once and declares it complete. Every value the
+  subset admits is one `UtcInstant` holds exactly, so no conforming lane is ever
+  left a normalisation choice to make — and a fourth literal found later is
+  already excluded rather than owing a fourth exclusion. Closing it costs an
+  honest fetcher nothing, in the same way excluding `-00:00` cost it nothing: a
+  fetcher that knows the instant writes it upper-case, to second `00`–`59`, with
+  an offset it actually knows. A fetcher that writes anything else is broken or
+  forging, and §5 skips it either way, which is the fail-closed direction.
 - **What happens to a message-supplied copy**, because a header the fetcher writes
   is a header an attacker can also write. The fetcher strips; the reader skips on
   a duplicate rather than picking one. **Skipping is fail-closed and is the whole
@@ -1081,8 +1118,9 @@ carries is to **pass** the existing suite, not to write one.
   an `Engine` call holding no reader (ADR-0083 §8).
 - **Deployment documentation for the fetcher** — that it writes header blocks and
   no bodies; that it writes exactly one `X-Assistant-Delivered-At` per message in
-  RFC 3339 with a determinate offset (`Z` or numeric, never `-00:00`), from the
-  server's own record, after stripping
+  the closed RFC 3339 subset §5 fixes — upper-case `T` and `Z`, second `00`–`59`,
+  at most microsecond precision, and a determinate offset that is never `-00:00`
+  — from the server's own record, after stripping
   every copy the message carried; that it emits no header value containing a bare
   line break and escapes the format's separator; that it replaces the store by
   `rename(2)` on the same filesystem; that its retention exceeds the reader's
