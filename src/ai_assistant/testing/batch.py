@@ -288,7 +288,7 @@ class FakeBatchCompleter:
             ModelError: For every refusal ADR-0143 §2's window clause puts ahead of
                 the provider call. Neither retryable nor routable (ADR-0066 §3).
         """
-        snapshot = tuple(item.model_copy(deep=True) for item in items)
+        snapshot = _snapshot(items)
         _refuse_unusable_handle_text(batch_key, what=f"batch_key {batch_key!r}")
         _refuse_unusable_handle_text(self._issuer, what=f"issuer {self._issuer!r}")
         self._refuse_unacceptable(snapshot)
@@ -411,7 +411,6 @@ class FakeBatchCompleter:
                 msg = f"item_id {item.item_id!r} appears twice; ids must be unique within a batch"
                 raise ModelError(msg)
             seen.add(item.item_id)
-            _refuse_unusable_handle_text(item.item_id, what=f"item_id {item.item_id!r}")
             _refuse_malformed_history(item)
 
 
@@ -433,12 +432,52 @@ def _refuse_unusable_handle_text(value: str, *, what: str) -> None:
         raise ModelError(msg) from exc
 
 
+def _snapshot(items: Sequence[BatchRequest]) -> tuple[BatchRequest, ...]:
+    """Take ADR-0065's one observation, and take it as values the type vouches for.
+
+    Two jobs in one pass, and the second is not optional. The first is the
+    snapshot: deep enough to cover everything ``submit`` goes on to read, so a
+    caller mutating the sequence, an item in it, or that item's ``messages`` while
+    the call is suspended can make it act on the wrong version but never make one
+    batch describe two.
+
+    The second is that the snapshot is **validated** rather than faithful, and
+    faithful is exactly wrong here. ``model_construct`` is a documented escape
+    hatch that skips validation, so an item can reach this seam holding a raw
+    ``"tool"`` string where a :class:`Role` belongs — and a ``model_copy`` would
+    preserve it perfectly, leaving every check below comparing against an enum
+    member the value is equal to but is not. Rebuilding through the type costs one
+    round trip per item and buys that the refusals of ADR-0143 §3 run against
+    something that satisfies :class:`BatchRequest`'s own annotations.
+
+    Raises:
+        ModelError: If any item is not a well-formed ``BatchRequest``. Refused here
+            rather than at the provider, which is where ADR-0143 §2 requires every
+            refusable check to land.
+    """
+    try:
+        # `warnings=False` because a serializer warning here is the *expected*
+        # noise of the path that is about to refuse: an item holding a raw
+        # string where an enum belongs is exactly what this call exists to
+        # surface, and pydantic would otherwise report it twice — once as a
+        # warning nobody acts on, and once as the ModelError below.
+        return tuple(BatchRequest.model_validate(item.model_dump(warnings=False)) for item in items)
+    except (ValidationError, AttributeError, TypeError) as exc:
+        msg = f"batch item is not a well-formed BatchRequest: {exc}"
+        raise ModelError(msg) from exc
+
+
 def _refuse_malformed_history(item: BatchRequest) -> None:
     """Hold one item's messages to ``ModelProvider.complete``'s precondition.
 
     Read as that docstring states it — a necessary condition admitting nothing by
     omission — which is why the tool-role turn is refused although the clause names
     only the other two shapes (ADR-0143 §3, §10).
+
+    Identity comparison against :class:`Role` is sound here only because
+    :func:`_snapshot` rebuilt the item through its type first: :class:`Role` is a
+    ``StrEnum``, so a raw ``"tool"`` string is *equal* to ``Role.TOOL`` and is not
+    it, and this check would have waved one through.
 
     Raises:
         ModelError: If the history is empty, ends on an assistant turn, or holds a
