@@ -176,13 +176,29 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
             report = await harness.lifecycle.capture(
                 conversation.id, content=exchange.content, outcome=exchange.outcome
             )
+            # **Counted before it is classified, because the window counts turns and
+            # this loop cannot see which kind of degradation it got.** `capture` writes
+            # the index entry first and the episode second, so an episode-stage failure
+            # leaves a turn in the conversation carrying an id that no longer resolves.
+            # `ObservationStage` reads the most recent `batch_size` *turns* and skips an
+            # unresolvable one **without backfilling** (ADR-0074 §5), so that turn still
+            # holds a slot. Pacing on successful captures alone would therefore let an
+            # earlier, perfectly good episode fall out of every window that is ever
+            # read — never distilled, and silently, which biases the very retrieval the
+            # pilot measures.
+            #
+            # A lost *append* records no turn and holds no slot, but `CaptureReport`
+            # reports both failures identically (#1075), so this counts every capture
+            # and takes the safe direction: `batch_size` is "a maximum, not a quota",
+            # so over-counting under-fills a window, where under-counting drops
+            # episodes.
+            pending += 1
             if report.degraded or report.episode_id is None:
                 summary.turns_degraded += 1
-                continue
-            summary.turns_captured += 1
-            if not exchange.user_led:
-                summary.assistant_led_turns += 1
-            pending += 1
+            else:
+                summary.turns_captured += 1
+                if not exchange.user_led:
+                    summary.assistant_led_turns += 1
             if pending == batch_size:
                 await _observe(harness, conversation.id, summary)
                 pending = 0

@@ -23,12 +23,15 @@ import pytest
 from benchmarks.memory.cases import BenchCase, BenchQuestion, BenchSession, BenchTurn
 from benchmarks.memory.corpora.provenance import LOCOMO
 from benchmarks.memory.grade import ExactGrader
+from benchmarks.memory.ingest import ingest_case
 from benchmarks.memory.records import QuestionRecord, RunManifest, RunMode, read_jsonl
 from benchmarks.memory.run import case_dir_name, execute_run, plan_run
+from benchmarks.memory.wiring import build_harness
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError, ModelUnavailableError
 from ai_assistant.core.types import Message, Role
+from ai_assistant.orchestration.conversations import CaptureReport
 from ai_assistant.testing import FakeModelProvider, FakeObserver
 
 if TYPE_CHECKING:
@@ -396,6 +399,49 @@ async def test_colliding_keys_get_their_own_stores(tmp_path: Path) -> None:
     assert retrieved["a/b"]
     assert retrieved["a_b"]
     assert not retrieved["a/b"] & retrieved["a_b"]
+
+
+async def test_a_degraded_capture_does_not_cost_the_episode_before_it(tmp_path: Path) -> None:
+    """`capture` appends the turn before it writes the episode, so an episode-stage
+    failure leaves a turn whose id no longer resolves — and `ObservationStage` reads the
+    most recent `batch_size` *turns*, skipping an unresolvable one without backfilling.
+    That turn holds a window slot. Pacing on successful captures alone would let the
+    episode before it fall out of every window ever read, undistilled and silently."""
+    settings = _settings(tmp_path)
+    observer = FakeObserver(max_batch_size=BATCH)
+    harness = build_harness(
+        settings, data_dir=tmp_path / "case", model=FakeModelProvider("x"), observer=observer
+    )
+    real_capture = harness.lifecycle.capture
+    # The *middle* exchange of three, so the degraded turn sits between two successes.
+    # At a batch of two that is what pushes the first episode out of every window the
+    # buggy cadence would ever read; degrading the last exchange proves nothing, because
+    # the episode before it has already been observed by the pass that filled.
+    degrade_on = "Her name is Juno."
+
+    async def _capture(conversation_id: str, *, content: str, **kwargs: object) -> CaptureReport:
+        """Capture for real, then fail the episode the way the store failing would.
+
+        Deleting the episode after the turn is appended reproduces the exact state an
+        episode-stage failure (or §8's compensation) leaves behind: the turn stands,
+        its episode is gone, and the report says degraded.
+        """
+        report = await real_capture(conversation_id, content=content, **kwargs)  # type: ignore[arg-type]
+        if degrade_on not in content or report.episode_id is None:
+            return report
+        await harness.store.delete(report.episode_id)
+        return CaptureReport(conversation_id=conversation_id, degraded=True)
+
+    try:
+        harness.lifecycle.capture = _capture  # type: ignore[method-assign]
+        summary = await ingest_case(harness, _case(), batch_size=BATCH)
+    finally:
+        harness.close()
+
+    observed = "\n".join(episode.content for batch in observer.batches for episode in batch)
+    assert summary.turns_degraded == 1
+    # The episode captured *before* the degraded turn is the one the defect lost.
+    assert "adopted a dog" in observed
 
 
 async def test_a_run_grades_the_unanswerable_question_on_abstention(
