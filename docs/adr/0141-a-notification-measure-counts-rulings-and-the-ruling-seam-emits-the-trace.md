@@ -13,13 +13,14 @@
   `Settings` field appears, no `AssistantEngine` method, wire operation or CLI
   command is created, and no other enumeration gains a member.
 - **This ADR's ratification.** It decides a contract surface, so the required set
-  is adversarial **and** architecture. A finding on the first flipped tree
-  returned it to `Proposed` and it re-entered the sequence, so it is ratified on
-  its **second** flip: both lenses returned clean on one corrected `Proposed`
-  tree, the status flipped only then, and both were re-run on the flipped tree —
-  `CONTRIBUTING.md` → "Finishing an ADR PR: `Proposed` through the reviews,
-  `Accepted` on the way out", whose sequence this PR's round record carries.
-  Nothing implements against §10 until this has merged.
+  is adversarial **and** architecture, and it is ratified only on a tree where
+  both are green — `CONTRIBUTING.md` → "Finishing an ADR PR: `Proposed` through
+  the reviews, `Accepted` on the way out". A blocker on the first flipped tree
+  returned it to `Proposed` under that section's recovery clause, so it takes the
+  route that clause describes and is ratified on its **second** flip. This PR's
+  round record carries every round and both lenses' outcomes; the `Status` line
+  above states where the sequence has reached. Nothing implements against §10
+  until this has merged.
 - **It answers #980 by ruling the measure's definition, and it does not close
   it.** #980 asks for an instrument in the tree. This ADR supplies what an
   instrument needs before it can be written — what is counted, out of what, and
