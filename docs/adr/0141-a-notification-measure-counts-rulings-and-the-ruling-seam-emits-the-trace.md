@@ -351,6 +351,14 @@ kinds. §13e's price is one ADR, and this is it.
 > class is decided, and no trace records it — ADR-0119 §3's clause, on ADR-0060
 > §1, applied here rather than excepted.
 
+> **Normative.** That clause **governs wherever it meets another clause here**,
+> and the clock read is where it does. `checked_clock` lets a `BaseException`
+> from the invocation propagate along with everything else, so a cancellation can
+> arrive as a failed clock read — and ADR-0119 §5's lost-trace record names the
+> failure's class, which ADR-0119 §3 forbids deriving from a cancellation. It is
+> re-raised, and **nothing is written for it: no trace, and no lost-trace
+> record.** The clause above reaches every other way a reading fails to arrive.
+
 **The cancellation carve-out is stated rather than inherited, because this seam
 is the one most likely to meet one.** ADR-0119 §3 makes it general —
 "A cancellation is never classified… so no trace records one" — and
@@ -362,6 +370,21 @@ incomplete ruling in a window. `SqliteNotificationStore` already absorbs
 cancellation at a physical boundary for the ruling transaction's sake, so the
 crossing this ADR traces is exactly a place the two rules meet. Architecture
 review found the contradiction on the fifth round.
+
+**And it outranks the lost-trace rule, which is the second place the two meet.**
+The clock read is not exempt from cancellation: `checked_clock` lets a
+`BaseException` from the invocation propagate along with everything else, so a
+shutdown can arrive at the seam as a clock read that produced nothing. Read
+without the precedence clause, the two rules above collide — the no-reading
+clause says log it as a lost trace, ADR-0119 §5 says that record names the
+failure's class, and ADR-0119 §3 says a cancellation is never classified. Writing
+the record would classify a shutdown, which is the same defect the fifth round
+found one clause earlier, arriving by a different route: an operator's log would
+carry a notification-seam failure every time the hub stops. Cancellation wins,
+and it costs nothing, because a cancelled read has no event to be lost. That the
+precedence has to be *said* is the cost of stating a general rule twice, and it
+is cheaper than the collision. Architecture review found it on the fourteenth
+round.
 
 > **Normative.** The trace carries `refs[TraceRef.CORRELATION]` on ADR-0119 §4's
 > clause, read from the ambient value as every other emitter reads it. No measure
