@@ -1,6 +1,6 @@
 # 143. Bulk inference is a second seam beside the model provider, and a batch is a handle the caller holds
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-13
 - **Durability clause.** Every quotation below — from an ADR, from
   `core/protocols.py`, from `core/errors.py`, from `pyproject.toml`, or from an
@@ -456,8 +456,8 @@ carries a disposition that would be acted on.
 
 > **Normative.** A single item's failure is **returned** as a `FAILED`
 > `BatchItemOutcome`, never raised. `fetch` raises only for a fault of the fetch
-> itself — the handle, the transport, the retention window of §6 — and never
-> because some items failed.
+> itself — the handle, the transport, the retention window of §6, or a batch
+> that is not yet `COMPLETE` (§9) — and never because some items failed.
 
 > **Normative.** `BatchItemFailure` carries a `BatchFailureKind`, an enum of
 > exactly seven members, each declaring the `retryable` and `routable` flags
@@ -580,8 +580,20 @@ forbidden thing the easy one.
 > `EncodableText`. `total` is a positive `int` and `settled` a non-negative
 > one, both on `BatchStatus`. `BatchRequest.messages` and `submit`'s items are `Sequence`s, spelled as
 > `ModelProvider.complete` spells its own `Sequence[Message]`, and `fetch`
-> returns a `Sequence[BatchItemOutcome]`. No field is typed `Any`, and no type
-> in `models/` or any vendor package is named by any annotation.
+> returns a `Sequence[BatchItemOutcome]`. `BatchStatus.handle` is a
+> `BatchHandle`. `BatchItemOutcome.message` is `Message | None` and its
+> `failure` is `BatchItemFailure | None` — the optional pair §4 binds to `kind`.
+> Every enum-typed field takes the enum this section names for it:
+> `BatchStatus.state` is `BatchState`, `BatchItemOutcome.kind` is
+> `BatchOutcomeKind`, and `BatchItemFailure.kind` is `BatchFailureKind`. No field
+> is typed `Any`, and no type in `models/` or any vendor package is named by any
+> annotation. On the members: `submit`'s model override is `str | None`,
+> keyword-only and defaulting to `None`, spelled as `ModelProvider.complete`
+> spells its own `model`, and `poll` and `fetch` each take a single
+> `BatchHandle`. Every field of the eight types and every parameter and return of
+> the three members therefore has its annotation fixed here, which is what makes
+> §13's exact-annotation row a test with a defined expected result rather than
+> one the lane supplies for itself.
 
 Counts live on `BatchStatus` and not on the handle, which is what makes the
 address clause enforceable rather than aspirational. `BatchHandle` is a public
@@ -782,7 +794,12 @@ widely than it now holds?
   (ADR-0015 §1). The ratification sequence is `CONTRIBUTING.md` → "Finishing an
   ADR PR": drafted, reviewed and revised as `Proposed`, both lenses returning
   clean on one tree, the status flipped to `Accepted` on one physical line, and
-  both lenses re-run on the flipped tree. Nothing implements against this ADR
+  both lenses re-run on the flipped tree. **This ADR is ratified on its second
+  flip.** Findings arrived on the first post-flip round — §5's `fetch` clause
+  contradicted §9's `PENDING` raise, and §9 left four annotations to inference
+  against its own promise that they are fixed here — and were *fixed* rather
+  than waived, so the ADR returned to `Proposed` and re-entered at step 1, the
+  route that step 3 prescribes and that ADR-0127 and ADR-0133 each took. Nothing implements against this ADR
   until it has merged.
 
 ### 13. The work order: what the implementing lane owes
