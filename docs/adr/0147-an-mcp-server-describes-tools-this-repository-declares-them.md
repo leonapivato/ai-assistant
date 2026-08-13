@@ -11,9 +11,13 @@
   designating: §3 below states in a marked clause that no byte is authorised by
   this ADR and that every one of ADR-0017 §3's fourteen conditions stands
   exactly as written.
-- **Adds no `core` surface.** No Protocol, no type, no field, no error class.
-  `ToolDefinition` is used as ADR-0016 §1 and ADR-0018 ratified it, and every
-  rule below is a rule about what may be *put in* one.
+- **Adds no `core` surface.** No Protocol, no type, no field, no error class, and
+  **no meaning attached to a `core` value that any consumer reads**: §7's
+  clauses keep `ToolDefinition.id` an opaque `Identifier` and put the provenance
+  fact in the declaration set instead, so nothing outside the composition that
+  mints an id may interpret one. `ToolDefinition` is used as ADR-0016 §1 and
+  ADR-0018 ratified it, and every rule below is a rule about what may be *put in*
+  one.
 - **Required review set: adversarial *and* architecture.** **Declared, not
   compelled**, on ADR-0146's grounds read onto this subject:
   `CONTRIBUTING.md` → "Stop when the required reviews are green" makes a change
@@ -361,7 +365,7 @@ Naming the seam therefore does not make the boundary enforceable; it makes it
 *describable*, which is the condition ADR-0017 §3 actually states and the first
 thing a designating ADR needs to attest against.
 
-### 4. The local/remote line: stdio leaves no device, and it is not therefore harmless
+### 4. The local/remote line, and why neither transport is connected before a ratified authorisation
 
 > **Normative.** Handing a tool's arguments to an MCP server over a **stdio**
 > transport — a subprocess this system launched on the hub's own machine, speaking
@@ -371,122 +375,108 @@ thing a designating ADR needs to attest against.
 
 > **Normative.** No lane, ADR or surface may state or imply that the clause above
 > establishes what an admitted server does with what it is handed. This system
-> obtains no fact about whether a subprocess transmits, and nothing in this ADR —
-> the empty-`discloses` requirement, its recorded ground, or the transport
-> distinction — is evidence that one does not. A server that transmits contrary to
-> its declaration produces an egress this system caused and did not designate, and
-> that residue is stated here rather than closed.
-
-> **Normative.** No clause of this section may be cited toward designating the
-> `tools/` seam, toward discharging any ADR-0017 §3 condition, or as a precedent
-> that a program on the hub's machine is a permitted recipient of user data.
+> obtains no fact about whether a subprocess transmits, and neither the transport
+> distinction nor any declaration is evidence that one does not.
 
 > **Normative.** Reaching an MCP server over a **network** transport — Streamable
 > HTTP, the deprecated HTTP+SSE form, or any custom transport that opens a socket
 > — is off-device transmission. It is not `models/`, it is not the hub's remote
 > transport to an enrolled device, and the `tools/` seam is undesignated, so it
-> matches none of ADR-0124 §1's three boundaries and is a bug under it. No such
-> server is connected to, at all, before the designating ADR ADR-0017 §2 requires.
+> matches none of ADR-0124 §1's three boundaries and is a bug under it.
 
-> **Normative.** Before that ADR, a tool served by any MCP server is registered
-> only if its declaration states an **empty `discloses`**. A tool declared to
-> disclose any tier is not registered, and the refusal is not a gate a policy may
-> pass, a confirmation a user may answer, or a setting an operator may flip.
+> **Normative.** **No MCP server is connected to, over any transport, and no
+> MCP-served tool is registered, until a ratified ADR authorises it.** For a
+> network transport that ADR is the designating ADR ADR-0017 §2 requires. For a
+> stdio transport it is that ADR or another, and what makes one owed there is the
+> second clause above rather than ADR-0017 §1: a program this repository did not
+> write becomes a recipient of user data, and no ratified decision authorises
+> that.
 
-> **Normative.** A declaration that states an empty `discloses` for an
-> MCP-served tool records, in the declaration, the **ground** on which that server
-> transmits nothing on that tool's behalf. A declaration that cannot state one
-> states a non-empty `discloses` instead and the tool is refused under the clause
-> above.
+> **Normative.** The ADR that authorises a stdio server settles what makes that
+> acceptable, explicitly and in its own text: what bounds the recipient, what an
+> operator's claim about it is worth, and what is recorded. It may not infer an
+> answer from ADR-0017 §1's device scope, from ADR-0084 §1's loopback reading, or
+> from roadmap leg 6's local-file reading, none of which was decided about a
+> counterparty holding a socket. **This adds no condition to ADR-0017 §3's list and
+> relaxes none of them**; those fourteen stand exactly as written and govern the
+> network transport as before.
 
-> **Normative.** What crosses to an MCP server on a call is the tool name the
-> enumeration states and the `ActionRequest.parameters` mapping, and nothing else.
-> No memory record, no context facet, no conversation history, no other tool's
-> result, no plan, no belief and no credential is placed in an outbound MCP
-> message, and no such value may be added to one by configuration, by a
-> declaration, or by a server asking for it.
+> **Normative.** Whenever a call is eventually made, what crosses to an MCP server
+> is the tool name the enumeration states and the `ActionRequest.parameters`
+> mapping, and nothing else. No memory record, no context facet, no conversation
+> history, no other tool's result, no plan, no belief and no credential is placed
+> in an outbound MCP message, and no such value may be added to one by
+> configuration, by a declaration, or by a server asking for it.
 
-**A subprocess is not a device, and it is not this system either, and both halves
-matter.** ADR-0017 §1's rule is scoped to the *device*, and the corpus has read it
-that way twice: ADR-0084 §1 for the hub's own loopback socket, and roadmap leg 6
-for a reader opening a local file — "A file the hub opens on its own disk leaves no
-device". A stdio server is on the same side of that line. What neither precedent
-covers is that this counterparty has a network stack: a file cannot phone home and
-the CLI spoke is our own code, while a stdio MCP server is a program this
-repository did not write, running with the hub's privileges, free to open a socket
-we never see. So the honest position is two sentences rather than one — it is not
-egress, **and** it is not therefore harmless — and the third clause is what carries
-the second half.
+**A subprocess is not a device, and it is not this system either, and the second
+half is why the fourth clause exists.** ADR-0017 §1's rule is scoped to the
+*device*, and the corpus has read it that way twice: ADR-0084 §1 for the hub's own
+loopback socket, and roadmap leg 6 for a reader opening a local file — "A file the
+hub opens on its own disk leaves no device". A stdio server is on the same side of
+that line, and the first clause says so. What neither precedent covers is that this
+counterparty has a network stack: a file cannot phone home and the CLI spoke is our
+own code, while a stdio MCP server is a program this repository did not write,
+running with the hub's privileges, free to open a socket we never see. So the
+transport question and the trust question are two questions, the corpus has ratified
+an answer to only the first, and the fourth clause refuses to let the first stand in
+for the second.
 
-**`discloses` is the right lever because it is already the declared fact about
-this exact question.** ADR-0016 §3 defines it as the tiers a call transmits
-off-device, requires it, and makes a non-empty value imply `side_effecting`.
-Gating MCP admission on it needs no new field and no new vocabulary: an operator
-declaring that a local server discloses nothing is making the claim that the seam
-would otherwise have to guess at, and one declaring that it discloses is naming
-the case that ADR-0017 §3 exists to govern. The fourth clause requires the ground
-because "empty" is the cheap answer and ADR-0016 §1's forgetful author is the
-failure this whole corpus keeps designing against; a ground is not a validator and
-does not pretend to be one, but it is the difference between a decision and an
-omission, and it is what a reviewer reads.
+**An earlier draft of this section admitted a stdio server on a declared empty
+`discloses`, and it was wrong in a way worth recording.** The reasoning was that
+`discloses` is already the declared fact about off-device transmission (ADR-0016
+§3), so an operator declaring a local server transmits nothing is making exactly the
+claim the seam would otherwise guess at. Both review lenses found the same defect
+independently and both were right: a declaration is a claim about a program, it
+constrains that program not at all, and the draft's own prose conceded the
+subprocess "is free to open a socket we never see" two paragraphs below the clause
+admitting it. **A declaration is the right instrument for a fact about *our*
+intent and the wrong one for a fact about *their* behaviour**, and ADR-0016 §1's
+whole argument — that a declaration is what makes an author state something, not
+what makes it true — reads that way once the author and the subject are different
+parties. What the draft had built was ADR-0098 §6's forbidden shape with the
+detector replaced by a promise: a bound bought from a component whose failure
+nobody would notice.
 
-**The declaration is not the containment, and the containment is a bound this
-system can actually obtain.** An operator's empty `discloses` is a statement about
-a program they installed; it constrains the program not at all, and the second
-clause above refuses to let anyone read it as though it did. What bounds the
-exposure is the minimisation clause: the only user data that reaches a server is
-the arguments of the call it was selected for — the mapping `ActionRequest`
-carries, which a ruling was made on and which `PermissionDecision` pins by digest
-(ADR-0021 §1). A compromised local server therefore learns what it was asked to
-act on, once per authorised call, and has no route to the memory store, the
-conversation, the profile or a credential; every one of those would have to be put
-into the arguments by something on this side, which the clause forbids. That is a
-real ceiling and it is the shape ADR-0004 §7 asks for, stated where a reviewer can
-check it — unlike a claim about the subprocess's own sockets, which is the bound
-this ADR cannot obtain and does not state.
+**Neither review's stated direction was available, and the fourth clause is the
+third answer.** Adversarial asked for "an enforceable no-network isolation
+boundary"; that is platform-specific, costly per server, and — specified from a
+prose ADR with no mechanism behind it — the bound-with-nothing-behind-it defect
+ADR-0098 §3 records itself making twice. Architecture asked, in the alternative,
+that stdio tools not be admitted until contained; that is this clause, reached
+without pretending to specify the containment. **#1112** carries the isolation
+question with its cost and its platform spread, as an input to the authorising ADR
+rather than as a condition this ADR invents.
 
-**What is left after that, said plainly rather than argued away.** A local server
-that transmits contrary to its declaration exfiltrates the arguments of the calls
-it is given, and nothing here detects it. Where the policy ruled `CONFIRM` the user
-saw those arguments at the moment they approved — ADR-0144 §5 records that the
-`Confirmation` carries `parameters` — and where it ruled `ALLOW` they did not, which
-is the policy's call over a declared severity and is why the empty-`discloses`
-refusal rather than the prompt is what carries the pre-designation bound. The
-proper close is an enforceable isolation boundary around the subprocess — a network
-namespace, a sandbox profile, a container — which is platform-specific, is a
-decision with its own cost and its own failure modes, and is not something a
-docs-only ADR can specify without stating a bound it has no mechanism for. It is
-**#1112**, filed rather than gestured at, and §12 records it.
+**Refusing the network transport and refusing the stdio one are refusals for
+different reasons, and collapsing them would lose the useful half.** The network
+case is settled by a ratified rule: ADR-0124 §1's enumeration is exhaustive, it
+names three boundaries, and a remote MCP server is none of them, so no policy could
+pass a gate and building the connection would be building the thing ADR-0017 §2 says
+does not exist. The stdio case is *unsettled* — ADR-0017 §3's fourteen conditions
+have no subject on a subprocess, since recipient authorisation, destination
+canonicalisation, multi-recipient sets and transport pinning are all about a
+destination chosen at call time from arguments, and ADR-0124 §12 declined to apply
+the same list to the hop for exactly that reason. So the fifth clause states what
+the authorising ADR owes rather than pointing at a list that does not reach it. This
+is ADR-0098 §3's form, deliberately: bind the later lane, name the question, add
+nothing to §3.
 
-**The alternative — admit no MCP server until the seam is designated — was
-considered and is worse.** It reads as the safe answer and it makes ADR-0017 §3's
-list govern a case none of its conditions has a subject for: recipient
-authorisation, destination canonicalisation, multi-recipient sets and transport
-pinning are all about a destination chosen at call time from arguments, and a
-subprocess on the hub's own machine selects no destination. ADR-0124 §12 declined
-to apply the same list to the hop for exactly that reason. Requiring fourteen
-conditions with no subject would postpone the whole leg to buy a property none of
-them delivers, while the property that *would* help — isolation — is on none of
-their lists.
+**What the authorising ADR is likely to admit first, offered as an input and not as
+a rule.** Empty `discloses` does not mean read-only: ADR-0016 §3 makes a tool that
+writes side-effecting whatever it discloses, and reversibility is independent of
+disclosure (§2 there). So a local server that writes files or drives a local
+application yields tools that are `side_effecting`, plausibly `IRREVERSIBLE`, and
+declare no disclosure — the live case ADR-0021 §5's floors have never had, and the
+narrowest thing an authorising ADR could turn on first. Whether the declaration is
+worth anything there is exactly what #1112 is about, and this ADR does not decide it.
 
-**What this leaves buildable, which is more than it first appears.** Empty
-`discloses` does not mean read-only. ADR-0016 §3's rules make a tool that writes
-side-effecting whatever it discloses, and reversibility is independent of
-disclosure (§2 there). So a local MCP server that writes files, moves things on
-disk, or drives a local application yields tools that are `side_effecting`,
-plausibly `IRREVERSIBLE`, and disclose nothing — which is exactly the live case
-the permission machinery has never had. **Leg 12's exit test is reachable without
-the designating ADR**: something changes in the world, the irreversibility floor
-fires, and the user is asked once. That is a consequence of the rule rather than a
-motivation for it, and it is stated here because a reader would otherwise conclude
-this clause postpones the leg.
-
-**Why the network case is refused rather than gated.** A gate implies a policy
-that could pass it, and there is no such policy: ADR-0124 §1's enumeration is
-exhaustive, it names three boundaries, and a remote MCP server is none of them.
-Building the connection and refusing to use it would be building the thing ADR-0017
-§2 says does not exist yet. The sequencing this produces is the roadmap's own:
-local actuators now, and the designating ADR is what unlocks the remote ones.
+**What this costs, said without softening.** Leg 12's exit test — *the assistant
+completes a task that changes something in the world, and the user was asked exactly
+once* — is not reachable on this ADR alone. It needs the authorising ADR, which the
+roadmap already sequences into this leg alongside "the deferred egress cluster", and
+which #1096 already queues last. An earlier draft claimed the exit was reachable
+without it; that claim was true only under the admission this section has now
+withdrawn, and it is corrected rather than left standing.
 
 ### 5. Schemas are carried or refused, never translated
 
@@ -551,10 +541,13 @@ there.
 > derived from an `isError` result. Nothing about the result narrows the class:
 > not its shape, not its declared type, not its passing a schema.
 
-> **Normative.** The fact that marks it is held by this system and never read from
-> the result: the **declaration's record that the tool is MCP-served**, reachable
-> from `ToolDefinition.id`. No component decides whether a result is external by
-> inspecting it.
+> **Normative.** The fact that marks it is the **declaration set** — configuration
+> this system holds, which says of each registered id whether that tool is
+> MCP-served — and it is reached by asking that set. No component decides whether a
+> result is external by inspecting the result, and **no component derives it by
+> parsing a `ToolDefinition.id`**: an id stays an opaque `Identifier` carrying no
+> meaning a consumer reads, which is ADR-0016 §5's property and is not weakened
+> here.
 
 > **Normative.** Where such a result reaches a model call, ADR-0098 §2 governs it
 > in full — presented as third-party data, with the attribution not forgeable from
@@ -616,10 +609,17 @@ reach that ruling as an input.
 > composition is injective: the alias excludes the separator, so no pair of alias
 > and name composes to the same id as a different pair.
 
-> **Normative.** The composed form carries a fixed leading segment marking the
-> tool as MCP-served, and no tool this repository composes by any other route may
-> take an id of that form. A server cannot therefore claim the id of a builtin,
-> and a builtin cannot shadow a server's tool.
+> **Normative.** The composed form carries a fixed leading segment, so that the
+> ids of MCP-served tools and the ids this repository composes by any other route
+> are **disjoint sets**. A server cannot therefore claim the id of a builtin, and a
+> builtin cannot shadow a server's tool.
+
+> **Normative.** That segment exists for disjointness and for nothing else. It is
+> **not** a provenance marker: no component outside the composition that builds it
+> may read, match, strip or otherwise interpret any part of an id, and nothing
+> — a prompt assembler, a policy, a surface, a trace — may establish that a tool is
+> MCP-served by looking at its id. §6's declaration set is the only route to that
+> fact.
 
 > **Normative.** `capability` is **not** namespaced. It is declared under §1 from
 > this repository's own open vocabulary (ADR-0016 §5), and two MCP-served tools
@@ -636,6 +636,22 @@ registration order — an availability bug in the good case and, if the ordering
 went the other way, the substitution ADR-0016 §5 spends its length preventing.
 Composing the id from two locally-authored parts closes it by construction rather
 than by a check, which is the direction this corpus prefers.
+
+**The leading segment is disjointness and not a namespace anyone reads, and an
+earlier draft got that wrong in a way architecture review caught.** That draft
+described the segment as "marking the tool as MCP-served" and §6 pointed at
+`ToolDefinition.id` as where the marker was "reachable" from. Taken together those
+two sentences reserved a semantic namespace inside a shared `core` value and made
+a cross-subsystem consumer depend on its spelling — which is a change to what a
+`core` type *means* even though it adds no field, and which contradicts ADR-0016
+§5's own reason for ordering by id: it is "the one that carries no accidental
+meaning". The finding was right and the repair is to separate the two jobs. The
+segment does the job an id can do — keep two id spaces from colliding, inside the
+composition that mints them — and the provenance fact lives where every other
+declared fact in this ADR lives, in the declaration set, which is configuration the
+composition root holds rather than a string other subsystems parse. **The
+consequence is that this ADR still adds no `core` surface**: `ToolDefinition` gains
+no field, no validator, no constraint and no meaning any consumer reads.
 
 **Capabilities are not namespaced, and this is the clause that engages #1100
 rather than sidestepping it.** That issue records that ADR-0144 made a
@@ -758,7 +774,10 @@ hand.
 ### 10. What the implementing lanes owe
 
 None of this is built here (ADR-0015 §5). What is owed is the evidence for the
-claims above that a signature does not show.
+claims above that a signature does not show. **Nothing in this list is owed by a
+lane before the authorising ADR of §4 lands**, because no server is connected
+until it does; what the list fixes is what that lane inherits rather than
+rediscovers.
 
 - **§1 as refusals, not as omissions**: a discovered tool with a plausible
   `annotations` object claiming `readOnlyHint` and a declaration stating
@@ -789,12 +808,13 @@ claims above that a signature does not show.
   serialised message rather than against a call site. The fixture puts a
   distinctive string into a memory record, the conversation and a context facet,
   and none of the three appears in any byte written to the server.
-- **§4's refusals as construction-time facts**: a declaration naming a network
-  transport yields no connection attempt at all, asserted as no socket opened
-  rather than as a request that failed; a declaration stating a non-empty
-  `discloses` for an MCP-served tool yields no registration. Both must be asserted
-  against the built registry, since a test that only checks an exception proves
-  nothing about what the composition root ended up holding.
+- **§4's refusal as a construction-time fact**: before the authorising ADR, a
+  declaration naming *any* transport yields no connection attempt at all —
+  asserted as no socket opened and no subprocess spawned, rather than as a request
+  that failed — and the built registry holds no MCP-served tool. Asserting the
+  registry matters as much as asserting the absence of I/O, since a test that only
+  checks an exception proves nothing about what the composition root ended up
+  holding.
 - **§5's carry and refusals** (ADR-0145 §13's list applies to the carried
   document): a schema declaring draft-07 refuses the tool; a schema with no
   `$schema` is carried and read as 2020-12; a server sending no `inputSchema`
@@ -804,10 +824,13 @@ claims above that a signature does not show.
   the prompt assembler's own container syntax leaves the attribution of every span
   unchanged, and a result carrying a `resource_link` produces no fetch of any
   kind. A test asserting only that a label is present does not satisfy this.
-- **§7's injectivity, as a collision that is refused**: an alias containing the
-  separator is refused where the declaration is read; a server offering a tool
-  named exactly as a builtin's id produces two distinct ids and both remain
-  invocable.
+- **§7's injectivity and its opacity**: an alias containing the separator is
+  refused where the declaration is read; a server offering a tool named exactly as
+  a builtin's id produces two distinct ids and both remain invocable. And the
+  opacity is a review property with one testable half — the externality marking of
+  §6 is shown to work against a definition whose id was minted with **no** leading
+  segment at all, which is what proves the marking reads the declaration set and
+  not the string.
 - **§9 read off the initialization handshake**: the capabilities this system
   declares contain neither `sampling` nor `elicitation`, asserted against the
   actual `initialize` payload rather than against the absence of a handler.
@@ -829,7 +852,10 @@ declaration-taking constructor and is correct, merely silent about the MCP case.
 **ADR-0016 §5 and §7 — no record owed.** §5's flat capability strings and §7's
 namespacing deferral are untouched: §7 above namespaces `id`, which §5 already
 requires to be unique and which §7's deferral does not speak to, and it declines to
-namespace `capability`. A reader holding only ADR-0016 reads "names are flat
+namespace `capability`. §5's stated reason for ordering by `id` — that it is "the
+one that carries no accidental meaning" — is *preserved* rather than merely
+survived: §7's opacity clause forbids any consumer reading meaning out of an id, so
+the property §5 relies on holds after this ADR exactly as before it. A reader holding only ADR-0016 reads "names are flat
 strings" and acts identically; nothing here makes the deferral narrower, and §7
 above says in terms that it is narrowed in its *cause* and not in its text.
 
@@ -847,6 +873,20 @@ ADR to attest them. Note what would have owed a record and is deliberately not
 done: attesting condition one — "a named seam and an import-linter contract pinning
 it" — is a statement about code, reserved by §2 to the designating ADR, and this
 ADR makes no such statement.
+
+**§4's fifth clause is the entry a reviewer should press on, and the test still
+comes out no.** It obliges the ADR that authorises a stdio server to settle what
+bounds a recipient this repository did not write. That is an obligation on a
+*later ADR*, stated in this ADR's text, which is exactly the form ADR-0098 §3 used
+for its own actuator clause — "The clause above binds the later ADR that designates
+an actuation or egress seam. It adds no condition to ADR-0017 §3's list and relaxes
+none of them; those fourteen stand exactly as written." The same two sentences hold
+here and the clause says so in its own words. Nothing in ADR-0017 §3 becomes false
+or over-wide: the list is fourteen entries before and after, each governs what it
+governed, and a lane reading ADR-0017 alone still finds fourteen and still needs the
+attesting ADR. What §4 adds is a *different* obligation about a case §3's entries
+have no subject for — which under ADR-0082 §1 is a stacked addition and is recorded
+here rather than on ADR-0017.
 
 **ADR-0124 §1 — no record owed.** Its enumeration is read here and applied, not
 widened: §4 above concludes that a remote MCP server matches none of its three
@@ -905,13 +945,16 @@ form).
   manifest (#57), canonicalisation, multi-recipient sets, attempt identifiers and
   the rest — is inherited unabridged and undischarged. Saying it loudly is the
   point: an integration ADR reads like permission to connect, and it is not.
-- **Remote MCP servers**, per §4, until that ADR lands. Not deferred for
-  convenience: ADR-0124 §1's enumeration is exhaustive and a remote server is
-  outside it, so the deferral is a consequence of a ratified rule rather than a
-  scoping choice.
-- **Isolating an admitted stdio server so that "it transmits nothing" is a
-  property rather than a claim** — **#1112**. §4 states the residual and bounds
-  the payload; what it cannot do is bound the program. The close is a network
+- **Connecting to any MCP server at all**, per §4, until a ratified ADR
+  authorises it. Neither half is deferred for convenience. For a network transport
+  ADR-0124 §1's enumeration is exhaustive and a remote server is outside it, so the
+  refusal is a consequence of a ratified rule. For stdio the refusal is a
+  consequence of the *absence* of one: a program this repository did not write
+  becomes a recipient of user data, and §4's fifth clause states what the
+  authorising ADR owes rather than pretending ADR-0017 §3's list reaches it.
+- **Bounding what an admitted stdio server does, so that "it transmits nothing" is
+  a property rather than a claim** — **#1112**, and the input §4's authorising ADR
+  most needs. §4 bounds the payload; what it cannot do is bound the program. The close is a network
   namespace, a sandbox profile or a container, which is platform-specific across
   the three deployments this hub is expected to run on, carries a real cost per
   server (an isolated server cannot reach a socket or a config file it
@@ -928,8 +971,8 @@ form).
   condition that ADR-0125 §9 leaves open by name. So: no declaration carries a
   secret value and this system supplies no credential to a server. A server that
   obtains its own credential from its own configuration is outside this system's
-  reach; the tools it serves are still bound by §4's `discloses` rule, which is
-  what keeps the ordinary case behind the designating ADR anyway.
+  reach; §4 keeps every such server behind the authorising ADR in any case, and
+  #74's answer is one of the things that ADR will need.
 - **MCP resources and prompts.** The protocol's other two server primitives are
   not tools. A resource is an ingestion source, and this repository already has a
   seam for one — `Reader` (ADR-0093 as renamed by ADR-0095 §1) — with a grant
@@ -978,8 +1021,9 @@ form).
 question each would otherwise have invented separately: where a safety field comes
 from, what a schema does, what a result is, and what an id looks like. The
 designating ADR inherits a *named* module rather than a phrase, which is what #66
-has been asking for since PR #64. And leg 12's exit test is reachable on local
-actuators, so the leg does not stall behind fourteen conditions.
+has been asking for since PR #64, and it inherits §4's fifth clause telling it what
+the stdio case additionally owes — a question it would otherwise have met with the
+code written.
 
 **What becomes harder, and it is the headline cost.** Adding a tool now costs a
 human writing a declaration. "In bulk" means many servers reachable, not many tools
@@ -998,7 +1042,8 @@ the MCP-shaped case, and it is a strong one: the provenance of every MCP-served
 declaration is local, so the incentive #1102 describes never attaches. What #1102
 still records truly is the residue — a *local* author who under-declares, whether
 out of optimism about a server or to make a prompt go away, is unchecked by
-anything, and §4's ground requirement is a review aid rather than a detector.
+anything. What checks it is review of a declaration, which is a weaker instrument
+than a validator and a stronger one than an incentive pointed the wrong way.
 
 **Two servers offering the same capability now compete, and that is ADR-0144
 working.** Because capabilities are declared on this side (§7), a deployment can
@@ -1012,21 +1057,24 @@ server, so the deferral ADR-0016 §7 holds waits on an author's mistake instead 
 on breadth. The issue stays open and its urgency drops, which is worth saying
 plainly because the opposite was expected.
 
-**The system acquires a recipient it cannot account for, and says so.** ADR-0017
-§4's property is that egress is "accountable — few, named, and answerable for what
-it sends". An admitted stdio server is named and few and is *not* answerable: it
-receives the arguments of every call it is selected for and this system establishes
-nothing about what it then does. §4 bounds the payload rather than the program,
-refuses in a marked clause to let the transport distinction be read as a safety
-finding, and files #1112 for the isolation that would close it. This is the
-largest residual in the decision and it is the one a later reader is most likely to
-find understated somewhere else — so it is stated three times: in §4's clauses,
-here, and in the case against below.
+**Nothing connects, and leg 12's exit test moves behind the authorising ADR.**
+This is the largest thing the decision costs and the largest thing it changed
+between drafts. An earlier §4 admitted a stdio server on a declared empty
+`discloses`; both review lenses found that a declaration is a claim about a
+program and constrains it not at all, and the admission was withdrawn. So this ADR
+fixes the shape and connects nothing, the exit test needs the ADR §4's fourth
+clause requires, and #1096 already queues that lane last. **The question is
+sharpened rather than merely postponed**: ADR-0017 §3's fourteen conditions have no
+subject on a subprocess, so §4's fifth clause states what the authorising ADR must
+settle instead — what bounds a recipient this repository did not write — with #1112
+carrying the isolation option and its cost.
 
-**The permission machinery finally gets its live case, and it is a local one.** An
-`IRREVERSIBLE`, `side_effecting`, non-disclosing tool from a local server exercises
-ADR-0021 §5's floors and ADR-0029 §5's retry conjunction against a real effect, with
-no egress anywhere in the picture. If the floors are wrong, this is where it shows.
+**The permission machinery's first live case is now that ADR's to deliver.** An
+`IRREVERSIBLE`, `side_effecting`, non-disclosing tool from a local server is still
+the narrowest thing that exercises ADR-0021 §5's floors and ADR-0029 §5's retry
+conjunction against a real effect, and §4 offers it as the input that lane is most
+likely to turn on first. It is offered and not ruled, which is the difference this
+revision is about.
 
 **A tool result is now a named class of untrusted input.** ADR-0098's posture
 acquires its third producer, after `readers/` and the provider's error text, and
@@ -1035,12 +1083,13 @@ downstream detects a result that steers; what bounds it is that no result reache
 permission ruling as an input (§6) and that every invocation is gated whatever the
 model concluded (ADR-0016 §3).
 
-**Revisit when** the designating ADR lands and remote servers become reachable
-(does §4's `discloses` gate turn out to have been the right lever, or does it just
-mean every useful server waits?); when a schema change between runs is observed in
-practice (§8's pinning question); if a server worth having turns out to need
-sampling or elicitation (§9); or if the declaration burden of §1 measurably stops
-tools being added, which is the failure mode this ADR most plausibly has.
+**Revisit when** the authorising ADR of §4 lands and the first server is actually
+connected — which is the moment every rule here first meets a real one, and in
+particular the moment to ask whether §1's per-tool authorship was priced right; when
+a schema change between runs is observed in practice (§8's pinning question); if a
+server worth having turns out to need sampling or elicitation (§9); or if the
+declaration burden of §1 measurably stops tools being added, which is the failure
+mode this ADR most plausibly has.
 
 ### The strongest case against this decision
 
@@ -1070,6 +1119,19 @@ against an honest peer — #1102's compounding, arriving through a channel the
 counterparty controls. ADR-0016 §1's whole argument is that this class of error is
 silent and that a construction error is better; nothing about the error becoming
 somebody else's makes it louder.
+
+**There is a second, opposite case against, and it arrived from review rather
+than from the author.** Having withdrawn the stdio admission, this ADR now decides
+a great deal and connects nothing: no server, no tool, no call, until an ADR that
+does not exist. That is a contract ratified without implementation contact, which
+`CONTRIBUTING.md` warns about by name, and it means every rule here is judged on
+argument rather than on use. The answer is that the alternative was worse in a way
+that is not recoverable — an unisolated third-party program admitted as a recipient
+of user data, on an operator's word, before any ratified decision authorised it —
+and that the shape is what leg 12's remaining lanes are blocked on either way:
+#1096 sequences the egress mechanism lanes as "shaped by what ADR-0147 rules". The
+honest residual is that the first server will find something here wrong, and §4's
+authorising ADR is the near-term lane positioned to say so.
 
 **The cost is bounded by a mechanism this ADR chose for that purpose, and it is
 measurable.** Server-level values plus a per-tool name is one line per tool after
