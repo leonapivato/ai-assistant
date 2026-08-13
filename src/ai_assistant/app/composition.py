@@ -539,8 +539,19 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
         # authorises nothing — every read that names one hands back the record
         # beside it — so it is an identity rather than a capability, and the
         # default is a plain UUID rather than a ``secrets`` draw.
+        #
+        # **ADR-0141 §3's ruling seam is inside this store, and this is the
+        # wiring point that arms it** — the same argument the memory store's
+        # ``RETRIEVAL`` emitter is wired on. The conditions §4 records exist only
+        # inside ADR-0130 §3's atomic act, and the reconsideration path does not
+        # reach the writer stage at all, so an emitter one layer up would miss
+        # every ruling that is not a first offer. The sink is the *same* trace
+        # store the engine boundary and the memory seams append to, so one stream
+        # carries every kind. It is a required argument with no default (§10), so
+        # a composition that omitted it would not type-check.
         notifications = SqliteNotificationStore(
             path=directory / "notifications.db",
+            traces_sink=traces,
             retention=settings.notification_retention,
             cap=settings.notification_queue_limit,
         )

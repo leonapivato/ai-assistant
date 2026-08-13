@@ -1466,16 +1466,18 @@ async def test_only_the_maintenance_operation_is_handed_the_trace_store(
     contract cannot see, because the store arrives by injection precisely so that
     a subsystem never names it.
 
-    **Four attributes of the engine are the permitted holders, and between them
+    **Five attributes of the engine are the permitted holders, and between them
     they are §7's two narrow seams**: "a ``TraceSink`` to every emitter, a
     ``TraceRetention`` to the ``Engine``'s maintenance operation, and the
     ``TraceStore`` itself to nothing in the pipeline". ``_traces`` is the purge
-    (§10); the other three are §8's emitters — the engine boundary, ``memory``'s
-    relevance read and ``memory``'s write path — each reaching the object through
-    its own ``MemoryTraces``/``OperationTraces`` and each holding it under a
-    ``TraceSink`` annotation. The narrowing is that annotation rather than anything
-    done here, which is why the object identity is the same and the *reach* is not
-    — the same arrangement ``SourceGrants``/``SourceGrantStore`` uses.
+    (§10); the other four are emitters — §8's three, the engine boundary and
+    ``memory``'s relevance read and write path, and ADR-0141 §3's ruling seam
+    inside the notification store — each reaching the object through its own
+    ``MemoryTraces``/``OperationTraces``/``NotificationTraces`` and each holding it
+    under a ``TraceSink`` annotation. The narrowing is that annotation rather than
+    anything done here, which is why the object identity is the same and the
+    *reach* is not — the same arrangement ``SourceGrants``/``SourceGrantStore``
+    uses.
 
     **Neither can walk, which is the property the list is guarding.** §7 cuts the
     seam at the walk rather than at the store — "the pipeline may not read a trace
@@ -1495,6 +1497,7 @@ async def test_only_the_maintenance_operation_is_handed_the_trace_store(
         assert sorted(holders) == [
             "engine._loop._memory._traces._sink",
             "engine._loop._writes._writer._traces._sink",
+            "engine._notifications._traces._sink",
             "engine._operation_traces._sink",
             "engine._traces",
         ], f"the trace store is reachable from {holders}"

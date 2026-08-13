@@ -76,7 +76,7 @@ TRACE_NOT_RECORDED: Final = "trace_not_recorded"
 UNREADABLE_TRACE_FIELD: Final = "unreadable"
 
 #: The seam pattern, duplicated from ``core/types.py``'s private ``_TRACE_LABEL``
-#: for the one use :func:`_dropped` has for it. Importing the original would be
+#: for the one use :func:`dropped` has for it. Importing the original would be
 #: reaching into another module's internals for a two-token regex, and the
 #: duplication is checked by a test that builds a trace with a seam this accepts.
 _SEAM_LABEL: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
@@ -234,7 +234,16 @@ DECISION_METRICS: Final[Mapping[MemoryDecisionKind, str]] = {
 #: (ADR-0108 §2), but from ``_apply_supersede`` the same class means a bounded
 #: re-mint loop was exhausted, which is a malfunction. One class, one reading,
 #: and ``FAULT`` is the direction that does not hide the second case.
-_REFUSALS: Final[tuple[type[Exception], ...]] = (
+#:
+#: **Public rather than private because it is the package's reading and not this
+#: module's**, and ADR-0141 §10 says so in as many words: the notification ruling
+#: seam "chooses ``REFUSED`` against ``FAULT`` with the refusal tuple
+#: ``ai_assistant.memory.traces`` already holds — the package the store lives in".
+#: The per-module duplication the sibling emitters practise is a *cross-subsystem*
+#: rule (golden rule 1 forbids `memory` naming `orchestration`'s module), and
+#: copying inside one package would only be two things to keep honest. That two
+#: subsystems' tuples can read one class differently is filed as #1046.
+REFUSALS: Final[tuple[type[Exception], ...]] = (
     # ADR-0077 §5: a `DERIVED` proposal whose warrant does not exist is
     # inadmissible rather than rule-able, and the refusal is deliberately a raise
     # "rather than a fabricated `REJECT`". Answered, not broken.
@@ -367,9 +376,7 @@ class MemoryTraces:
                 seam,
                 occurred_at=occurred_at,
                 started=started,
-                outcome=TraceOutcome.REFUSED
-                if isinstance(error, _REFUSALS)
-                else TraceOutcome.FAULT,
+                outcome=TraceOutcome.REFUSED if isinstance(error, REFUSALS) else TraceOutcome.FAULT,
                 reading=self._merged(seam, entry, partial),
                 fault_class=fault_class_of(error),
             )
@@ -401,7 +408,7 @@ class MemoryTraces:
             return self._now()
         # Broad by design: §5 lets no clock fault reach the work being observed.
         except Exception as error:
-            _dropped(self._kind, seam, error)
+            dropped(self._kind, seam, error)
             return None
 
     def _merged(
@@ -437,7 +444,7 @@ class MemoryTraces:
             reading = produce()
         # Broad by design: §5 lets no mapper bug reach the work being observed.
         except Exception as error:
-            _dropped(self._kind, seam, error)
+            dropped(self._kind, seam, error)
             reading = _NOTHING_FURTHER
         return Reading(metrics={**(entry or {}), **reading.metrics}, records=reading.records)
 
@@ -490,14 +497,14 @@ class MemoryTraces:
             )
         # Broad by design: §5 makes a malformed trace a lost trace, not a failed read.
         except Exception as error:
-            _dropped(self._kind, seam, error)
+            dropped(self._kind, seam, error)
             return
         try:
             await self._sink.emit(trace)
         # Broad by design: §7 says a conforming sink cannot raise here, and §5 says
         # what to do if one does anyway.
         except Exception as error:
-            _dropped(self._kind, seam, error)
+            dropped(self._kind, seam, error)
 
 
 def _capped(ids: Sequence[str]) -> RecordIdSet:
@@ -537,7 +544,7 @@ def _capped(ids: Sequence[str]) -> RecordIdSet:
     return RecordIdSet(ids=distinct[:TRACE_RECORD_SET_CAP], total=len(distinct))
 
 
-def _dropped(kind: TraceKind, seam: str, error: Exception) -> None:
+def dropped(kind: TraceKind, seam: str, error: Exception) -> None:
     """Log a trace that could not be recorded (ADR-0119 §5).
 
     "Emission failure is never silent", because "a measure over a stream with
@@ -547,6 +554,15 @@ def _dropped(kind: TraceKind, seam: str, error: Exception) -> None:
     total conversion rather than being read raw — ADR-0004 §5 is unconditional that
     logs are Tier 2 only, so the bound §2 puts on a trace's ``fault_class`` has to
     hold on this side of the seam too. The message never appears.
+
+    **Public rather than private because it is the package's record and not this
+    module's.** ADR-0141 §3's notification ruling seam logs its lost traces here
+    too — a crossing that obtained no clock reading, and any trace this envelope
+    could not build or append. The sibling emitters in `orchestration`,
+    `service`, `evaluation` and `testing` each hold their own copy because golden
+    rule 1 forbids naming another subsystem's concrete module; inside one package
+    that argument does not apply, and a second copy would be a second thing to
+    keep honest.
 
     Args:
         kind: What the lost trace would have recorded.
@@ -574,6 +590,7 @@ __all__ = [
     "FETCH_K",
     "LIMIT",
     "PROPOSALS",
+    "REFUSALS",
     "RETURNED",
     "SEAM_INGEST",
     "SEAM_INGEST_READING",
@@ -582,4 +599,5 @@ __all__ = [
     "UNREADABLE_TRACE_FIELD",
     "MemoryTraces",
     "Reading",
+    "dropped",
 ]
