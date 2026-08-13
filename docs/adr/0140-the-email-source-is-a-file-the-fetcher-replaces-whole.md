@@ -1226,10 +1226,19 @@ carries is to **pass** the existing suite, not to write one.
     honest mail they agree.
   - **`Date` is required and singular, and the delivery instant is never
     substituted for it (§5).** A message with a valid in-window
-    `X-Assistant-Delivered-At` but no `Date`, two `Date` headers, or a `Date`
-    whose zone is `-0000` or absent is **skipped** — not proposed with the
-    delivery instant standing in as `reported_at`, which is the substitution a
-    reader reaches for precisely because it has a usable instant in hand. The
+    `X-Assistant-Delivered-At` but no `Date`, or two `Date` headers, or a `Date`
+    **the reader cannot resolve to a determinate instant**, is **skipped** — not
+    proposed with the delivery instant standing in as `reported_at`, which is
+    the substitution a reader reaches for precisely because it has a usable
+    instant in hand. That third arm is tested at §5's predicate rather than at
+    the two values §5 offers to illustrate it, because they are not the whole of
+    it and are the easier half: `-0000` and an absent zone both *parse* and then
+    resolve to nothing usable, while a malformed or impossible `Date` does not
+    parse at all — so a lane that handles only the illustrations reaches either
+    the fallback or an escaping parser error, and the second breaches §5's rule
+    that a skip raises nothing while every other test here still passes. The
+    delivery-header item above already reads its own clause this way, and the
+    two are the same rule. The
     converse is asserted in the same test so the skip is not quietly generalised
     to every field the rule does not reach: a message with **no** `Subject` and
     a message with **two** both still propose, with the subject empty in each
