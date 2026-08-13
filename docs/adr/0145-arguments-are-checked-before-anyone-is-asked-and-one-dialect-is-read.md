@@ -418,7 +418,7 @@ set is fixed by construction and checked by resolution:
 > not at all; and `$dynamicRef` and `$dynamicAnchor` do not appear. `$anchor` is
 > permitted. Construction resolves every reference against a registry containing
 > that one document and nothing else, and refuses the schema when any reference
-> does not resolve.
+> does not resolve **or when the reference graph contains a cycle**.
 
 Each exclusion is a case where a `#`-prefixed reference stops meaning
 "somewhere in this document": a subschema `$id` re-bases resolution, so a
@@ -430,6 +430,41 @@ self-contained" a fact a reader can check by looking at it. Resolving at
 construction rather than merely pattern-matching is what makes a dangling
 fragment — `#/$defs/Absent` — a definition that does not load instead of a call
 that fails.
+
+**The cycle clause is the one that stops a schema from being a weapon, and it is
+why the whole reference model is worth stating.** `{"$ref": "#"}` satisfies every
+other condition above — the reference is same-document, it resolves, there is no
+`$id` and no dynamic keyword, and it is a valid 2020-12 schema — and evaluating
+any instance against it recurses until the interpreter gives up. A cycle through
+`$defs` does the same. Under leg 12 that schema arrives from a server this
+repository does not control, so the shape of the attack is: publish a tool, have
+it discovered, and every call that reaches validation exhausts the stack. §7's
+fail-closed clause means the *outcome* is still a refusal rather than a pass —
+`RecursionError` is an `Exception` — but a refusal reached by exhausting the
+stack is not the "report the violations" behaviour §2 promises, and it is
+reached inside `core`, on a path every tool call takes.
+
+**Refusing every cycle rather than only the divergent ones, and the cost is
+real.** A cycle that is *instance-consuming* — `#/$defs/node` reached through a
+`properties` step — terminates, because the instance is finite; only a cycle
+reachable without consuming any instance diverges. Distinguishing them means
+classifying every keyword as consuming or not and getting that classification
+right, in the check whose whole job is to be trustworthy about documents from
+untrusted servers. A plain reachability walk over `$ref` targets is decidable,
+total, and has no subtle case to get wrong, and it is chosen for that. The cost
+is that a genuinely recursive argument — a tree, a nested filter expression —
+cannot be declared, and an adapter meeting one bounds the nesting explicitly or
+refuses the tool (§9). Bounding the depth is arguably the better declaration
+anyway, since an unbounded-depth argument is an unbounded payload. Revisit if a
+tool worth having turns out to need one.
+
+**What this does not bound is evaluation *cost*.** An acyclic schema can still
+be expensive, and a deeply nested instance recurses on its own way in — but the
+parameters were already deep-frozen by `_freeze_json` on the way to becoming a
+`FrozenJsonMapping`, which walks the same structure, so that limit predates this
+decision rather than arriving with it. A cost budget for pathological-but-
+terminating schemas is a separate rule with a constant nobody can calibrate yet,
+and §14 scopes it out with an issue rather than inventing one here.
 
 **One check on the type, inherited by every stage that rebuilds one.** The
 repository already revalidates a definition wherever it could have been tampered
@@ -785,12 +820,14 @@ is owed is the evidence for the claims above that a signature does not show.
   as a *rejection* rather than argued: a draft-07 schema whose bound is
   `additionalItems` does not load, so it cannot be read permissively.
 - **The reference model, as refusals** (§6): an external `$ref`, a non-root
-  `$id`, a `$dynamicRef`, and a *dangling* same-document fragment
-  (`#/$defs/Absent`) each refuse the definition at construction — the last is the
-  one that distinguishes resolving from pattern-matching, and a check that only
-  inspects `$ref` strings passes without it. A same-document `$ref` and an
-  `$anchor` are accepted, so the model is shown to be usable and not merely
-  restrictive.
+  `$id`, a `$dynamicRef`, a *dangling* same-document fragment (`#/$defs/Absent`),
+  a self-reference (`{"$ref": "#"}`) and a two-hop `$defs` cycle each refuse the
+  definition at construction. The dangling case is what distinguishes resolving
+  from pattern-matching; the two cycle cases are the ones that must be asserted
+  as *construction* refusals and not merely as calls that fail, since a test that
+  only checks the outcome would pass against an implementation that reaches it by
+  exhausting the stack. A same-document `$ref` and an `$anchor` are accepted, so
+  the model is shown to be usable and not merely restrictive.
 - **No I/O, as a test that cannot pass by accident** (§7): separately from the
   construction refusal, an evaluator built by the `core` seam is shown to raise
   rather than retrieve when handed an external reference, so the belt is tested
@@ -841,6 +878,10 @@ so deleting them changes a recorded outcome and the tests that pin it.
 - **Validating a tool's `output` against a declared schema.** `ToolDefinition`
   declares no output schema and ADR-0029 §3 makes `output` a `FrozenJsonValue`
   the tool is trusted for. Adding one is an ADR-0016 field change.
+- **A cost budget for schema evaluation** (§6). The cycle refusal removes the
+  divergent case; an acyclic schema that is merely expensive is bounded by
+  nothing here, and a constant to bound it by is not calibratable before tool
+  breadth exists. Filed.
 - **A schema migration mechanism** (§6). If the supported dialect ever changes,
   stored decisions carrying the old one are a migration question this ADR does
   not answer and does not need to, since the corpus it lands on has none.
