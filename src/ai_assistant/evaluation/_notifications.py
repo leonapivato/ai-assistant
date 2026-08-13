@@ -223,8 +223,24 @@ def read(trace: EvaluationTrace) -> Ruling:
 def _undecided(state: NotificationState, seam: Seam | None) -> Ruling:
     """A trace §5 excluded before anything could be read off it.
 
-    Its ``held_seconds`` is not *misplaced*: §7's misplacement is a statement about
-    a trace that "stays in every other population", and this one is in none.
+    **Its ``held_seconds`` is not *misplaced*, and that is the ADR's reading rather
+    than a convenience.** §7's clause is stated about a trace whose "value is never
+    read as a latency, **its trace stays in every other population**, and the report
+    counts it" — a sentence that presupposes populations to stay in, where §5 says
+    flatly that an incomplete trace "enters no population" and "a malformed trace
+    enters no population". The diagnostic misplacement is *for* is the latency
+    distribution, defined over members of §5's reconsideration sub-population, and
+    neither state is in it.
+
+    **Deciding it the other way would mean trusting exactly what §5 distrusts.**
+    Establishing whether §4 *required* the key means reading the disposition off the
+    trace, and §5's own commentary is that a malformed trace's problem is that
+    "neither trace can be trusted for anything, so both leave every population". It
+    would also make the misplaced count's population an accident of parsing — only
+    those malformed traces whose three disposition keys happen to be readable, which
+    is not a set the ADR names anywhere. The trace is already counted, under the rule
+    that actually excluded it. Adversarial review proposed the wider reading on the
+    second round; it is declined on these sentences, and pinned by test.
     """
     return Ruling(
         state=state, seam=seam, ruled=None, conditions={}, held_seconds=None, misplaced=False
