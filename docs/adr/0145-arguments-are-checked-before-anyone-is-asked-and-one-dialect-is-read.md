@@ -257,9 +257,22 @@ The three checks ADR-0029 §2 puts in `invoke` raise `ToolBindingError` because
 they answer *"is this the authorised call?"*, and a substitution fault must not
 be recordable as an ordinary result. A schema mismatch is not that question: the
 arguments **are** the ones that would have been authorised; they are the wrong
-shape for the tool. So it is neither a `ToolBindingError` nor a `ToolFailure` —
-it is a value that does not get built, reported to its caller in-process, before
-any of the machinery that produces either exists.
+shape for the tool. So on the ordinary path it is neither a `ToolBindingError`
+nor a `ToolFailure` — it is a value that does not get built, reported to its
+caller in-process, before any of the machinery that produces either exists.
+
+**`ToolBindingError` is retained, unchanged, for the bypass path, and the two
+are not the same event.** A request that arrives at the seam having skipped
+validation fails ADR-0029 §2's step 1, and that step's rule is already written:
+"a revalidation failure carrying the underlying `ValidationError` as its cause".
+Nothing here alters it, and nothing here should — by the time a request reaches
+`invoke` unvalidated, the fact worth recording is not *which* validator it
+failed but that the thing about to run was not built the way anything is
+entitled to build it, which is exactly what §2's error means. So the two
+refusals are distinguished by where they happen rather than by a new error type:
+the selection stage's is a disposition (§4), the seam's is the
+`ToolBindingError` ADR-0029 §2 already specifies, and ADR-0029 §8's handling of
+it — committed `RUNNING → FAILED`, never retried — applies as written.
 
 **What ADR-0029 §7's bound becomes.** It is discharged in its premise rather
 than contradicted in its conclusion. `INVALID_REQUEST` keeps its ratified
