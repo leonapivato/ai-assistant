@@ -641,9 +641,14 @@ reach that ruling as an input.
 
 > **Normative.** An MCP-served tool's `ToolDefinition.id` is composed from a
 > **server alias** and the **tool name the enumeration states**, both of which the
-> declaration authors. No value a server sends contributes to an id. The
-> composition is injective: the alias excludes the separator, so no pair of alias
-> and name composes to the same id as a different pair.
+> declaration authors. No value a server sends contributes to an id.
+
+> **Normative.** A server alias is **unique across the whole declaration set** and
+> excludes the separator. A set in which two servers carry one alias is **refused
+> where it is read**, before any discovery or registration, rather than resolved by
+> a rule about which server the alias means. Together these make the composition
+> injective: distinct servers have distinct aliases, the alias and the name are
+> recoverable from the composed id, so no two admitted tools compose one id.
 
 > **Normative.** The composed form carries a fixed leading segment, so that the
 > ids of MCP-served tools and the ids this repository composes by any other route
@@ -672,6 +677,20 @@ registration order — an availability bug in the good case and, if the ordering
 went the other way, the substitution ADR-0016 §5 spends its length preventing.
 Composing the id from two locally-authored parts closes it by construction rather
 than by a check, which is the direction this corpus prefers.
+
+**Uniqueness across the set is the other half of that, and an earlier draft had
+only the separator half.** Excluding the separator makes the composition function
+injective over *pairs*; it says nothing about two servers presenting the same pair.
+Two entries aliased `calendar`, each enumerating `create_event`, compose one id for
+two different programs — and the consequence is not a quiet mis-selection but a
+`ToolRegistrationError` aborting the registry build under ADR-0016 §5, so a
+deployment that meant to admit both tools admits neither and gets a failure whose
+cause is three layers from its symptom. Adversarial review found it. **Refusing the
+declaration set is better than defining which occurrence wins**, and the argument is
+ADR-0144 §4's verbatim for a duplicated id in the preference sequence: defining a
+tie-break "would close it and refusing closes it better", because a duplicate is a
+mistake in the deployment's configuration and a rule that silently picks one hides
+the mistake at the moment it is cheapest to see.
 
 **The leading segment is disjointness and not a namespace anyone reads, and an
 earlier draft got that wrong in a way architecture review caught.** That draft
@@ -867,7 +886,10 @@ rediscovers.
   declaration rather than by stubbing a lookup is what makes it the cross-restart
   case rather than a mocked one.
 - **§7's injectivity and its opacity**: an alias containing the separator is
-  refused where the declaration is read; a server offering a tool named exactly as
+  refused where the declaration is read, and so is a declaration set in which two
+  servers carry one alias — asserted as a refusal of the *set*, before any
+  discovery runs, rather than as a `ToolRegistrationError` surfacing later out of
+  the registry build; a server offering a tool named exactly as
   a builtin's id produces two distinct ids and both remain invocable. And the
   opacity is a review property with one testable half — the externality marking of
   §6 is shown to work against a definition whose id was minted with **no** leading
