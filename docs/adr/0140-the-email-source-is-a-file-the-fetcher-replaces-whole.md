@@ -174,10 +174,14 @@ rather than merely a stale one.
 > **requirement of the arrangement**, stated so a deployment can meet it; the
 > reader cannot verify it and may not assume it has been met.
 
-> **Normative.** Where the requirement above is violated and the reader observes a
-> torn message, that message is **skipped** under §6's skip rule. A torn store
-> degrades a reading by losing messages from it and may never produce a proposal
-> the store's intact content did not support.
+> **Normative.** The snapshot property is bought by the `rename(2)` requirement
+> and is **not** a property the reader can establish from the bytes it reads.
+> Where the requirement is violated the reader may observe a store no complete
+> version ever held, and no clause of this ADR may be read as a guarantee that it
+> cannot.
+
+> **Normative.** A message the reader cannot interpret — torn, truncated or
+> malformed — is **skipped** under §5's skip rule, and a skip raises nothing.
 
 **This is #649's escape, and it is the same escape the calendar took, found
 rather than inherited.** #649's own text names `vdirsyncer`'s `singlefile`
@@ -201,6 +205,21 @@ three reasons #649 enumerates as the ones a directory would reopen:
   single file has and a directory does not — "A single file has no equivalent
   hazard: it is one `open` and one bounded read" — and it is why the atomicity
   requirement is on the *replacement* rather than on the fetcher's manners.
+
+**The third and fourth clauses say what the first one buys and what it does not,
+and separating them is a repair rather than a hedge.** An earlier draft of this
+section promised that a torn store "may never produce a proposal the store's
+intact content did not support", and adversarial review was right that the reader
+cannot hold it: a writer editing an already-open inode in place can leave two
+separately-read regions that never coexisted, and nothing in the resulting bytes
+says so. **A clause whose truth depends on a fact the bound component cannot
+observe is not a bound**, which is the lesson ADR-0098 §3 records against its own
+earlier drafts — they "reached past" the span to conditions "whose truth depends
+on an inference nobody can make deterministically", and the repair there was to
+rule on what the component *does*. So the guarantee is stated as conditional on
+the write discipline, the reader's own obligation is the skip, and §4 is where a
+violated write's consequence is bounded — by clauses that hold whatever the bytes
+turn out to be.
 
 **Maildir is declined, and the survey's premise survives the decline intact.**
 #664's candidate is "imap-tools … in a co-located fetcher writing a maildir,
@@ -334,12 +353,34 @@ the right home for this: its whole standing is that somebody else said it
 (ADR-0093 §1), and a belief that the store attributes to Alice is a belief about
 what the store said, ruled on by the gate like every other.
 
-**The escaping requirement still belongs on the fetcher, as defence in depth and
-for one honest reason beyond it.** A split message inflates §6's facet count and
-consumes §12's message cap, both of which are our own claims about what the reader
-parsed. §6 states them as exactly that and never as claims about the account, so a
-splitting attack costs accuracy in a Tier-2 figure and nothing else. Under
-ADR-0098 §6 no bound in this corpus may be bought from a filter, and none is
+**The escaping requirement still belongs on the fetcher, and what it actually
+costs when it fails is stated rather than minimised.** A split message does three
+things. It inflates §6's facet count and consumes §12's message cap — both our own
+claims about what the reader parsed, which §6's third clause says in as many words
+and never as claims about the account. And it puts **body text into a proposal**,
+wearing an envelope's clothes: the fragment's apparent `Subject` is a sentence the
+message's author wrote, and §5's body prohibition cannot see it. That is the honest
+residual of choosing an in-band-delimited format, it is why §5's clause is stated
+over the framing rather than over the bytes, and it is bounded rather than
+prevented — the fragment lands in the `ATTESTED` band like every other proposal,
+under §4's clauses (no authority, no identity, nothing authenticated), under
+ADR-0098's ceilings, inside §12's message cap, and visible and killable by the
+user (ADR-0073 §5).
+
+**Two requirements have to fail together to reach it, which is worth stating
+precisely rather than leaving as reassurance.** The splitting hazard needs a
+`From ` line *in a body*, so it is unreachable when §5's envelopes-only
+requirement is met: a store the fetcher built from header blocks alone contains no
+body for an attacker to hide a separator in. It needs escaping to fail *as well*,
+and it additionally needs the fetcher to have written a header value containing a
+bare line break, or the fragment carries no valid `X-Assistant-Delivered-At` and
+§5 skips it. Note what the delivery header does **not** buy here: an attacker who
+splices a plausible `X-Assistant-Delivered-At` into their own body gives the
+fragment exactly one such header, so the duplicate rule does not catch it. The
+skip catches the careless case and §4 catches the careful one, and neither is
+offered as catching both.
+
+Under ADR-0098 §6 no bound in this corpus may be bought from a filter, and none is
 bought here: the clauses above are total, and the escaping is hygiene stated as
 hygiene.
 
@@ -353,22 +394,40 @@ hygiene.
 
 > **Normative.** `Attestation.reported_at` carries the message's own `Date`
 > header — the sender's clock, which is what a report time is (ADR-0092 §3). The
-> **delivery instant** the store records is a different fact and is what §3's
-> window membership is decided on. The two are never merged and neither is
-> substituted for the other.
+> **delivery instant** is a different fact and is what §3's window membership is
+> decided on. The two are never merged and neither is substituted for the other.
 
-> **Normative.** A message whose delivery instant the store does not supply, or
-> which the reader cannot otherwise interpret, is **skipped**. Nothing is
-> substituted for a fact the source did not make, and a skip raises nothing.
+> **Normative.** The delivery instant is carried in **one** header the fetcher
+> writes, `X-Assistant-Delivered-At`, whose value is a single RFC 3339 timestamp
+> with an explicit UTC offset and nothing else. The fetcher writes it from what
+> the server recorded, and **strips every copy the message itself carried** before
+> writing its own.
 
-> **Normative.** The reader materialises **no span of a message body** into a
-> proposal, into a facet, or into any value that leaves it. No body span reaches a
-> model call by any path this ADR opens.
+> **Normative.** The reader decides membership on that header and on nothing else.
+> It never derives a delivery instant from the mbox `From ` line, from a
+> `Received` header, from `Date`, or from the file's modification time.
+
+> **Normative.** A message carrying no `X-Assistant-Delivered-At`, more than one,
+> or one whose value does not parse as a single RFC 3339 instant is **skipped**,
+> as is a message the reader cannot otherwise interpret. Nothing is substituted
+> for a fact the source did not make, and a skip raises nothing.
+
+> **Normative.** The reader reads only what the store's framing presents as a
+> message's **header block**. It does not read, parse or materialise what that
+> framing presents as a **body** — into a proposal, into a facet, or into any
+> value that leaves it — and this ADR opens no path by which such a span reaches a
+> model call.
+
+> **Normative.** Whether the framing is honest is the fetcher's, and the reader
+> may not assume it. Where the framing is violated, text a message's author wrote
+> may present itself to the reader as another message's envelope; §4 is what
+> bounds that, and no clause of this ADR may be read as a guarantee that it cannot
+> happen.
 
 > **Normative.** The store the arrangement requires contains **envelopes only** —
-> per message, the header fields above and what the format needs to delimit it.
-> This is a requirement of the arrangement in §2's sense; the clause above binds
-> the reader whether or not it is met.
+> per message, the header fields above, `X-Assistant-Delivered-At`, and what the
+> format needs to delimit it. This is a requirement of the arrangement in §2's
+> sense; the clauses above bind the reader whether or not it is met.
 
 **Two clocks, and the security half is why they are separated rather than merely
 distinguished.** `Date:` is the sender's claim, which is precisely
@@ -380,6 +439,32 @@ it is not a field the message's author sets. The corpus already keeps two clocks
 apart at the reading level — `read_at` and `as_of`, "two different clocks and …
 never merged" — and this is the same discipline one level down, taken for a
 second reason.
+
+**The header, its syntax and its strip-and-skip rule are pinned here rather than
+left to the lane, because "the delivery instant the store records" was not a
+specification and adversarial review showed why.** An mbox has a Unix-`From `
+line, a `Received` chain and a `Date`, and two lanes choosing differently among
+them put the same stored message in different windows while each believes it
+conforms — which is ADR-0103 §9's test failed exactly ("could two lanes make
+incompatible choices and both claim compliance?"), and the reason ADR-0110 §2
+pinned coverage's domain rather than its spelling. Three things therefore had to
+be decided and are:
+
+- **Which field**, because the alternatives are worse in a specific way. The
+  Unix-`From ` line is reachable by §4's splitting hazard and its timestamp has
+  never had one syntax; `Received` is a chain of hops whose earliest entries are
+  written by machines the sender may control; `Date` is the sender's own. A header
+  the *fetcher* writes is the only one whose author is on our side of the file.
+- **Its syntax**, because "a timestamp" admits a dozen parsers that disagree about
+  offsets, and the corpus's one instant type is tz-aware. RFC 3339 with an
+  explicit offset is what a fetcher can emit in one line and a reader can parse
+  without a policy.
+- **What happens to a message-supplied copy**, because a header the fetcher writes
+  is a header an attacker can also write. The fetcher strips; the reader skips on
+  a duplicate rather than picking one. **Skipping is fail-closed and is the whole
+  point**: the worst an attacker achieves by forging the header is that their own
+  message is not proposed, which is not an attack. Picking the first occurrence
+  would have made forgery *work* wherever a fetcher's strip failed.
 
 **Envelopes only, and the argument is minimisation before it is injection.** Three
 things follow from the body never being present, and each is a bound obtained by
@@ -399,6 +484,19 @@ construction rather than by a rule someone must remember:
   megabytes.
 - **§10's narrowing is structural.** There is no body in the store to read, so the
   deferral in §14 is not a discipline the next lane must hold; it is a shape.
+
+**The body clause is stated over the framing rather than over the bytes, and an
+earlier draft was not holdable.** That draft said the reader "materialises no span
+of a message body" and added that the clause binds "whether or not" the
+envelopes-only requirement is met — which adversarial review showed is impossible
+to obey: an unescaped `From ` line inside a body splits one message into two, and
+the second fragment's apparent `Subject` *is* body text the reader has no way to
+recognise as such. A clause the reader must breach to function is worse than no
+clause, because a later lane reads it as a guarantee somebody checked. So the
+obligation is on what the reader does — it reads header blocks and never bodies —
+and the case where the framing lies is handled where it is actually bounded, in
+§4. This is the same repair §2's third clause takes, for the same reason, and
+ADR-0098 §3 is the corpus's precedent for making it.
 
 **What is deliberately left out of the field set.** `To:` and `Cc:` are not
 carried: they multiply Tier-1 addresses by every recipient of every mailing list,
@@ -815,14 +913,19 @@ carries is to **pass** the existing suite, not to write one.
 - The `context/` adapter contributing §6's facet, gated on a live `FACET` grant.
 - The ingestion wiring, gated on a live `INGEST` grant, and the scheduler job as
   an `Engine` call holding no reader (ADR-0083 §8).
-- **Deployment documentation for the fetcher** — what it must write, that it must
-  replace the store by `rename(2)`, that it must escape the format's separator,
-  that its retention must exceed the reader's window, and that its credential
-  never enters the hub. This is documentation and not `src/`, and §1's second
-  clause is why: the fetcher is not ours to ship.
-- A test that a message body present in a store the reader is pointed at reaches
-  **no** proposal and **no** facet (§5), because that is the clause a lane can
-  satisfy in prose and breach in code.
+- **Deployment documentation for the fetcher** — that it writes header blocks and
+  no bodies; that it writes exactly one `X-Assistant-Delivered-At` per message in
+  RFC 3339 with an explicit offset, from the server's own record, after stripping
+  every copy the message carried; that it emits no header value containing a bare
+  line break and escapes the format's separator; that it replaces the store by
+  `rename(2)` on the same filesystem; that its retention exceeds the reader's
+  window; and that its credential never enters the hub. This is documentation and
+  not `src/`, and §1's second clause is why: the fetcher is not ours to ship.
+- Tests for the three clauses a lane can satisfy in prose and breach in code: that
+  a body present in a store the reader is pointed at reaches **no** proposal and
+  **no** facet (§5); that a message with zero, two, or an unparseable
+  `X-Assistant-Delivered-At` is skipped rather than dated by any fallback (§5);
+  and that a store whose messages carry only a `Date` header proposes nothing.
 
 ### 14. Deferred, by name, each with the condition that fires it
 
@@ -848,6 +951,12 @@ carries is to **pass** the existing suite, not to write one.
   verify **without** the fetcher's testimony. §7's second clause forecloses the
   cheap route deliberately, and this deferral is recorded in the expectation that
   its condition may never be met.
+- **A self-delimiting store format the reader can frame without trusting a
+  writer.** Fires with the body deferral above, and would fire early if a
+  deployment is ever found that cannot hold §5's envelopes-only requirement. §4's
+  splitting hazard is bounded rather than closed today, and it is closed by
+  construction the moment the store stops being delimited in-band; the trade is
+  weighed in Alternatives considered.
 - **Event-driven reading.** #664 lists `watchfiles` for "the hub noticing fetcher
   writes". This reader is scheduler-driven per ADR-0093 §6. Fires with a decision
   about read cadence, which is a different question from this source and would
@@ -951,7 +1060,16 @@ paragraphs above.
   message was deleted, which is not a fact this system wants.
 - **The injection surface for email is a subject line and a sender string.** That
   is small, fixed, legible, and bounded by ADR-0098's existing construction rules;
-  it is not zero, and §10 says so rather than claiming a prevention.
+  it is not zero, and §10 says so rather than claiming a prevention. The one way
+  body text reaches a proposal is §4's in-band splitting hazard, which needs two
+  deployment requirements to fail together, is skipped in its careless form and
+  bounded in its careful one, and is **stated as a residual rather than closed** —
+  §14 carries the format change that would close it.
+- **Two clauses are conditional on the fetcher and say so.** The snapshot property
+  (§2) and the envelopes-only store (§5) are requirements a deployment meets, not
+  facts the reader can check, and each is paired with what the reader does anyway.
+  A clause the reader would have to breach to function is worse than no clause,
+  and this ADR carries none.
 - **The credential and the network stay outside the hub**, which keeps ADR-0017
   §1 and ADR-0093 §11's networked-source deferral untouched and keeps `secret_store/`
   free of an account password a later lane would otherwise have put there.
@@ -1010,6 +1128,22 @@ paragraphs above.
   window or keep it out of all of them. The delivery instant the store records is
   not attacker-set, and §5 keeps the two apart as two facts rather than choosing
   between them.
+- **A length-prefixed store the reader can frame unambiguously**, instead of an
+  in-band-delimited mbox. It would close §4's splitting hazard by construction
+  rather than by requiring two deployment properties to hold together, which is
+  the stronger form of argument this ADR uses everywhere else. Rejected on
+  balance, and it is the closest call here: it abandons stdlib `mailbox` — the one
+  half of #664's premise that is doing real work, since the format would then be
+  ours to define, version and parse — and §5's envelopes-only requirement already
+  removes the body a separator hides in, so the framing would be buying a
+  guarantee against a hazard that needs a *second* requirement to fail first. §14
+  records it with the condition that would change the balance: a store that must
+  carry bodies.
+- **Take the first `X-Assistant-Delivered-At` when a message carries several**,
+  rather than skipping. Rejected because it makes a forged header *work* wherever
+  a fetcher's strip fails — the attacker writes theirs above the fetcher's, and
+  ordering decides membership. Skipping costs an attacker their own message and
+  costs an honest deployment nothing, because an honest fetcher writes one.
 - **Use `Message-ID` as the record id.** Rejected on ADR-0092 §6, which rules that
   an import proposes "each record at an id it mints, opaque to the source" and may
   never use the source's own key. §4's third clause states it for this source
