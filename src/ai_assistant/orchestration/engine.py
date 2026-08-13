@@ -799,7 +799,7 @@ def conversation_summary(conversation: Conversation) -> ConversationSummary:
     )
 
 
-def _outcome_of(step: StepOutcome | None) -> str:
+def _outcome_of(step: StepOutcome | None) -> str:  # noqa: PLR0911 — one return per Disposition member plus the no-step case; collapsing them would hide the totality the docstring relies on
     """How the exchange turned out, as the captured episode's ``outcome`` (ADR-0074 §4).
 
     Total over :class:`~ai_assistant.orchestration.runner.Disposition` and
@@ -821,6 +821,8 @@ def _outcome_of(step: StepOutcome | None) -> str:
             return "no tool advertised the capability the step needed"
         case Disposition.AMBIGUOUS_CAPABILITY:
             return "several tools advertised the capability, so none was chosen"
+        case Disposition.INVALID_PARAMETERS:
+            return "the step's arguments did not fit the declared schema of any capable tool"
         case _:  # pragma: no cover - exhaustive
             assert_never(step.disposition)
 
