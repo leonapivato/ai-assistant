@@ -116,7 +116,18 @@ USER_SEAMS: Final = frozenset({"converse", "resume", "observe", "learn", "answer
 #: ADR-0120 §3's **machine** set: the operations that write on their own
 #: initiative. Keeping these out of §4's and §5's numerators is what lets #829's
 #: arming of consolidation move a diagnostic instead of a measure.
-MACHINE_SEAMS: Final = frozenset({"ingest", "consolidate", "purge_expired", "start"})
+#:
+#: **One member per ingestion source, because ADR-0142 §4 gives each source its own
+#: operation and therefore its own seam.** Both write on their own initiative
+#: exactly as the single ``ingest`` did, so this is that rename's mechanical
+#: consequence rather than a re-classification. A seam on neither set is dropped
+#: from every measure into ``unclassified`` (:func:`~ai_assistant.evaluation._stream.classify`),
+#: which fails safe and fails silently — so a third source's lane owes this set a
+#: member, and #1076 records that ADR-0142 §5's own cost measurement does not
+#: mention this file.
+MACHINE_SEAMS: Final = frozenset(
+    {"ingest_calendar", "ingest_email", "consolidate", "purge_expired", "start"}
+)
 
 #: ADR-0120 §3's **direct** set, a subset of the user set: a user act the user
 #: performed, rather than one the observation stage mined out of a conversation.
