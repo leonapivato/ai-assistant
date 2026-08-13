@@ -537,6 +537,403 @@ class Message(BaseModel):
     name: EncodableText | None = Field(default=None, description="Optional author/tool name.")
 
 
+# --- bulk inference: the batch, and the handle the caller holds (ADR-0143) ---
+# The eight public names ADR-0143 §9 fixes, declared beside :class:`Message`
+# because every one of them either carries a conversation or answers one. They
+# serve a **second** seam rather than a widening of :class:`ModelProvider`
+# (ADR-0143 §1): a batch is submitted, polled and fetched across hours, so the
+# value that names it is the caller's to keep and to write down.
+#
+# Nothing here reaches the promoted engine surface, and that is structural rather
+# than incidental: ADR-0143 §8 gives no subsystem a ``BatchCompleter``, and §11
+# leaves wiring one into `app` or the hub deferred.
+
+
+class BatchRequest(BaseModel):
+    """One item of a batch: a conversation awaiting a reply, under the caller's id.
+
+    ``messages`` is a request on :meth:`ModelProvider.complete
+    <ai_assistant.core.protocols.ModelProvider.complete>`'s own terms (ADR-0143
+    §3) — the same **necessary** condition, read as that docstring states it and
+    admitting nothing by omission. ``item_id`` is minted by the caller, is unique
+    within its batch, and is what an outcome is matched back by (ADR-0143 §4); no
+    implementation mints, rewrites or normalises one, which is why it is
+    :data:`NonBlankEncodableText` and not :data:`Identifier` — the latter strips
+    the value it accepts, and a normalisation on one side of the round trip
+    quietly breaks the match.
+
+    **Not frozen, and that is the decision rather than an omission.** ADR-0143
+    §3's observation clause is discharged by ``submit`` taking a snapshot deep
+    enough to cover everything the call goes on to read, never by the argument
+    being immutable: ADR-0065 says in as many words that "a frozen argument is not
+    a discharge on its own", and ADR-0143 §12 records that reading a batch's items
+    as immune because they are frozen was this ADR's own corrected error. Freezing
+    would also only have moved the hole — ``messages`` is a ``Sequence`` field, so
+    pydantic holds it as a mutable ``list`` beneath a frozen model exactly as
+    :class:`MemoryWrite` holds a mutable :class:`MemoryRecord`.
+
+    Attributes:
+        item_id: The caller's own id for this item, unique within its batch and
+            carried back unchanged on the item's outcome.
+        messages: Conversation history, oldest first. Non-empty, not ending on a
+            ``Role.ASSISTANT`` turn, and — like every history at the model seam —
+            containing no ``Role.TOOL`` turn (ADR-0143 §10).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: NonBlankEncodableText = Field(
+        description="The caller's id for this item, unique within its batch, never rewritten."
+    )
+    messages: Sequence[Message] = Field(
+        description="Conversation history, oldest first, awaiting an assistant reply."
+    )
+
+
+class BatchHandle(BaseModel):
+    """What names a submitted batch, and the account it is reachable from.
+
+    An **address, not a capability** (ADR-0143 §2). It carries what names the
+    batch — ``batch_id`` and ``issuer`` — together with the caller's own
+    ``batch_key`` and the ``submitted_at`` record, neither of which an
+    implementation reads back. It carries **no field a later ``poll`` or ``fetch``
+    would have to agree with**, in particular no count: this is a public `core`
+    model, so anyone can build one, and a handle carrying an ``item_count`` its
+    author invented would put ``poll`` in an impossible position — report the
+    provider's true ``settled`` and breach the bound, or agree with a number the
+    caller made up. Counts live on :class:`BatchStatus` instead, read from the
+    provider on every poll.
+
+    A handle a caller assembles by hand, naming a real batch under its own
+    ``issuer``, is a valid address for that batch and is answered for it. The seam
+    neither authenticates handles nor pretends to; holding one confers nothing the
+    caller's own credential did not already confer.
+
+    **Validity is scoped to the ``issuer``, never to the object.** A handle
+    persisted to disk and presented to a freshly constructed ``BatchCompleter`` of
+    equal ``issuer`` is valid — that is what makes resumption across a process
+    restart possible, and object identity would reject exactly the case the shape
+    exists to support.
+
+    Attributes:
+        batch_key: The caller's own key for the batch, carried unchanged and
+            **never interpreted**. It correlates a caller's durable record of an
+            intended batch with the handle it got back. It is *not* an idempotency
+            key: two ``submit`` calls under one key create two batches.
+        batch_id: The provider's identifier for the accepted batch.
+        issuer: A **non-secret** label naming the provider account or workspace the
+            batch is reachable from, supplied to the implementation by the
+            composition root that constructs it and never derived from the
+            credential — so it survives a key rotation, which a credential
+            fingerprint would not (ADR-0143 §2).
+        submitted_at: When the batch was accepted, as the submitting implementation
+            observed it. A record for the caller; no implementation reads it back.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    batch_key: NonBlankEncodableText = Field(
+        description="The caller's own key for the batch, carried unchanged and never interpreted."
+    )
+    batch_id: NonBlankEncodableText = Field(
+        description="The provider's identifier for the accepted batch."
+    )
+    issuer: NonBlankEncodableText = Field(
+        description="Non-secret label for the account the batch is reachable from."
+    )
+    submitted_at: UtcInstant = Field(description="When the batch was accepted (tz-aware).")
+
+
+class BatchState(StrEnum):
+    """Whether a batch has finished, as :class:`BatchStatus` reports it (ADR-0143 §9)."""
+
+    PENDING = "pending"
+    """Some item has not settled. ``fetch`` is not defined for a batch in this state."""
+
+    COMPLETE = "complete"
+    """Every item has settled — succeeded, failed, expired or been cancelled."""
+
+
+class BatchStatus(BaseModel):
+    """What one ``poll`` learnt about a batch (ADR-0143 §9).
+
+    ``total`` is the provider's count of the batch's items, read on **every**
+    poll rather than carried on the handle, and ``settled`` is how many of them
+    have reached one of the four outcomes. The two are bound to ``state``:
+    ``0 <= settled <= total``, and ``state`` is ``COMPLETE`` if and only if
+    ``settled == total``.
+
+    **An implementation whose provider reports no in-flight progress reports
+    ``settled`` as ``0`` until the batch completes.** That satisfies the invariant
+    and is not a defect — the seam asks for a count it can stand behind, not for a
+    progress bar.
+
+    ``results_expire_at`` is the **results retention**, and it is a different bound
+    from the processing window: the window is per item and surfaces as the
+    ``EXPIRED`` outcome of :class:`BatchOutcomeKind`, while retention is per batch
+    and bounds how long a settled batch's outcomes stay fetchable. Conflating them
+    is the failure ADR-0143 §6 exists to prevent, and the dangerous direction is a
+    ``fetch`` that quietly short-returns after retention lapsed: 900 outcomes for a
+    1,986-item batch would read as 1,086 expired items and score a run that never
+    happened. So a lapsed ``fetch`` raises instead (ADR-0143 §6).
+
+    Attributes:
+        handle: The batch this status is about.
+        state: Whether every item has settled.
+        total: The provider's count of the batch's items, read on this poll.
+        settled: How many of them have reached an outcome.
+        results_expire_at: When the settled outcomes stop being fetchable, or
+            ``None`` where the implementation cannot state one.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    handle: BatchHandle = Field(description="The batch this status is about.")
+    state: BatchState = Field(description="Whether every item has settled.")
+    total: int = Field(ge=1, description="The provider's count of the batch's items.")
+    settled: int = Field(ge=0, description="How many items have reached an outcome.")
+    results_expire_at: UtcInstant | None = Field(
+        default=None,
+        description="When the outcomes stop being fetchable; None where none can be stated.",
+    )
+
+    @model_validator(mode="after")
+    def _settled_is_within_the_total_and_fixes_the_state(self) -> BatchStatus:
+        """Bind ``state`` to the counts, in both directions (ADR-0143 §9).
+
+        A status reporting ``COMPLETE`` while items are outstanding would send a
+        caller to a ``fetch`` the seam refuses; one reporting ``PENDING`` on a
+        fully settled batch would make the caller poll forever. Both are
+        constructible without this, on every path a conformance suite cannot reach
+        — a fixture, a fake, or a hand-built status — so the binding is on the type.
+        """
+        if self.settled > self.total:
+            msg = f"settled ({self.settled}) may not exceed total ({self.total})"
+            raise ValueError(msg)
+        complete = self.state is BatchState.COMPLETE
+        if complete != (self.settled == self.total):
+            msg = (
+                f"state must be COMPLETE if and only if every item has settled; got "
+                f"{self.state.name} with settled={self.settled} of total={self.total}"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class BatchOutcomeKind(StrEnum):
+    """How one item of a batch ended — exactly one of four (ADR-0143 §4).
+
+    The taxonomy is the seam's own, and is justified by what a caller must *do*
+    differently with each: read a result, decide on a disposition, resubmit the
+    item in a new batch, or stop. That it agrees with what the vendor surfaces
+    report is convergence on the same four facts about a unit of work, not a
+    vendor shape crossing the seam — nothing on :class:`BatchItemOutcome` carries a
+    vendor status string, error code or response envelope.
+    """
+
+    SUCCEEDED = "succeeded"
+    """The model answered. The outcome carries that reply as a :class:`Message`."""
+
+    FAILED = "failed"
+    """The item was attempted and did not produce an answer. The outcome carries a
+    :class:`BatchItemFailure` and no message."""
+
+    EXPIRED = "expired"
+    """The provider's processing window closed before the item ran (ADR-0143 §6).
+    Carries neither payload. Resubmitting it is a new batch, not a retry of this
+    one, which is why there is no ``TIMED_OUT`` failure kind for it to be."""
+
+    CANCELLED = "cancelled"
+    """The batch stopped by an act outside this seam — an operator in a vendor
+    console, an account action. Carries neither payload. It exists although
+    ADR-0143 §10 gives the seam no ``cancel``: an outcome vocabulary with nowhere
+    to put the fact would force an implementation to report it as ``FAILED`` or
+    ``EXPIRED``, both false, and one of them carrying a disposition a caller would
+    act on."""
+
+
+class BatchFailureKind(StrEnum):
+    """Why one item of a batch failed, in ``ModelError``'s own vocabulary (ADR-0143 §5).
+
+    Seven members, each corresponding to a class in ``core/errors.py`` and taking
+    that class's two flags, so a caller that already reasons about
+    ``retryable``/``routable`` needs no second vocabulary whether an answer came
+    through ``complete`` or through a batch.
+
+    The correspondence is deliberately **not** a bijection, and both gaps are
+    decisions. There is no counterpart to ``ModelTimeoutError``: a batch item has
+    no per-request deadline of its own, and the only clock over it is the
+    processing window, whose exhaustion is
+    :attr:`BatchOutcomeKind.EXPIRED` rather than a failure. And
+    :attr:`INVALID_REQUEST` corresponds to no class at all, because at the
+    ``complete`` seam a malformed request is *raised* under ADR-0066 §3 and never
+    returned — here the whole-batch refusal of ADR-0143 §3 covers the malformed
+    items ``submit`` can see, and this kind is what remains for an item a provider
+    rejects for a reason ``submit`` could not check.
+    """
+
+    AUTHENTICATION = "authentication"
+    """The provider refused the credential — ``ModelAuthError``'s disposition."""
+
+    RATE_LIMITED = "rate_limited"
+    """The provider throttled the item — ``ModelRateLimitError``'s disposition."""
+
+    UNAVAILABLE = "unavailable"
+    """The provider was unreachable or failing — ``ModelUnavailableError``'s."""
+
+    CONTENT_FILTER = "content_filter"
+    """The provider's safety filter refused it — ``ModelContentFilterError``'s."""
+
+    UNUSABLE_RESPONSE = "unusable_response"
+    """An answer came back that could not be used — ``ModelResponseError``'s."""
+
+    UNKNOWN = "unknown"
+    """Nothing above matched — a bare ``ModelError``'s conservative disposition."""
+
+    INVALID_REQUEST = "invalid_request"
+    """The provider rejected the request itself, for a reason ``submit`` could not
+    check ahead of it. Takes ADR-0066 §3's disposition for a malformed request:
+    neither retryable nor routable, because it reproduces identically on every
+    attempt from every route."""
+
+    @property
+    def retryable(self) -> bool:
+        """Whether a repeat of this same item, to this same provider, could succeed.
+
+        Declared once here rather than per consumer, the shape ``core/errors.py``
+        ratified for ``ModelError.retryable`` and :class:`ToolFailureKind` already
+        copies: it is computable from the enum's own declaration and is the same
+        answer for every consumer, which is ADR-0016 §2's test for a semantic
+        intrinsic to a type.
+
+        Raises:
+            KeyError: If a member was added without a value in
+                ``_BATCH_RETRYABLE_BY_KIND``. Loud by construction — a default
+                would let a new kind acquire a retry policy nobody chose.
+        """
+        return _BATCH_RETRYABLE_BY_KIND[self]
+
+    @property
+    def routable(self) -> bool:
+        """Whether a *different* provider could plausibly succeed at this item.
+
+        Raises:
+            KeyError: If a member was added without a value in
+                ``_BATCH_ROUTABLE_BY_KIND``, for the reason above. Note that
+                routing a *batch* is incoherent — a handle issued by one provider
+                is meaningless to another (ADR-0143 §2) — so this flag is advice to
+                a caller assembling the **next** batch, not a promise the seam
+                will re-route this one.
+        """
+        return _BATCH_ROUTABLE_BY_KIND[self]
+
+
+#: Exhaustive over :class:`BatchFailureKind`; a missing member raises rather than
+#: defaulting, so adding a kind without choosing its disposition fails loudly.
+#: Each value is the ``retryable`` flag ``core/errors.py`` declares for the class
+#: ADR-0143 §5 pairs the kind with.
+_BATCH_RETRYABLE_BY_KIND: Mapping[BatchFailureKind, bool] = {
+    BatchFailureKind.AUTHENTICATION: False,
+    BatchFailureKind.RATE_LIMITED: True,
+    BatchFailureKind.UNAVAILABLE: True,
+    BatchFailureKind.CONTENT_FILTER: False,
+    BatchFailureKind.UNUSABLE_RESPONSE: False,
+    BatchFailureKind.UNKNOWN: False,
+    BatchFailureKind.INVALID_REQUEST: False,
+}
+
+#: The ``routable`` half of the same correspondence, on the same terms.
+_BATCH_ROUTABLE_BY_KIND: Mapping[BatchFailureKind, bool] = {
+    BatchFailureKind.AUTHENTICATION: True,
+    BatchFailureKind.RATE_LIMITED: True,
+    BatchFailureKind.UNAVAILABLE: True,
+    BatchFailureKind.CONTENT_FILTER: False,
+    BatchFailureKind.UNUSABLE_RESPONSE: True,
+    BatchFailureKind.UNKNOWN: False,
+    BatchFailureKind.INVALID_REQUEST: False,
+}
+
+
+class BatchItemFailure(BaseModel):
+    """Why one item failed, as a **value** rather than as an exception (ADR-0143 §5).
+
+    Returned, never raised, for the reason ADR-0029 §8 gives and
+    :class:`ToolBindingError`'s docstring quotes: "an exception has no
+    ``failure.kind.retryable`` to read, so there is nothing for a retry decision to
+    be made from". A batch's whole point is that one item's refusal must not
+    destroy the other 1,985 results, and an exception is not a container that can
+    hold 1,986 answers.
+
+    Attributes:
+        kind: The disposition-carrying classification a caller decides from.
+        detail: Operator-facing text saying what the provider reported. Free-form
+            and never parsed; the decision is ``kind``'s.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: BatchFailureKind = Field(description="The classification a retry decision reads.")
+    detail: EncodableText = Field(description="Operator-facing account of what went wrong.")
+
+
+class BatchItemOutcome(BaseModel):
+    """How one submitted item ended, matched to its request by ``item_id``.
+
+    ``fetch`` returns exactly one of these per submitted item — no more, no fewer,
+    and none for an ``item_id`` that was not submitted (ADR-0143 §4). **The order
+    is unspecified**, and an implementation is not required to make it stable: the
+    vendor's results arrive unordered, so a caller matches by ``item_id`` and never
+    by position.
+
+    The optional pair is bound to ``kind`` by the type rather than left to the
+    caller: a ``message`` is present if and only if the kind is ``SUCCEEDED``, and a
+    ``failure`` if and only if it is ``FAILED``. The two payload-free kinds carry
+    neither.
+
+    Attributes:
+        item_id: The caller's own id, byte-for-byte as it was submitted.
+        kind: Which of the four ways this item ended.
+        message: The assistant's reply, present exactly on ``SUCCEEDED``.
+        failure: The classification and detail, present exactly on ``FAILED``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    item_id: NonBlankEncodableText = Field(
+        description="The caller's id, byte-for-byte as it was submitted."
+    )
+    kind: BatchOutcomeKind = Field(description="Which of the four ways this item ended.")
+    message: Message | None = Field(
+        default=None, description="The assistant's reply; present exactly on SUCCEEDED."
+    )
+    failure: BatchItemFailure | None = Field(
+        default=None, description="Why it failed; present exactly on FAILED."
+    )
+
+    @model_validator(mode="after")
+    def _payload_matches_the_kind(self) -> BatchItemOutcome:
+        """Bind the two optional fields to ``kind``, in both directions (ADR-0143 §9).
+
+        Both directions, because each mis-reads differently: a ``SUCCEEDED``
+        outcome with no message is an answer a caller cannot read, and a
+        ``FAILED`` one with no failure is a refusal carrying no disposition to
+        decide from — which is precisely what returning the failure as a value was
+        meant to avoid.
+        """
+        wants_message = self.kind is BatchOutcomeKind.SUCCEEDED
+        if (self.message is not None) != wants_message:
+            msg = (
+                f"a message is carried if and only if the outcome is SUCCEEDED, "
+                f"not {self.kind.name}"
+            )
+            raise ValueError(msg)
+        wants_failure = self.kind is BatchOutcomeKind.FAILED
+        if (self.failure is not None) != wants_failure:
+            msg = f"a failure is carried if and only if the outcome is FAILED, not {self.kind.name}"
+            raise ValueError(msg)
+        return self
+
+
 # --- memory: a record, where it came from, when it is believed (ADR-0005) ----
 # The four typed kinds and their discriminated union, plus the two axes every
 # record carries: `Provenance` (how it was learnt, and how much to trust it)
