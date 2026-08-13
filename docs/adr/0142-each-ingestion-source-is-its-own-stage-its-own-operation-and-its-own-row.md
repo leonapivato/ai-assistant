@@ -286,10 +286,10 @@ to every job is a scheduler decision and is not this one's to take.
 
 > **Normative.** For each ingestion source, one **stem** names all three of its
 > artefacts: the engine operation is `ingest_<stem>`, the scheduler row's name is
-> `<stem>_reader`, and the arming `Settings` field is `<stem>_reader_interval`.
-> The stem is the source's declared `Reader.name` where that is a valid Python
-> identifier; where it is not, the stem is named explicitly by the decision that
-> adds that source, and is never derived silently.
+> `<stem>_reader`, and the arming `Settings` field is `<stem>_reader_interval`. A
+> stem matches `[a-z][a-z0-9_]{0,56}`. It is the source's declared `Reader.name`
+> where that matches; where it does not, the decision adding that source names a
+> matching stem explicitly, and no stem is ever derived silently.
 
 > **Normative.** `Engine.ingest` is renamed `Engine.ingest_calendar` and its
 > constructor parameter and attribute are renamed from `ingestion` to
@@ -305,18 +305,36 @@ ratified `email_reader_interval` and fixes the email reader's identity as
 chosen. Three artefacts named by one stem are three artefacts a registry can
 later enumerate mechanically (§8), which is worth more than the saved keystrokes.
 
-**The escape clause exists because a declared identity is not a Python
-identifier, and the corpus is explicit that it need not be.** `Reader.name`
-returns `str` and the identity that lands on a reading is `Identifier` in
-`core/types.py` — "A non-blank, stripped identifier that has a UTF-8 encoding",
-and nothing more; `VisibleIdentifier` is a separate type and #62 still holds the
-canonical-syntax question. So a future reader may legitimately declare
-`"rss-feed"`, which yields no legal method name and would otherwise force a
-choice between an unimplementable rule and renaming a reader's declared identity
-to suit the engine. A reader's identity is ADR-0093 §7's, decided for the
-reader's own reasons, and this rule does not get to reach it. Both identities
-this ADR governs are valid Python identifiers, so the derivation is total over
-the sources in scope and the escape fires for nobody today.
+**The grammar is the intersection of the three domains a stem has to be legal
+in, stated once rather than left to be discovered.** `ingest_<stem>` is a Python
+method name; `<stem>_reader_interval` is a `Settings` field name; and
+`ingest_<stem>` is also the `seam` string `Engine._tracked` passes into the
+`OPERATION` trace, which `core/types.py` types as `TraceLabel` and validates
+against `[a-z][a-z0-9_]{0,63}` — lowercase ASCII, leading letter, sixty-four
+characters. `ingest_` spends seven of those, which is where the fifty-seven comes
+from. `[a-z][a-z0-9_]{0,56}` satisfies all three at once, and both stems this ADR
+governs — `calendar` and `email` — match it.
+
+**A declared identity satisfies none of that, and the corpus is explicit that it
+need not.** `Reader.name` returns `str`, and the identity that lands on a reading
+is `Identifier` in `core/types.py` — "A non-blank, stripped identifier that has a
+UTF-8 encoding", and nothing more; `VisibleIdentifier` is a separate type and #62
+still holds the canonical-syntax question. So `"rss-feed"` (no legal method name),
+`"RSS"` (a legal method name and an illegal trace label) and a fifty-eight
+character lower-case identity (legal everywhere except the seam, by one character)
+are all identities a future reader may declare in good standing. A reader's
+identity is ADR-0093 §7's, decided for the reader's own reasons, and a naming rule
+of the engine's does not get to reach back and constrain it — so the derivation
+yields where it must, and the source's own decision names the stem instead.
+
+**The failure this forecloses is silent, which is why the grammar is on the stem
+rather than on a reviewer's eye.** ADR-0119 §5 makes the emitter subordinate to
+the work — `Engine._tracked` states it as "no trace failure reaches `coro`'s
+caller" — so an over-long or upper-case seam does not fail the operation. It
+raises inside the emitter, is swallowed, and that source's ingestion simply emits
+no `OPERATION` record at all: the operation succeeds forever while the
+observability §4 chose this whole shape to buy is gone, with nothing anywhere
+saying so.
 
 **One stem across all three artefacts, rather than a per-artefact allowance.** A
 row name and a `Settings` field could each carry a hyphen where a method cannot,
