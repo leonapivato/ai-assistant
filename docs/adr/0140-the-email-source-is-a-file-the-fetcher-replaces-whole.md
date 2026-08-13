@@ -267,6 +267,28 @@ fires on the first source whose natural output really is a directory.
 > any interval, and may not widen or narrow its window on anything the fetcher
 > does.
 
+> **Normative.** Every instant this ADR's sections compute **saturates** at the
+> representable bounds: where `read_at - email_window_past` is not representable
+> the lower edge is the minimum representable instant, and likewise at the maximum.
+> This governs §6's `covers_from` as well as the window edge, and none of this
+> arithmetic raises.
+
+**The saturation clause is stated here rather than inherited, and adversarial
+review was right that inheriting it does not work.** ADR-0093 §7b's saturation
+rule is scoped in its own words to "every instant **these sections** compute" —
+its sections, about its window and its seek anchor — so it does not reach a second
+reader, and an earlier draft of §12 claimed it in unmarked prose, which ADR-0089
+§3 makes an obligation on nobody. The hazard is §7b's own and transfers exactly:
+§12's range check makes an overflow unreachable from configuration alone but not
+from configuration *and* a clock, and "a sensor is not entitled to assume where in
+time the clock sits". Without the clause, one implementation clamps and reads the
+store while another raises a wrapped overflow that escapes ADR-0093 §8's two
+outcomes entirely. Saturation is chosen for §7b's reason unchanged: it loses
+nothing, because there is no instant before the minimum for a message to have been
+delivered at, so the clamped window and the ideal one select the same messages —
+and it is deliberately not a refusal, because a clock that near the limit is a
+wiring problem the reader neither causes nor can diagnose.
+
 **The unboundedness is real and it is on the fetcher's side of the file.** A mail
 account grows forever, which is why ADR-0093 §5 named a mailbox among the sources
 that cannot be re-read in full. What §5's clause actually predicates on is the
@@ -537,6 +559,56 @@ ADR relies on is the narrower one §5 relies on: a re-read destroys nothing.
 > **Normative.** `arrived_in_window` is a count of what **this reader parsed from
 > the store**. It is not a claim about the account, is never presented as one, and
 > no consumer may read it as a count of mail received.
+
+> **Normative.** `SourceReading.facet` is widened from `CalendarFacet | None` to
+> `CalendarFacet | EmailFacet | None`, as ADR-0096 §5 requires of each later ADR
+> that adds a facet.
+
+> **Normative.** That union is made explicitly **discriminated** on a new field
+> `kind`, carried by every concrete facet type as its own `Literal` tag —
+> `CalendarFacet` gains `kind: Literal["calendar"]` and `EmailFacet` declares
+> `kind: Literal["email"]`. Every facet type added later carries one.
+
+> **Normative.** `kind` is defaulted to its type's own tag, so no existing
+> construction site of `CalendarFacet` changes and no fixture, fake or persisted
+> value is invalidated.
+
+> **Normative.** `kind` is reserved on every facet subclass exactly as `source`,
+> `read_at` and `as_of` are (ADR-0096 §1): no subclass redefines it, and no
+> subclass's payload vocabulary may shadow it.
+
+**This is ADR-0096 §5's second clause discharged at the moment its condition
+fires, and the lane owed it rather than the implementation.** §5 rules that the
+annotation is "widened by each later ADR that adds a facet", and that "when a
+second concrete type joins that annotation, the union is made explicitly
+**discriminated**, each member carrying its own literal tag, so that no payload's
+facet type is decided by inference". **This ADR is that second type**, so both
+clauses fire here and nowhere else — an implementation lane that met the first and
+missed the second would ship a smart union in which "two facets that differ only in
+a scalar could parse as each other, quietly", which is §5's own stated defect. An
+earlier draft of §13 listed only `EmailFacet` and `CurrentContext.email`, leaving
+`SourceReading.facet` annotated `CalendarFacet | None` and the reader-to-context
+handoff with no satisfiable contract at all; adversarial review found it.
+
+**A separate `kind` rather than reusing `source`, and the reason is the validator
+one section over.** `source` looks like a free discriminator — it already carries
+the reader's declared identity, and the two values would agree. It cannot be one:
+ADR-0096 §5's model validator requires `facet.source` to equal the *reading's*
+`source`, which is a plain `str` carrying `Reader.name`, so making the facet's
+`source` a `Literal` would constrain by type a value that is cross-checked against
+free text, and a mismatch would surface as a union-resolution failure naming the
+wrong fact. The two are different facts and stay two fields: `source` says who
+produced the value, `kind` says which payload shape it is. Defaulting `kind` is
+what keeps the widening additive, which is ADR-0008 §1's pattern and the property
+§5 relied on when it called this "one more line in the change that ADR
+authorises".
+
+**ADR-0096 §5's other three clauses bind this facet unchanged and are not
+restated as though they were new**: the facet's stamp is the reading's, the model
+validator refuses a facet stamped otherwise, and the `context/` adapter
+contributes under the field it was wired for and raises `ContextError` on a type
+mismatch. The last of those acquires a second instance here for the first time,
+which is exactly the wiring bug it was written against.
 
 **The facet's job is the one thing the beliefs cannot answer at request time, and
 for email that is volume rather than presence.** ADR-0096 §6 chose the calendar's
@@ -846,9 +918,9 @@ rather than copied from the calendar's nine** — which §3 is the argument for.
   what the assistant needs; a mailbox has no future, so `email_window_future` would
   bound nothing. The remaining edge may **not** be zero, for ADR-0093 §7a's reason
   applied unchanged: a zero-width window is a reader that reads nothing while
-  reporting health. It is bounded above at ten years for §7b's overflow reason —
-  `read_at - email_window_past` must be a representable instant, and saturation
-  under §7b covers the rest.
+  reporting health. It is bounded above at ten years for ADR-0093 §7b's overflow
+  reason — the ceiling makes an overflow unreachable from configuration alone, and
+  §3's own saturation clause covers the case a clock can still reach.
 - **No expansion budget.** `calendar_max_expansion` exists because one `VEVENT`
   can generate hundreds of thousands of occurrences, so neither the byte cap nor
   the entry cap bounds the work of finding them. A mailbox has no generator: the
@@ -887,8 +959,16 @@ would be one keystroke away in a `Settings` field, which is why there is no fiel
 later lane after this ADR merges:**
 
 - **`core/types.py`** gains `EmailFacet` and the optional field
-  `CurrentContext.email` (§6). Additive, and every existing construction site
-  stays valid, which is ADR-0008 §1's pattern and ADR-0096 §1's.
+  `CurrentContext.email` (§6).
+- **`core/types.py`** widens `SourceReading.facet` to
+  `CalendarFacet | EmailFacet | None`, made an explicitly **discriminated** union
+  on a new `kind` field, and adds `kind` to `CalendarFacet` with its tag as the
+  default (§6, ADR-0096 §5). **This is a change to a ratified type and is the one
+  place this ADR touches an existing shape**; it is additive and defaulted, so
+  every existing construction site stays valid, which is ADR-0008 §1's pattern and
+  the property ADR-0096 §5 was counting on.
+- **`tests/core/test_facet_coverage.py`** grows `kind` in the reserved-name set it
+  already enforces for `source`, `read_at` and `as_of` (§6, ADR-0096 §1).
 - **`core/config.py`** gains §12's seven `Settings` fields with their ranges and
   the load-time refusal.
 
@@ -1008,8 +1088,20 @@ change here is a stacked addition or a deferral discharged on its own terms.
   possible use of a clause that has an exception available.**
 - **ADR-0096 §1 and §6** — one optional `CurrentContext` field per facet, every
   facet a `ContextFacet`, no entry text in the calendar facet. §6 adds a second
-  facet in exactly that shape and states the no-text rule for its own payload. §6's
-  sentences are about the *calendar* facet and stay true of it. **Addition.**
+  facet in exactly that shape and states the no-text rule for its own payload.
+  ADR-0096 §6's sentences are about the *calendar* facet and stay true of it. §6's
+  reservation of `kind` extends ADR-0096 §1's reserved-name rule to a fourth name
+  by the same argument that section makes for the first three. **Addition.**
+- **ADR-0096 §5** — the `facet` field, its widening and its discriminator. §6
+  widens the annotation and makes the union discriminated because **§5 instructs
+  the later facet ADR to do exactly that**, at the condition §5 names ("when a
+  second concrete type joins that annotation"). Doing what a clause instructs is
+  not amending it: a reader holding only ADR-0096 §5 and confronted with a second
+  facet reaches §6's answer, and every sentence of §5 stays true — including its
+  three clauses this ADR does not touch, which §6 records as binding unchanged.
+  Adding a defaulted `kind` to `CalendarFacet` is the mechanical consequence §5
+  called "one more line in the change that ADR authorises". **Addition, and a
+  clause discharged at its own stated trigger.**
 - **ADR-0097 §1, §2, §5 and ADR-0133 §1** — the grant model. §9 adds a source to
   it and adds no member, no mechanism and no exception. §9's fourth clause is a new
   obligation on a *surface*, stated about a component ADR-0097 could not see; it
@@ -1046,6 +1138,10 @@ paragraphs above.
 - **The email source is buildable against a settled contract.** No Protocol
   changes, no triad is owed, and `Reader`'s conformance suite gets the second
   implementation ADR-0095 §3 said it was waiting for.
+- **The facet union becomes discriminated, which is the second facet's bill and
+  not this source's.** ADR-0096 §5 conditioned it on a second concrete type
+  arriving, and one has. Every later facet pays a smaller version: a `Literal` tag
+  and a line in the annotation.
 - **#649 stops blocking email and stays open for what it is actually about.** The
   single-file arrangement satisfies ADR-0093 §7 as ratified, and it is chosen on
   three correctness properties rather than on compliance, so the choice survives
