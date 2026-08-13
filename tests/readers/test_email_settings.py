@@ -49,14 +49,19 @@ _ABSOLUTE = Path("/srv/mail/inbox.mbox")
 
 @pytest.fixture(autouse=True)
 def _no_email_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep a developer's own ``.env`` out of the defaults being asserted."""
-    for name in (
-        "ASSISTANT_EMAIL_SOURCE_PATH",
-        "ASSISTANT_EMAIL_READER_INTERVAL",
-        "ASSISTANT_EMAIL_WINDOW_PAST",
-        "ASSISTANT_EMAIL_MAX_MESSAGES",
-    ):
-        monkeypatch.delenv(name, raising=False)
+    """Keep a developer's own ``.env`` out of the defaults being asserted.
+
+    **Derived from the model rather than listed**, because a hand-written list
+    covers the fields whoever wrote it was thinking about and silently stops
+    covering the eighth. Every assertion below about a *default* is only as sound
+    as this fixture: with ``ASSISTANT_EMAIL_MAX_BYTES`` set in the shell,
+    ``Settings()`` reads it and the default test fails for a reason that has
+    nothing to do with the code — or, worse, a wrong default passes because the
+    environment happens to carry the right value.
+    """
+    for name in Settings.model_fields:
+        if name.startswith("email_"):
+            monkeypatch.delenv(f"ASSISTANT_{name.upper()}", raising=False)
 
 
 # --- disabled by default (ADR-0093 §7, ADR-0140 §12) ------------------------
