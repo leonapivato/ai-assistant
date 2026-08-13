@@ -199,10 +199,12 @@ one paste convert an arbitrary later transmission into a user disclosure, which 
 the transitivity §4 refuses on the recipient axis, taken along the time axis
 instead. §7 states what this costs, honestly.
 
-### 3. The surviving claim: system-selected Tier 0 is only ever a credential, to the party that issued it
+### 3. The surviving claim: system-selected Tier 0 is only ever a credential, to the service it authenticates this system to
 
 > **Normative.** No component selects for transmission a span it holds as Tier 0
-> to any recipient other than the party that issued that credential.
+> to any recipient other than **the service that credential authenticates this
+> system to** — the audience it was obtained for and presented against, which is
+> not necessarily the party that issued it.
 
 > **Normative.** A user-authored span is never a route by which this system
 > discloses Tier 0 it holds. No component places a value it holds as Tier 0 into
@@ -216,16 +218,35 @@ expensive way: three clauses in one section were "stated over something this
 system cannot obtain" and were rewritten over what a serialiser and a caller do,
 "which is checkable in a test".
 
+**The audience is the bound, not the issuer, and #94's drafted wording does not
+survive generalisation.** #94 states the claim as "the provider credential, **to
+the provider that issued it**", which is exact for the model boundary because
+there the issuer and the audience are the same party. They routinely are not:
+an OAuth authorization server issues an access token that a *resource server*
+consumes, and a `tools/` integration holding such a token must present it to the
+resource API rather than back to its issuer. Bounding on the issuer would forbid
+the ordinary delegated-credential integration outright, and would sit against
+ADR-0017 §3's own transport-pinning condition — "transport pinned to the
+**connected service**". Adversarial review found this on round 1 and the clause is
+stated on the audience instead. The property the bound is protecting is unchanged:
+a credential goes to exactly one place, decided when the credential was obtained,
+and never to a recipient chosen later.
+
 **It holds today at all three boundaries ADR-0124 §1 names, which is what makes it
 worth ratifying now.** `models/` sends the provider credential to the configured
 provider (ADR-0017 §2's declaration of what it transmits). A designated `tools/`
 seam would read an integration's credential through `Secrets` (ADR-0004 §3 as
-replaced by ADR-0125) and present it to that integration's own upstream. The
-remote transport's client presents its enrolment credential to the hub that
-enrolled it (ADR-0124 §1's second clause: "sends only two things: the connect
+replaced by ADR-0125) and present it to the service that credential authenticates
+it to. The remote transport's client presents its enrolment credential to the hub
+that enrolled it (ADR-0124 §1's second clause: "sends only two things: the connect
 frame §7 requires, and the request it was asked to make"). Everything else the
 system selects and sends is Tier 1 or Tier 2. There is no fourth case, and a lane
 that finds itself wanting one is looking at a bug.
+
+**Where the audience is not determinable, the clause bites rather than lapses.** A
+credential whose audience nobody recorded has no permitted recipient under this
+clause, which is the fail-closed direction and the same default §2 takes for a
+span with no recorded provenance. It is not licence to pick a plausible one.
 
 **The second clause closes the bypass the first would otherwise leave open.**
 Without it, a component holding a credential could embed it in the outbound
@@ -236,18 +257,26 @@ material it assembled.
 
 ### 4. The conduit holds where the user's own act chose the recipient — and at `tools/` it does not
 
-> **Normative.** Where the recipient is one the user's own act in that exchange
-> selected, a user-authored span is disclosed by the user, and its transmission is
-> not a disclosure this system made on the user's behalf. Sending the user's
-> message to a model provider the user has explicitly configured (ADR-0004 §2, as
-> amended 2026-07-19) is such a transmission, and a credential the user pasted
-> into it does not make the call non-compliant.
+> **Normative.** A user-authored span is disclosed by the user, and its
+> transmission is not a disclosure this system made on the user's behalf, where
+> the recipient was **determined by an act of the user** — the user directing this
+> exchange to it, or the user having explicitly configured it as a recipient for
+> exchanges of this kind — and **not** determined from content this system
+> selected.
 
-> **Normative.** User-authored provenance is **not transitive** across a recipient
-> the user's own act did not select. At the `tools/` seam the recipient is
-> selected per call, so a user-authored span forwarded there is disclosed by this
-> system in respect of that recipient, and its transmission needs the recipient
-> authorisation ADR-0017 §3 already conditions the seam on.
+> **Normative.** Sending a user-authored span to a model provider the user has
+> explicitly configured (ADR-0004 §2 as amended 2026-07-19) is such a
+> transmission, **fallback to another member of that same configured set
+> included** (ADR-0013 §6), and a credential the user pasted into it does not make
+> the call non-compliant.
+
+> **Normative.** User-authored provenance is **not transitive** to a recipient
+> determined from content this system selected. At the `tools/` seam the recipient
+> is the semantic recipient the arguments select, so a user-authored span
+> forwarded there is disclosed by this system in respect of that recipient, and
+> its transmission needs the recipient authorisation ADR-0017 §3 already
+> conditions the seam on — including where the destination first appeared in the
+> user's own words, a case §3's condition governs and this ADR does not.
 
 **Provenance answers who discloses the *content*; authorisation answers who chose
 the *recipient*. The conduit argument is the conjunction of the two, and it is
@@ -259,9 +288,25 @@ At `models/` both hold, and they hold structurally rather than by luck:
   §2 as amended admits "only model providers the user has explicitly configured",
   and ADR-0013 §6's constraints keep fallback from widening it — "fallback is not
   permission to reach a provider the user never chose".
-- The user's act of sending the message **is** the act of selecting that
-  recipient. A person typing into an assistant they configured against a provider
-  knows, at the moment of typing, the class of party that receives it.
+- The user's act of configuring that set **is** the act of selecting the
+  recipient, and it is a **standing** act rather than a per-exchange one. A person
+  typing into an assistant they configured against a provider knows, at the moment
+  of typing, the class of party that receives it.
+
+**The user act is the configuration, not the send, and an earlier draft got this
+backwards.** That draft required the recipient to be "one the user's own act **in
+that exchange** selected" and then declared a send to any configured provider such
+a transmission — which ADR-0013 §6's fallback falsifies in one step: providers A
+and B are both configured, A fails, and `RoutingProvider` re-sends the exchange to
+B. The router selected B; the user, in that exchange, selected nothing. The
+antecedent classified the fallback as a system disclosure while the sentence
+beside it classified it as a conduit transmission. Adversarial review found the
+contradiction on round 1. Keying on *how the recipient was determined* — by a user
+act, standing or immediate, rather than from content the system selected — makes
+the fallback plainly conduit, because every member of the route list is by
+ADR-0013 §6 a provider "the user explicitly configured" and fallback "is not
+permission to reach a provider the user never chose". Nothing about the model
+boundary rests on the user having thought about it during that particular turn.
 
 At `tools/` neither half survives intact, and ADR-0017 §3 says so in its own
 conditions before this ADR arrives. The destination is "the semantic recipient the
@@ -277,6 +322,19 @@ tool transmission.** What provenance settles there is *whose words these are* �
 which is what a payload description and an approver need in order to be truthful
 (§5) — and nothing about *who may receive them*. The recipient half stays exactly
 where ADR-0017 §3 put it.
+
+**The user naming a destination out loud does not collapse the two boundaries,
+and the third clause says where that case is decided.** A user who types *email
+bob@example.com the paragraph below* has performed a user act about a recipient —
+but what reaches the seam is an argument a model produced, and by §2 a destination
+this system extracted from a span is content it selected, not a recorded user act.
+Reading it the other way would let any address a model lifted out of text
+authorise its own send, which is §2's inference problem arriving at the one place
+it costs the most. The case is real and it is genuinely covered: ADR-0017 §3's
+condition asks for "recipient authorisation that traces to **a user decision** or
+a standing user policy", which is exactly where a user naming a destination is
+given effect, per call and bound to the resolved destination. This ADR routes the
+case there rather than answering it.
 
 **Two things this deliberately does not do.** It does not forbid forwarding a
 user's words to a third party: that is most of what an integration is for, and
