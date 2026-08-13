@@ -397,15 +397,21 @@ without prohibiting calls the product already makes."
 
 ### 5. The pasted credential is classified, not exempted: a user-authored free-text span asserts no tier
 
-> **Normative.** A span is **free text** for the purposes of this ADR only where
-> the implementation places it into no field whose semantics establish its tier.
-> A value placed into such a field — a recipient address, an account identifier, a
-> credential reference, or any other argument whose meaning the implementation
-> knows — is **not** free text, whoever authored it, and surrounding it with prose
-> does not make it so.
+> **Normative.** A span is **free text** for the purposes of this ADR wherever the
+> implementation places it into no field whose semantics **establish the tier of
+> its value**. A field establishes that tier only where every value it can hold
+> carries the same tier by what the field is for — a recipient address, an account
+> identifier, a credential reference. A field that carries arbitrary text the user
+> supplied — a message body, a note, a subject line — establishes no tier and its
+> value stays free text, however well the implementation knows what that field is
+> for.
 
 > **Normative.** A value that is not free text is classified and described at its
 > tier under ADR-0004 §1 as usual, and this ADR's no-tier rule does not reach it.
+
+> **Normative.** Surrounding a value whose field establishes its tier with prose,
+> or moving it into a field that establishes none, does not make it free text and
+> does not relieve the implementation of describing it at its tier.
 
 > **Normative.** A payload description or an audit record states **no tier** for a
 > user-authored free-text span. It states the span's provenance and its extent,
@@ -429,7 +435,7 @@ middle one is the load-bearing block:
   words, verbatim, N characters, to <destination>*.
 - It therefore cannot **pass inspection**, because it never acquires a tier claim
   to pass inspection with. A policy keyed on tier has nothing to key on, and the
-  fourth clause says so explicitly rather than leaving it to be inferred from the
+  fifth clause says so explicitly rather than leaving it to be inferred from the
   absence.
 
 **"Classified, not exempted" is exactly what this is, and the distinction is worth
@@ -458,11 +464,25 @@ own §9: a rule that mattered was written where the document's own regime discar
 it. The definition now carries its scope inside the clause, which is what ADR-0089
 §2 asks of every mark.
 
-**The line the definition draws is knowledge, not shape.** Free text is the case
-where the system holds no knowledge of the contents; a named argument is the case
-where it does. That is why the no-tier rule cannot be escaped by wrapping a known
-value in prose, and equally why it cannot be extended to cover a field the
-implementation itself gave a meaning to.
+**The line is drawn on whether the field determines the tier, and the round-2
+repair drew it on whether the implementation knows the field's purpose — which is
+a different line and a wider one.** That draft excluded "any other argument whose
+meaning the implementation knows", which sweeps in a tool's `message` parameter: a
+lane knows exactly what that field is for, so the value would not be free text,
+and the clause beside it would then require a tier the system cannot supply.
+Tier 1 is forbidden by §1, Tier 0 needs the detector §7 forbids anyone from
+buying a bound with, and the no-tier rule would have been made unavailable — the
+one span for which it exists left with no lawful description at all. Adversarial
+review found it on round 4. The test is now whether **every value the field can
+hold carries the same tier by what the field is for**, which a recipient address
+passes and a message body does not, and which is answerable from the tool's own
+definition rather than from its contents.
+
+**The anti-evasion property survives the narrowing, in its own clause.** What
+round 2 was defending against is an implementation escaping tiering by putting a
+known-tier value somewhere looser — wrapping it in prose, or moving it into a
+free-text field. That is stated over what the implementation *does with a value it
+already tiered*, which is checkable, rather than over what it knows about a field.
 
 ### 6. What must be recorded so an audit can tell the two apart
 
