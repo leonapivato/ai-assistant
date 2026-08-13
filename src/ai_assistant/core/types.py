@@ -7318,16 +7318,22 @@ TRACE_RECORD_SET_CAP: Final = 256
 
 
 class TraceKind(StrEnum):
-    """What kind of event a trace records (ADR-0119 §3).
+    """What kind of event a trace records (ADR-0119 §3, ADR-0141 §2).
 
-    Exactly four members, and §13e makes a fifth an ADR's to add: these are the
+    Exactly five members, and §13e makes a sixth an ADR's to add: these are the
     axis along which the tier discipline is stated, so membership is contract.
+    ``NOTIFICATION`` is that clause's first exercise — ADR-0141 §2 adds it,
+    ratified ahead of any emitter, because a notification ruling happens many
+    times *within* one engine call rather than once per call, so recording it as
+    an ``OPERATION`` would break ADR-0120 §3's one-trace-per-correlation
+    attribution rather than merely read oddly.
     """
 
     OPERATION = "operation"
     RETRIEVAL = "retrieval"
     MEMORY_WRITE = "memory_write"
     CONFIGURATION = "configuration"
+    NOTIFICATION = "notification"
 
 
 class TraceOutcome(StrEnum):
@@ -7457,7 +7463,7 @@ class EvaluationTrace(BaseModel):
             :class:`~ai_assistant.core.errors.TraceStoreError` rather than
             letting this default stand in for the id the row was supposed to
             have.
-        kind: Which of the four kinds of event this is.
+        kind: Which kind of event this is.
         seam: Where it happened, as a literal label the emitting module wrote.
         occurred_at: When it happened, stamped by the **emitter** from the
             ``Clock`` it already holds — never by the store on append, which

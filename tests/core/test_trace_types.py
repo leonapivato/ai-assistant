@@ -65,7 +65,10 @@ def _trace(**fields: Any) -> EvaluationTrace:
 @pytest.mark.parametrize(
     ("vocabulary", "members"),
     [
-        (TraceKind, {"operation", "retrieval", "memory_write", "configuration"}),
+        (
+            TraceKind,
+            {"operation", "retrieval", "memory_write", "configuration", "notification"},
+        ),
         (TraceOutcome, {"ok", "refused", "fault", "incomplete"}),
         (TraceRef, {"correlation", "conversation", "turn", "execution"}),
         (
@@ -88,6 +91,17 @@ def test_each_vocabulary_holds_exactly_the_ratified_members(
     is a break the other way.
     """
     assert {member.value for member in vocabulary} == members
+
+
+def test_the_notification_kind_is_spelled_as_ratified() -> None:
+    """ADR-0141 §2: the fifth member is ``NOTIFICATION``, valued ``notification``.
+
+    The equality above pins the *values* only, and nothing in the tree reads this
+    attribute yet — the emitter is a later lane (ADR-0141 §10), so the member
+    lands ahead of its first caller by golden rule 5. Pinned by name here for
+    that window, or a rename would pass every check until the emitter arrives.
+    """
+    assert TraceKind.NOTIFICATION.value == "notification"
 
 
 def test_the_record_set_cap_is_the_ratified_figure() -> None:
