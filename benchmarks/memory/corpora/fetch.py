@@ -33,6 +33,18 @@ DEFAULT_CACHE: Final = Path(__file__).resolve().parent.parent.parent / ".corpora
 #: memory — which matters because the largest artifact is 2.7 GiB.
 _CHUNK: Final = 1 << 20
 
+#: Seconds any single socket operation may block before the transfer is abandoned.
+#:
+#: **A per-operation bound, not a total-transfer one, and the distinction is the whole
+#: reason a number is safe here.** The largest pinned artifact is 2.7 GiB, so a cap on
+#: how long a download may take would refuse a slow but perfectly healthy connection.
+#: What this bounds is how long the socket may deliver *nothing*, which no honest
+#: transfer does. Without it `urlopen` inherits the global default of ``None`` and a
+#: peer that completes the handshake and then stalls hangs `fetch` — and with it the
+#: `run` command, which fetches on the way in — with no output and no exception path
+#: ever reached.
+_SOCKET_TIMEOUT: Final = 60.0
+
 
 class CorpusFetchError(RuntimeError):
     """A corpus could not be acquired, or the bytes were not the pinned bytes."""
@@ -151,7 +163,10 @@ def _download(url: str, target: Path) -> None:
         target: Where to write.
 
     Raises:
-        CorpusFetchError: If the scheme is not ``https``, or the transfer failed.
+        CorpusFetchError: If the scheme is not ``https``, or the transfer failed — a
+            stall included, since :data:`_SOCKET_TIMEOUT` turns one into a
+            ``TimeoutError``, which is an ``OSError`` and so takes the same path as any
+            other broken transfer.
     """
     if not url.startswith("https://"):
         # Checked rather than assumed, because everything downstream trusts these
@@ -165,7 +180,7 @@ def _download(url: str, target: Path) -> None:
     )
     try:
         with (
-            urllib.request.urlopen(request) as response,  # noqa: S310 — as above
+            urllib.request.urlopen(request, timeout=_SOCKET_TIMEOUT) as response,  # noqa: S310 — as above
             target.open("wb") as handle,
         ):
             shutil.copyfileobj(response, handle, _CHUNK)
