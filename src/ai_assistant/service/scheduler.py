@@ -246,6 +246,42 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       deployment is a lead comfortably larger than its interval. That is this
       producer's coverage argument and it is a bounded one.
 
+    * **Email reader** — ADR-0140's ingestion, and the **second source** on this
+      table rather than a second use of the first. ADR-0142 §4 gives each source
+      its own no-argument operation and §5 names all three of its artefacts from
+      one stem: the reader declares ``email``, so the row is ``email_reader``, the
+      arming field is ``email_reader_interval`` and the engine call is
+      ``ingest_email``. Three artefacts named by one rule are three a registry can
+      later enumerate mechanically, which is what §8 trades against not building
+      one yet.
+
+      **Its interval is its own and is never ``calendar_reader_interval``**
+      (ADR-0142 §1). The clause is bidirectional and marked: "No ingestion source's
+      arming field is derived from, defaulted from, or conditioned on another
+      source's." A deployment may run any subset of the configured sources'
+      ingestion jobs, including none and including all — so the calendar's row
+      being absent says nothing about this one, and the reverse.
+
+      **The reason the clause is marked rather than inferred** is that the breach
+      is silent and one-directional: defaulting ``email_reader_interval`` to
+      ``calendar_reader_interval`` when the former is unset would arm a read of the
+      user's mail because they had armed a read of their calendar. That is
+      ADR-0093 §7's consent failure arriving through a default rather than through
+      a flag, and it passes every test that only asks whether both jobs exist.
+
+      **Disabled by default for the calendar reader's reason exactly** (ADR-0093
+      §7), and ``Settings`` refuses an interval whose ``email_source_path`` is
+      unset (ADR-0140 §12) — so this entry can never arm a job with nothing to
+      read. The converse state *is* legal and is deliberately reachable: a path
+      with no interval builds the stage, arms no row, and leaves
+      ``Engine.ingest_email`` callable and reaching its grant gate (ADR-0142 §2).
+
+      **A failure here is this source's alone** (ADR-0142 §7). One ingestion job
+      raising ``ReaderError`` every tick neither disarms nor alters the outcome of
+      any other source's job; what the two share is §7's serial duty cycle, so a
+      long calendar read delays a due mail read by its own duration and a late tick
+      is never a correctness bug.
+
     **Consolidation is deliberately not here, and its absence is the decision.**
     Leg 7's chunked walk (ADR-0106, ADR-0111) is built and wired —
     ``Engine.consolidate`` exists and its stage is constructed by the composition
@@ -313,6 +349,7 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
             settings.calendar_upcoming_interval,
             engine.notice_upcoming_events,
         ),
+        ("email_reader", settings.email_reader_interval, engine.ingest_email),
     )
     return tuple(
         Job(name=name, interval=interval, run=run)

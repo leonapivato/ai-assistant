@@ -26,6 +26,7 @@ from ai_assistant.context import (
     AssemblingContextProvider,
     CalendarContextSource,
     ClockContextSource,
+    EmailContextSource,
 )
 from ai_assistant.core.config import EmbedderKind
 from ai_assistant.core.errors import ConfigurationError, ModelError
@@ -79,7 +80,7 @@ from ai_assistant.permissions import (
     ThresholdActionPolicy,
 )
 from ai_assistant.planning import ModelBackedPlanner, SqlitePlanStore
-from ai_assistant.readers import CalendarReader
+from ai_assistant.readers import CalendarReader, EmailReader
 from ai_assistant.tools import build_default_registry
 
 if TYPE_CHECKING:
@@ -87,7 +88,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.config import Settings
-    from ai_assistant.core.protocols import Embedder, TraceSink
+    from ai_assistant.core.protocols import Embedder, Reader, TraceSink
 
 
 #: What this layer tunes :class:`LearningLoop`'s retrieval to, and **passed
@@ -366,6 +367,26 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
     facet_reader = _build_calendar_reader(settings)
     ingestion_reader = _build_calendar_reader(settings)
     upcoming_reader = _build_calendar_reader(settings)
+    # And the same rule applied to the **second source** (ADR-0140, ADR-0142 §3).
+    # Two instances rather than three, because email has two consumers and not
+    # three: ADR-0140 §9 mints no producer for it, so there is no upcoming-event
+    # sibling to build. The count follows the consumers rather than the calendar's
+    # shape, which is the half a lane copying the block above gets wrong.
+    #
+    # **Separate instances is ADR-0140 §13's own deliverable**, stated there rather
+    # than left to ADR-0096 §5 by inference: "both consumers above are wired into
+    # the engine on **separate** ``EmailReader`` instances, neither sharing the
+    # other's". A root injecting one reader into both wires a hub in which a
+    # running scheduled ingest makes the request-path facet raise ``ReaderError``
+    # and vanish — every presence check passing while a ratified clause is
+    # breached.
+    #
+    # Built above the data directory for the calendar readers' reason exactly
+    # (#372): constructing one opens nothing and validates ADR-0140 §12's five
+    # figures, so a window or cap outside its range fails the build before any
+    # store is written.
+    email_facet_reader = _build_email_reader(settings)
+    email_ingestion_reader = _build_email_reader(settings)
     # The temporal core is built here, above the data directory, because it is what
     # *validates*: a non-conforming zone or a working-hours pair fails the build
     # before disk is touched (#372). The ``AssemblingContextProvider`` around it is
@@ -618,12 +639,14 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
             store=notifications, policy=notification_policy, outbox=outbox
         )
 
-        # The context provider, assembled now that the grant seam exists. Its
-        # calendar facet is registered only when a source is configured — a source
-        # with nothing to read would be I/O on personal data in exchange for nothing
-        # (ADR-0093 §7a). It carries no `required` marker, so a reader fault, a
-        # store fault or a withdrawn grant each degrade the facet and leave the rest
-        # of the context assembled (ADR-0008 §4, ADR-0026 §4).
+        # The context provider, assembled now that the grant seam exists. Each
+        # source's facet is registered only when **that source** is configured — a
+        # source with nothing to read would be I/O on personal data in exchange for
+        # nothing (ADR-0093 §7a, ADR-0140 §13) — and the two decisions read
+        # different fields and neither reads the other's (ADR-0142 §2). Neither
+        # carries a `required` marker, so a reader fault, a store fault or a
+        # withdrawn grant each degrade that one facet and leave the rest of the
+        # context assembled (ADR-0008 §4, ADR-0026 §4).
         context = AssemblingContextProvider(
             [
                 clock_source,
@@ -631,6 +654,11 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
                     []
                     if facet_reader is None
                     else [CalendarContextSource(reader=facet_reader, grants=grants)]
+                ),
+                *(
+                    []
+                    if email_facet_reader is None
+                    else [EmailContextSource(reader=email_facet_reader, grants=grants)]
                 ),
             ]
         )
@@ -813,6 +841,35 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
                 if ingestion_reader is None
                 else IngestionStage(reader=ingestion_reader, writes=writes, grants=grants)
             ),
+            # ADR-0140's ingestion, and the **second source's** stage rather than a
+            # second use of the first (ADR-0142 §3). It is a second construction of
+            # the same class — no new machinery at all, which is the strongest
+            # available evidence that the seam was cut in the right place at leg 6 —
+            # over the *same* write stage, so an ingested mail belief the policy
+            # defers parks a question the user can answer and one it stores is
+            # inspectable and forgettable through the surfaces that already exist.
+            #
+            # **A multiplexing stage is refused, and the reason is cadence rather
+            # than taste** (§3). One stage behind one operation is one scheduler row,
+            # and one row has one interval — so a multiplexer would have to grow a
+            # schedule of its own, which is ADR-0093 §11's registry arriving at the
+            # second source instead of the third. It would also fuse the failure
+            # modes: a `ReaderError` from one source would abort the loop and the
+            # sibling source would not be read at all that tick.
+            #
+            # **Wired on its own path and armed on its own interval** (§2), reading
+            # no field of the calendar's in either decision. Both clauses of §1 are
+            # visible right here: the stage exists whenever `email_source_path` is
+            # set, whatever the calendar is doing, and nothing defaults this
+            # source's arming from another's.
+            #
+            # Its **own** reader, never the one the context source holds
+            # (ADR-0096 §5, ADR-0140 §13).
+            email_ingestion=(
+                None
+                if email_ingestion_reader is None
+                else IngestionStage(reader=email_ingestion_reader, writes=writes, grants=grants)
+            ),
             # Leg 10's upcoming-event producer (ADR-0132). **The first holder of
             # ADR-0130 §3's seam**, and the reason `notification_writer` above
             # exists at all.
@@ -941,17 +998,27 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
             # having to know what a calendar is. A *sequence* rather than a mapping:
             # §7 rules that two readers declaring one identity at differing
             # locations is a configuration error the engine does not build through,
-            # and a mapping would deduplicate that conflict away unseen. The three
-            # instances this function builds agree by construction — all come from
-            # `calendar_reader_path` — which is exactly why the refusal has to be
+            # and a mapping would deduplicate that conflict away unseen. Each
+            # source's instances agree by construction — all of one source's come
+            # from one path field — which is exactly why the refusal has to be
             # expressed rather than assumed.
+            #
+            # **Each source's readers carry that source's own location, and the
+            # second source is what made that necessary** (ADR-0102 §6). Until email
+            # arrived this list read one field for every reader in it, which was
+            # correct only while every reader was a calendar's;
+            # `_configured_email_location` exists so that the disclosure a client
+            # renders before a user grants is *this* source's path and never a
+            # sibling's. A grant given against the wrong disclosed location is the
+            # uninformed grant ADR-0097 §9a exists to prevent, arriving through a
+            # wiring shortcut rather than through an encoding.
             grant_operations=GrantOperations(
                 store=grants,
-                sources=[
-                    HeldSource(reader.name, location=_configured_location(settings))
-                    for reader in (facet_reader, ingestion_reader, upcoming_reader)
-                    if reader is not None
-                ],
+                sources=_held_sources(
+                    settings,
+                    calendar=(facet_reader, ingestion_reader, upcoming_reader),
+                    email=(email_facet_reader, email_ingestion_reader),
+                ),
                 id_factory=_uuid,
                 clock=_utcnow,
             ),
@@ -1332,6 +1399,64 @@ def _build_calendar_reader(settings: Settings) -> CalendarReader | None:
     )
 
 
+def _build_email_reader(settings: Settings) -> EmailReader | None:
+    """Construct the configured email reader, or ``None`` if there is no store.
+
+    :func:`_build_calendar_reader`'s shape for the **second** source (ADR-0140,
+    ADR-0142 §2), and every sentence of that function's docstring about why this
+    layer may import ``ai_assistant.readers`` at all, and about why ``None`` is a
+    consent decision rather than a technical one, holds here unchanged. What is
+    worth stating separately is what differs.
+
+    **Keyed on ``email_source_path`` and on nothing else.** ADR-0142 §2 is marked:
+    "A source's ingestion stage is constructed by the composition root when **that
+    source's** path field is configured … Neither decision reads any other source's
+    fields." So this function consults no calendar field and no interval — a store
+    configured with no ``email_reader_interval`` is the legal, meaningful state in
+    which the reader exists, the facet is available to a turn, and no scheduler row
+    is armed.
+
+    **No timezone parameter, unlike the calendar's**, and the absence is
+    ``EmailReader``'s own consequence rather than an omission here: every instant it
+    reads is already an instant, because ADR-0140 §5's delivery header carries a
+    determinate offset and a ``Date`` that resolves to none is skipped. There is no
+    floating wall time for a zone to localise, so there is no second timezone source
+    for this layer to decline to invent.
+
+    **Five figures rather than the calendar's eight** (ADR-0140 §12), each already
+    refused at load by ``Settings`` and stated again at the constructor because it
+    is a second seam a test or a second composition root reaches directly. The one
+    that differs in *kind* is ``email_window_past``, whose lower bound is open where
+    ``calendar_window_past``'s is closed: a window of zero width is a reader that
+    reads nothing while reporting health.
+
+    The clock is left at the reader's own default, for the calendar reader's reason:
+    nothing at this layer has a second clock to hand it.
+
+    Args:
+        settings: Loaded application settings — the store path and ADR-0140 §12's
+            five figures.
+
+    Returns:
+        The reader, or ``None`` when ``email_source_path`` is unset.
+
+    Raises:
+        ValueError: If a figure is outside its range or the path is not absolute.
+            Unreachable through ``Settings``, which refuses both at load; it is the
+            constructor's own guard on the seam a caller could reach directly.
+    """
+    if settings.email_source_path is None:
+        return None
+    return EmailReader(
+        settings.email_source_path,
+        window_past=settings.email_window_past,
+        max_messages=settings.email_max_messages,
+        max_bytes=settings.email_max_bytes,
+        read_timeout=settings.email_read_timeout,
+        max_content_bytes=settings.email_max_content_bytes,
+    )
+
+
 def _build_embedder(settings: Settings) -> Embedder:
     """Construct the configured :class:`Embedder`, bounded, before disk is touched.
 
@@ -1522,8 +1647,8 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _configured_location(settings: Settings) -> str | None:
-    """Where this deployment configured its one source to read from (ADR-0102 §6).
+def _configured_calendar_location(settings: Settings) -> str | None:
+    """Where this deployment configured its **calendar** to read from (ADR-0102 §6).
 
     A plain ``str`` and not a ``Path``, because §6's hazard is precisely a pathname
     with no UTF-8 encoding: Linux pathnames are bytes and Python surfaces an
@@ -1531,15 +1656,86 @@ def _configured_location(settings: Settings) -> str | None:
     surrogate. The string is what has to be judged, and judging it is the grant
     operations' job rather than this layer's — here it is only read.
 
-    **One source, and the day there is a second this stops being a function of
-    ``Settings`` alone.** ADR-0093 §11's registry lane is where a location becomes a
-    property of a registered source rather than of a named field, and ADR-0102 §10's
-    normative clause already owes that lane a re-derivation of the enumeration's
-    worst case.
+    **This function said "one source, and the day there is a second this stops
+    being a function of ``Settings`` alone" — that day arrived and this is the
+    answer.** The location is now per source rather than per deployment: this reads
+    the calendar's field, :func:`_configured_email_location` reads email's, and
+    :func:`_held_sources` pairs each reader with its own. What is *not* answered is
+    ADR-0093 §11's registry, in which a location becomes a property of a registered
+    source rather than of a named field — ADR-0142 §8 declines to fire it at the
+    second source and ADR-0102 §10's normative clause still owes that lane a
+    re-derivation of the enumeration's worst case.
     """
     if settings.calendar_reader_path is None:
         return None
     return str(settings.calendar_reader_path)
+
+
+def _configured_email_location(settings: Settings) -> str | None:
+    """Where this deployment configured its **mail store** to be (ADR-0102 §6).
+
+    :func:`_configured_calendar_location`'s rule on ADR-0140 §12's field. The plain
+    ``str`` is for the same reason and the judging is the same layer's.
+
+    **Read off ``Settings`` rather than off the reader**, which is the one place
+    this pair departs from the identity beside it: ``Reader`` declares a ``name``
+    and declares no location at all, so the identity comes from the object and the
+    location cannot. That asymmetry is ADR-0102 §7's and is why the two are supplied
+    together rather than derived from one another.
+    """
+    if settings.email_source_path is None:
+        return None
+    return str(settings.email_source_path)
+
+
+def _held_sources(
+    settings: Settings,
+    *,
+    calendar: Sequence[Reader | None],
+    email: Sequence[Reader | None],
+) -> list[HeldSource]:
+    """Pair every reader this root built with **its own** source's location.
+
+    ADR-0102 §7's input to :class:`~ai_assistant.orchestration.grants.GrantOperations`,
+    assembled here because this is the one layer that knows both halves: the
+    identity is read off the reader object, and the location off the ``Settings``
+    field that configured *that* source.
+
+    **A sequence rather than a mapping, and duplicates are deliberate** (ADR-0102
+    §7). Each of a source's consumers holds its own reader instance (ADR-0096 §5),
+    so one source contributes as many rows as it has consumers, all declaring one
+    identity. §7 rules that two readers declaring one identity at differing
+    locations is a configuration error the engine does not build through, and a
+    mapping would deduplicate that conflict away unseen — so the repetition is what
+    makes the check possible rather than noise the check has to tolerate.
+
+    **Grouped by source rather than flattened**, which is what keeps the pairing
+    honest. A single comprehension over every reader would need one location
+    expression for all of them, which is exactly the shape that was correct while
+    every reader was a calendar's and silently wrong the moment a second source
+    arrived.
+
+    Args:
+        settings: Where each source's configured location comes from.
+        calendar: The calendar readers this root built, ``None`` for each consumer
+            of an unconfigured source.
+        email: The email readers, on the same terms.
+
+    Returns:
+        One :class:`~ai_assistant.orchestration.grants.HeldSource` per reader
+        actually built, in source order. Empty when no source is configured, which
+        is the shipping default and the state in which ``grantable_sources`` offers
+        nothing (ADR-0093 §7, ADR-0140 §13).
+    """
+    return [
+        HeldSource(reader.name, location=location)
+        for readers, location in (
+            (calendar, _configured_calendar_location(settings)),
+            (email, _configured_email_location(settings)),
+        )
+        for reader in readers
+        if reader is not None
+    ]
 
 
 def _as_async(close: Callable[[], None]) -> Callable[[], Awaitable[None]]:
