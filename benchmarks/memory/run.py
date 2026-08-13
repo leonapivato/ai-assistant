@@ -21,9 +21,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from ai_assistant.app import ensure_model_credentials
 from ai_assistant.app.composition import CONFLICT_LIMIT, RETRIEVAL_LIMIT
 from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.models import ensure_credential_available, ensure_vendor_available
 from benchmarks.memory.answer import ANSWER_SYSTEM_PROMPT, answer_question
 from benchmarks.memory.grade import JUDGE_PROMPT, ExactGrader, Grading, ModelGrader, Verdict
 from benchmarks.memory.ingest import exchanges_of, ingest_case
@@ -51,6 +51,7 @@ __all__ = [
     "PREREGISTRATION_REFUSAL",
     "RunPlan",
     "build_grader",
+    "check_credentials_for",
     "execute_run",
     "plan_run",
     "refuse_ineligible_scored_run",
@@ -166,6 +167,53 @@ def build_grader(settings: Settings, *, kind: str) -> Grader:
     raise ValueError(msg)
 
 
+def check_credentials_for(
+    settings: Settings, *, answering: bool, distillation: bool, judging: bool
+) -> None:
+    """Fail now if a route this run will actually build holds no credential.
+
+    **Route by route, and not ``app.ensure_model_credentials``.** That helper checks
+    the router's whole preference order, which is right for the hub — it builds a
+    ``RoutingProvider`` and will reach every one of those routes. This harness builds
+    one fixed route per seam and disables routing outright (:mod:`benchmarks.memory.wiring`),
+    so checking the fallbacks would refuse to run a perfectly valid benchmark because
+    of a credential for a vendor it will never construct. The per-route pair is public
+    and is what the composition root itself pairs.
+
+    **Only the seams this run builds are checked.** A seam the caller injected is a
+    fake, and a fake needs no credential — which is what keeps this suite runnable with
+    no key configured at all.
+
+    Args:
+        settings: Loaded application settings.
+        answering: Whether the answering seam will be built here.
+        distillation: Whether the observer will be built here.
+        judging: Whether a model judge will be built here.
+
+    Raises:
+        ConfigurationError: If a vendor is unresolvable or holds no credential.
+    """
+    observer_route = (
+        settings.observer_model if settings.observer_model is not None else settings.default_model
+    )
+    # Accumulated into a set rather than a mapping from spec to "is it needed": the
+    # observer's route *defaults to* `default_model`, so a mapping keyed by spec has
+    # one entry overwrite the other and a run judging on the default route while
+    # injecting the observer would check nothing at all. Duplicates are checked once,
+    # which is what the set is for.
+    needed: set[str] = set()
+    if answering or judging:
+        needed.add(settings.default_model)
+    if distillation:
+        needed.add(observer_route)
+    for spec in sorted(needed):
+        # Vendor first, then credential — the order `ensure_credential_available`
+        # asks for: an uninstalled package surfaces there as a bare `ImportError`
+        # with a worse message than its sibling's.
+        ensure_vendor_available(spec)
+        ensure_credential_available(spec)
+
+
 async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis of the experiment, and bundling them into a config object would hide which ones a caller left at a default
     plan: RunPlan,
     *,
@@ -248,19 +296,12 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     # Built after the gate, so a scored run's judge is one this function constructed
     # from `Settings` and never one it was handed.
     judge = grader if grader is not None else build_grader(resolved, kind=grader_kind)
-    # The public startup gate (issue #530, ADR-0083 §3). A missing credential is a
-    # configuration fault, and without this it would surface as identical per-question
-    # failures the loop below dutifully records — which is exactly the shape a "keep
-    # going" policy must not turn a misconfiguration into.
-    #
-    # **The condition is "will any configured provider be reached", not "was the
-    # answering seam injected".** Every seam that is *not* injected is one this
-    # function builds from `Settings`, and the model judge is one of them: a run with
-    # fake answering and distillation seams but a real judge reaches a provider on
-    # every answerable question, and skipping the check there turns a missing
-    # credential into a completed run of `ungraded` rows.
-    if model is None or observer is None or (grader is None and grader_kind == "model"):
-        ensure_model_credentials(resolved)
+    check_credentials_for(
+        resolved,
+        answering=model is None,
+        distillation=observer is None,
+        judging=grader is None and grader_kind == "model",
+    )
     run_id = uuid4().hex[:12]
     run_dir = output_root / run_id
     records_path = run_dir / "records.jsonl"
@@ -445,7 +486,12 @@ def refuse_ineligible_scored_run(  # noqa: PLR0913 — one parameter per precond
     """
     if RunMode(mode) is not RunMode.SCORED:
         return
-    if not preregistration_final:
+    if preregistration_final is not True:
+        # `is not True`, not `not …`: this arrives from a command line and from callers
+        # outside mypy's reach, where `"false"` and `0` are both things a shell wrapper
+        # produces — and `not "false"` is False, so a truthiness test reads the string
+        # "false" as confirmation of the one rule that must never be confirmed by
+        # accident.
         raise PermissionError(PREREGISTRATION_REFUSAL)
     if max_sessions:
         msg = (
