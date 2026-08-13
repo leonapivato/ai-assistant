@@ -458,13 +458,32 @@ refuses the tool (§9). Bounding the depth is arguably the better declaration
 anyway, since an unbounded-depth argument is an unbounded payload. Revisit if a
 tool worth having turns out to need one.
 
-**What this does not bound is evaluation *cost*.** An acyclic schema can still
-be expensive, and a deeply nested instance recurses on its own way in — but the
-parameters were already deep-frozen by `_freeze_json` on the way to becoming a
-`FrozenJsonMapping`, which walks the same structure, so that limit predates this
-decision rather than arriving with it. A cost budget for pathological-but-
-terminating schemas is a separate rule with a constant nobody can calibrate yet,
-and §14 scopes it out with an issue rather than inventing one here.
+**Depth is bounded explicitly, because the cycle rule does not reach it and the
+existing freeze does not either.** An acyclic schema nested a few hundred levels
+through `properties`, paired with arguments nested to match, diverges nowhere
+and still exhausts the stack: evaluation descends the schema and the instance
+together, and it spends *more* stack per level than `_freeze_json` does building
+the `FrozenJsonMapping`. So both halves can pass the freeze independently and the
+evaluation between them can still fail. That is a new exposure this decision
+introduces rather than one it inherits, and an earlier draft of this paragraph
+claimed otherwise, on the strength of a limit that binds a cheaper walk.
+
+> **Normative.** A `parameters_schema` nested deeper than a fixed bound is
+> refused at construction, and a parameter mapping nested deeper than that same
+> bound is reported as a violation without being evaluated. The bound is one
+> constant in `core`, not configurable and not per-tool, and it is fixed low
+> enough that evaluating a schema and an instance both at the bound completes
+> well inside the interpreter's recursion limit.
+
+**Checked before recursing, not caught after.** §7's clause makes an evaluation
+that raises a refusal, and a `RecursionError` is an `Exception`, so the *outcome*
+would be safe either way. It is a bad thing to depend on: unwinding at the
+recursion limit leaves the handler almost no stack to run in, so the guarantee
+is weakest exactly where it is being relied on. Two depth measurements — one on
+a document at construction, one on a mapping before evaluation — are cheap,
+iterative, and mean the evaluator is only ever entered on inputs already known
+to fit. §13 requires the bound to be established by a test at the bound and at
+the bound plus one, rather than asserted.
 
 **One check on the type, inherited by every stage that rebuilds one.** The
 repository already revalidates a definition wherever it could have been tampered
@@ -828,6 +847,12 @@ is owed is the evidence for the claims above that a signature does not show.
   only checks the outcome would pass against an implementation that reaches it by
   exhausting the stack. A same-document `$ref` and an `$anchor` are accepted, so
   the model is shown to be usable and not merely restrictive.
+- **The depth bound, measured rather than asserted** (§6): a schema at the bound
+  constructs and a schema one level deeper is refused; a parameter mapping one
+  level deeper than the bound comes back as a violation without the evaluator
+  being entered. And the bound is shown to be *safe* rather than merely enforced
+  — a schema and an instance both at the bound evaluate to completion — because a
+  bound nobody checked against the recursion limit is a number, not a guarantee.
 - **No I/O, as a test that cannot pass by accident** (§7): separately from the
   construction refusal, an evaluator built by the `core` seam is shown to raise
   rather than retrieve when handed an external reference, so the belt is tested
@@ -879,9 +904,12 @@ so deleting them changes a recorded outcome and the tests that pin it.
   declares no output schema and ADR-0029 §3 makes `output` a `FrozenJsonValue`
   the tool is trusted for. Adding one is an ADR-0016 field change.
 - **A cost budget for schema evaluation** (§6). The cycle refusal removes the
-  divergent case; an acyclic schema that is merely expensive is bounded by
-  nothing here, and a constant to bound it by is not calibratable before tool
-  breadth exists. Filed.
+  divergent case and the depth bound removes the deep one; an acyclic schema
+  within the bound that is merely *expensive* — a combinatorial `anyOf`, a
+  pathological `pattern`, an enormous `enum` — is bounded by nothing here. A
+  budget for that needs a unit and a constant neither of which is calibratable
+  before tool breadth exists, and guessing one would put a knob in `core` that
+  §2's clause (b) forbids. Filed.
 - **A schema migration mechanism** (§6). If the supported dialect ever changes,
   stored decisions carrying the old one are a migration question this ADR does
   not answer and does not need to, since the corpus it lands on has none.
