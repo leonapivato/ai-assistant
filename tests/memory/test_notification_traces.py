@@ -477,6 +477,75 @@ async def test_a_disposition_the_transaction_rolled_back_carries_no_metric_key(
     assert await store.export() == []
 
 
+async def test_a_reconsideration_that_raised_carries_its_fault_at_its_own_seam(
+    make_store: Callable[..., SqliteNotificationStore], sink: FakeTraceSink
+) -> None:
+    """§3's fault clause reaches the second seam, and it is not the first's.
+
+    Both ruling seams owe the same trace on the same terms — the clause is
+    written over "a crossing", not over ``admit`` — and the seam label is what
+    §5's two sub-populations are drawn by, so a fault trace landing under the
+    wrong label would move a diagnostic rather than merely read oddly.
+    """
+
+    class _RaisingPolicy:
+        async def rule(self, *args: object, **kwargs: object) -> NotificationDisposition:
+            msg = "the policy is broken"
+            raise RuntimeError(msg)
+
+    clock = MutableClock()
+    store = make_store(now=clock)
+    ruling = await _held_behind_a_quiet_window(store, clock)
+    assert ruling.notification_id is not None
+
+    with pytest.raises(RuntimeError):
+        await store.reconsider(ruling.notification_id, policy=_RaisingPolicy())
+
+    trace = sink.recorded[-1]
+    assert trace.seam == SEAM_RECONSIDER
+    assert trace.outcome is TraceOutcome.FAULT
+    assert trace.fault_class == "RuntimeError"
+    assert trace.metrics == {}
+    assert trace.occurred_at == clock.at
+    held = await store.get(ruling.notification_id)
+    assert held is not None
+    assert held.kind is NotificationDispositionKind.HOLD
+
+
+async def test_a_reconsideration_the_transaction_rolled_back_carries_no_metric_key(
+    make_store: Callable[..., SqliteNotificationStore], sink: FakeTraceSink
+) -> None:
+    """§3: on this seam too, a re-ruling that never committed is not a ruling.
+
+    A reconsideration ruled ``INTERRUPT`` spends a unit of budget like any other
+    ruling (ADR-0130 §5), so the window between the policy returning and the
+    commit is where the same three readings of a ruling-bounded clause would
+    diverge. The record is left holding its previous disposition, and the trace
+    says a crossing happened and nothing about what it decided.
+    """
+    clock = MutableClock()
+    store = make_store(now=clock)
+    ruling = await _held_behind_a_quiet_window(store, clock)
+    assert ruling.notification_id is not None
+
+    def raising(conn: sqlite3.Connection, record: HeldNotification) -> None:
+        msg = "disk I/O error"
+        raise sqlite3.OperationalError(msg)
+
+    store._write = raising  # type: ignore[method-assign]
+    with pytest.raises(NotificationStoreError):
+        await store.reconsider(ruling.notification_id, policy=DefaultNotificationPolicy())
+
+    trace = sink.recorded[-1]
+    assert trace.seam == SEAM_RECONSIDER
+    assert trace.outcome is TraceOutcome.FAULT
+    assert trace.metrics == {}
+    held = await store.get(ruling.notification_id)
+    assert held is not None
+    assert held.kind is NotificationDispositionKind.HOLD
+    assert held.ruled_at == NOW
+
+
 @pytest.mark.parametrize(
     ("mode", "expected"),
     [("refused-reading", NotificationStoreError), ("raising-invocation", RuntimeError)],
