@@ -434,11 +434,15 @@ hygiene.
 > as is a message the reader cannot otherwise interpret. Nothing is substituted
 > for a fact the source did not make, and a skip raises nothing.
 
-> **Normative.** The reader reads only what the store's framing presents as a
-> message's **header block**. It does not read, parse or materialise what that
-> framing presents as a **body** — into a proposal, into a facet, or into any
-> value that leaves it — and this ADR opens no path by which such a span reaches a
-> model call.
+> **Normative.** The reader acquires the store's bytes whole and bounded, and
+> traverses its framing, exactly as ADR-0093 §7's byte cap requires. Nothing in
+> this section restricts which bytes it reads or scans past.
+
+> **Normative.** The reader **interprets** only what the store's framing presents
+> as a message's **header block**. What that framing presents as a **body** is
+> traversed and discarded: it is never parsed for meaning, never materialised into
+> a proposal, a facet or any value that leaves the reader, and this ADR opens no
+> path by which such a span reaches a model call.
 
 > **Normative.** Whether the framing is honest is the fetcher's, and the reader
 > may not assume it. Where the framing is violated, text a message's author wrote
@@ -507,18 +511,27 @@ construction rather than by a rule someone must remember:
 - **§10's narrowing is structural.** There is no body in the store to read, so the
   deferral in §14 is not a discipline the next lane must hold; it is a shape.
 
-**The body clause is stated over the framing rather than over the bytes, and an
-earlier draft was not holdable.** That draft said the reader "materialises no span
-of a message body" and added that the clause binds "whether or not" the
-envelopes-only requirement is met — which adversarial review showed is impossible
-to obey: an unescaped `From ` line inside a body splits one message into two, and
-the second fragment's apparent `Subject` *is* body text the reader has no way to
-recognise as such. A clause the reader must breach to function is worse than no
-clause, because a later lane reads it as a guarantee somebody checked. So the
-obligation is on what the reader does — it reads header blocks and never bodies —
-and the case where the framing lies is handled where it is actually bounded, in
-§4. This is the same repair §2's third clause takes, for the same reason, and
-ADR-0098 §3 is the corpus's precedent for making it.
+**The body clause is stated over the framing rather than over the bytes, and two
+earlier drafts were not holdable.** The first said the reader "materialises no
+span of a message body" and added that the clause binds "whether or not" the
+envelopes-only requirement is met — impossible to obey, because an unescaped
+`From ` line inside a body splits one message into two and the second fragment's
+apparent `Subject` *is* body text the reader has no way to recognise as such. The
+second said the reader "does not read, parse or materialise" a body-presented
+span, which is unsatisfiable for a different reason adversarial review found:
+ADR-0093 §7 requires the source read to be bounded on the read itself, and an
+in-band-delimited store cannot be traversed at all without scanning past bodies to
+reach the next delimiter. **Reading a byte and interpreting it are two acts**, and
+only the second is what this section is about — so the clauses now separate them:
+acquisition and framing are unrestricted and are what ADR-0093 §7 already
+governs, and the prohibition is on interpretation and materialisation.
+
+A clause the reader must breach to function is worse than no clause, because a
+later lane reads it as a guarantee somebody checked. The case where the framing
+lies is handled where it is actually bounded, in §4. This is the same repair §2's
+third clause takes, for the same reason, and ADR-0098 §3 is the corpus's precedent
+for making it — its own earlier drafts "reached past" the span to conditions
+nobody could evaluate, and the fix was to rule on what the component does.
 
 **What is deliberately left out of the field set.** `To:` and `Cc:` are not
 carried: they multiply Tier-1 addresses by every recipient of every mailing list,
@@ -573,9 +586,10 @@ ADR relies on is the narrower one §5 relies on: a re-read destroys nothing.
 > construction site of `CalendarFacet` changes and no fixture, fake or persisted
 > value is invalidated.
 
-> **Normative.** `kind` is reserved on every facet subclass exactly as `source`,
-> `read_at` and `as_of` are (ADR-0096 §1): no subclass redefines it, and no
-> subclass's payload vocabulary may shadow it.
+> **Normative.** The name `kind` is **reserved for the discriminator** across the
+> facet hierarchy. Declaring it as a `Literal` tag is what a concrete facet type
+> is required to do; what no facet may do is give the name a payload meaning, and
+> no type below a concrete facet may redefine it.
 
 **This is ADR-0096 §5's second clause discharged at the moment its condition
 fires, and the lane owed it rather than the implementation.** §5 rules that the
@@ -602,6 +616,18 @@ produced the value, `kind` says which payload shape it is. Defaulting `kind` is
 what keeps the widening additive, which is ADR-0008 §1's pattern and the property
 §5 relied on when it called this "one more line in the change that ADR
 authorises".
+
+**The reservation is worded over the *name's meaning* rather than over
+redefinition, because the obvious wording contradicts the clause above it.** An
+earlier draft said `kind` is reserved "exactly as `source`, `read_at` and `as_of`
+are — no subclass redefines it", and adversarial review was right that this makes
+the union unsatisfiable: those three live on `ContextFacet` and a subclass must
+leave them alone, whereas a discriminated union requires each *concrete* member to
+declare its own distinct literal, which is the one thing a no-redefinition rule
+forbids. A shared `kind` on the base discriminates nothing. So the two rules are
+different in kind and are stated differently: the base's three stamp fields are
+reserved against redefinition, and `kind` is reserved against acquiring a second,
+payload meaning while each concrete type is *required* to declare it.
 
 **ADR-0096 §5's other three clauses bind this facet unchanged and are not
 restated as though they were new**: the facet's stamp is the reading's, the model
@@ -967,8 +993,12 @@ later lane after this ADR merges:**
   place this ADR touches an existing shape**; it is additive and defaulted, so
   every existing construction site stays valid, which is ADR-0008 §1's pattern and
   the property ADR-0096 §5 was counting on.
-- **`tests/core/test_facet_coverage.py`** grows `kind` in the reserved-name set it
-  already enforces for `source`, `read_at` and `as_of` (§6, ADR-0096 §1).
+- **`tests/core/test_facet_coverage.py`** grows a second property beside the
+  reserved-name one it already enforces for `source`, `read_at` and `as_of`: that
+  every concrete facet type declares a `kind` whose `Literal` value is distinct
+  across the union, and that no facet gives the name a payload meaning (§6). It is
+  the file-level check ADR-0096 §1 chose over a convention held by review, applied
+  to the field that makes the union resolvable.
 - **`core/config.py`** gains §12's seven `Settings` fields with their ranges and
   the load-time refusal.
 
