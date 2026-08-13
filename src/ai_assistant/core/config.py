@@ -597,6 +597,18 @@ _MAX_FRAME_BYTES: Final = 2**32 - 1
 #: together, so the duplication cannot drift.
 _MAX_CALENDAR_WINDOW: Final = timedelta(days=3650)
 
+#: ADR-0140 §12's ceiling on the email window's one arm, for ADR-0093 §7a's reason
+#: applied unchanged: ``> 0`` alone admits ``timedelta.max``, and the ceiling is
+#: what makes an overflow unreachable *from configuration alone*. It does not make
+#: it unreachable from configuration **and** a clock, which is why ADR-0140 §3
+#: states a saturation clause of its own rather than leaning on this figure.
+#:
+#: The same number as ``_MAX_CALENDAR_WINDOW`` and deliberately its own constant:
+#: two ADRs name a ceiling for two different windows, and one of them moving is
+#: not the other moving. ``tests/readers/test_email_settings.py`` pins it to the
+#: reader's copy, exactly as the calendar's is pinned.
+_MAX_EMAIL_WINDOW: Final = timedelta(days=3650)
+
 
 class Settings(BaseSettings):
     """Typed application settings.
@@ -2114,6 +2126,167 @@ class Settings(BaseSettings):
             msg = (
                 "calendar_reader_interval is set but calendar_reader_path is not; a "
                 "scheduled read needs a source to read (ADR-0093 §7a)"
+            )
+            raise ValueError(msg)
+        return self
+
+    # --- The email source (ADR-0140 §12) ----------------------------------
+    # **Seven fields, derived from this source rather than copied from the
+    # calendar's nine** (§12). What is *absent* is as decided as what is here: no
+    # `email_window_future`, because a mailbox has no future; and no expansion
+    # budget, because a mailbox has no generator — the messages in the store are
+    # the messages, so the byte cap bounds the parse and the message cap bounds
+    # the output, and a third figure would bound nothing the first two do not.
+    #
+    # **No field carries the account, and that is a decision rather than an
+    # omission** (§12). The reader's identity is the declared constant `"email"`,
+    # never the address: ADR-0093 §7 uses exactly this source as its worked
+    # counter-example — a reader "names *itself*, never the data it holds" — and
+    # here the mistake would be one keystroke away in a free-text setting. Nor is
+    # the account **credential** here, or anywhere else in this process: it is the
+    # operator's and the fetcher's, and keeping it outside is what makes ADR-0140
+    # §1's file boundary a boundary rather than a diagram (§11).
+    email_source_path: Path | None = Field(
+        default=None,
+        description=(
+            "Absolute path to the single mbox file the email reader reads; None "
+            "disables it (ADR-0140 §2, §12). One regular file, replaced whole by a "
+            "co-located fetcher — never a directory and never a maildir (#649)."
+        ),
+    )
+
+    @field_validator("email_source_path")
+    @classmethod
+    def _email_source_is_absolute(cls, value: Path | None) -> Path | None:
+        """Refuse a relative source path, and expand ``~`` (ADR-0093 §7).
+
+        ``calendar_reader_path``'s validator above, unchanged and for its reasons:
+        absoluteness is a property of the *configuration* and is checked here,
+        while existence is a property of the world at an instant and is checked at
+        run time, where it degrades under ADR-0093 §8 rather than refusing to
+        start.
+        """
+        if value is None:
+            return None
+        expanded = value.expanduser()
+        if not expanded.is_absolute():
+            msg = (
+                f"email_source_path must be an absolute path, got {str(value)!r}; a "
+                f"relative value resolves against each process's working directory "
+                f"(ADR-0093 §7)"
+            )
+            raise ValueError(msg)
+        return expanded
+
+    email_reader_interval: _NullableDuration = Field(
+        default=None,
+        gt=timedelta(0),
+        description=(
+            "How often the hub reads the configured email store; None disables the "
+            "scheduled ingestion job (ADR-0140 §12). Never 0."
+        ),
+    )
+    # **One window edge, not two, and it may not be zero.** A calendar is
+    # asymmetric because the future is what the assistant needs; a mailbox has no
+    # future, so an `email_window_future` would bound nothing. The remaining edge
+    # is refused at zero for ADR-0093 §7a's reason applied unchanged — a
+    # zero-width window is a reader that reads nothing while reporting health —
+    # and this is where `calendar_window_past`'s neighbouring declaration is a
+    # trap: that one **may** be zero and its own test asserts so, so a `ge=0`
+    # inherited by copying ships exactly that reader.
+    #
+    # **Seven days rather than the calendar's one**, and the asymmetry is
+    # deliberate (§12): a calendar's past is wanted only so "this morning" stays
+    # in view, while a mailbox's whole content is its past. A window shorter than
+    # the gap between two runs of a hub that is occasionally off loses mail
+    # permanently, because ADR-0140 §3 leaves no cursor to notice — seven days is
+    # small enough to be a bounded payload of Tier 1 data and large enough that
+    # the loss needs a week of downtime to reach.
+    email_window_past: _DurationSetting = Field(
+        default=timedelta(days=7),
+        gt=timedelta(0),
+        le=_MAX_EMAIL_WINDOW,
+        description=(
+            "How far back the clock-relative arrival window reaches (ADR-0140 §3, "
+            "§12). Strictly positive — never zero; at most ten years."
+        ),
+    )
+    # **Counts the messages the store's framing yields, before any header is
+    # interpreted** (§12). The obvious spelling — "in-window messages" — cannot be
+    # enforced, because deciding whether a message is in the window means reading
+    # its delivery header, which is the very step ADR-0140 §5's skip rule turns
+    # on: a store of 2,001 messages none of which carries a valid
+    # `X-Assistant-Delivered-At` would then be skipped message by message and
+    # returned as a **successful empty reading** — a busted cap wearing the
+    # clothes of a quiet week, which is what ADR-0093 §5's refuse-don't-truncate
+    # rule exists to prevent.
+    email_max_messages: _IntegerSetting = Field(
+        default=2_000,
+        ge=1,
+        lt=2**63,
+        description=(
+            "The most framed messages one email read may accept, counted as they "
+            "are framed and before any header is interpreted (ADR-0140 §12). "
+            "Exceeding it refuses the read; it is never truncated."
+        ),
+    )
+    # Separate from `email_max_messages` and the one that **must** exist, on
+    # ADR-0093 §7a's ordering argument unchanged: a message cap can only be
+    # applied after parsing, so a cap on messages alone lets a 2 GiB store be
+    # fully parsed before anything refuses it.
+    email_max_bytes: _IntegerSetting = Field(
+        default=8 * 1024 * 1024,
+        gt=0,
+        description=(
+            "The most bytes one email read consumes, enforced on the read itself "
+            "and before any parsing (ADR-0093 §7, ADR-0140 §12)."
+        ),
+    )
+    email_read_timeout: _DurationSetting = Field(
+        default=timedelta(seconds=10),
+        gt=timedelta(0),
+        description=(
+            "The email reader's deadline on its own read (ADR-0093 §7, ADR-0140 "
+            "§12). A path that is absolute and readable may still be a stalled "
+            "mount, and every other bound sits behind an operation that never "
+            "returns."
+        ),
+    )
+    # Bounds the **output**, which none of the others do: a `Subject` may be
+    # folded across many lines, and 2,000 of them inside every other cap can still
+    # materialise more content than any consumer wants (§12).
+    email_max_content_bytes: _IntegerSetting = Field(
+        default=4 * 1024 * 1024,
+        gt=0,
+        description=(
+            "The most proposal content one email read may materialise, checked "
+            "before each proposal is built (ADR-0140 §12)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _an_email_interval_needs_a_source(self) -> Settings:
+        """Refuse a scheduled read of a source that is not configured (ADR-0140 §12).
+
+        ``_a_reader_interval_needs_a_source`` above, for the equivalent pair and
+        for ADR-0093 §7a's reason unchanged: every alternative outcome is worse
+        and every one is silently different. A scheduler that omits the requested
+        job reports health while running nothing, one that arms it re-runs a
+        failing job forever, and one that treats it as a source fault turns a
+        configuration mistake into an infinite retry.
+
+        **The converse pair is coherent and is deliberately not refused.** A path
+        with no interval is the facet-only state — a source a request-path
+        assembly may read while nothing ingests from it on a schedule — which is
+        one of ADR-0140 §9's three scopes being granted without the other.
+
+        Raises:
+            ValueError: If an interval is set with no path beside it.
+        """
+        if self.email_reader_interval is not None and self.email_source_path is None:
+            msg = (
+                "email_reader_interval is set but email_source_path is not; a "
+                "scheduled read needs a source to read (ADR-0140 §12)"
             )
             raise ValueError(msg)
         return self

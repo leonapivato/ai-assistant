@@ -21,6 +21,7 @@ import pytest
 from ics_fixtures import calendar, reader, source, vevent
 
 from ai_assistant.core.errors import ReaderError
+from ai_assistant.core.types import CalendarFacet
 from ai_assistant.readers._occurrences import (
     EntryCapExceededError,
     ExpansionBudgetExhaustedError,
@@ -782,7 +783,7 @@ async def test_a_sub_minute_zone_offset_keeps_its_seconds_in_the_label(tmp_path:
     assert proposal.proposed.content == (
         'Calendar entry "x", on 2026-08-03 from 13:00 to 14:00 (UTC+00:53:28).'
     )
-    assert reading.facet is not None
+    assert isinstance(reading.facet, CalendarFacet)
     assert reading.facet.next_starts_at == datetime(2026, 8, 3, 12, 6, 32, tzinfo=UTC)
 
 
@@ -821,7 +822,7 @@ async def test_a_sub_minute_zone_offset_west_of_utc_keeps_its_sign_and_its_secon
     assert proposal.proposed.content == (
         'Calendar entry "x", on 2026-08-03 from 13:00 to 14:00 (UTC-00:53:28).'
     )
-    assert reading.facet is not None
+    assert isinstance(reading.facet, CalendarFacet)
     assert reading.facet.next_starts_at == datetime(2026, 8, 3, 13, 53, 28, tzinfo=UTC)
 
 

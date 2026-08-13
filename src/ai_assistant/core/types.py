@@ -2633,6 +2633,11 @@ class CalendarFacet(ContextFacet):
     breaking change. The asymmetry decides it (ADR-0096 §10).
 
     Attributes:
+        kind: This type's own literal tag, the discriminator
+            :data:`ReadingFacet` resolves on (ADR-0140 §6). **Defaulted**, so
+            every construction site that predates the union stays valid — which
+            is ADR-0008 §1's pattern and the property ADR-0096 §5 was counting on
+            when it called this "one more line in the change that ADR authorises".
         entries_in_progress: How many occurrences were in progress at
             :attr:`~ContextFacet.read_at`. An occurrence with a non-zero duration
             is in progress when ``start <= read_at < end``; a zero-duration one
@@ -2661,6 +2666,7 @@ class CalendarFacet(ContextFacet):
 
     model_config = ConfigDict(frozen=True)
 
+    kind: Literal["calendar"] = "calendar"
     entries_in_progress: int = Field(
         ge=0,
         description="Occurrences in progress at read_at (ADR-0096 §6's membership rule).",
@@ -2675,6 +2681,111 @@ class CalendarFacet(ContextFacet):
     covers_until: UtcInstant = Field(
         description="The exclusive upper edge of the window the reading covered (tz-aware).",
     )
+
+
+class EmailFacet(ContextFacet):
+    """How much mail arrived in the window the reading covered (ADR-0140 §6).
+
+    Two scalars, and **no span of any message** — no sender, address, display
+    name, subject, body, identifier or per-message instant. That rule is stronger
+    here than ADR-0096 §6 needed it to be for the calendar. ``CurrentContext``
+    reaches every prompt, and a subject line is not merely disclosing: it is
+    *attacker-chosen text* on the advisory path, where a failure is silent and
+    where ADR-0098 §2's escaping obligation falls on an assembler that does not
+    yet exist (#672). Two scalars need no content budget, no truncation rule and
+    no escaping at all, which is what makes this facet safe to ship before that
+    assembler lands.
+
+    **A count rather than a boolean**, for ADR-0096 §6's ``busy: bool`` reason
+    exactly: deciding what counts as *new* is a judgement about the user's
+    attention, and the reader holds no read/unread state and may not infer one
+    (ADR-0093 §2). A count is a fact about what was parsed.
+
+    **The facet's job is what the beliefs cannot answer at request time, and for
+    email that is volume rather than presence.** "You have had two messages
+    today" and "you have had ninety" are different situations, and neither is
+    legible from a belief the retrieval budget may not have selected.
+
+    Attributes:
+        kind: This type's own literal tag, the discriminator
+            :data:`ReadingFacet` resolves on (ADR-0140 §6).
+        arrived_in_window: How many messages the read **proposed from**.
+
+            **A count of what this reader parsed from its store, and never a
+            claim about the mail account** (ADR-0140 §6). The store is written by
+            a fetcher outside this system whose completeness the reader cannot
+            verify (§1), so no consumer may read this as a count of mail
+            received, and no surface may present it as one. A stopped fetcher
+            reads as a quiet week and nothing here can tell the difference —
+            which is why the reading declares no coverage at all (§7).
+        covers_from: The **inclusive** lower edge of the arrival window this
+            reading covered.
+
+            :attr:`CalendarFacet.covers_until`'s mirror, carried for the
+            identical reason (ADR-0096 §6): a count of zero means nothing to a
+            consumer who does not know how long an interval it counted over, and
+            a consumer of :class:`CurrentContext` does not read ``Settings``, so
+            the horizon has to travel with the value or not exist. Only the one
+            edge is carried, because a mailbox has no future and the window's
+            upper edge is ``read_at`` itself (ADR-0140 §3). Saturated under §3, so
+            it is always a representable instant.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["email"] = "email"
+    arrived_in_window: int = Field(
+        ge=0,
+        description=(
+            "Messages this read proposed from — what the reader parsed from the "
+            "store, never a count of mail the account received (ADR-0140 §6)."
+        ),
+    )
+    covers_from: UtcInstant = Field(
+        description=(
+            "The inclusive lower edge of the arrival window the reading covered (tz-aware)."
+        ),
+    )
+
+
+ReadingFacet = Annotated[
+    CalendarFacet | EmailFacet,
+    Field(discriminator="kind"),
+]
+"""One reading's situational half: a concrete facet type, tagged by ``kind``.
+
+**Explicitly discriminated rather than a plain union**, which ADR-0096 §5
+required of the second concrete facet to join the annotation and ADR-0140 §6
+discharges: without the tag, pydantic's smart union picks a member by fit, so
+"two facets that differ only in a scalar could parse as each other, quietly".
+
+**``kind`` rather than ``source``, and the reason is the validator on
+:class:`SourceReading`.** ``source`` looks like a free discriminator — it already
+carries the reader's declared identity and the two values agree — but ADR-0096
+§5's model validator cross-checks ``facet.source`` against the *reading's*
+``source``, which is free text carrying ``Reader.name``. Constraining it by type
+would make a mismatch surface as a union-resolution failure naming the wrong
+fact. The two are different facts and stay two fields: ``source`` says who
+produced the value, ``kind`` says which payload shape it is.
+
+**The name is reserved for the discriminator across the facet hierarchy**
+(ADR-0140 §6). Declaring it as a ``Literal`` tag is what a concrete facet type is
+*required* to do — which is why it is not reserved against redefinition the way
+:class:`ContextFacet`'s three stamp fields are, a rule that would make this union
+unsatisfiable. What no facet may do is give the name a payload meaning, and no
+type below a concrete facet may redefine it.
+``tests/core/test_facet_coverage.py`` holds both halves.
+
+**The tag's default does not make a serialised payload lacking ``kind``
+loadable**, and no reading of it may claim otherwise: a discriminated union
+extracts its tag from the input *before* it selects a member, so the field's
+default never runs. Nothing persists or wire-carries one of these types today —
+both are in-process values passed from a reader to ``orchestration`` and to the
+ingest — so there is no legacy payload to invalidate. A lane that gives
+:class:`SourceReading` or :class:`CurrentContext` a persisted or wire-carried
+form owes the compatibility step with it, in a shape that cannot mask a genuinely
+invalid payload (ADR-0140 §6).
+"""
 
 
 # --- reading: what one pass over a source produced (ADR-0093, ADR-0095) ------
@@ -2902,11 +3013,11 @@ class SourceReading(BaseModel):
 
             **Annotated with the concrete facet types a reader may produce**, and
             widened by each later ADR that adds a facet, because the base
-            annotation loses the payload silently (see :class:`ContextFacet`).
-            When a second concrete type joins it, the union is made explicitly
-            **discriminated**, each member carrying its own literal tag, so that no
-            payload's facet type is decided by pydantic's smart union picking a
-            member by fit.
+            annotation loses the payload silently (see :class:`ContextFacet`). A
+            second concrete type has joined it, so the union is now explicitly
+            **discriminated** on ``kind`` — see :data:`ReadingFacet`, which
+            carries that clause and what its tag's default does and does not buy
+            (ADR-0096 §5, ADR-0140 §6).
 
             **Both halves are computed on every read and they may legitimately
             contain different things.** ``CalendarReader`` skips an occurrence
@@ -2954,7 +3065,7 @@ class SourceReading(BaseModel):
             "the reading declares none and warrants no absence (ADR-0110 §2)."
         ),
     )
-    facet: CalendarFacet | None = Field(
+    facet: ReadingFacet | None = Field(
         default=None,
         description=(
             "The situational half of this reading, stamped identically to it; "
@@ -3066,6 +3177,10 @@ class CurrentContext(BaseModel):
             returns it — never served from a cached, carried-over or previously
             assembled reading, and a failed read yields ``None`` rather than the
             previous value (§3).
+        email: How much mail arrived during the window this assembly's reading
+            covered, or ``None`` (ADR-0140 §6). Built from a reading taken during
+            this assembly on exactly the terms ``calendar`` is, and carrying no
+            span of any message.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -3081,6 +3196,13 @@ class CurrentContext(BaseModel):
         description=(
             "What the calendar said during this assembly; None says nothing "
             "beyond its absence (ADR-0096 §4)."
+        ),
+    )
+    email: EmailFacet | None = Field(
+        default=None,
+        description=(
+            "How much mail arrived in the window this assembly's reading covered; "
+            "None says nothing beyond its absence (ADR-0096 §4, ADR-0140 §6)."
         ),
     )
 
