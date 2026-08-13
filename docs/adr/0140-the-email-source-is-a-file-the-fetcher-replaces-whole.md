@@ -1406,7 +1406,15 @@ carries is to **pass** the existing suite, not to write one.
 >     carries the calendar's cases at this exact boundary — including the
 >     unconfigured direction, which is the half a lane omits because a hub with
 >     no mail configured looks like nothing to assert — and, as with the two
->     items above, is not coverage for this one.
+>     items above, is not coverage for this one. **This item is scoped to the
+>     single-configured-source case, deliberately and not by omission**: how this
+>     source's ingestion is *armed* alongside the calendar's is §14's deferral
+>     (#1030), and an item asserting anything about the two-source arrangement
+>     would presuppose the answer to a question this ADR does not settle. What is
+>     owed here is that a hub configured for email registers it, on its own
+>     readers, and that a hub not configured for it registers nothing; what the
+>     resulting cadence does to the calendar's is not owed here and is not
+>     satisfiable from this document.
 >   - **The facet union discriminates at validation, not by declaration (§6).** A
 >     tagged calendar payload and a tagged email payload each resolve through
 >     `SourceReading` to their own type; a payload carrying `kind: "email"` **and**
@@ -1455,6 +1463,24 @@ carries is to **pass** the existing suite, not to write one.
   writes". This reader is scheduler-driven per ADR-0093 §6. Fires with a decision
   about read cadence, which is a different question from this source and would
   reach every reader.
+- **How this source's ingestion cadence coexists with the calendar's (#1030).**
+  `Engine` holds exactly one `IngestionStage` and `Engine.ingest()` invokes that
+  one; the scheduler carries one ingestion row, armed by
+  `calendar_reader_interval`. §13 asks for this source's scheduler job as an
+  `Engine` call and §12 gives it its own interval — and the surface those would be
+  wired into cannot express two, so a lane could replace the calendar's ingestion,
+  or retain it and leave `email_reader_interval` arming nothing, and satisfy every
+  test §13 requires. **Fires with the implementing lane, before it wires the second
+  stage**, which is why it is an issue with a decision owed rather than a condition
+  that may never be met. **The independence is deferred rather than assumed:**
+  nothing in this ADR rules in a marked clause that email ingestion is armed
+  independently of the calendar's — it follows only by inference from the two
+  interval fields being separate, which in this document's regime obligates nobody
+  (§15, ADR-0089 §3), and ADR-0132 §4 is the shape that states such a thing
+  outright. **The decision #1030 tracks owns that clause.** This is not ADR-0093
+  §11's source registry, which fires at the third source and does not fire here
+  (§9), and it is not a contract change: `ingest()` is not a member of
+  `AssistantEngine`, so §13's `core` surface is unaffected either way.
 - **Sending email.** An actuator. ADR-0017 §1 and ADR-0021 §6 govern, a read-only
   seam cannot reach it, and it is named here only so nothing reads this ADR as a
   step toward it.
