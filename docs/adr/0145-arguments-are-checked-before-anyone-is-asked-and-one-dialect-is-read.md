@@ -242,10 +242,16 @@ have to obtain it from somewhere other than the violation.
 
 ### 3. A mismatch is not a `ToolFailure`, and `INVALID_REQUEST` keeps a narrower meaning
 
-> **Normative.** A parameter-schema mismatch never produces a `ToolResult` and
-> never reaches `ToolInvoker.invoke`. `ToolFailureKind.INVALID_REQUEST` is not
-> the vocabulary for it, and no seam synthesises an `INVALID_REQUEST` failure
-> for a violation of a declared schema.
+> **Normative.** A parameter-schema mismatch never reaches a tool's callable and
+> never produces a `ToolResult`. `ToolFailureKind.INVALID_REQUEST` is not the
+> vocabulary for it, and no seam synthesises an `INVALID_REQUEST` failure for a
+> violation of a declared schema.
+
+The invariant is about the callable and the result rather than about `invoke`,
+because §1 leaves one path into `invoke` open: a request built by a bypass
+reaches the seam and is refused by ADR-0029 §2's step 1 revalidation, before the
+callable and without a result. §2's obligation on the selection stage is what
+keeps the ordinary path out of the seam entirely.
 
 The three checks ADR-0029 §2 puts in `invoke` raise `ToolBindingError` because
 they answer *"is this the authorised call?"*, and a substitution fault must not
@@ -654,7 +660,8 @@ is that deferral working as designed.
   unacceptable argument reaches the tool and comes back as INVALID_REQUEST (§3),
   which is not retryable" — describes what no longer happens for a violation a
   declared schema can decide: such a request is refused at construction, before
-  the ruling and before the claim, and never reaches invoke (ADR-0145 §1, §3).
+  the ruling and before the claim, and reaches no tool's callable and no
+  ToolResult (ADR-0145 §1, §3).
   §3 is unchanged: INVALID_REQUEST keeps its meaning and its retryable=False for
   arguments a tool refuses for reasons its schema does not express, and no seam
   synthesises it for a schema violation. §2's three checks and their order are
