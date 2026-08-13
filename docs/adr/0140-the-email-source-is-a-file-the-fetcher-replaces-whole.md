@@ -1283,20 +1283,34 @@ carries is to **pass** the existing suite, not to write one.
     the one §12 property every other test in this list passes while breached: an
     implementation that skips invalid messages first and counts what survives
     satisfies all twelve others and still turns a busted cap into a quiet week.
-  - **No grant, no read — asserted on the adapter and on the ingestion path
-    separately (§9).** §9's second clause is "not resolved, not opened, not
-    parsed", so what is asserted is a spy reader's **call count** rather than
-    the reading it returns: with no grant, and with a live grant naming the
-    other scope, the count stays at zero on both paths; `FACET` admits the
-    `context/` adapter's read and `INGEST` the ingestion wiring's, and neither
-    scope satisfies the other's path. This is the breach with the worst
-    consequence in the document — an adapter that reads first and checks the
-    grant afterwards opens and parses a user's mail under no grant at all — and
-    every other test in this list passes while it happens, because none of them
-    leaves the reader. The calendar's equivalents in
+  - **No grant, no read — and the whole of ADR-0097 §5a's lifecycle, on the
+    adapter and on the ingestion path separately (§9).** §9's second clause is
+    "not resolved, not opened, not parsed", so the first thing asserted is a spy
+    reader's **call count** rather than the reading it returns. That is the entry
+    case and not the item: what the two drivers this ADR adds owe is the set
+    ADR-0097 §5a's clauses form, which
     `tests/context/test_calendar_context_source.py` and
-    `tests/orchestration/test_ingestion.py` are the shape to follow and are not
-    coverage: this is new wiring and they do not reach it.
+    `tests/orchestration/test_ingestion.py` already carry case by case — no
+    grant, and a live grant naming the other scope, each leave the count at
+    zero; a `live()` that raises **before** the read opens nothing and lets the
+    `GrantError` propagate rather than becoming a silent empty result; a
+    revocation landing between the gate's check and `read()` returning
+    **discards** the reading, with the count at one and nothing proposed or
+    contributed from it; an unanswerable **re-check** discards it on the same
+    terms; and the granted case reads, without which the refusals prove nothing.
+    The two paths refuse differently and both are asserted: an ungranted
+    ingestion pass raises `SourceNotGrantedError` and is never a successful pass
+    (ADR-0097 §5), while an ungranted facet is simply **absent** and says nothing
+    about why, and on the facet path a `GrantError` propagates from the adapter
+    with the assembler being what leaves the facet absent. ADR-0097 §5a states
+    these as obligations on a driver rather than as owed tests; they are owed
+    *here* because this ADR is what adds the drivers, and an item naming only the
+    entry case would ship a gate that authorises the read and then ignores the
+    revocation landing inside it. This is the breach with the worst consequence
+    in the document, and every other test in this list passes while it happens,
+    because none of them leaves the reader. The calendar's two modules are the
+    shape to follow and are not coverage: this is new wiring and they do not
+    reach it.
   - **The facet union discriminates at validation, not by declaration (§6).** A
     tagged calendar payload and a tagged email payload each resolve through
     `SourceReading` to their own type; a payload carrying `kind: "email"` **and**
