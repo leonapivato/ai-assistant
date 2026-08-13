@@ -71,7 +71,14 @@ _PATIENT = timedelta(seconds=10)
 #: The engine calls the grant surface makes, recorded as the hub receives them.
 #: Enough to read the client's *whole* flow off the hub, which is the only vantage
 #: point from which "it did not send" differs from "it sent and was refused".
-_WATCHED = ("grantable_sources", "grant", "revoke", "recent_grants", "beliefs")
+_WATCHED = (
+    "grantable_sources",
+    "grant",
+    "revoke",
+    "recent_grants",
+    "standing_grants",
+    "beliefs",
+)
 
 
 class _Hub:
@@ -371,6 +378,42 @@ def test_the_grant_record_holds_both_acts_after_the_commands_run(
     assert "2 record(s)" in rendered
     assert "granted" in rendered
     assert "withdrew" in rendered
+
+
+def test_granted_reads_the_real_store_and_amend_leaves_both_acts_on_file(
+    hub: _Hub, console_output: StringIO
+) -> None:
+    """ADR-0139 §2 and §4, over the durable store rather than a fake's list.
+
+    Two halves the fake-backed cases cannot settle between them. ``granted`` has to
+    come back from the real ``SqliteSourceGrantStore``'s anti-join, which is the
+    query the new member added and the one a fake satisfies by having no other
+    option. And ``amend`` has to leave **three** records behind — the first grant,
+    its revocation and the new grant — because ADR-0097 §2's two-act form is a
+    property of what the table holds, not of what the client printed.
+
+    The scopes are the amendment's point: what is standing afterwards is the *new*
+    grant's, so a run that reported success while re-granting the old scope would
+    fail here rather than read as a pass.
+    """
+    CliRunner().invoke(cli.app, ["grant", CALENDAR_READER_NAME, "--scope", "facet", "--yes"])
+    CliRunner().invoke(cli.app, ["amend", CALENDAR_READER_NAME, "--scope", "ingest", "--yes"])
+
+    console_output.truncate(0)
+    console_output.seek(0)
+    standing = CliRunner().invoke(cli.app, ["granted"])
+
+    assert standing.exit_code == 0
+    rendered = _flat(console_output.getvalue())
+    assert "1 source(s)" in rendered
+    assert CALENDAR_READER_NAME in rendered
+    assert "durably remembering what it says" in rendered
+    assert "looking at it while answering" not in rendered
+
+    console_output.truncate(0)
+    console_output.seek(0)
+    CliRunner().invoke(cli.app, ["grants"])
+    assert "3 record(s)" in _flat(console_output.getvalue())
 
 
 def test_a_source_nobody_configured_is_refused_before_anything_is_sent(

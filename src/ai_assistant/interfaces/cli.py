@@ -111,7 +111,8 @@ import re
 import shlex
 import sys
 from datetime import UTC, datetime, time, timedelta
-from typing import TYPE_CHECKING, NamedTuple, assert_never
+from enum import Enum
+from typing import TYPE_CHECKING, NamedTuple, assert_never, final
 
 import typer
 from rich.console import Console
@@ -119,7 +120,7 @@ from rich.markup import escape
 
 from ai_assistant import __version__
 from ai_assistant.core.config import load_settings
-from ai_assistant.core.errors import AssistantError
+from ai_assistant.core.errors import AssistantError, OversizedValueError
 from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import (
     DEFAULT_NOTIFICATION_REACH,
@@ -451,6 +452,62 @@ _GRANT_SCOPE_OPTION = typer.Option(
         "in order to raise things with you unprompted."
     ),
 )
+
+#: The same option on ``amend``, and it carries **every** member for the same
+#: reason (ADR-0139 §3's second clause, over ADR-0133 §6's): wherever a surface
+#: offers, enumerates or explains the uses a user may choose among, it names all of
+#: them. An amendment is a choice context, so nothing here may be trimmed on the
+#: ground that the user granted a narrower set last time — that would be the
+#: surface deciding what the user permits on their behalf.
+_AMEND_SCOPE_OPTION = typer.Option(
+    ...,
+    "--scope",
+    callback=_distinct_scope,
+    help=(
+        "What the *new* grant allows (repeatable), replacing the old one entirely: "
+        "'facet' to look at the source while answering, 'ingest' to durably remember "
+        "what it says, 'notify' to read it in order to raise things with you "
+        "unprompted."
+    ),
+)
+
+
+class _ActOutcome(Enum):
+    """What a client can honestly say about one act of an amendment (ADR-0139 §4).
+
+    **Three rather than two**, because a mutating call over a socket has a third
+    and the corpus already knows it: a ``grant`` can be committed by the hub and
+    lose its response (ADR-0085 §8e, #570), and ADR-0060 makes a cancelled write's
+    effect indeterminate for the same reason. A two-outcome report forces a client
+    in that state to assert one of two things it does not know.
+
+    It reaches the **revocation** as well as the grant: the first act is a mutating
+    call over the same socket and has no better guarantee than the second.
+    """
+
+    #: The hub answered, and the record is appended.
+    LANDED = "landed"
+    #: The hub answered with a refusal, so nothing was written.
+    NOT_LANDED = "known not to have landed"
+    #: The response was lost, the call was cancelled, or the result could not be
+    #: returned after the work had committed. The hub may have done it.
+    UNKNOWN = "not known"
+
+
+@final
+class _Unread:
+    """A source whose current grant state this surface has **not** read.
+
+    ADR-0139 §4's third clause gives a surface that has not read exactly one thing
+    to say — that the state is unread — rather than a default to fall back on. It is
+    a distinct value rather than ``None`` because ``None`` already means something
+    here: read, and no grant covers the source. Collapsing the two would be the
+    inference the clause forbids, wearing a type.
+    """
+
+
+#: The one instance; there is nothing to distinguish two of them.
+_UNREAD = _Unread()
 
 
 def _utcnow() -> datetime:
@@ -1349,10 +1406,49 @@ def grant(
     do not raise it with me unprompted" is a thing people mean. Name as many as you
     mean; naming one allows only that one.
 
-    A source can have one grant at a time. To change what a grant covers, revoke it
-    and grant again; both acts stay on the record.
+    A source can have one grant at a time. To change what a grant covers, use
+    'assistant amend' — or revoke and grant yourself; both acts stay on the record
+    either way.
     """
     code = asyncio.run(_grant_source(source, scope=scope, assume_yes=yes))
+    raise typer.Exit(code)
+
+
+@app.command()
+def amend(
+    source: str = typer.Argument(
+        ...,
+        callback=_present_source,
+        help="The source whose grant you want to change (see 'assistant granted').",
+    ),
+    scope: list[GrantScope] = _AMEND_SCOPE_OPTION,
+    *,
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the question. The source is still shown first."
+    ),
+) -> None:
+    """Change what one source's grant covers, by withdrawing it and granting anew.
+
+    **This is two acts and I will tell you how each one went.** There is no way to
+    change a grant in place: the record says what you actually decided, so a
+    narrowing is a withdrawal followed by a new grant, and both stay on the record.
+    Between them there is a moment when the source is granted for nothing — that
+    moment cannot be closed, so what this does instead is never leave you guessing
+    which half happened.
+
+    Each act comes back as one of exactly three things: it **landed**, it is
+    **known not to have landed**, or its outcome is **not known** — the last one
+    because a call can be committed here and lose its answer on the way back to
+    you. If the withdrawal's outcome is not known I send no grant at all, because
+    guessing from what a second act returned is exactly the guess this exists to
+    avoid.
+
+    You give me the new scope up front, and I show you the source and where it
+    reads from before I touch anything — the same disclosure 'assistant grant'
+    makes, because the granting half of an amendment is a grant like any other.
+    Nothing is withdrawn in order to ask you a question.
+    """
+    code = asyncio.run(_amend_source(source, scope=scope, assume_yes=yes))
     raise typer.Exit(code)
 
 
@@ -1392,9 +1488,31 @@ def grants(
     makes this the honest answer to "what have I permitted, and when".
 
     **Do not read liveness off this list.** A record here says an act happened, not
-    that it still stands — use ``assistant sources``, which asks me directly.
+    that it still stands — use ``assistant granted``, which asks me directly.
     """
     code = asyncio.run(_list_grants(limit=limit))
+    raise typer.Exit(code)
+
+
+@app.command()
+def granted() -> None:
+    """Show every source I am currently allowed to read, and for what.
+
+    This is the honest answer to "what have I permitted": it comes from the record
+    of what you decided, not from what happens to be plugged in today. So a source
+    you granted and then unconfigured is **still listed here**, which is the point
+    — it is still permitted, and this is where you find its name in order to
+    withdraw it.
+
+    It is a different question from 'assistant sources', which lists what you
+    *could* connect me to. The two can disagree and that is not a fault: something
+    can be available and ungranted, or granted and no longer available. Neither
+    list is derived from the other, and neither answers the other's question.
+
+    It also says nothing about *reading*. A grant is what you allowed; whether
+    anything was actually read is a question nothing here answers yet.
+    """
+    code = asyncio.run(_list_standing())
     raise typer.Exit(code)
 
 
@@ -2104,6 +2222,38 @@ async def _list_grants(*, limit: int) -> int:
     return await _drive_grants(engine, limit=limit)
 
 
+async def _list_standing() -> int:
+    """Obtain a client, read what is currently authorised, and render it (ADR-0139 §2)."""
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_standing(engine)
+
+
+async def _amend_source(source: str, *, scope: list[GrantScope], assume_yes: bool) -> int:
+    """Obtain a client and run the two-act amendment (ADR-0139 §4, §5).
+
+    ``--yes`` supplies the answer and never the rendering, exactly as on
+    :func:`_grant_source`: ADR-0139 §5 applies ADR-0102 §6's disclosure to **every**
+    ``grant``, the granting half of an amendment included, and refuses every reason
+    a client might have for skipping it — that the new scope is narrower, that the
+    source was granted a moment ago, or that the user has granted it before.
+    """
+    confirm: Callable[[GrantableSource], bool] = (
+        (lambda _source: True) if assume_yes else _confirm_amendment
+    )
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_amend(engine, source, scope=scope, confirm=confirm)
+
+
 async def _list_notifications(*, limit: int, offset: int) -> int:
     """Obtain a client, read the held notifications, and render them (ADR-0130 §7).
 
@@ -2587,6 +2737,153 @@ async def _drive_grants(engine: AssistantEngine, *, limit: int) -> int:
         _render_error(exc)
         return _EXIT_ERROR
     _render_grants(recorded, limit=limit)
+    return _EXIT_OK
+
+
+async def _drive_standing(engine: AssistantEngine) -> int:
+    """Ask the hub what the user currently authorises and render it (ADR-0139 §2).
+
+    **One call and no second one**, which is the whole of ADR-0139 §1 as it reaches
+    a client: this adapter does not fetch ``grantable_sources`` to annotate the set,
+    does not drop a record because no held reader declares its source, and does not
+    merge the two answers. A grant on a source the hub no longer builds is exactly
+    what this command exists to show, and each of those moves would hide it again.
+
+    Nothing is re-derived either. Liveness was computed hub-side from the ``revokes``
+    relation (ADR-0097 §4); a client that answered this by walking ``recent_grants``
+    would report a withdrawn grant as live the moment a clock moved backwards, which
+    is what ADR-0102 §3 forbids and what this operation exists to make unnecessary.
+    """
+    try:
+        standing = await engine.standing_grants()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_standing(standing)
+    return _EXIT_OK
+
+
+def _outcome_of(exc: Exception) -> _ActOutcome:
+    """Classify what one failed act of an amendment is known to have done.
+
+    A **typed refusal** is the hub having received the request and declined it, so
+    nothing was written: known not to have landed. A **transport failure** is the
+    answer having been lost, and the hub may well have committed first — ADR-0084
+    §3 keeps the two events distinct precisely because they are not the same thing,
+    and here the difference decides what a user is told.
+
+    :class:`~ai_assistant.core.errors.OversizedValueError` is a typed refusal that
+    is nonetheless **unknown**, and it is the one worth stating. On a mutating call
+    the result is measured *after* the work has committed (ADR-0085 §8e, #570), so
+    an oversized ``grant`` result means the record stands and could not be returned
+    — while an oversized *argument* is refused before any I/O and did not land. A
+    caller cannot tell those apart from the exception, and ADR-0139 §4's third
+    outcome exists for exactly this: report what is known rather than pick.
+    """
+    if isinstance(exc, TransportError | OversizedValueError):
+        return _ActOutcome.UNKNOWN
+    return _ActOutcome.NOT_LANDED
+
+
+async def _state_after(engine: AssistantEngine, source: str) -> SourceGrant | None | _Unread:
+    """Re-read what ``source`` is currently granted for, or report it unread.
+
+    **ADR-0139 §4's third clause is why this exists at all**: no surface may infer a
+    source's state from an act's outcome, and this is the read that states it
+    instead. The inference is tempting and wrong in both directions — a ``grant``
+    refused with ``InvalidGrantError`` can mean *another client granted the source
+    in between* (ADR-0102 §5), so "it is now ungranted" is false in the very case
+    that produced the refusal.
+
+    A failed read leaves the state **unread** rather than assumed. That is the
+    honest answer and it is also the only safe one: the alternative is a client
+    that says "not granted" because it could not ask.
+    """
+    try:
+        standing = await engine.standing_grants()
+    except AssistantError, TransportError:
+        return _UNREAD
+    return next((record for record in standing if record.source == source), None)
+
+
+async def _drive_amend(
+    engine: AssistantEngine,
+    source: str,
+    *,
+    scope: list[GrantScope],
+    confirm: Callable[[GrantableSource], bool],
+) -> int:
+    """Withdraw one grant and make another, reporting what each act did (ADR-0139 §4).
+
+    **The two acts are the client's, and that is the design rather than a
+    limitation.** ADR-0102 §1 refuses a compound hub operation and ADR-0139 §4
+    re-refuses it, on the ground that a compound call "would hide the intermediate
+    state inside the hub, where the client could not report it". Composing them here
+    is what puts that state somewhere a person can be told about it.
+
+    **The decision comes first and nothing is withdrawn in order to ask** (§4's
+    sixth clause). The scope arrives on the command line and the confirmation is
+    taken before the revocation is sent, so a user who hesitates, or closes the
+    terminal, has not withdrawn their grant by starting to think. It also discharges
+    §5: the enumeration is fetched and the location rendered before any ``grant``
+    goes out, and a source the enumeration does not carry is not amended from here
+    — there is nothing to show, and §6 fails closed rather than granting unseen.
+
+    **A revocation whose outcome is not known stops the amendment** (§4's fourth
+    clause). Sending the grant anyway would buy an answer nobody can read: a refusal
+    is equally consistent with the revocation not having landed and with another
+    client having granted in between, so the inference is the one §4's third clause
+    forbids. One read settles it; a second write does not.
+
+    A revocation **known** not to have landed stops it too. Nothing obliges that,
+    and it is the conservative reading of the same clause: what is known is that the
+    hub declined, and following a declined withdrawal with a grant is a second write
+    made on no better information than the first refusal gave.
+    """
+    try:
+        offered = await engine.grantable_sources()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    chosen = next((one for one in offered if one.source == source), None)
+    if chosen is None:
+        _render_unamendable_source(source, offered)
+        return _EXIT_ERROR
+    _render_amend_prompt(chosen, scope)
+    if not confirm(chosen):
+        console.print("[dim]Left alone. Nothing was withdrawn and nothing was granted.[/]")
+        return _EXIT_OK
+
+    try:
+        withdrawn = await engine.revoke(chosen.source)
+    except asyncio.CancelledError:
+        # §4's fifth clause, and ``CancelledError`` is a ``BaseException`` — the
+        # natural ``except Exception`` above would not see it, and a client written
+        # that way exits without reporting anything. Reporting is all that happens
+        # here: no further call is started, and the cancellation still leaves.
+        _render_act("withdrawal", _ActOutcome.UNKNOWN)
+        _render_unread(chosen.source)
+        raise
+    except (AssistantError, TransportError) as exc:
+        outcome = _outcome_of(exc)
+        _render_act("withdrawal", outcome, detail=_leaf_messages(exc))
+        _render_amendment_stopped(outcome)
+        _render_state(chosen.source, await _state_after(engine, chosen.source))
+        return _EXIT_ERROR
+    _render_act("withdrawal", _ActOutcome.LANDED, withdrew=withdrawn is not None)
+
+    try:
+        await engine.grant(chosen.source, scope=scope)
+    except asyncio.CancelledError:
+        _render_act("grant", _ActOutcome.UNKNOWN)
+        _render_unread(chosen.source)
+        raise
+    except (AssistantError, TransportError) as exc:
+        _render_act("grant", _outcome_of(exc), detail=_leaf_messages(exc))
+        _render_state(chosen.source, await _state_after(engine, chosen.source))
+        return _EXIT_ERROR
+    _render_act("grant", _ActOutcome.LANDED)
+    _render_state(chosen.source, await _state_after(engine, chosen.source))
     return _EXIT_OK
 
 
@@ -4134,7 +4431,9 @@ def _render_grants(recorded: tuple[SourceGrant, ...], *, limit: int) -> None:
     timestamped before the grant it revokes, so a clock correction can put the two
     out of order here — which is a display oddity and never a wrong answer, as long
     as nothing on this page pretends to answer "is it granted now". That question is
-    ``assistant sources``.
+    ``assistant granted``, which reads the store (ADR-0139 §3's last clause);
+    ``assistant sources`` answers what *may* be granted, so it would miss a live
+    grant on a source the hub holds no reader for.
     """
     if not recorded:
         console.print("[yellow]Nothing recorded.[/] You have not granted or withdrawn anything.")
@@ -4152,8 +4451,231 @@ def _render_grants(recorded: tuple[SourceGrant, ...], *, limit: int) -> None:
             f"\n[dim]Showing {limit}. Ask for more with --limit; there is no total count.[/]"
         )
     console.print(
-        "\n[dim]Whether a source is granted *now* is 'assistant sources' — a record "
+        "\n[dim]Whether a source is granted *now* is 'assistant granted' — a record "
         "here says an act happened, not that it still stands.[/]"
+    )
+
+
+def _render_standing(standing: tuple[SourceGrant, ...]) -> None:
+    """Render what the user currently authorises, whole (ADR-0139 §3).
+
+    **The set is presented as it arrived.** No record is omitted because no held
+    reader declares its source, nothing is merged into the enumeration of grantable
+    sources, and no entry is offered as something to grant — that would present the
+    one answer as the other, which §1 keeps apart and §3's first clause forbids at
+    the rendering.
+
+    **Each grant renders exactly the uses it names**, and this is the half a
+    well-meaning view gets wrong. Adding the members a grant leaves out — greying
+    them out beside it, listing them as "not yet allowed" — presents the user's
+    decision as a half-filled form, which is a nudge toward a wider grant on the one
+    surface whose whole subject is what they actually decided (§3's third clause).
+    The choice context is where the whole vocabulary belongs, and that is
+    ``--scope``'s help.
+
+    **Nothing here is a claim about configuration or about reads.** Whether a held
+    reader currently declares one of these sources is a different question and
+    ``assistant sources`` is where it is asked (§3's fourth clause, ADR-0093 §7).
+    Whether a source was actually read has no answer on any surface yet (§6), and
+    saying so plainly is what stops this list being read as one.
+    """
+    if not standing:
+        console.print(
+            "[yellow]You have not granted anything.[/] I am allowed to read no "
+            "source at all. 'assistant sources' lists what you could connect me to."
+        )
+        return
+    console.print(f"[bold]{len(standing)}[/] source(s) you currently allow me to read:\n")
+    for record in standing:
+        console.print(f"  [bold cyan]{_safe(record.source)}[/]")
+        console.print(f"    [green]allowed for[/] {_scope_phrase(record.scope)}")
+        console.print(f"    [dim]granted {_when(record.decided_at)}[/]")
+        withdrawal = (
+            f"assistant revoke {_argument(record.source)}"
+            if _is_pasteable(record.source)
+            else "assistant revoke"
+        )
+        console.print(f"    [dim]withdraw with '{withdrawal}'[/]")
+        console.print()
+    console.print(
+        "[dim]This is what you permitted, read from the record of your own "
+        "decisions. It is not a list of what is configured — see 'assistant "
+        "sources' — and it says nothing about what has actually been read.[/]"
+    )
+
+
+def _render_unamendable_source(source: str, offered: tuple[GrantableSource, ...]) -> None:
+    """Report that an amendment cannot be offered for a source I cannot show.
+
+    ADR-0139 §5 carries ADR-0102 §6's disclosure into the granting half of an
+    amendment without exception, and §6's own words are that "a client that cannot
+    show the user the location does not send ``grant``". A source absent from the
+    enumeration leaves nothing to show, so the amendment fails closed here.
+
+    **Revocation is unaffected and is said so**, because this is exactly the case
+    where it matters: ADR-0102 §4 applies no admission check to ``revoke`` precisely
+    so a configuration edit can never make a grant unrevokable, and a user whose
+    source has stopped being offered still has their whole remedy.
+    """
+    console.print(
+        f"[yellow]I cannot amend the grant on[/] {_safe(source)}[yellow].[/] "
+        "Amending makes a new grant, and I only grant a source I can show you "
+        "first — this one is not among the sources I can offer."
+    )
+    if offered:
+        names = ", ".join(_safe(one.source) for one in offered)
+        console.print(f"Available to grant: {names}. See 'assistant sources'.")
+    withdrawal = (
+        f"assistant revoke {_argument(source)}" if _is_pasteable(source) else "assistant revoke"
+    )
+    console.print(
+        f"[dim]Withdrawing is not affected: '{withdrawal}' works whatever is "
+        "configured. 'assistant granted' shows what you currently allow.[/]"
+    )
+
+
+def _render_amend_prompt(chosen: GrantableSource, scope: Sequence[GrantScope]) -> None:
+    """Show the source, its location and the new scope, before anything is sent.
+
+    **ADR-0139 §5 discharged, and the ordering is the whole of it.** ADR-0102 §6's
+    obligation applies to every ``grant``, and the granting half of an amendment is
+    a ``grant`` — same operation, same record, same store. What makes the reminder
+    worth a clause is that an amendment *feels* like modifying something already
+    consented to, and a client author reasoning that way skips the one step §6
+    exists for. Nothing here branches on whether the new scope is narrower: that
+    branch buys nothing except somewhere for the mistake to live.
+
+    It also renders the **existing** grant exactly as it stands, without presenting
+    it as incomplete (§3's third clause), so a person can see what they are
+    replacing rather than what someone thought they should have asked for.
+    """
+    console.print(f"About to change the grant on [bold cyan]{_safe(chosen.source)}[/].\n")
+    if chosen.location is None:
+        console.print("  [yellow]It has no configured location.[/]")
+    else:
+        console.print(f"  It reads from: [bold]{_safe(chosen.location)}[/]")
+    if chosen.live is None:
+        console.print(
+            "  [yellow]It is not granted right now.[/] I will still withdraw first, "
+            "then grant — that is the only shape this act has."
+        )
+    else:
+        console.print(f"  It is currently allowed for: {_scope_phrase(chosen.live.scope)}")
+    console.print(f"  It would then be allowed for: {_scope_phrase(scope)}")
+    console.print(
+        "\n[dim]This is two acts: a withdrawal, then a new grant. Between them the "
+        "source is allowed nothing, and I will tell you how each one went.[/]"
+    )
+
+
+def _confirm_amendment(_source: GrantableSource) -> bool:
+    """Read the human's yes/no *without* rendering — the caller already displayed it.
+
+    Defaults to **no**, like :func:`_confirm_grant` and for its reason: the question
+    ends in a grant, and a bare Enter must not be what permits one.
+    """
+    return typer.confirm("Change it?", default=False)
+
+
+def _render_act(
+    act: str,
+    outcome: _ActOutcome,
+    *,
+    detail: Sequence[str] = (),
+    withdrew: bool | None = None,
+) -> None:
+    """Say what one act of the amendment did, as one of exactly three things.
+
+    **"Not merely failed" is the whole of ADR-0139 §4's second clause**, and the
+    wrong report is the one an implementer writes: catch, print the exception, exit
+    non-zero. A user reads that as the amendment not having happened, goes away, and
+    their source stops being read — silently, because the hub's refusal is a log
+    line and a missing facet is indistinguishable from every other absence. The
+    state is recoverable in one command; being told about it is what makes it so.
+
+    Each phrasing is about **this act** and never about the source. A withdrawal
+    that landed is not a statement that the source is ungranted, and a grant that
+    was refused is not one either (§4's third clause) — that is
+    :func:`_render_state`'s job, from a read.
+    """
+    match outcome:
+        case _ActOutcome.LANDED:
+            found = ""
+            if withdrew is False:
+                found = " (there was no live grant for it to withdraw)"
+            console.print(f"[green]The {act} landed.[/]{found}")
+        case _ActOutcome.NOT_LANDED:
+            console.print(
+                f"[red]The {act} is known not to have landed[/] — I was refused, so "
+                f"nothing was written: {_safe('; '.join(detail))}"
+            )
+        case _ActOutcome.UNKNOWN:
+            because = f" {_safe('; '.join(detail))}" if detail else ""
+            console.print(
+                f"[yellow]The outcome of the {act} is not known.[/]{because} I did "
+                "not get an answer back, and it may have been done anyway."
+            )
+        case _:  # pragma: no cover — exhaustive over the enum
+            assert_never(outcome)
+
+
+def _render_amendment_stopped(outcome: _ActOutcome) -> None:
+    """Say that no grant was sent after a withdrawal that did not plainly land.
+
+    ADR-0139 §4's fourth clause for the unknown branch, and the same conservatism
+    for the refused one. Sending the grant anyway would invite reasoning backwards
+    from its result — refused means the withdrawal did not land, accepted means it
+    did — which is precisely the inference §4's third clause forbids, because a
+    refusal is equally consistent with another client having granted in between.
+    """
+    if outcome is _ActOutcome.UNKNOWN:
+        console.print(
+            "[yellow]I sent no new grant.[/] I could not tell whether the withdrawal "
+            "happened, and sending a second act to find out would only give me an "
+            "answer I could not read. The amendment is incomplete."
+        )
+        return
+    console.print("[yellow]I sent no new grant.[/] The amendment is incomplete.")
+
+
+def _render_unread(source: str) -> None:
+    """Say the source's state is unread, and start no call to find out.
+
+    **ADR-0139 §4's fifth clause, and its middle sentence is the load-bearing one.**
+    A cancelled surface is still asked to report, which invites reaching for the
+    state before reporting it — the same breach by a kinder route. ADR-0060 permits
+    deferring a cancellation only while a method makes its resources safe, and a
+    read performed to present a state is not that. So this says what happened to the
+    act, says the source's state is unread, starts nothing, and lets the
+    ``CancelledError`` leave.
+    """
+    console.print(
+        f"[dim]I have not read what {_safe(source)} is allowed for, so I am not "
+        "saying. 'assistant granted' will tell you.[/]"
+    )
+
+
+def _render_state(source: str, state: SourceGrant | None | _Unread) -> None:
+    """State the source's current grant, from a read and never from an act's outcome.
+
+    ADR-0139 §4's third clause is sharper than it first looks, and an earlier draft
+    of that ADR got it wrong: a ``grant`` refused with ``InvalidGrantError`` is
+    refused *because another client's grant is live* (ADR-0102 §5), so "the source
+    is now ungranted" is false in the one case that produced the refusal. An act's
+    outcome is a fact about that act; the source's state is a fact about the store;
+    and one is never read off the other.
+    """
+    if isinstance(state, _Unread):
+        console.print(
+            f"[dim]I could not read what {_safe(source)} is allowed for, so I am not "
+            "saying. Try 'assistant granted'.[/]"
+        )
+        return
+    if state is None:
+        console.print(f"I read [bold]{_safe(source)}[/]'s state: nothing is granted on it.")
+        return
+    console.print(
+        f"I read [bold]{_safe(source)}[/]'s state: it is allowed {_scope_phrase(state.scope)}."
     )
 
 
