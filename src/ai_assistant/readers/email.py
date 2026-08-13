@@ -121,7 +121,7 @@ its process model are its own and are governed nowhere here (§1)::
     import os
     import tempfile
     import time
-    from datetime import UTC, datetime
+    from datetime import UTC, datetime, timedelta
 
     from imap_tools import A, MailBox
 
@@ -131,7 +131,8 @@ its process model are its own and are governed nowhere here (§1)::
 
     # Every message newer than `retention`, as one envelope-only mbox frame each.
     def frames(host, user, password, retention):
-        since = (datetime.now(UTC) - retention).date()
+        # A day earlier than the edge: SINCE compares dates, not instants.
+        since = (datetime.now(UTC) - retention - timedelta(days=1)).date()
         with MailBox(host).login(user, password) as box:
             box.folder.set("INBOX", readonly=True)
             for message in box.fetch(A(date_gte=since), headers_only=True, mark_seen=False):
@@ -183,8 +184,19 @@ half-implements.
   ``INTERNALDATE``, which is the only instant on our side of the file — ``Date``
   is the sender's clock and the thing an attacker controls (§5), and the search
   term is ``date_gte`` rather than a sent-date term for exactly that reason:
-  IMAP's ``SINCE`` selects on ``INTERNALDATE`` too, so retention and membership
-  are decided on one clock.
+  ``imap-tools`` renders it as IMAP's ``SINCE``, which selects on
+  ``INTERNALDATE`` too, so both ends of the arrangement are on one clock.
+  **``SINCE`` is nonetheless a coarse filter and the extra day is not
+  superstition**: RFC 3501 §6.4.4 selects on the internal date *"disregarding
+  time and timezone"*, so the server compares calendar dates rendered in **its**
+  zone against the date given. A server behind UTC therefore stamps a message
+  delivered at ``2026-08-07T02:00Z`` with the local date ``06-Aug``, and a
+  ``SINCE`` computed by truncating the retention edge to its UTC date would drop
+  it while the reader's window — which is instants, and closed at the bottom —
+  still contains it. §3 leaves no cursor to notice, so that message is lost
+  permanently rather than late. Subtracting a day before truncating makes the
+  search a **superset** of the retention edge in every zone; narrowing back to
+  the window is the reader's job and it does it on the delivery instant.
 - **In the closed subset and nothing wider** (§5, :data:`_DELIVERED_AT_VALUE`).
   The ``%Y-%m-%dT%H:%M:%SZ`` spelling lands inside it by construction.
   ``datetime.isoformat`` also lands inside it **when the value is UTC-aware** —
