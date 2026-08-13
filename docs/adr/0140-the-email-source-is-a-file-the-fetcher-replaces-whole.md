@@ -1161,7 +1161,7 @@ carries is to **pass** the existing suite, not to write one.
   `rename(2)` on the same filesystem; that its retention exceeds the reader's
   window; and that its credential never enters the hub. This is documentation and
   not `src/`, and §1's second clause is why: the fetcher is not ours to ship.
-- Tests for the clauses a lane can satisfy in prose and breach in code — six,
+- Tests for the clauses a lane can satisfy in prose and breach in code — seven,
   each named by the breach it catches:
 
   - **The body never leaves the reader (§5).** A message carrying a body still
@@ -1193,13 +1193,22 @@ carries is to **pass** the existing suite, not to write one.
     converse is asserted in the same test so the skip is not quietly generalised
     to every absent field: a message with no `Subject` still proposes, with the
     subject empty.
+  - **Every cap §12 names owes a refusal test, one each (§12).**
+    `email_max_bytes`, on a store larger than the cap, refusing on the read
+    itself rather than after parsing; and `email_max_content_bytes`, on an
+    in-window message whose folded `Subject` materialises past a deliberately
+    small aggregate budget, asserted to fail **before** the over-budget proposal
+    is materialised. A reader that never charges the content accumulator, or
+    enforces the byte cap only after reading the whole store, passes every other
+    test in this list. The rule is stated per cap rather than per figure so that
+    a cap added later arrives owing its test.
   - **The cap is applied at the framing (§12).** A store of
     `email_max_messages + 1` framed messages **none** of which carries a valid
     `X-Assistant-Delivered-At` **refuses** rather than returning a successful
     empty reading. This is the cap's *ordering* rather than its figure, and it is
     the one §12 property every test above passes while breached: an
     implementation that skips invalid messages first and counts what survives
-    satisfies all five others and still turns a busted cap into a quiet week.
+    satisfies all six others and still turns a busted cap into a quiet week.
 
 ### 14. Deferred, by name, each with the condition that fires it
 
