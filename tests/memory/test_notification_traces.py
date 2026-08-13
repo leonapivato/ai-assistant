@@ -28,7 +28,11 @@ from notification_contract import NOW, MutableClock, candidate, reaching
 from pydantic import TypeAdapter
 
 from ai_assistant.core.correlation import correlated_operation
-from ai_assistant.core.errors import NotificationStoreError, TraceStoreError
+from ai_assistant.core.errors import (
+    NotificationStoreError,
+    TraceStoreError,
+    UnresolvedEvidenceError,
+)
 from ai_assistant.core.types import (
     INTERRUPT_CONDITIONS,
     ClassReach,
@@ -483,6 +487,35 @@ async def test_a_crossing_that_raised_carries_its_fault_and_none_of_the_metric_k
     assert trace.fault_class == "RuntimeError"
     assert trace.metrics == {}
     assert trace.occurred_at == NOW
+
+
+async def test_a_refusal_is_classified_by_the_package_s_own_tuple(
+    make_store: Callable[..., SqliteNotificationStore], sink: FakeTraceSink
+) -> None:
+    """§10: the discriminator is the tuple ``ai_assistant.memory.traces`` already holds.
+
+    The tuples are per-module by design and their memberships differ, so *which*
+    refusal reading a new emitter takes is a choice — §10 makes it the package the
+    store lives in, and states the consequence rather than hiding it: a policy
+    raising a class `orchestration` reads as a refusal traces here as ``FAULT``,
+    on that tuple's own fail-towards-``FAULT`` default. No policy in this tree
+    raises a member of either, so a custom one is what the case models. That two
+    subsystems can read one class differently is filed as #1046.
+    """
+
+    class _RefusingPolicy:
+        async def rule(self, *args: object, **kwargs: object) -> NotificationDisposition:
+            msg = "the warrant does not exist"
+            raise UnresolvedEvidenceError(msg)
+
+    store = make_store()
+    with pytest.raises(UnresolvedEvidenceError):
+        await store.admit(candidate(), policy=_RefusingPolicy())
+
+    trace = _only(sink)
+    assert trace.outcome is TraceOutcome.REFUSED
+    assert trace.fault_class == "UnresolvedEvidenceError"
+    assert trace.metrics == {}
 
 
 async def test_a_disposition_the_transaction_rolled_back_carries_no_metric_key(
