@@ -335,13 +335,16 @@ kinds. §13e's price is one ADR, and this is it.
 > rule their absence says the ruling was not reached, which is what "not reached"
 > must mean for an act that is atomic.
 
-> **Normative.** A crossing whose **clock reading itself fails** emits nothing.
-> The store reads its clock first, inside the act, and `checked_clock` raises on
-> a reading it will not vouch for; `occurred_at` is required and there is no
-> instant to stamp, so no trace can be constructed. It is logged as a lost trace
-> under ADR-0119 §5, exactly as any other trace that could not be recorded, and
-> **no wall-clock fallback is introduced**. Every other fault before the commit
-> has the instant already in hand and the clause above binds unconditionally.
+> **Normative.** A crossing that obtains **no clock reading at all** emits
+> nothing, and that covers both ways it happens: the injected callable raising,
+> which `checked_clock` deliberately lets propagate unwrapped because "the guard
+> covers the reading, not the invocation", and the guard refusing a
+> non-conforming reading with `ClockReadingError`. The store reads its clock
+> first, inside the act, so either way `occurred_at` has no instant to stamp and
+> no trace can be constructed. It is logged as a lost trace under ADR-0119 §5,
+> exactly as any other trace that could not be recorded, and **no wall-clock
+> fallback is introduced**. Every fault after a reading was obtained has the
+> instant in hand, and the clause above binds unconditionally there.
 
 > **Normative.** A **cancellation is never classified and emits nothing.** An
 > externally delivered `CancelledError` is re-raised before any outcome or fault
@@ -401,16 +404,22 @@ and carries no keys. Adversarial review found it on the eleventh round.
 **The one crossing that emits nothing is the one that cannot say when.** The
 fault-path clause is otherwise unconditional and should be: a store fault after
 the clock read has the ruling instant in hand, so a trace costs nothing. But the
-store reads its clock first, inside the act, and `checked_clock` (ADR-0026 §7)
-raises `ClockReadingError` on a reading it will not vouch for — so that one
-crossing has no instant, and `EvaluationTrace.occurred_at` is not optional. Both
+store reads its clock first, inside the act, and that read has two failure modes
+`checked_clock` (ADR-0026 §7) deliberately keeps apart — it refuses a
+non-conforming *reading* with `ClockReadingError` and lets an exception from the
+*invocation* propagate unwrapped, because relabelling the clock's own failure
+"would destroy both" its type and its cause. The clause above is written over
+what the emitter lacks rather than over which of the two raised, since the
+consequence is identical: no instant, and `EvaluationTrace.occurred_at` is not
+optional. Both
 escapes make the instrument lie: dropping the trace silently is what ADR-0119 §5
 refuses outright, and stamping a wall-clock reading the guard has just rejected
 would put a fabricated instant in a window and move a rate. Logging it as a lost
 trace is neither, and it is ADR-0119 §5's existing rule rather than an exception
 carved for this seam — §9 already records the lossiness it costs, and §5's own
 denominator rule is why it does not make a measure wrong. Adversarial review
-found it on the tenth round, as a consequence of the ninth round's fix.
+found it on the tenth round, as a consequence of the ninth round's fix, and
+narrowed the clause to both failure modes on the twelfth.
 
 **`occurred_at` is pinned to the ruling because the emission is deliberately
 later.** The clauses above put the emission after the commit, so an emitter
