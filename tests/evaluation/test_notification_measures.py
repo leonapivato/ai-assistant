@@ -511,6 +511,62 @@ class TestMisplacedHeldSeconds:
             assert result.interruption.numerator == 1, value
 
 
+class TestMisplacementReachesThePopulationOnly:
+    """§7's misplacement is about a trace in the populations, and only about one.
+
+    Its clause reads: "A misplaced value is never read as a latency, **its trace
+    stays in every other population**, and the report counts it" — which presupposes
+    populations to stay in. §5 says an incomplete trace "enters no population" and "a
+    malformed trace enters no population", so neither can be misplaced *for a
+    diagnostic it is not in*. Establishing otherwise would mean reading a disposition
+    off a trace whose defect is that "neither trace can be trusted for anything".
+
+    Adversarial review proposed the wider reading on the second round. It is declined
+    here rather than adopted, and these cases are what make the decision checkable.
+    """
+
+    async def test_a_malformed_reconsideration_is_counted_once_under_its_own_rule(
+        self,
+    ) -> None:
+        """The reviewer's own example: a readable ``INTERRUPT``, a missing condition
+        key, and no ``held_seconds``."""
+        metrics = ruled(INTERRUPT)
+        del metrics[BUDGET]
+        result = await figures(notification(when=at(days=1), seam=RECONSIDER, metrics=metrics))
+        assert result.health.malformed == 1
+        assert result.health.misplaced_held_seconds == 0
+        assert result.interruption.denominator == 0
+        assert result.held_latency.count == 0
+
+    async def test_a_malformed_trace_carrying_it_where_forbidden_is_also_counted_once(
+        self,
+    ) -> None:
+        metrics = ruled(HOLD) | {HELD_SECONDS: 5.0}
+        del metrics[BUDGET]
+        result = await figures(notification(when=at(days=1), seam=ADMIT, metrics=metrics))
+        assert result.health.malformed == 1
+        assert result.health.misplaced_held_seconds == 0
+
+    async def test_an_incomplete_trace_is_never_misplaced(self) -> None:
+        """§4's requirement is not even determinable: there is no disposition."""
+        result = await figures(notification(when=at(days=1), seam=RECONSIDER, metrics={}))
+        assert result.health.incomplete == 1
+        assert result.health.misplaced_held_seconds == 0
+
+    async def test_a_counter_inconsistent_trace_can_be_misplaced(self) -> None:
+        """The contrast that shows the line is the population and not the state.
+
+        A counter-inconsistent trace *is* in the ruling population, so §7's clause
+        reaches it — which is why the rule above is about membership rather than
+        about being defect-free.
+        """
+        result = await figures(
+            notification(when=at(days=1), seam=RECONSIDER, metrics=ruled(INTERRUPT, duplicate=1))
+        )
+        assert result.health.counter_inconsistent == 1
+        assert result.health.misplaced_held_seconds == 1
+
+
 class TestExtremeLatencies:
     """§4 puts no ceiling on ``held_seconds``, and a report must survive the ceiling.
 
