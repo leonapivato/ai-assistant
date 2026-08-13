@@ -38,7 +38,14 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import ModelProvider
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
+    from ai_assistant.core.types import (
+        CalendarFacet,
+        ContextFacet,
+        CurrentContext,
+        EmailFacet,
+        Goal,
+        MemoryRecord,
+    )
 
 #: Total ``complete`` calls a single ``plan`` may make: one initial request plus
 #: one bounded repair round (ADR-0047 §6). The constructor rejects anything < 1.
@@ -312,6 +319,15 @@ def _render_request(
     accept in the Protocol's wording. The records are rendered **in the order they
     were handed**, unchanged; the header is inserted at the boundary, nothing is
     reordered or dropped.
+
+    ``context``'s facets are rendered by :func:`_render_facets` under the same
+    "Current context:" heading as the four temporal scalars, and **below** them:
+    the scalars are this system's own reading of its own clock, a facet is a
+    source's report, and ADR-0098 §2 requires the two be distinguishable in the
+    assembled prompt. A facet that is ``None`` contributes nothing at all — no
+    line, no header, no mention of its source — because ADR-0096 §4 and ADR-0097
+    §5 rule ``None`` the single absence that "does not distinguish unconfigured,
+    disabled, never-read, ungranted, failed or empty".
     """
     lines = [
         "Goal:",
@@ -329,8 +345,9 @@ def _render_request(
         f"  time_of_day: {context.time_of_day.value}",
         f"  is_weekend: {context.is_weekend}",
         f"  within_working_hours: {context.within_working_hours}",
-        "",
     ]
+    lines += _render_facets(context)
+    lines.append("")
 
     if memories:
         turns, retrieved = _split_conversation_tail(memories)
@@ -346,6 +363,148 @@ def _render_request(
         lines.append("No stored memories were retrieved for this goal.")
 
     return "\n".join(lines)
+
+
+def _render_facets(context: CurrentContext) -> list[str]:
+    """Render the present facets of ``context``, or nothing at all.
+
+    ``CurrentContext``'s facets are the only part of the assembled prompt this
+    system did not itself author, so the block they land in is headed as a
+    *report* and each one names the source that made it. That is ADR-0096 §7's
+    floor — "a surface that presents a facet's content names the facet's
+    ``source``, and may not present that content as the user's own statement, as
+    this system's inference, or as a reading of our own clock" — and ADR-0098 §2's
+    first clause read on the same spans.
+
+    **An absent facet renders nothing, and the header is not printed either.**
+    ADR-0096 §4 fixes ``None`` as the single absence and ADR-0097 §5 adds
+    ungranted to what it hides; a header printed over an empty block would be this
+    renderer reporting that a source *could* have spoken, which is the "grant
+    conversation conducted by a field nobody designed" both sections forbid.
+
+    Args:
+        context: The assembled context whose facets are to be rendered.
+
+    Returns:
+        The block's lines, or an empty list when every facet is ``None``.
+    """
+    blocks: list[list[str]] = []
+    if context.calendar is not None:
+        blocks.append(_render_calendar_facet(context.calendar))
+    if context.email is not None:
+        blocks.append(_render_email_facet(context.email))
+    if not blocks:
+        return []
+
+    lines = [
+        "  Reported by the sources this system read for this request — each block",
+        "  below is that source's own report, not the user's words and not this",
+        "  system's own conclusion:",
+    ]
+    for block in blocks:
+        lines += block
+    return lines
+
+
+def _render_calendar_facet(facet: CalendarFacet) -> list[str]:
+    """Render one calendar facet's stamp and payload (ADR-0096 §6).
+
+    ``next_starts_at`` being ``None`` is rendered as what §6 says it means — the
+    reading found no later occurrence **within the window it covered** — and never
+    as "there is nothing next", which §6 forbids a surface from presenting. That is
+    also why ``covers_until`` is rendered unconditionally: it is the field §6
+    carries so that a ``None`` here means something to a consumer who does not read
+    ``Settings``.
+    """
+    lines = _render_facet_stamp(facet)
+    lines.append(f"      entries in progress at that read: {facet.entries_in_progress}")
+    if facet.next_starts_at is None:
+        lines.append("      no later entry began within the window this reading covered")
+    else:
+        lines.append(
+            f"      the next entry within that window begins at: {facet.next_starts_at.isoformat()}"
+        )
+    lines.append(
+        "      the window this reading covered ended, exclusive, at: "
+        f"{facet.covers_until.isoformat()}"
+    )
+    return lines
+
+
+def _render_email_facet(facet: EmailFacet) -> list[str]:
+    """Render one email facet's stamp and payload (ADR-0140 §6).
+
+    The count's label says *parsed from the store*, because §6 rules that
+    ``arrived_in_window`` "is not a claim about the account, is never presented as
+    one, and no consumer may read it as a count of mail received" — the store is
+    written by a fetcher outside this system whose completeness the reader cannot
+    verify. ``covers_from`` is rendered with it for ``covers_until``'s reason
+    (ADR-0096 §6): a count means nothing without the interval it counted over, and
+    the window's upper edge is ``read_at`` itself (ADR-0140 §3), already on the
+    stamp line.
+    """
+    lines = _render_facet_stamp(facet)
+    lines.append(
+        "      messages this reader parsed from its own store, arriving since "
+        f"{facet.covers_from.isoformat()}: {facet.arrived_in_window}"
+    )
+    return lines
+
+
+def _render_facet_stamp(facet: ContextFacet) -> list[str]:
+    """Render the source line every facet block opens with (ADR-0096 §2, §7).
+
+    ``read_at`` is labelled as **this system's** read, never as the source's own
+    instant, and ``as_of`` — the only instant the source itself declares — is
+    rendered only when the source declared one. Where it is ``None`` the block says
+    nothing whatever about when the source's picture was current, rather than
+    substituting ``read_at`` for it: that substitution is exactly what ADR-0096 §7's
+    second clause forbids, and for the two producers that exist ``as_of`` is always
+    ``None``, so it is the live case rather than the defensive one.
+    """
+    lines = [
+        f"    - the source {_quoted_span(facet.source)}, which this system read at "
+        f"{facet.read_at.isoformat()}:"
+    ]
+    if facet.as_of is not None:
+        lines.append(
+            f"      the source says its own picture was current at: {facet.as_of.isoformat()}"
+        )
+    return lines
+
+
+def _quoted_span(value: str) -> str:
+    """Render one held string so it cannot write this renderer's own syntax.
+
+    ADR-0098 §2 rules that a span's attribution is "not forgeable from inside the
+    span" and that "an assembler that embeds a span in a syntax the serialised span
+    can itself produce does not conform, whatever labels it emits". This block's
+    syntax is line-oriented — a newline, an indent and a ``- the source`` bullet —
+    and a facet's ``source`` is the one field of it that is free text:
+    ``NonBlankEncodableText`` refuses a blank value and validates UTF-8
+    encodability, and permits every newline and bracket in between.
+
+    :func:`json.dumps` is the deterministic transform §2 admits, chosen over an
+    invented one because its escaping is total for this target rather than
+    plausible: at its default ``ensure_ascii=True`` the result is single-line,
+    printable ASCII, delimited by quotes the value can no longer close. So no
+    ``source`` — however it was constructed — can open a second bullet, forge a
+    second source, or reopen the "Current context:" heading.
+
+    It is deliberately **not** applied to :func:`_render_record`'s memory content.
+    ADR-0098 §9 states that obligation separately, on the prompt-assembly lane
+    filed as #672, which owes ``_render_record`` and ``observer._render_batch``
+    §2 in full along with ADR-0072 §6's band-and-confidence rendering. This lane
+    owes §9's third bullet — §2 "for any facet field that is ever rendered into a
+    prompt" — and discharges that and nothing more.
+
+    Args:
+        value: The held string, verbatim as this system carries it.
+
+    Returns:
+        The quoted, escaped span to interpolate into a prompt line.
+    """
+    return json.dumps(value)
 
 
 def _render_record(record: MemoryRecord) -> str:
