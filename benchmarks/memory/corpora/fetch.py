@@ -106,19 +106,24 @@ def ensure_file(file: CorpusFile, *, cache: Path | None = None) -> Path:
     )
     os.close(handle)
     partial = Path(staged_name)
-    _download(file.url, partial)
-
-    found = digest_of(partial)
-    if found != file.sha256:
+    # `mkstemp` has already created the file, so *every* exit that is not a successful
+    # publish has to remove it — including the ones that raise before a byte is
+    # written, such as `_download`'s scheme check. Without this a rejected URL leaves
+    # a stray staging file in the cache on every attempt.
+    try:
+        _download(file.url, partial)
+        found = digest_of(partial)
+        if found != file.sha256:
+            msg = (
+                f"{file.name}: downloaded bytes do not match the pinned digest "
+                f"(expected {file.sha256}, got {found}). The pin names an immutable "
+                f"revision, so this is a corrupted transfer or a changed pin, never a "
+                f"legitimately updated corpus."
+            )
+            raise CorpusFetchError(msg)
+        partial.replace(target)
+    finally:
         partial.unlink(missing_ok=True)
-        msg = (
-            f"{file.name}: downloaded bytes do not match the pinned digest "
-            f"(expected {file.sha256}, got {found}). The pin names an immutable "
-            f"revision, so this is a corrupted transfer or a changed pin, never a "
-            f"legitimately updated corpus."
-        )
-        raise CorpusFetchError(msg)
-    partial.replace(target)
     return target
 
 

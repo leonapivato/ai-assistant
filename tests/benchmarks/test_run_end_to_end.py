@@ -465,8 +465,9 @@ async def test_execute_run_refuses_a_scored_run_on_the_hashing_embedder(
 async def test_execute_run_refuses_a_scored_run_judged_by_the_exact_grader(
     tmp_path: Path,
 ) -> None:
-    """Read off the grader that will actually judge, not off a caller's description of
-    it — here everything else is eligible and only the judge is not."""
+    """The gate names the grader the harness is about to *build*, not one a caller
+    supplied and described — here everything else is eligible and only the judge is
+    not."""
     settings = _settings(tmp_path).model_copy(update={"embedder": EmbedderKind.ON_DEVICE})
 
     with pytest.raises(ValueError, match="LLM judge"):
@@ -476,8 +477,53 @@ async def test_execute_run_refuses_a_scored_run_judged_by_the_exact_grader(
             mode=RunMode.SCORED,
             corpus_digests={},
             settings=settings,
+            grader_kind="exact",
+            preregistration_final=True,
+        )
+
+
+async def test_execute_run_refuses_a_scored_run_with_an_injected_seam(
+    tmp_path: Path,
+) -> None:
+    """The manifest records the routes the settings name, so a seam supplied by the
+    caller makes that record false. This is the one precondition that can be checked
+    without trusting anything a caller says: an override is present or it is not — and
+    it is what stops a grader that merely *calls itself* a model judge from producing a
+    scored artifact."""
+    settings = _settings(tmp_path).model_copy(update={"embedder": EmbedderKind.ON_DEVICE})
+
+    with pytest.raises(ValueError, match="injected seam"):
+        await execute_run(
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            output_root=tmp_path / "runs",
+            mode=RunMode.SCORED,
+            corpus_digests={},
+            settings=settings,
+            grader_kind="model",
+            model=FakeModelProvider("a dog"),
+            observer=FakeObserver(max_batch_size=BATCH),
+            preregistration_final=True,
+        )
+
+
+async def test_execute_run_names_every_injected_seam_in_its_refusal(
+    tmp_path: Path,
+) -> None:
+    """A refusal naming one of three overrides sends the reader round the loop twice."""
+    settings = _settings(tmp_path).model_copy(update={"embedder": EmbedderKind.ON_DEVICE})
+
+    with pytest.raises(ValueError, match="injected seam") as caught:
+        await execute_run(
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            output_root=tmp_path / "runs",
+            mode=RunMode.SCORED,
+            corpus_digests={},
+            settings=settings,
+            grader_kind="model",
             grader=ExactGrader(),
             model=FakeModelProvider("a dog"),
             observer=FakeObserver(max_batch_size=BATCH),
             preregistration_final=True,
         )
+
+    assert "grader, model, observer" in str(caught.value)

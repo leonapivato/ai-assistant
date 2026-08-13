@@ -42,7 +42,6 @@ from benchmarks.memory.corpora.fetch import DEFAULT_CACHE, digest_of, ensure_cor
 from benchmarks.memory.corpora.provenance import CORPORA, Corpus, corpus_by_key
 from benchmarks.memory.records import RunMode
 from benchmarks.memory.run import (
-    build_grader,
     execute_run,
     plan_run,
     refuse_ineligible_scored_run,
@@ -174,7 +173,7 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
             mode=mode,
             corpus_digests=digests,
             settings=settings,
-            grader=build_grader(settings, kind=grader),
+            grader_kind=grader,
             preregistration_final=preregistration_final,
             slice_seed=seed if limit else None,
             max_sessions=max_sessions,
