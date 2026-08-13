@@ -593,13 +593,29 @@ the same reason one step out: both are compared, not read.
 > is present if and only if the kind is `FAILED`. The binding is validated by
 > the type, not left to the caller.
 
-> **Normative.** Under ADR-0137 §2 the `BatchCompleter` triad — the Protocol,
-> the shared `BatchCompleterContract` conformance suite, and the canonical
+> **Normative.** The `BatchCompleter` triad — the Protocol, the shared
+> `BatchCompleterContract` conformance suite, and the canonical
 > `FakeBatchCompleter` in `ai_assistant.testing` with its `Test…Contract`
-> subclass — rides in **one lane and one PR together with its primary
-> production implementation**, which is the vendor-backed `BatchCompleter` in
-> `models/`. The memory-benchmark harness of #1029/#1034 is a **follow-on
-> consumer group** under ADR-0137 §4, briefed only after the paired lane merges.
+> subclass — **never lands alone**. It rides in one lane and one PR with the
+> vendor-backed `BatchCompleter` in `models/`, which is its primary production
+> implementation in ADR-0137 §2's sense.
+
+> **Normative.** That lane also carries an **end-to-end exercise of the seam by
+> a caller**: a test that drives `submit` → `poll` → `fetch` to a settled batch
+> over the vendor binding of §13, reading outcomes back by `item_id` and
+> handling at least one non-`SUCCEEDED` kind. The conformance suite alone does
+> not discharge this, because a suite run against `FakeBatchCompleter` agrees
+> with the contract by construction. This is ADR-0015 §5's implementation
+> contact — "a contract ratified with no implementation contact is how a seam
+> that does not survive first use gets blessed" — made a deliverable rather than
+> an intention.
+
+> **Normative.** Whether the #1029 benchmark harness's batch consumer rides in
+> that same lane or follows as a consumer group under ADR-0137 §4 is a
+> **lane-shape question ADR-0137 governs and this ADR does not decide**. It is
+> the dispatching brief's to settle against ADR-0137 §1's bound at slice time.
+> Nothing in this ADR is conditioned on which way it goes, and no clause of
+> §1–§10 changes under either.
 
 The naming is not free choice: `tests/core/test_protocol_triad.py` derives the
 suite and fake names from the Protocol's, so `BatchCompleter` fixes
@@ -608,43 +624,41 @@ location follows the sibling seams' — `tests/models/model_provider_contract.py
 and `tests/models/embedder_contract.py` — and §13's table is where that lane's
 obligations are enumerated.
 
-**ADR-0137's operative noun is "implementation", and that is what is paired
-here.** The point deserves the argument because ADR-0137 §2's own wording
-invites the opposite reading: it pairs the triad with "its primary **production
-implementation**", then glosses the adjective as "Primary means the consumer
-whose demands shape the contract, not the one that is cheapest to write" —
-qualifying a noun the gloss does not repeat. Two things settle which noun the
-pairing takes.
+**What these three clauses do and do not settle.** ADR-0137 §2 pairs the triad
+with "its primary **production implementation**", then glosses the adjective as
+"Primary means the consumer whose demands shape the contract, not the one that
+is cheapest to write" — qualifying a noun the gloss does not repeat. §4 uses the
+operative phrase again and contrasts consumers against it: "Every consumer of
+the contract other than **the primary implementation** is briefed only after the
+paired lane has merged." Reasonable readers have taken §2 both ways during this
+ADR's review, which is a defect in ADR-0137's wording rather than in either
+reading; it is filed as **#1051** and is not this lane's to edit.
 
-**§4 uses the phrase itself, and contrasts consumers against it**: "Every
-consumer of the contract other than **the primary implementation** is briefed
-only after the paired lane has merged." A rule that separates "consumers" from
-"the primary implementation" is not one on which the paired half is a consumer.
-This ADR follows §2's and §4's operative nouns; the gloss's looseness is
-ADR-0137's own to tidy, and is filed as #1051 rather than argued here.
+**So this ADR settles only the part that is its own to settle, and drops the
+part that is not.** What a *contract* ADR must fix is that its seam is not
+ratified untested — that is ADR-0015 §5's rule, and the first two clauses
+discharge it concretely: the triad ships with a real implementation, and that
+lane must drive the seam end to end through a caller rather than only through
+the fake. That is the substance every reading of ADR-0137 §2 is reaching for,
+and it holds whichever noun the gloss meant.
 
-**And the alternative is not available.** A consumer cannot substitute for the
-implementation in the paired lane, because a triad with no production
-implementation gives the consumer nothing to call: a harness paired with the
-triad alone would run against `FakeBatchCompleter`, which agrees with the
-contract by construction and so can discover nothing about it. Pairing the
-harness *instead* would harden the contract against a double and call it
-contact. So the live question was never which of the two to pair, but whether
-the harness rides **as well** — and it does not, because it lives outside
-`ai_assistant` entirely and adding it would put a `core` contract, a vendor-SDK
-implementation and a new tree of harness machinery into one review, the
-compounding ADR-0137 §1 exists to stop. It follows under §4.
+**What is left over is lane shape, and the third clause leaves it where it
+belongs.** Whether the #1029 harness rides in the same PR is a slice-time
+judgement under ADR-0137 §1's "substantial new machinery" bound, made by the
+dispatcher with the batch's other lanes in view — not a decision a contract ADR
+should reach out and make on its behalf. The considerations are recorded rather
+than ruled: the harness lives outside `ai_assistant`, so adding it puts a `core`
+contract, a vendor-SDK implementation and a tree of harness machinery in one
+review; against that, it is the seam's first external caller. Both are real, and
+neither changes a clause of §1–§10.
 
-That leaves the concern behind the objection — a contract hardening before a
-real caller exercises it — which is worth answering on its merits rather than
-on ADR-0137's grammar. It does not arise here, because the harness is not where
-this contract's demands come from. It contributes exactly one — bulk completion
-at a discount — and that is discharged by the seam existing at all. Every clause
-that was *hard* was forced elsewhere: §2's shape by ADR-0060, §3's whole-batch
-refusal and §5's dispositions by ADR-0066 and `core/errors.py`, and §4's four
-kinds, §4's unordered results, §6's two distinct expiries and §7's refusable
-bound by the vendor surface — which is what the `models/` implementation is made
-of. It is the hardest exercise this contract has, and it rides with it.
+Worth recording for whoever makes that call: the harness is **not** where this
+contract's demands came from. It contributes one — bulk completion at a discount
+— discharged by the seam existing at all. Every clause that was *hard* was
+forced elsewhere: §2's shape by ADR-0060, §3's whole-batch refusal and §5's
+dispositions by ADR-0066 and `core/errors.py`, and §4's four kinds, §4's
+unordered results, §6's two distinct expiries and §7's refusable bound by the
+vendor surface — which is what the `models/` implementation is made of.
 
 ### 10. What this seam does not promise
 
@@ -751,9 +765,10 @@ widely than it now holds?
 
 The table below is the audit. Every normative clause of §1–§10 appears in it
 exactly once, and every row names something a reviewer can run. The count is
-27 rows against the 29 marked clauses in this ADR; the remaining two sit below
-the table, are obligations *about* the table and the suite that satisfies it,
-and so have no rows of their own.
+28 rows against the 31 marked clauses in this ADR; the remaining three have no
+deliverable for that lane to own: two sit below the table and are obligations
+*about* the table and the suite that satisfies it, and §9's lane-shape clause
+binds the dispatching brief rather than the lane the table is addressed to.
 
 | Clause | Deliverable | Test item |
 |---|---|---|
@@ -782,7 +797,8 @@ and so have no rows of their own.
 | §9 (annotations) | The exact annotations on all eight types and three members | A test asserts each field's annotation, that none is `Any`, and that no annotation names a `models/` or vendor type; a case round-trips an `item_id` and a `batch_key` carrying leading and trailing whitespace and asserts both survive byte-for-byte, which `Identifier` would have silently stripped |
 | §9 (state/settled) | `BatchStatus` validator | Contract cases: `settled` stays within bounds; `COMPLETE` iff fully settled; a provider reporting no in-flight progress is accepted; `fetch` on a `PENDING` batch raises |
 | §9 (kind/payload binding) | `BatchItemOutcome` validator | A test asserts each of the four kinds rejects the wrong payload combination |
-| §9 (triad + primary) | `BatchCompleterContract`, `FakeBatchCompleter`, `Test…Contract`, and the `models/` implementation, in one PR | `test_protocol_triad.py` is the mechanical check; the suite runs against both the fake and the real implementation |
+| §9 (triad never alone) | `BatchCompleterContract`, `FakeBatchCompleter`, `Test…Contract`, and the `models/` implementation, in one PR | `test_protocol_triad.py` is the mechanical check; the suite runs against both the fake and the real implementation |
+| §9 (end-to-end contact) | A caller-shaped test driving `submit` → `poll` → `fetch` over the vendor binding | The test reaches a settled batch, reads outcomes back by `item_id`, and covers at least one non-`SUCCEEDED` kind |
 | §10 (no promises) | Docstring clauses stating each exclusion | A test asserts a `Role.TOOL` turn in an item is refused, matching `complete`'s position |
 
 > **Normative.** The paired lane of §9 satisfies every row of the table above,
