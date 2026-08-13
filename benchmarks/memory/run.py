@@ -23,9 +23,8 @@ from uuid import uuid4
 
 from ai_assistant.app import ensure_model_credentials
 from ai_assistant.app.composition import CONFLICT_LIMIT, RETRIEVAL_LIMIT
-from ai_assistant.core.config import Settings
-from ai_assistant.core.errors import ModelError
-from benchmarks.memory.answer import ANSWER_SYSTEM_PROMPT, answer_question, failed_attempt
+from ai_assistant.core.config import EmbedderKind, Settings
+from benchmarks.memory.answer import ANSWER_SYSTEM_PROMPT, answer_question
 from benchmarks.memory.grade import JUDGE_PROMPT, ExactGrader, Grading, ModelGrader, Verdict
 from benchmarks.memory.ingest import exchanges_of, ingest_case
 from benchmarks.memory.records import (
@@ -54,7 +53,7 @@ __all__ = [
     "build_grader",
     "execute_run",
     "plan_run",
-    "refuse_unconfirmed_scored_run",
+    "refuse_ineligible_scored_run",
 ]
 
 #: Why a scored run is refused without an explicit confirmation.
@@ -271,18 +270,22 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
                 # exclude. `ensure_model_credentials` above is what keeps this from
                 # papering over a misconfiguration: a bad credential fails at startup,
                 # so what reaches here is a transient fault or a refused prompt.
-                try:
-                    attempt = await answer_question(harness, question)
-                except ModelError as error:
-                    attempt = failed_attempt(harness, question, error)
-                    grading = Grading(
+                #
+                # The failure is caught in `answer_question`, inside the correlation
+                # scope, so the retrieval that had already happened keeps its ids and
+                # its telemetry. Grading is skipped rather than asked to judge an
+                # answer that does not exist.
+                attempt = await answer_question(harness, question)
+                grading = (
+                    Grading(
                         verdict=Verdict.UNGRADED,
                         abstained=False,
                         judge=judge.name,
-                        detail=f"answering failed: {type(error).__name__}",
+                        detail=f"answering failed: {attempt.failure}",
                     )
-                else:
-                    grading = await judge.grade(question, attempt.answer)
+                    if attempt.failure is not None
+                    else await judge.grade(question, attempt.answer)
+                )
                 write_jsonl_line(
                     records_path,
                     QuestionRecord(
@@ -317,18 +320,40 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     return manifest
 
 
-def refuse_unconfirmed_scored_run(
-    mode: RunMode, *, preregistration_final: bool, max_sessions: int = 0
+def refuse_ineligible_scored_run(
+    mode: RunMode,
+    *,
+    preregistration_final: bool,
+    max_sessions: int = 0,
+    embedder: EmbedderKind = EmbedderKind.ON_DEVICE,
+    grader_kind: str = "model",
 ) -> None:
     """Refuse a scored run that is not entitled to be one.
 
-    Two conditions, and they refuse for different reasons. The first is #1029's ground
-    rule 1: the pre-registration is finalised before any scored evaluation. The second
-    is that a shortened history is a **different memory**, so questions asked of one
-    are questions about a conversation that did not happen — legitimate for a plumbing
-    check and not a thing a pre-registered prediction can be scored against. The bound
-    is recorded in the manifest either way; this is what stops it being recorded on a
-    run that should never have carried it.
+    **Every precondition for a scored run lives here, in one place, and every one of
+    them is a refusal rather than a warning.** The distinction that decides which
+    conditions belong here is whether the configuration *contradicts what the run's own
+    artifacts would claim*. A scored manifest asserts that this is the pilot's one
+    configuration; each condition below makes that assertion false, so a warning would
+    be a run that completes, writes something labelled `scored`, and is not.
+
+    1. **The pre-registration must be final** — #1029's ground rule 1, which is the
+       whole reason the mode exists.
+    2. **Histories must be whole.** A shortened history is a different memory, so the
+       questions are about a conversation that did not happen.
+    3. **The embedder must be on-device.** ``hashing`` is non-semantic, so retrieval
+       under it is not the retrieval the pilot is measuring (#1029's configuration
+       block requires "the real embedder, not the QA-run hashing embedder").
+    4. **The grader must be the model judge.** LoCoMo and LongMemEval both grade with
+       an LLM judge, and :class:`~benchmarks.memory.grade.ExactGrader` is a normalised
+       substring match — deliberately poor, and not comparable to the published
+       numbers this pilot is positioned against.
+
+    **``episode_retention`` is deliberately *not* here**, and the omission is the rule
+    working rather than a gap. A finite horizon is the product's own default and a
+    legitimate thing to measure; what it does under the corpus clock is surprising, not
+    false, so it is warned about at the command line and recorded in the manifest. The
+    four above are configurations under which the word ``scored`` would be untrue.
 
     Args:
         mode: The mode asked for.
@@ -336,20 +361,39 @@ def refuse_unconfirmed_scored_run(
             final.
         max_sessions: The session bound the cases were shortened to; ``0`` means whole
             histories.
+        embedder: The configured embedder.
+        grader_kind: Which grader was asked for.
 
     Raises:
-        PermissionError: If a scored run was asked for without that statement. The
-            class is chosen for what it reads as at a terminal — this is a refusal on
-            a rule, not a bad argument — and nothing catches it.
-        ValueError: If a scored run was asked for over shortened histories.
+        PermissionError: If a scored run was asked for without the pre-registration
+            being stated final. The class is chosen for what it reads as at a terminal
+            — this is a refusal on a rule, not a bad argument — and nothing catches it.
+        ValueError: If a scored run was asked for under any of the other three.
     """
-    if mode is RunMode.SCORED and not preregistration_final:
+    if mode is not RunMode.SCORED:
+        return
+    if not preregistration_final:
         raise PermissionError(PREREGISTRATION_REFUSAL)
-    if mode is RunMode.SCORED and max_sessions:
+    if max_sessions:
         msg = (
             f"a scored run cannot use --max-sessions ({max_sessions}): a shortened "
             f"history is a different memory, so its answers are about a conversation "
             f"that did not happen. It is a plumbing lever for smoke runs."
+        )
+        raise ValueError(msg)
+    if embedder is not EmbedderKind.ON_DEVICE:
+        msg = (
+            f"a scored run cannot use ASSISTANT_EMBEDDER={embedder}: retrieval under "
+            f"the hashing embedder is non-semantic, so the run would not measure the "
+            f"pipeline #1029 predicts about. Set it to on-device."
+        )
+        raise ValueError(msg)
+    if grader_kind != "model":
+        msg = (
+            f"a scored run cannot use --grader {grader_kind}: both benchmarks grade "
+            f"with an LLM judge, and the exact grader is a normalised substring match "
+            f"whose scores are not comparable to any published number. Use "
+            f"--grader model."
         )
         raise ValueError(msg)
 
