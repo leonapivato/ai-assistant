@@ -12,6 +12,14 @@ only; production code must not import it (enforced by ``lint-imports``).
 
 from __future__ import annotations
 
+from ai_assistant.testing.batch import (
+    DEFAULT_BATCH_ISSUER,
+    DEFAULT_BATCH_REPLY,
+    BatchProvider,
+    ExchangeGate,
+    FakeBatchCompleter,
+    ProgrammedOutcome,
+)
 from ai_assistant.testing.context import FakeContextProvider
 from ai_assistant.testing.conversations import FakeConversationStore
 from ai_assistant.testing.deferrals import FakeDeferralStore
@@ -72,6 +80,8 @@ from ai_assistant.testing.traces import (
 from ai_assistant.testing.writer import FakeMemoryWriter
 
 __all__ = [
+    "DEFAULT_BATCH_ISSUER",
+    "DEFAULT_BATCH_REPLY",
     "DEFAULT_DECIDED_AT",
     "DEFAULT_GRANTED_SOURCE",
     "DEFAULT_INSTALLATION",
@@ -81,10 +91,13 @@ __all__ = [
     "DEFAULT_READER_NAME",
     "OTHER_INSTALLATION",
     "TRACE_NOT_RECORDED",
+    "BatchProvider",
     "Disclosure",
+    "ExchangeGate",
     "FakeActionPolicy",
     "FakeAssistantEngine",
     "FakeAuditTrail",
+    "FakeBatchCompleter",
     "FakeContextProvider",
     "FakeConversationStore",
     "FakeDeferralStore",
@@ -116,6 +129,7 @@ __all__ = [
     "ObservationGate",
     "ObservedBelief",
     "PolicyCall",
+    "ProgrammedOutcome",
     "SecretBacking",
     "SecretMethod",
     "attested_proposal",
