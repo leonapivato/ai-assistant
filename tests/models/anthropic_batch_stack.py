@@ -146,10 +146,11 @@ class _ServerBatch:
     created_at: datetime
     settled: bool = False
     archived_at: datetime | None = None
-    #: When set, the results file carries only these ids while the batch's own
-    #: tallies still count every submitted item — the short read ADR-0143 §6
-    #: forbids being answered with silently, which nothing else can script.
-    short_results: tuple[str, ...] | None = None
+    #: When set, the results file carries exactly these ids while the batch's own
+    #: tallies still count every submitted item. Nothing else can script the two
+    #: faults ADR-0143 §4 and §6 forbid being answered with silently: a short
+    #: file, and one whose ids do not cover the batch.
+    results_ids: tuple[str, ...] | None = None
 
 
 @dataclass
@@ -213,7 +214,7 @@ class BatchServer:
                     "result": _result_for(self.programmed.get(custom_id, ProgrammedOutcome())),
                 }
             )
-            for custom_id in _jumbled(batch.short_results or batch.custom_ids)
+            for custom_id in _jumbled(batch.results_ids or batch.custom_ids)
         ]
         # Every line is newline-terminated, including the last: the SDK's JSONL
         # decoder only emits a line once it has seen the terminator, so a trailing

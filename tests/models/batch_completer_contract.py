@@ -262,6 +262,27 @@ class BatchCompleterContract:
             _assert_caller_error(caught.value)
             assert world.provider_calls == before
 
+    @pytest.mark.parametrize(
+        "key", [pytest.param("   ", id="blank"), pytest.param("\ud800", id="unencodable")]
+    )
+    async def test_a_batch_key_the_handle_cannot_carry_is_refused_uncontacted(
+        self, key: str
+    ) -> None:
+        async with self.world() as world:
+            before = world.provider_calls
+
+            with pytest.raises(ModelError) as caught:
+                await world.completer.submit(key, a_batch("one"))
+
+            _assert_caller_error(caught.value)
+            assert world.provider_calls == before, (
+                "ADR-0143 §2 puts every refusable check on the near side of the "
+                "acceptance window. A key `BatchHandle` would reject is such a "
+                "check, and discovering it *after* the provider accepted leaves a "
+                "paid batch whose only identifier never came back — and the key is "
+                "deliberately not sent to the provider, so nothing could find it"
+            )
+
     @pytest.mark.optional_obligation
     async def test_an_over_large_batch_is_refused_and_names_its_bound(self) -> None:
         async with self.world() as world:
