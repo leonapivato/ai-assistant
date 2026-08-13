@@ -24,9 +24,11 @@
   pending a JSON Schema runtime dependency" — and ADR-0145 settles the
   dependency and takes the deferral up, so §1's following sentence, "The
   parameters flow into the `ActionRequest` unvalidated", no longer describes the
-  system. `StepRunner` checks them against the selected tool's schema before
-  requesting a ruling and returns the new `Disposition.INVALID_PARAMETERS`,
-  which commits nothing and leaves the step `PENDING` — §1's
+  system. `StepRunner` checks them against each capable candidate's schema
+  before requesting a ruling — as ADR-0144 §7's eligibility filter, ahead of its
+  ordering — and where that leaves no candidate it returns the new
+  `Disposition.INVALID_PARAMETERS`, which commits nothing and leaves the step
+  `PENDING` — §1's
   `AMBIGUOUS_CAPABILITY` shape, reached by §1's own argument that no
   `SkipReason` is true of it. This note touches nothing else in §1: `find`'s
   one-candidate rule stands as written, and the several-candidates row stands as
