@@ -36,6 +36,20 @@
   remain deferred, though ADR-0144 §7 records that **namespacing** becomes more
   pressing under a rule that resolves a colliding capability name silently
   instead of stalling on it.
+- Note (2026-08-13): §7's **parameter-schema validation** deferral is discharged by
+  ADR-0145, which settles the runtime dependency §7 names as the blocker
+  (`jsonschema`, confined to `core`) and places the check at `ActionRequest`
+  construction — §7 said "at selection time", and the request is what selection
+  produces, since a `PlanStep` names a capability and no schema applies until a
+  tool is bound. §4's `parameters_schema` is unchanged in what it carries and
+  gains constraints on what it may hold: draft 2020-12 only, no reference
+  requiring retrieval, no reference cycle, and a bounded nesting depth — all
+  refused at `ToolDefinition` construction (ADR-0145 §5, §6). §1's no-defaults
+  rule is untouched: the schema keeps its default, and an empty schema declares
+  no constraint (ADR-0145 §9). §7's still-remaining deferrals — per-call data
+  reach (#57), persistence, enablement, namespacing, transacted cost — are
+  unaffected and remain deferred; ranking and selection is not among them, having
+  been discharged by ADR-0144 in the note directly above.
 
 ## Context
 

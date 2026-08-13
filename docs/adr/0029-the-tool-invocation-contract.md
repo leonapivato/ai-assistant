@@ -149,6 +149,20 @@
   from a ToolResult, never from an exception" are unchanged — the last is now
   *readable off the record* (a FAILED step with `kind is None` had no result to
   read from) without becoming enforced by the tracker, which §8 already rejected.
+- Note (2026-08-13): §7's **parameter validation against `parameters_schema`** bullet
+  is discharged by ADR-0145. Its bound — "an unacceptable argument reaches the
+  tool and comes back as `INVALID_REQUEST` (§3), which is not retryable" —
+  describes what no longer happens for a violation a declared schema can decide:
+  such a request is refused at construction, before the ruling and before the
+  claim, and reaches no tool's callable and no `ToolResult` (ADR-0145 §1, §3).
+  §3 is unchanged: `INVALID_REQUEST` keeps its meaning and its
+  `retryable = False` for arguments a tool refuses for reasons its schema does
+  not express, and no seam synthesises it for a schema violation. §2's three
+  checks and their order are unchanged and `invoke` gains no fourth — step 1's
+  revalidation re-runs the new `ActionRequest` validator, and step 2 makes the
+  schema it ran against the registry's own. A request that reaches the seam
+  having bypassed validation is refused there by step 1 as the `ToolBindingError`
+  §2 already specifies, unchanged. §7's remaining scope-outs are unaffected.
 - Decides: what ADR-0016 §7 defers — invocation, its result type and error
   taxonomy, timeouts and cancellation, and idempotency-key plumbing. It honours
   the three constraints ADR-0016 §7 sets on this ADR (§1, §2, §6 below).

@@ -1,6 +1,6 @@
 # 145. Arguments are checked against the declared schema before anyone is asked, and one dialect is read
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-13
 - Decides: what ADR-0016 §7 defers — "parameter validation against
   `parameters_schema`" — restated and re-deferred by ADR-0029 §7 and declined in
@@ -314,7 +314,7 @@ commit; `INVALID_PARAMETERS` asserts nothing about the step's status and writes
 nothing. (The refusal is cited as "ADR-0037 §8" by `Disposition`'s docstring in
 `src/ai_assistant/core/types.py` and by ADR-0084 §4, and ADR-0037 has six
 sections. The argument this clause relies on is ADR-0037 §1's, quoted above,
-which is in the document; the stale citation is filed rather than repaired here.)
+which is in the document; the stale citation is #1109 rather than repaired here.)
 
 **No ADR-0014 change, and that is a boundary this ADR keeps.** No `SkipReason`
 is added, the transition graph is untouched, and no state is written — so
@@ -492,8 +492,8 @@ evaluation anywhere in the picture. A depth check placed after that freeze
 cannot fire before the thing it is guarding against has already happened, and
 placing one *at* the freeze is a change to a shared `core` ingress affecting
 every holder of the type — a different decision, with its own cross-subsystem
-blast radius, and not one to make inside a schema-enforcement ADR. It is filed
-(§14).
+blast radius, and not one to make inside a schema-enforcement ADR. It is
+#1107 (§14).
 
 **What that leaves, stated exactly.** Evaluation spends more stack per level
 than freezing does, so there is a window: an instance deep enough that the freeze
@@ -785,13 +785,13 @@ is that deferral working as designed.
   construction — §7 said "at selection time", and the request is what selection
   produces, since a PlanStep names a capability and no schema applies until a
   tool is bound. §4's parameters_schema is unchanged in what it carries and
-  gains two constraints on what it may hold: draft 2020-12 only, and no
-  reference requiring retrieval, both refused at ToolDefinition construction
-  (ADR-0145 §5, §6). §1's no-defaults rule is untouched — the schema keeps its
-  default and an empty schema declares no constraint (ADR-0145 §9). §7's
-  remaining deferrals — per-call data reach (#57), ranking and selection (#241),
-  persistence, enablement, namespacing, transacted cost — are unaffected and
-  remain deferred.`
+  gains constraints on what it may hold: draft 2020-12 only, no reference
+  requiring retrieval, no reference cycle, and a bounded nesting depth — all
+  refused at ToolDefinition construction (ADR-0145 §5, §6). §1's no-defaults
+  rule is untouched: the schema keeps its default, and an empty schema declares
+  no constraint (ADR-0145 §9). §7's remaining deferrals — per-call data reach
+  (#57), ranking and selection (#241), persistence, enablement, namespacing,
+  transacted cost — are unaffected and remain deferred.`
 
 - **A dated note appended to ADR-0029's header, after the existing amendment
   notes:**
@@ -807,16 +807,18 @@ is that deferral working as designed.
   arguments a tool refuses for reasons its schema does not express, and no seam
   synthesises it for a schema violation. §2's three checks and their order are
   unchanged and invoke gains no fourth — step 1's revalidation re-runs the new
-  ActionRequest validator and step 2 makes the schema it ran against the
-  registry's own. §7's remaining scope-outs are unaffected.`
+  ActionRequest validator, and step 2 makes the schema it ran against the
+  registry's own. A request that reaches the seam having bypassed validation is
+  refused there by step 1 as the ToolBindingError §2 already specifies,
+  unchanged. §7's remaining scope-outs are unaffected.`
 
 - **A dated note appended to ADR-0037's header, after `Date`:**
 
   `Note (<ratification date>): §1's "Rejected: validating step.parameters
-  against tool.parameters_schema" is superseded in its premise by ADR-0145. That
+  against tool.parameters_schema" is discharged in its premise by ADR-0145. That
   rejection is conditional by its own words — "ADR-0016 §7 defers it explicitly,
   pending a JSON Schema runtime dependency" — and ADR-0145 settles the
-  dependency and discharges the deferral, so §1's following sentence, "The
+  dependency and takes the deferral up, so §1's following sentence, "The
   parameters flow into the ActionRequest unvalidated", no longer describes the
   system. StepRunner checks them against the selected tool's schema before
   requesting a ruling and returns the new Disposition.INVALID_PARAMETERS, which
@@ -914,12 +916,12 @@ so deleting them changes a recorded outcome and the tests that pin it.
   failure into an early stall. Closing the loop — putting the bound tool's schema
   in front of whatever composes the arguments, or feeding the violations back for
   a correction — is a `planning`/`orchestration` decision about prompts and
-  re-planning, with its own cost, and it is filed rather than assumed. This ADR
+  re-planning, with its own cost, and it is #1105 rather than assumed. This ADR
   is worth ratifying without it because the ordering it fixes is right either
   way: nothing is asked, recorded or claimed on a call that cannot run.
 - **Carrying the violations to a client.** `StepOutcome` tells a client the
   disposition; a field describing *why* is an additive wire change with its own
-  Tier question about what may be rendered, and §8 would govern it. Filed.
+  Tier question about what may be rendered, and §8 would govern it. #1106.
 - **Validating a tool's `output` against a declared schema.** `ToolDefinition`
   declares no output schema and ADR-0029 §3 makes `output` a `FrozenJsonValue`
   the tool is trusted for. Adding one is an ADR-0016 field change.
@@ -927,14 +929,14 @@ so deleting them changes a recorded outcome and the tests that pin it.
   without one, for every holder of a `FrozenJsonMapping`, which is a pre-existing
   hazard this ADR neither creates nor fixes and which is the proper place to
   bound instance depth. Changing it reaches `PlanStep`, `ToolResult` and every
-  other holder, so it is its own decision. Filed.
+  other holder, so it is its own decision. #1107.
 - **A cost budget for schema evaluation** (§6). The cycle refusal removes the
   divergent case and the schema depth bound removes the deep-document one; an
   acyclic schema within the bound that is merely *expensive* — a combinatorial
   `anyOf`, a pathological `pattern`, an enormous `enum` — is bounded by nothing
   here. A budget for that needs a unit and a constant neither of which is
   calibratable before tool breadth exists, and guessing one would put a knob in
-  `core` that §2's clause (b) forbids. Filed.
+  `core` that §2's clause (b) forbids. #1108.
 - **A schema migration mechanism** (§6). If the supported dialect ever changes,
   stored decisions carrying the old one are a migration question this ADR does
   not answer and does not need to, since the corpus it lands on has none.

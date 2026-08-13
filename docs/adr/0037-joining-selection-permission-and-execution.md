@@ -18,6 +18,22 @@
   §4's parking and `resume`, §5's one-commit denial and §6's entry rule — and
   selection still runs upstream of the gate, handing the policy exactly one
   declaration exactly once per step.
+- Note (2026-08-13): §1's "Rejected: validating `step.parameters` against
+  `tool.parameters_schema`" is discharged in its premise by ADR-0145. That
+  rejection is conditional by its own words — "ADR-0016 §7 defers it explicitly,
+  pending a JSON Schema runtime dependency" — and ADR-0145 settles the
+  dependency and takes the deferral up, so §1's following sentence, "The
+  parameters flow into the `ActionRequest` unvalidated", no longer describes the
+  system. `StepRunner` checks them against the selected tool's schema before
+  requesting a ruling and returns the new `Disposition.INVALID_PARAMETERS`,
+  which commits nothing and leaves the step `PENDING` — §1's
+  `AMBIGUOUS_CAPABILITY` shape, reached by §1's own argument that no
+  `SkipReason` is true of it. This note touches nothing else in §1: `find`'s
+  one-candidate rule stands as written, and the several-candidates row stands as
+  the supersession entry directly above leaves it — ADR-0144 both supplied the
+  ranking rule §1 recorded as absent and narrowed the refusal to the residue of
+  genuine ties. ADR-0145 reaches neither; a step that never selects a tool never
+  reaches a schema.
 - **Not a contract change.** No Protocol is added or altered, no `core` type
   moves, and `core/config.py` is untouched. Every contract this needs —
   `ToolRegistry`, `ActionPolicy`, `AuditTrail`, `PlanStore`, `ToolInvoker` — was
