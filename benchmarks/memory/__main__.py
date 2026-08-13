@@ -45,7 +45,7 @@ from benchmarks.memory.run import (
     build_grader,
     execute_run,
     plan_run,
-    refuse_unconfirmed_scored_run,
+    refuse_ineligible_scored_run,
 )
 from benchmarks.memory.select import first_questions, first_sessions
 
@@ -149,10 +149,14 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
     cache: Annotated[Path | None, typer.Option(help="Cache root.")] = None,
 ) -> None:
     """Execute a run. Smoke by default; a scored run must be asked for and confirmed."""
-    refuse_unconfirmed_scored_run(
-        mode, preregistration_final=preregistration_final, max_sessions=max_sessions
-    )
     settings = Settings()
+    refuse_ineligible_scored_run(
+        mode,
+        preregistration_final=preregistration_final,
+        max_sessions=max_sessions,
+        embedder=settings.embedder,
+        grader_kind=grader,
+    )
     corpus, cases, digests = _select(
         corpus_key, limit=limit, seed=seed, max_sessions=max_sessions, cache=cache
     )

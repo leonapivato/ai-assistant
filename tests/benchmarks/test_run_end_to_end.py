@@ -376,12 +376,14 @@ async def test_an_answering_failure_does_not_end_the_run(tmp_path: Path) -> None
     assert records[1].verdict == "incorrect"
 
 
-async def test_a_failed_answer_claims_no_retrieval_it_cannot_prove(
+async def test_a_failed_answer_keeps_the_retrieval_it_actually_made(
     tmp_path: Path,
 ) -> None:
-    """Whether retrieval had run when the failure landed is not recoverable, and
-    claiming one would corrupt the field P8 is computed from. The correlation id is
-    marked so a reader looking for its traces is told why there are none."""
+    """Retrieval runs before the provider is called, so its traces already exist when
+    the failure lands. Recording zero calls would be a false entry in exactly the field
+    P8 is computed from — and the cursor, walking forward, would step past those traces
+    permanently. Handling the failure inside the correlation scope is what keeps them
+    attributable."""
     manifest = await execute_run(
         plan_run(LOCOMO, (_case(),), batch_size=BATCH),
         output_root=tmp_path / "runs",
@@ -394,9 +396,10 @@ async def test_a_failed_answer_claims_no_retrieval_it_cannot_prove(
 
     failed = read_jsonl(tmp_path / "runs" / manifest.run_id / "records.jsonl", QuestionRecord)[0]
 
-    assert failed.retrieved_ids == ()
-    assert failed.telemetry.search_calls == 0
-    assert failed.correlation_id.startswith("unattributed:")
+    assert failed.answer == ""
+    assert failed.retrieved_ids
+    assert 1 <= failed.telemetry.search_calls <= 3
+    assert failed.telemetry.returned_ids
 
 
 async def test_the_manifest_records_a_session_bound(tmp_path: Path) -> None:

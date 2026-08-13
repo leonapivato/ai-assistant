@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.correlation import correlated_operation
+from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import Message, Role
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.retrieval import assemble_by_band
@@ -59,13 +60,7 @@ if TYPE_CHECKING:
     from benchmarks.memory.cases import BenchQuestion
     from benchmarks.memory.wiring import Harness
 
-__all__ = [
-    "ANSWER_SYSTEM_PROMPT",
-    "AnswerAttempt",
-    "answer_question",
-    "failed_attempt",
-    "render_context",
-]
+__all__ = ["ANSWER_SYSTEM_PROMPT", "AnswerAttempt", "answer_question", "render_context"]
 
 #: The instruction the answering model is given.
 #:
@@ -108,6 +103,11 @@ class AnswerAttempt:
         retrieved_kinds: Each record's ``kind``, aligned with ``retrieved_ids``.
         context: The rendered context block, exactly as the model saw it.
         asked_at: The instant the clock was set to while answering.
+        failure: The class name of the provider error that stopped this answer, or
+            ``None`` where one was produced. **Everything above it is still real** —
+            retrieval had already run when the failure landed, so the ids and the
+            correlation id are the retrieval's own and the telemetry is attributable.
+            Only its message is dropped: a provider's error text is untrusted content.
     """
 
     correlation_id: str
@@ -116,6 +116,7 @@ class AnswerAttempt:
     retrieved_kinds: tuple[str, ...]
     context: str
     asked_at: str
+    failure: str | None = None
 
 
 def render_context(records: Sequence[MemoryRecord]) -> str:
@@ -148,12 +149,26 @@ async def answer_question(harness: Harness, question: BenchQuestion) -> AnswerAt
     than at the moment the last session was captured. LoCoMo states none; there the
     clock is left where ingestion left it, which is the instant of the final session.
 
+    **A provider failure is returned, not raised**, and the handling is *inside* the
+    correlation scope, which is what makes it more than a convenience. Retrieval has
+    already run and already emitted its traces by the time the provider is called, so
+    a failure caught outside the scope would lose the id those traces carry — and the
+    trace cursor, walking forward, would step past them permanently. The result would
+    be a record claiming zero retrieval calls for an answer that made one to three,
+    which is a false entry in exactly the field #1029's P8 is computed from. Handled
+    here, a failed answer keeps its real ids and its real telemetry and reports only
+    that no answer came back.
+
+    A *retrieval* failure is deliberately not caught: ``MemoryStoreError`` is not a
+    per-question outcome, and a run whose store is failing should stop rather than
+    record hundreds of empty answers.
+
     Args:
         harness: The wired pipeline.
         question: The question to answer.
 
     Returns:
-        The attempt.
+        The attempt, carrying :attr:`AnswerAttempt.failure` where the provider failed.
     """
     if question.asked_at is not None:
         harness.clock.set(question.asked_at)
@@ -167,54 +182,28 @@ async def answer_question(harness: Harness, question: BenchQuestion) -> AnswerAt
             kinds=BELIEF_KINDS,
         )
         context = render_context(records)
-        reply = await harness.model.complete(
-            [
-                Message(role=Role.SYSTEM, content=ANSWER_SYSTEM_PROMPT),
-                Message(
-                    role=Role.USER,
-                    content=f"Memory records:\n{context}\n\nQuestion: {question.question}",
-                ),
-            ]
-        )
+        failure: str | None = None
+        answer = ""
+        try:
+            reply = await harness.model.complete(
+                [
+                    Message(role=Role.SYSTEM, content=ANSWER_SYSTEM_PROMPT),
+                    Message(
+                        role=Role.USER,
+                        content=f"Memory records:\n{context}\n\nQuestion: {question.question}",
+                    ),
+                ]
+            )
+        except ModelError as error:
+            failure = type(error).__name__
+        else:
+            answer = reply.content.strip()
     return AnswerAttempt(
         correlation_id=correlation_id,
-        answer=reply.content.strip(),
+        answer=answer,
         retrieved_ids=tuple(record.id for record in records),
         retrieved_kinds=tuple(record.kind for record in records),
         context=context,
         asked_at=asked_at,
-    )
-
-
-def failed_attempt(harness: Harness, question: BenchQuestion, error: Exception) -> AnswerAttempt:
-    """The record of a question whose answering call failed.
-
-    **An attempt that produced no answer, said so.** The empty ``answer`` is not a
-    blank reply the model gave — the grader never sees it, because the caller pairs
-    this with an ``UNGRADED`` verdict — and the empty ``retrieved_ids`` is honest for
-    the same reason: whether retrieval had already run when the failure landed is not
-    recoverable here, and claiming a retrieval that may not have happened would corrupt
-    exactly the field #1029's P8 is computed from.
-
-    The correlation id is **synthesised and marked**, because the real one was minted
-    inside the scope this failure escaped and is not reachable from outside it. A
-    reader looking for its traces should find nothing and be told why, rather than find
-    an id that silently matches nothing.
-
-    Args:
-        harness: The wired pipeline, for the clock reading.
-        question: The question that failed.
-        error: What went wrong. Only its class name is recorded — a provider's message
-            text is untrusted content.
-
-    Returns:
-        The attempt.
-    """
-    return AnswerAttempt(
-        correlation_id=f"unattributed:{type(error).__name__}:{question.question_id}",
-        answer="",
-        retrieved_ids=(),
-        retrieved_kinds=(),
-        context="",
-        asked_at=harness.clock().isoformat(),
+        failure=failure,
     )

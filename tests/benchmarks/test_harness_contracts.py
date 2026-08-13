@@ -14,7 +14,7 @@ from benchmarks.memory import records
 from benchmarks.memory.corpora.fetch import CorpusFetchError, cached_path, digest_of, ensure_file
 from benchmarks.memory.corpora.provenance import CorpusFile
 from benchmarks.memory.records import RunMode
-from benchmarks.memory.run import PREREGISTRATION_REFUSAL, refuse_unconfirmed_scored_run
+from benchmarks.memory.run import PREREGISTRATION_REFUSAL, refuse_ineligible_scored_run
 from benchmarks.memory.wiring import build_harness
 
 if TYPE_CHECKING:
@@ -95,21 +95,58 @@ def test_the_observer_route_falls_back_to_the_default_model(tmp_path: Path) -> N
         harness.close()
 
 
-def test_a_smoke_run_needs_no_confirmation() -> None:
-    refuse_unconfirmed_scored_run(RunMode.SMOKE, preregistration_final=False)
+def test_a_smoke_run_is_refused_nothing() -> None:
+    """Every condition below is a scored-run condition; a smoke run answers to none of
+    them, which is what makes smoke the safe default."""
+    refuse_ineligible_scored_run(
+        RunMode.SMOKE,
+        preregistration_final=False,
+        max_sessions=2,
+        embedder=EmbedderKind.HASHING,
+        grader_kind="exact",
+    )
 
 
 def test_a_scored_run_is_refused_without_confirmation() -> None:
     """#1029's ground rule 1, made a refusal rather than an understanding."""
     with pytest.raises(PermissionError) as caught:
-        refuse_unconfirmed_scored_run(RunMode.SCORED, preregistration_final=False)
+        refuse_ineligible_scored_run(RunMode.SCORED, preregistration_final=False)
 
     assert str(caught.value) == PREREGISTRATION_REFUSAL
     assert "#1029" in PREREGISTRATION_REFUSAL
 
 
-def test_a_confirmed_scored_run_is_allowed() -> None:
-    refuse_unconfirmed_scored_run(RunMode.SCORED, preregistration_final=True)
+def test_a_fully_eligible_scored_run_is_allowed() -> None:
+    refuse_ineligible_scored_run(
+        RunMode.SCORED,
+        preregistration_final=True,
+        embedder=EmbedderKind.ON_DEVICE,
+        grader_kind="model",
+    )
+
+
+def test_a_scored_run_under_the_hashing_embedder_is_refused() -> None:
+    """Retrieval under it is non-semantic, so the run would not measure the pipeline
+    #1029 predicts about."""
+    with pytest.raises(ValueError, match="non-semantic"):
+        refuse_ineligible_scored_run(
+            RunMode.SCORED,
+            preregistration_final=True,
+            embedder=EmbedderKind.HASHING,
+            grader_kind="model",
+        )
+
+
+def test_a_scored_run_with_the_exact_grader_is_refused() -> None:
+    """Both benchmarks grade with an LLM judge; a substring match is comparable to no
+    published number."""
+    with pytest.raises(ValueError, match="LLM judge"):
+        refuse_ineligible_scored_run(
+            RunMode.SCORED,
+            preregistration_final=True,
+            embedder=EmbedderKind.ON_DEVICE,
+            grader_kind="exact",
+        )
 
 
 @pytest.mark.integration
@@ -167,9 +204,10 @@ def test_a_scored_run_over_shortened_histories_is_refused() -> None:
     conversation that did not happen — not something a frozen prediction is scored
     against."""
     with pytest.raises(ValueError, match="different memory"):
-        refuse_unconfirmed_scored_run(RunMode.SCORED, preregistration_final=True, max_sessions=2)
-
-
-def test_a_smoke_run_over_shortened_histories_is_allowed() -> None:
-    """It is exactly what the lever exists for."""
-    refuse_unconfirmed_scored_run(RunMode.SMOKE, preregistration_final=False, max_sessions=2)
+        refuse_ineligible_scored_run(
+            RunMode.SCORED,
+            preregistration_final=True,
+            max_sessions=2,
+            embedder=EmbedderKind.ON_DEVICE,
+            grader_kind="model",
+        )
