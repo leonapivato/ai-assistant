@@ -11,11 +11,15 @@ running anything, saying durably why.
 
 Four rules shape the module and are worth stating before the code:
 
-- **Selection is defined for exactly one candidate** (ADR-0037 §1). ADR-0016 §5
-  refused to rank and ADR-0016 §7 deferred ranking to this stage without giving
-  it a rule. Rather than invent one quietly — ``candidates[0]`` is a ranking by
-  *name* — several candidates is a refusal that leaves the step ``PENDING``
-  (#241).
+- **Selection runs the unique least severe candidate whose schema the arguments
+  fit** (ADR-0144, ADR-0145 §2). ADR-0016 §5 refused to rank, ADR-0016 §7
+  deferred ranking here, and ADR-0037 §1 declined to invent it — ``candidates[0]``
+  is a ranking by *name*. ADR-0144 is that rule arriving (#241) and
+  :mod:`ai_assistant.orchestration.selection` holds it. Two filters bind before
+  it: argument fit removes a candidate whose ``parameters_schema`` the step's
+  parameters violate (ADR-0144 §7), and an evaluation that *raises* refuses the
+  step outright (ADR-0145 §7). What survives is ordered, and only a genuine tie
+  under the whole key still leaves the step ``PENDING`` (ADR-0144 §6).
 - **Decide, record, read back, then claim** (ADR-0037 §2). ADR-0014 §4 refuses
   ``→ RUNNING`` without an ``approval_ref`` and requires the claim to precede the
   call, so the decision must exist first; recording after the claim would leave a
@@ -63,9 +67,14 @@ from ai_assistant.core.types import (
     ToolCall,
 )
 from ai_assistant.orchestration.capability_alias import resolve_capability
+from ai_assistant.orchestration.selection import (
+    eligible_candidates,
+    select,
+    validated_preference,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -75,6 +84,7 @@ if TYPE_CHECKING:
         ToolRegistry,
     )
     from ai_assistant.core.types import (
+        ParameterViolation,
         PermissionRuling,
         ToolDefinition,
     )
@@ -227,6 +237,24 @@ class StepDisposition:
             hand here: :meth:`StepRunner._record` reads it back before
             :meth:`StepRunner._queue_for_approval` parks. ``None`` on every other
             disposition.
+        tied_candidates: The ids of the candidates that tied under the whole
+            ordering, on ``AMBIGUOUS_CAPABILITY``, and empty on every other
+            disposition (ADR-0144 §6). **They stop here.** ADR-0144 §6 puts them
+            on this dataclass precisely because it *"crosses no subsystem
+            boundary"* (ADR-0037 §4), decides no route by which they reach an
+            interface, and forbids inventing one:
+            :class:`~ai_assistant.core.types.StepOutcome` is the public carrier
+            and has no field for them, which is a ``core`` change with its own
+            ADR (#1103). Until then they reach a log line and the operator, whose
+            recovery is a preference sequence naming one of them (#1101).
+        violations: What the arguments missed, on the ``INVALID_PARAMETERS``
+            disposition ADR-0145 §4 reaches by its **first** cause — every capable
+            candidate reported violations, so the eligibility filter emptied the
+            set. Empty on its **second** cause, an evaluation that raised, which
+            §7 requires to report none; and empty on every other disposition.
+            Orchestration-local for ``tied_candidates``' reason: carrying them to
+            a client is an additive wire change with its own Tier question, which
+            ADR-0145 §14 files as #1106.
     """
 
     disposition: Disposition
@@ -234,6 +262,8 @@ class StepDisposition:
     decision_id: str | None = None
     tool_id: str | None = None
     decision: PermissionDecision | None = None
+    tied_candidates: tuple[str, ...] = ()
+    violations: tuple[ParameterViolation, ...] = ()
 
 
 class StepRunner:
@@ -244,8 +274,8 @@ class StepRunner:
             through :meth:`~ai_assistant.core.protocols.PlanStore.commit_transition`,
             the same compare-and-swap the executor's claim depends on.
         registry: Asked which tools advertise a step's capability. It does not
-            choose, and neither does this object beyond the single-candidate case
-            (ADR-0016 §5, ADR-0037 §1).
+            choose (ADR-0016 §5); this object does, by ADR-0144's fixed rule and
+            not by anything the registry's ``id`` ordering says.
         policy: The gate ADR-0004 §7 requires in front of every side-effecting
             call. It rules; it does not record (ADR-0021 §3).
         trail: Where every ruling is recorded, and — crucially — where the
@@ -280,6 +310,7 @@ class StepRunner:
         now: Clock = _utcnow,
         id_factory: Callable[[], str] = _uuid,
         confirmation_ttl: timedelta | None = None,
+        tool_preference: Sequence[str] = (),
     ) -> None:
         """Wire the stage from injected contracts.
 
@@ -299,17 +330,40 @@ class StepRunner:
         under the lifetime it was asked under and a later change to this setting
         leaves already-parked confirmations alone.
 
+        ``tool_preference`` is the other one, and it is ADR-0144 §4's preference
+        sequence: the ordered tool ids that break a tie **key 6 has reached** —
+        that is, between candidates the severity block and latency have already
+        found equal. It can never promote a candidate over one keys 1 through 5
+        prefer, and this stage exposes no other route by which a caller may
+        influence which candidate is chosen. **It is configuration and never
+        consent** (ADR-0144 §4): nothing in it grants, authorises or relaxes any
+        permission outcome, and whichever candidate it picks is ruled on against
+        its own declaration before anything runs (ADR-0016 §3).
+
+        The sequence is **snapshotted and validated here, and never re-read**
+        (:func:`~ai_assistant.orchestration.selection.validated_preference`). A
+        mutation the caller makes to what it passed — before, between or during a
+        selection — changes no later selection, which is what keeps §1's
+        order-independence true and the duplicate check a check that stays
+        checked. The cost is stated rather than smoothed over: a *changed*
+        preference reaches only a newly constructed stage, so recovering a tie by
+        naming one of the tied ids means building this object again — in practice
+        the next process life (ADR-0144 §5), which is already true of the
+        registry ADR-0016 §6 rebuilds each run.
+
         Raises:
             ValueError: If ``confirmation_ttl`` is set and not strictly positive.
                 A zero or negative lifetime would expire every confirmation the
                 instant it was recorded, which is a way to make the whole
                 confirmation flow unanswerable by misconfiguration rather than a
                 lifetime; refused at construction rather than surfacing per
-                answer.
+                answer. Or if ``tool_preference`` names any tool more than once
+                (ADR-0144 §4).
         """
         if confirmation_ttl is not None and confirmation_ttl <= timedelta(0):
             msg = f"confirmation_ttl must be strictly positive, got {confirmation_ttl}"
             raise ValueError(msg)
+        self._preference = validated_preference(tool_preference)
         self._plans = plans
         self._registry = registry
         self._policy = policy
@@ -348,8 +402,10 @@ class StepRunner:
                 plan the step is read from.
             step_id: Which step of that plan to dispose of. Its ``capability``
                 drives selection and its ``parameters`` are what the policy rules
-                on — unvalidated against the tool's ``parameters_schema``, which
-                ADR-0016 §7 defers.
+                on — checked against each capable candidate's
+                ``parameters_schema`` **before** any ruling is requested
+                (ADR-0145 §2), so a policy never rules on a call no tool could
+                perform.
             timeout: How long the seam may wait, per attempt; passed through to
                 the executor. The caller's budget, not the tool's property
                 (ADR-0029 §4).
@@ -379,18 +435,14 @@ class StepRunner:
         if not candidates:
             skipped = await self._skip(state, step, SkipReason.NO_CAPABLE_TOOL)
             return StepDisposition(Disposition.NO_CAPABLE_TOOL, skipped)
-        if len(candidates) > 1:
-            # No rule chooses, so nothing is written: `PENDING` is already the
-            # truth about this step, and no `SkipReason` would be (ADR-0037 §1).
-            _log.info(
-                "step_capability_ambiguous",
-                step_id=step.id,
-                capability=capability,
-                candidates=len(candidates),
-            )
-            return StepDisposition(Disposition.AMBIGUOUS_CAPABILITY, state)
+        chosen = self._select(state, step, capability, candidates)
+        if isinstance(chosen, StepDisposition):
+            # The selection stage declined, and every way it can commits nothing:
+            # the step is still `PENDING` and the turn ends here (ADR-0144 §6,
+            # ADR-0145 §4).
+            return chosen
 
-        tool = candidates[0]
+        tool = chosen
         request = ActionRequest(
             tool=tool, parameters=step.parameters, step_id=step.id, execution_id=state.id
         )
@@ -1049,6 +1101,95 @@ class StepRunner:
             raise PlanningError(msg)
         return _detached_step(planned)
 
+    def _select(
+        self,
+        state: ExecutionState,
+        step: PlanStep,
+        capability: str,
+        candidates: Sequence[ToolDefinition],
+        /,
+    ) -> ToolDefinition | StepDisposition:
+        """The selection stage: filter on argument fit, then run the rule (ADR-0144).
+
+        Three refusals and one selection, in the order ADR-0144 §7 and ADR-0145
+        §2 jointly fix. **All three refusals commit nothing** — no ruling is
+        requested, no audit record is written, no claim is made, and the step
+        stays ``PENDING`` — which is why they can be decided here, synchronously,
+        before the first collaborator downstream of ``find`` is touched.
+
+        1. **An evaluation that raised refuses the step** (ADR-0145 §7), not
+           merely the candidate that raised: ADR-0144 §7's ineligibility clause is
+           about a candidate whose schema the parameters *do not satisfy*, and a
+           raise establishes no such fact, so ranking the remainder would be
+           selecting under an unknown. Nothing about the exception but its **type**
+           is logged or carried — its ``str()``, ``args``, ``__cause__`` and
+           ``__notes__`` all carry the instance fragments the walk was holding, and
+           a schema that raises on demand would otherwise be the one path on which
+           an untrusted document makes the argument values arrive in a log
+           (ADR-0145 §7, §8).
+        2. **The fit filter emptying the set is** ``INVALID_PARAMETERS`` **and not
+           a** ``SkipReason`` (ADR-0145 §4). The tools were capable and the
+           arguments were not, so ``NO_CAPABLE_TOOL`` would be a falsehood written
+           into durable state — what ADR-0014 §4's legal-skip table exists to
+           prevent — and ``PENDING`` is already the truth, the state a re-plan with
+           corrected arguments can still run the step from.
+        3. **A tie under the whole key is** ``AMBIGUOUS_CAPABILITY``, narrowed to
+           exactly that residue (ADR-0144 §6). What it now means is stronger than
+           what it meant: the tied candidates are equal on every axis ADR-0021 §5
+           constrains a policy over, plus cost basis and latency, and the
+           deployment named none of them — a question the ordering has no further
+           ground to answer and the *user* does. Nothing was committed, so a later
+           ``run`` against the still-``PENDING`` step selects afresh (ADR-0144 §5).
+
+        **The fit filter binds before any ordering key**, which is the whole of
+        ADR-0144 §7's clause: a fit term folded into the ordering would let a
+        well-declared candidate that cannot accept the arguments outrank one that
+        can, which is a ranking answering a question about eligibility.
+
+        Args:
+            state: The private snapshot, returned unchanged on every refusal —
+                nothing here commits, so there is no later state to report.
+            step: The step being disposed of; its ``parameters`` are what each
+                candidate's schema is evaluated against, unmodified.
+            capability: The resolved capability, for the log record only.
+            candidates: What ``find`` returned, non-empty.
+
+        Returns:
+            The selected declaration, or the disposition that ends the turn.
+        """
+        fit = eligible_candidates(step.parameters, candidates)
+        if fit.failure is not None:
+            _log.warning(
+                "step_parameter_evaluation_failed",
+                step_id=step.id,
+                capability=capability,
+                candidates=len(candidates),
+                error_type=fit.failure,
+            )
+            return StepDisposition(Disposition.INVALID_PARAMETERS, state)
+        if not fit.eligible:
+            _log.info(
+                "step_parameters_invalid",
+                step_id=step.id,
+                capability=capability,
+                candidates=len(candidates),
+                violations=len(fit.violations),
+            )
+            return StepDisposition(Disposition.INVALID_PARAMETERS, state, violations=fit.violations)
+        selection = select(fit.eligible, self._preference)
+        if selection.tool is None:
+            _log.info(
+                "step_capability_ambiguous",
+                step_id=step.id,
+                capability=capability,
+                candidates=len(fit.eligible),
+                tied=selection.tied,
+            )
+            return StepDisposition(
+                Disposition.AMBIGUOUS_CAPABILITY, state, tied_candidates=selection.tied
+            )
+        return selection.tool
+
     async def _resolve_capability(self, step: PlanStep) -> str:
         """Map the step's capability onto an advertised one before selection (ADR-0053).
 
@@ -1063,9 +1204,10 @@ class StepRunner:
         rewrites only onto a name the registry currently advertises, and returns
         the step's own string unchanged for anything it does not recognise — so an
         unknown capability still reaches ``find`` verbatim and is still reported
-        ``NO_CAPABLE_TOOL`` honestly. A rewrite does not weaken the single-candidate
-        rule either: it changes which capability is looked up, and the ambiguity
-        refusal (ADR-0037 §1) still applies to whatever ``find`` returns.
+        ``NO_CAPABLE_TOOL`` honestly. A rewrite does not weaken the selection rule
+        either: it changes which capability is looked up, and ADR-0144's ordering
+        — with the fit filter ahead of it — still runs over whatever ``find``
+        returns.
 
         This is a pure normalisation over the injected registry — no new
         collaborator, so it needs no composition wiring.
