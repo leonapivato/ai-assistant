@@ -26,9 +26,12 @@ from benchmarks.memory.records import QuestionRecord, RunManifest, RunMode, read
 from benchmarks.memory.run import execute_run, plan_run
 
 from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.core.errors import ModelUnavailableError
+from ai_assistant.core.types import Message, Role
 from ai_assistant.testing import FakeModelProvider, FakeObserver
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
 pytestmark = pytest.mark.integration
@@ -318,3 +321,102 @@ async def test_a_run_grades_the_unanswerable_question_on_abstention(
     assert records[1].unanswerable is True
     assert records[1].verdict == "incorrect"
     assert records[1].abstained is False
+
+
+class _FailsOnceProvider:
+    """Answers, then fails, then answers — the shape a transient outage has."""
+
+    def __init__(self, *, fail_on: int) -> None:
+        """Fail the ``fail_on``-th call (1-based).
+
+        Args:
+            fail_on: Which call raises.
+        """
+        self._fail_on = fail_on
+        self.calls = 0
+
+    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
+        """Answer, or raise on the nominated call.
+
+        Args:
+            messages: Ignored.
+            model: Ignored.
+
+        Returns:
+            A fixed reply.
+
+        Raises:
+            ModelUnavailableError: On the nominated call.
+        """
+        self.calls += 1
+        if self.calls == self._fail_on:
+            raise ModelUnavailableError("provider is down")
+        return Message(role=Role.ASSISTANT, content="a dog")
+
+
+async def test_an_answering_failure_does_not_end_the_run(tmp_path: Path) -> None:
+    """Dying at question 400 of a paid 2,000-question run loses the 1,586 after it and
+    every later case, which is far worse than one row a reader can exclude."""
+    model = _FailsOnceProvider(fail_on=1)
+    manifest = await execute_run(
+        plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+        output_root=tmp_path / "runs",
+        mode=RunMode.SMOKE,
+        corpus_digests={},
+        settings=_settings(tmp_path),
+        model=model,
+        observer=FakeObserver(max_batch_size=BATCH),
+    )
+
+    records = read_jsonl(tmp_path / "runs" / manifest.run_id / "records.jsonl", QuestionRecord)
+
+    assert len(records) == 2
+    assert records[0].verdict == "ungraded"
+    assert records[0].judge_detail == "answering failed: ModelUnavailableError"
+    assert records[1].verdict == "incorrect"
+
+
+async def test_a_failed_answer_claims_no_retrieval_it_cannot_prove(
+    tmp_path: Path,
+) -> None:
+    """Whether retrieval had run when the failure landed is not recoverable, and
+    claiming one would corrupt the field P8 is computed from. The correlation id is
+    marked so a reader looking for its traces is told why there are none."""
+    manifest = await execute_run(
+        plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+        output_root=tmp_path / "runs",
+        mode=RunMode.SMOKE,
+        corpus_digests={},
+        settings=_settings(tmp_path),
+        model=_FailsOnceProvider(fail_on=1),
+        observer=FakeObserver(max_batch_size=BATCH),
+    )
+
+    failed = read_jsonl(tmp_path / "runs" / manifest.run_id / "records.jsonl", QuestionRecord)[0]
+
+    assert failed.retrieved_ids == ()
+    assert failed.telemetry.search_calls == 0
+    assert failed.correlation_id.startswith("unattributed:")
+
+
+async def test_the_manifest_records_a_session_bound(tmp_path: Path) -> None:
+    """A record set that cannot say which bound produced it can be neither reproduced
+    nor compared."""
+    manifest = await execute_run(
+        plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+        output_root=tmp_path / "runs",
+        mode=RunMode.SMOKE,
+        corpus_digests={},
+        settings=_settings(tmp_path),
+        model=FakeModelProvider("a dog"),
+        observer=FakeObserver(max_batch_size=BATCH),
+        max_sessions=2,
+    )
+
+    assert manifest.max_sessions == 2
+
+
+async def test_a_whole_history_records_a_zero_bound(tmp_path: Path) -> None:
+    manifest, _ = await _run(tmp_path)
+
+    assert manifest.max_sessions == 0

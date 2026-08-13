@@ -7,11 +7,19 @@ model is a scored measurement whatever it is called.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 from benchmarks.memory.cases import BenchQuestion
 from benchmarks.memory.grade import ExactGrader, ModelGrader, Verdict, is_abstention
 
+from ai_assistant.core.errors import ModelError, ModelRateLimitError
 from ai_assistant.testing import FakeModelProvider
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from ai_assistant.core.types import Message
 
 ANSWERABLE = BenchQuestion(
     question_id="q1", category="1", question="What did Ada adopt?", answer="a dog"
@@ -152,3 +160,35 @@ async def test_the_judge_is_not_shown_the_retrieved_context() -> None:
     sent = "\n".join(message.content for message in model.calls[0].messages)
     assert "a dog" in sent
     assert "memory record" not in sent.lower()
+
+
+async def test_model_grader_records_a_judge_failure_rather_than_raising() -> None:
+    """A judge outage is not evidence about the system under test, and a run of ~2,000
+    paid questions must not die on one."""
+
+    class _FailingProvider:
+        async def complete(
+            self, messages: Sequence[Message], *, model: str | None = None
+        ) -> Message:
+            raise ModelRateLimitError("slow down")
+
+    grading = await ModelGrader(_FailingProvider(), route="anthropic:x").grade(ANSWERABLE, "a dog")
+
+    assert grading.verdict is Verdict.UNGRADED
+    assert grading.detail == "judge failed: ModelRateLimitError"
+
+
+async def test_a_judge_failure_records_the_class_and_never_the_message() -> None:
+    """A provider's error text is untrusted content, and `detail` is the one free-text
+    field in the records."""
+
+    class _FailingProvider:
+        async def complete(
+            self, messages: Sequence[Message], *, model: str | None = None
+        ) -> Message:
+            raise ModelError("secret internal detail")
+
+    grading = await ModelGrader(_FailingProvider(), route="anthropic:x").grade(ANSWERABLE, "a dog")
+
+    assert grading.detail is not None
+    assert "secret internal detail" not in grading.detail

@@ -59,7 +59,13 @@ if TYPE_CHECKING:
     from benchmarks.memory.cases import BenchQuestion
     from benchmarks.memory.wiring import Harness
 
-__all__ = ["ANSWER_SYSTEM_PROMPT", "AnswerAttempt", "answer_question", "render_context"]
+__all__ = [
+    "ANSWER_SYSTEM_PROMPT",
+    "AnswerAttempt",
+    "answer_question",
+    "failed_attempt",
+    "render_context",
+]
 
 #: The instruction the answering model is given.
 #:
@@ -177,4 +183,38 @@ async def answer_question(harness: Harness, question: BenchQuestion) -> AnswerAt
         retrieved_kinds=tuple(record.kind for record in records),
         context=context,
         asked_at=asked_at,
+    )
+
+
+def failed_attempt(harness: Harness, question: BenchQuestion, error: Exception) -> AnswerAttempt:
+    """The record of a question whose answering call failed.
+
+    **An attempt that produced no answer, said so.** The empty ``answer`` is not a
+    blank reply the model gave — the grader never sees it, because the caller pairs
+    this with an ``UNGRADED`` verdict — and the empty ``retrieved_ids`` is honest for
+    the same reason: whether retrieval had already run when the failure landed is not
+    recoverable here, and claiming a retrieval that may not have happened would corrupt
+    exactly the field #1029's P8 is computed from.
+
+    The correlation id is **synthesised and marked**, because the real one was minted
+    inside the scope this failure escaped and is not reachable from outside it. A
+    reader looking for its traces should find nothing and be told why, rather than find
+    an id that silently matches nothing.
+
+    Args:
+        harness: The wired pipeline, for the clock reading.
+        question: The question that failed.
+        error: What went wrong. Only its class name is recorded — a provider's message
+            text is untrusted content.
+
+    Returns:
+        The attempt.
+    """
+    return AnswerAttempt(
+        correlation_id=f"unattributed:{type(error).__name__}:{question.question_id}",
+        answer="",
+        retrieved_ids=(),
+        retrieved_kinds=(),
+        context="",
+        asked_at=harness.clock().isoformat(),
     )

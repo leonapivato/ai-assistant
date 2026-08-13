@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, Protocol
 
+from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import Message, Role
 
 if TYPE_CHECKING:
@@ -43,7 +44,8 @@ class Verdict(StrEnum):
 
     ``UNGRADED`` exists because a judge can fail — a model error, an unparseable
     reply — and a run that recorded that as ``INCORRECT`` would charge a judge
-    outage to the system under test. It is excluded from the denominator, and a run
+    outage to the system under test. It also covers the answer that never existed,
+    where the *answering* seam failed. It is excluded from the denominator, and a run
     with many of them is a run to repeat rather than report.
     """
 
@@ -235,19 +237,31 @@ class ModelGrader:
                 judge=self.name,
                 detail="declined to answer an answerable question",
             )
-        reply = await self._model.complete(
-            [
-                Message(role=Role.SYSTEM, content=JUDGE_PROMPT),
-                Message(
-                    role=Role.USER,
-                    content=(
-                        f"Question: {question.question}\n"
-                        f"Reference answer: {question.answer}\n"
-                        f"Answer to grade: {answer}"
+        try:
+            reply = await self._model.complete(
+                [
+                    Message(role=Role.SYSTEM, content=JUDGE_PROMPT),
+                    Message(
+                        role=Role.USER,
+                        content=(
+                            f"Question: {question.question}\n"
+                            f"Reference answer: {question.answer}\n"
+                            f"Answer to grade: {answer}"
+                        ),
                     ),
-                ),
-            ]
-        )
+                ]
+            )
+        except ModelError as error:
+            # A judge outage is not evidence about the system under test, and a run of
+            # ~2,000 paid questions must not die on one. The class name is recorded and
+            # never the message: a provider's error text is untrusted content and this
+            # is the one free-text field in the records.
+            return Grading(
+                verdict=Verdict.UNGRADED,
+                abstained=False,
+                judge=self.name,
+                detail=f"judge failed: {type(error).__name__}",
+            )
         said = reply.content.strip().upper()
         if said.startswith("CORRECT"):
             return Grading(verdict=Verdict.CORRECT, abstained=False, judge=self.name)

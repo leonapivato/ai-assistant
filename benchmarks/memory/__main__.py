@@ -149,7 +149,9 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
     cache: Annotated[Path | None, typer.Option(help="Cache root.")] = None,
 ) -> None:
     """Execute a run. Smoke by default; a scored run must be asked for and confirmed."""
-    refuse_unconfirmed_scored_run(mode, preregistration_final=preregistration_final)
+    refuse_unconfirmed_scored_run(
+        mode, preregistration_final=preregistration_final, max_sessions=max_sessions
+    )
     settings = Settings()
     corpus, cases, digests = _select(
         corpus_key, limit=limit, seed=seed, max_sessions=max_sessions, cache=cache
@@ -166,6 +168,7 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
             settings=settings,
             grader=build_grader(settings, kind=grader),
             slice_seed=seed if limit else None,
+            max_sessions=max_sessions,
             notes=notes,
             keep_stores=keep_stores,
         )

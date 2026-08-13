@@ -188,6 +188,12 @@ class RunManifest(BaseModel):
         case_count: Cases in the run.
         question_count: Questions in the run.
         slice_seed: The seed a stratified slice was drawn with, where one was.
+        max_sessions: The session bound the cases were shortened to, or ``0`` where the
+            histories are whole. **A non-zero value means the run answered questions
+            about a conversation that did not happen**, which is legitimate for a
+            plumbing check and is not a measurement; it is recorded because a record
+            set that cannot say which bound produced it can be neither reproduced nor
+            compared.
         answer_route: The ``"provider:model"`` spec answers came from.
         observer_route: The spec episodes were distilled through.
         judge: What graded the answers.
@@ -223,6 +229,7 @@ class RunManifest(BaseModel):
     case_count: int
     question_count: int
     slice_seed: int | None
+    max_sessions: int = 0
     answer_route: str
     observer_route: str
     judge: str

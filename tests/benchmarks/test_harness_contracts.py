@@ -160,3 +160,16 @@ def test_a_non_https_url_is_refused_before_anything_is_written(tmp_path: Path) -
         ensure_file(file, cache=tmp_path)
 
     assert not (tmp_path / "corpus.json").exists()
+
+
+def test_a_scored_run_over_shortened_histories_is_refused() -> None:
+    """A shortened history is a different memory, so its answers are about a
+    conversation that did not happen — not something a frozen prediction is scored
+    against."""
+    with pytest.raises(ValueError, match="different memory"):
+        refuse_unconfirmed_scored_run(RunMode.SCORED, preregistration_final=True, max_sessions=2)
+
+
+def test_a_smoke_run_over_shortened_histories_is_allowed() -> None:
+    """It is exactly what the lever exists for."""
+    refuse_unconfirmed_scored_run(RunMode.SMOKE, preregistration_final=False, max_sessions=2)

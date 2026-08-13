@@ -40,7 +40,8 @@ Two levers narrow a run, and they are not the same lever. `--limit` bounds **how
 questions** are asked — a smaller sample of the same experiment. `--max-sessions`
 bounds **how much conversation** is ingested first, which is a *different* memory and
 therefore a different experiment: it is a plumbing lever for keeping a live smoke run
-to cents, never a measurement one.
+to cents, never a measurement one. A scored run refuses it outright, and every run
+records it in the manifest.
 
 `plan` is the one to run before spending. It reports cases, questions, captured turns
 and model calls split by what makes them, and warns when the configuration will
@@ -95,6 +96,12 @@ Under `.runs/<run_id>/`:
   telemetry for that answer.
 - `cases/<case>/traces.db` — the trace store. Kept; the other databases are removed
   unless `--keep-stores` is passed.
+
+A provider failure on one question is recorded as `ungraded` and stepped over rather
+than allowed to end the run — dying at question 400 of a paid 2,000-question run loses
+the rest of the run as well as the rest of that case. A *missing credential* is not
+that: it is checked once at startup through `ensure_model_credentials`, so a
+misconfiguration fails immediately instead of becoming 2,000 recorded failures.
 
 **Nothing aggregates.** No accuracy, no per-category rate, no verdict against a
 prediction — because an aggregate over a smoke run is a score, and ground rule 1 makes
