@@ -27,8 +27,10 @@ from typing import TYPE_CHECKING
 import pytest
 from assistant_engine_contract import (
     _NOT_CANONICAL,
+    _OVERFULL_GRANTS,
     _SOURCE,
     _TINY_LIMIT,
+    _UNHELD_SOURCE,
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
     AssistantEngineContract,
@@ -40,6 +42,7 @@ from ai_assistant.core.types import (
     CostBasis,
     DataTier,
     Disposition,
+    GrantScope,
     Idempotency,
     PlanStep,
     Reversibility,
@@ -77,12 +80,13 @@ from ai_assistant.testing import (
     FakeTraceRetention,
     FakeTraceSink,
 )
+from ai_assistant.testing.grants import source_grant
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
 
     from ai_assistant.core.protocols import AssistantEngine
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
+    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, SourceGrant
 
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
 RETENTION = timedelta(days=30)
@@ -184,6 +188,7 @@ def _wire(
     max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
     parks: bool = False,
     sources: Sequence[HeldSource] = (),
+    grants: Sequence[SourceGrant] = (),
     grant_clock: Callable[[], datetime] | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
@@ -265,7 +270,11 @@ def _wire(
         # of the wide seam (ADR-0097 §3). A second store here would let a grant land
         # somewhere the gate never reads.
         grant_operations=GrantOperations(
-            store=FakeSourceGrantStore(),
+            # ``grants`` seeds the store the way a *previous run* of the hub would
+            # have left it — which is the only way a grant on a source this build
+            # holds no reader for can exist (ADR-0139 §1). Nothing on the surface
+            # can put one there, because ``grant`` admits held readers only.
+            store=FakeSourceGrantStore(records=grants),
             sources=sources,
             id_factory=_counter("grant"),
             clock=grant_clock if grant_clock is not None else (lambda: AT),
@@ -347,6 +356,43 @@ class TestEngineContract(AssistantEngineContract):
         built = _wire(
             sources=[HeldSource(_GRANTABLE, location="/srv/calendar.ics")],
             grant_clock=backwards_clock(),
+        )
+        await built.start()
+        try:
+            yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def disagreeing_engine(self) -> AsyncIterator[AssistantEngine]:
+        """One held-and-ungranted source, one live grant on a source not held.
+
+        The grant is seeded into the store rather than granted through the surface,
+        because ``grant`` admits only a held reader's declared name (ADR-0102 §4)
+        and nothing unholds one. That is not a test contrivance: it is exactly the
+        shape a deployment reaches when an operator unsets a configured path, which
+        ADR-0097 §9 records is "not a defect" and ADR-0102 §14 named as the
+        condition that would fire this operation.
+        """
+        built = _wire(
+            sources=[HeldSource(_GRANTABLE, location="/srv/calendar.ics")],
+            grants=[source_grant(_UNHELD_SOURCE, scope=(GrantScope.INGEST,))],
+        )
+        await built.start()
+        try:
+            yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def overfull_granting_engine(self) -> AsyncIterator[AssistantEngine]:
+        """A wired engine at the tiny limit whose live set does not fit it."""
+        built = _wire(
+            max_payload_bytes=_TINY_LIMIT,
+            grants=[
+                source_grant(f"source-{index}", scope=(GrantScope.FACET,))
+                for index in range(_OVERFULL_GRANTS)
+            ],
         )
         await built.start()
         try:

@@ -27,7 +27,7 @@ from source_grant_contract import SourceGrantStoreContract
 from ai_assistant.core.errors import GrantError, InvalidGrantError
 from ai_assistant.core.types import GrantScope
 from ai_assistant.permissions import SqliteSourceGrantStore
-from ai_assistant.permissions.grants import _run_to_completion
+from ai_assistant.permissions.grants import _run_to_completion, _sort_key
 from ai_assistant.testing.cancellation import (
     ResourceLog,
     SuspendedMidWrite,
@@ -82,7 +82,32 @@ _SYNC_METHODS = {
     "live": "_live_sync",
     "recent": "_ordered_sync",
     "export": "_ordered_sync",
+    "standing": "_standing_sync",
 }
+
+
+def _seed_row(store: SqliteSourceGrantStore, grant: SourceGrant) -> None:
+    """Insert one record straight into the table, bypassing every invariant.
+
+    What a corrupted or hand-edited database looks like from the store's side, and
+    ADR-0139 §8's named route for a durable store into the one state ``record``
+    makes unreachable: two live grants for one source. Written against the shipped
+    schema on purpose — the columns beside ``data`` exist so SQLite can order,
+    constrain and narrow, and a seed that skipped them would test the anti-join
+    against rows the real writer could never produce.
+    """
+    # Reaching past the store's own writer is the whole point of this helper.
+    store._conn.execute(
+        "INSERT INTO grants(id, source, decided_at_us, revokes, data) VALUES (?, ?, ?, ?, ?)",
+        (
+            grant.id,
+            grant.source,
+            _sort_key(grant.decided_at),
+            grant.revokes,
+            grant.model_dump_json(),
+        ),
+    )
+    store._conn.commit()
 
 
 class TestSqliteSourceGrantStoreContract(SourceGrantStoreContract):
@@ -97,6 +122,20 @@ class TestSqliteSourceGrantStoreContract(SourceGrantStoreContract):
     @pytest.fixture
     def store(self, ephemeral: SqliteSourceGrantStore) -> SourceGrantStore:
         return ephemeral
+
+    async def corrupt_with_two_live_grants(
+        self, store: SourceGrantStore, first: SourceGrant, second: SourceGrant
+    ) -> None:
+        """Seed the rows, which is the route ADR-0139 §8 names for a durable store.
+
+        Not through ``record``: its live-grant check is atomic and refuses the
+        second, which is exactly the invariant that makes this state unreachable
+        any other way. Nothing here is a second write path in the store — the
+        insert is the test's, against the same table the anti-join reads.
+        """
+        assert isinstance(store, SqliteSourceGrantStore)
+        _seed_row(store, first)
+        _seed_row(store, second)
 
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(

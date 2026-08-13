@@ -269,8 +269,22 @@ class _ExportOp(_ReadOp):
         return store.export()
 
 
+class _StandingOp(_ReadOp):
+    """``standing`` — the live enumeration, its own lock site (ADR-0139 §2)."""
+
+    name = "standing"
+
+    def first(self, store: SourceGrantStore) -> Coroutine[Any, Any, object]:
+        """Enumerate the live grants — the call that is cancelled."""
+        return store.standing()
+
+    def second(self, store: SourceGrantStore) -> Coroutine[Any, Any, object]:
+        """Enumerate again concurrently."""
+        return store.standing()
+
+
 #: Every ``SourceGrantStore`` operation ADR-0060's case is run against. Both
-#: writes and all three reads, because ADR-0060 §3 binds any method that acquires
+#: writes and all four reads, because ADR-0060 §3 binds any method that acquires
 #: the resource rather than any method that mutates.
 _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _RecordOp,
@@ -278,6 +292,7 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _LiveOp,
     _RecentOp,
     _ExportOp,
+    _StandingOp,
 )
 
 
@@ -872,7 +887,119 @@ class SourceGrantStoreContract(SourceGrantsContract):
     async def test_an_empty_store_answers_emptily(self, store: SourceGrantStore) -> None:
         assert await store.recent() == []
         assert await store.export() == []
+        assert await store.standing() == []
         assert await store.live(source=SOURCE, use=GrantScope.FACET) is None
+
+    # --- the live enumeration (ADR-0139 §2) ----------------------------------
+
+    async def corrupt_with_two_live_grants(
+        self, store: SourceGrantStore, first: SourceGrant, second: SourceGrant
+    ) -> None:
+        """Override to seed the two-live-grants-for-one-source state ``record`` refuses.
+
+        The one arrangement no case below can make for itself, and the reason it is
+        a hook rather than a step: ``record``'s live-grant check is atomic and
+        refuses the second grant, so **every** history this suite can build through
+        the writer is one in which ADR-0139 §2's refusal cannot fire. An
+        implementation that returned both grants would pass every other case here.
+
+        ADR-0139 §8 names both routes in: the canonical fakes are scriptable into
+        the state, and a durable store's own tests reach it by seeding rows. Which
+        it is belongs to the implementation, so the suite asks the subject it was
+        handed rather than growing an affordance on the Protocol — ADR-0097 §10's
+        shape for exactly this problem.
+
+        The records go in **unchecked**. Both are expected to be granting records
+        naming one source; nothing here verifies that, because verifying is the
+        thing being bypassed.
+        """
+        raise NotImplementedError
+
+    async def test_standing_returns_every_live_grant_and_no_revoked_one(
+        self, store: SourceGrantStore
+    ) -> None:
+        """The whole of what the member is for: what is authorised, right now.
+
+        Two live grants on different sources and one revoked, so the case
+        distinguishes "every live grant" from "every grant" and from "the newest
+        grant per source" at once. ``export`` is asserted beside it because
+        revocation retires nothing (ADR-0097 §6): the revoked pair is still on file
+        and only *this* answer excludes it.
+        """
+        first = source_grant(SOURCE, grant_id="g-1")
+        second = source_grant("other", grant_id="g-2")
+        withdrawn = source_grant("gone", grant_id="g-3")
+        for record in (first, second, withdrawn):
+            await store.record(record)
+        await store.record(revocation_of(withdrawn, grant_id="r-1"))
+
+        assert {held.id for held in await store.standing()} == {"g-1", "g-2"}
+        assert {held.id for held in await store.export()} == {"g-1", "g-2", "g-3", "r-1"}
+
+    async def test_standing_answers_for_a_source_live_is_never_asked_about(
+        self, store: SourceGrantStore
+    ) -> None:
+        """The hole this member closes, stated as the case that proves it closed.
+
+        ``live`` takes a source name, so a caller that does not already know the
+        name cannot ask about it — which is precisely the position a user is in
+        when an operator unsets a reader's configured path: the grant stays live
+        and read-authorising, and ``grantable_sources`` no longer names it. The
+        enumeration is the only answer that reaches it, and it must not be
+        conditioned on anything outside the store.
+        """
+        await store.record(source_grant("a-source-nothing-asks-about", grant_id="g-1"))
+
+        standing = await store.standing()
+
+        assert [held.source for held in standing] == ["a-source-nothing-asks-about"]
+
+    async def test_standing_is_unaffected_by_a_backdated_revocation(
+        self, store: SourceGrantStore
+    ) -> None:
+        """Liveness is the ``revokes`` relation and never an ordering (ADR-0097 §4).
+
+        A revocation timestamped *before* the grant it revokes is permitted by the
+        contract and reachable on any host whose clock was corrected backwards. An
+        implementation that computed the live set by walking records in
+        ``decided_at`` order — taking the newest per source — passes every
+        membership case above and reports this withdrawn grant as live.
+        """
+        granted = source_grant(SOURCE, grant_id="g-1", decided_at=DEFAULT_DECIDED_AT)
+        await store.record(granted)
+        await store.record(
+            revocation_of(
+                granted, grant_id="r-1", decided_at=DEFAULT_DECIDED_AT - timedelta(days=365)
+            )
+        )
+
+        assert await store.standing() == []
+        assert {held.id for held in await store.recent()} == {"g-1", "r-1"}
+
+    async def test_standing_refuses_a_store_holding_two_live_grants_for_one_source(
+        self, store: SourceGrantStore
+    ) -> None:
+        """ADR-0139 §2: refuse the whole call, and answer nothing (ADR-0097 §5a).
+
+        Not "return both", not "choose", and **not** "answer for the sources it
+        could" — a set with the unstatable source omitted reads as complete and is
+        not, which is the failure the no-paging clause exists to prevent. A user
+        shown two standing grants where revoking one leaves the other live cannot
+        act on either, and a declared ``GrantError`` cannot be mistaken for an empty
+        set.
+
+        The second source is present so the case can assert the *partial* answer is
+        refused too, which is the half an over-helpful implementation gets wrong.
+        """
+        await store.record(source_grant("healthy", grant_id="g-1"))
+        await self.corrupt_with_two_live_grants(
+            store,
+            source_grant(SOURCE, grant_id="g-2"),
+            source_grant(SOURCE, grant_id="g-3"),
+        )
+
+        with pytest.raises(GrantError):
+            await store.standing()
 
     # --- export and erasure --------------------------------------------------
 
@@ -1052,15 +1179,17 @@ class SourceGrantStoreContract(SourceGrantsContract):
         assert reread.scope == (GrantScope.FACET,)
 
     async def test_a_returned_list_is_a_detached_snapshot(self, store: SourceGrantStore) -> None:
-        """``recent`` and ``export`` return ``list``, and a list is mutable."""
+        """``recent``, ``export`` and ``standing`` return ``list``, and a list is mutable."""
         await store.record(source_grant(SOURCE, grant_id="g-1"))
 
         (await store.recent()).clear()
         (await store.export()).clear()
+        (await store.standing()).clear()
 
         assert [each.id for each in await store.recent()] == ["g-1"]
+        assert [each.id for each in await store.standing()] == ["g-1"]
 
-    @pytest.mark.parametrize("query", ["live", "recent", "export"])
+    @pytest.mark.parametrize("query", ["live", "recent", "export", "standing"])
     async def test_every_query_returns_a_detached_record(
         self, store: SourceGrantStore, query: str
     ) -> None:
@@ -1068,8 +1197,11 @@ class SourceGrantStoreContract(SourceGrantsContract):
 
         A caller holding a store's own object could rewrite the record of what was
         granted; the narrow suite pins it for ``live`` because that is the answer
-        the gate rests on, and this pins it for the other two, which are what a
-        user is shown and what they export.
+        the gate rests on, and this pins it for the other three, which are what a
+        user is shown, what they export, and what they currently authorise. The
+        write goes **past** the frozen model — ``frozen=True`` refuses
+        ``held.scope = …`` and refuses this not at all — which is the one route
+        ADR-0097 §4's detachment obligation exists to close.
         """
         await store.record(source_grant(SOURCE, grant_id="g-1", scope=(GrantScope.FACET,)))
 
@@ -1080,6 +1212,8 @@ class SourceGrantStoreContract(SourceGrantsContract):
                 return one
             if query == "recent":
                 return (await store.recent())[0]
+            if query == "standing":
+                return (await store.standing())[0]
             return (await store.export())[0]
 
         leaked = await fetch()

@@ -68,7 +68,7 @@ class TestFakeSourceGrantStoreContract(SourceGrantStoreContract):
     """Runs FakeSourceGrantStore through the shared SourceGrantStore suite."""
 
     # No ``operations_without_shared_resource`` opt-out: every operation on this
-    # fake — the two writes and the three reads — enters the one modelled
+    # fake — the two writes and the four reads — enters the one modelled
     # resource, so ADR-0060's case runs against every lock site rather than
     # skipping some and leaving them proved only by a durable store that does not
     # exist yet.
@@ -76,6 +76,20 @@ class TestFakeSourceGrantStoreContract(SourceGrantStoreContract):
     @pytest.fixture
     def store(self) -> SourceGrantStore:
         return FakeSourceGrantStore()
+
+    async def corrupt_with_two_live_grants(
+        self, store: SourceGrantStore, first: SourceGrant, second: SourceGrant
+    ) -> None:
+        """Script the state through the fake's own lever (ADR-0139 §8).
+
+        ADR-0097 §10 required these fakes to be scriptable into a raising
+        ``live()``; this is the same requirement applied to the second state their
+        own writer makes unreachable, and the lever is on the fake rather than on
+        the Protocol for the same reason — the suite asks the subject it was
+        handed, never the seam every consumer depends on.
+        """
+        assert isinstance(store, FakeSourceGrantStore)
+        store.hold_conflicting_grants(first, second)
 
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(
