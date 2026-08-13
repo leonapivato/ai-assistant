@@ -17,6 +17,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.types import (
@@ -24,6 +25,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     Disposition,
     ExecutionState,
+    FrozenJson,
     Goal,
     MemoryKind,
     MemorySearchResult,
@@ -33,7 +35,6 @@ from ai_assistant.core.types import (
     SemanticMemory,
     StepStatus,
     ToolDefinition,
-    ToolFailureKind,
 )
 from ai_assistant.orchestration import (
     StepExecutor,
@@ -44,6 +45,7 @@ from ai_assistant.tools import (
     CURRENT_TIME,
     RECALL_MEMORY,
     CurrentTime,
+    InMemoryToolRegistry,
     RecallMemory,
     build_default_registry,
 )
@@ -293,9 +295,46 @@ async def test_a_plan_naming_report_current_time_executes_end_to_end() -> None:
     assert stored.output == {"utc": AT.isoformat()}
 
 
-async def test_an_unexpected_argument_fails_the_step_internally_end_to_end() -> None:
-    """A bad argument reaches the seam as INTERNAL, not a silently-ignored success."""
-    registry = build_default_registry(memory=FakeMemoryStore(now=_at), now=_at)
+class _CountingCurrentTime:
+    """The real ``current_time`` callable, counting the calls that reach it.
+
+    Structurally a ``ToolImplementation``, delegating everything: the point is to
+    prove a call did **not** arrive, and an assertion about the step's stored
+    status alone cannot tell "never invoked" from "invoked and rolled back".
+    """
+
+    def __init__(self) -> None:
+        """Wrap a real :class:`CurrentTime` bound to the suite's fixed clock."""
+        self._inner = CurrentTime(now=_at)
+        self.calls = 0
+
+    async def __call__(
+        self,
+        parameters: Mapping[str, FrozenJson],
+        *,
+        idempotency_key: str | None,
+    ) -> FrozenJson:
+        """Count the call, then do exactly what the real tool does."""
+        self.calls += 1
+        return await self._inner(parameters, idempotency_key=idempotency_key)
+
+
+async def test_an_unexpected_argument_never_reaches_the_tool() -> None:
+    """An argument the declared schema rejects is refused before the seam (ADR-0145).
+
+    This used to assert the opposite half of the same event: the call ran, the
+    tool's hand-written check raised, and the seam classified it ``INTERNAL``.
+    ADR-0145 §3 abolished that outcome — "a parameter-schema mismatch never
+    reaches a tool's callable and never produces a ``ToolResult``" — so what is
+    pinned here now is the refusal and its position, not the failure kind.
+
+    ``current_time`` declares ``additionalProperties: false`` and takes no
+    arguments, so ``{"timezone": "UTC"}`` violates its own declaration. The tool
+    is genuinely capable of the step's capability, which is what makes this a
+    statement about the arguments rather than about selection.
+    """
+    spy = _CountingCurrentTime()
+    registry = InMemoryToolRegistry([(CURRENT_TIME, spy)])
     runner, plans = _runner(registry)
     step = PlanStep(
         id="step-1",
@@ -305,15 +344,22 @@ async def test_an_unexpected_argument_fails_the_step_internally_end_to_end() -> 
     )
     state = await _execution_for(plans, step)
 
-    disposition = await runner.run(state, "step-1", timeout=PATIENT)
+    # **The one assertion here that is expected to change.** ADR-0145 §1 refuses
+    # the `ActionRequest` at construction, and `StepRunner` does not yet catch
+    # that — the stage that turns it into `Disposition.INVALID_PARAMETERS` with
+    # nothing committed is lane D of batch #1096 (ADR-0145 §4, §7). Pinning the
+    # raise is what makes this test honest *today*; when that lane lands, this
+    # line becomes an assertion on the returned disposition. Everything below it
+    # is the durable fact and holds under both.
+    with pytest.raises(ValidationError):
+        await runner.run(state, "step-1", timeout=PATIENT)
 
-    # The runner did execute; the tool's own outcome is a FAILED/INTERNAL step.
-    assert disposition.disposition is Disposition.EXECUTED
+    assert spy.calls == 0  # the callable is never reached (ADR-0145 §3)
     stored = (await plans.get_execution(state.id)).step("step-1")  # type: ignore[union-attr]
     assert stored is not None
-    assert stored.status is StepStatus.FAILED
-    assert stored.failure is not None
-    assert stored.failure.kind is ToolFailureKind.INTERNAL
+    assert stored.status is StepStatus.PENDING  # nothing was claimed (§1, §4)
+    assert stored.failure is None
+    assert stored.output is None
 
 
 async def test_a_plan_naming_recall_memory_executes_end_to_end() -> None:
