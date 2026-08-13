@@ -134,9 +134,14 @@ unmarked text supplies none.
 > no memory and no state but the store file.
 
 > **Normative.** The fetcher is a **deployment component and not part of this
-> system**. No Protocol describes it, no `Settings` field configures it, nothing
-> in `src/` starts, stops, supervises or health-checks it, and no ADR governs its
-> internals.
+> system**. No Protocol describes it, no `Settings` field configures it, and
+> nothing in `src/` starts, stops, supervises or health-checks it. What this ADR
+> states about it is confined to the **file boundary** — what the store must
+> contain, and how it must be published there (§2, §5, §13) — and each of those
+> is a requirement of the arrangement, met by a deployment and unverifiable by
+> the reader. Nothing on the far side of that boundary is governed here: its
+> protocol, its schedule, its retries, its process model and its internal state
+> are its own.
 
 > **Normative.** The reader treats everything the store contains as **external
 > content** under ADR-0098 §1, and treats the store's completeness as
