@@ -260,7 +260,7 @@ async def test_the_calendar_reader_job_is_absent_until_an_operator_arms_it(
         # The body is a **public ``Engine`` call**, by identity and not by name: a
         # job that held a reader, a store or a subsystem import would be the shape
         # ADR-0083 §8 forbids and ADR-0093 §6 restates.
-        assert armed[2].run == engine.ingest
+        assert armed[2].run == engine.ingest_calendar
     finally:
         await engine.aclose()
 
@@ -300,7 +300,7 @@ async def test_an_unreadable_source_is_logged_by_class_and_never_by_path(
         attempts += 1
         if attempts >= 2:
             twice.set()
-        return await engine.ingest()
+        return await engine.ingest_calendar()
 
     try:
         with structlog.testing.capture_logs() as captured:
@@ -354,7 +354,8 @@ def _armed_calendar_job(engine: Engine, settings: Settings) -> Job:
     """The ``calendar_reader`` job ``jobs_for`` actually builds, for driving.
 
     Taken from the real table rather than assembled here, so what the loop below
-    runs is the **bound ``Engine.ingest``** a deployment arms and not a stand-in
+    runs is the **bound ``Engine.ingest_calendar``** a deployment arms and not a
+    stand-in
     that happens to share its name (ADR-0083 §8).
     """
     return {job.name: job for job in jobs_for(engine, settings)}["calendar_reader"]
@@ -366,7 +367,7 @@ async def test_the_armed_job_ingests_a_granted_source_and_reports_completion(
     """Leg 6's exit test with the **scheduler** in the chain, not just the engine.
 
     ``tests/app/test_composition.py`` already proves that a granted source becomes
-    a belief when ``Engine.ingest`` is called directly. What nothing exercised is
+    a belief when ``Engine.ingest_calendar`` is called directly. What nothing exercised is
     the leg between: that the job ADR-0083 §7 arms, driven by the real loop on a
     real interval, gets from an ``.ics`` on disk to a belief the user can read.
     That is the whole of what "the assistant knows something true about the user's

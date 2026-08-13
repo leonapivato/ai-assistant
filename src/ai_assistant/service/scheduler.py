@@ -302,7 +302,7 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
         ("retention_purge", settings.retention_purge_interval, engine.purge_expired),
         ("conversation_sweep", settings.conversation_sweep_interval, engine.start),
         ("observation", settings.observation_interval, engine.observe),
-        ("calendar_reader", settings.calendar_reader_interval, engine.ingest),
+        ("calendar_reader", settings.calendar_reader_interval, engine.ingest_calendar),
         (
             "notification_reconsider",
             settings.notification_reconsider_interval,
