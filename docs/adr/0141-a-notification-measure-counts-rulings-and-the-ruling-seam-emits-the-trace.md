@@ -420,49 +420,95 @@ producers draw it from the owner's calendar. What §2 does *not* forbid on its o
 is the class or the producer name, both of which look like enum-shaped labels
 from a distance; §9 records why they may not travel and files the question.
 
-### 5. Eligibility, and the two ways a trace can be excluded
+### 5. Every trace is in exactly one of four states, tested in order
 
-> **Normative.** A `NOTIFICATION` trace is eligible for the **ruling population**
-> exactly when it carries all three disposition keys. Eligibility is decided by
-> which keys it carries and never by its `TraceOutcome`, on ADR-0120 §2's rule.
+> **Normative.** Every `NOTIFICATION` trace is in exactly one of four states —
+> **incomplete**, **malformed**, **counter-inconsistent** or **well-formed** —
+> decided by the four tests below applied **in this order**, the first that
+> applies deciding it. The states are disjoint and exhaustive by construction, so
+> no trace is counted under two of them and none is left unclassified by any
+> implementation.
 
-> **Normative.** A trace is **malformed** when it carries a strict, non-empty
-> subset of the three disposition keys; when all three are present and do not sum
-> to exactly `1`; or when any key §4 reads as a count carries a value that is not
-> a non-negative integer, or is a `bool`. A malformed trace enters no population.
+> **Normative.** A trace is **incomplete** when it carries none of the three
+> disposition keys. It records a crossing that raised before ruling (§3), it
+> enters no population, and the report counts it apart from the two faults below
+> because it is not one.
 
-> **Normative.** A trace is **counter-inconsistent** when any condition key
-> carries a value other than `0` or `1`; when `condition_expired` and
-> `condition_perishable` are both `1`; when `ruled_interrupt` is `1` and any of
-> the four interrupt-condition keys is absent or `0`; or when `ruled_drop` is `1`
-> and every drop-condition key is `0`.
+> **Normative.** A trace is **malformed** when any of the following holds: it
+> carries a strict, non-empty subset of the three disposition keys; a key §4
+> reads as a count carries a value that is not a non-negative integer, or is a
+> `bool`; the three disposition values do not sum to exactly `1`; a condition key
+> carries a value other than `0` or `1`; a drop-condition key is absent; the
+> ruling is not `DROP` and an interrupt-condition key is absent; or the ruling is
+> `DROP` and an interrupt-condition key is present. A malformed trace enters no
+> population.
 
-> **Normative.** A counter-inconsistent trace is excluded from §7's
-> condition-incidence diagnostic and from §6's duplicate share, and from no other
-> population. It is **not** malformed.
+> **Normative.** A trace is **counter-inconsistent** when its keys are all present
+> with admissible values and disagree with one another: `condition_expired` and
+> `condition_perishable` are both `1`; or `ruled_interrupt` is `1` while any
+> interrupt-condition key is `0`; or `ruled_drop` is `1` while every
+> drop-condition key is `0`; or `ruled_hold` is `1` while every
+> interrupt-condition key is `1`.
 
-> **Normative.** Over a window `W`, the **ruling population** is every eligible
-> `NOTIFICATION` trace whose `occurred_at` lies in `W`. Its **offer** and
-> **reconsideration** sub-populations are those of its members whose seam is
-> `notification_admit` and `notification_reconsider` respectively.
+> **Normative.** A trace in none of those three states is **well-formed**.
+
+> **Normative.** Over a window `W`, the **ruling population** is every
+> **well-formed or counter-inconsistent** trace whose `occurred_at` lies in `W`.
+> Membership is decided by which keys a trace carries and never by its
+> `TraceOutcome`, on ADR-0120 §2's rule. Its **offer** and **reconsideration**
+> sub-populations are those of its members whose seam is `notification_admit` and
+> `notification_reconsider` respectively.
 
 > **Normative.** A trace whose seam is neither of those two is **unclassified**:
 > it stays in the ruling population, enters neither sub-population, and the
 > report names each unclassified seam it met.
 
+> **Normative.** §6's duplicate share and §7's condition incidence are computed
+> over the **well-formed** members of their populations alone. Every other figure
+> §6 and §7 define reads the ruling population whole.
+
 > **Normative.** The report states, separately from one another, how many
-> `NOTIFICATION` traces it excluded as malformed, how many as
-> counter-inconsistent, and how many it met as unclassified.
+> `NOTIFICATION` traces it met as incomplete, as malformed, as
+> counter-inconsistent and as unclassified.
+
+**Ordered and disjoint, because two overlapping predicates are two
+implementations that disagree.** A trace carrying `ruled_interrupt = 2` satisfies
+"carries all three disposition keys" and also fails the sum rule; a condition key
+of `-1` is both a bad count and a bad condition value. Stated as independent
+predicates, each such trace is admissible under one clause and excluded under
+another, and the report's own exclusion counts double. This is the property §1 of
+ADR-0120 calls the whole point of the clauses being fussy — "two implementations
+must produce the same number" — and an order is the cheapest thing that supplies
+it. Adversarial review found both overlaps on the first round.
 
 **Malformed and counter-inconsistent divide by how far the damage reaches, which
 is ADR-0120 §7's line and is drawn here for its reason.** A disposition set that
-does not sum to one cannot say what was ruled, so the trace is useless for
-everything and leaves every population. Conditions that disagree with the
-disposition are a localised fault: they are written by a different statement from
-the disposition keys, so the trace can still say truthfully that an interruption
-happened while being untrustworthy about why. Excluding it from the interruption
-share as well would discard a real ruling for a reason the share does not depend
-on.
+does not sum to one cannot say what was ruled, and a missing condition key means
+a population's denominator would silently shrink — neither trace can be trusted
+for anything, so both leave every population. Conditions that are all present and
+admissible but disagree with the disposition are a localised fault: they are
+written by a different statement from the disposition keys, so the trace can
+still say truthfully that an interruption happened while being untrustworthy
+about why. Excluding it from the interruption share as well would discard a real
+ruling for a reason the share does not depend on.
+
+**A missing key is malformed rather than merely uncounted, and that is the
+second overlap closed.** §4 requires all four drop-condition keys on every
+completed ruling and all four interrupt-condition keys on every non-`DROP` one.
+A `HOLD` arriving without `condition_budget` breaches that, and under a rule that
+only checked consistency *where the keys were present* it would have entered the
+condition incidence, shrinking that one condition's denominator while appearing
+in no exclusion count at all — the invisible failure ADR-0120 §2 names when it
+says a measure that "silently divided by a partial sum would be wrong in a way
+nobody could see". No emitter in this tree can produce one; counting it is cheap
+and makes the assumption checkable.
+
+**Incomplete is named rather than folded into malformed, because it is the
+ordinary fault path.** ADR-0119 §8 requires a crossing that raised before ruling
+to emit its trace anyway, and §3 above requires it to carry none of §4's keys. So
+a trace with no disposition keys is the design working, not a defect, and
+counting it beside two genuine faults would make an outage look like an emitter
+bug.
 
 **Two seam labels rather than a denylist, on ADR-0120 §3's discipline.** A later
 lane may add a third ruling seam, and defaulting an unrecognised one into the
@@ -489,12 +535,11 @@ writes.
 > `ruled_interrupt`, divided by the sum of `ruled_interrupt`, `ruled_hold` and
 > `ruled_drop`, over §5's ruling population.
 
-> **Normative.** The **duplicate share** over `W` is computed over the members of
-> §5's offer population that are not counter-inconsistent **and carry**
-> `condition_duplicate`: the count of them carrying it as `1`, divided by the
-> count of them. The denominator is the traces carrying the key rather than the
-> sub-population, so the two counts are observed by one statement and lost by
-> one.
+> **Normative.** The **duplicate share** over `W` is computed over the
+> **well-formed** members of §5's offer population: the count of them carrying
+> `condition_duplicate` as `1`, divided by the count of them. Every well-formed
+> trace carries the key by §5's malformed rule, so the numerator and the
+> denominator are observed by one statement and lost by one.
 
 > **Normative.** The report states each measure's denominator beside it.
 
@@ -542,9 +587,8 @@ counter-inconsistent trace is untrustworthy about.
 > denominator is made of, stated as counts.
 
 > **Normative.** The **condition incidence** over `W` is, for each of the eight
-> condition keys, the count of eligible traces carrying it, the count carrying it
-> as `1`, and their ratio. It is computed over the eligible traces in `W` that
-> are not counter-inconsistent.
+> condition keys, the count of **well-formed** traces in the ruling population
+> carrying it, the count carrying it as `1`, and their ratio.
 
 > **Normative.** The report states each condition's own carrying count beside its
 > ratio, and never divides one condition's numerator by another's population. The
@@ -552,8 +596,8 @@ counter-inconsistent trace is untrustworthy about.
 > denominators are the non-`DROP` rulings and not the ruling population.
 
 > **Normative.** The **held-to-interruption latency** over `W` is the
-> distribution of `held_seconds` over the eligible traces in `W` carrying it as a
-> value §4 admits. It is a distribution and not a ratio, so the undefined rule
+> distribution of `held_seconds` over the members of §5's ruling population in
+> `W` carrying it as a value §4 admits. It is a distribution and not a ratio, so the undefined rule
 > does not reach it; over an empty sample the report says the sample is empty.
 
 > **Normative.** The **held-first share** over `W` is the sum of
@@ -561,10 +605,10 @@ counter-inconsistent trace is untrustworthy about.
 > `ruled_interrupt` over the ruling population.
 
 > **Normative.** The **notification stream-health counts** over `W` are the
-> `NOTIFICATION` traces walked, the counts excluded as malformed and as
-> counter-inconsistent, the count met as unclassified with each such seam named,
-> the count excluded from the latency distribution for an inadmissible
-> `held_seconds` (§4), and the count carrying an outcome other than `OK`.
+> `NOTIFICATION` traces walked, §5's four state counts, the count met as
+> unclassified with each such seam named, the count excluded from the latency
+> distribution for an inadmissible `held_seconds` (§4), and the count carrying an
+> outcome other than `OK`.
 
 **The condition incidence is what makes a share of zero readable, and without it
 the measure is a trap.** ADR-0130 §6 ships every class at reach `hold`, so a hub
