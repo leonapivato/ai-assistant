@@ -46,13 +46,13 @@ from ai_assistant.core.errors import ReaderError
 from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
-    CalendarFacet,
     DataTier,
     MemoryKind,
     MemorySource,
     MemoryUpdateProposal,
     Provenance,
     ReadCoverage,
+    ReadingFacet,
     ReportedExtent,
     SemanticMemory,
     SourceReading,
@@ -294,7 +294,7 @@ class FakeReader:
         read_at: datetime = _DEFAULT_READ_AT,
         as_of: datetime | None = None,
         coverage: ReadCoverage | None = None,
-        facet: CalendarFacet | None = None,
+        facet: ReadingFacet | None = None,
         failure: Exception | None = None,
         id_factory: Callable[[], str] | None = None,
     ) -> None:
@@ -350,7 +350,13 @@ class FakeReader:
                 must be this fake's own: :class:`SourceReading`'s validator refuses
                 a facet naming a different source or carrying different instants,
                 which is what makes a mis-stamped script fail *here* rather than at
-                the consumer that lifted it into ``CurrentContext``.
+                the consumer that lifted it into ``CurrentContext``. Annotated
+                :data:`~ai_assistant.core.types.ReadingFacet` — *any* member of the
+                union a reading may carry, not the calendar's alone (ADR-0140 §6).
+                A fake that admitted one concrete type could not model the reading
+                a second facet-bearing reader returns, and so could not drive the
+                adapter wired for it — nor the mis-wiring ADR-0096 §5 makes a
+                ``ContextError``, which needs a reading carrying the *other* one.
             failure: The **source-level** failure to model. When given, every read
                 raises :class:`~ai_assistant.core.errors.ReaderError` from it —
                 with a payload-free message carrying only this reader's identity

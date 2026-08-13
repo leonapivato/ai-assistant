@@ -8,8 +8,9 @@ request; it is advisory, not durable state (ADR-0008).
 The public contract is the ``ContextProvider`` Protocol in
 `ai_assistant.core.protocols`. ``AssemblingContextProvider`` implements it by
 composing internal ``ContextSource``s — ``ClockContextSource`` for the temporal
-core, and ``CalendarContextSource`` for the first facet read from the world
-(ADR-0096), which reads only under a live grant (ADR-0097 §5).
+core, ``CalendarContextSource`` for the first facet read from the world
+(ADR-0096) and ``EmailContextSource`` for the second (ADR-0140 §6), each of which
+reads only under a live grant (ADR-0097 §5).
 """
 
 from ai_assistant.context.provider import AssemblingContextProvider
@@ -17,6 +18,7 @@ from ai_assistant.context.sources import (
     CalendarContextSource,
     ClockContextSource,
     ContextSource,
+    EmailContextSource,
 )
 
 __all__ = [
@@ -24,4 +26,5 @@ __all__ = [
     "CalendarContextSource",
     "ClockContextSource",
     "ContextSource",
+    "EmailContextSource",
 ]
