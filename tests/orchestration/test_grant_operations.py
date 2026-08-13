@@ -29,10 +29,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ai_assistant.core.errors import UngrantableSourceError
+from ai_assistant.core.errors import GrantError, UngrantableSourceError
 from ai_assistant.core.types import GrantScope
 from ai_assistant.orchestration import GrantOperations, HeldSource
 from ai_assistant.testing import FakeSourceGrantStore
+from ai_assistant.testing.grants import source_grant
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -263,3 +264,45 @@ async def test_the_location_reaches_no_recorded_grant() -> None:
     assert "/srv/one.ics" not in recorded.model_dump_json()
     page = await operations.recent_grants(limit=50)
     assert all("/srv/one.ics" not in record.model_dump_json() for record in page)
+
+
+async def test_the_live_enumeration_ignores_which_sources_this_object_holds() -> None:
+    """ADR-0139 §1: neither grant answer is derivable from the other.
+
+    The state has no route through the surface — ``grant`` admits only a held
+    reader's declared name (§4) and nothing unholds one — so it is arranged by
+    seeding the store the way a *previous* build of the hub would have left it,
+    and then building the operations with **no sources at all**. That is exactly
+    what an operator unsetting a configured path produces.
+
+    ``grantable_sources`` then answers empty and ``standing_grants`` answers with
+    the grant, which is the disagreement §1 calls a legitimate state rather than a
+    fault. It is asserted here rather than only in the shared suite because this is
+    the object that holds *both* answers: an implementation that intersected them,
+    or that filtered the set by ``self._sources``, would do it in this class and
+    nowhere else, and would leave the grant live, read-authorising and reported by
+    nothing — the hole the whole operation was added to close.
+    """
+    store = FakeSourceGrantStore(records=[source_grant("journal", grant_id="g-1")])
+    operations = GrantOperations(store=store, sources=[], id_factory=_ids(), clock=lambda: AT)
+
+    assert await operations.grantable_sources() == ()
+    assert [record.source for record in await operations.standing_grants()] == ["journal"]
+
+
+async def test_the_live_enumeration_propagates_a_corrupt_store_rather_than_converting_it() -> None:
+    """ADR-0139 §2: the ``GrantError`` is passed on, not turned into a partial answer.
+
+    Two live grants for one source make that source's authorisation unstatable, and
+    the tempting repair here — catch it and answer for the sources the store *could*
+    speak for — produces a set that reads as complete and is not. The healthy source
+    is present precisely so that repair would pass a weaker assertion.
+    """
+    store = FakeSourceGrantStore(records=[source_grant("healthy", grant_id="g-1")])
+    store.hold_conflicting_grants(
+        source_grant("calendar", grant_id="g-2"), source_grant("calendar", grant_id="g-3")
+    )
+    operations = GrantOperations(store=store, sources=[], id_factory=_ids(), clock=lambda: AT)
+
+    with pytest.raises(GrantError):
+        await operations.standing_grants()
