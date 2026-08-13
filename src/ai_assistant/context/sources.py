@@ -9,7 +9,10 @@ assembled :class:`~ai_assistant.core.types.CurrentContext` does.
 working hours) from an injected clock and configured locale.
 ``CalendarContextSource`` is the first source that reads the world: it holds a
 ``Reader`` and a ``SourceGrants``, and contributes the calendar facet when — and
-only when — a live grant covers that read.
+only when — a live grant covers that read. ``EmailContextSource`` is the second
+(ADR-0140 §6), and the two are the same object with two pairings: both derive
+from ``_GrantedFacetSource``, which owns ADR-0097 §5a's gate once and takes the
+``CurrentContext`` field and the facet type it accepts from the concrete class.
 
 Nothing concrete is imported. The reader and the grant seam arrive by injection
 and are seen only through their Protocols (CLAUDE.md golden rule 1), which
@@ -20,12 +23,18 @@ and are seen only through their Protocols (CLAUDE.md golden rule 1), which
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, ClassVar, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import ConfigurationError, ContextError
-from ai_assistant.core.types import CalendarFacet, ContextFacet, GrantScope, TimeOfDay
+from ai_assistant.core.types import (
+    CalendarFacet,
+    ContextFacet,
+    EmailFacet,
+    GrantScope,
+    TimeOfDay,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -178,13 +187,38 @@ class ClockContextSource:
         }
 
 
-class CalendarContextSource:
-    """Contributes the calendar facet from a reader, when a grant covers the read.
+class _GrantedFacetSource:
+    """A context source that reads one source under a grant and contributes its facet.
 
     Structurally implements :class:`ContextSource`. ADR-0093 §3's ruling in one
     object — "A ``ContextSource`` in `context/` holds a ``Reader``" — with
     ADR-0097 §5's gate in front of it, which is the caller's and never the
     reader's: "A ``Reader`` neither holds a grant seam nor learns of one."
+
+    **The pairing of a ``CurrentContext`` field with the facet type admissible in
+    it is declared by the concrete class and is the whole of what a concrete class
+    declares.** ADR-0096 §5 rules that the adapter "contributes the facet from the
+    reading it took, under the ``CurrentContext`` field it was wired for" and that
+    "a facet whose type does not match that field is a wiring bug" — one field, one
+    type, decided where the source is defined. Holding that pair in two class-level
+    :data:`~typing.ClassVar` declarations rather than in two literals inside a
+    copied ``contribute`` is what makes the second facet source *be* the first: the
+    gate below, whose five ADR-0097 §5a cases are the expensive part, exists once.
+
+    **That is a defence against a named hazard rather than tidiness.** ADR-0140
+    §13's facet item observes that the calendar adapter "writes its field as a
+    literal in the mapping it returns, so a lane copying that module and changing
+    only the reader ships it" — an adapter that reads email under a live grant and
+    contributes the facet under ``calendar``. Deriving the key from the same
+    declaration the type guard reads makes the two impossible to disagree: there is
+    no second place to change and forget.
+
+    **The pair is class-level and deliberately not a constructor argument.** A
+    composition root free to pass ``field="calendar"`` beside ``EmailFacet`` could
+    wire the mismatch this class exists to refuse, and the refusal would then be
+    checking one runtime value against another. Declared on the class, the pairing
+    is fixed where it is reviewed, and a composition root chooses only *which*
+    source it builds.
 
     **It reads at assembly time and contributes what that read carried, never a
     cached value** (ADR-0096 §3). A facet is built from a reading taken during the
@@ -197,28 +231,38 @@ class CalendarContextSource:
     **It carries no ``required`` marker, so every fault here ends at an absent
     facet** (ADR-0026 §4, ADR-0008 §4). A ``ReaderError``, a ``GrantError``, a
     timeout, a wiring bug — the assembler's ``_safe_contribute`` logs the class and
-    skips the source, and ``CurrentContext.calendar`` is ``None``. ADR-0096 §4
-    rules that the ``None`` says nothing beyond its absence, and ADR-0097 §5 adds
-    *ungranted* to the states it does not distinguish: an ungranted calendar is
-    observationally identical to one that failed to read, because a field saying
-    "the calendar is not granted" is a model being handed a script to ask for
-    access.
+    skips the source, and :attr:`_field` is ``None`` on the assembled context.
+    ADR-0096 §4 rules that the ``None`` says nothing beyond its absence, and
+    ADR-0097 §5 adds *ungranted* to the states it does not distinguish: an
+    ungranted source is observationally identical to one that failed to read,
+    because a field saying "this source is not granted" is a model being handed a
+    script to ask for access.
 
     **A slow source degrades the facet for more than one request, and that is the
     ratified design working rather than a defect.** The assembler's
-    ``source_timeout`` defaults to 5 s while ``calendar_read_timeout`` is 10 s, so a
-    slow calendar is skipped before the reader's own deadline fires — and the
-    reader's worker is still outstanding, so the *next* assembly's ``read()``
-    raises immediately and its facet is absent too, until the worker returns
-    (ADR-0093 §7). A consumer watching a facet blink in and out will be tempted to
-    read something into the pattern; ADR-0096 §4 forbids exactly that.
+    ``source_timeout`` defaults to 5 s while a reader's own deadline is 10 s
+    (``calendar_read_timeout``, ``email_read_timeout``), so a slow source is
+    skipped before that deadline fires — and the reader's worker is still
+    outstanding, so the *next* assembly's ``read()`` raises immediately and its
+    facet is absent too, until the worker returns (ADR-0093 §7). A consumer
+    watching a facet blink in and out will be tempted to read something into the
+    pattern; ADR-0096 §4 forbids exactly that.
 
     **Its reader is its own** (ADR-0096 §5). The ingestion stage holds a separate
     instance of the same reader: ADR-0093 §7 bounds a reader at one outstanding
     worker, per instance, so sharing one would let a scheduled ingestion read
     suppress the request-path facet for as long as it runs — coupling a request
     cadence to a periodic job, in the direction that makes an advisory facet wait.
+    ADR-0140 §6 is where that clause "acquires a second instance for the first
+    time", and the composition root is what holds it: this class cannot detect a
+    shared reader and does not pretend to.
     """
+
+    _field: ClassVar[str]
+    """The ``CurrentContext`` field this source is wired for."""
+
+    _facet_type: ClassVar[type[ContextFacet]]
+    """The one facet type admissible in :attr:`_field`; any other is a wiring bug."""
 
     def __init__(self, *, reader: Reader, grants: SourceGrants) -> None:
         """Wire the source from an injected reader and the grant query seam.
@@ -264,9 +308,10 @@ class CalendarContextSource:
         Three properties hold it, and none needs a lock:
 
         * **Nothing is opened without a grant.** The source is not resolved, not
-          opened and not parsed — opening the user's calendar *is* the act the
-          grant is about, so a design that read the file and then declined to use
-          it would already have done the thing it was not permitted to do.
+          opened and not parsed — opening the user's calendar or their mail store
+          *is* the act the grant is about, so a design that read the file and then
+          declined to use it would already have done the thing it was not
+          permitted to do.
         * **No ``await`` stands between the ``live()`` answer and ``read()``.**
           Awaiting a coroutine does not yield to the event loop, so with nothing in
           between this source cannot sit on a stale answer at all; a driver free to
@@ -285,16 +330,18 @@ class CalendarContextSource:
         absent facet, as every optional-source fault does (ADR-0097 §5a).
 
         Returns:
-            ``{"calendar": facet}`` when a granted read carried one, and ``{}``
-            otherwise — no grant, a grant withdrawn mid-read, or a reading with no
-            facet in it. The empty mapping is the *only* absence: this source never
-            contributes a marker saying which of them happened (ADR-0096 §4).
+            ``{self._field: facet}`` when a granted read carried a facet of
+            :attr:`_facet_type`, and ``{}`` otherwise — no grant, a grant withdrawn
+            mid-read, or a reading with no facet in it. The empty mapping is the
+            *only* absence: this source never contributes a marker saying which of
+            them happened (ADR-0096 §4).
 
         Raises:
             ContextError: If the reading carried a facet of a type this source is
                 not wired to contribute — a deployment wired wrongly rather than
                 data to reconcile, which is exactly what ADR-0008 §4 reserves this
-                error for.
+                error for. It is raised *instead of* contributing, under either
+                this source's field or any other (ADR-0096 §5, ADR-0140 §13).
             GrantError: If the grant store could not answer, before or after the
                 read. Propagated, never converted (above).
             ReaderError: As the reader raises. Propagated for the same reason: the
@@ -312,20 +359,59 @@ class CalendarContextSource:
         # discarded whole, and nothing records that it happened.
         if await self._grants.live(source=source, use=GrantScope.FACET) is None:
             return {}
-        # Widened deliberately. `SourceReading.facet` is annotated with the one
-        # concrete facet type today, so a narrower local would make the guard
-        # below statically dead — and ADR-0096 §5 widens that union with every
-        # later facet-bearing reader, at which point a reader wired to the wrong
-        # adapter is a live possibility rather than an impossible one. The guard
-        # is written for the union it is about to have.
+        # Widened deliberately: `SourceReading.facet` is a union of every concrete
+        # facet type (ADR-0096 §5), and this source accepts one member of it. The
+        # guard below is what turns the rest into a wiring bug rather than a
+        # silently mis-filed field.
         facet: ContextFacet | None = reading.facet
         if facet is None:
             return {}
-        if not isinstance(facet, CalendarFacet):
+        if not isinstance(facet, self._facet_type):
             msg = (
                 f"the {source!r} reader contributed a {type(facet).__name__} to the "
-                f"'calendar' field of the situational context; a source is wired for "
-                f"one facet type and this is a wiring bug (ADR-0096 §5)"
+                f"{self._field!r} field of the situational context; a source is wired "
+                f"for one facet type and this is a wiring bug (ADR-0096 §5)"
             )
             raise ContextError(msg)
-        return {"calendar": facet}
+        return {self._field: facet}
+
+
+class CalendarContextSource(_GrantedFacetSource):
+    """Contributes the calendar facet from a reader, when a grant covers the read.
+
+    The first source that reads the world (ADR-0096). Everything it does is
+    :class:`_GrantedFacetSource`'s; what it declares is the pairing — the calendar
+    facet belongs in ``CurrentContext.calendar`` and nothing else does.
+    """
+
+    _field: ClassVar[str] = "calendar"
+    _facet_type: ClassVar[type[ContextFacet]] = CalendarFacet
+
+
+class EmailContextSource(_GrantedFacetSource):
+    """Contributes the email facet from a reader, when a grant covers the read.
+
+    ADR-0140 §6's adapter, and the second instance of ADR-0096 §5's
+    contribute-and-raise clause — "which is exactly the wiring bug it was written
+    against". Everything it does is :class:`_GrantedFacetSource`'s; what it
+    declares is the pairing — the email facet belongs in ``CurrentContext.email``
+    and nothing else does.
+
+    **What reaches the context is two scalars and no span of any message**
+    (ADR-0140 §6). That is the reader's obligation and this adapter neither widens
+    nor narrows it: it lifts the facet the reading carried, unedited, exactly as
+    ADR-0096 §5 requires of every adapter. It is worth naming here because
+    ``CurrentContext`` is rendered into every prompt and a subject line would be
+    attacker-chosen text on that path — so a later change that gave this source a
+    facet to *build* rather than to carry would be re-deciding §6, not extending
+    it.
+
+    **An ungranted mail store is absent and says nothing about why** (ADR-0097 §5).
+    ADR-0140 §9's fourth clause adds a warning this adapter cannot enforce but that
+    a surface reading its output must: withdrawing the grant stops *this system's
+    read*, and does not stop the fetcher outside it from collecting mail. A facet
+    that is absent means only that it is absent.
+    """
+
+    _field: ClassVar[str] = "email"
+    _facet_type: ClassVar[type[ContextFacet]] = EmailFacet
