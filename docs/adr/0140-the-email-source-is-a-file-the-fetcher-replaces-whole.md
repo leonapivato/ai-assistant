@@ -1049,7 +1049,8 @@ rather than copied from the calendar's nine** — which §3 is the argument for.
 > fields `None` — and the reason is ADR-0093 §7's: nothing may read a user's
 > personal files because a default said so.
 
-**Four of the seven are decisions rather than numbers.**
+**Four of the seven fields are decisions rather than numbers, and a fifth
+decision is a field that is not there.**
 
 - **One window edge, not two.** A calendar is asymmetric because the future is
   what the assistant needs; a mailbox has no future, so `email_window_future` would
@@ -1161,7 +1162,7 @@ carries is to **pass** the existing suite, not to write one.
   `rename(2)` on the same filesystem; that its retention exceeds the reader's
   window; and that its credential never enters the hub. This is documentation and
   not `src/`, and §1's second clause is why: the fetcher is not ours to ship.
-- Tests for the clauses a lane can satisfy in prose and breach in code — ten,
+- Tests for the clauses a lane can satisfy in prose and breach in code — eleven,
   each named by the breach it catches:
 
   - **The body never leaves the reader (§5).** A message carrying a body still
@@ -1238,6 +1239,18 @@ carries is to **pass** the existing suite, not to write one.
     *first* occurrence of a repeated header and says nothing — which is exactly
     the selection §5 forbids, reaching the opposite outcome from the duplicate
     `Date` immediately above it.
+  - **§12's table is refused where §12 says it is, and the calendar's is where a
+    lane gets it wrong (§12).** Three directions, each named: both nullable
+    fields default to `None`, so a fresh install reads no mail; an
+    `email_reader_interval` set with `email_source_path` unset raises
+    `ConfigurationError` at load; and a figure outside its stated range is
+    refused at load. The range worth the test is `email_window_past`'s **open**
+    lower bound — `calendar_window_past` may be zero and
+    `tests/readers/test_calendar_settings.py` asserts that it is accepted, while
+    this one may not be, so a lane that reaches for the neighbouring field
+    declaration inherits a `ge=0` and ships §12's reader that reads nothing while
+    reporting health. Nothing else in this list observes the configuration layer
+    at all.
   - **Every cap §12 names owes a refusal test, one each (§12).**
     `email_max_bytes`, on a store larger than the cap, refusing on the read
     itself rather than after parsing; and `email_max_content_bytes`, on an
@@ -1245,15 +1258,17 @@ carries is to **pass** the existing suite, not to write one.
     small aggregate budget, asserted to fail **before** the over-budget proposal
     is materialised. A reader that never charges the content accumulator, or
     enforces the byte cap only after reading the whole store, passes every other
-    test in this list. The rule is stated per cap rather than per figure so that
-    a cap added later arrives owing its test.
+    test in this list. `email_max_messages` is the third cap and its refusal is
+    the item below, which pins the cap's *ordering* in the same assertion. The
+    rule is stated per cap rather than per figure so that a cap added later
+    arrives owing its test.
   - **The cap is applied at the framing (§12).** A store of
     `email_max_messages + 1` framed messages **none** of which carries a valid
     `X-Assistant-Delivered-At` **refuses** rather than returning a successful
     empty reading. This is the cap's *ordering* rather than its figure, and it is
     the one §12 property every test above passes while breached: an
     implementation that skips invalid messages first and counts what survives
-    satisfies all nine others and still turns a busted cap into a quiet week.
+    satisfies all ten others and still turns a busted cap into a quiet week.
 
 ### 14. Deferred, by name, each with the condition that fires it
 
