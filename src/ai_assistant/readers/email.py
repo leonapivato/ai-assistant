@@ -375,9 +375,7 @@ class EmailReader:
         _check_count("email_max_messages", max_messages)
         _check_positive_int("email_max_bytes", max_bytes)
         _check_positive_int("email_max_content_bytes", max_content_bytes)
-        if read_timeout <= timedelta(0):
-            msg = f"email_read_timeout must be > 0, got {read_timeout!r}"
-            raise ValueError(msg)
+        _check_duration("email_read_timeout", read_timeout)
 
         self._path = path
         self._now = checked_clock(now, owner="EmailReader")
@@ -989,12 +987,53 @@ def _check_window(field: str, value: timedelta) -> None:
     # **May not be zero**, unlike `calendar_window_past` — a window of zero width
     # is a reader that reads nothing while reporting health, and the neighbouring
     # field's `>= 0` is exactly what a lane inherits by copying (ADR-0140 §12).
+    _refuse_a_non_duration(field, value)
     if value <= timedelta(0) or value > MAX_EMAIL_WINDOW:
         msg = (
             f"{field} must be > 0 and <= {MAX_EMAIL_WINDOW}, got {value!r}; the ceiling "
             f"is what keeps `read_at - {field}` reachable from configuration alone "
             f"(ADR-0140 §12)"
         )
+        raise ValueError(msg)
+
+
+def _check_duration(field: str, value: timedelta) -> None:
+    _refuse_a_non_duration(field, value)
+    if value <= timedelta(0):
+        msg = f"{field} must be > 0, got {value!r}"
+        raise ValueError(msg)
+
+
+def _refuse_a_non_duration(field: str, value: object) -> None:
+    """Refuse a value no ordering comparison below could survive.
+
+    Typed ``object`` because the guard **disbelieves the annotation, which is the
+    point** — the same reason :func:`~ai_assistant.core.clock.checked_clock`
+    states for its own parameter. A ``timedelta`` annotation here would make the
+    refusal statically unreachable, which is exactly the reasoning that let the
+    value through in the first place.
+
+    **The type check is the two integer guards' rule for the durations**, and
+    without it this constructor is asymmetric with itself: ``_check_count``
+    refuses anything that is not exactly an ``int`` while a duration reached a
+    bare ``<=``, so ``window_past=None`` escaped as a ``TypeError`` from an
+    operator rather than as the ``ValueError`` this constructor documents.
+
+    The reason a duration needs one at all is not the reason an integer does.
+    ``bool`` is an ``int`` by inheritance, so ``max_messages=True`` **passes**
+    ``mypy`` and loads as a cap of one — a value silently accepted, which is
+    #471's defect. Nothing is silently accepted here: every wrong type already
+    fails, and what it fails as is the whole of what this fixes. A refusal at
+    construction that names the field it refused is what ADR-0093 §10 asks the
+    concrete reader's constructor for, and an operator's ``TypeError`` naming
+    ``NoneType`` and ``datetime.timedelta`` names neither the field nor the rule.
+
+    ``isinstance`` rather than an exact-type test, unlike the integer guards: they
+    are exact in order to exclude ``bool`` specifically, and there is no
+    ``timedelta`` subclass whose acceptance would be a mistake.
+    """
+    if not isinstance(value, timedelta):
+        msg = f"{field} must be a timedelta, got {value!r}"
         raise ValueError(msg)
 
 
