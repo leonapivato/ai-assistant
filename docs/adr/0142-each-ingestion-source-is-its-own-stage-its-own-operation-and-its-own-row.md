@@ -163,7 +163,18 @@ path and consults no interval.
 
 > **Normative.** A source whose path is configured and whose interval is unset is
 > a legal, meaningful state per source: its ingestion stage exists and its
-> ingestion operation works when called, and no scheduler row is armed for it.
+> ingestion operation reaches that source's grant gate when called rather than
+> refusing as unwired, and no scheduler row is armed for it.
+
+**"Reaches its grant gate" rather than "succeeds", and the distinction is
+load-bearing.** An unarmed source's operation is a *wired* operation with no
+caller, so what it must not do is raise §6's `ConfigurationError` — the refusal
+that means "no source is configured". What it does after that is §7's and is
+unchanged: with no live `INGEST` grant it raises `SourceNotGrantedError`, which
+is the ordinary state of a source the user has not granted, and nothing in this
+clause lets an unarmed source be read without one. The two refusals are different
+facts, which `Engine.ingest` already says in its own words — "that one is a
+deployment that cannot ask, this one is a user who has not said yes".
 
 **That state is what makes the facet independent of ingestion**, which is
 ADR-0093 §3's rule and ADR-0140 §13's per-consumer instance requirement working
@@ -259,7 +270,10 @@ decide against it, and the fourth is the one a lane would not find:
   written here or an exception's class name", and a reader's declared identity is
   read at runtime. So under a discriminator, no `OPERATION` trace can say which
   source ran or which one is failing, and no smaller fix restores it. Distinct
-  operations give distinct literal seams for free.
+  operations make distinct literal seams *available* — §9's test 10 is what makes
+  them owed, because an implementation can add the operation and still route it
+  through the existing seam string, throwing away the one property this bullet
+  chose the shape for.
 
 **The bound-method clause is an addition, and it is scoped to these rows.**
 ADR-0083 §8's sentence does not say "bound"; the scheduler's own `jobs_for`
@@ -270,10 +284,12 @@ to every job is a scheduler decision and is not this one's to take.
 
 ### 5. The reader's declared identity is the stem, and the existing operation is renamed
 
-> **Normative.** For each ingestion source, the engine operation is
-> `ingest_<identity>`, the scheduler row's name is `<identity>_reader`, and the
-> arming `Settings` field is `<identity>_reader_interval`, where `<identity>` is
-> the reader's own declared `Reader.name`.
+> **Normative.** For each ingestion source, one **stem** names all three of its
+> artefacts: the engine operation is `ingest_<stem>`, the scheduler row's name is
+> `<stem>_reader`, and the arming `Settings` field is `<stem>_reader_interval`.
+> The stem is the source's declared `Reader.name` where that is a valid Python
+> identifier; where it is not, the stem is named explicitly by the decision that
+> adds that source, and is never derived silently.
 
 > **Normative.** `Engine.ingest` is renamed `Engine.ingest_calendar` and its
 > constructor parameter and attribute are renamed from `ingestion` to
@@ -284,11 +300,28 @@ to every job is a scheduler decision and is not this one's to take.
 **The rule is satisfied by everything already on `main`, which is the point of
 stating it.** The calendar reader declares `"calendar"`; its row is
 `calendar_reader`; its arming field is `calendar_reader_interval`. ADR-0140 §12
-ratified `email_reader_interval` and §12 fixes the email reader's identity as
-`"email"`, so `email_reader` and `ingest_email` are determined rather than chosen.
-A third source has no naming decision left to make, which is worth more than the
-saved keystrokes: three artefacts named by one rule are three artefacts a
-registry can later enumerate mechanically (§8).
+ratified `email_reader_interval` and fixes the email reader's identity as
+`"email"`, so `email_reader` and `ingest_email` are determined rather than
+chosen. Three artefacts named by one stem are three artefacts a registry can
+later enumerate mechanically (§8), which is worth more than the saved keystrokes.
+
+**The escape clause exists because a declared identity is not a Python
+identifier, and the corpus is explicit that it need not be.** `Reader.name`
+returns `str` and the identity that lands on a reading is `Identifier` in
+`core/types.py` — "A non-blank, stripped identifier that has a UTF-8 encoding",
+and nothing more; `VisibleIdentifier` is a separate type and #62 still holds the
+canonical-syntax question. So a future reader may legitimately declare
+`"rss-feed"`, which yields no legal method name and would otherwise force a
+choice between an unimplementable rule and renaming a reader's declared identity
+to suit the engine. A reader's identity is ADR-0093 §7's, decided for the
+reader's own reasons, and this rule does not get to reach it. Both identities
+this ADR governs are valid Python identifiers, so the derivation is total over
+the sources in scope and the escape fires for nobody today.
+
+**One stem across all three artefacts, rather than a per-artefact allowance.** A
+row name and a `Settings` field could each carry a hyphen where a method cannot,
+so a looser rule would let one source's three artefacts disagree — which is the
+enumeration §8 relies on becoming three lists instead of one.
 
 **The scope of the rule is the three artefacts this decision creates, and the
 path field is deliberately outside it.** `calendar_reader_path` and
@@ -391,19 +424,19 @@ either — the increment from one to two is one field pair, one stage, one metho
 and one row — and ADR-0093 §11 names the third source as the trigger, which
 ADR-0140 §9 confirms email does not reach.
 
-**What three sources cost under this shape, counted rather than waved at:** three
-`Settings` field pairs, three stage constructions in `app/`, three engine
-attributes, three engine operations and three scheduler rows — and, at the third,
-ADR-0093 §11's registry *and* its configurable display label *and* its
-instance-distinguishing `reported_by` all fire together, because §11 defers them
-as one entry. So the third source's lane pays a schema decision it was always
-going to pay, plus the mechanical collapse of nine enumerated artefacts into
-three registered ones.
+**What three sources cost under this shape, counted rather than waved at:** each
+source carries **five** enumerated artefacts — a `Settings` field pair, a stage
+construction in `app/`, an engine attribute, an engine operation and a scheduler
+row — so three sources carry fifteen. And at the third, ADR-0093 §11's registry
+*and* its configurable display label *and* its instance-distinguishing
+`reported_by` all fire together, because §11 defers them as one entry. So the
+third source's lane pays a schema decision it was always going to pay, plus the
+mechanical collapse of those five per-source artefacts into one registered entry.
 
 **Nothing here forecloses that, and §5 is why.** The registry replaces an
-enumeration, not a mechanism: every artefact this ADR names is derived from the
-reader's declared identity by one rule, so the migration is a fold over a list of
-identities rather than a redesign. A discriminator-carrying `ingest(source)`
+enumeration, not a mechanism: all five of a source's artefacts are named from one
+stem by one rule (§5), so the migration is a fold over a list of stems rather
+than a redesign. A discriminator-carrying `ingest(source)`
 would not have been closer to the registry — it would have been the registry's
 dispatch half without its schema half, validation story or display label, which
 is the worst of the two shapes and the one §4 refuses.
@@ -431,7 +464,7 @@ is the worst of the two shapes and the one §4 refuses.
 >    settings.email_reader_interval, engine.ingest_email)` on `jobs_for`'s table,
 >    armed only when that interval is set.
 
-> **Normative.** The lane owes each of the following nine tests, each named by the
+> **Normative.** The lane owes each of the following ten tests, each named by the
 > breach it catches. A test item omitted is a defect rather than a scoping choice.
 >
 > 1. **Both sources, differing intervals, both retained (§1, items 1–4).** With
@@ -440,10 +473,13 @@ is the worst of the two shapes and the one §4 refuses.
 >    is its own source's. Catches #1030's option 1 — email's wiring replacing the
 >    calendar's — which every single-source test passes.
 > 2. **Path without interval arms nothing and disables nothing (§2, items 2–4).**
->    With the email path set and `email_reader_interval` unset, no `email_reader`
->    row is armed and `Engine.ingest_email` **still succeeds when called
->    directly**. Both halves are asserted: a lane that keys the stage off the
->    interval passes the first half and fails the second.
+>    With the email path set, `email_reader_interval` unset and a live `INGEST`
+>    grant on `"email"`, no `email_reader` row is armed and `Engine.ingest_email`
+>    **still succeeds when called directly**. Both halves are asserted: a lane
+>    that keys the stage off the interval passes the first half and fails the
+>    second. The grant is part of the arrangement rather than incidental to it —
+>    without one the operation raises `SourceNotGrantedError` (§7) and the test
+>    would assert the wrong refusal.
 > 3. **Either source alone (§1, §2, items 2–4).** With only the email source
 >    configured, `email_reader` is armed and `Engine.ingest_calendar` refuses;
 >    with only the calendar's, the mirror. Catches an implementation in which
@@ -476,18 +512,26 @@ is the worst of the two shapes and the one §4 refuses.
 >    reports `email_reader` beside `calendar_reader` when both are armed, and the
 >    calendar row's name is unchanged by the rename in item 1. Catches a
 >    wire-visible rename of a stable identifier.
+> 10. **Each source's operation emits its own trace seam (§4, §5, items 1, 2).**
+>    A calendar ingestion and an email ingestion each emit their `OPERATION` trace
+>    under their own stem's seam — `ingest_calendar` and `ingest_email` — and
+>    neither emits under the other's. Catches an implementation that adds the
+>    second operation and routes it through the first's seam string: it passes
+>    every other test in this list while leaving no `OPERATION` record able to say
+>    which source ran or which one is failing, which is the property §4 chose this
+>    shape for and which ADR-0119 §2 forecloses repairing from the report.
 
 **The lists were audited against each other rather than grown, and the counts are
 counted rather than incremented.** This ADR carries **fifteen** marked clauses:
 twelve in §§1–7, one in §8, and the two work orders in this section. Each of the
 twelve has at least one deliverable item and at least one test item —
 §1 → items 1–4, tests 1 and 3; §2 → items 2–4, tests 2 and 3; §3 → item 3, tests
-4 and 8; §4 → items 1, 2 and 4, test 5; §5 → items 1 and 4, tests 5 and 9;
-§6 → items 2 and 3, test 6; §7 → items 2–4, tests 7 and 8. In the other
-direction, every deliverable item is exercised: item 1 by tests 1, 5 and 9; item
-2 by tests 1, 2, 3, 5, 6, 7 and 8; item 3 by tests 1, 2, 3, 4, 6 and 7; item 4 by
-tests 1, 2, 3, 5, 8 and 9. **Four** deliverable items, **nine** tests, and no
-clause left without either.
+4 and 8; §4 → items 1, 2 and 4, tests 5 and 10; §5 → items 1 and 4, tests 5, 9
+and 10; §6 → items 2 and 3, test 6; §7 → items 2–4, tests 7 and 8. In the other
+direction, every deliverable item is exercised: item 1 by tests 1, 5, 9 and 10;
+item 2 by tests 1, 2, 3, 5, 6, 7, 8 and 10; item 3 by tests 1, 2, 3, 4, 6 and 7;
+item 4 by tests 1, 2, 3, 5, 8 and 9. **Four** deliverable items, **ten** tests,
+and no clause left without either.
 
 **§8's clause is the one that is review-enforced rather than test-enforced, and
 saying so is better than inventing a test for it.** It is a refusal binding a
@@ -604,8 +648,8 @@ nothing there.
 ## Consequences
 
 - **ADR-0140 §13's ingestion deliverable becomes implementable.** Its named
-  precondition is discharged, and the lane taking it has four items and nine
-  tests rather than three incompatible readings.
+  precondition is discharged, and the lane taking it has four deliverables and
+  ten tests rather than three incompatible readings.
 - **Cadence independence is a clause rather than an inference.** A lane that
   defaults one source's interval from another's now breaches a marked ruling, and
   a reviewer has a sentence to quote.
