@@ -235,9 +235,29 @@ def test_the_constructor_refuses_a_relative_path() -> None:
         ("max_messages", True),
         ("max_bytes", True),
         ("max_content_bytes", True),
+        # And a value of the wrong type is refused as a value rather than
+        # escaping as an operator's `TypeError` from the comparison below it.
+        # The durations are the half that had no type guard: `_check_count` is
+        # exact-typed to exclude `bool`, so the integers were covered by the
+        # rule they got for a different reason.
+        ("window_past", None),
+        ("window_past", 3600),
+        ("read_timeout", None),
+        ("read_timeout", 10),
+        ("read_timeout", True),
+        ("max_messages", None),
+        ("max_bytes", "8388608"),
     ],
 )
 def test_the_constructor_refuses_a_figure_outside_its_range(field: str, value: object) -> None:
+    """Refused at construction, as a ``ValueError`` naming the field it refused.
+
+    ADR-0093 §10 puts this seam's guard here because the constructor "is a second
+    seam a test or a second composition root reaches directly" — and what such a
+    caller needs from a refusal is the field's name and the rule. A ``TypeError``
+    reading ``'<=' not supported between instances of 'NoneType' and
+    'datetime.timedelta'`` names neither.
+    """
     kwargs: dict[str, Any] = {field: value}
     with pytest.raises(ValueError, match=f"email_{field}"):
         EmailReader(_ABSOLUTE, **kwargs)
