@@ -554,6 +554,61 @@ def test_a_truncated_report_says_so_rather_than_truncating_silently() -> None:
     assert all(one.keyword == "type" for one in violations[:-1])
 
 
+def test_the_cap_bounds_the_work_and_not_only_the_report() -> None:
+    """The cap is a real bound, not a slice taken after the cost was paid (§8).
+
+    A schema over an array of failing items yields one error per item, so a
+    report capped *after* every violation had been built and sorted would exhaust
+    memory on the way to a refusal — on a path every tool call takes, over a
+    document an untrusted server authored. Counting the models actually
+    constructed is what tells the two implementations apart; asserting the length
+    of the result cannot, because both produce the same list.
+
+    The evaluation's own cost still scales with the instance. That is #1108's,
+    parked by ADR-0145 §14, and this pins the half that was this decision's.
+    """
+    built = 0
+    real = core_types.ParameterViolation
+
+    class _Counting(real):  # type: ignore[valid-type, misc]  # a frozen model subclass
+        def __init__(self, **fields: Any) -> None:
+            nonlocal built
+            built += 1
+            super().__init__(**fields)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(core_types, "ParameterViolation", _Counting)
+    try:
+        errors = _MAX_REPORTED_VIOLATIONS * 50
+        schema: Mapping[str, Any] = {
+            "type": "object",
+            "properties": {"xs": {"type": "array", "items": {"type": "integer"}}},
+        }
+        violations = parameter_violations(schema, {"xs": ["no"] * errors})
+    finally:
+        monkeypatch.undo()
+
+    assert len(violations) == _MAX_REPORTED_VIOLATIONS + 1
+    assert violations[-1].schema_value == errors
+    assert built == _MAX_REPORTED_VIOLATIONS + 1
+
+
+def test_a_truncated_report_is_a_stable_prefix_of_the_whole_ordering() -> None:
+    """What survives the cap is the deterministic first N, not the first N seen (§8)."""
+    count = _MAX_REPORTED_VIOLATIONS + 20
+    schema: Mapping[str, Any] = {
+        "type": "object",
+        "properties": {f"p{index:04d}": {"type": "integer"} for index in range(count)},
+    }
+    parameters: Mapping[str, Any] = {f"p{index:04d}": "no" for index in range(count)}
+    violations = parameter_violations(schema, parameters)
+
+    assert [one.path for one in violations[:-1]] == [
+        f"/p{index:04d}" for index in range(_MAX_REPORTED_VIOLATIONS)
+    ]
+    assert violations == parameter_violations(schema, parameters)
+
+
 # --- §9: an absent schema declares no constraint -----------------------------
 
 

@@ -13,6 +13,7 @@ state-transition graph does not, which is why that one lives in ``planning``.
 
 from __future__ import annotations
 
+import heapq
 import json
 import re
 import unicodedata
@@ -5464,8 +5465,17 @@ def _violation_path(location: Sequence[str | int], named: frozenset[str]) -> str
     return "".join(f"/{segment}" for segment in segments)
 
 
-def _violation_of(error: ValidationError, named: frozenset[str]) -> ParameterViolation:
-    """Turn one library error into the three schema-side facts §8 permits."""
+def _violation_facts(error: ValidationError, named: frozenset[str]) -> tuple[str, str, FrozenJson]:
+    """Reduce one library error to the three schema-side facts §8 permits.
+
+    A plain tuple rather than a :class:`ParameterViolation`, and that is what
+    keeps the cap in :func:`parameter_violations` a real bound. A schema with an
+    array of a million failing items yields a million errors, so building a
+    validated model for each one before truncating would exhaust memory on the
+    way to a refusal — the report would be capped and the work reaching it would
+    not. Models are built for the violations actually reported and for nothing
+    else.
+    """
     keyword = error.validator if isinstance(error.validator, str) else "schema"
     # `validator_value` is the schema's own value for the failing keyword, and it
     # came out of the thawed document — so it is JSON by construction. The one
@@ -5476,25 +5486,21 @@ def _violation_of(error: ValidationError, named: frozenset[str]) -> ParameterVio
     schema_value: FrozenJson = (
         declared if isinstance(declared, str | bool | int | float | Mapping | Sequence) else None
     )
-    return ParameterViolation(
-        path=_violation_path(list(error.absolute_path), named),
-        keyword=keyword,
-        schema_value=schema_value,
-    )
+    return (_violation_path(list(error.absolute_path), named), keyword, schema_value)
 
 
-def _violation_order(violation: ParameterViolation) -> tuple[str, str, bytes]:
+def _facts_order(facts: tuple[str, str, FrozenJson]) -> tuple[str, str, bytes]:
     """Order violations totally, so the same call reports the same list twice.
 
     The library yields errors in whatever order it walked the instance, and for
     ``additionalProperties`` that walk is over a set. ADR-0145 §8 requires a
-    deterministic order, so one is imposed here rather than inherited.
+    deterministic order, so one is imposed here rather than inherited — and it is
+    imposed over the *whole* set of errors rather than over the ones that happen
+    to arrive first, which is what makes the truncated report a stable prefix
+    instead of a sample.
     """
-    return (
-        violation.path,
-        violation.keyword,
-        _canonical_bytes(_thaw_json(violation.schema_value)),
-    )
+    path, keyword, schema_value = facts
+    return (path, keyword, _canonical_bytes(_thaw_json(schema_value)))
 
 
 def parameter_violations(
@@ -5554,14 +5560,31 @@ def parameter_violations(
     document = _thaw_json(schema)
     named = _schema_named_properties(document)
     validator = Draft202012Validator(document)
-    found = sorted(
-        (_violation_of(error, named) for error in validator.iter_errors(_thaw_json(parameters))),
-        key=_violation_order,
+    instance = _thaw_json(parameters)
+
+    total = 0
+
+    def _streamed() -> Iterator[tuple[str, str, FrozenJson]]:
+        nonlocal total
+        for error in validator.iter_errors(instance):
+            total += 1
+            yield _violation_facts(error, named)
+
+    # `nsmallest` over a generator holds one bounded heap, so the peak cost is the
+    # cap and not the error count. The alternative — sort everything, then slice —
+    # made the advertised cap a property of the *report* while the work reaching
+    # it still scaled with the instance, which is the wrong half to bound on a
+    # path every tool call takes. The evaluation's own O(n) cost is untouched and
+    # deliberately so: ADR-0145 §14 parks a cost budget for it as #1108.
+    kept = heapq.nsmallest(_MAX_REPORTED_VIOLATIONS + 1, _streamed(), key=_facts_order)
+    reported = tuple(
+        ParameterViolation(path=path, keyword=keyword, schema_value=schema_value)
+        for path, keyword, schema_value in kept[:_MAX_REPORTED_VIOLATIONS]
     )
-    if len(found) <= _MAX_REPORTED_VIOLATIONS:
-        return tuple(found)
-    truncation = ParameterViolation(path="", keyword=_TRUNCATION_KEYWORD, schema_value=len(found))
-    return (*found[:_MAX_REPORTED_VIOLATIONS], truncation)
+    if total <= _MAX_REPORTED_VIOLATIONS:
+        return reported
+    truncation = ParameterViolation(path="", keyword=_TRUNCATION_KEYWORD, schema_value=total)
+    return (*reported, truncation)
 
 
 def _refused_parameters(violations: Sequence[ParameterViolation]) -> str:
