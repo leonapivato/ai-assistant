@@ -1189,7 +1189,12 @@ carries is to **pass** the existing suite, not to write one.
 >   failure's class and never the path.
 > - The `context/` adapter contributing §6's facet, gated on a live `FACET` grant.
 > - The ingestion wiring, gated on a live `INGEST` grant, and the scheduler job as
->   an `Engine` call holding no reader (ADR-0083 §8).
+>   an `Engine` call holding no reader (ADR-0083 §8). **This bullet has a
+>   precondition and it is named rather than left to be discovered**: how a second
+>   ingestion stage and its job coexist with the calendar's is §14's deferral
+>   (#1030), which fires *before* this is wired, so this deliverable follows that
+>   decision in ADR-0015 §5's ordinary sequencing rather than being implementable
+>   ahead of it.
 > - **The composition-root registration in `app/`**, which is what makes §9's
 >   first clause true of a running hub rather than of a fixture: with
 >   `email_source_path` set, the source is offered by `grantable_sources()` under
