@@ -76,6 +76,7 @@ class FakeEngine:
         self.purged = 0
         self.observed = 0
         self.ingested = 0
+        self.mail_ingested = 0
         self.consolidated = 0
         self.reconsidered = 0
         self.noticed = 0
@@ -119,6 +120,16 @@ class FakeEngine:
         # façade carries fails the hub's *startup*, not just the job.
         self.ingested += 1
         _marker.info("fake_engine_ingested")
+
+    async def ingest_email(self) -> None:
+        # ADR-0140's ingestion, and the **second source's own operation** rather
+        # than an argument to the first (ADR-0142 §4). Present for
+        # `ingest_calendar`'s reason exactly — `jobs_for` builds §7's whole table
+        # before filtering it by interval — which is why this stand-in acquiring
+        # the method is what the two-source table costs a fake engine, and why
+        # omitting it fails the hub's startup rather than one job.
+        self.mail_ingested += 1
+        _marker.info("fake_engine_ingested_email")
 
     async def consolidate(self) -> None:
         # Leg 7's chunked walk (ADR-0106, ADR-0111). Present for `ingest_calendar`'s reason:

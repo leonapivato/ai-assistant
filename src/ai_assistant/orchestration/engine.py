@@ -892,6 +892,7 @@ class Engine:
         questions: QuestionStage,
         grant_operations: GrantOperations,
         calendar_ingestion: IngestionStage | None = None,
+        email_ingestion: IngestionStage | None = None,
         upcoming: UpcomingEventStage | None = None,
         consolidation: ConsolidationStage | None = None,
         notifications: NotificationStore | None = None,
@@ -1064,14 +1065,22 @@ class Engine:
                 in this package, and ADR-0102 §2 records that reusing a word for a
                 different type one constructor over is how two things come to be
                 confused at a glance.
-            calendar_ingestion: The calendar's read-only ingestion stage (ADR-0093
-                §6), or ``None``
-                where this deployment configured no source. It writes through the
-                *same* write stage the learn leg and ``observation`` use — the
-                composition-root obligation ADR-0078 §3 puts on every producer, so
-                an ingested belief the policy defers parks a question the user can
-                actually answer, and one it stores is retrievable and forgettable
-                through the surfaces the user already has (ADR-0028 §4).
+            calendar_ingestion: The **calendar's** read-only ingestion stage
+                (ADR-0093 §6), or ``None`` where this deployment configured no
+                calendar source. It writes through the *same* write stage the learn
+                leg and ``observation`` use — the composition-root obligation
+                ADR-0078 §3 puts on every producer, so an ingested belief the policy
+                defers parks a question the user can actually answer, and one it
+                stores is retrievable and forgettable through the surfaces the user
+                already has (ADR-0028 §4).
+
+                **One stage per source, held as its own collaborator** (ADR-0142
+                §3). It is named for its source rather than being *the* ingestion
+                stage, and ``email_ingestion`` below is its sibling rather than an
+                argument to it: "No ingestion stage holds more than one reader, and
+                no ingestion stage dispatches over a collection of readers." A
+                multiplexing stage would put one interval behind two sources and
+                fuse their failure modes, which is what §3 refuses.
 
                 **Optional, where its three siblings above are required, and the
                 asymmetry is ADR-0093 §7 rather than laxity.** Every reader ships
@@ -1084,6 +1093,26 @@ class Engine:
                 refuses rather than reporting an empty success, because a job that
                 reports health while ingesting nothing is the failure mode this
                 corpus keeps naming (ADR-0022 §4a).
+            email_ingestion: The **email** source's read-only ingestion stage
+                (ADR-0140, ADR-0142 §3), or ``None`` where this deployment
+                configured no mail store. Everything said of ``calendar_ingestion``
+                above holds of it unchanged — the same write stage, the same
+                disabled-by-default reason, the same refusal rather than an empty
+                success — and what is *not* shared is the point.
+
+                **Its own stage over its own reader, and neither derived from the
+                calendar's** (ADR-0142 §3, ADR-0096 §5). ADR-0093 §7 bounds a reader
+                at one outstanding worker *per instance*, so two sources' ingestion
+                can never contend for one reservation; ADR-0083 §7's serial loop
+                makes the stronger statement anyway, that the two jobs never run
+                concurrently at all.
+
+                **A deployment may wire either, both or neither** (ADR-0142 §1).
+                Neither collaborator is conditioned on the other's presence, and
+                :meth:`ingest_email` refusing says nothing whatever about the
+                calendar's state — §6's rule that no ingestion operation reports
+                another source's state, applied at the constructor that could
+                breach it.
             upcoming: ADR-0132's upcoming-event producer, or ``None`` where this
                 deployment configured no calendar source. **Its own reader
                 instance, and not ``calendar_ingestion``'s** (ADR-0132 §3): the two consumers
@@ -1246,6 +1275,7 @@ class Engine:
         self._questions = questions
         self._grants = grant_operations
         self._calendar_ingestion = calendar_ingestion
+        self._email_ingestion = email_ingestion
         self._upcoming = upcoming
         self._consolidation = consolidation
         if (notifications is None) != (notification_policy is None):
@@ -1637,13 +1667,124 @@ class Engine:
         self._reject_if_closing()
         if self._calendar_ingestion is None:
             msg = (
-                "no ingestion stage is wired, so there is nothing to ingest; it "
-                "needs a configured source (ASSISTANT_CALENDAR_READER_PATH, "
-                "ADR-0093 §7a). Configuration says where a source is; a grant says "
-                "whether it may be read, and neither stands in for the other"
+                "no calendar ingestion stage is wired, so there is nothing to "
+                "ingest from the calendar; it needs a configured source "
+                "(ASSISTANT_CALENDAR_READER_PATH, ADR-0093 §7a). Configuration says "
+                "where a source is; a grant says whether it may be read, and "
+                "neither stands in for the other"
             )
             raise ConfigurationError(msg)
         return await self._tracked(self._calendar_ingestion.ingest(), "ingest_calendar", _ingested)
+
+    async def ingest_email(self) -> IngestionReport:
+        """Read the configured mail store once and propose what it read (ADR-0140).
+
+        The **maintenance surface**'s scheduled operation for the system's second
+        ingestion source, added *beside* :meth:`ingest_calendar` rather than through
+        it. It carries no ordinal because the surface has stopped being a list and
+        started being a list *plus one entry per source*, which is ADR-0142 §8's
+        counted cost: five enumerated artefacts per source until ADR-0093 §11's
+        registry fires at the third. ADR-0142 §4: "Each configured ingestion source is driven by its
+        **own** public operation on the concrete ``orchestration`` engine, returning
+        that source's ``IngestionReport``. No ingestion operation takes a source
+        argument, a source name, or any argument at all."
+
+        **Why not one operation taking a source, which is the option that had to be
+        argued down.** ``functools.partial(engine.ingest, "email")`` satisfies
+        ``JobBody`` structurally and is, in a sense, a public ``Engine`` call. §4
+        refuses it on four grounds, and the one no care repairs is the trace: the
+        ``seam`` this method hands :meth:`_tracked` is the ``OPERATION`` record's
+        one wiring point (ADR-0119 §8), and a single parameterised operation emits
+        one seam for every source. Putting the source in the trace instead is
+        already foreclosed — :func:`_ingested` records that
+        ``IngestionReport.source`` "is deliberately left off" because ADR-0119 §2
+        admits no runtime-read string into a trace — so under a discriminator no
+        ``OPERATION`` record could say which source ran or which one is failing.
+        Two literal seams is what buys that back, and it is why this method exists
+        rather than a parameter.
+
+        **Its own stage, its own reader, its own grant** (ADR-0142 §3, §7). The
+        stage is a second construction of the same
+        :class:`~ai_assistant.orchestration.ingestion.IngestionStage` the calendar's
+        uses — zero new machinery, which is the strongest available evidence that
+        the seam was cut in the right place at leg 6 — over an ``EmailReader``
+        instance the composition root builds for this consumer alone (ADR-0096 §5).
+        The read is gated on a live ``INGEST`` grant for *this* source's declared
+        identity: "No grant on one source authorises a read of another, whatever
+        its scope."
+
+        **Independent of the calendar's in both directions** (ADR-0142 §1). This
+        source is armed on ``email_reader_interval`` and on nothing else; arming or
+        retuning it changes the calendar's cadence in no way, and arming the
+        calendar's arms no mail read. A deployment may run either, both or neither.
+        The direction worth naming is the one a default would breach: nothing here
+        falls back to ``calendar_reader_interval``, because that would silently arm
+        a read of the user's mail because they had armed a read of their calendar.
+
+        **Takes no argument, deliberately** — :meth:`ingest_calendar`'s reason
+        unchanged: the reader is given its own source and its own bound, so a caller
+        able to widen the read is a caller able to defeat the bound. It is also what
+        makes this a legal ``JobBody``, which the scheduler's table requires.
+
+        **Nothing else calls it, and nothing may wire it into a turn** (ADR-0093
+        §6). The facet read a request-time assembly performs is a separate path on
+        ``context``'s own reader instance, gated on its own ``FACET`` grant, and it
+        proposes nothing.
+
+        **Arming it is three independent acts and the recipe is not here.** The
+        operator sets ``ASSISTANT_EMAIL_READER_INTERVAL`` (unset, this operation has
+        no caller), the user grants the source ``ingest``, and a fetcher outside
+        this system keeps the store current. All three are written out, with the
+        command forms that exist and the duration forms the first one accepts, in
+        :mod:`ai_assistant.readers.email`'s module docstring — beside the source's
+        own deployment recipe, because that is where an operator connecting a mail
+        store is already reading and this project has no operator-facing docs tree
+        to hold it (#887, #981).
+
+        Returns:
+            What the mail store proposed and what memory did with it. Every count
+            zero is a **successful** pass over a source that had nothing to say
+            within the bound, and no caller may read it as a failure (ADR-0093 §8).
+            It is also indistinguishable from a fetcher that stopped running, which
+            ADR-0140 §1 accepts rather than patches: the fetcher is monitored where
+            the operator monitors processes, never through this system's surfaces.
+
+        Raises:
+            RuntimeError: If the engine is shutting down, exactly as
+                :meth:`ingest_calendar` raises it.
+            ConfigurationError: If this engine was built with no **email** ingestion
+                stage, which means one thing: no configured mail store. The message
+                names ``ASSISTANT_EMAIL_SOURCE_PATH`` and no other source's
+                configuration (ADR-0142 §6) — one shared message is the trap here,
+                because an operator told "no ingestion stage is wired" by an engine
+                ingesting the calendar every hour looks in the wrong place.
+            SourceNotGrantedError: If no live ``INGEST`` grant covers **this**
+                source at the moment of the read, or if one is revoked while the
+                read is in flight (ADR-0097 §5). A grant on the calendar authorises
+                nothing here. Distinct from the error above: that one is a
+                deployment that cannot ask, this one is a user who has not said yes.
+            ReaderError: If the read could not complete because of its source — a
+                missing, unreadable, non-regular or oversized store, a store framing
+                more messages than the cap, proposals past the content budget, or a
+                deadline expiry. The scheduler logs it with its class and retries at
+                the next due instant, and the calendar's job is neither disarmed nor
+                affected (ADR-0142 §7). Its message is payload-free by contract,
+                which is what keeps the mail store's path out of the operational log.
+            MemoryStoreError: If the write path failed, as
+                :meth:`ingest_calendar` raises it.
+            DeferralStoreError: If a deferred question could not be parked.
+        """
+        self._reject_if_closing()
+        if self._email_ingestion is None:
+            msg = (
+                "no email ingestion stage is wired, so there is nothing to ingest "
+                "from email; it needs a configured source "
+                "(ASSISTANT_EMAIL_SOURCE_PATH, ADR-0140 §12). Configuration says "
+                "where a source is; a grant says whether it may be read, and "
+                "neither stands in for the other"
+            )
+            raise ConfigurationError(msg)
+        return await self._tracked(self._email_ingestion.ingest(), "ingest_email", _ingested)
 
     async def notice_upcoming_events(self) -> int:
         """Notice what is about to start, and offer a candidate for each (ADR-0132).
