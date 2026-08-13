@@ -25,7 +25,14 @@ from ai_assistant.app import ensure_model_credentials
 from ai_assistant.app.composition import CONFLICT_LIMIT, RETRIEVAL_LIMIT
 from ai_assistant.core.config import EmbedderKind, Settings
 from benchmarks.memory.answer import ANSWER_SYSTEM_PROMPT, answer_question
-from benchmarks.memory.grade import JUDGE_PROMPT, ExactGrader, Grading, ModelGrader, Verdict
+from benchmarks.memory.grade import (
+    JUDGE_PROMPT,
+    MODEL_JUDGE_PREFIX,
+    ExactGrader,
+    Grading,
+    ModelGrader,
+    Verdict,
+)
 from benchmarks.memory.ingest import exchanges_of, ingest_case
 from benchmarks.memory.records import (
     QuestionRecord,
@@ -154,6 +161,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     grader: Grader | None = None,
     model: ModelProvider | None = None,
     observer: Observer | None = None,
+    preregistration_final: bool = False,
     slice_seed: int | None = None,
     max_sessions: int = 0,
     notes: str = "",
@@ -171,7 +179,14 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     Args:
         plan: What to run.
         output_root: Where run directories are created.
-        mode: Whether these outputs may be read as scores.
+        mode: Whether these outputs may be read as scores. A ``SCORED`` run is put
+            through :func:`refuse_ineligible_scored_run` **here**, at the boundary that
+            actually writes the manifest, not only at the command line — this function
+            is exported and a caller reaching it directly could otherwise label an
+            ineligible run ``scored``.
+        preregistration_final: Whether the operator states #1029's pre-registration is
+            discharged. Defaults to ``False``, so the unsafe direction needs an
+            argument and the safe one needs nothing.
         corpus_digests: Each fetched file's name mapped to its SHA-256, for the
             manifest.
         settings: Loaded application settings; loaded from the environment when
@@ -193,6 +208,16 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     """
     resolved = settings if settings is not None else Settings()
     judge = grader if grader is not None else ExactGrader()
+    refuse_ineligible_scored_run(
+        mode,
+        preregistration_final=preregistration_final,
+        max_sessions=max_sessions,
+        embedder=resolved.embedder,
+        # Read off the grader that will actually judge, rather than trusting a caller's
+        # description of it: what the manifest records and what the gate inspects are
+        # then the same object.
+        grader_kind="model" if judge.name.startswith(MODEL_JUDGE_PREFIX) else judge.name,
+    )
     if model is None:
         # The public startup gate (issue #530, ADR-0083 §3). A missing credential is a
         # configuration fault, and without this it would surface as ~2,000 identical

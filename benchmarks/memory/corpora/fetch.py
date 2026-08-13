@@ -14,7 +14,9 @@ never in the history.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -92,7 +94,18 @@ def ensure_file(file: CorpusFile, *, cache: Path | None = None) -> Path:
         target.unlink()
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    partial = target.with_suffix(target.suffix + ".partial")
+    # **A staging path unique to this process, not one derived from the target.** Two
+    # concurrent fetches of the same corpus that shared a `.partial` would have one
+    # verify and publish the inode the other is still writing through — corrupting the
+    # cache *after* the digest check that is supposed to make it trustworthy, and then
+    # hashing a path that no longer exists. With distinct names each process verifies
+    # its own bytes, and `Path.replace` publishes atomically, so the loser of the race
+    # simply overwrites identical verified content.
+    handle, staged_name = tempfile.mkstemp(
+        dir=target.parent, prefix=f"{target.name}.", suffix=".partial"
+    )
+    os.close(handle)
+    partial = Path(staged_name)
     _download(file.url, partial)
 
     found = digest_of(partial)

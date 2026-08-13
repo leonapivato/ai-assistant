@@ -36,7 +36,23 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import ModelProvider
     from benchmarks.memory.cases import BenchQuestion
 
-__all__ = ["ExactGrader", "Grader", "Grading", "ModelGrader", "Verdict", "is_abstention"]
+__all__ = [
+    "MODEL_JUDGE_PREFIX",
+    "ExactGrader",
+    "Grader",
+    "Grading",
+    "ModelGrader",
+    "Verdict",
+    "is_abstention",
+]
+
+#: What a model judge's :attr:`Grader.name` begins with.
+#:
+#: The scored-run gate uses it to tell a model judge from any other, so it is a shared
+#: constant rather than a string two places spell alike. A grader that is a model judge
+#: and does not follow the convention is classified as *not* one, which is the
+#: conservative direction for a gate: it refuses a run rather than admitting one.
+MODEL_JUDGE_PREFIX: Final = "model:"
 
 
 class Verdict(StrEnum):
@@ -204,7 +220,7 @@ class ModelGrader:
     @property
     def name(self) -> str:
         """The judge label recorded for this grader."""
-        return f"model:{self._route}"
+        return f"{MODEL_JUDGE_PREFIX}{self._route}"
 
     async def grade(self, question: BenchQuestion, answer: str) -> Grading:
         """Judge one answer, abstention first.
@@ -262,10 +278,16 @@ class ModelGrader:
                 judge=self.name,
                 detail=f"judge failed: {type(error).__name__}",
             )
-        said = reply.content.strip().upper()
-        if said.startswith("CORRECT"):
+        # **The whole reply must be the token, not merely start with it.** A prefix
+        # test reads "CORRECTLY ANSWERED" and "CORRECT, but uncertain" as verdicts,
+        # and the second is a judge expressing doubt being recorded as certainty —
+        # a false benchmark result produced by the grader rather than by the system.
+        # Surrounding punctuation and whitespace are forgiven because the prompt asks
+        # for one bare word and a model will add a full stop; nothing else is.
+        said = reply.content.strip().strip(".!,;:'\"*` ").upper()
+        if said == "CORRECT":
             return Grading(verdict=Verdict.CORRECT, abstained=False, judge=self.name)
-        if said.startswith("INCORRECT"):
+        if said == "INCORRECT":
             return Grading(verdict=Verdict.INCORRECT, abstained=False, judge=self.name)
         return Grading(
             verdict=Verdict.UNGRADED,

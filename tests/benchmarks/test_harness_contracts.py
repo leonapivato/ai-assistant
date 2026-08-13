@@ -7,11 +7,19 @@ caught by a type check, so each has a test.
 
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING
+from unittest import mock
 
 import pytest
 from benchmarks.memory import records
-from benchmarks.memory.corpora.fetch import CorpusFetchError, cached_path, digest_of, ensure_file
+from benchmarks.memory.corpora import fetch as fetch_module
+from benchmarks.memory.corpora.fetch import (
+    CorpusFetchError,
+    cached_path,
+    digest_of,
+    ensure_file,
+)
 from benchmarks.memory.corpora.provenance import CorpusFile
 from benchmarks.memory.records import RunMode
 from benchmarks.memory.run import PREREGISTRATION_REFUSAL, refuse_ineligible_scored_run
@@ -211,3 +219,33 @@ def test_a_scored_run_over_shortened_histories_is_refused() -> None:
             embedder=EmbedderKind.ON_DEVICE,
             grader_kind="model",
         )
+
+
+@pytest.mark.integration
+def test_two_fetches_of_one_corpus_do_not_share_a_staging_path(tmp_path: Path) -> None:
+    """A shared `.partial` would have one process verify and publish the inode the
+    other is still writing through — corrupting the cache *after* the digest check that
+    is supposed to make it trustworthy. Each fetch stages under a name of its own, so
+    the loser of the race only overwrites identical verified content."""
+    staged: list[str] = []
+    payload = b"the pinned bytes"
+    file = CorpusFile(
+        name="corpus.json",
+        url="https://example.invalid/x",
+        sha256=hashlib.sha256(payload).hexdigest(),
+        size_bytes=len(payload),
+    )
+
+    def _fake_download(url: str, target: Path) -> None:
+        staged.append(target.name)
+        target.write_bytes(payload)
+
+    with mock.patch.object(fetch_module, "_download", _fake_download):
+        first = ensure_file(file, cache=tmp_path)
+        (tmp_path / "corpus.json").unlink()
+        second = ensure_file(file, cache=tmp_path)
+
+    assert first == second
+    assert len(staged) == 2
+    assert staged[0] != staged[1]
+    assert not list(tmp_path.glob("*.partial"))
