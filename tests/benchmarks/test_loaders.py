@@ -166,6 +166,33 @@ def test_locomo_carries_evidence_through_untouched(locomo_file: Path) -> None:
     assert locomo.load(locomo_file)[0].questions[0].evidence == ("D1:1",)
 
 
+def test_locomo_keys_each_turn_by_the_pointer_its_questions_cite(locomo_file: Path) -> None:
+    """#1074's join needs both sides in one id space. A qa entry's `evidence` is a list
+    of `dia_id` values, so the turns must carry their own `dia_id` — not a position, not
+    a synthesised key."""
+    case = locomo.load(locomo_file)[0]
+
+    assert [turn.evidence_key for turn in case.sessions[0].turns] == ["D1:1", "D1:2", "D1:3"]
+    assert case.sessions[1].turns[0].evidence_key == "D2:1"
+    # The join is a lookup, not a coincidence: every cited pointer names a real turn.
+    keyed = {turn.evidence_key for session in case.sessions for turn in session.turns}
+    assert {pointer for question in case.questions for pointer in question.evidence} <= keyed
+
+
+def test_locomo_takes_no_key_rather_than_inventing_one(tmp_path: Path) -> None:
+    """A fabricated pointer would join to a question's evidence by accident and report a
+    retrieval that never happened, so a turn without a `dia_id` simply has none."""
+    sample = _locomo_sample()
+    del sample[0]["conversation"]["session_1"][0]["dia_id"]
+    path = tmp_path / "locomo10.json"
+    path.write_text(json.dumps(sample), encoding="utf-8")
+
+    case = locomo.load(path)[0]
+
+    assert case.sessions[0].turns[0].evidence_key is None
+    assert case.sessions[0].turns[1].evidence_key == "D1:2"
+
+
 def test_locomo_refuses_a_file_that_is_not_a_list(tmp_path: Path) -> None:
     path = tmp_path / "bad.json"
     path.write_text('{"sample_id": "x"}', encoding="utf-8")
@@ -252,6 +279,18 @@ def test_longmemeval_adds_no_speaker_prefix(longmemeval_file: Path) -> None:
 
     assert late.text == "I bought a bicycle."
     assert late.user_side is True
+
+
+def test_longmemeval_keys_every_turn_by_its_own_session(longmemeval_file: Path) -> None:
+    """The corpus cites *sessions*, not utterances — `answer_session_ids` names haystack
+    session ids — so the honest pointer for a turn is the session it belongs to, and
+    #1074's join is correspondingly session-coarse here. The sessions are reordered by
+    date, so the key has to follow the session rather than its file position."""
+    case = longmemeval.load(longmemeval_file, corpus_key=CLEANED)[0]
+
+    assert [turn.evidence_key for turn in case.sessions[0].turns] == ["s_early", "s_early"]
+    assert [turn.evidence_key for turn in case.sessions[1].turns] == ["s_late"]
+    assert case.questions[0].evidence == ("s_late",)
 
 
 def test_longmemeval_marks_the_abstention_variant(longmemeval_file: Path) -> None:
