@@ -282,10 +282,22 @@ their only chance to notice.
 
 > **Normative.** The `tools/` egress seam ADR-0017 §2 anticipates is
 > `ai_assistant.tools.egress` — one module, not a package, holding outbound
-> transport and nothing else. No other module under `ai_assistant.tools` may
-> import a network client, an HTTP library, a socket API or a subprocess API, and
-> an `import-linter` contract in `pyproject.toml` pins that, in the form ADR-0125
-> §8 uses for `keyring` and the readers' contract uses for `icalendar`.
+> transport and nothing else.
+
+> **Normative.** No module under `ai_assistant.tools` other than that one opens a
+> network connection or launches a subprocess, by any route: a client library, an
+> HTTP or socket API, a standard-library module, or a wrapper around any of them.
+> This binds an author and a reviewer; it is not a claim about what a check can
+> see.
+
+> **Normative.** An `import-linter` contract in `pyproject.toml` forbids, to every
+> module under `ai_assistant.tools` except the seam, an **enumerated** set of
+> modules: at minimum `socket`, `ssl`, `http`, `urllib`, `subprocess`,
+> `asyncio.subprocess`, and every transport-bearing third-party package this
+> repository depends on. The lane that adds any further transport-bearing
+> dependency adds it to that enumeration in the same change. This is ADR-0125 §8's
+> form for `keyring` and the readers' contract's for `icalendar`, applied to a set
+> rather than to one name.
 
 > **Normative.** MCP protocol handling — the JSON-RPC message shapes, discovery,
 > the mapping from a declaration to a `ToolDefinition`, and the mapping from a
@@ -328,19 +340,46 @@ ordinary rule and states the constraint the choice has to meet, because the choi
 is one to make with code in hand and the constraint is one that is expensive to
 discover afterwards.
 
-**Honest accounting, in ADR-0017 §4's own terms.** "An import contract is a net,
-not a proof": it matches module names and cannot see a subsystem reaching the
-network through `urllib`, a raw socket, or a library added after the contract was
-written. What it catches is the realistic accident. Naming the seam does not make
-the boundary enforceable; it makes it *describable*, which is the condition ADR-0017
-§3 actually states and the first thing a designating ADR needs to attest against.
+**The prohibition and the contract are two clauses because they reach different
+distances, and collapsing them would overstate the second.** ADR-0017 §4 already
+says why: "an import contract is a net, not a proof. It matches module names, so
+it cannot see a subsystem reaching the network through `urllib`, a raw socket, a
+library added after the contract was written, or an internal wrapper." A clause
+claiming a contract pins a *universal* prohibition would be claiming exactly the
+proof §4 denies — a bound stated over something the check cannot obtain, which is
+the defect ADR-0098 §3 records itself making twice before a reviewer caught it. So
+the rule is stated universally, as a rule, and the contract is stated over an
+enumeration, which is what a contract can actually hold. The enumeration names
+`urllib` and the raw socket module explicitly, so ADR-0017 §4's first two examples
+are inside the net rather than outside it; what stays outside is a dependency
+nobody added to the list, and the extension clause is what makes adding one a
+change that either updates the list or fails review. What the contract reliably
+catches is the realistic accident — `httpx` appearing in the MCP protocol module —
+and nothing here upgrades it past that.
+
+Naming the seam therefore does not make the boundary enforceable; it makes it
+*describable*, which is the condition ADR-0017 §3 actually states and the first
+thing a designating ADR needs to attest against.
 
 ### 4. The local/remote line: stdio leaves no device, and it is not therefore harmless
 
 > **Normative.** Handing a tool's arguments to an MCP server over a **stdio**
 > transport — a subprocess this system launched on the hub's own machine, speaking
-> over its `stdin` and `stdout` — is not off-device transmission and does not
-> engage ADR-0017 §1.
+> over its `stdin` and `stdout` — is not off-device transmission **by this
+> system** and does not engage ADR-0017 §1. The clause is about this system's own
+> act and about nothing else.
+
+> **Normative.** No lane, ADR or surface may state or imply that the clause above
+> establishes what an admitted server does with what it is handed. This system
+> obtains no fact about whether a subprocess transmits, and nothing in this ADR —
+> the empty-`discloses` requirement, its recorded ground, or the transport
+> distinction — is evidence that one does not. A server that transmits contrary to
+> its declaration produces an egress this system caused and did not designate, and
+> that residue is stated here rather than closed.
+
+> **Normative.** No clause of this section may be cited toward designating the
+> `tools/` seam, toward discharging any ADR-0017 §3 condition, or as a precedent
+> that a program on the hub's machine is a permitted recipient of user data.
 
 > **Normative.** Reaching an MCP server over a **network** transport — Streamable
 > HTTP, the deprecated HTTP+SSE form, or any custom transport that opens a socket
@@ -359,6 +398,13 @@ the boundary enforceable; it makes it *describable*, which is the condition ADR-
 > transmits nothing on that tool's behalf. A declaration that cannot state one
 > states a non-empty `discloses` instead and the tool is refused under the clause
 > above.
+
+> **Normative.** What crosses to an MCP server on a call is the tool name the
+> enumeration states and the `ActionRequest.parameters` mapping, and nothing else.
+> No memory record, no context facet, no conversation history, no other tool's
+> result, no plan, no belief and no credential is placed in an outbound MCP
+> message, and no such value may be added to one by configuration, by a
+> declaration, or by a server asking for it.
 
 **A subprocess is not a device, and it is not this system either, and both halves
 matter.** ADR-0017 §1's rule is scoped to the *device*, and the corpus has read it
@@ -383,6 +429,45 @@ because "empty" is the cheap answer and ADR-0016 §1's forgetful author is the
 failure this whole corpus keeps designing against; a ground is not a validator and
 does not pretend to be one, but it is the difference between a decision and an
 omission, and it is what a reviewer reads.
+
+**The declaration is not the containment, and the containment is a bound this
+system can actually obtain.** An operator's empty `discloses` is a statement about
+a program they installed; it constrains the program not at all, and the second
+clause above refuses to let anyone read it as though it did. What bounds the
+exposure is the minimisation clause: the only user data that reaches a server is
+the arguments of the call it was selected for — the mapping `ActionRequest`
+carries, which a ruling was made on and which `PermissionDecision` pins by digest
+(ADR-0021 §1). A compromised local server therefore learns what it was asked to
+act on, once per authorised call, and has no route to the memory store, the
+conversation, the profile or a credential; every one of those would have to be put
+into the arguments by something on this side, which the clause forbids. That is a
+real ceiling and it is the shape ADR-0004 §7 asks for, stated where a reviewer can
+check it — unlike a claim about the subprocess's own sockets, which is the bound
+this ADR cannot obtain and does not state.
+
+**What is left after that, said plainly rather than argued away.** A local server
+that transmits contrary to its declaration exfiltrates the arguments of the calls
+it is given, and nothing here detects it. Where the policy ruled `CONFIRM` the user
+saw those arguments at the moment they approved — ADR-0144 §5 records that the
+`Confirmation` carries `parameters` — and where it ruled `ALLOW` they did not, which
+is the policy's call over a declared severity and is why the empty-`discloses`
+refusal rather than the prompt is what carries the pre-designation bound. The
+proper close is an enforceable isolation boundary around the subprocess — a network
+namespace, a sandbox profile, a container — which is platform-specific, is a
+decision with its own cost and its own failure modes, and is not something a
+docs-only ADR can specify without stating a bound it has no mechanism for. It is
+**#1112**, filed rather than gestured at, and §12 records it.
+
+**The alternative — admit no MCP server until the seam is designated — was
+considered and is worse.** It reads as the safe answer and it makes ADR-0017 §3's
+list govern a case none of its conditions has a subject for: recipient
+authorisation, destination canonicalisation, multi-recipient sets and transport
+pinning are all about a destination chosen at call time from arguments, and a
+subprocess on the hub's own machine selects no destination. ADR-0124 §12 declined
+to apply the same list to the hop for exactly that reason. Requiring fourteen
+conditions with no subject would postpone the whole leg to buy a property none of
+them delivers, while the property that *would* help — isolation — is on none of
+their lists.
 
 **What this leaves buildable, which is more than it first appears.** Empty
 `discloses` does not mean read-only. ADR-0016 §3's rules make a tool that writes
@@ -690,11 +775,20 @@ claims above that a signature does not show.
   server does not offer admits nothing without erroring; a tool the server offers
   and the enumeration does not name is dropped **and reported**.
 - **§3's contract, exercised rather than asserted**: `uv run lint-imports` fails
-  when a module under `ai_assistant.tools` other than the named seam imports a
-  network client or a subprocess API, which means the contract is written and
-  tested rather than assumed. And the seam holds no MCP protocol code, which is a
-  review property rather than a test — say so rather than pretending a test covers
-  it.
+  when a module under `ai_assistant.tools` other than the named seam imports one of
+  the enumerated modules, asserted for a standard-library entry (`socket` or
+  `urllib`) as well as for a third-party one, so the enumeration is shown to hold
+  where ADR-0017 §4's own examples sit. Two things a test does not cover and which
+  the lane states rather than implies: that the seam holds no MCP protocol code,
+  and that a transport a later dependency brings is inside the enumeration — both
+  are review properties, and pretending otherwise is the overstatement §3 splits
+  its clauses to avoid.
+- **§4's minimisation clause, as what an outbound message contains**: a
+  `tools/call` built for a tool whose declaration reads Tier 1 carries the tool
+  name and the request's `parameters` and nothing else, asserted against the
+  serialised message rather than against a call site. The fixture puts a
+  distinctive string into a memory record, the conversation and a context facet,
+  and none of the three appears in any byte written to the server.
 - **§4's refusals as construction-time facts**: a declaration naming a network
   transport yields no connection attempt at all, asserted as no socket opened
   rather than as a request that failed; a declaration stating a non-empty
@@ -815,6 +909,16 @@ form).
   convenience: ADR-0124 §1's enumeration is exhaustive and a remote server is
   outside it, so the deferral is a consequence of a ratified rule rather than a
   scoping choice.
+- **Isolating an admitted stdio server so that "it transmits nothing" is a
+  property rather than a claim** — **#1112**. §4 states the residual and bounds
+  the payload; what it cannot do is bound the program. The close is a network
+  namespace, a sandbox profile or a container, which is platform-specific across
+  the three deployments this hub is expected to run on, carries a real cost per
+  server (an isolated server cannot reach a socket or a config file it
+  legitimately needs), and — worst — is the kind of partial mechanism ADR-0098 §6
+  forbids buying a bound from if it is reported as more than it is. Specifying one
+  from a docs-only ADR would be stating a bound with no mechanism behind it, which
+  is the defect ADR-0098 §3 records itself making twice.
 - **Passing a credential to an MCP server.** ADR-0125 §8 gives `tools/` a
   `Secrets` face "at the tool that needs one, by injection", and an MCP server is
   not a tool inside `tools/` — it is a separate program, and putting a Tier 0
@@ -907,6 +1011,17 @@ collisions were expected to become real; under §1 and §7 they cannot arrive fr
 server, so the deferral ADR-0016 §7 holds waits on an author's mistake instead of
 on breadth. The issue stays open and its urgency drops, which is worth saying
 plainly because the opposite was expected.
+
+**The system acquires a recipient it cannot account for, and says so.** ADR-0017
+§4's property is that egress is "accountable — few, named, and answerable for what
+it sends". An admitted stdio server is named and few and is *not* answerable: it
+receives the arguments of every call it is selected for and this system establishes
+nothing about what it then does. §4 bounds the payload rather than the program,
+refuses in a marked clause to let the transport distinction be read as a safety
+finding, and files #1112 for the isolation that would close it. This is the
+largest residual in the decision and it is the one a later reader is most likely to
+find understated somewhere else — so it is stated three times: in §4's clauses,
+here, and in the case against below.
 
 **The permission machinery finally gets its live case, and it is a local one.** An
 `IRREVERSIBLE`, `side_effecting`, non-disclosing tool from a local server exercises
