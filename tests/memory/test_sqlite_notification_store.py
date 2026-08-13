@@ -45,6 +45,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory.notification_policy import DefaultNotificationPolicy
 from ai_assistant.memory.notification_store import _MAX_RETENTION, SqliteNotificationStore
+from ai_assistant.testing import FakeTraceSink
 from ai_assistant.testing.cancellation import ThreadSuspension
 
 if TYPE_CHECKING:
@@ -94,7 +95,9 @@ class TestSqliteNotificationStoreContract(NotificationStoreContract):
 
     @pytest.fixture
     def store(self, tmp_path: Path) -> Iterator[NotificationStore]:
-        realised = SqliteNotificationStore(path=tmp_path / "notifications.db", now=_fixed_now)
+        realised = SqliteNotificationStore(
+            traces_sink=FakeTraceSink(), path=tmp_path / "notifications.db", now=_fixed_now
+        )
         try:
             yield realised
         finally:
@@ -118,6 +121,7 @@ class TestSqliteNotificationStoreContract(NotificationStoreContract):
             cap: int = _CAP,
         ) -> NotificationStore:
             realised = SqliteNotificationStore(
+                traces_sink=FakeTraceSink(),
                 path=tmp_path / f"notifications-{len(opened)}.db",
                 now=now,
                 retention=retention,
@@ -143,7 +147,9 @@ class TestSqliteNotificationStoreContract(NotificationStoreContract):
 @pytest.fixture
 def store(tmp_path: Path) -> Iterator[SqliteNotificationStore]:
     """A store on a file, so a case can reopen it or inspect its mode."""
-    realised = SqliteNotificationStore(path=tmp_path / "notifications.db", now=_fixed_now)
+    realised = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=tmp_path / "notifications.db", now=_fixed_now
+    )
     try:
         yield realised
     finally:
@@ -163,7 +169,7 @@ def test_the_store_refuses_a_cap_it_cannot_work_under(tmp_path: Path, cap: objec
     refuses when the store is built rather than per admission.
     """
     with pytest.raises(ValueError, match="cap must be an int"):
-        SqliteNotificationStore(path=tmp_path / "n.db", cap=cap)  # type: ignore[arg-type]
+        SqliteNotificationStore(traces_sink=FakeTraceSink(), path=tmp_path / "n.db", cap=cap)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -176,7 +182,11 @@ def test_the_store_refuses_a_retention_it_cannot_work_under(
 ) -> None:
     """``None`` is the only spelling for "never purged" (ADR-0130 §7)."""
     with pytest.raises(ValueError, match="retention must be"):
-        SqliteNotificationStore(path=tmp_path / "n.db", retention=retention)  # type: ignore[arg-type]
+        SqliteNotificationStore(
+            traces_sink=FakeTraceSink(),
+            path=tmp_path / "n.db",
+            retention=retention,  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize(
@@ -202,7 +212,9 @@ def test_the_store_refuses_a_retention_it_cannot_persist(
     fails once, at startup, naming the value.
     """
     with pytest.raises(ValueError, match="retention must be at most"):
-        SqliteNotificationStore(path=tmp_path / "n.db", retention=retention)
+        SqliteNotificationStore(
+            traces_sink=FakeTraceSink(), path=tmp_path / "n.db", retention=retention
+        )
 
 
 async def test_the_longest_persistable_retention_round_trips(tmp_path: Path) -> None:
@@ -213,7 +225,10 @@ async def test_the_longest_persistable_retention_round_trips(tmp_path: Path) -> 
     retention an operator chose.
     """
     store = SqliteNotificationStore(
-        path=tmp_path / "n.db", now=_fixed_now, retention=_MAX_RETENTION
+        traces_sink=FakeTraceSink(),
+        path=tmp_path / "n.db",
+        now=_fixed_now,
+        retention=_MAX_RETENTION,
     )
     try:
         ruling = await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
@@ -246,7 +261,10 @@ async def test_a_horizon_past_the_calendar_is_not_purgeable_and_does_not_raise(
     representable time has not elapsed, and will not.
     """
     store = SqliteNotificationStore(
-        path=tmp_path / "n.db", now=_fixed_now, retention=_MAX_RETENTION
+        traces_sink=FakeTraceSink(),
+        path=tmp_path / "n.db",
+        now=_fixed_now,
+        retention=_MAX_RETENTION,
     )
     try:
         ruling = await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
@@ -270,7 +288,7 @@ def test_the_database_file_is_owner_only(tmp_path: Path) -> None:
     """
     path = tmp_path / "notifications.db"
 
-    realised = SqliteNotificationStore(path=path, now=_fixed_now)
+    realised = SqliteNotificationStore(traces_sink=FakeTraceSink(), path=path, now=_fixed_now)
     realised.close()
 
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -279,12 +297,12 @@ def test_the_database_file_is_owner_only(tmp_path: Path) -> None:
 async def test_a_record_survives_a_reopen(tmp_path: Path) -> None:
     """Durability is the whole point of this backend over the fake."""
     path = tmp_path / "notifications.db"
-    first = SqliteNotificationStore(path=path, now=_fixed_now)
+    first = SqliteNotificationStore(traces_sink=FakeTraceSink(), path=path, now=_fixed_now)
     ruling = await first.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
     first.close()
     assert ruling.notification_id is not None
 
-    second = SqliteNotificationStore(path=path, now=_fixed_now)
+    second = SqliteNotificationStore(traces_sink=FakeTraceSink(), path=path, now=_fixed_now)
     try:
         recovered = await second.get(ruling.notification_id)
     finally:
@@ -306,7 +324,7 @@ async def test_a_spent_unit_of_budget_survives_a_reopen(tmp_path: Path) -> None:
     """
     path = tmp_path / "notifications.db"
     policy = DefaultNotificationPolicy()
-    first = SqliteNotificationStore(path=path, now=_fixed_now)
+    first = SqliteNotificationStore(traces_sink=FakeTraceSink(), path=path, now=_fixed_now)
     await first.set_preferences(
         NotificationPreferences(
             reaches=(ClassReach(notification_class="calendar", reach=NotificationReach.INTERRUPT),),
@@ -318,7 +336,7 @@ async def test_a_spent_unit_of_budget_survives_a_reopen(tmp_path: Path) -> None:
     )
     first.close()
 
-    second = SqliteNotificationStore(path=path, now=_fixed_now)
+    second = SqliteNotificationStore(traces_sink=FakeTraceSink(), path=path, now=_fixed_now)
     try:
         second_ruling = await second.admit(_perishable("k2"), policy=policy)
     finally:
@@ -338,7 +356,7 @@ async def test_a_spend_outside_the_window_is_swept_from_the_ledger(
     without bound.
     """
     clock = MutableClock()
-    store = SqliteNotificationStore(path=tmp_path / "n.db", now=clock)
+    store = SqliteNotificationStore(traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=clock)
     policy = DefaultNotificationPolicy()
     try:
         await store.set_preferences(_interrupting())
@@ -379,7 +397,9 @@ async def test_a_budget_window_at_the_edge_of_the_range_still_rules(
     ``HOLD`` carrying no ``reconsider_at``, since a due instant there would promise
     a re-ruling that can only re-hold on every tick for the life of the record.
     """
-    store = SqliteNotificationStore(path=tmp_path / "n.db", now=_fixed_now)
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=_fixed_now
+    )
     policy = DefaultNotificationPolicy()
     try:
         await store.set_preferences(
@@ -409,7 +429,9 @@ async def test_the_preferences_survive_a_clear(tmp_path: Path) -> None:
     A ``clear`` that silently restored every class to ``hold`` would undo a
     "never tell me this" the user meant to keep.
     """
-    store = SqliteNotificationStore(path=tmp_path / "n.db", now=_fixed_now)
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=_fixed_now
+    )
     try:
         await store.set_preferences(_interrupting())
         await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
@@ -427,7 +449,9 @@ async def test_a_corrupt_row_is_reported_as_this_stores_error(tmp_path: Path) ->
     A corrupt row is a *store* fault rather than a caller's, and an adapter that
     renders an ``AssistantError`` would otherwise print a traceback.
     """
-    store = SqliteNotificationStore(path=tmp_path / "n.db", now=_fixed_now)
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=_fixed_now
+    )
     try:
         ruling = await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
         assert ruling.notification_id is not None
@@ -443,7 +467,9 @@ async def test_a_corrupt_row_is_reported_as_this_stores_error(tmp_path: Path) ->
 
 async def test_a_corrupt_failed_set_is_reported_as_this_stores_error(tmp_path: Path) -> None:
     """The one column this backend encodes itself rather than through pydantic."""
-    store = SqliteNotificationStore(path=tmp_path / "n.db", now=_fixed_now)
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=_fixed_now
+    )
     try:
         ruling = await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
         assert ruling.notification_id is not None
@@ -463,7 +489,9 @@ async def test_corrupt_preferences_are_reported_as_this_stores_error(tmp_path: P
     The two are different facts, and answering the defaults over a corrupt row
     would silently drop a "never tell me this" the user had set.
     """
-    store = SqliteNotificationStore(path=tmp_path / "n.db", now=_fixed_now)
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=_fixed_now
+    )
     try:
         await store.set_preferences(_interrupting())
         store._conn.execute(
@@ -484,7 +512,9 @@ async def test_an_unusable_clock_is_reported_as_this_stores_error(tmp_path: Path
     only place a naive reading can be caught.
     """
     naive = NOW.replace(tzinfo=None)
-    store = SqliteNotificationStore(path=tmp_path / "n.db", now=lambda: naive)
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=lambda: naive
+    )
     try:
         with pytest.raises(NotificationStoreError):
             await store.due()
@@ -509,7 +539,9 @@ async def test_a_bad_clock_reaching_a_ruling_rolls_back_and_leaves_the_store_usa
     caller. The second admission succeeding is the observable that it rolled back.
     """
     readings = [NOW.replace(tzinfo=None), NOW, NOW]
-    store = SqliteNotificationStore(path=tmp_path / "n.db", now=lambda: readings.pop(0))
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=lambda: readings.pop(0)
+    )
     try:
         with pytest.raises(NotificationStoreError):
             await store.admit(candidate(key="k1"), policy=DefaultNotificationPolicy())
@@ -532,7 +564,10 @@ async def test_an_id_source_returning_a_present_id_raises_and_commits_nothing(
     unit of budget.
     """
     store = SqliteNotificationStore(
-        path=tmp_path / "n.db", now=_fixed_now, new_id=lambda: "always-the-same"
+        traces_sink=FakeTraceSink(),
+        path=tmp_path / "n.db",
+        now=_fixed_now,
+        new_id=lambda: "always-the-same",
     )
     policy = DefaultNotificationPolicy()
     try:
@@ -554,6 +589,7 @@ async def test_an_id_source_returning_a_present_id_raises_and_commits_nothing(
 async def test_a_blank_id_source_raises_before_anything_is_written(tmp_path: Path) -> None:
     """A caller supplies no id here, so there is no argument for a ``ValueError``."""
     store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(),
         path=tmp_path / "n.db",
         now=_fixed_now,
         new_id=lambda: "   ",
@@ -578,7 +614,9 @@ async def test_the_ruling_runs_inside_one_write_transaction(tmp_path: Path) -> N
     transaction state at the moment it is asked, which is the only place the
     property is visible.
     """
-    store = SqliteNotificationStore(path=tmp_path / "n.db", now=_fixed_now)
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=_fixed_now
+    )
     inner = DefaultNotificationPolicy()
     seen: list[bool] = []
 
@@ -604,7 +642,9 @@ async def test_a_policy_that_raises_leaves_the_store_untouched(tmp_path: Path) -
     later caller (``memory/_transactions.py``). The second admission is what
     proves the rollback happened.
     """
-    store = SqliteNotificationStore(path=tmp_path / "n.db", now=_fixed_now)
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=_fixed_now
+    )
 
     class Exploding:
         async def rule(self, subject, **facts):  # type: ignore[no-untyped-def]
@@ -645,7 +685,9 @@ async def test_a_cancellation_landing_on_the_begin_leaves_no_transaction_open(
     window itself — and the second admission succeeding is the observable that it
     does.
     """
-    store = SqliteNotificationStore(path=tmp_path / "n.db", now=_fixed_now)
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=_fixed_now
+    )
     suspension = ThreadSuspension()
     original = store._begin_sync
     armed = threading.Event()
@@ -684,7 +726,9 @@ async def test_two_concurrent_offers_serialise_on_this_backend(tmp_path: Path) -
     reaching it is a serialised connection rather than two overlapping
     transactions, which is the failure ``sqlite3`` reports rather than absorbs.
     """
-    store = SqliteNotificationStore(path=tmp_path / "n.db", now=_fixed_now, cap=1)
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=_fixed_now, cap=1
+    )
     policy = DefaultNotificationPolicy()
     try:
         rulings = await asyncio.gather(
@@ -707,7 +751,9 @@ async def test_a_quiet_window_is_read_in_the_configured_zone(tmp_path: Path) -> 
     which is the whole of why the zone is the policy's one construction-time
     property.
     """
-    store = SqliteNotificationStore(path=tmp_path / "n.db", now=_fixed_now)
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=_fixed_now
+    )
     try:
         await store.set_preferences(
             NotificationPreferences(
@@ -761,7 +807,9 @@ async def test_a_window_ending_inside_a_spring_gap_resolves_to_the_transition(
     transition = datetime(2026, 3, 8, 7, 0, tzinfo=UTC)
     # 01:30 EST, inside the window and before the gap.
     inside = datetime(2026, 3, 8, 6, 30, tzinfo=UTC)
-    store = SqliteNotificationStore(path=tmp_path / "n.db", now=lambda: inside)
+    store = SqliteNotificationStore(
+        traces_sink=FakeTraceSink(), path=tmp_path / "n.db", now=lambda: inside
+    )
     try:
         await store.set_preferences(
             NotificationPreferences(
@@ -789,7 +837,7 @@ def test_opening_over_an_unusable_path_is_reported_as_this_stores_error(
 ) -> None:
     """A directory is not a database, and the failure carries the seam's error."""
     with pytest.raises(NotificationStoreError, match="failed to open notification store"):
-        SqliteNotificationStore(path=tmp_path)
+        SqliteNotificationStore(traces_sink=FakeTraceSink(), path=tmp_path)
 
 
 def test_a_reopen_over_a_foreign_schema_is_reported_as_this_stores_error(
@@ -800,7 +848,7 @@ def test_a_reopen_over_a_foreign_schema_is_reported_as_this_stores_error(
     path.write_bytes(b"not a database at all, not even slightly")
 
     with pytest.raises(NotificationStoreError, match="failed to open notification store"):
-        SqliteNotificationStore(path=path)
+        SqliteNotificationStore(traces_sink=FakeTraceSink(), path=path)
 
 
 def test_a_failed_open_leaks_no_connection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -825,7 +873,7 @@ def test_a_failed_open_leaks_no_connection(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr(SqliteNotificationStore, "_restrict_permissions", refuse)
 
     with pytest.raises(NotificationStoreError):
-        SqliteNotificationStore(path=tmp_path / "n.db")
+        SqliteNotificationStore(traces_sink=FakeTraceSink(), path=tmp_path / "n.db")
 
     assert len(opened) == 1
     with pytest.raises(sqlite3.ProgrammingError, match="closed database"):

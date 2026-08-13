@@ -53,6 +53,17 @@ running under a retention horizon shorter than the budget window — the last a
 timer. What is kept is a bare instant: no key, no summary, no class, so it is a
 rate limiter's state rather than the user's content, it appears in no export, and
 destroying a notification still destroys everything the notification said.
+
+**Each ruling emits one trace, and this store is where ADR-0141 §3 puts the
+emitter.** The facts §4 records — which of the eight conditions held — exist only
+inside the transaction above: the duplicate lookup, the cap check and the budget
+read are this store's own, and the reconsideration path never passes through the
+writer stage, so an emitter one layer up "would satisfy the letter of 'we have
+notification telemetry' and be blind to the reason". The trace is appended
+**after** the act commits and is subordinate to it (ADR-0119 §5): a rolled-back
+disposition is not a ruling and carries none of §4's keys, a crossing that never
+read the clock emits nothing at all, a cancellation is never classified, and no
+ruling has ever failed because a trace could not be written.
 """
 
 from __future__ import annotations
@@ -83,12 +94,18 @@ from ai_assistant.core.types import (
     describe_untrusted,
 )
 from ai_assistant.memory._transactions import transaction
+from ai_assistant.memory.notification_traces import (
+    SEAM_ADMIT,
+    SEAM_RECONSIDER,
+    NotificationTraces,
+    ruling_metrics,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.protocols import NotificationPolicy
+    from ai_assistant.core.protocols import NotificationPolicy, TraceSink
 
 _OWNER_ONLY = 0o600
 
@@ -604,10 +621,11 @@ class _StoreFacts:
 class SqliteNotificationStore:
     """A persistent ``NotificationStore`` backed by ``sqlite3``."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one per injected seam and per §7 tuning
         self,
         *,
         path: Path | str,
+        traces_sink: TraceSink,
         now: Clock = _utcnow,
         retention: timedelta | None = _DEFAULT_RETENTION,
         cap: int = _DEFAULT_CAP,
@@ -617,6 +635,17 @@ class SqliteNotificationStore:
 
         Args:
             path: Database file path, or ``":memory:"`` for an ephemeral store.
+            traces_sink: Where ADR-0141 §3's ruling traces are appended.
+                **Required and with no default**, in the shape
+                :class:`~ai_assistant.memory.sqlite_store.SqliteMemoryStore`
+                already takes one, on ADR-0119 §7's clause that "a composition
+                that omits it does not type-check" (ADR-0141 §10). A
+                :class:`~ai_assistant.core.protocols.TraceSink` and never a
+                ``TraceStore``: an emitter holds the write and not the walk.
+                Emission is **not** an obligation of the ``NotificationStore``
+                contract — ADR-0130 §9's conformance suite gains no case for it
+                and no canonical fake emits — so this argument is the concrete
+                store's and nothing reads it back.
             now: Clock the store stamps and judges instants with; injectable for
                 deterministic tests. Guarded by
                 :func:`~ai_assistant.core.clock.checked_clock`, because this seam
@@ -643,6 +672,7 @@ class SqliteNotificationStore:
         """
         check_notification_tuning(retention, cap)
         self._clock = checked_clock(now, owner="SqliteNotificationStore")
+        self._traces = NotificationTraces(sink=traces_sink)
         self._retention = retention
         self._cap = cap
         self._new_id = new_id
@@ -1115,42 +1145,90 @@ class SqliteNotificationStore:
     ) -> NotificationDisposition:
         """Rule on an offered candidate and record the ruling — atomically (§3).
 
+        **One crossing, at most one trace, emitted after the act commits**
+        (ADR-0141 §3). The trace is built and appended outside the transaction and
+        is subordinate to it: a sink call inside :meth:`_ruling_transaction` would
+        let a trace-store fault roll back a committed disposition, spending
+        nothing and telling nobody. What it carries is decided by where the
+        crossing got to — §4's keys once the ruling committed, and none of them if
+        anything raised before that, because a disposition the transaction rolled
+        back is not a ruling.
+
         Raises:
             NotificationStoreError: If the clock's reading is unusable, the id
                 source returns an unusable id, or the store cannot be read or
                 written. Nothing is committed by a failed admission — no record,
                 and **no unit of budget**.
         """
-        async with self._lock, self._ruling_transaction("admit a notification"):
-            # **The ruling instant is read inside the exclusion**, as every
-            # comparison §5 makes is against it: a reading taken before the lock
-            # would be however old the queue ahead of this call was, so a
-            # candidate that perished while waiting could still be ruled
-            # perishable and spend a unit of budget on an opportunity that had
-            # already gone.
-            now, record_id, facts = await _run_to_completion(self._admit_facts, candidate)
-            ruling = await policy.rule(
-                candidate,
-                notification_id=record_id,
+        # The fault path's instant, absent until the clock reads. A crossing that
+        # never obtained a reading emits nothing at all (ADR-0141 §3): there is no
+        # instant to stamp, `occurred_at` is not optional, and inventing one would
+        # put a fabricated instant in a window and move a rate.
+        stamped: datetime | None = None
+        try:
+            async with self._lock, self._ruling_transaction("admit a notification"):
+                # **The ruling instant is read inside the exclusion**, as every
+                # comparison §5 makes is against it: a reading taken before the
+                # lock would be however old the queue ahead of this call was, so a
+                # candidate that perished while waiting could still be ruled
+                # perishable and spend a unit of budget on an opportunity that had
+                # already gone. It is read on this side of the worker hop because
+                # it touches no connection, and ADR-0141 §3 pins the trace's
+                # `occurred_at` to this one reading rather than to the emission.
+                now = stamped = self._now()
+                record_id, facts = await _run_to_completion(self._admit_facts, candidate, now)
+                ruling = await policy.rule(
+                    candidate,
+                    notification_id=record_id,
+                    preferences=facts.preferences,
+                    now=now,
+                    duplicate=facts.duplicate,
+                    at_cap=facts.at_cap,
+                    budget_spent=facts.budget_spent,
+                    budget_frees_at=facts.budget_frees_at,
+                )
+                recorded = await _run_to_completion(
+                    self._admit_write, candidate, ruling, record_id, now
+                )
+        # `Exception` and not `BaseException`: a cancellation is never classified
+        # and no trace records one (ADR-0141 §3, ADR-0119 §3, ADR-0060 §1).
+        except Exception as error:
+            await self._traces.failed(SEAM_ADMIT, occurred_at=stamped, error=error)
+            raise
+        await self._traces.ruled(
+            SEAM_ADMIT,
+            occurred_at=now,
+            metrics=ruling_metrics(
+                candidate=candidate,
+                ruling=ruling,
                 preferences=facts.preferences,
-                now=now,
                 duplicate=facts.duplicate,
                 at_cap=facts.at_cap,
-                budget_spent=facts.budget_spent,
-                budget_frees_at=facts.budget_frees_at,
-            )
-            return await _run_to_completion(self._admit_write, candidate, ruling, record_id, now)
+                now=now,
+            ),
+        )
+        return recorded
 
-    def _admit_facts(self, candidate: NotificationCandidate) -> tuple[datetime, str, _StoreFacts]:
-        """Read the instant, mint the id and read the four facts, in the transaction.
+    def _admit_facts(
+        self, candidate: NotificationCandidate, now: datetime
+    ) -> tuple[str, _StoreFacts]:
+        """Mint the id and read the four facts, in the transaction.
+
+        Args:
+            candidate: The offered proposal, for the key the duplicate lookup
+                narrows by.
+            now: The ruling instant, already read inside this transaction.
+
+        Returns:
+            The record id this ruling would produce, and the facts to rule
+            against.
 
         Raises:
-            NotificationStoreError: If the clock's reading is unusable, or the id
-                source returns an unusable id. Nothing is committed either way.
+            NotificationStoreError: If the id source returns an unusable id, or
+                the store cannot be read. Nothing is committed either way.
         """
-        now = self._now()
         record_id = self._fresh_id(self._conn)
-        return now, record_id, self._facts(self._conn, candidate.candidate_key, now)
+        return record_id, self._facts(self._conn, candidate.candidate_key, now)
 
     def _admit_write(
         self,
@@ -1193,6 +1271,13 @@ class SqliteNotificationStore:
     ) -> NotificationDisposition | None:
         """Re-rule one held record that has fallen due, in place (§5).
 
+        **One record per call, so one trace at most** (ADR-0141 §3), emitted after
+        the act commits and subordinate to it exactly as :meth:`admit`'s is. A
+        call that **found nothing to rule emits none**: no ruling was made, and a
+        trace for one would put a crossing in §5's ruling population that decided
+        nothing. A ruling of ``INTERRUPT`` here is the only trace in the stream
+        carrying ``held_seconds`` (§4).
+
         Returns:
             The fresh disposition, or ``None`` where the id named nothing, or
             named a record that is not actionable or has not fallen due.
@@ -1201,42 +1286,73 @@ class SqliteNotificationStore:
             NotificationStoreError: If the clock's reading is unusable, or the
                 store cannot be read or written.
         """
-        async with self._lock, self._ruling_transaction("reconsider a notification"):
-            held = await _run_to_completion(self._reconsider_facts, notification_id)
-            if held is None:
-                return None
-            now, record, facts = held
-            ruling = await policy.rule(
-                record.candidate,
-                notification_id=record.id,
+        stamped: datetime | None = None  # see :meth:`admit`
+        try:
+            async with self._lock, self._ruling_transaction("reconsider a notification"):
+                now = stamped = self._now()
+                held = await _run_to_completion(self._reconsider_facts, notification_id, now)
+                if held is None:
+                    return None
+                record, facts = held
+                ruling = await policy.rule(
+                    record.candidate,
+                    notification_id=record.id,
+                    preferences=facts.preferences,
+                    now=now,
+                    # A reconsideration is not an offer: it never matches itself
+                    # (§5), and the record already holds its slot under the cap.
+                    duplicate=facts.duplicate,
+                    at_cap=facts.at_cap,
+                    budget_spent=facts.budget_spent,
+                    budget_frees_at=facts.budget_frees_at,
+                )
+                recorded = await _run_to_completion(self._reconsider_write, record, ruling, now)
+        # `Exception` and not `BaseException`, for :meth:`admit`'s reason.
+        except Exception as error:
+            await self._traces.failed(SEAM_RECONSIDER, occurred_at=stamped, error=error)
+            raise
+        await self._traces.ruled(
+            SEAM_RECONSIDER,
+            occurred_at=now,
+            metrics=ruling_metrics(
+                candidate=record.candidate,
+                ruling=ruling,
                 preferences=facts.preferences,
-                now=now,
-                # A reconsideration is not an offer: it never matches itself
-                # (§5), and the record already holds its slot under the cap.
                 duplicate=facts.duplicate,
                 at_cap=facts.at_cap,
-                budget_spent=facts.budget_spent,
-                budget_frees_at=facts.budget_frees_at,
-            )
-            return await _run_to_completion(self._reconsider_write, record, ruling, now)
+                now=now,
+                # The one seam that carries it, and only where the ruling
+                # interrupted: the store already holds the instant this is
+                # measured from, so the duration travels as a number rather than
+                # as a join a later reader would have to make (§4).
+                admitted_at=record.admitted_at,
+            ),
+        )
+        return recorded
 
     def _reconsider_facts(
-        self, notification_id: str
-    ) -> tuple[datetime, HeldNotification, _StoreFacts] | None:
-        """The instant, the due record and the facts to re-rule it against.
+        self, notification_id: str, now: datetime
+    ) -> tuple[HeldNotification, _StoreFacts] | None:
+        """The due record and the facts to re-rule it against.
 
         ``None`` where the id named nothing, or named a record that is not
         actionable or has not fallen due — which a job driving this over a page
         of due records races other writers into by construction.
 
+        Args:
+            notification_id: The record to re-rule.
+            now: The ruling instant, already read inside this transaction.
+
+        Returns:
+            The record and the facts, or ``None`` where there is nothing to rule.
+
         Raises:
-            NotificationStoreError: If the clock's reading is unusable.
+            NotificationStoreError: If the store cannot be read.
         """
-        now = self._now()
         record = self._row(self._conn, notification_id)
         if record is None or not record.is_due_at(now):
             return None
-        return now, record, self._facts(self._conn, None, now)
+        return record, self._facts(self._conn, None, now)
 
     def _reconsider_write(
         self, record: HeldNotification, ruling: NotificationDisposition, now: datetime
