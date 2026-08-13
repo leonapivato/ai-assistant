@@ -13,6 +13,7 @@ import os
 import stat
 import sys
 from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from enum import StrEnum
 from pathlib import Path
 from types import ModuleType
@@ -31,7 +32,11 @@ from ai_assistant.app import (
     ensure_model_credentials,
 )
 from ai_assistant.app import composition as composition_module
-from ai_assistant.context import AssemblingContextProvider, CalendarContextSource
+from ai_assistant.context import (
+    AssemblingContextProvider,
+    CalendarContextSource,
+    EmailContextSource,
+)
 from ai_assistant.core.config import EmbedderKind, Settings, load_settings
 from ai_assistant.core.errors import (
     AssistantError,
@@ -82,7 +87,7 @@ from ai_assistant.orchestration.upcoming import (
 )
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.planning import SqlitePlanStore
-from ai_assistant.readers import CALENDAR_READER_NAME
+from ai_assistant.readers import CALENDAR_READER_NAME, EMAIL_READER_NAME
 from ai_assistant.testing import FakeMemoryStore, FakeTraceSink, evaluation_trace
 from ai_assistant.tools import InMemoryToolRegistry
 
@@ -1123,6 +1128,64 @@ def _calendar_sources(engine: Engine) -> list[CalendarContextSource]:
     return [source for source in provider._sources if isinstance(source, CalendarContextSource)]
 
 
+def _one_message_mailbox(directory: Path) -> Path:
+    """A minimal mbox holding one message delivered an hour ago, and its path.
+
+    :func:`_one_event_calendar`'s shape for the second source, and anchored on the
+    real clock for its reason exactly: the composition root leaves the reader's
+    clock at its default, because nothing at this layer has a second clock to hand
+    it. An hour ago sits comfortably inside ADR-0140 §12's seven-day default window,
+    so the case does not depend on the wall clock beyond it being a clock (#658
+    tracks the live-clock dependency this shares with the calendar's fixtures).
+
+    **The ``From `` separator's own timestamp is deliberately wrong**, as every
+    fixture in ``tests/readers`` writes it: ADR-0140 §5 forbids deriving a delivery
+    instant from it, and a fixture that made it agree with the headers would let a
+    reader that read the wrong line pass.
+
+    ``Date`` and ``X-Assistant-Delivered-At`` are written from the same instant here
+    because this case is about *wiring* rather than about §5's two clocks — the
+    tests that pull them apart are the reader's, in
+    ``tests/readers/test_email_headers.py``.
+    """
+    delivered = datetime.now(UTC) - timedelta(hours=1)
+    path = directory / "mail.mbox"
+    path.write_bytes(
+        (
+            "From nobody@invalid Thu Jan  1 00:00:00 1970\n"
+            "From: Alice <alice@example.com>\n"
+            "Subject: Standup moved to ten\n"
+            f"Date: {format_datetime(delivered)}\n"
+            f"X-Assistant-Delivered-At: {delivered:%Y-%m-%dT%H:%M:%SZ}\n"
+            "\n"
+        ).encode()
+    )
+    return path
+
+
+def _email_sources(engine: Engine) -> list[EmailContextSource]:
+    """The email context sources the built provider actually composes.
+
+    :func:`_calendar_sources`'s reason unchanged: reached through the loop's
+    provider, because a source registered anywhere else would not contribute to a
+    turn.
+    """
+    provider = engine._loop._context
+    assert isinstance(provider, AssemblingContextProvider)
+    return [source for source in provider._sources if isinstance(source, EmailContextSource)]
+
+
+async def _grant_the_mail(engine: Engine) -> None:
+    """Grant the email source through the surface a user uses.
+
+    ``EMAIL_READER_NAME`` rather than a literal, for :func:`_grant_the_calendar`'s
+    reason: ADR-0097 §1 keys a grant to the reader's **declared** identity, and a
+    grant naming anything else covers nothing — which is also what makes ADR-0142
+    §7's "no grant on one source authorises a read of another" testable at all.
+    """
+    await engine.grant(EMAIL_READER_NAME, scope=[GrantScope.FACET, GrantScope.INGEST])
+
+
 async def _grant_the_calendar(engine: Engine) -> None:
     """Grant the one source this tree has, through the surface a user uses.
 
@@ -1666,6 +1729,225 @@ async def test_a_granted_source_becomes_readable_and_a_revocation_stops_it(
         with pytest.raises(SourceNotGrantedError):
             await engine.ingest_calendar()
         assert len(await engine.beliefs()) == 1
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_registers_the_configured_mail_source_on_its_own_readers(
+    tmp_path: Path,
+) -> None:
+    """ADR-0140 §13's registration item: the deliverable that makes the reader called.
+
+    §13 names this as its own deliverable rather than leaving it implicit in the
+    reader and the adapter, "because they are *objects* and this is the wiring that
+    puts them in the engine — a different thing to omit, and the one omission that
+    leaves a fully conforming ``EmailReader`` a module nothing calls". Every other
+    test in ADR-0140's list constructs its subject directly, so every one of them
+    passes on an engine that wires none of them.
+
+    **All three registrations, and the instance assertion beside them.** The source
+    is offered by ``grantable_sources()`` under the declared identity ``email``, the
+    facet adapter is composed into the provider a turn assembles from, and the
+    ingestion stage is held — and the two readers are asserted **not to be the same
+    object**. That last half is not redundant with the presence checks: ADR-0096 §5
+    forbids the two consumers to share a reader and ADR-0093 §7 bounds each instance
+    at one outstanding worker, so a root injecting one reader into both wires a hub
+    in which a running scheduled ingest makes the request-path facet raise
+    ``ReaderError`` and vanish — passing every presence check while breaching a
+    ratified clause.
+    """
+    store = _one_message_mailbox(tmp_path)
+    settings = Settings(embedder=EmbedderKind.HASHING, email_source_path=store)
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        offered = await engine.grantable_sources()
+        assert [one.source for one in offered] == [EMAIL_READER_NAME]
+        assert offered[0].location == str(store)
+
+        (facet_source,) = _email_sources(engine)
+        stage = engine._email_ingestion
+        assert stage is not None
+
+        assert stage._reader is not facet_source._reader
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_registers_nothing_for_email_without_a_path(
+    tmp_path: Path,
+) -> None:
+    """The half a lane omits, because a hub with no mail configured looks like nothing.
+
+    ADR-0140 §13: "with it unset, none of the three is registered at all, because a
+    source with nothing to read is 'I/O on personal data in exchange for nothing'".
+    All three absences are asserted, because a lane that keyed one of them off a
+    different field would pass a test of the other two.
+
+    ``email_source_path`` defaults to ``None`` (ADR-0140 §12), so this is the
+    shipping default rather than a configuration a test had to construct.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        assert not _email_sources(engine)
+        assert engine._email_ingestion is None
+        assert await engine.grantable_sources() == ()
+        with pytest.raises(ConfigurationError):
+            await engine.ingest_email()
+    finally:
+        await engine.aclose()
+
+
+async def test_every_consumer_of_every_source_holds_its_own_reader(
+    tmp_path: Path,
+) -> None:
+    """ADR-0142 §9 test 4: five instances, no two of them one object.
+
+    The clause is ADR-0096 §5's — each consumer of a source holds its **own** reader
+    instance — and ADR-0142 §3 carries it across the second source rather than
+    restating it for one. What this catches is a lane reusing one construction,
+    "which no behavioural test in this list would notice": on a single-threaded test
+    the shared instance answers every read correctly, and the breach only surfaces
+    on a running hub as a scheduled ingest suppressing the request-path facet.
+
+    **Asserted across sources as well as within them.** §9's item says the email
+    ingestion stage's reader "is not the instance the email ``context/`` adapter
+    holds, and is no calendar reader either", so identity is checked pairwise over
+    the whole set rather than within each source — a lane that shared one *calendar*
+    reader between the calendar's two consumers would otherwise pass an
+    email-only check.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        calendar_reader_path=_one_event_calendar(tmp_path),
+        email_source_path=_one_message_mailbox(tmp_path),
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        calendar_ingestion = engine._calendar_ingestion
+        email_ingestion = engine._email_ingestion
+        upcoming = engine._upcoming
+        assert calendar_ingestion is not None
+        assert email_ingestion is not None
+        assert upcoming is not None
+        (calendar_facet,) = _calendar_sources(engine)
+        (email_facet,) = _email_sources(engine)
+
+        readers = [
+            calendar_facet._reader,
+            calendar_ingestion._reader,
+            upcoming._reader,
+            email_facet._reader,
+            email_ingestion._reader,
+        ]
+
+        assert len({id(reader) for reader in readers}) == len(readers)
+    finally:
+        await engine.aclose()
+
+
+async def test_no_grant_on_one_source_authorises_a_read_of_another(
+    tmp_path: Path,
+) -> None:
+    """ADR-0142 §9 test 7: a granted calendar buys no mail, and the mirror.
+
+    §7's marked clause: "Each source's ingestion read is gated on a live ``INGEST``
+    grant for **that source's** declared identity. No grant on one source authorises
+    a read of another, whatever its scope." ADR-0097 §5 and ADR-0133 §2 already rule
+    it; it is asserted here because a shared stage or a shared operation is exactly
+    how it would be breached by accident, and because the composition root is where
+    the wrong grant lookup would be injected.
+
+    **Both directions, because one grant proves only one of them.** A stage
+    constructed over the wrong source's grant lookup refuses the source that *is*
+    granted and admits the one that is not, so asserting a refusal alone is passed
+    by an engine that refuses everything.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        calendar_reader_path=_one_event_calendar(tmp_path),
+        email_source_path=_one_message_mailbox(tmp_path),
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        await _grant_the_calendar(engine)
+        assert (await engine.ingest_calendar()).source == CALENDAR_READER_NAME
+        with pytest.raises(SourceNotGrantedError):
+            await engine.ingest_email()
+
+        assert await engine.revoke(CALENDAR_READER_NAME) is not None
+        await _grant_the_mail(engine)
+        assert (await engine.ingest_email()).source == EMAIL_READER_NAME
+        with pytest.raises(SourceNotGrantedError):
+            await engine.ingest_calendar()
+    finally:
+        await engine.aclose()
+
+
+async def test_each_source_is_offered_under_its_own_identity_and_its_own_location(
+    tmp_path: Path,
+) -> None:
+    """ADR-0102 §6 with a second source, which is what made the location per source.
+
+    Until email arrived, ``grantable_sources`` read one ``Settings`` field for every
+    reader in the list — correct only while every reader was a calendar's. With two
+    sources that shape discloses the calendar's path as email's, and §6's third
+    clause forbids a client that cannot show the location from sending ``grant``: a
+    grant given against a *wrong* disclosed location is the uninformed grant
+    ADR-0097 §9a exists to prevent, arriving through a wiring shortcut.
+
+    **Each source's instances still deduplicate to one row**, which is ADR-0102 §7's
+    other half and is what makes the count assertion below meaningful: two calendar
+    consumers and two email consumers, four readers, two offers.
+    """
+    calendar = _one_event_calendar(tmp_path)
+    store = _one_message_mailbox(tmp_path)
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        calendar_reader_path=calendar,
+        email_source_path=store,
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        offered = {one.source: one for one in await engine.grantable_sources()}
+
+        assert set(offered) == {CALENDAR_READER_NAME, EMAIL_READER_NAME}
+        assert offered[CALENDAR_READER_NAME].location == str(calendar)
+        assert offered[EMAIL_READER_NAME].location == str(store)
+    finally:
+        await engine.aclose()
+
+
+async def test_an_ingested_mail_belief_is_readable_through_the_surface_the_user_has(
+    tmp_path: Path,
+) -> None:
+    """The second source's whole path: an mbox on disk becomes an inspectable belief.
+
+    The claim the wiring exists to support, and the one nothing below the composition
+    root can make — ``lint-imports`` forbids every subsystem to import
+    ``ai_assistant.readers``, so this layer is the only place a concrete reader and a
+    real store meet (ADR-0093 §2, ADR-0095 §3). It also pins the direction ADR-0093
+    §1 rules on for a source it had never been applied to: the reader proposed, and
+    the gate disposed.
+
+    Asserting on the *report's* source as well as the belief is what separates this
+    from the calendar's identical case: a lane that wired the calendar's reader into
+    ``email_ingestion`` would store a belief and report ``calendar``.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        email_source_path=_one_message_mailbox(tmp_path),
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        await _grant_the_mail(engine)
+        report = await engine.ingest_email()
+
+        assert report.source == EMAIL_READER_NAME
+        assert report.proposed == 1
+        assert report.stored == 1
+        beliefs = await engine.beliefs()
+        assert len(beliefs) == 1
+        assert "Standup moved to ten" in beliefs[0].content
     finally:
         await engine.aclose()
 
