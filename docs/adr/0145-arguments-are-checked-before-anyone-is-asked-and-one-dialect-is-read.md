@@ -395,7 +395,9 @@ stage rather than at the tool.
 > **Normative.** `ToolDefinition` construction refuses a `parameters_schema`
 > that is not a valid draft 2020-12 schema, that declares a `$schema` other than
 > draft 2020-12, that breaches the reference model below, or whose root
-> constrains the instance to a type that excludes a JSON object.
+> carries a root `type` keyword that does not admit `object`. That last is a
+> syntactic check on the root `type` keyword alone: a schema that excludes every
+> object by some other construction is not refused here.
 
 > **Normative.** Schema validity is a `ToolDefinition` construction check and
 > nothing else. It runs wherever a `ToolDefinition` is constructed, including
@@ -452,12 +454,17 @@ that does not declare its reach does not load", because a construction error is
 better than a silent under-protection. A schema nobody can evaluate is a
 declaration nobody can check, and the same answer applies.
 
-**The root-type clause catches a real authoring mistake cheaply.**
-`ActionRequest.parameters` is a mapping, so a schema whose root says
-`"type": "string"` refuses every possible call — a definition that loads and can
-never be used. Pasting the wrong schema is exactly the error an MCP adapter will
-make, and refusing at construction says so at the moment the definition is
-built.
+**The root-`type` clause catches a real authoring mistake cheaply, and it is
+deliberately not a satisfiability rule.** `ActionRequest.parameters` is a
+mapping, so a schema whose root says `"type": "string"` would load as a
+definition no call could ever satisfy; pasting the wrong schema is exactly the
+error an MCP adapter will make, and one keyword lookup says so at the moment the
+definition is built. What the clause does not do is decide whether *some* object
+satisfies the schema, which is not something a construction check can answer in
+general — so `{"not": {}}`, the object spelling of `false` (§5), loads. The two
+halves are complementary rather than in tension: the cheap syntactic case is
+refused because it is cheap and common, and the general case is left to fail
+visibly on the first call, at the selection stage rather than at the tool.
 
 **One durable consequence, stated rather than discovered.** A stored
 `PermissionDecision` embeds its `ToolDefinition` by value (ADR-0021 §1) and is
@@ -771,10 +778,12 @@ is owed is the evidence for the claims above that a signature does not show.
   free to return it, and nothing in the seam produces it from a schema.
 - **The dialect rules, in both directions** (§5, §6): a schema declaring
   draft-07 refused at construction; a schema with no `$schema` accepted and read
-  as 2020-12; an invalid schema refused; a root type excluding `object` refused.
-  And the fail-open case that motivates the refusal, pinned as a *rejection*
-  rather than argued: a draft-07 schema whose bound is `additionalItems` does not
-  load, so it cannot be read permissively.
+  as 2020-12; an invalid schema refused; a root `type` excluding `object`
+  refused — **and `{"not": {}}` accepted**, which is what pins the clause as
+  syntactic rather than as a satisfiability rule an implementation might try to
+  generalise. And the fail-open case that motivates the dialect refusal, pinned
+  as a *rejection* rather than argued: a draft-07 schema whose bound is
+  `additionalItems` does not load, so it cannot be read permissively.
 - **The reference model, as refusals** (§6): an external `$ref`, a non-root
   `$id`, a `$dynamicRef`, and a *dangling* same-document fragment
   (`#/$defs/Absent`) each refuse the definition at construction — the last is the
