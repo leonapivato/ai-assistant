@@ -360,10 +360,21 @@ def _held_seconds(
     where §4 requires it".
 
     Admissibility is §4's own four properties — a finite, non-negative ``int`` or
-    ``float`` that is not a ``bool``. ADR-0119 §3 already refuses ``NaN`` and the
-    infinities at construction, so the finiteness conjunct holds of every trace this
-    tree can hydrate; it is written because §4 states it, so a reader checking this
-    function against the clause finds all four rather than three and a footnote.
+    ``float`` that is not a ``bool``.
+
+    **Finiteness is asked of a ``float`` and never of an ``int``**, which mirrors
+    ``core``'s own ``_finite`` validator exactly and is not a shortcut. Every
+    Python ``int`` is finite by construction, and ``math.isfinite`` reaches that
+    answer by *converting to a float* — so asking it about an ``int`` too large for
+    one raises ``OverflowError`` and aborts the whole report over a value §4
+    admits. ADR-0119 §3 puts no ceiling on an integral metric value and no emitter
+    in this tree writes a large one; the guard costs nothing and the crash cost the
+    report. Adversarial review found it on the first round.
+
+    **And the value is passed through rather than coerced**, for the same reason:
+    ``float()`` on that same ``int`` raises, and §7's distribution is defined over
+    the value the trace carries. Python's numeric tower makes an ``int`` admissible
+    wherever the ``float`` annotation appears.
 
     Args:
         trace: A trace that reached §5's third test.
@@ -377,9 +388,11 @@ def _held_seconds(
     value = trace.metrics.get(HELD_SECONDS)
     if not required:
         return None, value is not None
-    if value is None or isinstance(value, bool) or not isfinite(value) or value < 0:
+    if value is None or isinstance(value, bool) or value < 0:
         return None, True
-    return float(value), False
+    if isinstance(value, float) and not isfinite(value):
+        return None, True
+    return value, False
 
 
 class Tally:

@@ -511,6 +511,82 @@ class TestMisplacedHeldSeconds:
             assert result.interruption.numerator == 1, value
 
 
+class TestExtremeLatencies:
+    """§4 puts no ceiling on ``held_seconds``, and a report must survive the ceiling.
+
+    ADR-0119 §3 constrains a metric value to a finite number and stops there, so an
+    ``int`` too large for a ``float`` and a ``float`` near the maximum are both
+    values the type admits, the store hydrates and §4 calls **admissible** — they
+    belong in the distribution rather than in the misplaced count. Neither may abort
+    the walk, on :meth:`Rate.value`'s existing disposition for the same hazard: "a
+    value that is data, not a bug in this walk". Adversarial review found both on the
+    first round.
+    """
+
+    async def test_an_integer_too_large_for_a_float_is_admitted_and_stated(self) -> None:
+        """``math.isfinite`` answers by converting, so asking it about this raises."""
+        result = await figures(
+            notification(
+                when=at(days=1),
+                seam=RECONSIDER,
+                metrics=ruled(INTERRUPT) | {HELD_SECONDS: 10**400},
+            )
+        )
+        assert result.health.misplaced_held_seconds == 0
+        assert result.held_latency.count == 1
+        assert "n=1" in result.held_latency.rendered()
+        assert "too large to state as a decimal" in result.held_latency.rendered()
+
+    async def test_near_maximum_floats_do_not_overflow_the_mean(self) -> None:
+        """``fmean`` raises "intermediate overflow in fsum" summing these."""
+        result = await figures(
+            *(
+                notification(
+                    when=at(days=day),
+                    seam=RECONSIDER,
+                    metrics=ruled(INTERRUPT) | {HELD_SECONDS: 1.7e308},
+                )
+                for day in (1, 2)
+            )
+        )
+        assert result.held_latency.count == 2
+        assert result.held_latency.mean is None
+        assert result.held_latency.minimum == 1.7e308
+
+    async def test_an_unrepresentable_figure_is_not_an_empty_sample(self) -> None:
+        """The count is the emptiness signal, so the two cannot be confused."""
+        result = await figures(
+            notification(
+                when=at(days=1),
+                seam=RECONSIDER,
+                metrics=ruled(INTERRUPT) | {HELD_SECONDS: 10**400},
+            )
+        )
+        assert result.held_latency.rendered() != "no observations"
+
+    async def test_the_whole_report_still_renders(self) -> None:
+        """The blocker's actual shape: one admissible value aborting every figure."""
+        anchor = operation("start", when=START, correlation="boot")
+        report = await compute(
+            FakeTraceStore(
+                (
+                    anchor,
+                    notification(
+                        when=at(days=1),
+                        seam=RECONSIDER,
+                        metrics=ruled(INTERRUPT) | {HELD_SECONDS: 10**400},
+                    ),
+                )
+            ),
+            start=START,
+            end=END,
+            settling=SETTLING,
+        )
+        assert report.notifications is not None
+        assert report.notifications.interruption.value == 1.0
+        assert "interruption share" in report.render()
+
+
 class TestWindow:
     """§8 — ADR-0120's window rules, and the settling that does not apply."""
 

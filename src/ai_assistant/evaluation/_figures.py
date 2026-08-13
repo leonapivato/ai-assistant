@@ -25,10 +25,11 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass
+from math import isfinite
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from datetime import datetime, timedelta
 
     from ai_assistant.core.types import NotificationCondition, TraceKind
@@ -119,12 +120,27 @@ class Distribution:
     measure. (It summarised the window share of each shortfall read as well until
     ADR-0128 §3 retired that watch.)
 
+    **A derived figure that cannot be represented is stated as such, never as a
+    crash and never as a substitute.** :attr:`minimum` and :attr:`maximum` *select*
+    an observation, so they always exist once the sample does. :attr:`median` and
+    :attr:`mean` *compute* one, and both can overflow on values their ADR admits —
+    ADR-0141 §4 admits any finite, non-negative ``int`` under ``held_seconds`` and
+    puts no ceiling on it, so a sample of two near-maximum floats overflows
+    ``fmean``'s intermediate sum and a large ``int`` overflows the division inside
+    ``median``. Each is caught and reported as unrepresentable, which is
+    :meth:`Rate.value`'s existing disposition for the same hazard: "a value that is
+    data, not a bug in this walk" must not abort the whole report. Adversarial
+    review found both on the first round.
+
     Attributes:
-        count: How many observations the summary is over.
+        count: How many observations the summary is over. **The emptiness signal**:
+            a zero here is the only thing that means "no observations", so an
+            unrepresentable figure below cannot be mistaken for an empty sample.
         minimum: The smallest, or ``None`` over an empty sample.
-        median: The middle, or ``None`` over an empty sample.
+        median: The middle, or ``None`` over an empty sample or where computing it
+            overflowed.
         maximum: The largest, or ``None`` over an empty sample.
-        mean: The arithmetic mean, or ``None`` over an empty sample.
+        mean: The arithmetic mean, under the same two conditions as the median.
     """
 
     count: int
@@ -138,7 +154,10 @@ class Distribution:
         """Summarise ``sample``, which may be empty.
 
         Args:
-            sample: The observations.
+            sample: The observations. An ``int`` is admissible wherever a ``float``
+                is, on Python's numeric tower, and ADR-0141 §4 admits an unbounded
+                one — which is why the two computed figures are guarded and the two
+                selected ones are not.
 
         Returns:
             The summary.
@@ -148,9 +167,9 @@ class Distribution:
         return cls(
             count=len(sample),
             minimum=min(sample),
-            median=statistics.median(sample),
+            median=_computed(statistics.median, sample),
             maximum=max(sample),
-            mean=statistics.fmean(sample),
+            mean=_computed(statistics.fmean, sample),
         )
 
     def rendered(self, *, places: int = 4) -> str:
@@ -162,12 +181,72 @@ class Distribution:
         Returns:
             The line.
         """
-        if self.minimum is None or self.median is None or self.maximum is None or self.mean is None:
+        if self.count == 0:
             return "no observations"
-        return (
-            f"n={self.count}  min {self.minimum:.{places}f}  median {self.median:.{places}f}"
-            f"  max {self.maximum:.{places}f}  mean {self.mean:.{places}f}"
+        figures = " ".join(
+            f" {name} {_figure(value, places)}"
+            for name, value in (
+                ("min", self.minimum),
+                ("median", self.median),
+                ("max", self.maximum),
+                ("mean", self.mean),
+            )
         )
+        return f"n={self.count} {figures}"
+
+
+def _computed(
+    summarise: Callable[[Sequence[float]], float], sample: Sequence[float]
+) -> float | None:
+    """One derived figure, or ``None`` where the arithmetic could not represent it.
+
+    ``OverflowError`` is the whole of it and both routes to it are real: ``fmean``
+    raises "intermediate overflow in fsum" summing near-maximum floats, and
+    ``median`` divides the middle pair, which overflows on an ``int`` too large for
+    a ``float``. A non-finite result is refused for the same reason — ADR-0119 §3
+    keeps ``inf`` out of a trace, and a summary must not put one back.
+
+    **The finiteness test is asked of a ``float`` alone**, exactly as ``core``'s own
+    ``_finite`` validator asks it and for the same reason: every ``int`` is finite,
+    and ``math.isfinite`` answers by converting to a ``float``, so asking it about a
+    large one raises the very ``OverflowError`` this function exists to absorb. The
+    median of a one-element sample is that element untouched, which is how an ``int``
+    reaches here at all.
+
+    Args:
+        summarise: The statistic to take.
+        sample: A non-empty sample.
+
+    Returns:
+        The figure, or ``None``.
+    """
+    try:
+        value = summarise(sample)
+    except OverflowError:
+        return None
+    if isinstance(value, float) and not isfinite(value):
+        return None
+    return value
+
+
+def _figure(value: float | None, places: int) -> str:
+    """One figure of a summary, or the statement that stands in for it.
+
+    The format guard is not the same one :func:`_computed` applies and neither
+    covers the other. That one is about arithmetic that could not be *done*; this
+    one is about a figure that was selected rather than computed — ``min`` and
+    ``max`` return an observation untouched, and a decimal presentation of an
+    ``int`` too large for a ``float`` overflows in ``format`` itself. So a sample
+    of one such value has a perfectly well-defined minimum that cannot be written
+    as a decimal, and :data:`_UNRENDERABLE` is what :meth:`Rate.rendered` already
+    says in that situation.
+    """
+    if value is None:
+        return _UNRENDERABLE
+    try:
+        return f"{value:.{places}f}"
+    except OverflowError:
+        return _UNRENDERABLE
 
 
 @dataclass(frozen=True, slots=True)
