@@ -359,6 +359,37 @@ visible, reviewable act producing a definition that says what it means — or it
 may refuse the tool (§9). What it may not do is hand over a document to be read
 under semantics its author did not use.
 
+**One form of the dialect is out of reach, and the narrowing is stated rather
+than left to be discovered.** Draft 2020-12 admits a *boolean* schema — `true`
+accepts every instance, `false` accepts none — and `ToolDefinition.
+parameters_schema` is a `FrozenJsonMapping` by ADR-0016 §4's ratified
+declaration, so the field cannot hold one. This ADR does not widen that field:
+changing a ratified type's declaration is a change to ADR-0016's decision, not a
+deferral of it being taken up.
+
+> **Normative.** A `parameters_schema` is an object schema. The boolean schema
+> forms draft 2020-12 admits are outside what the field can hold, and a
+> component building a definition from a description that uses one declares the
+> object form with the same meaning — `{}` for `true` — or refuses the tool
+> under §9. Neither boolean is read as a schema, and neither is silently
+> discarded.
+
+The narrowing is of the schema *language*, not of the *dialect*: every schema
+this field can hold is read as 2020-12 and nothing about keyword semantics
+changes. It costs nothing expressible, because `true` is `{}` — which §9 already
+rules is a declaration of no constraint — and `false` is a tool that refuses
+every call, which is a definition that could never be used and is better
+declined at the adapter than loaded. What the narrowing buys is that §6's
+construction check and §2's function have one input shape rather than two, in
+`core`, on a field whose type was fixed before this decision existed.
+
+**A schema that no object can satisfy is not detected**, and §6's root-type
+clause is deliberately syntactic. `{"not": {}}` is the object spelling of
+`false`, and deciding satisfiability in general is not something a construction
+check can do. So a definition can load and refuse every call; it fails the same
+way an over-strict schema does, visibly, on the first call, at the selection
+stage rather than at the tool.
+
 ### 6. A schema that cannot be read is refused at construction, so no later stage meets one
 
 > **Normative.** `ToolDefinition` construction refuses a `parameters_schema`
