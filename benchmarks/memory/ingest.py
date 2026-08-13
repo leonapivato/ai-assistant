@@ -5,9 +5,19 @@
 a window, not a cursor, which ADR-0083 §13 records as the reason the scheduler's
 observation job ships disabled. Capturing 300 turns and then calling ``observe``
 once would distil the last twenty and never see the other 280. So the driver
-captures a batch, observes it, captures the next, observes that: the windows tile,
-every turn is read exactly once, and the pass count is the honest cost of ingesting
-that case.
+captures a batch, observes it, captures the next, observes that: the full windows
+tile, and the pass count is the honest cost of ingesting that case.
+
+**The last window overlaps, and it cannot be made not to.** A case whose turn count is
+not a multiple of the batch ends with a remainder, and the window is always *the most
+recent ``batch_size``* — there is no offset on the read — so the closing pass re-reads
+``batch_size - remainder`` turns an earlier pass already distilled. The alternative is
+to skip the closing pass, and that is worse in the case that matters most: a
+LongMemEval haystack is often shorter than one batch outright, so skipping would
+ingest a conversation and distil nothing from it. The overlap is therefore taken and
+**counted** — :attr:`IngestionSummary.episodes_reobserved` — rather than hidden, since
+it is a real token cost and a real second chance for the observer to propose the same
+belief twice.
 
 **A benchmark turn is not always an exchange.** Capture records one episode per
 turn, with a user half and an assistant half. LoCoMo alternates between two named
@@ -82,6 +92,19 @@ class IngestionSummary:
     discarded_over_limit: int = 0
     dropped_unsupported: int = 0
     observation_routes: set[str] = field(default_factory=set)
+
+    @property
+    def episodes_reobserved(self) -> int:
+        """Episodes a pass read that an earlier pass had already read.
+
+        The closing partial window's overlap — see this module's docstring. Zero when
+        the turn count is a multiple of the batch size, and at most ``batch_size - 1``
+        otherwise.
+
+        Returns:
+            The count.
+        """
+        return max(0, self.episodes_read - self.turns_captured)
 
 
 def exchanges_of(session: BenchSession) -> tuple[Exchange, ...]:

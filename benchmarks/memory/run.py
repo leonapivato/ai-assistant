@@ -240,6 +240,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
                 "assistant_led_turns": summary.assistant_led_turns,
                 "observation_passes": summary.observation_passes,
                 "episodes_read": summary.episodes_read,
+                "episodes_reobserved": summary.episodes_reobserved,
                 "proposals": summary.proposals,
                 "discarded_unusable": summary.discarded_unusable,
                 "discarded_over_limit": summary.discarded_over_limit,
