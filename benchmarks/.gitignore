@@ -1,0 +1,12 @@
+# Fetched corpora and run artifacts. Both are outputs, not sources.
+#
+# The corpora are a build input in the shape the vendored embedding model already is
+# (ADR-0024 §4, `.gitignore` at the root): fetched from a pinned revision, verified
+# against a recorded SHA-256, never committed. LoCoMo is additionally CC BY-NC 4.0, so
+# committing it would be redistributing someone else's data under this repository's
+# licence — see `memory/corpora/provenance.py`.
+#
+# Runs hold per-case SQLite stores and JSONL records, which are measurements. They
+# belong wherever the write-up keeps its evidence, not in the history.
+.corpora/
+.runs/
