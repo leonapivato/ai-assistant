@@ -41,7 +41,7 @@ def _entry(
 async def _facet_of(tmp_path: Path, *events: str, **overrides: object) -> CalendarFacet:
     """Read a calendar of ``events`` and return the facet it carried."""
     reading = await reader(source(tmp_path, calendar(*events)), **overrides).read()
-    assert reading.facet is not None
+    assert isinstance(reading.facet, CalendarFacet)
     return reading.facet
 
 
@@ -287,7 +287,7 @@ async def test_an_unstamped_entry_is_counted_in_the_facet_and_missing_from_the_p
     reading = await reader(source(tmp_path, calendar(unstamped))).read()
 
     assert reading.proposals == ()
-    assert reading.facet is not None
+    assert isinstance(reading.facet, CalendarFacet)
     assert reading.facet.entries_in_progress == 1
 
 
@@ -334,8 +334,8 @@ async def test_each_read_recomputes_the_facet_against_the_moving_window(
     during = await reader(path).read()
     after = await reader(path, now=frozen(later)).read()
 
-    assert during.facet is not None
-    assert after.facet is not None
+    assert isinstance(during.facet, CalendarFacet)
+    assert isinstance(after.facet, CalendarFacet)
     assert during.facet.entries_in_progress == 1
     assert after.facet.entries_in_progress == 0
     assert after.facet.read_at == later

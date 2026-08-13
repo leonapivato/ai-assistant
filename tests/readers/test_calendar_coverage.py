@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 import pytest
 from ics_fixtures import NOW, calendar, reader, source, utc, vevent
 
-from ai_assistant.core.types import ReadCoverage, ReportedExtent
+from ai_assistant.core.types import CalendarFacet, ReadCoverage, ReportedExtent
 from ai_assistant.readers._occurrences import UTC_MAX
 
 if TYPE_CHECKING:
@@ -312,7 +312,7 @@ async def test_an_entry_with_no_dtstamp_withholds_the_coverage(tmp_path: Path) -
 
     assert reading.coverage is None
     assert len(reading.proposals) == 1, "the stampless entry is skipped, not proposed"
-    assert reading.facet is not None
+    assert isinstance(reading.facet, CalendarFacet)
     assert reading.facet.entries_in_progress == 2, "the facet counts what the proposals skip"
 
 

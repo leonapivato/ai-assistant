@@ -815,9 +815,14 @@ _INTEGER_FIELDS: Final = tuple(
 #: right, a case exercising one of them overrides the companion, and no assertion
 #: below reads any of them — and it keeps the parametrisation field-agnostic, which
 #: is what makes a new setting covered without anyone editing the cases.
+#: ``email_source_path`` is here for ``calendar_reader_path``'s reason exactly:
+#: ADR-0140 §12 refuses an ``email_reader_interval`` with no source at load, so a
+#: case setting the interval alone would exercise that cross-field refusal rather
+#: than the per-field guard it means to.
 _COMPANIONS: Final[dict[str, Any]] = {
     "calendar_reader_path": Path("/srv/calendars/personal.ics"),
     "calendar_upcoming_lead": timedelta(hours=2),
+    "email_source_path": Path("/srv/mail/inbox.mbox"),
 }
 
 
@@ -905,6 +910,16 @@ def test_every_integer_setting_is_discovered() -> None:
         "scheduler_chunk_size",
         "calendar_max_expansion",
         "calendar_max_content_bytes",
+        # ADR-0140 §12's three caps, acknowledged here for the reason ADR-0093
+        # §7a's four are. The ``bool`` guard earns its place on each:
+        # ``email_max_messages=True`` is a store of one message accepted and every
+        # larger one refused, and ``email_max_bytes=True`` a one-byte store cap —
+        # both of which "refuse rather than truncate" correctly while reading
+        # nothing, which is the shape ADR-0093 §5's rule exists to prevent from
+        # wearing the clothes of a quiet week (ADR-0140 §12).
+        "email_max_messages",
+        "email_max_bytes",
+        "email_max_content_bytes",
     }
 
 
@@ -1169,6 +1184,17 @@ def test_every_duration_setting_is_discovered() -> None:
         # purge, which is the instrument switched off by misconfiguration rather
         # than by a decision.
         "trace_retention",
+        # ADR-0140 §12's three durations. The interval follows ADR-0083 §7's
+        # convention exactly — disabled is ``None``, never ``0`` — and carries the
+        # same cross-field precondition ``calendar_reader_interval`` does, which
+        # is why ``email_source_path`` joins :data:`_COMPANIONS`. The window is
+        # the model's third duration bounded *above*, and it is the one bounded
+        # **open** at the bottom: ``calendar_window_past`` may be zero and its own
+        # test asserts so, while a zero email window is a reader that reads
+        # nothing while reporting health (ADR-0140 §12).
+        "email_reader_interval",
+        "email_window_past",
+        "email_read_timeout",
     }
 
 
