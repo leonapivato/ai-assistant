@@ -309,6 +309,14 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     is a lot of disk for something nothing reads. ``traces.db`` is always kept: it is
     the ADR-0119 record P8's analysis is defined over, and it is small.
 
+    **Deleting the rest costs the analysis nothing, which is a property this function
+    now has rather than one it always had** (#1074). The link between a corpus evidence
+    pointer and the generated record ids a retrieval returns used to exist only in the
+    episodes inside ``memory.db``, so P8's split needed a run someone had thought to
+    pass ``--keep-stores`` on. It is written into ``records.jsonl`` here instead —
+    ``evidence_episode_ids`` off the ingestion summary, ``retrieved_evidence`` off the
+    answer — so the split is computable from the retained artifacts by default.
+
     Args:
         plan: What to run.
         output_root: Where run directories are created.
@@ -450,7 +458,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         harness = build_harness(resolved, data_dir=case_dir, model=model, observer=observer)
         try:
             summary = await ingest_case(harness, case, batch_size=resolved.observation_batch_size)
-            ingestion: dict[str, int | str | list[str]] = {
+            ingestion: dict[str, int | float | str | list[str]] = {
                 "conversation_id": summary.conversation_id,
                 "turns_captured": summary.turns_captured,
                 "turns_degraded": summary.turns_degraded,
@@ -462,6 +470,16 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
                 "discarded_unusable": summary.discarded_unusable,
                 "discarded_over_limit": summary.discarded_over_limit,
                 "dropped_unsupported": summary.dropped_unsupported,
+                # The harness's own headlessness, reported beside the run's records so
+                # a depressed P3/P5 is attributable to it rather than to retrieval: a
+                # deferred proposal is a question nobody will answer, so the belief is
+                # never written and no retrieval can find it.
+                "proposals_deferred": summary.proposals_deferred,
+                "proposals_ruled": summary.proposals_ruled,
+                "ask_rate": summary.ask_rate,
+                # The denominator for `QuestionRecord.evidence_episode_ids`: how many
+                # of this case's corpus pointers became an episode at all.
+                "evidence_keys_captured": summary.evidence_keys_captured,
                 "observation_routes": sorted(summary.observation_routes),
             }
             cursor = TraceCursor(harness.traces)
@@ -508,7 +526,18 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
                         correlation_id=attempt.correlation_id,
                         retrieved_ids=attempt.retrieved_ids,
                         retrieved_kinds=attempt.retrieved_kinds,
+                        retrieved_evidence=attempt.retrieved_evidence,
+                        retrieved_evidence_elided=attempt.retrieved_evidence_elided,
                         evidence=question.evidence,
+                        # #1074's join, projected onto this question's own pointers.
+                        # The case's whole mapping is thousands of entries wide on a
+                        # LoCoMo dialogue and would be denormalised onto all ~199 of
+                        # its records; the slice a question's own analysis reads is
+                        # this one, and it is small.
+                        evidence_episode_ids=tuple(
+                            tuple(summary.evidence_episodes.get(pointer, ()))
+                            for pointer in question.evidence
+                        ),
                         telemetry=await cursor.collect(attempt.correlation_id),
                         asked_at=attempt.asked_at,
                         context_chars=len(attempt.context),

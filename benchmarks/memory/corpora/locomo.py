@@ -175,6 +175,17 @@ def _session(
 def _turn(entry: Any, *, speaker_a: str, case_key: str, key: str) -> BenchTurn:
     """Build one utterance, rendering a shared photo as text.
 
+    **``dia_id`` is kept, and it is the same id space the questions cite.** A qa
+    entry's ``evidence`` is a list of ``dia_id`` values (``["D1:1"]``), so carrying
+    each turn's own ``dia_id`` onto the turn is what lets ingestion record which
+    captured episode a cited turn became — #1074's join, and the one point in a run
+    where both halves of it are in hand.
+
+    It is read leniently: a turn without one takes ``None`` rather than failing the
+    load. Nothing this harness *runs* reads the key — a missing pointer costs that
+    turn its place in the join and nothing else — so refusing the file over it would
+    turn an analysis field into a parsing precondition.
+
     Args:
         entry: One element of a session's list.
         speaker_a: The speaker whose turns take the user half.
@@ -195,7 +206,13 @@ def _turn(entry: Any, *, speaker_a: str, case_key: str, key: str) -> BenchTurn:
     caption = entry.get("blip_caption")
     if isinstance(caption, str) and caption.strip():
         said = f"{said} [shared a photo: {caption.strip()}]"
-    return BenchTurn(speaker=speaker, text=f"{speaker}: {said}", user_side=speaker == speaker_a)
+    dia_id = entry.get("dia_id")
+    return BenchTurn(
+        speaker=speaker,
+        text=f"{speaker}: {said}",
+        user_side=speaker == speaker_a,
+        evidence_key=dia_id if isinstance(dia_id, str) and dia_id else None,
+    )
 
 
 def _question(entry: Any, *, case_key: str, ordinal: int) -> BenchQuestion:

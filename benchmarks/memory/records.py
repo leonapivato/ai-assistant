@@ -135,8 +135,31 @@ class QuestionRecord(BaseModel):
         correlation_id: Ties this answer to its traces in ``traces.db``.
         retrieved_ids: The records placed in the prompt, in prompt order.
         retrieved_kinds: Their kinds, aligned with ``retrieved_ids``.
+        retrieved_evidence: The episode ids each retrieved record cites, aligned with
+            ``retrieved_ids``.
+        retrieved_evidence_elided: How many citations each retrieved record no longer
+            carries (ADR-0086 §4), aligned with ``retrieved_ids``. Non-zero turns an
+            empty join below into "cannot tell" rather than "never retrieved".
         evidence: The corpus's own pointer to the supporting turns, carried through
             untouched. P8's split is computed against this.
+        evidence_episode_ids: For each entry of ``evidence``, in the same order, the
+            captured episode ids that corpus pointer became during this run (#1074).
+
+            **This is the join P8 needs, and it is written here because it exists
+            nowhere else.** ``evidence`` is a corpus pointer — a LoCoMo ``dia_id``, a
+            LongMemEval session id — and ``retrieved_ids`` are generated record ids;
+            before this field nothing retained mapped one to the other, and the
+            episodes carrying the link live in a ``memory.db`` a default run deletes.
+            With it the split is a set intersection over this file alone: an evidence
+            episode appearing somewhere in ``retrieved_evidence`` was in context and
+            the reader failed; one appearing nowhere in it was never retrieved.
+
+            An **empty tuple** for a pointer says that pointer never became an episode
+            in this run — it named a turn outside the ingested slice
+            (``--max-sessions``), or its capture degraded, or the corpus gave that
+            turn no pointer at all. Read it against
+            ``ingestion["evidence_keys_captured"]`` before concluding anything: a case
+            that mapped nothing has a *missing* split, not a negative one.
         telemetry: What the traces said.
         asked_at: The benchmark clock's reading while the question was answered.
         context_chars: How large the rendered context block was. A crude proxy for
@@ -145,6 +168,14 @@ class QuestionRecord(BaseModel):
         ingestion: The case's ingestion summary, repeated on every record of that
             case. Denormalised deliberately: a JSONL line that cannot be read on its
             own is a format that invites a join, and the file is small.
+
+            **It carries the case's ask rate**, which is the one harness artifact
+            #1029's P3 and P5 can be silently depressed by: benchmark ingestion is
+            headless, so a proposal the policy rules ``ASK_USER`` on becomes a
+            question nobody answers and a belief nobody writes, and retrieval cannot
+            find what was never stored. The rate is a property of *this harness* and
+            not of the pipeline's answers, so it is not an aggregate ground rule 1
+            forbids — nothing here says whether an answer was right.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -165,11 +196,14 @@ class QuestionRecord(BaseModel):
     correlation_id: str
     retrieved_ids: tuple[str, ...]
     retrieved_kinds: tuple[str, ...]
+    retrieved_evidence: tuple[tuple[str, ...], ...]
+    retrieved_evidence_elided: tuple[int, ...]
     evidence: tuple[str, ...]
+    evidence_episode_ids: tuple[tuple[str, ...], ...]
     telemetry: RetrievalTelemetry
     asked_at: str
     context_chars: int
-    ingestion: dict[str, int | str | list[str]]
+    ingestion: dict[str, int | float | str | list[str]]
 
 
 class RunManifest(BaseModel):
