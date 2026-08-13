@@ -84,6 +84,44 @@ class CaseSelection(tuple[BenchCase, ...]):
         return self._max_sessions
 
 
+def _carrying(source: Sequence[BenchCase], cases: tuple[BenchCase, ...]) -> tuple[BenchCase, ...]:
+    """Give ``cases`` whatever selection provenance ``source`` carried.
+
+    **A lever that does not touch sessions must not erase what a session lever
+    recorded.** Composing the two — ``first_questions(first_sessions(cases, 1), 5)`` —
+    otherwise hands back a bare tuple, the plan records "no selection", and a smoke run
+    writes a manifest saying the histories are whole when every one was cut to a single
+    session. Question selection changes which questions are asked and never how much
+    conversation precedes them, so the bound it inherits is still true of what it
+    returns.
+
+    Args:
+        source: What the selection was applied to.
+        cases: The result of applying it.
+
+    Returns:
+        ``cases``, as a :class:`CaseSelection` where ``source`` was one — and a plain
+        tuple where it was not, because cases that recorded nothing about their own
+        selection must not acquire a claim by passing through here.
+    """
+    if isinstance(source, CaseSelection):
+        return CaseSelection(cases, max_sessions=source.max_sessions)
+    return cases
+
+
+def _tightest(*bounds: int) -> int:
+    """The tightest of ``bounds``, in the encoding where ``0`` means unbounded.
+
+    Args:
+        bounds: Session bounds, ``0`` for whole histories.
+
+    Returns:
+        The smallest non-zero bound, or ``0`` where every bound is.
+    """
+    applied = [bound for bound in bounds if bound]
+    return min(applied) if applied else 0
+
+
 def first_questions(cases: Sequence[BenchCase], limit: int) -> tuple[BenchCase, ...]:
     """Take the first ``limit`` questions, from as few cases as they fit in.
 
@@ -98,7 +136,9 @@ def first_questions(cases: Sequence[BenchCase], limit: int) -> tuple[BenchCase, 
 
     Returns:
         Cases whose question lists sum to ``limit`` — or all of them, where the corpus
-        holds fewer questions than that.
+        holds fewer questions than that. A :class:`CaseSelection` in, a
+        :class:`CaseSelection` out: this lever does not touch sessions, so it carries
+        the session bound through rather than dropping it.
 
     Raises:
         ValueError: If ``limit`` is negative. Refused rather than treated as zero,
@@ -111,7 +151,7 @@ def first_questions(cases: Sequence[BenchCase], limit: int) -> tuple[BenchCase, 
         msg = f"a question limit cannot be negative, got {limit}"
         raise ValueError(msg)
     if not limit:
-        return tuple(cases)
+        return _carrying(cases, tuple(cases))
     taken: list[BenchCase] = []
     remaining = limit
     for case in cases:
@@ -120,7 +160,7 @@ def first_questions(cases: Sequence[BenchCase], limit: int) -> tuple[BenchCase, 
         questions = case.questions[:remaining]
         remaining -= len(questions)
         taken.append(case.model_copy(update={"questions": questions}))
-    return tuple(taken)
+    return _carrying(cases, tuple(taken))
 
 
 def first_sessions(cases: Sequence[BenchCase], limit: int) -> CaseSelection:
@@ -145,7 +185,9 @@ def first_sessions(cases: Sequence[BenchCase], limit: int) -> CaseSelection:
         The cases, shortened, in a :class:`CaseSelection` recording the bound that was
         *applied* rather than the one that was asked for: a ``limit`` no case reached
         left every history whole, and the selection says ``0``. That is what the run's
-        gate reads, so the difference decides whether a scored run is refused.
+        gate reads, so the difference decides whether a scored run is refused. Shortening
+        an already-shortened selection keeps the tighter of the two bounds, because both
+        are true of the histories that come out.
 
     Raises:
         ValueError: If ``limit`` is negative.
@@ -153,8 +195,13 @@ def first_sessions(cases: Sequence[BenchCase], limit: int) -> CaseSelection:
     if limit < 0:
         msg = f"a session limit cannot be negative, got {limit}"
         raise ValueError(msg)
+    # A bound already on the way in is a fact about these histories that this call
+    # cannot see: shortening cases that were cut to two sessions yesterday shortens
+    # nothing today, and reporting `0` for it would erase the earlier cut. The tighter
+    # of the two is what the histories are.
+    inherited = cases.max_sessions if isinstance(cases, CaseSelection) else 0
     if not limit:
-        return CaseSelection(cases, max_sessions=0)
+        return CaseSelection(cases, max_sessions=inherited)
     kept = tuple(case.model_copy(update={"sessions": case.sessions[:limit]}) for case in cases)
     # Read off the cases themselves rather than assumed from `limit`: a case with fewer
     # sessions than the limit is returned untouched, and where that is true of every
@@ -162,4 +209,4 @@ def first_sessions(cases: Sequence[BenchCase], limit: int) -> CaseSelection:
     shortened = any(
         len(short.sessions) < len(case.sessions) for short, case in zip(kept, cases, strict=True)
     )
-    return CaseSelection(kept, max_sessions=limit if shortened else 0)
+    return CaseSelection(kept, max_sessions=_tightest(inherited, limit if shortened else 0))

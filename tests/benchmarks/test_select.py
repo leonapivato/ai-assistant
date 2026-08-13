@@ -159,6 +159,47 @@ def test_a_selection_is_the_case_sequence_everything_downstream_reads() -> None:
     assert [len(case.sessions) for case in selection] == [2]
 
 
+def test_a_question_limit_carries_the_session_bound_through() -> None:
+    """Composing the two levers must not erase what the session lever recorded: the
+    question lever never touches sessions, so its output is over exactly the histories
+    its input was, and a plan told otherwise would write a manifest claiming whole
+    histories over cases cut to one session."""
+    cases = (_case("a", sessions=9, questions=4), _case("b", sessions=9, questions=4))
+
+    taken = first_questions(first_sessions(cases, 1), 5)
+
+    assert isinstance(taken, CaseSelection)
+    assert taken.max_sessions == 1
+
+
+def test_a_zero_question_limit_carries_the_session_bound_through() -> None:
+    """The early return is the same seam and loses the same fact."""
+    cases = (_case("a", sessions=9, questions=4),)
+
+    taken = first_questions(first_sessions(cases, 2), 0)
+
+    assert isinstance(taken, CaseSelection)
+    assert taken.max_sessions == 2
+
+
+def test_a_question_limit_invents_no_provenance() -> None:
+    """The other direction: cases that recorded nothing about their own selection must
+    not acquire a claim to whole histories by passing through a question limit."""
+    cases = (_case("a", sessions=9, questions=4),)
+
+    assert not isinstance(first_questions(cases, 2), CaseSelection)
+
+
+def test_shortening_an_already_shortened_selection_keeps_the_tighter_bound() -> None:
+    """The second call shortens nothing, and reporting `0` for it would erase the first
+    cut — the histories really are two sessions long."""
+    cases = (_case("a", sessions=9, questions=2),)
+
+    assert first_sessions(first_sessions(cases, 2), 5).max_sessions == 2
+    assert first_sessions(first_sessions(cases, 5), 2).max_sessions == 2
+    assert first_sessions(first_sessions(cases, 3), 0).max_sessions == 3
+
+
 def test_a_negative_bound_cannot_be_stamped_on_a_selection() -> None:
     """The gate reads `0` as "whole" and anything truthy as "shortened", so a negative
     bound would be a shortened history that reports as one — and a nonsense figure in

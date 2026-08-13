@@ -584,6 +584,10 @@ def refuse_ineligible_scored_run(  # noqa: PLR0913 — one parameter per precond
             :func:`execute_run` passes ``plan.max_sessions`` here; the command line
             passes its own flag, one screen before the corpus is fetched, so an
             ineligible scored run is refused in a second rather than after a download.
+            That earlier call is a declaration and is deliberately the stricter of the
+            two — it refuses ``--max-sessions 99`` on a corpus no case of which has 99
+            sessions, which selection would have shown to shorten nothing. The asymmetry
+            only ever refuses, never admits, and no scored run reaches a store on it.
         embedder: The configured embedder.
         grader_kind: Which grader will be built. Named rather than inspected off a
             grader object, because a display name is something a caller controls and
