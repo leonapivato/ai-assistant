@@ -167,6 +167,32 @@ _REFUSED_HISTORIES = [
     ),
 ]
 
+#: Items that reached the seam without passing their own type. ``model_construct``
+#: is a documented escape hatch that skips validation, so these are constructible
+#: — and each is a value every check below would otherwise compare against and get
+#: wrong. The tool-role one is the sharp case: :class:`Role` is a ``StrEnum``, so a
+#: raw ``"tool"`` string is *equal* to ``Role.TOOL`` and is not it, and an identity
+#: check against the enum waves it straight through to the provider.
+_BYPASSED_ITEMS = [
+    pytest.param(
+        BatchRequest.model_construct(
+            item_id="   ", messages=[Message(role=Role.USER, content="hi")]
+        ),
+        id="unusable-item-id",
+    ),
+    pytest.param(
+        BatchRequest.model_construct(
+            item_id="raw-role",
+            messages=[Message.model_construct(role="tool", content="{}", name="t")],
+        ),
+        id="raw-tool-role",
+    ),
+    pytest.param(
+        BatchRequest.model_construct(item_id="no-turns", messages=[]),
+        id="no-turns",
+    ),
+]
+
 #: One case per outcome kind, with the payload ADR-0143 §4 binds to it.
 _OUTCOME_KINDS = [
     pytest.param(ProgrammedOutcome(kind=BatchOutcomeKind.SUCCEEDED), id="succeeded"),
@@ -283,21 +309,15 @@ class BatchCompleterContract:
                 "deliberately not sent to the provider, so nothing could find it"
             )
 
-    async def test_an_item_id_the_outcome_could_not_carry_is_refused_uncontacted(self) -> None:
+    @pytest.mark.parametrize("bypassed", _BYPASSED_ITEMS)
+    async def test_an_item_that_bypassed_its_own_type_is_refused_uncontacted(
+        self, bypassed: BatchRequest
+    ) -> None:
         async with self.world() as world:
             before = world.provider_calls
-            # `model_construct` is the one path that still reaches `submit` with a
-            # value the type would refuse — `BatchRequest` validates assignment, so
-            # a plain `item.item_id = "   "` no longer builds this state. ADR-0143
-            # §2 puts the check in `submit` regardless of how the state arose: the
-            # id is what §4 has the caller matching outcomes by, so an unusable one
-            # discovered after acceptance costs the whole batch's answers.
-            malformed = BatchRequest.model_construct(
-                item_id="   ", messages=[Message(role=Role.USER, content="hi")]
-            )
 
             with pytest.raises(ModelError) as caught:
-                await world.completer.submit("key-1", [a_request("fine"), malformed])
+                await world.completer.submit("key-1", [a_request("fine"), bypassed])
 
             _assert_caller_error(caught.value)
             assert world.provider_calls == before
