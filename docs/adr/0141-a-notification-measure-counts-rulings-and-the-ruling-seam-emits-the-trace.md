@@ -455,19 +455,19 @@ from a distance; §9 records why they may not travel and files the question.
 > no trace is counted under two of them and none is left unclassified by any
 > implementation.
 
-> **Normative.** A trace is **incomplete** when it carries none of the three
-> disposition keys. It records a crossing that raised before ruling (§3), it
-> enters no population, and the report counts it apart from the two faults below
-> because it is not one.
+> **Normative.** A trace is **incomplete** when it carries **none of the metric
+> keys §4 defines** — none of the three disposition keys, none of the eight
+> condition keys and no `held_seconds`. It records a crossing that raised before
+> ruling (§3), it enters no population, and the report counts it apart from the
+> two faults below because it is not one.
 
 > **Normative.** A trace is **malformed** when any of the following holds: it
-> carries a strict, non-empty subset of the three disposition keys; a key §4
-> reads as a count carries a value that is not a non-negative integer, or is a
-> `bool`; the three disposition values do not sum to exactly `1`; a condition key
-> carries a value other than `0` or `1`; a drop-condition key is absent; the
-> ruling is not `DROP` and an interrupt-condition key is absent; or the ruling is
-> `DROP` and an interrupt-condition key is present. A malformed trace enters no
-> population.
+> does not carry all three disposition keys; a key §4 reads as a count carries a
+> value that is not a non-negative integer, or is a `bool`; the three disposition
+> values do not sum to exactly `1`; a condition key carries a value other than
+> `0` or `1`; a drop-condition key is absent; the ruling is not `DROP` and an
+> interrupt-condition key is absent; or the ruling is `DROP` and an
+> interrupt-condition key is present. A malformed trace enters no population.
 
 > **Normative.** A trace is **counter-inconsistent** when its keys are all present
 > with admissible values and disagree with one another: `condition_expired` and
@@ -542,9 +542,28 @@ and makes the assumption checkable.
 **Incomplete is named rather than folded into malformed, because it is the
 ordinary fault path.** ADR-0119 §8 requires a crossing that raised before ruling
 to emit its trace anyway, and §3 above requires it to carry none of §4's keys. So
-a trace with no disposition keys is the design working, not a defect, and
-counting it beside two genuine faults would make an outage look like an emitter
-bug.
+a trace carrying none of them is the design working, not a defect, and counting
+it beside two genuine faults would make an outage look like an emitter bug.
+
+**Incomplete is defined over §4's whole key set, and malformed's first disjunct
+widened to catch what that released.** Defined over the disposition keys alone,
+the state matched more than the path it names: a trace carrying
+`condition_budget = 2` and no disposition would satisfy the first test, be
+decided there, and never reach the checks that would have called it malformed —
+so emitter corruption would be reported as an ordinary pre-ruling fault and
+stream health could not tell an outage from a defect. Narrowing it to §3's own
+words — **none** of the keys §4 defines — makes the two sections one predicate:
+a trace bearing any of those keys reached the ruling, so it is a fault of the
+emitter and belongs to the tests below. That narrowing alone would have left a
+hole, because a trace carrying valid drop conditions and no disposition at all
+passed every remaining test and entered the ruling population as well-formed;
+so the first malformed disjunct now reads "does not carry all three disposition
+keys" rather than "a strict, non-empty subset". Incomplete is tested first and
+requires an empty key set, so the widened disjunct reaches exactly the traces
+incomplete released and the four states stay disjoint and exhaustive. No measure
+defined here moves under either edit — both states leave every population — and
+what is bought is the legibility of the exclusion counts, which is what this
+section's clauses exist for. Adversarial review found it on the seventh round.
 
 **Two seam labels rather than a denylist, on ADR-0120 §3's discipline.** A later
 lane may add a third ruling seam, and defaulting an unrecognised one into the
