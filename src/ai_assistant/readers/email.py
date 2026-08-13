@@ -119,6 +119,7 @@ its process model are its own and are governed nowhere here (§1)::
 
     import imaplib
     import os
+    import ssl
     import tempfile
     import time
     from datetime import UTC, datetime, timedelta
@@ -129,18 +130,32 @@ its process model are its own and are governed nowhere here (§1)::
     SEPARATOR = "From assistant-fetcher Thu Jan  1 00:00:00 1970"
 
 
+    # The one INTERNALDATE among a response's items, or None if it is not there.
+    def delivered_at(items):
+        for item in items:
+            if isinstance(item, tuple):
+                item = item[0]
+            if isinstance(item, bytes) and b"INTERNALDATE" in item:
+                local = imaplib.Internaldate2tuple(item)
+                if local is not None:
+                    return datetime.fromtimestamp(time.mktime(local), UTC)
+        return None
+
+
     # Every message newer than `retention`, as one envelope-only mbox frame each.
     def frames(host, user, password, retention):
         # A day earlier than the edge: SINCE compares dates, not instants.
         since = (datetime.now(UTC) - retention - timedelta(days=1)).date()
-        with MailBox(host).login(user, password) as box:
+        context = ssl.create_default_context()  # verified TLS; see below
+        with MailBox(host, ssl_context=context).login(user, password) as box:
             box.folder.set("INBOX", readonly=True)
             for message in box.fetch(A(date_gte=since), headers_only=True, mark_seen=False):
                 status, data = box.client.uid("FETCH", message.uid, "(INTERNALDATE)")
                 if status != "OK":
                     continue
-                local = imaplib.Internaldate2tuple(data[0])
-                delivered = datetime.fromtimestamp(time.mktime(local), UTC)
+                delivered = delivered_at(data)
+                if delivered is None:
+                    continue
                 stamp = format(delivered, "%Y-%m-%dT%H:%M:%SZ")
                 lines = [SEPARATOR, "X-Assistant-Delivered-At: " + stamp]
                 for name in KEEP:
@@ -228,6 +243,35 @@ half-implements.
   rather than reading the recent tail (§12). The credential is the fetcher's
   process and the operator's secret store; nothing puts it in this one, and
   ``secret_store/`` is exactly where a later lane will be tempted to (§11).
+
+**Two things in that recipe are load-bearing and look like boilerplate**, which
+is the combination worth spelling out in the one document an operator copies
+from.
+
+- **``ssl_context=ssl.create_default_context()`` is not decoration.**
+  ``MailBox(host)`` with no context reaches ``imaplib.IMAP4_SSL``, which builds
+  ``ssl._create_stdlib_context()`` when none is passed — a context with
+  ``check_hostname=False`` and ``verify_mode=CERT_NONE``. That is *encrypted and
+  unauthenticated*: any certificate is accepted, so an attacker positioned on the
+  network receives the account password and then chooses what the store says.
+  ``ssl.create_default_context()`` is the same two knobs at ``True`` and
+  ``CERT_REQUIRED``. §11 keeps the credential out of the hub precisely because
+  it is the sensitive thing in this arrangement — handing it to an unverified
+  peer at the other end gives back everything that buys. Note what the second
+  half would defeat and what it would not: forged envelopes are still bounded by
+  §4, which holds whatever the bytes turn out to be, because nothing the store
+  says is authenticated *anyway*.
+- **The ``INTERNALDATE`` is selected from the response rather than indexed out
+  of it.** IMAP may interleave untagged and unsolicited responses, so
+  ``data[0]`` is not reliably the item asked for;
+  ``imaplib.Internaldate2tuple`` returns ``None`` rather than raising when its
+  pattern does not match, and ``time.mktime(None)`` then raises ``TypeError``
+  out of the generator — aborting the whole run *before* ``publish``, so the
+  previous store stays in place. The reader cannot tell that store from a
+  current one (§1, §7), which turns one odd response into a silent staleness
+  rather than a loud failure. Selecting the item and skipping the message when
+  there is none keeps the failure per-message, which is the same shape §5 gives
+  the reader for a header it cannot use.
 
 **Arming the read** is two settings, and the hub reads nothing on the strength of
 them::
