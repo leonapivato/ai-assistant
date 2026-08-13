@@ -395,9 +395,14 @@ stage rather than at the tool.
 > **Normative.** `ToolDefinition` construction refuses a `parameters_schema`
 > that is not a valid draft 2020-12 schema, that declares a `$schema` other than
 > draft 2020-12, that breaches the reference model below, or whose root
-> constrains the instance to a type that excludes a JSON object. Schema validity
-> is established once, at construction, and is never re-established at
-> registration, at request construction or at call time.
+> constrains the instance to a type that excludes a JSON object.
+
+> **Normative.** Schema validity is a `ToolDefinition` construction check and
+> nothing else. It runs wherever a `ToolDefinition` is constructed, including
+> every defensive revalidation and detachment already required of a registry, of
+> a request and at the seam, and no stage adds a schema check of its own.
+> Evaluating a call's arguments never re-establishes the validity of the schema
+> it evaluates against.
 
 **The reference model is stated rather than left to "does it need retrieval",
 because that question is not decidable from the syntax alone.** An external
@@ -424,13 +429,23 @@ construction rather than merely pattern-matching is what makes a dangling
 fragment — `#/$defs/Absent` — a definition that does not load instead of a call
 that fails.
 
-**At construction, which is what makes every later stage total.** ADR-0018 §4
-already requires that "what a registry stores must be valid and detached", and
-`InMemoryToolRegistry` revalidates every definition it stores, so a check on the
-type is inherited by the registry for free — no `ToolRegistrationError` case is
-added. And because a `ToolDefinition` that exists has a readable schema, §1's
-validator and §2's function may assume one: they report violations, never a
-defect in the document they are reading.
+**One check on the type, inherited by every stage that rebuilds one.** The
+repository already revalidates a definition wherever it could have been tampered
+with: ADR-0018 §4 requires that "what a registry stores must be valid and
+detached"; `_detached_tool` in `src/ai_assistant/core/types.py` rebuilds the
+definition through `ToolDefinition.model_validate(...)` as an `ActionRequest` is
+built; and ADR-0029 §2's step 1 does the same for the whole call at the seam.
+Putting the check on construction places it at all of them at once — no
+`ToolRegistrationError` case is added, and there is no per-stage rule to keep in
+step. That is also what closes the corruption route: a definition mutated
+through `object.__setattr__` into carrying a remote `$ref` is refused by the
+revalidation those clauses already mandate, rather than surviving to evaluation.
+The check having *one* definition — on the type — is what makes that true
+without any of those stages knowing about schemas.
+
+Because a `ToolDefinition` in hand was built by some construction, §1's
+validator and §2's function may assume a readable schema: they report violations
+in the arguments, never a defect in the document they are reading.
 
 **Fail-closed, in ADR-0016 §1's direction.** That section's rule is that "a tool
 that does not declare its reach does not load", because a construction error is
