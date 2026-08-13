@@ -1198,7 +1198,7 @@ class SqliteNotificationStore:
         await self._traces.ruled(
             SEAM_ADMIT,
             occurred_at=now,
-            metrics=ruling_metrics(
+            observe=lambda: ruling_metrics(
                 candidate=candidate,
                 ruling=ruling,
                 preferences=facts.preferences,
@@ -1314,7 +1314,7 @@ class SqliteNotificationStore:
         await self._traces.ruled(
             SEAM_RECONSIDER,
             occurred_at=now,
-            metrics=ruling_metrics(
+            observe=lambda: ruling_metrics(
                 candidate=record.candidate,
                 ruling=ruling,
                 preferences=facts.preferences,
