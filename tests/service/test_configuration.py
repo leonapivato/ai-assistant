@@ -41,6 +41,8 @@ from ai_assistant.service.configuration import (
     CONFLICT_SEARCH_LIMIT,
     CONVERSATION_SWEEP_ARMED,
     CONVERSATION_SWEEP_SECONDS,
+    EMAIL_READER_ARMED,
+    EMAIL_READER_SECONDS,
     EMBEDDING_TIMEOUT_SECONDS,
     EPISODE_RETENTION_FINITE,
     EPISODE_RETENTION_SECONDS,
@@ -167,16 +169,23 @@ async def test_the_declared_allowlist_is_exactly_what_two_deployments_produce(
 ) -> None:
     """The other direction: no key is declared that nothing can emit.
 
-    Two opposite deployments are needed because eight of the entries are pairs
+    Two opposite deployments are needed because most of the entries are pairs
     whose numeric half appears only when the duration is set — so an armed hub and
     a disarmed one each produce a strict subset, and only their union is the list.
     A declared-but-unreachable key would otherwise sit here forever, describing a
     record no operator will ever meet.
+
+    The armed deployment arms **both** ingestion sources, which is the shape
+    ADR-0142 §1 requires of anything that enumerates them: a fixture arming only
+    the calendar is what let ``email_reader_interval``'s absence from the list
+    survive to be found live (#1083).
     """
     armed = Settings(
         data_dir=tmp_path / "armed",
         calendar_reader_path=tmp_path / "calendar.ics",
         calendar_reader_interval=timedelta(minutes=15),
+        email_source_path=tmp_path / "mail.mbox",
+        email_reader_interval=timedelta(minutes=25),
         observation_interval=timedelta(hours=6),
     )
     disarmed = Settings(
@@ -212,6 +221,7 @@ async def test_a_default_deployment_records_its_effective_figures(settings: Sett
         CONVERSATION_SWEEP_SECONDS: timedelta(hours=1).total_seconds(),
         OBSERVATION_ARMED: False,
         CALENDAR_READER_ARMED: False,
+        EMAIL_READER_ARMED: False,
         SCHEDULER_RUN_BUDGET_SECONDS: timedelta(minutes=5).total_seconds(),
         SCHEDULER_CHUNK_SIZE: 50,
         OBSERVATION_BATCH_SIZE: 20,
@@ -279,6 +289,45 @@ async def test_an_armed_calendar_reader_records_its_cadence(tmp_path: Path) -> N
 
     assert metrics[CALENDAR_READER_ARMED] is True
     assert metrics[CALENDAR_READER_SECONDS] == timedelta(minutes=15).total_seconds()
+
+
+async def test_arming_email_ingestion_moves_the_mapping_as_arming_the_calendar_does(
+    tmp_path: Path,
+) -> None:
+    """#1083: the two ingestion sources partition a window alike, or the list lies.
+
+    The leg-11 QA run (#1081) drove four hub startups, changing email's arming
+    between them, and ``ai-assistant-measures`` reported "configuration unchanged"
+    across every email transition while a notification figure moving one step
+    reported "configuration CHANGED". ADR-0120 §8 partitions at every
+    ``CONFIGURATION`` trace whose metric mapping differs from its predecessor's,
+    so an interval the list omits is an intervention no measure can date.
+
+    Asserted as the *pair* of properties that made it invisible — the armed
+    cadence is recorded, and the mapping a disarmed hub emits is not the mapping
+    an armed one emits — because either alone passes on a list carrying the key
+    and never reaching it, or on a key that moves for some other reason.
+    ADR-0142 §1's "equal in kind" is what makes the calendar's own test the
+    template rather than a coincidence.
+    """
+    disarmed = dict((await _recorded(Settings(data_dir=tmp_path / "hub-data"))).metrics)
+    armed = dict(
+        (
+            await _recorded(
+                Settings(
+                    data_dir=tmp_path / "hub-data",
+                    email_source_path=tmp_path / "mail.mbox",
+                    email_reader_interval=timedelta(seconds=25),
+                )
+            )
+        ).metrics
+    )
+
+    assert disarmed[EMAIL_READER_ARMED] is False
+    assert EMAIL_READER_SECONDS not in disarmed
+    assert armed[EMAIL_READER_ARMED] is True
+    assert armed[EMAIL_READER_SECONDS] == timedelta(seconds=25).total_seconds()
+    assert armed != disarmed
 
 
 async def test_an_armed_observation_job_dates_the_arming(tmp_path: Path) -> None:
