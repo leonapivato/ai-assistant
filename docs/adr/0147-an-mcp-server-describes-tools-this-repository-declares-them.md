@@ -565,6 +565,19 @@ there.
 > never an instruction to fetch. Nothing in this system resolves a URI a tool
 > result carries, subscribes to it, opens it, or turns it into an ingestion.
 
+> **Normative.** The declaration set answers for every id the registry holds, so
+> within a process the origin of any result in hand is always establishable. It
+> does **not** answer for a result retained past the process that produced it: a
+> consumer holding such a result and unable to establish its origin treats it as
+> **external**, and never as this system's own words or the user's.
+
+> **Normative.** `StepExecution.output` is therefore a projection that carries
+> content which may be external and carries no origin for it, and is **defective in
+> that respect** under ADR-0098 §7's third clause. That obligation falls on the ADR
+> that next revises `StepExecution`, never on a surface reading one, and is never
+> licence to present the retained span as the assistant's words. This ADR names the
+> instance and adds no `core` surface to close it.
+
 **ADR-0098 §12's trigger fires here, and this ADR is what it fires into.** That
 bullet — "**Tool and MCP results.** External content by §1, inheriting §2 and §3.
 **Fires with the first tool that returns text**, which the roadmap places behind
@@ -592,6 +605,29 @@ counterparty naming a location and a program fetching it, which is content
 selecting an action (ADR-0098 §3) and, for any non-`file:` URI, an egress from a
 module that is not the seam. Refusing it costs a feature nothing in this system
 currently wants, and it costs it now rather than after a lane has built on it.
+
+**The cross-restart hole is real, was found by review, and is closed in the only
+direction available here.** `StepExecution` persists `bound_tool` and `output` and
+plan state is durable (ADR-0014 §5), while ADR-0016 §6 rebuilds the registry from
+configuration and persists nothing. So an operator who removes a server from the
+declaration set and restarts leaves behind a durable span of external content whose
+origin the second clause cannot recover and which §7 forbids recovering from the
+id — an earlier draft nonetheless asserted that the fourth clause "holds for a
+result that has already been recorded as much as for one in flight", which was a
+bound stated over something this system could not obtain, the defect ADR-0098 §5
+names and §3 records itself making twice.
+
+The fix that would actually close it is a durable origin beside the output, which
+is `core/types.py` surface and therefore an ADR of its own (golden rule 5) — the
+same wall ADR-0098 §5 and §12 hit for their own marker, and for the same stated
+reason. What is available here is the fail-closed default, and it is available
+precisely because it needs nothing new: **unknown origin means external.** That
+over-marks a builtin's output whose declaration is in code and cannot vanish, at no
+cost, and it under-marks nothing. It is ADR-0098 §1's own posture — a source is
+enrolled in the protection by default and "must be argued out of it, not into it" —
+read onto a projection instead of onto a `MemorySource`. The durable marker is
+**#1114**, filed as the fourth instance of the lossy-projection class ADR-0098 §12
+already tracks rather than as a fifth coincidence.
 
 **What is not promised, in ADR-0098 §3's own words.** "A model that reads a
 well-marked, correctly positioned external span may still follow an instruction
@@ -824,6 +860,12 @@ rediscovers.
   the prompt assembler's own container syntax leaves the attribution of every span
   unchanged, and a result carrying a `resource_link` produces no fetch of any
   kind. A test asserting only that a label is present does not satisfy this.
+- **§6's fail-closed default, asserted on the path that produces it**: a
+  `StepExecution` carrying an output is read back after the declaration naming its
+  `bound_tool` has been removed, and the span is treated as external — not as the
+  assistant's words, and not dropped. Building the fixture by deleting the
+  declaration rather than by stubbing a lookup is what makes it the cross-restart
+  case rather than a mocked one.
 - **§7's injectivity and its opacity**: an alias containing the separator is
   refused where the declaration is read; a server offering a tool named exactly as
   a builtin's id produces two distinct ids and both remain invocable. And the
@@ -887,6 +929,14 @@ governed, and a lane reading ADR-0017 alone still finds fourteen and still needs
 attesting ADR. What §4 adds is a *different* obligation about a case §3's entries
 have no subject for — which under ADR-0082 §1 is a stacked addition and is recorded
 here rather than on ADR-0017.
+
+**ADR-0014 §5 and ADR-0098 §7 — no record owed for naming `StepExecution.output`
+defective.** ADR-0098 §7's third clause defines the class and assigns the debt "to
+the ADR that defines or next revises that projection"; naming a fourth member is
+that clause working, and §12 there already tracks three. No sentence of ADR-0014
+becomes false: it never claimed `output` carried an origin, and this ADR neither
+adds a field to `StepExecution` nor changes what one means. The debt is recorded in
+#1114 and against a future revision, which is where §7's own words put it.
 
 **ADR-0124 §1 — no record owed.** Its enumeration is read here and applied, not
 widened: §4 above concludes that a remote MCP server matches none of its three
@@ -973,6 +1023,12 @@ form).
   obtains its own credential from its own configuration is outside this system's
   reach; §4 keeps every such server behind the authorising ADR in any case, and
   #74's answer is one of the things that ADR will need.
+- **A durable origin for a retained tool result** — **#1114**. §6 states the
+  fail-closed default and names `StepExecution.output` under ADR-0098 §7's third
+  clause; the close is a field beside the output or a durable declaration history,
+  both `core` decisions with their own ADR and both wanting a producer in hand
+  (ADR-0073 §4), which is exactly why ADR-0098 §5 and §12 declined the analogous
+  marker.
 - **MCP resources and prompts.** The protocol's other two server primitives are
   not tools. A resource is an ingestion source, and this repository already has a
   seam for one — `Reader` (ADR-0093 as renamed by ADR-0095 §1) — with a grant
