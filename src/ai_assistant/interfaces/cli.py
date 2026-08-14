@@ -100,6 +100,32 @@ reading is this device's, so a record within clock skew of its expiry may be
 labelled from the wrong side; that moves a label and never a verb, the engine
 staying the authority on what any act does.
 
+``connect``, ``reconnect``, ``disconnect``, ``connections`` and ``connection-log``
+are the connection surface — the five engine operations ADR-0151 §1 ratifies and
+no sixth. They are **not** the grant surface and are never offered as an
+alternative to it: a connection is not an authorisation, and nothing here is a
+list of what the assistant may do (ADR-0151 §12).
+
+Four obligations land on *this module* and none of them is enforceable from the
+hub's side (ADR-0098 §5), which is why ADR-0151 §16's client lane owes each as a
+test here. **The identity is displayed as part of the act** (§5) — a person
+pasting a token into the name field is caught by seeing it, and a client that
+swallowed the value would remove the one ingredient that failure needs. **A
+``PENDING`` record is rendered as not connectable** (§4), never as a connection
+being established or one that completes on its own: nothing is running, and
+ADR-0148 §6 rules the state "refused rather than reconciled". **A partial outcome
+is reported as the half that landed** (§7) — the vocabulary is ADR-0139 §4's,
+which §7 transposes from an amendment's two calls to one act's three writes, and
+the resolution is always a *read* rather than a second write, because the write a
+hopeful client would send carries a credential. And **a disconnection says what
+was removed and never more** (§8): a ``None`` is not a report of a disconnection,
+and disconnecting every reference is not ADR-0149 §8's purge.
+
+The credential is **prompted and never an argument**, so it does not land in a
+shell history, a process listing or an argv-reading log; ``--credential-stdin``
+is the scriptable door, and it strips the line terminator alone because ADR-0125
+§3 makes two spellings of a secret two different secrets.
+
 v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 """
 
@@ -115,12 +141,22 @@ from enum import Enum
 from typing import TYPE_CHECKING, NamedTuple, assert_never, final
 
 import typer
+from pydantic import SecretStr
 from rich.console import Console
 from rich.markup import escape
 
 from ai_assistant import __version__
 from ai_assistant.core.config import load_settings
-from ai_assistant.core.errors import AssistantError, OversizedValueError
+from ai_assistant.core.errors import (
+    AssistantError,
+    DisplacedProvisioningError,
+    IncompleteProvisioningError,
+    OversizedValueError,
+    ProvisioningOutcomeUnknownError,
+    ResidualCredentialError,
+    UnknownConnectionError,
+    UnusableIdentityError,
+)
 from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import (
     DEFAULT_NOTIFICATION_REACH,
@@ -137,12 +173,14 @@ from ai_assistant.core.types import (
     NotificationDispositionKind,
     NotificationPreferences,
     NotificationReach,
+    ProvisioningState,
     QuestionState,
     QueueOutcome,
     QuietWindow,
     SecretScope,
     StepStatus,
     encodable_text,
+    secret_value,
 )
 from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.wire import (
@@ -169,6 +207,8 @@ if TYPE_CHECKING:
         Belief,
         BeliefSummary,
         Confirmation,
+        ConnectedAccount,
+        ConnectionAct,
         ConversationDigest,
         ConversationSummary,
         GrantableSource,
@@ -395,6 +435,53 @@ def _present_source(value: str) -> str:
         # ADR-0097 §9 forbids and a string this process may not be able to write
         # down. The remedy is the enumeration, not the value.
         msg = "must be text with a UTF-8 encoding; see 'assistant sources'"
+        raise typer.BadParameter(msg) from exc
+    return value
+
+
+def _present_identity(value: str) -> str:
+    r"""Reject a blank or unwritable account identity, **without stripping** it.
+
+    :func:`_present_source`'s shape for the one argument on the connection surface
+    that is :data:`~ai_assistant.core.types.NonBlankEncodableText` rather than
+    :data:`~ai_assistant.core.types.Identifier`, and the non-stripping is
+    contractual rather than incidental. ADR-0151 §5 forbids **every**
+    implementation from stripping, case-folding, case-normalising or
+    Unicode-normalising a caller-supplied identity "at any point — not at the
+    surface", and a Typer callback that returned ``value.strip()`` would be the
+    surface doing exactly that, one layer before the annotation ADR-0151 §2 chose
+    ``NonBlankEncodableText`` over ``Identifier`` to prevent.
+
+    The reason for a callback at all is :func:`_present_source`'s: the refusals
+    below are ``ValueError``, which is **not** an :class:`AssistantError`, so they
+    would escape :func:`_connect_account`'s error boundary as an uncaught traceback
+    with no controlled exit code (ADR-0042 §7). Catching them here makes each a
+    usage error (exit code 2) **before any client is built and before a credential
+    is prompted for** — which is the ordering that matters on this surface, because
+    the alternative asks a person for a secret in order to refuse the call anyway.
+
+    **The value is never echoed**, and here that is a data-tier rule rather than a
+    writability one: an account identity is Tier 1 personal data (ADR-0149 §3), so
+    it reaches no log line, no error message and no operator diagnostic. Click
+    renders a ``BadParameter`` as the parameter's name and this message, carrying
+    neither.
+
+    Args:
+        value: The account identity as the user typed it.
+
+    Returns:
+        The value, byte for byte.
+
+    Raises:
+        BadParameter: If the value is blank, or has no UTF-8 encoding.
+    """
+    if not value.strip():
+        msg = "must not be blank"
+        raise typer.BadParameter(msg)
+    try:
+        encodable_text(value)
+    except ValueError as exc:
+        msg = "must be text with a UTF-8 encoding"
         raise typer.BadParameter(msg) from exc
     return value
 
@@ -1668,6 +1755,194 @@ def tune(
     raise typer.Exit(code)
 
 
+# --- the connection surface (ADR-0151 §1, §16) -------------------------------
+# The five operations by which a person connects an account to a service, replaces
+# its credential, disconnects it, sees what is connected, and reads back what was
+# done. Four clauses here are the *client's* and are unenforceable from the hub's
+# side (ADR-0098 §5): §5's display of the identity, §4's rendering of a PENDING
+# record, §7's report of a partial outcome, and §8's two clauses about what a
+# disconnection may be said to have done. This is the only place they can live.
+#
+# **The spellings are this lane's under ADR-0073 §1**, taken from ADR-0151 §16's
+# illustrative list. `connect` is deliberately not a near-neighbour of `grant`:
+# ADR-0151 §12 forbids offering a connection as an alternative to a grant, so each
+# command below says which question it does *not* answer.
+
+
+#: The scriptable door onto the credential, shared by ``connect`` and
+#: ``reconnect``. Hoisted for ruff's B008 like the other shared options.
+#:
+#: **There is deliberately no ``--credential`` option.** A secret on the command
+#: line lands in the shell's history file, in every ``ps`` listing while the
+#: process runs, and in any log that records an invocation — three durable
+#: disclosures of a Tier 0 value (ADR-0125 §1) that no amount of care downstream
+#: undoes. ``device enrol`` reads its credential the same way and for the same
+#: reason.
+_CREDENTIAL_STDIN_OPTION = typer.Option(
+    False,
+    "--credential-stdin",
+    help="Read the credential from the first line of standard input instead of prompting.",
+)
+
+
+@app.command()
+def connect(
+    identity: str = typer.Argument(
+        ...,
+        metavar="IDENTITY",
+        callback=_present_identity,
+        help="The account's name at the service, as you recognise it — an address or a handle.",
+    ),
+    *,
+    credential_stdin: bool = _CREDENTIAL_STDIN_OPTION,
+) -> None:
+    """Connect an account, under a reference I mint.
+
+    I show you the identity you typed and then ask for the credential, which is
+    **never** an argument: a secret on the command line is in your shell history
+    and in every process listing for as long as the call runs. Use
+    ``--credential-stdin`` to pipe it in instead.
+
+    **You cannot name the connection and I will not let you try.** The reference is
+    minted here, at the moment the first record is written, because it is the one
+    handle on this surface that may be logged — and a value you typed could not be
+    (ADR-0149 §3). So every act after this one goes through
+    ``assistant connections``, which is where you read the reference back.
+
+    Showing you the identity is part of the act rather than a courtesy: the
+    commonest way to leak a credential on a surface like this is to paste it into
+    the name field, and seeing it is what catches that.
+
+    **This is not 'assistant grant'.** A connection is not permission to act, it
+    authorises nothing, and it never appears in what I am allowed to read.
+    """
+    code = asyncio.run(_connect_account(identity, credential_stdin=credential_stdin))
+    raise typer.Exit(code)
+
+
+@app.command()
+def reconnect(
+    reference: str = typer.Argument(
+        ...,
+        metavar="REFERENCE",
+        callback=_present_id,
+        help="The connection to re-provision, as 'assistant connections' prints it.",
+    ),
+    identity: str = typer.Option(
+        ...,
+        "--identity",
+        callback=_present_identity,
+        help="The account identity for the new revision. Shown back to you before I ask.",
+    ),
+    *,
+    credential_stdin: bool = _CREDENTIAL_STDIN_OPTION,
+) -> None:
+    """Replace the credential under a connection you already have.
+
+    This is the act for a rotated token. It keeps the reference — that is what
+    makes the reference worth having — and takes the connection to a new revision;
+    the credential it replaces is deleted once the new one is in use.
+
+    **It is a different command from ``assistant connect`` on purpose.** Connecting
+    cannot be aimed at a connection that exists, and re-provisioning refuses a
+    reference I do not hold, so the mistake of meaning to replace a credential and
+    creating a second connection instead is unreachable rather than merely visible.
+
+    The reference is positional and the identity is a named option, so the two
+    cannot be transposed. As on ``connect``, the credential is prompted for and is
+    never an argument.
+    """
+    code = asyncio.run(
+        _reprovision_account(reference, identity=identity, credential_stdin=credential_stdin)
+    )
+    raise typer.Exit(code)
+
+
+@app.command()
+def disconnect(
+    reference: str = typer.Argument(
+        ...,
+        metavar="REFERENCE",
+        callback=_present_id,
+        help="The connection to disconnect, as 'assistant connections' prints it.",
+    ),
+) -> None:
+    """Disconnect one account and delete the credentials it left behind.
+
+    **No question is asked**, for the reason ``assistant revoke`` asks none: this is
+    your remedy, and a prompt between you and it is a prompt too many at the moment
+    you have decided a credential should stop working. It is idempotent — running it
+    twice is safe, and running it again is also how you finish a deletion that
+    failed part way.
+
+    What it does **not** do: it does not stop a transmission already in flight, it
+    does not cancel a provisioning act that is running, and it is not a guarantee
+    that my keyring holds nothing at all for that reference. What is true is the
+    weaker thing — no live record names any credential for it any more.
+
+    **Disconnecting everything is not the same as erasing this installation.** If
+    what you want is your delete right, that is the offline delete act, not a
+    sequence of these.
+    """
+    code = asyncio.run(_disconnect_account(reference))
+    raise typer.Exit(code)
+
+
+@app.command()
+def connections() -> None:
+    """Show every account that is connected now, and what state each one is in.
+
+    This is the honest answer to "what have I connected", read from the record: a
+    connection whose integration is no longer built, or whose tool is no longer
+    registered, is **still listed here**, which is the point — it still exists, its
+    credential still exists, and this is where you find the reference in order to
+    end it.
+
+    It is also where a **pending** connection shows up. An act that was interrupted
+    before it finished leaves a record that is not connectable; nothing is running,
+    nothing repairs it, and it would appear nowhere else at all. The remedy is
+    always to run the act again, or to disconnect it.
+
+    There is no paging and no ``--limit``: a truncated answer to "what is connected"
+    is a false answer rather than a partial one. It is a snapshot taken when you
+    asked, not a claim that stays true afterwards.
+
+    It says nothing about permissions — see ``assistant granted`` for those — and
+    nothing about *when* anything happened.
+    """
+    code = asyncio.run(_list_connections())
+    raise typer.Exit(code)
+
+
+@app.command("connection-log")
+def connection_log(
+    limit: int = typer.Option(
+        50,
+        "--limit",
+        callback=_positive_page_argument,
+        help="How many acts to show at most (at least 1).",
+    ),
+) -> None:
+    """Show what was done to connections, in the order it was recorded.
+
+    Every provisioning act and every disconnection is here, one row per act, and
+    nothing is ever edited or removed from this list: disconnecting adds a record,
+    it does not delete one. That is what makes this the honest answer to "what have
+    I connected, and what did I take away".
+
+    **There are no times on it.** A connection record carries no instant, so the
+    order is the order I recorded the acts in and nothing more — no row says when,
+    and the distance between two rows is not an interval.
+
+    **Do not read liveness off this list.** A row says an act happened, not that it
+    still stands, and the page has a bound: a reference whose latest act falls off
+    the end would be reported here by an earlier one. ``assistant connections`` is
+    what states what is connected now.
+    """
+    code = asyncio.run(_list_connection_acts(limit=limit))
+    raise typer.Exit(code)
+
+
 @device_app.command("enrol")
 def device_enrol(
     hub_identity: str = typer.Argument(
@@ -2339,6 +2614,149 @@ async def _tune_notifications(asked: _Tuning) -> int:
     return await _drive_tune(engine, asked)
 
 
+def _prompt_for_credential() -> str:
+    """Read the credential from the terminal without echoing it (I/O; ADR-0042 §6).
+
+    ``device enrol``'s prompt, one surface over, and hidden for the same reason: a
+    Tier 0 value must not be left on screen, in a scrollback buffer, or in whatever
+    records a terminal session.
+
+    Returns:
+        The line the user typed, without its terminator and otherwise unaltered.
+    """
+    # Annotated rather than returned directly: ``typer.prompt`` is typed ``Any``, and
+    # a bare return would silently widen this function's declared contract to it.
+    typed: str = typer.prompt("Credential", hide_input=True)
+    return typed
+
+
+def _credential_from_stdin() -> str:
+    r"""Read the credential from the first line of standard input (I/O; ADR-0042 §6).
+
+    **The line terminator is removed and nothing else is**, which is where this
+    parts company with ``device enrol``'s reader. That credential is minted by the
+    hub from an alphabet with no whitespace in it, so a ``strip()`` there cannot
+    change the value; an integration credential is whatever the service issued, and
+    ADR-0125 §3 is explicit that "two spellings of a secret are two different
+    secrets" and that helpfully removing a trailing character "would produce an
+    authentication failure nobody could reproduce by inspection". A leading space in
+    a pasted token is admissible and is kept.
+
+    Returns:
+        The first line, less exactly one ``\\r\\n`` or ``\\n``.
+    """
+    return sys.stdin.readline().removesuffix("\n").removesuffix("\r")
+
+
+def _credential(plaintext: str) -> SecretStr:
+    """Wrap and validate one supplied credential, before anything is opened.
+
+    ADR-0125 §3 makes :func:`~ai_assistant.core.types.secret_value` the only
+    supported way to build one: :data:`~ai_assistant.core.types.SecretValue` is an
+    ``Annotated`` alias, so constructing the origin directly satisfies every static
+    check while the validator never runs. Revalidating here is the seam's own rule
+    applied at the door, and it makes the refusal local — a blank or oversized
+    credential is refused before a frame is built rather than after.
+
+    Args:
+        plaintext: What the user typed or piped, unaltered.
+
+    Returns:
+        The value in its redacting holder.
+
+    Raises:
+        ValueError: If the plaintext is blank, has no UTF-8 encoding, or exceeds
+            the contract bound. The message names neither the value nor its length
+            (ADR-0125 §6), which is what makes it safe to print.
+    """
+    return secret_value(SecretStr(plaintext))
+
+
+async def _connect_account(identity: str, *, credential_stdin: bool) -> int:
+    """Obtain a client, show the identity, take the credential, and connect.
+
+    **The hub is reached before the credential is asked for**, which is the one
+    ordering decision in this function. A client that prompted first would ask a
+    person for a secret in order to discover that nothing is listening — and the
+    natural response to that is to run it again and type it a second time.
+
+    The single error boundary is :func:`_list_sources`' (ADR-0042 §7).
+    """
+    read = _credential_from_stdin if credential_stdin else _prompt_for_credential
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_connect(engine, identity, read_credential=read)
+
+
+async def _reprovision_account(reference: str, *, identity: str, credential_stdin: bool) -> int:
+    """Obtain a client, show the identity, take the credential, and re-provision."""
+    read = _credential_from_stdin if credential_stdin else _prompt_for_credential
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_reconnect(engine, reference, identity=identity, read_credential=read)
+
+
+async def _disconnect_account(reference: str) -> int:
+    """Obtain a client, disconnect the reference, and say exactly what went.
+
+    **No ceremony, and that is a decision rather than an omission**, on ADR-0102
+    §4's reasoning transposed to ADR-0149 §5's act. ``forget`` shows-then-confirms
+    because it destroys something the user would have to have been shown to consent
+    to destroying; a disconnection destroys a credential whose whole point is that
+    the user has decided it should stop working, and ADR-0151 §8 makes the act
+    idempotent and re-runnable so a mistaken one costs nothing to correct.
+
+    It also sends ``disconnect_account`` **without** reading ``connected_accounts``
+    first. That read would be a liveness claim the client then acted on, which is
+    the inference ADR-0151 §7 and §9 keep apart everywhere else on this surface —
+    and it would fail for the one case a disconnection exists for, a reference whose
+    record the client could not read. What the user is told comes from the act's own
+    answer, which carries the record it removed.
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_disconnect(engine, reference)
+
+
+async def _list_connections() -> int:
+    """Obtain a client, read what is connected now, and render it (ADR-0151 §9)."""
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_connections(engine)
+
+
+async def _list_connection_acts(*, limit: int) -> int:
+    """Obtain a client, read what was done to connections, and render it (ADR-0151 §12).
+
+    This is the operation that discharges the record half of ADR-0004 §7 for a
+    provisioning act: the connection store is append-only, and a store the owner
+    cannot read is not a discharge of "transparent and reviewable".
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_connection_acts(engine, limit=limit)
+
+
 async def _forget_belief(belief_id: str, *, assume_yes: bool) -> int:
     """Load settings, build the engine, run the deletion ceremony, and close it.
 
@@ -2998,6 +3416,257 @@ async def _drive_tune(engine: AssistantEngine, asked: _Tuning) -> int:
     _render_notification_settings(written)
     _render_reach_notice(current, asked)
     return _EXIT_OK
+
+
+async def _drive_connect(
+    engine: AssistantEngine, identity: str, *, read_credential: Callable[[], str]
+) -> int:
+    """Show the identity, take the credential, connect, and report the outcome.
+
+    **The display is not a courtesy and skipping it is not permitted** (ADR-0151
+    §5): "every client that accepts an identity displays it to the user as part of
+    the act", and nothing on the wire distinguishes a client that did from one that
+    did not (ADR-0098 §5). It is shown *before* the credential is asked for, which
+    is the ordering that makes it useful — ADR-0149 §4's third answer to a
+    credential pasted into the identity field is precisely that the value is seen,
+    and a client that rendered it afterwards would show it once the secret had
+    already been typed into the field beside it.
+
+    Everything after the call is ADR-0151 §7's classification, and the one thing
+    this function may not do is report the act as having changed nothing. Five of
+    the six outcomes are the exception classes; the sixth is the return.
+    """
+    _render_connection_intent(identity)
+    try:
+        credential = _credential(read_credential())
+    except ValueError as exc:
+        _render_unusable_credential(exc)
+        return _EXIT_ERROR
+
+    try:
+        connected = await engine.connect_account(identity=identity, credential=credential)
+    except asyncio.CancelledError:
+        # ADR-0151 §7's cancellation clause: a cancelled act leaves the same outcome
+        # the partial classes describe, the client says so **without the reference
+        # and without starting a call to obtain one**, and the ``CancelledError``
+        # still leaves (ADR-0060). ``CancelledError`` is a ``BaseException``, so the
+        # handler below would not see it.
+        _render_cancelled_act("connection")
+        _render_connections_unread()
+        raise
+    except (AssistantError, TransportError) as exc:
+        return await _report_provisioning_failure(engine, "connection", exc, reference=None)
+    _render_connected("Connected", connected)
+    return _EXIT_OK
+
+
+async def _drive_reconnect(
+    engine: AssistantEngine,
+    reference: str,
+    *,
+    identity: str,
+    read_credential: Callable[[], str],
+) -> int:
+    """Show the identity, take the credential, re-provision, and report the outcome.
+
+    :func:`_drive_connect` with two differences, both of them ADR-0151's. The
+    reference is the caller's, so every refusal has one to name and every unread
+    state has one to read (§2a, §7). And two further outcomes are reachable that a
+    fresh connection cannot produce — a reference the store does not hold, and a
+    losing compare-and-swap — which is the whole reason §1 refused to fold the two
+    operations into one method with an optional reference.
+    """
+    _render_connection_intent(identity, reference=reference)
+    try:
+        credential = _credential(read_credential())
+    except ValueError as exc:
+        _render_unusable_credential(exc)
+        return _EXIT_ERROR
+
+    try:
+        connected = await engine.reprovision_account(
+            reference, identity=identity, credential=credential
+        )
+    except asyncio.CancelledError:
+        _render_cancelled_act("re-provisioning")
+        _render_connection_unread(reference)
+        raise
+    except (AssistantError, TransportError) as exc:
+        return await _report_provisioning_failure(
+            engine, "re-provisioning", exc, reference=reference
+        )
+    _render_connected("Re-provisioned", connected)
+    return _EXIT_OK
+
+
+async def _drive_disconnect(engine: AssistantEngine, reference: str) -> int:
+    """Relay one disconnection and say exactly what it did — and did not do.
+
+    Three answers, and ADR-0151 §8 rules each of them. A record is the live one that
+    was removed. A ``None`` says **one** thing — no live record was removed by this
+    call — and is not a report of a disconnection, not a confirmation that a
+    credential was deleted, and not a statement that the reference does not exist. A
+    :class:`~ai_assistant.core.errors.ResidualCredentialError` means the removal
+    *landed* and a deletion did not, so it is reported as a disconnection whose
+    credential deletion is incomplete and never as a failed disconnection — which is
+    why it is caught above the general handler rather than through it.
+    """
+    try:
+        removed = await engine.disconnect_account(reference)
+    except asyncio.CancelledError:
+        _render_cancelled_act("disconnection")
+        _render_connection_unread(reference)
+        raise
+    except ResidualCredentialError as exc:
+        _render_residual_credential("disconnection", exc, reference=reference)
+        return _EXIT_ERROR
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        _render_connection_state(reference, await _connection_state(engine, reference))
+        return _EXIT_ERROR
+    if removed is None:
+        _render_nothing_removed(reference)
+        return _EXIT_ERROR
+    _render_disconnected(removed)
+    return _EXIT_OK
+
+
+async def _drive_connections(engine: AssistantEngine) -> int:
+    """Ask the hub what is connected now and render it whole (ADR-0151 §9).
+
+    **One call and no second one.** This adapter does not annotate the set against
+    what the hub can currently offer, does not drop a record whose integration is
+    not built, and does not merge in ``recent_connection_acts``: a connection the
+    hub can do nothing with is exactly what this command exists to show, and each of
+    those moves would hide it again. Nothing is re-derived either — a reference's
+    state is the store's answer, and ADR-0151 §9 forbids reading one off the history.
+    """
+    try:
+        connected = await engine.connected_accounts()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_connections(connected)
+    return _EXIT_OK
+
+
+async def _drive_connection_acts(engine: AssistantEngine, *, limit: int) -> int:
+    """Read what was done to connections and render it in the store's own order."""
+    try:
+        acts = await engine.recent_connection_acts(limit=limit)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_connection_acts(acts, limit=limit)
+    return _EXIT_OK
+
+
+def _partial_reference(exc: BaseException) -> str | None:
+    """The reference an error names, where its class carries one (ADR-0151 §2a).
+
+    Three classes do, and each is an outcome in which the act *partly landed* — the
+    state a user has to be able to name in order to act on it. After
+    ``connect_account`` it is the only handle they will ever have, because §3 minted
+    it inside the act and no result came back.
+
+    An **empty** member is not an absent one: ADR-0085 §10a nulls ``details`` before
+    it truncates a message, so a reduced delivery reconstructs the class with the
+    default and the handle is genuinely lost. That is reported as a loss rather than
+    rendered as an empty reference, which is why this returns ``None`` for it.
+
+    Args:
+        exc: The failure the act raised.
+
+    Returns:
+        The reference, or ``None`` where the class carries none or lost it.
+    """
+    match exc:
+        case (
+            IncompleteProvisioningError()
+            | ProvisioningOutcomeUnknownError()
+            | ResidualCredentialError()
+        ):
+            return exc.reference or None
+        case _:
+            return None
+
+
+def _state_is_known(exc: BaseException) -> bool:
+    """Whether a refusal settles the reference's state without a read (ADR-0151 §7).
+
+    Two of the seven classes do, and both are refusals that never reached an act:
+    :class:`~ai_assistant.core.errors.UnusableIdentityError` is raised locally before
+    any I/O, and :class:`~ai_assistant.core.errors.UnknownConnectionError` is refused
+    before the first write. Every other outcome on this surface leaves the state
+    **unread**, which ADR-0151 §7 says is resolved by reading ``connected_accounts``
+    and never by re-running the act — so a client that treated a refusal as an answer
+    about the store would be making the inference §7 exists to forbid.
+
+    Args:
+        exc: The failure the act raised.
+
+    Returns:
+        Whether the reference's state follows from the class alone.
+    """
+    return isinstance(exc, UnusableIdentityError | UnknownConnectionError)
+
+
+async def _connection_state(
+    engine: AssistantEngine, reference: str
+) -> ConnectedAccount | None | _Unread:
+    """Re-read one reference's live record, or report it unread (ADR-0151 §7).
+
+    :func:`_state_after`'s shape on the connection surface, and it exists for the
+    same clause one act over: no surface may infer a reference's state from an act's
+    outcome, and this is the read that states it instead. The inference is wrong in
+    both directions here — an ``IncompleteProvisioningError`` asserts nothing about
+    the live record, because a later act may have displaced this one — so the answer
+    comes from the store or it is withheld.
+
+    A failed read leaves the state **unread** rather than assumed, which is the only
+    safe answer: the alternative is a client that says "nothing is connected" because
+    it could not ask.
+    """
+    try:
+        connected = await engine.connected_accounts()
+    except AssistantError, TransportError:
+        return _UNREAD
+    return next((record for record in connected if record.reference == reference), None)
+
+
+async def _report_provisioning_failure(
+    engine: AssistantEngine, act: str, exc: Exception, *, reference: str | None
+) -> int:
+    """Report one failed provisioning act, then state the reference from a read.
+
+    The two halves are kept apart deliberately, and it is ADR-0151 §7's design
+    rather than this function's: an act's outcome is a fact about *that act*, and a
+    reference's state is a fact about the store. Only the second is answered by a
+    read, and no client derives either from the other.
+
+    A reference the *error* names outranks the one the call carried, because they
+    can differ in exactly one direction that matters: after ``connect_account``
+    there is no supplied reference at all, and the minted one exists only on the
+    error.
+
+    Args:
+        engine: The hub, for the read that states the reference's state.
+        act: What is being reported, opening each sentence.
+        exc: The failure.
+        reference: The reference the call carried, where it carried one.
+
+    Returns:
+        The process exit code, which is always a failure.
+    """
+    named = _partial_reference(exc) or reference
+    _render_provisioning_outcome(act, exc, reference=named)
+    if _state_is_known(exc):
+        return _EXIT_ERROR
+    if named is None:
+        _render_connections_unread()
+        return _EXIT_ERROR
+    _render_connection_state(named, await _connection_state(engine, named))
+    return _EXIT_ERROR
 
 
 def _render_reach_notice(current: NotificationPreferences, asked: _Tuning) -> None:
@@ -5134,6 +5803,453 @@ def _confirm(_confirmation: Confirmation) -> bool:
     action before prompting, so rendering here too would show it twice (I/O; §6).
     """
     return typer.confirm("Proceed?", default=False)
+
+
+# --- rendering the connection surface (ADR-0151 §4, §5, §7, §8, §9) ----------
+
+
+def _reference_hint(reference: str, command: str, *, subject: str = "That reference") -> str:
+    """One copyable command naming a reference, or the line that replaces it.
+
+    :func:`_argument` and :func:`_is_pasteable` composed the way every other hint on
+    this surface composes them (#984, #1013). A minted reference is bounded and
+    chosen by code, but nothing in :data:`~ai_assistant.core.types.DurableIdentifier`
+    forbids a byte a terminal must not be handed — and a *wrong* command is worse
+    than no command, because it is a working instruction naming something else.
+
+    Args:
+        reference: The reference as the hub returned it.
+        command: The command to build, e.g. ``"assistant disconnect"``.
+        subject: What cannot be shown, opening the replacement sentence.
+
+    Returns:
+        The text to print, quoted or withheld.
+    """
+    if not _is_pasteable(reference):
+        return _uncopyable(subject, "The command still takes it, given the exact bytes.")
+    return f"'{command} {_argument(reference)}'"
+
+
+def _connection_state_phrase(state: ProvisioningState) -> str:
+    """Say what one record's provisioning state means, in words (ADR-0151 §4).
+
+    **The pending phrasing is a normative clause rather than a wording choice.**
+    ADR-0151 §4 requires a surface rendering a ``PENDING`` record to say the
+    reference is *not connectable* and that the remedy is to run the act again, and
+    forbids saying that the connection is being established, is in progress, or will
+    complete on its own. Nothing is running: ADR-0148 §6 rules an interrupted act's
+    state "refused rather than reconciled", the act that wrote the record is gone,
+    and the record is inert until a person acts.
+
+    Total over the enum through :func:`~typing.assert_never`, so a third member
+    would fail the type check rather than render as an empty string.
+    """
+    match state:
+        case ProvisioningState.ACTIVE:
+            return "connected"
+        case ProvisioningState.PENDING:
+            return "not connectable — the act that wrote it never finished"
+        case _:  # pragma: no cover — exhaustive over the enum
+            assert_never(state)
+
+
+def _render_connection_intent(identity: str, *, reference: str | None = None) -> None:
+    """Show the account identity before the credential is asked for (ADR-0151 §5).
+
+    "No surface accepts an identity it does not display" is §5's own sentence, and
+    the hub cannot enforce it — nothing on the wire distinguishes a client that
+    rendered the value (ADR-0098 §5). What it buys is ADR-0149 §4's third answer to
+    a credential typed into the name field: the value is *seen*, by the one person
+    who can tell that it is the wrong value.
+
+    The identity is rendered and never echoed anywhere else — it is Tier 1 personal
+    data, so it reaches no log line and no error message (ADR-0149 §3).
+    """
+    where = "" if reference is None else f" under [bold]{_safe(reference)}[/]"
+    console.print(f"About to connect the account [bold cyan]{_safe(identity)}[/]{where}.\n")
+    console.print(
+        "[dim]That is the name I will record and show you, exactly as you typed it — "
+        "I normalise nothing. If it is not the account you meant, or if it is your "
+        "credential, stop here.[/]\n"
+    )
+
+
+def _render_unusable_credential(exc: ValueError) -> None:
+    """Report a credential this surface will not carry, having sent nothing.
+
+    The message is :func:`~ai_assistant.core.types.secret_value`'s own, and it is
+    safe to print for a reason worth stating: ADR-0125 §6 forbids any exception that
+    seam raises from carrying a prefix, a suffix, a truncation, a digest **or a
+    length** of the rejected value. So it says which rule was broken and nothing
+    about what broke it.
+    """
+    console.print(f"[red]That credential cannot be used:[/] {_safe(str(exc))}. Nothing was sent.")
+
+
+def _render_connected(verb: str, record: ConnectedAccount) -> None:
+    """Report a completed provisioning act, with the reference the hub minted.
+
+    An act returns only once ADR-0148 §6's **third** write has landed, so this is
+    the one place on the surface where a connection may be called live — and the
+    record carries ``ACTIVE`` by contract (ADR-0151 §7).
+
+    The reference is printed prominently because it is the whole handle: §3 minted
+    it inside the act, the user did not choose it, and every act after this one is
+    performed against a value they read back off a listing.
+    """
+    console.print(
+        f"[green]{verb}.[/] [bold cyan]{_safe(record.identity)}[/] is connected, "
+        f"at revision {record.revision}."
+    )
+    console.print(f"  Its reference is [bold]{_safe(record.reference)}[/]")
+    console.print(
+        f"  [dim]Replace its credential later with 'assistant reconnect' — see "
+        f"{_reference_hint(record.reference, 'assistant connections', subject='Its reference')}"
+        f" for it. End it with {_reference_hint(record.reference, 'assistant disconnect')}[/]"
+    )
+    console.print(
+        "\n[dim]This is a connection, not a permission: it authorises nothing on its "
+        "own. What I am allowed to read is 'assistant granted'.[/]"
+    )
+
+
+def _render_cancelled_act(act: str) -> None:
+    """Say a cancelled act's outcome is not known, starting no call (ADR-0151 §7).
+
+    §7's cancellation clause has three parts and the middle one is load-bearing: a
+    cancelled client is still asked to report, which invites reading the state
+    before reporting it — the same breach by a kinder route. So this says what
+    happened to the act, and the caller says the state is unread without asking. The
+    ``CancelledError`` then leaves unconverted, which ADR-0060 requires and which no
+    report satisfies.
+    """
+    console.print(
+        f"[yellow]The outcome of the {act} is not known.[/] It was cancelled, and a "
+        "cancelled act leaves exactly the states a lost answer does — it may have "
+        "been done anyway."
+    )
+
+
+def _render_unknown_outcome(act: str, exc: Exception) -> None:
+    """Report an act whose outcome cannot be asserted in either direction.
+
+    Three failures land here and each is genuinely unknown rather than merely
+    unreported. A :class:`~ai_assistant.core.errors.ConnectionStoreError` is raised
+    *before the act's own first write returns*, so whether that write landed cannot
+    be asserted and a reference may or may not exist (ADR-0151 §7). A
+    ``TransportError`` is the answer having been lost after the hub may already have
+    committed (ADR-0084 §3). And an
+    :class:`~ai_assistant.core.errors.OversizedValueError` is a *typed* refusal that
+    is nonetheless unknown, for :func:`_outcome_of`'s reason: on a mutating call the
+    result is measured after the work has committed (ADR-0085 §8e, #570), so an
+    oversized result means the act landed and could not be reported — while an
+    oversized argument is refused before any I/O. A caller cannot tell those apart.
+    """
+    remedy = (
+        " The frame this hub is configured with is too small to carry it; raising "
+        "'hub_max_frame_bytes' is the operator's remedy."
+        if isinstance(exc, OversizedValueError)
+        else ""
+    )
+    console.print(
+        f"[yellow]The outcome of the {act} is not known.[/] "
+        f"{_safe('; '.join(_leaf_messages(exc)))}.{remedy} I am not saying it landed "
+        "and I am not saying it did not."
+    )
+
+
+def _render_provisioning_outcome(act: str, exc: Exception, *, reference: str | None) -> None:
+    """Say what one failed provisioning act is known to have done (ADR-0151 §7).
+
+    Six outcomes, six sentences and six next steps, and no two of them
+    interchangeable — a surface that collapsed any pair would tell a person their
+    credential was unused when it was live, or send them to re-run an act that had
+    already worked. The vocabulary is ADR-0139 §4's ("landed", "known not to have
+    landed", "not known"), which ADR-0151 §7 transposes from an amendment's two
+    calls to one act's three writes.
+
+    Two negatives are as load-bearing as the positives. An
+    :class:`~ai_assistant.core.errors.IncompleteProvisioningError` is **never**
+    reported as the call having changed nothing — its own first write landed, and
+    the reference it names exists. And a
+    :class:`~ai_assistant.core.errors.DisplacedProvisioningError` is **never**
+    reported as having left the store unchanged, as having rolled anything back, or
+    as a reason to retry the same act blind: ADR-0148 §6 displaces an act that may
+    already have appended its entry and written its credential.
+    """
+    named = "that reference" if reference is None else f"[bold]{_safe(reference)}[/]"
+    match exc:
+        case UnusableIdentityError():
+            console.print(
+                f"[red]The {act} is known not to have landed[/] — I refused the "
+                f"account name before anything was sent, so your credential never "
+                f"left this machine: {_safe(str(exc))}."
+            )
+        case UnknownConnectionError():
+            console.print(
+                f"[red]The {act} is known not to have landed[/] — I hold no "
+                f"connection under {named}, so nothing was written. "
+                "'assistant connections' lists the references I do hold."
+            )
+        case DisplacedProvisioningError():
+            console.print(
+                f"[red]The {act} was not performed.[/] Another act took {named} over "
+                "while this one was running, so no record I wrote is that "
+                "reference's live one. Nothing was rolled back, and this act may "
+                "have left an entry and a credential of its own that no call reads — "
+                "disconnecting that reference removes them. Do not simply run it "
+                "again; read what is connected first."
+            )
+        case IncompleteProvisioningError():
+            console.print(
+                f"[yellow]The {act} did not complete.[/] The reference {named} "
+                "**exists** — I wrote its record — and the credential you gave me "
+                "was never put into use, so it will not become the live one. This "
+                "call did not leave things as they were. Run the act again on that "
+                "reference, or disconnect it; both are safe."
+            )
+        case ProvisioningOutcomeUnknownError():
+            console.print(
+                f"[yellow]The outcome of the {act} is not known.[/] The reference "
+                f"{named} **exists**; whether the credential you gave me is now in "
+                "use I cannot say, because the store may have committed and failed "
+                "before telling me. **Do not run it again on the assumption it "
+                "failed** — that would replace a credential that may already be "
+                "working."
+            )
+        case ResidualCredentialError():
+            _render_residual_credential(
+                f"The {act} completed, and the connection is live at its new revision.",
+                exc,
+                reference=reference,
+            )
+        case _:
+            _render_unknown_outcome(act, exc)
+
+
+def _render_residual_credential(landed: str, exc: Exception, *, reference: str | None) -> None:
+    """Report an act that **completed** and whose credential deletion did not.
+
+    ADR-0151 §7 and §8 both state what a caller may conclude, and both state it as a
+    prohibition first: no client reports this as a failed connection or a failed
+    disconnection. The act landed. What did not is the removal of a credential the
+    act was to delete — a predecessor's slot, or the disconnection's own pass — so an
+    unreferenced credential remains, named by the store, read by no call, and
+    reachable by running the disconnection again.
+
+    It is raised rather than reported in a field for ADR-0149 §5's reason: the
+    failure "is reported and never suppressed", and a boolean is precisely what an
+    inattentive client suppresses by rendering the success and dropping the flag.
+    """
+    where = "" if reference is None else f" for [bold]{_safe(reference)}[/]"
+    console.print(f"[green]{landed}[/]")
+    console.print(
+        f"[yellow]A credential I was to delete{where} is still there:[/] "
+        f"{_safe('; '.join(_leaf_messages(exc)))}. Nothing reads it and no live "
+        "record names it, but it has not gone."
+    )
+    if reference is not None:
+        console.print(
+            f"  [dim]Run {_reference_hint(reference, 'assistant disconnect')} again to "
+            "finish the deletion — it is safe to repeat.[/]"
+        )
+
+
+def _render_connections_unread() -> None:
+    """Say nothing is known about what was written, with no reference to name.
+
+    The state a ``connect_account`` failure before the first write leaves: there may
+    or may not be a record, and there is certainly no handle, because ADR-0151 §3
+    mints one only as that first record is written. ADR-0151 §7 resolves it by a
+    read of ``connected_accounts`` **once the store is readable**, which is a later
+    command rather than a second call now.
+    """
+    console.print(
+        "[dim]I have not read what is connected, and there is no reference to name. "
+        "'assistant connections' will tell you, once the hub can answer.[/]"
+    )
+
+
+def _render_connection_unread(reference: str) -> None:
+    """Say one reference's state is unread, and start no call to find out.
+
+    ADR-0151 §7's cancellation clause: "A cancelled client starts no new call in
+    order to report". ADR-0060 permits deferring a cancellation only while a method
+    makes its resources safe, and a read performed to present a state is not that —
+    so this says the state is unread, starts nothing, and lets the
+    ``CancelledError`` leave.
+    """
+    console.print(
+        f"[dim]I have not read the state of {_safe(reference)}, so I am not saying. "
+        "'assistant connections' will tell you.[/]"
+    )
+
+
+def _render_connection_state(reference: str, state: ConnectedAccount | None | _Unread) -> None:
+    """State one reference's live record, from a read and never from an act's outcome.
+
+    ADR-0151 §7's resolution, and :func:`_render_state`'s shape one surface over.
+    Three answers, and the middle one is the one an author collapses: a ``None`` is
+    "I read the store and it holds no live record for this reference", which is
+    **not** the same as "the reference does not exist" — the store may hold entries
+    for it that no live record names (ADR-0149 §3, §5).
+    """
+    if isinstance(state, _Unread):
+        console.print(
+            f"[dim]I could not read the state of {_safe(reference)}, so I am not "
+            "saying. Try 'assistant connections'.[/]"
+        )
+        return
+    if state is None:
+        console.print(
+            f"I read the store: nothing is connected under [bold]{_safe(reference)}[/] right now."
+        )
+        return
+    console.print(
+        f"I read the store: [bold]{_safe(reference)}[/] holds "
+        f"[bold cyan]{_safe(state.identity)}[/] at revision {state.revision} — "
+        f"{_connection_state_phrase(state.state)}."
+    )
+
+
+def _render_connections(connected: tuple[ConnectedAccount, ...]) -> None:
+    """Render what is connected now, whole, with each record's state (ADR-0151 §4, §9).
+
+    **The set is presented as it arrived.** No record is dropped because no
+    integration is built for it, nothing is merged in from the act history, and no
+    state is re-derived — a connection the hub can do nothing with is exactly what
+    this command exists to show, and each of those moves would hide it from the
+    disconnection that is its owner's only remedy (ADR-0139 §1, ADR-0151 §9).
+
+    **A ``PENDING`` row is visibly not a working connection**, which is the clause
+    ADR-0151 §4 puts on a client and #1130 filed against the delete act's own
+    statement of the same list. It says the reference is not connectable and what
+    the remedy is, and it never says the connection is being established or will
+    complete on its own.
+
+    **A listing says which account and not which service**, and that is a
+    consequence rather than an omission: nothing in the tree says what an
+    integration *is* yet, so there is nothing honest to put there (ADR-0151 §18).
+    """
+    if not connected:
+        console.print(
+            "[yellow]Nothing is connected.[/] 'assistant connect' adds an account; "
+            "it is a different question from 'assistant granted', which is what I am "
+            "allowed to read."
+        )
+        return
+    console.print(f"[bold]{len(connected)}[/] connection(s):\n")
+    for record in connected:
+        console.print(f"  [bold cyan]{_safe(record.identity)}[/]")
+        console.print(f"    [dim]{_safe(record.reference)}[/] — revision {record.revision}")
+        if record.state is ProvisioningState.ACTIVE:
+            console.print(f"    [green]{_connection_state_phrase(record.state)}[/]")
+        else:
+            console.print(f"    [yellow]{_connection_state_phrase(record.state)}[/]")
+            console.print(
+                "    [yellow]Nothing is in progress and nothing will finish it.[/] "
+                "Run the act again with 'assistant reconnect', or end it with "
+                "'assistant disconnect'."
+            )
+        console.print(
+            f"    [dim]end it with {_reference_hint(record.reference, 'assistant disconnect')}[/]"
+        )
+        console.print()
+    console.print(
+        "[dim]This is a snapshot taken when you asked, not a claim that stays true. "
+        "It says nothing about what I am permitted to do — a connection is not an "
+        "authorisation; see 'assistant granted' — and it carries no times.[/]"
+    )
+
+
+def _render_connection_acts(acts: tuple[ConnectionAct, ...], *, limit: int) -> None:
+    """Render what was done to connections, without claiming any of it is live.
+
+    **An act is shown as an act and never as a standing** (ADR-0151 §9). The reason
+    is not the clock one :func:`_render_grants` carries — there is no clock here at
+    all — but the page boundary: this listing is bounded by ``limit``, so a
+    reference whose latest act falls outside the page is one a client walking the
+    page would report by an *earlier* act. That failure appears on the deployment
+    with the most history and nowhere else, which is why the rule is stated over the
+    shape rather than left to a reader's judgement.
+
+    **A removal is the absence of the account and not a third state** (ADR-0149 §5),
+    which is what this renderer's two branches are.
+
+    **No position on this page means a time.** A connection record carries no
+    instant, so the order is the order the store recorded the acts in and nothing
+    more (ADR-0151 §4, §9).
+    """
+    if not acts:
+        console.print("[yellow]Nothing recorded.[/] No connection has been made or ended.")
+        return
+    console.print(f"[bold]{len(acts)}[/] act(s), in the order I recorded them, newest first:\n")
+    for act in acts:
+        if act.account is None:
+            console.print(f"  [bold]disconnected[/] [dim]{_safe(act.reference)}[/]")
+        else:
+            console.print(
+                f"  [bold]connected[/] [bold cyan]{_safe(act.account.identity)}[/] "
+                f"[dim]{_safe(act.reference)}[/] — reached "
+                f"{_connection_state_phrase(act.account.state)}"
+            )
+        console.print(f"    [dim]revision {act.revision}[/]")
+    if len(acts) == limit:
+        console.print(
+            f"\n[dim]Showing {limit}. Ask for more with --limit; there is no total count.[/]"
+        )
+    console.print(
+        "\n[dim]There are no times here: a position is where I recorded the act and "
+        "nothing else. What is connected *now* is 'assistant connections' — a row "
+        "here says an act happened, not that it still stands.[/]"
+    )
+
+
+def _render_disconnected(record: ConnectedAccount) -> None:
+    """Report the live record a disconnection removed, and never more (ADR-0151 §8).
+
+    The overclaim this wording exists to avoid is the sibling of ``revoke``'s
+    (ADR-0102 §9): "that account can no longer be used" is the sentence a person
+    writes, and it promises three things ADR-0149 §5 declines to. A disconnection
+    does not stop a transmission already in flight, does not cancel a provisioning
+    act that is running, and is not a guarantee that the keyring holds nothing for
+    that reference. What is true is the weaker thing §5 does state — no live record
+    names any slot for it.
+
+    The last line closes an overclaim the acts make available *together*: a user who
+    disconnects everything has not performed ADR-0149 §8's purge and has not
+    discharged their delete right, and presenting it as either would be a purge that
+    skips a scope arriving by composition instead of by omission.
+    """
+    console.print(
+        f"[green]Disconnected.[/] [bold cyan]{_safe(record.identity)}[/] was live at "
+        f"revision {record.revision}; no live record names any credential for "
+        f"[bold]{_safe(record.reference)}[/] any more."
+    )
+    console.print(
+        "[dim]That is the whole of what I can promise: it does not stop anything "
+        "already in flight, it does not cancel an act that is running, and it is not "
+        "a guarantee that my keyring holds nothing at all for that reference. "
+        "Disconnecting everything is not the same as erasing this installation.[/]"
+    )
+
+
+def _render_nothing_removed(reference: str) -> None:
+    """Report that no live record was removed, and say only that (ADR-0151 §8).
+
+    A ``None`` is **not** a report of a disconnection, not a confirmation that a
+    credential was deleted, and not a statement that the reference does not exist —
+    the store may hold entries for it that no live record names, and the reference
+    may simply never have been one of mine. All three of those are readings this
+    wording has to refuse at once, which is why it says the one true thing and then
+    points at the command that answers the question the user probably has.
+    """
+    console.print(
+        f"[yellow]Nothing was removed:[/] no live record for "
+        f"[bold]{_safe(reference)}[/] when the call ran. That is not a "
+        "disconnection, and it does not say the reference is unknown to me — "
+        "'assistant connections' says what is connected."
+    )
 
 
 def _render_error(exc: Exception) -> None:
