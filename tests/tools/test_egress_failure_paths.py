@@ -441,6 +441,67 @@ async def test_arguments_that_are_not_a_submission_are_refused(payload: dict[str
     assert ring.reads == []
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("ok\r\nBcc: mallory@example.invalid", id="crlf"),
+        pytest.param("ok\nBcc: mallory@example.invalid", id="bare-lf"),
+        pytest.param("ok\rBcc: mallory@example.invalid", id="bare-cr"),
+        pytest.param("\nleading", id="leading-lf"),
+    ],
+)
+async def test_a_header_field_carrying_a_line_break_is_refused_before_anything_is_spent(
+    text: str,
+) -> None:
+    r"""Refusal hygiene, not a disclosure control, and the distinction is the point.
+
+    **This is not header injection, and that was checked rather than assumed.**
+    ``EmailMessage`` already refuses a header value containing ``CR`` or ``LF`` —
+    "Header values may not contain linefeed or carriage return characters", for
+    ``\r\n`` and for a bare ``\n`` alike — so a smuggled ``Bcc:`` never reached the
+    wire and no unauthorised recipient was ever reachable this way. Had the stdlib
+    accepted it, this would be a blocker about an added recipient rather than a
+    major about a refusal's type and timing.
+
+    What the stdlib's refusal does not do is arrive well. It fires inside the
+    renderer, which runs **after** the credential has been presented and the
+    envelope accepted, and it escapes as a bare ``ValueError`` that ADR-0029 §3
+    records as ``INTERNAL`` — so the call reads as a broken tool rather than as a
+    refused one, and a credential was spent on a call that could never be
+    performed. ADR-0148 §1's third clause is the ground for moving it earlier: a
+    request that cannot be completed is "refused **before the ruling**", and
+    ADR-0145's precedent is the same move one field over.
+
+    So the assertions are about *where* and *what*, not merely that it failed: the
+    refusal is typed, and no record is read, no credential fetched, no connection
+    opened. Found by adversarial review on round 4.
+    """
+    subject, ring = await _refusing()
+
+    with pytest.raises(BoundCallChangedError, match="line break"):
+        await subject.transmit(binding(subject=text), arguments(subject=text))
+
+    assert ring.reads == []
+
+
+async def test_a_body_may_carry_line_breaks_because_a_body_is_not_a_header() -> None:
+    """The other half, without which the check above would be a defect of its own.
+
+    A body is content, and RFC 5321 §4.5.2's transparency is what makes its line
+    breaks safe. Refusing them would leave the seam unable to send an ordinary
+    multi-line email, so the header-field list is narrow on purpose and this is
+    what holds it narrow.
+    """
+    body = "first line\nsecond line\n.third looks like a terminator"
+    channel = ScriptedChannel(*implicit_tls_script())
+    subject = transport(channel, secrets=await keyring())
+
+    await subject.transmit(binding(body=body), arguments(body=body))
+
+    assert "second line" in channel.payload()
+    assert "\r\n..third" in channel.payload()
+
+
 async def test_a_binding_naming_another_connection_is_refused_on_the_same_identity() -> None:
     """The reference is compared, not only the identity (ADR-0148 §6).
 
