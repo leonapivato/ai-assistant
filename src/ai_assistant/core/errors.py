@@ -1103,3 +1103,279 @@ class SecretStoreUnavailableError(SecretStoreError):
     which backend was looked for and what was found — and never in terms of a
     value (§7).
     """
+
+
+# --- connections: the seven failures of a provisioning act (ADR-0151 §2a) ----
+# Six outcomes and seven classes. The count is the subject's rather than the
+# design's: ADR-0148 §6 gives a provisioning act three writes and three
+# displacement points, and ADR-0149 §5 and §8 give it a deletion that can outlive
+# its own success — so a caller owes the user six different sentences with six
+# different next steps, and no two of them are interchangeable. A surface that
+# collapsed any pair would tell a user their credential was unused when it was
+# live, or send them to re-run an act that had already worked.
+#
+# **A class rather than a field, for each of them** (ADR-0151 §7, §8): the
+# distinction a caller must not miss belongs in the type they catch, because a
+# field is what an inattentive client renders past.
+#
+# **No class here names the supplied identity, the supplied credential, any part
+# or derivation of either, or a filesystem path** (ADR-0151 §2a). The identity is
+# Tier 1 personal data (ADR-0149 §3) and the credential is Tier 0; what a refusal
+# on this surface names is the *reference*, which ADR-0149 §3 rules a non-secret
+# handle chosen by code and licenses to be logged.
+
+
+class UnusableIdentityError(AssistantError):
+    """The account identity supplied with a provisioning act is refused (ADR-0151 §5).
+
+    One class for four refusals, on the same test: the identity equals the
+    plaintext of the credential supplied in the same call, it carries a Unicode
+    control character or a line break, or its UTF-8 encoding exceeds
+    :data:`~ai_assistant.core.types.ACCOUNT_IDENTITY_MAX_BYTES`. In every case the
+    recourse is to supply a different identity, so one class is right and three
+    would be surface with no consumer (ADR-0097 §10's rule, applied here).
+
+    **Raised locally, before any I/O, by every implementation of
+    ``connect_account`` and ``reprovision_account`` — the client included.** Both
+    implementations therefore refuse the same values without a round trip and
+    neither is silently more permissive (ADR-0085 §9). No such call reaches the
+    hub, and no credential is sent for one — which is the property that matters
+    most here, because the refused call is one of the two that carry a Tier 0
+    value.
+
+    **An** :class:`AssistantError` **rather than ADR-0085 §9's ``ValueError``,
+    and the distinction is §9's own.** A ``ValueError`` there is "a caller
+    programming error rather than a condition of the system" — a blank id, a
+    non-positive ``limit``. An identity is a value the *user typed*, and a person
+    pasting a token into the wrong field has not made a programming error: a
+    client needs to render the refusal, and ``wire/server.py`` converts an
+    ``AssistantError`` into an error frame while letting anything else close the
+    connection. A dropped socket is the worst available outcome on the one call
+    that carries a credential, because the natural client response to a dropped
+    socket is to retry it.
+
+    **The message names neither value, no part of either, and no length of
+    either** (ADR-0151 §5). It says which rule was broken and nothing about what
+    broke it.
+
+    It carries no structured state and in particular **no reference**: the
+    refusal happens before any write, so ``connect_account`` has none to name
+    (§3's mint produces one only as the first record is written) and
+    ``reprovision_account``'s caller already holds the one they supplied.
+    """
+
+
+class ConnectionStoreError(AssistantError):
+    """The connection store could not be read or written (ADR-0151 §2a).
+
+    The per-store class this corpus writes for every durable store —
+    :class:`MemoryStoreError`, :class:`ConversationStoreError`,
+    :class:`DeferralStoreError`, :class:`NotificationStoreError`,
+    :class:`TraceStoreError`, :class:`GrantError` — arriving for the seventh
+    (ADR-0149 §3). Declared by all five connection operations, because all five
+    read or write the store.
+
+    **Raised by a provisioning act it leaves the act's outcome *not known*.**
+    ADR-0151 §7 classifies by two facts the act knows, and this is the class for a
+    failure *before the act's own first write returns*: whether that write landed
+    cannot be asserted, so a reference may or may not exist. The client reports it
+    as not known — never as landed and never as not landed — and resolves it by
+    reading ``connected_accounts`` once the store is readable (ADR-0139 §4).
+
+    **It carries no reference, because there may be none to carry.** That is the
+    one place this class differs from :class:`ProvisioningOutcomeUnknownError`,
+    which asserts the reference exists and asserts nothing else.
+    """
+
+
+class UnknownConnectionError(ConnectionStoreError):
+    """``reprovision_account`` named a reference the store does not hold (ADR-0151 §2a).
+
+    What the corpus does for "you named something this store does not hold",
+    after :class:`UnknownConversationError` and :class:`UnknownContinuationError`.
+    Refused before the first write, so nothing is written.
+
+    **It reaches ``reprovision_account`` only.** ``disconnect_account`` on an
+    unheld reference is not an error at all — it returns ``None``, which says one
+    thing: no live record was removed by this call (ADR-0151 §8) — and
+    ``connect_account`` names nothing, because its reference is minted and cannot
+    be aimed at an existing record (ADR-0151 §3).
+
+    A subclass of :class:`ConnectionStoreError` so a caller that only wants "the
+    connection store could not answer" writes one handler, in the shape
+    :class:`UnknownConversationError` already has under
+    :class:`ConversationStoreError`.
+    """
+
+
+class DisplacedProvisioningError(ConnectionStoreError):
+    """Another act took the connection record over (ADR-0151 §2a, §7).
+
+    ADR-0148 §6 gives a provisioning act three points at which another act can
+    take the record from it — the taking compare-and-swap, the re-read before the
+    credential write, and the activation's own compare-and-swap — and all three
+    end the same way for the caller: **no record this act wrote is the
+    reference's live one**, and the recourse is to read ``connected_accounts`` and
+    decide whether to run the act again. One class covers them because the
+    caller's recourse is identical (ADR-0097 §10).
+
+    **It does not mean the act wrote nothing**, and ADR-0151 §7 is careful about
+    that because an earlier draft got it wrong. ADR-0148 §6's "never held it and
+    writes nothing" is scoped by its own words to an act whose *taking*
+    compare-and-swap fails; the re-read and activation clauses displace an act
+    that has already appended its pending entry and may already have written its
+    credential, which §6 then rules lands "in that act's own slot". So depending
+    on the point, the store may hold that act's own pending entry at its own
+    revision and the keyring may hold a credential in that act's own slot.
+    Neither is read by any call, both are named by the store, and both are
+    removed by a disconnection of that reference and by ADR-0149 §8's purge.
+
+    **No client presents it as having left the store unchanged, as having rolled
+    anything back, or as a reason to retry the same act blind** (ADR-0151 §7). It
+    reports the act as not performed and the reference's state as unread.
+
+    No operation performs a liveness pre-check to narrow the window, because a
+    pre-check narrows and does not close it while inviting a reader to believe it
+    had.
+    """
+
+
+class IncompleteProvisioningError(AssistantError):
+    """A provisioning act did not complete, and its reference exists (ADR-0151 §7).
+
+    It asserts **exactly two things**. The reference it carries *exists* in the
+    connection store, because this act's own first write landed and ADR-0149 §3's
+    store is append-only. And *this act did not complete*, because no activation
+    of it landed, so nothing it wrote is or ever becomes the live credential.
+
+    It asserts **nothing** about the reference's live record at the moment it is
+    caught: this act's record may still be live and pending, or a later act may
+    have displaced it, and the store is what says which. A client names the
+    reference, says the act did not complete, says the reference's state is
+    unread, and offers ``reprovision_account`` or ``disconnect_account`` on it —
+    both safe whoever now owns the record, the first by its own compare-and-swap
+    and the second by being idempotent (ADR-0149 §5). **No client reports the call
+    as having changed nothing.**
+
+    Raised where the credential write fails, where either of ADR-0148 §6's two
+    re-reads fails, and where an activation's compare-and-swap is *observed not to
+    land* other than by a later act holding the record (ADR-0151 §7). A keyring
+    failure at the credential write is **converted** into this class with the
+    underlying :class:`SecretStoreError` chained as the cause: the raw class says
+    the keyring failed and says nothing about which of the three writes had
+    landed, and the two answers are opposite (ADR-0151 §2a).
+    """
+
+    def __init__(self, message: str, reference: str = "") -> None:
+        """Create the failure, recording which reference the act was on.
+
+        Args:
+            message: What did not complete, for a human reader. **Sized by its
+                raiser** so that the whole error payload — the code, this message
+                and the one ``details`` member — fits the budget
+                ``hub_max_frame_bytes`` leaves at its 1024-byte floor (ADR-0151
+                §11, ADR-0085 §8c, §8d). ADR-0085 §10a nulls ``details`` before it
+                truncates a message, so a payload that has to be reduced is one
+                that arrives without its reference — and on the two classes
+                ``connect_account`` raises, that is the only handle the caller
+                will ever have, because the mint made it.
+            reference: The connection reference whose record this act wrote.
+                Defaults to the empty string so a *reduced* delivery still
+                reconstructs (ADR-0085 §10a); ``details_elided`` is what tells such
+                a caller the value was lost, rather than an empty one reading as an
+                answer.
+
+        Raises:
+            ValueError: If either string has no UTF-8 encoding
+                (:class:`AssistantError`).
+        """
+        super().__init__(message)
+        self.reference: str = encodable_text(reference)
+
+
+class ProvisioningOutcomeUnknownError(AssistantError):
+    """A provisioning act's activation failed rather than returning (ADR-0151 §7).
+
+    It asserts that the reference it carries **exists** and asserts **nothing
+    else**: the store may have committed the compare-and-swap and failed before
+    saying so, so neither completion nor incompletion may be asserted — the act
+    may have completed, or may have left the record pending.
+
+    The client names the reference, says the outcome is not known, and resolves it
+    by reading ``connected_accounts`` — **never by re-running the act on the
+    assumption it failed**, which would rotate a credential that may already be
+    live. Both remedies stay available afterwards, whichever the read shows.
+
+    **The activation is a connection-store write, not a keyring one** (ADR-0148
+    §6), so ADR-0151 §2a's keyring-conversion clause does not reach it and no lane
+    reads it as doing so.
+    """
+
+    def __init__(self, message: str, reference: str = "") -> None:
+        """Create the failure, recording which reference the act was on.
+
+        Args:
+            message: What outcome is unknown, for a human reader. Sized by its
+                raiser for :class:`IncompleteProvisioningError`'s reason — and this
+                is the widest of the three codes at 31 bytes, which is the one the
+                shared message bound is sized against (ADR-0151 §11).
+            reference: The connection reference the act was on. Defaults to the
+                empty string so a reduced delivery still reconstructs.
+
+        Raises:
+            ValueError: If either string has no UTF-8 encoding
+                (:class:`AssistantError`).
+        """
+        super().__init__(message)
+        self.reference: str = encodable_text(reference)
+
+
+class ResidualCredentialError(AssistantError):
+    """The act completed and a credential it was to delete did not go (ADR-0151 §7, §8).
+
+    **The act it was raised by completed.** After ``reprovision_account`` the
+    reference is connected at the new revision; after ``disconnect_account`` the
+    reference has no live record. What failed is a deletion of a credential the
+    act was to remove — the predecessor's slot (ADR-0148 §6) or the
+    disconnection's deletion pass (ADR-0149 §5) — so an unreferenced credential
+    remains, named by the store, read by no call, and reachable by a re-run of
+    ``disconnect_account`` and by ADR-0149 §8's purge. **No client reports it as a
+    failed connection or a failed disconnection.**
+
+    **Raising rather than reporting a residue in a field is ADR-0149 §5's own
+    requirement doing the choosing**: §5 says the failure "is reported and never
+    suppressed", and a boolean field saying the deletion did not complete is
+    exactly what an inattentive client suppresses — it renders the success and
+    drops the flag — whereas an exception cannot be ignored without being caught,
+    and a catch is a line a reviewer reads. The cost is that an operation both
+    succeeds and raises, which is unusual enough that ADR-0151 §7 and §8 say
+    precisely what a caller may conclude from it.
+
+    A keyring failure at either deletion is **converted** into this class with the
+    underlying :class:`SecretStoreError` chained as the cause (ADR-0151 §2a). The
+    conversion is what makes the outcome answerable from the class rather than
+    from a rule about ordering: ADR-0148 §6's predecessor-slot deletion happens
+    *after* the activation, so a keyring failure there arrives with all three
+    writes landed and the record active — and a client deriving the answer from
+    the write order would report a live connection as pending and rotate a
+    credential that was working.
+    """
+
+    def __init__(self, message: str, reference: str = "") -> None:
+        """Create the failure, recording which reference the act was on.
+
+        Args:
+            message: Which deletion did not complete, for a human reader. Sized
+                by its raiser for :class:`IncompleteProvisioningError`'s reason.
+            reference: The connection reference the act was on. Defaults to the
+                empty string so a reduced delivery still reconstructs. It is
+                inside ADR-0151 §11's bound although its caller supplied it,
+                because that clause is stated over *the class* rather than over
+                which references are re-suppliable.
+
+        Raises:
+            ValueError: If either string has no UTF-8 encoding
+                (:class:`AssistantError`).
+        """
+        super().__init__(message)
+        self.reference: str = encodable_text(reference)

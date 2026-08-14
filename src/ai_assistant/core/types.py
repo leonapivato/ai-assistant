@@ -10765,3 +10765,256 @@ class NotificationDelivery(BaseModel):
             "decides nothing about its meaning (ADR-0131 §8)."
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Connections: what the owner connected, and what was done to it (ADR-0151)
+# ---------------------------------------------------------------------------
+# Three types and two constants, promoted because ADR-0151 §1's five engine
+# operations exchange them and ADR-0151 §10's `ConnectionProvisioner` carries
+# them across the `orchestration`/`tools` boundary (ADR-0068 §1).
+#
+# **No credential value, and nothing derived from one, appears anywhere below**
+# (ADR-0149 §9, ADR-0151 §6). A connection's credential travels only in the two
+# requests that write it and comes to rest only in the keyring; what these types
+# carry is the non-secret half of ADR-0148 §6's record — the reference, the
+# identity, the revision and the provisioning state. In particular no model here
+# carries a :class:`SecretName`: a credential slot is `tools/`-internal
+# (ADR-0149 §3), and a caller holding one could reach the keyring by another
+# route (ADR-0149 §10).
+#
+# **There is no timestamp, and that is a consequence rather than an omission.**
+# ADR-0149 §3 fixes what a connection record carries and an instant is not among
+# it, so `recent_connection_acts` answers in the store's own append order and
+# makes no timing claim (ADR-0151 §4, §9). Giving a record a recorded instant is
+# a change to ADR-0149 §3 and owes its own ADR.
+
+
+class ProvisioningState(StrEnum):
+    """How far the act that wrote a connection record got (ADR-0148 §6).
+
+    **Exactly two members, and the closure is ADR-0148 §6's own rule expressed
+    as a type.** §6 gives a connection record one of two provisioning states and
+    ADR-0149 §5 forbids a third: a disconnection appends a *removal entry*, and a
+    reference whose latest entry is a removal has no live connection record at
+    all rather than a record in a third state. So there is no member here for a
+    removal, none for an unknown state, and none for a failure — a removal is
+    read off :attr:`ConnectionAct.account` being absent, and a failure is a class
+    the caller catches (ADR-0151 §2a).
+
+    **Both members are reachable without anyone doing anything wrong**, which is
+    why :attr:`PENDING` is on the surface at all rather than hidden as an
+    implementation detail. ADR-0148 §6 rules an interrupted act's state "refused
+    rather than reconciled": nothing repairs it, and a listing that showed only
+    active records would leave a user whose hub was killed mid-act with a
+    reference that exists, is refused at every call, and appears nowhere they can
+    see (ADR-0151 §4).
+    """
+
+    PENDING = "pending"
+    """The record was written and its act has not activated it.
+
+    The reference is **not connectable** (ADR-0148 §6): no ``ActionRequest`` is
+    built against it, no ruling is sought for one, and no callable transmits
+    under it. Nothing is in progress — the act that wrote it is gone — so no
+    surface may render this as a connection being established, and the remedy is
+    for the user to run the act again (ADR-0151 §4).
+    """
+
+    ACTIVE = "active"
+    """The act's third write landed and the reference is connectable.
+
+    That is a statement about the *record*, not about the keyring: ADR-0149 §6
+    rules that an active record over an empty slot is refused at the credential
+    read and repaired by nothing, which is the state a restored data directory
+    produces (ADR-0123, ADR-0125 §12).
+    """
+
+
+#: The most an account identity may encode to, in UTF-8 bytes (ADR-0151 §5).
+#:
+#: **ADR-0149 §4 left the value to this lane and ADR-0151 §5 fixed its
+#: location**, which is the half that matters: enforcement in the store alone
+#: would put the refusal on the far side of a round trip, and a bound each
+#: implementation chose for itself would make the wire client and the in-process
+#: engine disagree about a value both are handed (ADR-0085 §9). Every
+#: implementation of ``connect_account`` and ``reprovision_account``, the wire
+#: client included, refuses against this one constant.
+#:
+#: **In bytes rather than characters**, because ADR-0085 §8c bounds a serialised
+#: payload, :data:`EncodableText` is defined by having a UTF-8 encoding, and
+#: :data:`SECRET_VALUE_MAX_BYTES` is already stated in bytes — a character bound
+#: would be the only measurement on this surface that does not compose with the
+#: frame arithmetic (ADR-0151 §5).
+#:
+#: **256 is chosen against the frame floor rather than against a taxonomy of
+#: account names.** ADR-0151 §11 does the arithmetic: the payload budget at
+#: ``hub_max_frame_bytes``' 1024-byte floor is 512 bytes, and a
+#: :class:`ConnectedAccount` spends roughly 60 on its member names and JSON
+#: punctuation plus at most :data:`CONNECTION_REFERENCE_MAX_BYTES` on the
+#: reference — so 256 leaves a maximal single record inside the smallest frame an
+#: operator can configure, with room left for the revision and the state. It is
+#: also far above every account name this system expects: an email address is
+#: bounded at 254 octets by RFC 5321, and a service handle is shorter still.
+ACCOUNT_IDENTITY_MAX_BYTES: Final[int] = 256
+
+#: The most a minted connection reference may encode to, in UTF-8 bytes
+#: (ADR-0151 §11).
+#:
+#: **Its ceiling is fixed by ADR-0151 §11 at 64 rather than left to this lane**,
+#: and the asymmetry with :data:`ACCOUNT_IDENTITY_MAX_BYTES` is the mint. An
+#: oversized *identity* refuses the request the caller sent, and the caller still
+#: holds the value and can send a shorter one. An oversized *reference* refuses a
+#: response carrying a value that exists only in the hub, so the act has landed
+#: and its handle is unreachable — recoverable only by matching on an identity
+#: nothing makes unique. A bound wide enough to bust a frame would produce a
+#: handle the hub can write and the caller can never receive.
+#:
+#: A version 4 UUID in its canonical hyphenated form is 36 bytes, so the ceiling
+#: is taken whole and leaves a conforming factory room for a prefix.
+CONNECTION_REFERENCE_MAX_BYTES: Final[int] = 64
+
+
+class ConnectedAccount(BaseModel):
+    """One reference's live connection record, as the store holds it (ADR-0151 §4).
+
+    Exactly four fields, and the three that are *not* here are the point:
+
+    - **no credential slot and no** :class:`SecretName`. The slot is
+      `tools/`-internal (ADR-0149 §3) and a caller holding one could reach the
+      keyring by a route the seam was built to close (ADR-0149 §10).
+    - **no endpoint.** Nothing in the tree says what an integration *is* yet, so
+      a listing shows an identity and a minted reference with nothing saying
+      which service the account is on (ADR-0151 §18).
+    - **no timestamp**, for the reason this block's header gives.
+
+    **A pending record is a value of this type**, not an absence. ``connected``
+    returns one for every reference whose live record is pending, with
+    :attr:`ProvisioningState.PENDING`; it does not omit the reference and does
+    not substitute the previous act's record for it (ADR-0151 §4).
+
+    Attributes:
+        reference: The minted handle naming this connection record and nothing
+            else (ADR-0148 §6). Stable across a re-provisioning, which is what
+            keeps a parked ``CONFIRM`` answerable after one.
+        identity: The account identity the user supplied, byte-for-byte.
+        revision: ADR-0148 §6's monotonic revision, reported as the store holds
+            it.
+        state: How far the act that wrote this record got.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reference: DurableIdentifier = Field(
+        description=(
+            "The connection reference: a non-secret handle minted by the provisioner "
+            "and never authored by a caller (ADR-0151 §3). It may be logged, which is "
+            "the half of ADR-0149 §3's split that makes the identity beside it "
+            "loggable by nobody. At most CONNECTION_REFERENCE_MAX_BYTES in UTF-8."
+        ),
+    )
+    identity: NonBlankEncodableText = Field(
+        description=(
+            "The user-recognisable name of the account, recorded and returned "
+            "byte-for-byte as it was supplied (ADR-0149 §4, ADR-0151 §5). Nothing "
+            "strips, case-folds, case-normalises or Unicode-normalises it, at any "
+            "layer. Tier 1 personal data: it reaches no log line, no error message "
+            "and no operator diagnostic (ADR-0149 §3)."
+        ),
+    )
+    revision: int = Field(
+        gt=0,
+        description=(
+            "ADR-0148 §6's monotonic revision, incremented by every provisioning act "
+            "on this reference and never reused, never decreasing, and never reset by "
+            "a disconnection (ADR-0149 §5). Reported as the store holds it: nothing "
+            "renumbers, compacts, offsets or resets it, and no surface presents it as "
+            "a count of anything."
+        ),
+    )
+    state: ProvisioningState = Field(
+        description=(
+            "Whether the act that wrote this record activated it. A PENDING record is "
+            "not connectable and nothing repairs it (ADR-0148 §6)."
+        ),
+    )
+
+
+class ConnectionAct(BaseModel):
+    """One act on one reference, as the store recorded it (ADR-0151 §4, §9).
+
+    The row ``recent_connection_acts`` returns: one per ``(reference, revision)``
+    pair, carrying the furthest provisioning state that act reached, in the
+    store's own append order. It answers *what was done*, where
+    :class:`ConnectedAccount` through ``connected_accounts`` answers *what is
+    connected now* — and neither is derivable from the other, because this
+    listing is bounded by a ``limit`` and a reference whose latest act falls
+    outside the page would be reported by an earlier one (ADR-0139 §1, ADR-0151
+    §9).
+
+    **A removal is the absence of** :attr:`account`, **and not a third
+    provisioning state**, which ADR-0149 §5 forbids in terms. An earlier draft of
+    ADR-0151 §4 gave this model a ``kind`` discriminator over ``PROVISIONING``
+    and ``REMOVAL``; it was refused as a fourth promoted type encoding a
+    distinction one optional field already carries unambiguously — and the
+    optional is the safer of the two shapes, because an enum invites a third
+    member where ADR-0149 §5 has ruled there may not be one.
+
+    **This row carries no instant**, so its position in the sequence is the order
+    the store recorded the acts in and nothing more. No client presents that
+    order as a timing claim, an interval, or a statement about when anything
+    happened (ADR-0151 §9).
+
+    Attributes:
+        reference: The reference this act was on.
+        revision: The revision this act took.
+        account: The record this act wrote, or ``None`` where the act was a
+            disconnection.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reference: DurableIdentifier = Field(
+        description="The connection reference this act was performed on.",
+    )
+    revision: int = Field(
+        gt=0,
+        description=(
+            "The revision this act took. Strictly greater than every revision the "
+            "reference has ever held, a disconnection included (ADR-0149 §5)."
+        ),
+    )
+    account: ConnectedAccount | None = Field(
+        description=(
+            "The record this act wrote, present exactly when the act was a "
+            "provisioning act and absent exactly when it was a disconnection "
+            "(ADR-0149 §5's removal entry). Where present, its reference and "
+            "revision equal this act's own."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _account_transcribes_the_act(self) -> ConnectionAct:
+        """Refuse a row whose nested record disagrees with the act it belongs to.
+
+        ADR-0151 §4's equality clause, enforced here rather than left to a reader
+        to check. The nesting is a redundancy the ADR accepted deliberately —
+        an optional record rather than a discriminator over two — and a value in
+        which the two halves disagree describes no act the store could have
+        recorded, so it is unconstructible rather than merely unusual.
+
+        Raises:
+            ValueError: If ``account`` is present and names a different reference
+                or a different revision.
+        """
+        if self.account is None:
+            return self
+        if self.account.reference != self.reference or self.account.revision != self.revision:
+            msg = (
+                "a connection act's record must transcribe the act's own reference and "
+                "revision (ADR-0151 §4); got a record for "
+                f"{self.account.reference!r} at revision {self.account.revision} on an act "
+                f"for {self.reference!r} at revision {self.revision}"
+            )
+            raise ValueError(msg)
+        return self
