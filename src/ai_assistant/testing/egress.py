@@ -47,6 +47,7 @@ from ai_assistant.core.types import (
     ProvisioningState,
     ToolDefinition,
 )
+from ai_assistant.testing.cancellation import LoopSuspension
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
@@ -175,6 +176,7 @@ class FakeEgressBinder:
         "_reads",
         "_records",
         "_registrations",
+        "_suspension",
     )
 
     def __init__(self, *, canonicalises: Collection[DestinationProtocol] | None = None) -> None:
@@ -193,6 +195,7 @@ class FakeEgressBinder:
         self._records: dict[str, _Record] = {}
         self._reads: list[str] = []
         self._fail_next_read = False
+        self._suspension: LoopSuspension | None = None
         self._canonicalises: frozenset[DestinationProtocol] = frozenset(
             _CANONICALISERS if canonicalises is None else canonicalises
         )
@@ -247,6 +250,21 @@ class FakeEgressBinder:
     def fail_next_read(self) -> None:
         """Make the next connection-record read raise ``ConnectionStoreError``."""
         self._fail_next_read = True
+
+    def suspend_next_read(self) -> LoopSuspension:
+        """Hold the next connection-record read open, so a suite can mutate inside it.
+
+        ADR-0152 §13's detachment and pairing pins are stated over a mutation
+        landed **while the member is suspended on the awaited read** — the one
+        suspension point ADR-0152 §10 permits. A fake owns no store to park, so it
+        models the window the way :mod:`ai_assistant.testing.cancellation` models
+        every other one.
+
+        Returns:
+            The handle the suite waits on and releases.
+        """
+        self._suspension = LoopSuspension()
+        return self._suspension
 
     def reads(self) -> tuple[str, ...]:
         """Every connection reference read so far, in order (ADR-0152 §10's budget)."""
@@ -489,6 +507,9 @@ class FakeEgressBinder:
 
     async def _account(self, tool: ToolDefinition, registration: _Registration) -> BoundAccount:
         """The one read: the connection record, for its connectability and identity."""
+        suspension, self._suspension = self._suspension, None
+        if suspension is not None:
+            await suspension.hold()
         if self._fail_next_read:
             self._fail_next_read = False
             msg = f"failed to read connection {registration.reference!r}"
