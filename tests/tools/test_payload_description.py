@@ -16,7 +16,6 @@ from ai_assistant.core.types import DataTier
 from ai_assistant.tools.destination_arguments import (
     DestinationArgument,
     DestinationDeclaration,
-    select_destinations,
 )
 from ai_assistant.tools.destinations import DestinationProtocol
 from ai_assistant.tools.payload_description import (
@@ -66,8 +65,8 @@ def _describe(
 ) -> PayloadDescription:
     return describe_payload(
         _PAYLOAD,
+        _DESTINATIONS,
         parameters,
-        destinations=select_destinations(_DESTINATIONS, parameters),
         provenance=provenance or {},
     )
 
@@ -224,10 +223,43 @@ def test_a_non_text_argument_has_no_described_extent() -> None:
     with pytest.raises(PayloadDescriptionError, match="not text"):
         describe_payload(
             numeric,
+            _DESTINATIONS,
             {"to": ("bob@example.com",), "priority": 3},
-            destinations=(),
             provenance={},
         )
+
+
+def test_a_recipient_field_the_payload_declaration_omits_is_refused() -> None:
+    """The description would then cover every span but the recipients (ADR-0148 §6).
+
+    Refused on the declarations rather than on one call's arguments, because a
+    payload declaration that does not name a destination-bearing argument is wrong
+    for every call that tool could ever make.
+    """
+    without_recipients = PayloadDeclaration(
+        tool_id="send_email",
+        arguments=(PayloadArgument(name="body", establishes_tier=None),),
+    )
+
+    with pytest.raises(PayloadDescriptionError, match="bears destinations"):
+        describe_payload(
+            without_recipients, _DESTINATIONS, {"body": "see you at one"}, provenance={}
+        )
+
+
+def test_the_destinations_are_derived_rather_than_accepted_from_the_caller() -> None:
+    """Adversarial round 1: an accepted destination tuple is bound by nothing.
+
+    A description whose recipients came from a separate argument is not "a
+    function of the request and the registry's definition alone" (ADR-0148 §6), so
+    the approver, the seam and a later auditor cannot re-derive and compare it —
+    and a caller could describe one set of recipients while the arguments named
+    another. There is no parameter to pass one through, and this asserts the
+    recipients follow the arguments.
+    """
+    description = _describe({**_ARGUMENTS, "to": ("carol@example.com",)})
+
+    assert [one.canonical for one in description.destinations] == ["carol@example.com"]
 
 
 def test_the_description_carries_both_forms_of_every_destination() -> None:

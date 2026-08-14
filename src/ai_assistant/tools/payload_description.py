@@ -11,7 +11,10 @@ it …, the provenance the request carries for their spans, and the registry's
 definition for the bound tool — and of nothing else: no clock, no configuration,
 no store read, no network." :func:`describe_payload` takes those three and reads
 nothing else, so "two derivations of the description for one request agree" and
-an approver, the seam and a later auditor can each re-derive and compare it.
+an approver, the seam and a later auditor can each re-derive and compare it. It
+**derives** the destinations from the tool's own declaration rather than
+accepting them, for the reason that function's docstring gives: a recipient set
+handed in beside the arguments is bound by nothing and re-derivable by nobody.
 
 **It covers every span, or the call is refused.** §6: "a span transmitted but not
 covered is a defect rather than a permitted omission", and a request whose
@@ -61,11 +64,13 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.errors import ToolError
+from ai_assistant.tools.destination_arguments import select_destinations
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from ai_assistant.core.types import DataTier, FrozenJson
+    from ai_assistant.tools.destination_arguments import DestinationDeclaration
     from ai_assistant.tools.destinations import Destination
 
 
@@ -261,24 +266,37 @@ def _spans_of(argument: PayloadArgument, value: FrozenJson) -> tuple[tuple[SpanR
 
 def describe_payload(
     declaration: PayloadDeclaration,
+    recipients: DestinationDeclaration,
     parameters: Mapping[str, FrozenJson],
     *,
-    destinations: tuple[Destination, ...],
     provenance: Mapping[SpanRef, DiscloserProvenance],
 ) -> PayloadDescription:
     """Derive the description of what this call would transmit.
 
-    Deterministic over its three inputs and nothing else (ADR-0148 §6): the
-    arguments, the destinations already canonicalised for them, and the carried
-    provenance — with the declaration standing in for "the registry's definition
-    for the bound tool", since what the definition supplies to this derivation is
-    which arguments are transmitted and what each field establishes.
+    Deterministic over ADR-0148 §6's three inputs and nothing else: the call's
+    arguments, the provenance carried for their spans, and the tool's own
+    declarations — which are what "the registry's definition for the bound tool"
+    supplies to this derivation, namely which arguments are transmitted, which of
+    them bear destinations, and what each field establishes.
+
+    **The destinations are derived here rather than accepted from the caller,**
+    and that is the repair for a real defect an earlier draft carried. Taking them
+    as an argument left the description a function of the arguments *plus an
+    independent value*, so a caller could hand over an empty tuple, or one naming
+    a recipient the arguments never selected, and get back a description that
+    passed every check in this module. That contradicts §6 in two places at once:
+    "two derivations of the description for one request agree" — they would not —
+    and the whole reason determinism is required, that the description is one "the
+    approver, the seam and a later auditor can each re-derive and compare". A
+    value nobody else can reproduce is exactly the "second, divergent account of
+    the call" §6's determinism clause exists to prevent. Adversarial review found
+    it on round 1.
 
     Args:
         declaration: The tool's transmitted arguments.
+        recipients: The tool's destination-bearing arguments, from which the
+            canonical destination set is computed (ADR-0148 §2).
         parameters: The call's arguments.
-        destinations: The recipients selected from those arguments, in both forms
-            (:func:`~ai_assistant.tools.destination_arguments.select_destinations`).
         provenance: The recorded origin of each span. A span absent from it is
             ``SYSTEM_SELECTED`` (ADR-0146 §2) — the fail-closed default, never a
             reason to inspect the value.
@@ -290,14 +308,29 @@ def describe_payload(
         UndescribedSpanError: If ``parameters`` carries an argument the
             declaration does not name — the span would be transmitted and not
             covered (ADR-0148 §6, §14).
-        PayloadDescriptionError: If an argument's value is not text or a list of
+        DestinationSelectionError: If the destinations cannot be read and
+            canonicalised out of ``parameters`` (ADR-0148 §1's third clause).
+        PayloadDescriptionError: If the two declarations disagree about which
+            arguments exist, if an argument's value is not text or a list of
             text, or if ``provenance`` names a span this call does not transmit.
-            The second is refused rather than ignored: a carried provenance for a
+            The last is refused rather than ignored: a carried provenance for a
             span that is not there means the caller and this derivation disagree
             about what the payload is, and the disagreement is exactly what a
             silent drop would hide.
     """
     declared = {argument.name: argument for argument in declaration.arguments}
+    bearing = {argument.name for argument in recipients.arguments}
+    if not bearing <= set(declared):
+        # A recipient the payload declaration does not name would be transmitted
+        # and uncovered, which is the same defect the coverage check below
+        # refuses — caught here because it is a defect in the *declarations*
+        # rather than in one call's arguments, so it is wrong for every call.
+        msg = (
+            f"{declaration.tool_id}: {', '.join(sorted(bearing - set(declared)))} bears "
+            f"destinations and is not covered by the payload declaration"
+        )
+        raise PayloadDescriptionError(msg)
+
     undescribed = sorted(set(parameters) - set(declared))
     if undescribed:
         msg = (
@@ -332,7 +365,9 @@ def describe_payload(
         raise PayloadDescriptionError(msg)
 
     return PayloadDescription(
-        tool_id=declaration.tool_id, destinations=destinations, spans=tuple(spans)
+        tool_id=declaration.tool_id,
+        destinations=select_destinations(recipients, parameters),
+        spans=tuple(spans),
     )
 
 
