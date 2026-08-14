@@ -13,11 +13,19 @@ that instant would leave, which is the only thing §5's guarantee is about.
 The mount table is faked in every test by an autouse fixture. The real one is a
 property of the machine the suite runs on, and a test whose meaning depends on
 whether the developer's ``/tmp`` happens to be a mount is not a test.
+
+**The connection purger is faked in every test by a second autouse fixture**
+(ADR-0153), and it is the canonical fake rather than a hand-rolled double, so what
+the act is driven against is a subject the shared conformance suite already holds
+to the contract. No test here reaches a real keyring: a real one is a property of
+the developer's session, and an act whose whole subject is deleting credentials is
+the last thing to point at the one they are using.
 """
 
 from __future__ import annotations
 
 import ast
+import asyncio
 import errno
 import os
 import shutil
@@ -27,14 +35,24 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
+from ai_assistant.app import OpenedConnections
 from ai_assistant.core.config import EmbedderKind, Settings
-from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.core.errors import (
+    ConfigurationError,
+    ConnectionStoreError,
+    ResidualCredentialError,
+    SecretStoreUnavailableError,
+)
+from ai_assistant.core.protocols import ConnectionPurger
+from ai_assistant.core.types import ConnectedAccount, SecretScope
 from ai_assistant.service import purge
 from ai_assistant.service.backup import SIDECAR_SUFFIXES
 from ai_assistant.service.enrolment import ENROLMENTS_FILENAME, LISTING_LIMIT, EnrolmentStore
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
+from ai_assistant.testing import FakeConnectionProvisioner
 
 pytestmark = pytest.mark.integration
 
@@ -57,6 +75,74 @@ def mount_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     table.write_text(_mountinfo())
     monkeypatch.setattr(purge, "MOUNT_TABLE", table)
     return table
+
+
+class _WatchedPurger:
+    """The canonical fake under ADR-0153 §2's face, with a journal and a fault lever.
+
+    Every answer is :class:`FakeConnectionProvisioner`'s — the subject the shared
+    conformance suite already holds to the contract — and what is added here is the
+    two things no fake can afford, because ADR-0153 §8 puts them on the **act**
+    rather than on the seam: the order in which the act used the seam, and a fault
+    delivered at a member of the test's choosing. §8 says so in as many words —
+    "driving the act with a purger that raises is deterministic, so these are
+    ordinary tests rather than an integration burden".
+
+    ``close`` is journalled rather than delegated because it is not on the Protocol
+    at all: it is what the composition root hands back beside the purger, and
+    whether the act calls it — and *when* — is the obligation being asserted.
+    """
+
+    def __init__(self) -> None:
+        self.subject = FakeConnectionProvisioner()
+        self.events: list[str] = []
+        self.connected_fault: BaseException | None = None
+        self.purge_fault: BaseException | None = None
+        self.builds = 0
+
+    def build(self, settings: Settings, *, data_dir: Path | None = None) -> OpenedConnections:
+        """Stand in for ``app.build_connection_purger`` with the same signature."""
+        del settings, data_dir
+        self.builds += 1
+        self.events.append("open")
+        return OpenedConnections(purger=self, close=self.close)
+
+    def close(self) -> None:
+        self.events.append("close")
+
+    async def connected(self) -> tuple[ConnectedAccount, ...]:
+        self.events.append("connected")
+        if self.connected_fault is not None:
+            raise self.connected_fault
+        return await self.subject.connected()
+
+    async def purge(self) -> None:
+        self.events.append("purge")
+        if self.purge_fault is not None:
+            raise self.purge_fault
+        await self.subject.purge()
+
+    def connect(self, *identities: str) -> tuple[ConnectedAccount, ...]:
+        """Provision an account per identity through the fake's own wide face."""
+
+        async def _provision() -> tuple[ConnectedAccount, ...]:
+            for identity in identities:
+                await self.subject.provision(identity=identity, credential=SecretStr("hunter2"))
+            return await self.subject.connected()
+
+        return asyncio.run(_provision())
+
+    def slots_held(self) -> int:
+        """How many credentials the fake's keyring still holds."""
+        return len(self.subject.secrets.backing)
+
+
+@pytest.fixture(autouse=True)
+def purger(monkeypatch: pytest.MonkeyPatch) -> _WatchedPurger:
+    """Hand the act a faked ADR-0153 §2 seam, never a real keyring or a real store."""
+    watched = _WatchedPurger()
+    monkeypatch.setattr(purge, "build_connection_purger", watched.build)
+    return watched
 
 
 @pytest.fixture
@@ -680,11 +766,17 @@ def test_the_report_names_the_backup_artifact_it_does_not_reach(
 def test_the_report_names_the_tier_0_credential_it_cannot_reach(
     data_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """§6's replacement for ADR-0004 §6's Tier 0 purge clause, which it partially supersedes."""
+    """§6's replacement for ADR-0004 §6's Tier 0 purge clause, which it partially supersedes.
+
+    The blanket "no keyring" line this used to assert is the one ADR-0153 §5
+    replaces, and §5's fourth clause keeps this scope's statement word for word:
+    what is now checked is that the ``PROVIDER`` row still says it.
+    """
     assert _run(data_dir) == EXIT_OK
     printed = capsys.readouterr().out
-    assert "no keyring" in printed
+    assert "provider — not reached." in printed
     assert "shell profile" in printed
+    assert f"is not in {data_dir}" in printed
 
 
 @pytest.mark.usefixtures("settings")
@@ -718,18 +810,42 @@ def _imported_by(module: object) -> set[str]:
     return names
 
 
-def test_the_act_reaches_no_keyring() -> None:
-    """§6: ADR-0125 §8 names ``service`` among the packages that "hold neither" face."""
+def test_the_act_holds_neither_face_of_the_keyring_seam() -> None:
+    """ADR-0153 §6's first clause, which is ADR-0126 §6's surviving three-quarters.
+
+    What ADR-0153 supersedes of §6 is "the act reaches no keyring" and "performs no
+    keyring operation", and *only* as those reach one invocation across one seam.
+    What stands is the clause this asserts: ``service`` "names neither ``Secrets``
+    nor ``SecretStore``, cannot name ``get``, ``set`` or ``delete``, and no
+    annotation anywhere in ``ai_assistant/service/`` mentions either Protocol".
+    """
     imported = _imported_by(purge)
     assert not [name for name in imported if "keyring" in name]
-    assert not [name for name in imported if "secret" in name.lower()]
+    assert not [name for name in imported if name.startswith("ai_assistant.secret_store")]
+
+    package = Path(purge.__file__).parent
+    named = {
+        node.id
+        for module in package.glob("*.py")
+        for node in ast.walk(ast.parse(module.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Name)
+    }
+    assert not named & {"Secrets", "SecretStore"}
 
 
-def test_the_act_adds_no_core_surface() -> None:
-    """§8: no Protocol changes, no type is added, and nothing here crosses a boundary."""
+def test_the_act_reaches_its_implementation_by_injection_and_not_by_import() -> None:
+    """ADR-0153 §6's fourth clause: a Protocol in ``core``, an implementation from ``app``.
+
+    ADR-0126 §8's superseded limb is "No Protocol in ``core/protocols.py``
+    changes"; naming ``core`` types was never forbidden and is what §5's
+    scope-by-scope report is built on. What is forbidden, and asserted here, is
+    ``service`` reaching a subsystem directly (golden rule 1).
+    """
     imported = _imported_by(purge)
-    assert not [name for name in imported if name.startswith("ai_assistant.core.protocols")]
-    assert not [name for name in imported if name.startswith("ai_assistant.core.types")]
+    assert "ai_assistant.app.build_connection_purger" in imported
+    assert not [name for name in imported if name.startswith("ai_assistant.tools")]
+    for subsystem in ("models", "memory", "context", "planning", "permissions", "learning"):
+        assert not [name for name in imported if name.startswith(f"ai_assistant.{subsystem}")]
 
 
 @pytest.mark.usefixtures("settings")
@@ -914,3 +1030,475 @@ def test_the_preflight_never_reads_a_tree_a_swapped_directory_names(
         assert (outside / "sealed").is_dir()
     finally:
         (outside / "sealed").chmod(0o700)
+
+
+# ---------------------------------------------------------------------------
+# ADR-0153: the integration purge is routed, and it runs before the first
+# destruction
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def journal(purger: _WatchedPurger, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """One list carrying the whole act's order — the seam, the report and the removals.
+
+    The removals are recorded by wrapping ``os.unlink`` rather than by reading the
+    directory afterwards, because ADR-0153 §3's obligations are about *order* and a
+    final state cannot tell "closed before the first destruction" from "closed
+    after the last".
+    """
+    real_unlink = os.unlink
+    real_state_before = purge._state_before
+    real_rmdir = os.rmdir
+
+    def unlink(path: object, *, dir_fd: int | None = None) -> None:
+        purger.events.append(f"unlink:{path}")
+        real_unlink(path, dir_fd=dir_fd)  # type: ignore[arg-type]
+
+    def rmdir(path: object, *, dir_fd: int | None = None) -> None:
+        purger.events.append(f"rmdir:{path}")
+        real_rmdir(path, dir_fd=dir_fd)  # type: ignore[arg-type]
+
+    def state_before(
+        directory: Path, devices: object, accounts: tuple[ConnectedAccount, ...]
+    ) -> None:
+        purger.events.append("statement")
+        real_state_before(directory, devices, accounts)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    monkeypatch.setattr(os, "rmdir", rmdir)
+    monkeypatch.setattr(purge, "_state_before", state_before)
+    return purger.events
+
+
+@pytest.mark.usefixtures("settings")
+def test_the_purge_runs_after_the_confirmation_and_before_the_first_destruction(
+    data_dir: Path, purger: _WatchedPurger, journal: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0153 §3's whole ordering, in one list, against the shipped act.
+
+    Forced at both ends by different rules: after the confirmation because
+    ADR-0126 §7 admits no destruction before one and a keyring deletion is a
+    destruction; before the first destruction because the connection store lives in
+    ``data_dir`` and is the only index into the keyring.
+    """
+    _enrol(data_dir, "device-a")
+    purger.connect("someone@example.com")
+
+    def confirm(_prompt: str) -> str:
+        journal.append("confirm")
+        return str(data_dir)
+
+    monkeypatch.setattr("builtins.input", confirm)
+
+    assert purge.main([]) == EXIT_OK
+
+    seam = [event for event in journal if not event.startswith(("unlink:", "rmdir:"))]
+    assert seam == ["open", "connected", "statement", "confirm", "purge", "close"]
+    destroyed = [event for event in journal if event.startswith(("unlink:", "rmdir:"))]
+    assert journal.index("close") < journal.index(destroyed[0])
+    assert destroyed[0] == f"unlink:{ENROLMENTS_FILENAME}"
+
+
+@pytest.mark.usefixtures("settings")
+def test_the_record_and_its_sidecars_still_go_first_after_the_purge(
+    data_dir: Path, purger: _WatchedPurger, journal: list[str]
+) -> None:
+    """ADR-0153 §3: §5's ordering inside ``data_dir`` is unchanged; the purge precedes it."""
+    _enrol(data_dir, "device-a")
+    for suffix in SIDECAR_SUFFIXES:
+        (data_dir / f"{ENROLMENTS_FILENAME}{suffix}").write_bytes(b"pages")
+    purger.connect("someone@example.com")
+
+    assert _run(data_dir) == EXIT_OK
+
+    removals = [event for event in journal if event.startswith("unlink:")]
+    expected = [f"unlink:{ENROLMENTS_FILENAME}"]
+    expected += [f"unlink:{ENROLMENTS_FILENAME}{suffix}" for suffix in SIDECAR_SUFFIXES]
+    assert removals[: len(expected)] == expected
+
+
+@pytest.mark.usefixtures("settings")
+def test_every_refusing_check_refuses_without_the_purge_being_invoked(
+    data_dir: Path, purger: _WatchedPurger, mount_table: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0153 §3: a refusal "costs the owner nothing and leaves the keyring as it was".
+
+    All three of ADR-0126 §1's refusal-producing checks, plus the confirmation,
+    driven one at a time against one keyring that must be untouched at the end of
+    each — and against a seam that must not even have been *opened* for the two
+    that refuse before the lock is taken.
+    """
+    purger.connect("someone@example.com")
+    held = purger.slots_held()
+
+    mount_table.write_text(_mountinfo(data_dir / "vectors"))
+    assert _run(data_dir) == EXIT_DEPLOYMENT
+    assert purger.events == []
+
+    mount_table.write_text("nonsense\n")
+    assert _run(data_dir) == EXIT_DEPLOYMENT
+    assert purger.events == []
+
+    mount_table.write_text(_mountinfo())
+    (data_dir / "vectors").chmod(0o000)
+    try:
+        assert _run(data_dir) == EXIT_DEPLOYMENT
+    finally:
+        (data_dir / "vectors").chmod(0o700)
+    assert "purge" not in purger.events
+
+    purger.events.clear()
+    monkeypatch.setattr("builtins.input", lambda _prompt: "no")
+    assert purge.main([]) == EXIT_DEPLOYMENT
+    assert purger.events == ["open", "connected", "close"]
+    assert purger.slots_held() == held
+
+
+@pytest.mark.usefixtures("settings")
+def test_an_installation_with_no_connections_makes_no_keyring_call(
+    data_dir: Path, purger: _WatchedPurger
+) -> None:
+    """ADR-0153 §4: "a purge over a store that names no slot makes no keyring call".
+
+    Which is what keeps the delete right intact for every installation shipped to
+    date and for a headless box with no keyring at all (#879).
+    """
+    purger.subject.secrets.become_unavailable()
+
+    assert _run(data_dir) == EXIT_OK
+    assert _remaining(data_dir) == {LOCK_FILENAME}
+    assert purger.events == ["open", "connected", "purge", "close"]
+
+
+# --- §4: a failed purge destroys nothing -----------------------------------
+
+
+@pytest.mark.usefixtures("settings")
+def test_a_purge_that_raises_destroys_nothing_at_all(
+    data_dir: Path, purger: _WatchedPurger, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §4: no destruction of any kind, best-effort included; §3's first window.
+
+    The connection store still names every slot, ``data_dir`` is untouched, and
+    every enrolment is still live — which is the state the owner re-runs out of.
+    """
+    _enrol(data_dir, "device-a")
+    purger.connect("someone@example.com")
+    purger.purge_fault = SecretStoreUnavailableError("the keyring is locked")
+    before = _remaining(data_dir)
+
+    assert _run(data_dir) == EXIT_RESTART
+    assert _remaining(data_dir) == before
+    assert (data_dir / ENROLMENTS_FILENAME).exists()
+    assert purger.events == ["open", "connected", "purge", "close"]
+    assert "the keyring is locked" in capsys.readouterr().err
+
+
+@pytest.mark.usefixtures("settings")
+def test_a_connected_that_raises_destroys_nothing_and_never_reaches_the_purge(
+    data_dir: Path, purger: _WatchedPurger, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §4: "an unreadable index is the case in which proceeding guarantees" it."""
+    _enrol(data_dir, "device-a")
+    purger.connected_fault = ConnectionStoreError("the connection store could not be read")
+    before = _remaining(data_dir)
+
+    assert _run(data_dir) == EXIT_RESTART
+    assert _remaining(data_dir) == before
+    assert purger.events == ["open", "connected", "close"]
+    printed = capsys.readouterr()
+    assert "the connection store could not be read" in printed.err
+    assert "about to destroy everything" not in printed.out
+
+
+@pytest.mark.usefixtures("settings")
+def test_a_store_that_cannot_be_opened_destroys_nothing(
+    data_dir: Path, purger: _WatchedPurger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0153 §4's third clause reaches the open as much as the read."""
+    _enrol(data_dir, "device-a")
+
+    def refuse(_settings: Settings) -> OpenedConnections:
+        raise ConnectionStoreError("connections.db could not be opened")
+
+    monkeypatch.setattr(purge, "build_connection_purger", refuse)
+    before = _remaining(data_dir)
+
+    assert _run(data_dir) == EXIT_RESTART
+    assert _remaining(data_dir) == before
+    assert purger.events == []
+
+
+@pytest.mark.usefixtures("settings")
+def test_an_unavailable_keyring_is_never_reported_as_nothing_to_purge(
+    data_dir: Path, purger: _WatchedPurger, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §4's fifth clause: the deployment condition is reported as itself."""
+    purger.connect("someone@example.com")
+    purger.subject.secrets.become_unavailable()
+
+    assert _run(data_dir) != EXIT_OK
+    printed = capsys.readouterr().err
+    assert "could not be purged" in printed
+    assert "Nothing was destroyed." in printed
+
+
+@pytest.mark.parametrize("widening", ["--force", "--skip-keyring", "--ignore-purge-failure"])
+@pytest.mark.usefixtures("settings")
+def test_no_argument_lets_the_act_past_a_failed_purge(
+    data_dir: Path, purger: _WatchedPurger, widening: str
+) -> None:
+    """ADR-0153 §4's fourth clause: ADR-0126 §11's "no argument that widens it" binds this step.
+
+    "An override would be a flag whose only function is to manufacture the one
+    state the whole section exists to prevent, which is not a remedy the owner
+    would choose if the flag's help text were honest about it." So the act carries
+    none, the parser refuses each, and the step is still owed afterwards.
+    """
+    purger.connect("someone@example.com")
+    purger.purge_fault = SecretStoreUnavailableError("the keyring is locked")
+
+    with pytest.raises(SystemExit):
+        purge.main([widening, "--confirm", str(data_dir)])
+    assert (data_dir / "notes.txt").exists()
+
+    assert _run(data_dir) != EXIT_OK
+    assert (data_dir / "notes.txt").exists()
+
+
+# --- §4: cancellation propagates unconverted -------------------------------
+
+
+@pytest.mark.usefixtures("settings")
+def test_a_cancellation_during_the_purge_propagates_and_destroys_nothing(
+    data_dir: Path, purger: _WatchedPurger
+) -> None:
+    """ADR-0153 §4: not a purge failure, never converted into one, never classified.
+
+    It lands in ADR-0153 §3's second window by position — every entry of
+    ``data_dir`` present, the store closed rather than orphaned, and the close made
+    only *after* ``purge`` returned control to the act, so the act's own close
+    cannot race work the purge still holds.
+    """
+    _enrol(data_dir, "device-a")
+    purger.connect("someone@example.com")
+    purger.purge_fault = asyncio.CancelledError()
+    before = _remaining(data_dir)
+
+    with pytest.raises(asyncio.CancelledError):
+        _run(data_dir)
+
+    assert _remaining(data_dir) == before
+    assert purger.events == ["open", "connected", "purge", "close"]
+    assert purger.events.index("purge") < purger.events.index("close")
+
+
+@pytest.mark.usefixtures("settings")
+def test_a_cancellation_during_connected_propagates_and_destroys_nothing(
+    data_dir: Path, purger: _WatchedPurger
+) -> None:
+    """ADR-0153 §4: "where one arrives at any point of the act"."""
+    _enrol(data_dir, "device-a")
+    purger.connected_fault = asyncio.CancelledError()
+    before = _remaining(data_dir)
+
+    with pytest.raises(asyncio.CancelledError):
+        _run(data_dir)
+
+    assert _remaining(data_dir) == before
+    assert purger.events == ["open", "connected", "close"]
+
+
+# --- §3: what each interruption window leaves ------------------------------
+
+
+@pytest.mark.usefixtures("settings")
+def test_an_interruption_after_the_purge_leaves_the_directory_whole(
+    data_dir: Path, purger: _WatchedPurger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0153 §3's second window: keyring empty, ``data_dir`` intact, enrolments live."""
+    _enrol(data_dir, "device-a")
+    purger.connect("someone@example.com")
+    before = _remaining(data_dir)
+
+    def interrupted(_data_dir: Path) -> list[object]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(purge, "_destroy", interrupted)
+
+    assert _run(data_dir) == EXIT_RESTART
+    assert _remaining(data_dir) == before
+    assert purger.slots_held() == 0
+    assert purger.events == ["open", "connected", "purge", "close"]
+
+
+@pytest.mark.usefixtures("settings")
+def test_an_interruption_after_the_record_leaves_no_credential_and_no_enrolment(
+    data_dir: Path, purger: _WatchedPurger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0153 §3's third window: ADR-0126 §5's state, and now with no credential either."""
+    _enrol(data_dir, "device-a")
+    purger.connect("someone@example.com")
+
+    def interrupted(*_args: object, **_kwargs: object) -> list[object]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(purge, "_destroy_tree", interrupted)
+
+    assert _run(data_dir) == EXIT_RESTART
+    assert not (data_dir / ENROLMENTS_FILENAME).exists()
+    assert (data_dir / "notes.txt").exists()
+    assert purger.slots_held() == 0
+
+
+@pytest.mark.usefixtures("settings")
+def test_a_later_best_effort_failure_still_leaves_no_credential(
+    data_dir: Path, purger: _WatchedPurger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0153 §3's fourth window: §1's best-effort continuation, unchanged."""
+    _enrol(data_dir, "device-a")
+    purger.connect("someone@example.com")
+    real = os.unlink
+
+    def refuse(path: object, *, dir_fd: int | None = None) -> None:
+        if str(path) == "notes.txt":
+            raise OSError(errno.EIO, "I/O error", str(path))
+        real(path, dir_fd=dir_fd)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "unlink", refuse)
+
+    assert _run(data_dir) == EXIT_RESTART
+    assert _remaining(data_dir) == {LOCK_FILENAME, "notes.txt"}
+    assert purger.slots_held() == 0
+
+
+# --- §5: the report is stated scope by scope -------------------------------
+
+
+@pytest.mark.usefixtures("settings")
+def test_the_statement_carries_a_row_for_every_secret_scope(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §5: indexed on the closed enum, so no member can be skipped silently.
+
+    Asserted over ``SecretScope`` itself rather than over three literals, which is
+    the instrument §5 chose: a fourth member added by a future ADR fails this test
+    without it being edited, exactly as it fails ``mypy`` in ``_state_scope``.
+    """
+    assert _run(data_dir) == EXIT_OK
+    statement = capsys.readouterr().out.split("destroyed. ")[0]
+    for scope in SecretScope:
+        assert f"  {scope.value} —" in statement
+
+
+@pytest.mark.usefixtures("settings")
+def test_the_statement_names_every_live_connection_by_reference_and_identity(
+    data_dir: Path, purger: _WatchedPurger, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §5: complete, with no bound, no page and no omission count."""
+    accounts = purger.connect(*(f"account-{index:03d}@example.com" for index in range(50)))
+
+    assert _run(data_dir) == EXIT_OK
+    statement = capsys.readouterr().out.split("destroyed. ")[0]
+    for account in accounts:
+        assert account.reference in statement
+        assert account.identity in statement
+
+
+@pytest.mark.usefixtures("settings")
+def test_the_statement_says_deleting_a_credential_revokes_nothing(
+    data_dir: Path, purger: _WatchedPurger, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §5's third clause, the obligation an implementation would most omit."""
+    purger.connect("someone@example.com")
+
+    assert _run(data_dir) == EXIT_OK
+    printed = capsys.readouterr().out
+    assert printed.count("does not revoke it at the service that issued it") == 2
+
+
+@pytest.mark.usefixtures("settings")
+def test_a_disconnected_account_is_purged_but_not_listed_back_at_the_owner(
+    data_dir: Path, purger: _WatchedPurger, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §5: only *live* connections are named; superseded ones go silently."""
+    live, gone = purger.connect("live@example.com", "gone@example.com")
+    asyncio.run(purger.subject.disconnect(gone.reference))
+
+    assert _run(data_dir) == EXIT_OK
+    printed = capsys.readouterr().out
+    assert live.identity in printed
+    assert gone.identity not in printed
+    assert purger.slots_held() == 0
+
+
+@pytest.mark.usefixtures("settings")
+def test_the_connection_list_is_restated_after_the_act_without_being_re_read(
+    data_dir: Path, purger: _WatchedPurger, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §5's sixth clause: "It re-reads nothing; the store it would read is gone"."""
+    accounts = purger.connect("someone@example.com")
+
+    assert _run(data_dir) == EXIT_OK
+    printed = capsys.readouterr().out
+    reference = accounts[0].reference
+    assert printed.count(reference) == 2
+    assert printed.index(reference) < printed.index("destroyed. ") < printed.rindex(reference)
+    assert purger.events.count("connected") == 1
+
+
+@pytest.mark.usefixtures("settings")
+def test_the_report_may_not_describe_the_keyring_as_swept(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §5's fifth clause, and ADR-0126 §6's fourth is unchanged in that limb."""
+    assert _run(data_dir) == EXIT_OK
+    printed = capsys.readouterr().out
+    assert "it does not sweep the keyring" in printed
+    assert "it does not purge everything, and it does not purge Tier 0." in printed
+
+
+@pytest.mark.usefixtures("settings")
+def test_no_diagnostic_carries_an_account_identity(
+    data_dir: Path, purger: _WatchedPurger, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §5's last clause: "reported by reference and by condition, never by account".
+
+    The failure classes this act surfaces carry a **reference** (ADR-0151 §7), and
+    the reduction the reporting applies must keep it while never acquiring an
+    identity — so both halves are asserted against one failure, not just the
+    absence.
+    """
+    accounts = purger.connect("someone@example.com")
+    reference = accounts[0].reference
+    purger.purge_fault = ResidualCredentialError(
+        f"connection {reference!r} left a credential behind", reference
+    )
+
+    assert _run(data_dir) != EXIT_OK
+    printed = capsys.readouterr()
+    assert reference in printed.err
+    assert accounts[0].identity not in printed.err
+
+
+@pytest.mark.usefixtures("settings")
+def test_the_statement_carries_no_slot_and_no_credential_value(
+    data_dir: Path, purger: _WatchedPurger, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §5's seventh clause: no ``SecretName``, slot or value in either statement."""
+    purger.connect("someone@example.com")
+
+    assert _run(data_dir) == EXIT_OK
+    printed = capsys.readouterr().out
+    assert "hunter2" not in printed
+    assert "connection." not in printed
+
+
+# --- §2, §6: what the act holds and what it does not ------------------------
+
+
+def test_the_seam_the_act_is_handed_is_the_narrow_face() -> None:
+    """ADR-0153 §2: two members, and ``@runtime_checkable`` so an ``isinstance`` answers."""
+    assert isinstance(FakeConnectionProvisioner(), ConnectionPurger)
+    assert not hasattr(purge, "ConnectionProvisioner")
