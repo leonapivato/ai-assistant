@@ -47,7 +47,7 @@ import asyncio
 import contextlib
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, ClassVar, Final
 
 from ai_assistant.core.types import DEFAULT_PAGE_SIZE, secret_value
 from ai_assistant.wire import envelope as env
@@ -649,166 +649,6 @@ class HubClient:
         """
         return await self._call("standing_grants")  # type: ignore[no-any-return]
 
-    # --- the five connection operations (ADR-0151 §16 item 5) ---------------
-    #
-    # **The unwrap lives in the two methods below and nowhere else** (ADR-0151 §6,
-    # ADR-0124 §7's shape). ADR-0087's canonical projection is deliberately **not**
-    # extended to ``SecretStr``: ``project`` is a total dispatch that ends in
-    # ``TypeError`` for a type it has no form for, and ``SecretStr`` is not a
-    # ``str`` subclass, so a credential that reached it fails loudly here, before
-    # the socket is opened. Teaching the codec to unwrap one is refused because it
-    # is general where the need is specific — it would silently encode every secret
-    # any promoted value ever came to carry, removing exactly the property ADR-0125
-    # §3 bought, that "a disclosure requires somebody to write the unwrapping call,
-    # which makes it deliberate and reviewable rather than accidental".
-    #
-    # **The hazard the by-hand unwrap forecloses is invisible, which is why it is
-    # written down here.** A ``TypeAdapter`` over ``SecretValue`` serialises to
-    # ``"**********"``. An implementation reaching for pydantic's serialiser rather
-    # than this project's own projection would send ten asterisks as the
-    # credential; the hub would validate them as a well-formed ``SecretValue``, the
-    # provisioner would write them into the keyring, the record would go active,
-    # and **every in-process test would pass**, because the in-process engine never
-    # serialises anything. The failure would surface only at the first egress call,
-    # as an authentication error against a credential nobody could find a fault in
-    # by inspection.
-
-    async def connect_account(
-        self, *, identity: NonBlankEncodableText, credential: SecretValue
-    ) -> ConnectedAccount:
-        """Connect a fresh account, hub-side, under a reference the hub mints.
-
-        **This client takes no reference and offers no way to propose one**
-        (ADR-0151 §3). Every act after the first goes through
-        :meth:`connected_accounts`, which is the price of a reference the corpus
-        licenses to be logged, paid deliberately.
-
-        **The three local refusals are this client's own, not the hub's**
-        (ADR-0085 §9, ADR-0151 §5). They run before the socket is opened, so a
-        credential is never sent for a call the hub would refuse — which is the
-        whole reason the identity's bound lives in ``core`` as one constant both
-        implementations name rather than in the store alone.
-
-        Args:
-            identity: The account's user-recognisable name, sent verbatim.
-            credential: The account's secret. Unwrapped **once**, immediately
-                below, after being revalidated through ``secret_value``.
-
-        Returns:
-            The record the hub wrote, ``ACTIVE`` at its minted reference.
-
-        Raises:
-            ValueError: If ``identity`` is blank or unwritable, or ``credential``
-                is blank, unencodable or oversized.
-            UnusableIdentityError: If ``identity`` is one ADR-0149 §4 does not
-                admit. **No frame is sent and no credential leaves this process.**
-            OversizedValueError: If the arguments exceed the limit the hub
-                published. Nothing is truncated and nothing falls back to another
-                route; raising ``hub_max_frame_bytes`` is the operator's remedy
-                (ADR-0151 §11).
-        """
-        secret = secret_value(credential)
-        named = non_blank_text(identity, name="identity")
-        usable_identity(named, credential=secret)
-        return await self._call(  # type: ignore[no-any-return]
-            "connect_account", identity=named, credential=secret.get_secret_value()
-        )
-
-    async def reprovision_account(
-        self,
-        reference: Identifier,
-        *,
-        identity: NonBlankEncodableText,
-        credential: SecretValue,
-    ) -> ConnectedAccount:
-        """Replace the credential under a reference the hub returned, hub-side.
-
-        Args:
-            reference: The connection to re-provision, validated and normalised
-                here as every id argument on this surface is (ADR-0085 §3c).
-            identity: The account identity for the new revision, sent verbatim.
-            credential: The replacement secret, unwrapped once immediately below.
-
-        Returns:
-            The record the hub wrote, ``ACTIVE`` at the new revision.
-
-        Raises:
-            ValueError: If ``reference`` or ``identity`` is blank or unwritable,
-                or ``credential`` is blank, unencodable or oversized.
-            UnusableIdentityError: On :meth:`connect_account`'s terms.
-            OversizedValueError: On :meth:`connect_account`'s terms.
-        """
-        secret = secret_value(credential)
-        handle = identifier(reference, name="reference")
-        named = non_blank_text(identity, name="identity")
-        usable_identity(named, credential=secret)
-        return await self._call(  # type: ignore[no-any-return]
-            "reprovision_account",
-            reference=handle,
-            identity=named,
-            credential=secret.get_secret_value(),
-        )
-
-    async def disconnect_account(self, reference: Identifier) -> ConnectedAccount | None:
-        """Disconnect a reference hub-side, or report that nothing was removed.
-
-        A ``None`` says one thing — no live record was removed by this call — and
-        is **not** a report of a disconnection, a confirmation that a credential
-        was deleted, or a statement that the reference does not exist
-        (ADR-0151 §8).
-
-        Args:
-            reference: The connection to disconnect.
-
-        Returns:
-            The live record the hub removed, or ``None``.
-
-        Raises:
-            ValueError: If ``reference`` is blank or unwritable.
-            ResidualCredentialError: If the reference **is** disconnected and a
-                credential deletion failed. Never rendered as a failed
-                disconnection.
-        """
-        named = identifier(reference, name="reference")
-        return await self._call("disconnect_account", reference=named)  # type: ignore[no-any-return]
-
-    async def connected_accounts(self) -> tuple[ConnectedAccount, ...]:
-        """Every connection with a live record, read hub-side from the store.
-
-        **Unpaged, so a bare ``_call``.** The refusal that matters is the hub's —
-        a live set too large for the frame is an ``OversizedValueError`` and no set
-        at all, because a truncated answer to "what is connected" is a false answer
-        rather than a partial one (ADR-0151 §9).
-
-        Returns:
-            Every live record, pending ones included and carrying ``PENDING``. No
-            client presents such a record as a working connection.
-        """
-        return await self._call("connected_accounts")  # type: ignore[no-any-return]
-
-    async def recent_connection_acts(
-        self, *, limit: int = DEFAULT_PAGE_SIZE
-    ) -> tuple[ConnectionAct, ...]:
-        """One page of what was done to connections, newest first.
-
-        ``limit`` is refused when not strictly positive, locally, on
-        :meth:`recent_grants`' reason (ADR-0151 §2a).
-
-        Args:
-            limit: The most acts to return.
-
-        Returns:
-            Up to ``limit`` acts. **The order carries no timing claim** — there is
-            no instant on a connection record, so a position means only where the
-            store recorded the act (ADR-0151 §9).
-
-        Raises:
-            TypeError: If ``limit`` is not an integer, or is a ``bool``.
-            ValueError: If ``limit`` is not in ``[1, 2**63)``.
-        """
-        positive_page_argument(limit, name="limit")
-        return await self._call("recent_connection_acts", limit=limit)  # type: ignore[no-any-return]
-
     # --- the wire ----------------------------------------------------------
 
     async def _page(self, method: str, *, limit: int, offset: int) -> Any:
@@ -972,6 +812,238 @@ class HubClient:
             )
             raise HubUnavailableError(msg) from exc
         return env.decode_envelope(body)
+
+    # --- the five connection operations (ADR-0151 §16 item 5) ---------------
+    #
+    # **Each one refuses before it does anything, unless this client is on
+    # ADR-0084 §1's loopback socket** (:meth:`_refuse_off_loopback`). ADR-0151 §13
+    # is normative that "No lane exposes these operations over any transport other
+    # than ADR-0084 §1's loopback socket — in particular not over ADR-0124's remote
+    # listener — before a ratified decision rules the credential's hop from an
+    # enrolled device to the hub", and ``RemoteHubEngineClient`` subclasses this
+    # class — so without the guard an enrolled device would inherit five methods
+    # that unwrap a Tier 0 credential and put it across an overlay network, which
+    # is exactly the hop §13 refuses until it is ruled.
+    #
+    # **The guard is on the class rather than the methods being moved down to
+    # :class:`HubEngineClient`**, and the reason is ADR-0084 §4's substitutability.
+    # Moving them would leave ``RemoteHubEngineClient`` no longer satisfying
+    # ``AssistantEngine`` at all — which ADR-0084 §5 and ADR-0124 §1 each rely on,
+    # and which ``interfaces/cli.py`` reads directly, since ``_client_for``
+    # returns whichever client configuration names as one engine. Making a
+    # ratified Protocol unsatisfiable by a ratified implementation is a contract
+    # change owing its own ADR; refusing an operation the transport may not carry
+    # is not.
+    #
+    # **The refusal is the client's half only.** A client that lacks a method is
+    # not a check, so ``wire/server.py`` refuses the same five on any connection
+    # the remote listener admitted — §13's prohibition binds the hub as well as
+    # the spoke, and a non-conforming peer is exactly what the hub half is for.
+    #
+    # **This weakens no clause of ADR-0124 §9**, which is about frames: "the remote
+    # listener adds no member to the connect exchange, changes no frame's encoding,
+    # and changes no method's arguments or results". None of those moves.
+
+    #: Whether this transport may carry ADR-0151 §1's connection operations.
+    #: ``True`` here because ADR-0084 §1's ``0600`` socket is what every disclosure
+    #: argument on that surface rests on, and overridden to ``False`` on
+    #: :class:`~ai_assistant.wire.remote.RemoteHubEngineClient` — where ADR-0124 §3
+    #: accepts a specific, enumerated disclosure to a coordination service, and a
+    #: Tier 0 credential is not on that list.
+    carries_connection_operations: ClassVar[bool] = True
+
+    def _refuse_off_loopback(self, method: str) -> None:
+        """Refuse a connection operation this transport may not carry (ADR-0151 §13).
+
+        Called as the **first** statement of each of the five, so it runs before
+        the credential is revalidated, before it is unwrapped, and before any
+        socket is opened. Nothing derived from the secret exists by the time this
+        raises.
+
+        Args:
+            method: The operation being refused, for the message.
+
+        Raises:
+            ProtocolError: If this client's transport is not ADR-0084 §1's
+                loopback socket. A transport error rather than an
+                ``AssistantError``, and that is its own docstring's case — "a
+                credential this transport does not carry" — because no ratified
+                code in ADR-0085 §10a's vocabulary means "not on this transport",
+                and inventing one would be authoring contract surface this lane
+                may not author.
+        """
+        if self.carries_connection_operations:
+            return
+        msg = (
+            f"{method}() is not carried on this transport. ADR-0151 §13 keeps the "
+            f"connection operations on the hub's local socket until a ratified decision "
+            f"rules the credential's hop from an enrolled device to the hub, so no "
+            f"credential is sent from here. Run it on the machine the hub is on"
+        )
+        raise ProtocolError(msg)
+
+    # **The unwrap lives in the two methods below and nowhere else** (ADR-0151 §6,
+    # ADR-0124 §7's shape). ADR-0087's canonical projection is deliberately **not**
+    # extended to ``SecretStr``: ``project`` is a total dispatch that ends in
+    # ``TypeError`` for a type it has no form for, and ``SecretStr`` is not a
+    # ``str`` subclass, so a credential that reached it fails loudly here, before
+    # the socket is opened. Teaching the codec to unwrap one is refused because it
+    # is general where the need is specific — it would silently encode every secret
+    # any promoted value ever came to carry, removing exactly the property ADR-0125
+    # §3 bought, that "a disclosure requires somebody to write the unwrapping call,
+    # which makes it deliberate and reviewable rather than accidental".
+    #
+    # **The hazard the by-hand unwrap forecloses is invisible, which is why it is
+    # written down here.** A ``TypeAdapter`` over ``SecretValue`` serialises to
+    # ``"**********"``. An implementation reaching for pydantic's serialiser rather
+    # than this project's own projection would send ten asterisks as the
+    # credential; the hub would validate them as a well-formed ``SecretValue``, the
+    # provisioner would write them into the keyring, the record would go active,
+    # and **every in-process test would pass**, because the in-process engine never
+    # serialises anything. The failure would surface only at the first egress call,
+    # as an authentication error against a credential nobody could find a fault in
+    # by inspection.
+
+    async def connect_account(
+        self, *, identity: NonBlankEncodableText, credential: SecretValue
+    ) -> ConnectedAccount:
+        """Connect a fresh account, hub-side, under a reference the hub mints.
+
+        **This client takes no reference and offers no way to propose one**
+        (ADR-0151 §3). Every act after the first goes through
+        :meth:`connected_accounts`, which is the price of a reference the corpus
+        licenses to be logged, paid deliberately.
+
+        **The three local refusals are this client's own, not the hub's**
+        (ADR-0085 §9, ADR-0151 §5). They run before the socket is opened, so a
+        credential is never sent for a call the hub would refuse — which is the
+        whole reason the identity's bound lives in ``core`` as one constant both
+        implementations name rather than in the store alone.
+
+        Args:
+            identity: The account's user-recognisable name, sent verbatim.
+            credential: The account's secret. Unwrapped **once**, immediately
+                below, after being revalidated through ``secret_value``.
+
+        Returns:
+            The record the hub wrote, ``ACTIVE`` at its minted reference.
+
+        Raises:
+            ValueError: If ``identity`` is blank or unwritable, or ``credential``
+                is blank, unencodable or oversized.
+            UnusableIdentityError: If ``identity`` is one ADR-0149 §4 does not
+                admit. **No frame is sent and no credential leaves this process.**
+            OversizedValueError: If the arguments exceed the limit the hub
+                published. Nothing is truncated and nothing falls back to another
+                route; raising ``hub_max_frame_bytes`` is the operator's remedy
+                (ADR-0151 §11).
+        """
+        self._refuse_off_loopback("connect_account")
+        secret = secret_value(credential)
+        named = non_blank_text(identity, name="identity")
+        usable_identity(named, credential=secret)
+        return await self._call(  # type: ignore[no-any-return]
+            "connect_account", identity=named, credential=secret.get_secret_value()
+        )
+
+    async def reprovision_account(
+        self,
+        reference: Identifier,
+        *,
+        identity: NonBlankEncodableText,
+        credential: SecretValue,
+    ) -> ConnectedAccount:
+        """Replace the credential under a reference the hub returned, hub-side.
+
+        Args:
+            reference: The connection to re-provision, validated and normalised
+                here as every id argument on this surface is (ADR-0085 §3c).
+            identity: The account identity for the new revision, sent verbatim.
+            credential: The replacement secret, unwrapped once immediately below.
+
+        Returns:
+            The record the hub wrote, ``ACTIVE`` at the new revision.
+
+        Raises:
+            ValueError: If ``reference`` or ``identity`` is blank or unwritable,
+                or ``credential`` is blank, unencodable or oversized.
+            UnusableIdentityError: On :meth:`connect_account`'s terms.
+            OversizedValueError: On :meth:`connect_account`'s terms.
+        """
+        self._refuse_off_loopback("reprovision_account")
+        secret = secret_value(credential)
+        handle = identifier(reference, name="reference")
+        named = non_blank_text(identity, name="identity")
+        usable_identity(named, credential=secret)
+        return await self._call(  # type: ignore[no-any-return]
+            "reprovision_account",
+            reference=handle,
+            identity=named,
+            credential=secret.get_secret_value(),
+        )
+
+    async def disconnect_account(self, reference: Identifier) -> ConnectedAccount | None:
+        """Disconnect a reference hub-side, or report that nothing was removed.
+
+        A ``None`` says one thing — no live record was removed by this call — and
+        is **not** a report of a disconnection, a confirmation that a credential
+        was deleted, or a statement that the reference does not exist
+        (ADR-0151 §8).
+
+        Args:
+            reference: The connection to disconnect.
+
+        Returns:
+            The live record the hub removed, or ``None``.
+
+        Raises:
+            ValueError: If ``reference`` is blank or unwritable.
+            ResidualCredentialError: If the reference **is** disconnected and a
+                credential deletion failed. Never rendered as a failed
+                disconnection.
+        """
+        self._refuse_off_loopback("disconnect_account")
+        named = identifier(reference, name="reference")
+        return await self._call("disconnect_account", reference=named)  # type: ignore[no-any-return]
+
+    async def connected_accounts(self) -> tuple[ConnectedAccount, ...]:
+        """Every connection with a live record, read hub-side from the store.
+
+        **Unpaged, so a bare ``_call``.** The refusal that matters is the hub's —
+        a live set too large for the frame is an ``OversizedValueError`` and no set
+        at all, because a truncated answer to "what is connected" is a false answer
+        rather than a partial one (ADR-0151 §9).
+
+        Returns:
+            Every live record, pending ones included and carrying ``PENDING``. No
+            client presents such a record as a working connection.
+        """
+        self._refuse_off_loopback("connected_accounts")
+        return await self._call("connected_accounts")  # type: ignore[no-any-return]
+
+    async def recent_connection_acts(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[ConnectionAct, ...]:
+        """One page of what was done to connections, newest first.
+
+        ``limit`` is refused when not strictly positive, locally, on
+        :meth:`recent_grants`' reason (ADR-0151 §2a).
+
+        Args:
+            limit: The most acts to return.
+
+        Returns:
+            Up to ``limit`` acts. **The order carries no timing claim** — there is
+            no instant on a connection record, so a position means only where the
+            store recorded the act (ADR-0151 §9).
+
+        Raises:
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+        """
+        self._refuse_off_loopback("recent_connection_acts")
+        positive_page_argument(limit, name="limit")
+        return await self._call("recent_connection_acts", limit=limit)  # type: ignore[no-any-return]
 
 
 class HubEngineClient(HubClient):

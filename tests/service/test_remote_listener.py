@@ -1038,3 +1038,79 @@ async def test_a_bound_listener_answers_nothing_until_it_is_told_to_serve(
         await listener.stop_accepting()
         await listener.aclose()
         store.close()
+
+
+# --- ADR-0151 §13: the connection operations are not served here -------------
+
+
+@pytest.mark.parametrize(
+    ("method", "payload"),
+    [
+        ("connect_account", {"identity": "ada", "credential": "hunter2-correct-horse"}),
+        (
+            "reprovision_account",
+            {"identity": "ada", "credential": "hunter2-correct-horse", "reference": "ref-1"},
+        ),
+        ("disconnect_account", {"reference": "ref-1"}),
+        ("connected_accounts", {}),
+        ("recent_connection_acts", {}),
+    ],
+)
+async def test_no_connection_operation_is_served_on_the_remote_listener(
+    tmp_path: Path, method: str, payload: dict[str, Any]
+) -> None:
+    """ADR-0151 §13, held on the hub's side rather than trusted to the client.
+
+    **A conforming client refuses these locally** (``wire/client.py``), and that is
+    not a check: a peer speaking the ratified frames by hand — which is exactly
+    what this ``_Peer`` is — never runs that code. §13's prohibition is on
+    *exposure*, so the listener that must not carry them is where the enforcement
+    has to be, and the credential-carrying pair is why: without this, an enrolled
+    device could put a Tier 0 secret into the hub's keyring across an overlay
+    network that ADR-0124 §3's enumerated disclosures do not cover.
+
+    **Closed with no reply rather than answered with an error frame**, which is the
+    same answer a peer gets for a method this build's surface does not declare —
+    and a method not carried on this listener is exactly that. ADR-0085 §10a fixes
+    the wire's error vocabulary as "exactly the ``AssistantError`` subtree", so
+    there is no ratified code meaning "not on this transport" and this lane may not
+    invent one.
+
+    **All five, not only the two carrying a credential.** The listings disclose an
+    account identity, which ADR-0149 §3 makes Tier 1.
+    """
+    engine = FakeAssistantEngine()
+    async with _remote(tmp_path, engine=engine) as hub:
+        minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        async with _dialling(hub) as peer:
+            assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
+            await peer.send(
+                env.Envelope(kind=env.FrameKind.REQUEST, id="r-0", payload=payload, method=method)
+            )
+            with pytest.raises(Exception):  # noqa: B017, PT011 — the connection closes
+                await peer.receive()
+
+    # The discriminating half: not merely "no reply", but **nothing happened**. A
+    # listener that served the call and then failed to write the reply would leave
+    # a connection record behind (ADR-0148 §6's first write).
+    assert engine.connections.entries == []
+    assert [name for name, _arguments in engine.calls] == []
+
+
+async def test_the_loopback_listener_still_serves_them(tmp_path: Path) -> None:
+    """The other side of the same clause, and the reason it is a *pair* of cases.
+
+    A hub that refused these everywhere would satisfy every assertion above while
+    breaking the surface this lane exists to build. ADR-0084 §1's ``0600`` socket
+    is where they belong, and ``serve_connection`` tells the two listeners apart by
+    the ``admission`` the remote one supplies and the loopback one does not.
+    """
+    engine = FakeAssistantEngine()
+    listener = Listener(engine, _settings(tmp_path), data_dir=tmp_path)
+    await listener.start(build="test")
+    try:
+        client = HubEngineClient(tmp_path / "hub.sock", read_timeout=_PATIENT)
+        assert await client.connected_accounts() == ()
+    finally:
+        await listener.stop_accepting()
+        await listener.aclose()
