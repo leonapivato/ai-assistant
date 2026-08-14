@@ -303,7 +303,7 @@ authors. The strengthening §3c buys for an id is harmless where nothing was typ
 ADR-0102 §2 declined it only for a value "whose whole contract is exact comparison
 against a declared constant", which a minted reference is not.
 
-#### 2a. The declared failures, and the four new error classes
+#### 2a. The declared failures, and the seven new error classes
 
 ADR-0085 §9 makes the per-method failures part of the contract, "A Protocol whose
 methods raise unnamed exceptions is not a contract a conformance suite can hold
