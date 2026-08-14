@@ -95,6 +95,8 @@ from ai_assistant.readers import CALENDAR_READER_NAME, EMAIL_READER_NAME
 from ai_assistant.secret_store import backend as secret_store_module
 from ai_assistant.testing import FakeMemoryStore, FakeTraceSink, evaluation_trace
 from ai_assistant.tools import InMemoryToolRegistry
+from ai_assistant.tools.egress_binder import EgressBindingSeam
+from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -1341,6 +1343,63 @@ async def test_the_connection_surface_is_wired_and_answers_from_its_own_store(
         # rather than merely present.
         with pytest.raises(ValueError, match="strictly positive"):
             await engine.recent_connection_acts(limit=0)
+    finally:
+        await engine.aclose()
+
+
+async def test_the_egress_binder_is_wired_over_the_store_the_provisioner_writes(
+    tmp_path: Path,
+) -> None:
+    """ADR-0152 §10, #1138: "The composition root wires the one implementation."
+
+    **Two claims, and the second is the one a `is not None` check would miss.**
+    The seam must exist on the runner, and its ``records`` must be the *same*
+    ``SqliteConnectionStore`` object the provisioner writes through — not a second
+    handle over the same file. ADR-0152 §10 has the seam read one connection record
+    per egress call for its connectability and identity, so a second handle would
+    let a provisioning act commit a revision the seam could not yet see: the split
+    ADR-0102 §7 refuses one store over, arriving one subsystem across.
+
+    Asserted by identity (``is``) rather than by path equality, because two stores
+    over one path compare equal on every attribute a test would think to check and
+    are still two objects with two connections.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        binder = engine._runner._binder  # the seam the composition root wired
+        assert binder is not None, "ADR-0152 §10 requires the root to wire it (#1138)"
+        # Narrowed to the concrete classes, which is itself part of the claim: §10
+        # says the root wires "the one implementation", and the seam and the
+        # provisioner are each reached through a Protocol everywhere else.
+        assert isinstance(binder, EgressBindingSeam)
+        provisioner = engine._connections._provisioner
+        assert isinstance(provisioner, KeyringConnectionProvisioner)
+        assert binder._records is provisioner._store
+    finally:
+        await engine.aclose()
+
+
+async def test_the_wired_binder_refuses_a_mis_registered_egress_tool(
+    tmp_path: Path,
+) -> None:
+    """ADR-0152 §8's refusal, reachable in production for the first time (#1138).
+
+    This is what the wiring actually buys today. With ``binder=None`` the runner
+    answered ``None`` for every call and §8's refusal — a tool declaring either §3
+    keyword while bound to no connected account — was unreachable in a built
+    engine, whatever the seam's own tests proved. The registration table is empty,
+    which is the honest production state, so a declaring tool is exactly the
+    mis-registration §8 names.
+
+    Driven through the seam the root wired rather than a fresh one, because a
+    freshly constructed seam would prove the class works and say nothing about
+    whether this deployment reaches it.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        binder = engine._runner._binder
+        assert isinstance(binder, EgressBindingSeam)
+        assert binder._registrations.registration("send_email") is None
     finally:
         await engine.aclose()
 
