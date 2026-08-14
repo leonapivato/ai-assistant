@@ -507,14 +507,22 @@ exists; the other three travel together in one value the request carries.
 > activation has landed, and a deletion that fails leaves an unreferenced slot
 > rather than an incorrect one — the failure is reported and never suppressed.
 
-> **Normative.** **At most one provisioning act is in flight per credential
-> reference**, and the connection record is what enforces it. An act *begins* by a
+> **Normative.** **At most one provisioning act owns a connection record at a
+> time**, and the record itself is what confers ownership. An act *takes* it by a
 > single **compare-and-swap** on that record — from the identity, revision and
-> state it observed, to *pending* with the incremented revision — and an act whose
-> compare-and-swap fails has not begun and writes nothing, neither the credential
-> nor the activation. This is ADR-0014 §5's compare-and-swap applied to the one
-> store that can offer it; nothing of the kind is asked of the keyring, which
-> ADR-0125 §4 rules never refuses a `set`.
+> state it observed, to *pending* with the incremented revision and its own slot —
+> and an act whose compare-and-swap fails never held it and writes nothing,
+> neither the credential nor the activation. This is ADR-0014 §5's compare-and-swap
+> applied to the one store that can offer it; nothing of the kind is asked of the
+> keyring, which ADR-0125 §4 rules never refuses a `set`.
+
+> **Normative.** Ownership is over the **record**, not over the act's own
+> execution: a displaced act's ownership ends the instant the displacing act's
+> compare-and-swap lands, and a keyring write it had already begun is neither
+> stopped nor waited for. Two acts may therefore overlap in time — one owning the
+> record, one finishing a write it started while it owned the record — and that is
+> the permitted interleaving §14 requires a test for, not a violation of this
+> clause. What may never overlap is ownership.
 
 > **Normative.** Before the credential write, and again before the activation, a
 > provisioning act re-reads the connection record and **abandons** — performing
