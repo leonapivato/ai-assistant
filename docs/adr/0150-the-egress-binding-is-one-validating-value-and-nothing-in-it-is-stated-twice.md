@@ -402,8 +402,21 @@ protocol's own ADR — and every refusal below lands on the conservative side of
 asymmetry, since a refusal is "a recoverable error the user sees" and the alternative it
 forecloses is a disclosure. §13 records the ADR-0082 §1 judgement on both clauses.
 
-**Each refusal is a case where the protocol does not settle equivalence, and folding
-would be inventing one.** RFC 5321 §2.4 makes an SMTP local part case-sensitive and
+**The boundary is stated as a grammar rather than as a list of refusals, and round 8
+is why.** An earlier draft enumerated six refused shapes and stated the positive rule
+as "everything before the final `@`". Adversarial review found that `a@b@example.com`
+is ASCII, carries no whitespace, quote, literal or trailing dot, and is on none of the
+six — so one implementation splits at the final `@` and canonicalises it while another
+refuses it as the producer does, and the same request yields a binding in one and a
+refusal at the seam in the other. A list of known-bad shapes is not an acceptance
+boundary, and ADR-0148 §2's sixth clause — one canonicaliser per protocol, so two
+integrations "cannot disagree about whether two destinations are the same recipient" —
+is worth nothing if they can disagree about whether a string is an address at all. The
+grammar closes it: everything not matched is refused, and the six become instances
+worth naming rather than the definition.
+
+**Each named refusal is also a case where the protocol does not settle equivalence, so
+folding would be inventing one.** RFC 5321 §2.4 makes an SMTP local part case-sensitive and
 leaves the domain not (RFC 4343), which is why the two halves are treated differently
 and why the local part is copied byte for byte — "MUST BE interpreted and assigned
 semantics only by the host specified in the domain part". A **quoted** local part has
@@ -430,13 +443,28 @@ the reason this member is decidable here at all.
 > canonicaliser folds, strips, trims, reorders or otherwise rewrites a local part on
 > any ground.
 
-> **Normative.** Under `SMTP`, every form whose equivalence the protocol does not
-> establish is **refused** rather than canonicalised, and a refusal is ADR-0148 §1's
-> third clause — the request is not built and no ruling is sought. Refused: a quoted
-> local part; any address carrying a character outside ASCII; an address literal, in
-> which the domain is an IP address rather than a name; a trailing dot on the domain;
-> an address carrying whitespace anywhere, which is refused and never trimmed; and
-> any string with no `@` or with an empty local part or domain.
+> **Normative.** `SMTP` **accepts** exactly the following supplied forms and
+> **refuses every other string**, and the boundary is closed rather than a list of
+> known-bad shapes. An accepted form is entirely ASCII and carries **exactly one**
+> `@`, before which is the local part and after which is the domain.
+> - The **local part** is 1 to 64 characters (RFC 5321 §4.5.3.1.1), and is one or
+>   more *atoms* separated by single `.` characters, with no leading, trailing or
+>   repeated `.`. An atom is one or more of `A-Z`, `a-z`, `0-9` and
+>   ``!#$%&'*+-/=?^_`{|}~`` — RFC 5321's `Dot-string` of RFC 5322 `atext`.
+> - The **domain** is 1 to 255 characters (RFC 5321 §4.5.3.1.2) and is one or more
+>   labels separated by single `.` characters, with no trailing `.`. A label is 1 to
+>   63 characters (RFC 1035 §2.3.4) of `A-Z`, `a-z`, `0-9` and `-`, beginning and
+>   ending with a letter or digit.
+
+> **Normative.** A refusal is ADR-0148 §1's third clause: the request is not built and
+> no ruling is sought. The forms the boundary above excludes include, each for a reason
+> §3's prose gives and none by accident: a **quoted** local part; any address carrying
+> a character **outside ASCII**; an **address literal**, whose domain is an IP address
+> rather than a name; a **trailing dot** on the domain; an address carrying
+> **whitespace** anywhere, which is refused and never trimmed; a string with **more
+> than one** `@`, or with **none**; and an empty local part or domain. No lane treats
+> that list as the boundary — the grammar above is — and no lane accepts a form
+> because it is absent from the list.
 
 > **Normative.** A refusal under the clause above is **not a canonical form** and is
 > not a rewrite. ADR-0148 §2's second clause governs what a canonicaliser does to a
@@ -1068,9 +1096,13 @@ lands there whole.
 > for **each** equivalence and **each** refusal §3 states: a pair differing only in
 > domain case canonicalises to one form; a pair differing only in local-part case
 > canonicalises to **two**; and a quoted local part, a non-ASCII address, an address
-> literal, a trailing dot, an address carrying whitespace, and a string with no `@`
-> are each **refused** rather than canonicalised or passed through. A canonicaliser
-> that lowercases the whole address passes the first and fails the second.
+> literal, a trailing dot, an address carrying whitespace, a string with **two** `@`
+> characters, a string with none, a local part with a leading, trailing or doubled
+> `.`, a local part over 64 characters, a domain label beginning or ending with `-`,
+> a domain with an empty label, and a domain over 255 characters are each **refused**
+> rather than canonicalised or passed through. A canonicaliser that lowercases the
+> whole address passes the first and fails the second, and one that splits at the
+> final `@` passes every refusal case except the two-`@` one.
 
 > **Normative.** The lane that builds an egress `CONFIRM` ships the
 > **duplicate-across-arguments** case §10's third clause is stated for: one recipient
@@ -1334,8 +1366,10 @@ rather than re-deriving it, and the outcome is recorded here on ratification.
   byte-exact, each because the protocol does not settle its equivalence and this ADR
   would rather spend a recoverable error than an undetectable disclosure — ADR-0017
   §4's asymmetry argument, that "a boundary that has never transmitted can be held to
-  the standard we would want everywhere". The cost is real and the route out is
-  named rather than left to erosion: §3 makes widening `SMTP` an ADR, on the same
+  the standard we would want everywhere". The acceptance boundary is a **closed
+  grammar** rather than a list of refusals, so a form nobody thought of is refused
+  rather than silently canonicalised by whichever implementation saw it first. The
+  cost is real and the route out is named rather than left to erosion: §3 makes widening `SMTP` an ADR, on the same
   terms as adding a protocol, so the forms come back with an argument about what
   equivalences they establish rather than as a patch to a canonicaliser.
 - **Nothing here authorises a byte.** The seam remains approved and undesignated, no
