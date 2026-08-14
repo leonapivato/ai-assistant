@@ -186,6 +186,38 @@ def test_a_declaration_naming_a_protocol_this_seam_cannot_canonicalise_is_refuse
         DestinationDeclaration(tool_id="send_email", arguments=(malformed,))
 
 
+def test_a_declaration_holding_a_malformed_member_refuses_before_it_is_used() -> None:
+    """Adversarial round 8: the checks ran after the names were collected.
+
+    An unhashable name reached ``set`` and a member that was not an argument at
+    all reached an attribute access, so a declaration this type documents as
+    refusing raised a bare ``TypeError`` or ``AttributeError`` instead. "A guard
+    whose own failure modes bypass the failure path it specifies is enforcing
+    nothing" — ADR-0026 §2's rule for ``checked_clock``.
+    """
+    with pytest.raises(DestinationSelectionError, match="destination-bearing arguments"):
+        DestinationDeclaration(tool_id="send_email", arguments=(None,))  # type: ignore[arg-type]
+
+    unhashable = DestinationArgument(
+        name=[],  # type: ignore[arg-type]
+        protocol=DestinationProtocol.SMTP,
+        multiple=True,
+        required=True,
+    )
+    with pytest.raises(DestinationSelectionError, match="has no name"):
+        DestinationDeclaration(tool_id="send_email", arguments=(unhashable,))
+
+
+def test_a_declaration_naming_no_tool_is_refused_without_rendering_it() -> None:
+    """Every other refusal opens with the tool id, so it is checked before it is."""
+    needle = "the secret is swordfish"
+
+    with pytest.raises(DestinationSelectionError) as raised:
+        DestinationDeclaration(tool_id=needle.encode(), arguments=(_TO,))  # type: ignore[arg-type]
+
+    assert needle not in str(raised.value)
+
+
 def test_a_declaration_naming_a_nameless_argument_is_refused() -> None:
     """An argument with no name selects from no field and describes no span."""
     nameless = DestinationArgument(

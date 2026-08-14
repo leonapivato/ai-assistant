@@ -84,6 +84,61 @@ class DestinationArgument:
     required: bool
 
 
+def _checked_name(member: DestinationArgument, tool_id: str) -> str:
+    """Check one declared argument, and return the name it is keyed by.
+
+    **Every member is checked before any of them is used**, which is the ordering
+    adversarial review asked for on round 8: collecting the names first put an
+    unhashable one into a ``set`` and a malformed member into an attribute access,
+    so a declaration this type documents as refusing raised a bare ``TypeError``
+    or ``AttributeError`` instead. A guard whose own failure modes bypass the
+    failure path it specifies is enforcing nothing, which is ADR-0026 §2's rule
+    for ``checked_clock`` and the reason the check runs first rather than second.
+
+    **Where this stops.** These fields are annotated, so reaching this function
+    with a malformed one means a caller has already silenced the type checker;
+    what is bought by checking anyway is that such a caller gets this package's
+    refusal rather than an arbitrary Python error, and that a declaration which
+    cannot describe a call does not load. It is **not** a claim that a declaration
+    is trustworthy: one that is well-formed and *wrong* — naming a body field as
+    destination-bearing, or omitting a recipient — is undetectable here and is
+    ruled on elsewhere. ADR-0148 §2 calls that "a defect in the same class as a
+    mis-declared ``discloses``", §8 records that "nothing in ADR-0016 detects a
+    declaration that understates", and ADR-0021 §1 states the general case: "no
+    producer can prevent it".
+
+    Args:
+        member: The entry to check.
+        tool_id: The declaring tool, already checked, for the refusal's text.
+
+    Returns:
+        The argument's name.
+
+    Raises:
+        DestinationSelectionError: If the entry is not a
+            :class:`DestinationArgument`, has no usable name, or names a protocol
+            this seam does not canonicalise. No message renders the offending
+            value: a well-formed declaration is the tool author's text, and a
+            malformed one is whatever a caller wrote.
+    """
+    argument: object = member
+    if not isinstance(argument, DestinationArgument):
+        msg = f"{tool_id}: a destination declaration holds destination-bearing arguments"
+        raise DestinationSelectionError(msg)
+    name: object = argument.name
+    if not isinstance(name, str) or not name:
+        msg = f"{tool_id}: a destination-bearing argument has no name"
+        raise DestinationSelectionError(msg)
+    protocol: object = argument.protocol
+    if not isinstance(protocol, DestinationProtocol):
+        msg = (
+            f"{tool_id}: a destination-bearing argument names a protocol this seam "
+            f"does not canonicalise"
+        )
+        raise DestinationSelectionError(msg)
+    return name
+
+
 @dataclass(frozen=True, slots=True)
 class DestinationDeclaration:
     """Every destination-bearing argument of one registered tool.
@@ -122,36 +177,24 @@ class DestinationDeclaration:
             DestinationSelectionError: On an empty or duplicated declaration, or
                 one naming an unusable protocol or a nameless argument.
         """
+        tool_id: object = self.tool_id
+        if not isinstance(tool_id, str) or not tool_id:
+            # Refused before it is rendered, because every message below opens
+            # with it and a forged one is whatever a caller wrote.
+            msg = "a destination declaration names the tool it describes"
+            raise DestinationSelectionError(msg)
         if not self.arguments:
             msg = (
-                f"{self.tool_id}: a destination declaration names at least one "
+                f"{tool_id}: a destination declaration names at least one "
                 f"argument. A call whose arguments select no onward recipient is "
                 f"authorised against the connected account alone (ADR-0148 §2), "
                 f"which no value in tools/ can name today (ADR-0125 §12)"
             )
             raise DestinationSelectionError(msg)
-        names = [argument.name for argument in self.arguments]
+        names = [_checked_name(member, tool_id) for member in self.arguments]
         if len(set(names)) != len(names):
-            msg = f"{self.tool_id}: a destination declaration names each argument once"
+            msg = f"{tool_id}: a destination declaration names each argument once"
             raise DestinationSelectionError(msg)
-        for argument in self.arguments:
-            # Checked here so a malformed declaration does not load, rather than
-            # reaching `canonicalise` at call time with a protocol that has no
-            # canonicaliser and no name — ADR-0016 §1's "a tool that does not
-            # declare its reach does not load", and adversarial round 7's finding.
-            # Neither message names the offending value: a declaration is the tool
-            # author's, but a forged one is whatever a caller wrote.
-            declared: object = argument.protocol
-            if not isinstance(declared, DestinationProtocol):
-                msg = (
-                    f"{self.tool_id}: a destination-bearing argument names a protocol "
-                    f"this seam does not canonicalise"
-                )
-                raise DestinationSelectionError(msg)
-            named: object = argument.name
-            if not isinstance(named, str) or not named:
-                msg = f"{self.tool_id}: a destination-bearing argument has no name"
-                raise DestinationSelectionError(msg)
 
 
 def _supplied_forms(

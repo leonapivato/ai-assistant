@@ -64,12 +64,13 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.errors import ToolError
+from ai_assistant.core.types import DataTier
 from ai_assistant.tools.destination_arguments import select_destinations
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from ai_assistant.core.types import DataTier, FrozenJson
+    from ai_assistant.core.types import FrozenJson
     from ai_assistant.tools.destination_arguments import DestinationDeclaration
     from ai_assistant.tools.destinations import Destination
 
@@ -172,6 +173,48 @@ class PayloadArgument:
     multiple: bool = False
 
 
+def _checked_payload_name(member: PayloadArgument, tool_id: str) -> str:
+    """Check one declared argument, and return the name it is keyed by.
+
+    The ordering is adversarial round 8's: every member is checked before any of
+    them is used, so an unhashable name reaches this refusal rather than a bare
+    ``TypeError`` from ``set``. What it buys, and what it does not, is what
+    :func:`~ai_assistant.tools.destination_arguments._checked_name` records — a
+    caller who has silenced the type checker gets this package's refusal instead
+    of an arbitrary Python error, and a declaration that is well-formed and wrong
+    is still undetectable here (ADR-0148 §2, §8; ADR-0021 §1).
+
+    Args:
+        member: The entry to check.
+        tool_id: The declaring tool, already checked, for the refusal's text.
+
+    Returns:
+        The argument's name.
+
+    Raises:
+        PayloadDescriptionError: If the entry is not a :class:`PayloadArgument`,
+            has no usable name, or states an established tier that is not a
+            :class:`~ai_assistant.core.types.DataTier`. No message renders the
+            offending value.
+    """
+    argument: object = member
+    if not isinstance(argument, PayloadArgument):
+        msg = f"{tool_id}: a payload declaration holds transmitted arguments"
+        raise PayloadDescriptionError(msg)
+    name: object = argument.name
+    if not isinstance(name, str) or not name:
+        msg = f"{tool_id}: a transmitted argument has no name"
+        raise PayloadDescriptionError(msg)
+    tier: object = argument.establishes_tier
+    if tier is not None and not isinstance(tier, DataTier):
+        msg = (
+            f"{tool_id}: a transmitted argument establishes something that is not a "
+            f"data tier; ADR-0146 §5 admits a tier or none"
+        )
+        raise PayloadDescriptionError(msg)
+    return name
+
+
 @dataclass(frozen=True, slots=True)
 class PayloadDeclaration:
     """Every argument one tool transmits, which is what "covers" is measured against.
@@ -196,12 +239,17 @@ class PayloadDeclaration:
         Raises:
             PayloadDescriptionError: On an empty or duplicated declaration.
         """
-        if not self.arguments:
-            msg = f"{self.tool_id}: a payload declaration names at least one argument"
+        tool_id: object = self.tool_id
+        if not isinstance(tool_id, str) or not tool_id:
+            # Refused before it is rendered: every message below opens with it.
+            msg = "a payload declaration names the tool it describes"
             raise PayloadDescriptionError(msg)
-        names = [argument.name for argument in self.arguments]
+        if not self.arguments:
+            msg = f"{tool_id}: a payload declaration names at least one argument"
+            raise PayloadDescriptionError(msg)
+        names = [_checked_payload_name(member, tool_id) for member in self.arguments]
         if len(set(names)) != len(names):
-            msg = f"{self.tool_id}: a payload declaration names each argument once"
+            msg = f"{tool_id}: a payload declaration names each argument once"
             raise PayloadDescriptionError(msg)
 
 
