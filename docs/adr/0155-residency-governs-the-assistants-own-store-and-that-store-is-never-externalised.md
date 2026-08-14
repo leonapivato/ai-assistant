@@ -27,9 +27,7 @@
   marker the corpus has (ADR-0146's discloser provenance) records *who disclosed* a
   span, not *where it came from*, and the two questions come apart exactly on this
   line.
-- **§3's first clause is stated over what a component obtained, what it supplied and
-  when — the moment fixed by the recorded persistence of the plan step naming the
-  **§3's first clause is the maximally restrictive interim rule, and it carries no
+- **§3's first clause is the maximally restrictive interim rule, and it carries no
   time predicate and no exception.** No component introduces into an egress span a
   value it obtained from any store under `Settings.data_dir`, nor the output of an
   operation it supplied one to — at any moment, by any route, and no authorisation
@@ -38,12 +36,15 @@
   `parameters`, so the runner carries what was composed rather than adding to it, and
   the binder's connection read reaches the binding and the destination set, which are
   not spans.
-- **One question is reserved to the owner rather than decided here.** Diffuse
-  model-context influence — a model drafting under a prompt that carried store
-  content, with no component routing an extractable value — is the boundary twelve
-  review rounds could not state. §3's second clause names both candidate rules and
-  their costs and **reserves the choice to an owner ruling**, with the restrictive
-  clause governing until then. Earlier drafts reached the case by derivation, by a
+- **§3's second clause forbids the model-context case outright, and reserves only
+  its relaxation to the owner.** Diffuse influence — a model drafting under a prompt
+  that carried store content, with no component routing an extractable value — is the
+  boundary twelve review rounds could not state a *permissive* rule for, so the clause
+  states the restrictive one and makes it decidable at the supply site: the component
+  assembling a model call's context knows what it put there, and does not emit that
+  call's output into an egress span. What an owner ruling decides is whether to relax
+  it or ratify it as permanent; both candidate rules and their costs are set out
+  beside the clause. Earlier drafts reached the case by derivation, by a
   carve-out with its own antecedent, by an exception for the call's own recorded
   arguments, by a store partition and by a read-relation pair; all five were
   defeated in review, and §3 records how rather than quietly repairing it, because
@@ -406,23 +407,27 @@ checkable direction and the one a reviewer can test a change against.
 > such a value — **at any moment, by any route**, whether verbatim or as a copy, an
 > excerpt, a re-encoding, a rendering, a summary or a translation. There is no moment
 > before which this is permitted and no read of any such store that is excepted from
-> it, and no authorisation cures it. This clause is stated over what a component
+> it, and no authorisation cures it. This clause reaches the **direct** case — a
+> component that itself obtained the value and introduced it, or supplied it to an
+> operation whose output it introduced — which is its predicate's whole extent; the
+> model-context case is the clause below's and is not governed here. This clause is
+> stated over what a component
 > obtained and what it introduced, never over what a span contains, and no lane reads
 > it as requiring or licensing an inspection of content.
 
-> **Normative.** One case is **not decided by this ADR**: diffuse model-context
-> influence — a model drafting an argument under a prompt that carried store content,
-> where no component routed an extractable value into the span. Two rules are
-> available and this ADR adopts neither. **(a) Treat it as covered**, so an egress
-> argument drafted by a model whose context held store content is forbidden; its cost
-> is that retrieval-augmented drafting of outbound content ends entirely. **(b) Treat
-> it as residue**, disposed of by §2's conditions and by the owner reading the payload
-> at confirmation; its cost is accepting that store content externalises by influence,
-> with the owner's `CONFIRM` as the only control. The choice is **reserved to an owner
-> ruling** and to no lane, no reviewer and no later ADR acting without one; the record
-> of rounds 4 through 15 on this document's own PR (#1153) is the evidence that the
-> boundary was worked and did not resolve. Until the owner rules, the clause above
-> governs the case, and it is deliberately the more restrictive of the two readings.
+> **Normative.** Until an owner ruling relaxes this clause, an egress span may not
+> carry content produced by a model call whose context carried a value obtained from
+> any store this system keeps under `Settings.data_dir` — whether or not any component
+> routed an extractable value into the span. This is decidable at the supply site: the
+> component that assembles a model call's context knows whether it placed such content
+> there, and such a component does not emit that call's output into an egress step's
+> parameters or into any egress span. What is reserved to an owner ruling is solely
+> the **relaxation** — whether such influence, disposed of by the owner reading the
+> payload at confirmation and by ADR-0146's provenance marking, may instead be
+> permitted as residue — together with the alternative of ratifying this clause as
+> permanent. No lane, reviewer or later ADR makes that choice without an owner ruling.
+> Until ruled, this clause governs, and it is deliberately the more restrictive
+> reading.
 
 > **Normative.** No authorisation makes a transmission the first clause forbids
 > lawful. A per-call user
@@ -644,10 +649,11 @@ to the turn as JSON.
 
 - **A turn that recalls and then sends, where the record reaches the planner's prompt
   and the model writes the argument.** No component routed an extractable value into a
-  span — the influence ran through the model. This is exactly the case §3's second
-  clause **reserves to the owner**, and until they rule, §3's first clause governs it:
-  the restrictive reading, under which the send is forbidden. A lane may not read the
-  reservation as a permission.
+  span — the influence ran through the model, so §3's first clause does not reach it.
+  §3's **second clause forbids it directly**: the span carries content produced by a
+  model call whose context held store content, and `orchestration`, which assembled
+  that context, is the component the clause binds. What an owner ruling may later do
+  is relax that; a lane may not read the reservation as a permission now.
 - **A component that reads a store and introduces the value, or the output of
   something it commissioned on it, into a span** — any store, at any moment, whether
   during that step, an earlier step of the same plan, or before any plan existed.
@@ -826,9 +832,13 @@ one.
 > either: its execution introduces nothing into a span — the runner carries the
 > request's own `parameters`, which ADR-0150 §4 makes the spans themselves, and the
 > binder's connection read reaches the binding and the destination set rather than a
-> span. The statement is about the tool's ordinary
-> operation and its declared arguments; it is not a statement about the payload of
-> any particular call, which §3 governs call by call.
+> span. This statement is about §3's first clause only and does not reach §3's second:
+> whether a particular call's arguments were drafted by a model whose context carried
+> store content is a fact about that call, and the registering lane's statement under
+> the clause above addresses it call by call rather than once for the tool. The
+> statement is about the tool's ordinary operation and its declared arguments; it is
+> not a statement about the payload of any particular call, which §3 governs call by
+> call.
 
 **Why the gate lifts corpus-wide rather than per integration, decided rather than
 assumed.** ADR-0154 §6's second clause names its own condition, and the condition is
@@ -925,13 +935,16 @@ absorbed:
   third and putting the restrictive rule in force meanwhile, rather than covering it
   with a form of words, is what architecture review's round-2 and round-3 blockers and
   twelve later rounds bought.
-- **`send_email` can be registered and QA'd under the interim rule.** A send whose
-  spans carry only content the owner authored, or content composed for that send in
-  the turn, routes no store value into a span and is untouched by §3's first clause.
-  Anything more — an argument drafted from recalled memory — waits on the owner's
-  ruling on §3's second clause, and until then the restrictive reading applies. That
-  is a real narrowing of what a first integration may do, and it is stated rather than
-  discovered later.
+- **`send_email` can be registered and QA'd under the interim rules, within a
+  narrowed envelope.** A send whose spans carry only content the owner authored, or
+  content composed for that send from what the turn itself supplied, introduces no
+  store value and is produced by no model call carrying store content — so neither
+  clause of §3 reaches it. **A recall-then-send turn cannot draft egress arguments
+  under the interim**: once recalled records are in the planner's context, §3's second
+  clause forbids that call's output reaching a span. A QA send therefore composes from
+  turn content only. That is a real narrowing of what a first integration may do, it
+  is what makes the interim restrictive rather than nominal, and it is stated here
+  rather than discovered during QA.
 - **The batch ratifies what the corpus could decide and stops where it could not.**
   Fourteen of this ADR's clauses were settled by reading the corpus; the fifteenth's
   crux is a question about what this system is *for*, and it is recorded as the
