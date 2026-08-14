@@ -604,7 +604,16 @@ exists; the other three travel together in one value the request carries.
 > field or its shape, which is the inference ADR-0146 §2 forbids. Where it rides
 > inside the request is ADR-0146 §8's deferred marker and is not decided here
 > (§11); **that** it reaches the request before the ruling is decided here, because
-> nothing downstream of the ruling may add it.
+> nothing downstream of the ruling may add it. This clause adds **no field** to
+> `ActionRequest`, and no lane adds one on the strength of it: whatever carries the
+> provenance is inside §11(a)'s deferred surface, so each shape ADR-0146 §6's own
+> prose names — "a `core` type", "a wrapper the seam constructs", "the payload
+> description itself" — remains that surface's contract ADR to choose, under the
+> one constraint that it is in the request before `ActionPolicy.decide` is reached.
+> What is consumed here is ADR-0146 §6's **requirement** that each span's provenance
+> be recorded with the payload it binds before transmission — a ratified obligation,
+> not the deferral beside it — and §1's earliness is only what moves that recording
+> ahead of the ruling rather than after it.
 
 > **Normative.** The payload description is **deterministic**: it is a function of
 > exactly three things — the request's own arguments, each destination-bearing one
