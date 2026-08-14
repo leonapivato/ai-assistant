@@ -207,7 +207,11 @@ class ScriptedChannel:
     """
 
     def __init__(
-        self, *replies: str, secure: bool = True, on_exhausted: Exception | None = None
+        self,
+        *replies: str,
+        secure: bool = True,
+        on_exhausted: Exception | None = None,
+        on_payload_write: Exception | None = None,
     ) -> None:
         """Arrange the replies this endpoint gives, in order.
 
@@ -220,8 +224,11 @@ class ScriptedChannel:
                 bytes that stand for a clean end of stream. A far end can stop
                 answering either way, and the two arrive at a caller as different
                 types — which is exactly the distinction one case is about.
+            on_payload_write: Raised by the write of the ``DATA`` block, after the
+                octets have been recorded. See :meth:`write`.
         """
         self._on_exhausted = on_exhausted
+        self._on_payload_write = on_payload_write
         self._lines: deque[bytes] = deque(
             line.encode("ascii") + b"\r\n"
             for reply in replies
@@ -259,12 +266,30 @@ class ScriptedChannel:
         return b""
 
     async def write(self, data: bytes, /) -> None:
-        """Record what the transport sent.
+        """Record what the transport sent, failing the payload write if armed.
+
+        The failure is armed against the ``DATA`` block rather than against a
+        write *count*, because the count is an artefact of how many commands the
+        exchange happens to take and would silently arm the wrong write the day
+        one is added. The block is the only write that ends with the ``CRLF.CRLF``
+        terminator, so it identifies itself.
+
+        **The octets are recorded before the failure is raised**, which is the
+        whole point of the case: a stream writer hands data to the transport and
+        only then awaits the flush, so a failing flush leaves a payload that may
+        already be on the wire. A double that dropped the write would be modelling
+        a guarantee the real channel does not offer.
 
         Args:
             data: The octets written.
+
+        Raises:
+            Exception: ``on_payload_write``, where one was armed and this is the
+                ``DATA`` block.
         """
         self.written += data
+        if self._on_payload_write is not None and data.endswith(b"\r\n.\r\n"):
+            raise self._on_payload_write
 
     async def start_tls(self) -> None:
         """Mark the channel secure, as a completed handshake would."""

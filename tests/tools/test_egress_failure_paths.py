@@ -676,6 +676,38 @@ async def test_a_read_that_raises_after_the_payload_is_indeterminate_too(
     assert channel.payload().endswith("\r\n.\r\n")
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(ConnectionResetError("the peer reset during the flush"), id="reset"),
+        pytest.param(TimeoutError("the flush timed out"), id="timeout"),
+    ],
+)
+async def test_a_write_that_fails_while_sending_the_payload_is_indeterminate(
+    failure: Exception,
+) -> None:
+    """The window opens at the write, not after it.
+
+    Found by adversarial review on round 2, after round 1's repair had covered
+    only the *read*. A stream writer queues octets to the transport and then
+    awaits the flush, so an exception from that flush does not establish that
+    nothing left this device — and no channel this seam could be handed can
+    establish it either. Reporting it as a failure would let a retry duplicate a
+    disclosure that already happened, which is the harm ADR-0017 §3's fourth
+    outcome exists to keep visible.
+
+    So the conservative answer is the only honest one: the message reached the
+    transport, and what the endpoint did with it is unknown.
+    """
+    channel = ScriptedChannel(*implicit_tls_script(), on_payload_write=failure)
+    subject = transport(channel, secrets=await keyring())
+
+    with pytest.raises(IndeterminateTransmissionError, match="unknown"):
+        await subject.transmit(binding(), MESSAGE)
+
+    assert channel.payload().endswith("\r\n.\r\n")
+
+
 async def test_a_socket_error_before_the_payload_stays_a_failure() -> None:
     """The other side of the same asymmetry, which is what makes it a decision.
 
