@@ -19,18 +19,27 @@ Three properties, and they are not the same property:
    and costs an entry per module. Nothing in ``import-linter`` notices a module that
    was never listed, so this is where forgetting is caught.
 
-The last test is a second net rather than a restatement. It reads source text, so it
-reaches two routes the contract cannot: ``asyncio.subprocess``, which
-``import-linter`` rejects as a subpackage of an external package and which the graph
-squashes into the ``asyncio`` that ``tools/invocation.py`` legitimately imports for
-ADR-0029 §4's deadline; and the ``os`` process launchers, which are not modules at all
-— ``import os`` is unremarkable and the launch is a *call*, so the name only appears
-at an attribute.
+The source-reading test is a second net rather than a restatement. It reads names, so
+it reaches the two subprocess routes no import contract can express: ``asyncio``'s —
+``asyncio.subprocess``, which ``import-linter`` rejects as a subpackage of an external
+package, and the ``create_subprocess_*`` functions the package exports at its root,
+both squashed into the ``asyncio`` that ``tools/invocation.py`` legitimately imports
+for ADR-0029 §4's deadline — and the ``os`` process launchers, which are not modules
+at all, so the name shows up only at a call. Both sets are derived from the running
+interpreter rather than hand-listed, because a hand list is exactly what the second
+review round found incomplete.
 
-**What that second net does not see, stated rather than implied.** ``getattr(os,
-"system")``, a launcher reached through a local wrapper or a callable passed in, and
-any transport in a dependency nobody added to the enumeration. It is a net and not a
-proof, which is ADR-0017 §4's own accounting, and it is why ADR-0147 §3 states the
+**And the enumeration is checked against the dependency closure, not against itself.**
+``test_every_runtime_dependency_is_classified`` walks the runtime requirement graph
+and fails on any package this file has not sorted into transport-bearing or not, so a
+new dependency is a decision rather than an omission — which is the mechanical half of
+ADR-0147 §3's clause obliging the lane that adds a transport to extend the list.
+
+**What none of this sees, stated rather than implied.** ``getattr(os, "system")``, a
+launcher or a client reached through a local wrapper or a callable passed in, a
+transport inside a package classified as not transport-bearing, and a dev-only
+dependency (outside the runtime closure by construction). It is a net and not a proof,
+which is ADR-0017 §4's own accounting, and it is why ADR-0147 §3 states the
 prohibition as a rule binding an author and a reviewer *separately* from the check: a
 clause claiming these tests pinned the universal rule would claim exactly the proof
 §4 denies.
@@ -39,12 +48,16 @@ clause claiming these tests pinned the universal rule would claim exactly the pr
 from __future__ import annotations
 
 import ast
+import asyncio
+import importlib.metadata
 import importlib.util
+import os
 import tomllib
 from pathlib import Path
 from typing import Any
 
 import pytest
+from packaging.requirements import Requirement
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TOOLS = _REPO_ROOT / "src" / "ai_assistant" / "tools"
@@ -67,39 +80,143 @@ REQUIRED_STDLIB = frozenset({"socket", "ssl", "http", "urllib", "subprocess"})
 #: on must not silently widen the seam; neither resolves in this environment today.
 FORWARD_LOOKING = frozenset({"aiohttp", "websockets"})
 
-#: The `os` process launchers. Not modules, so no import contract can name them, and
-#: `import os` is not itself a reason to fail anything — the name shows up only at the
-#: call, as an attribute or as a `from os import …` binding.
+#: The `os` process launchers, **derived from the running interpreter** rather than
+#: hand-listed — the hand list missed `execvpe`, `spawnve` and four others. Not
+#: modules, so no import contract can name them, and `import os` is not itself a
+#: reason to fail anything: the name shows up at an attribute or a `from os import …`.
+#: `startfile` is added by name because it exists only on Windows.
 OS_LAUNCHERS = frozenset(
-    {
-        "execl",
-        "execle",
-        "execlp",
-        "execv",
-        "execve",
-        "execvp",
-        "fork",
-        "forkpty",
-        "popen",
-        "posix_spawn",
-        "posix_spawnp",
-        "spawnl",
-        "spawnlp",
-        "spawnv",
-        "spawnvp",
-        "startfile",
-        "system",
-    }
+    {name for name in dir(os) if name.startswith(("exec", "spawn", "posix_spawn", "fork", "popen"))}
+    | {"system", "startfile"}
+)
+
+#: `asyncio`'s subprocess surface: the submodule ADR-0147 §3 names, plus the two
+#: functions the package exports at its root, which are how a launch is actually
+#: written. Derived the same way and for the same reason as `OS_LAUNCHERS`.
+ASYNCIO_LAUNCHERS = frozenset(
+    {"subprocess"} | {name for name in dir(asyncio) if name.startswith("create_subprocess")}
 )
 
 #: Dotted names no `tools/` module but the seam may reach for, matched against the
-#: name and every package containing it: the contract's own standard-library list,
-#: plus the two routes it cannot express. `asyncio` and `os` are deliberately absent
-#: as roots — ADR-0029 §4's deadline runs on the first and the second is the standard
-#: library's front door, and forbidding either would forbid the timeout and `os.path`
+#: name and every package containing it. `asyncio` and `os` are deliberately absent as
+#: *roots* — ADR-0029 §4's deadline runs on the first and the second is the standard
+#: library's front door, so forbidding either would forbid the timeout and `os.path`
 #: rather than a transport.
 FORBIDDEN_NAMES = frozenset(
-    REQUIRED_STDLIB | {"asyncio.subprocess"} | {f"os.{name}" for name in OS_LAUNCHERS}
+    REQUIRED_STDLIB
+    | {f"asyncio.{name}" for name in ASYNCIO_LAUNCHERS}
+    | {f"os.{name}" for name in OS_LAUNCHERS}
+)
+
+#: The roots whose *attributes* the source scan follows, because the module itself is
+#: legitimate and only some of its members are not.
+WATCHED_ROOTS = frozenset({"asyncio", "os"})
+
+#: Runtime dependencies whose own purpose includes moving bytes over a connection, by
+#: distribution name. `test_every_runtime_dependency_is_classified` fails on anything
+#: in the closure that is in neither this set nor `NOT_TRANSPORT_BEARING`, so a new
+#: dependency has to be sorted into one of them.
+TRANSPORT_BEARING = frozenset(
+    {
+        "anthropic",
+        "anyio",
+        "fastembed",
+        "fsspec",
+        "genai_prices",
+        "hf_xet",
+        "httpcore",
+        "httpcore2",
+        "httpx",
+        "httpx2",
+        "huggingface_hub",
+        "openai",
+        "pydantic_ai_slim",
+        "requests",
+        "tiktoken",
+        "tokenizers",
+        "urllib3",
+    }
+)
+
+#: Where a distribution's name is not the name a module imports.
+IMPORT_NAME = {"pydantic_ai_slim": "pydantic_ai"}
+
+#: The rest of the runtime closure, classified and not forbidden. Four groups, and the
+#: grouping is the argument: packages that hold no I/O at all; `h11`, `certifi` and
+#: `truststore`, which serve a transport without being one; `jeepney` and
+#: `secretstorage`, which speak D-Bus over a local socket rather than off the device;
+#: and the residue whose *purpose* is something else but which holds an incidental
+#: fetch — `numpy`'s `DataSource`, `jsonschema`'s legacy remote-`$ref` resolver,
+#: `pygments`, `tqdm`, `opentelemetry_api`, `onnxruntime`. Forbidding that last group
+#: to `tools/` would be a rule about arithmetic and progress bars, and would be worked
+#: around the first time somebody wanted one. It is the residue ADR-0017 §4 means by
+#: "a net, not a proof", and it rests on ADR-0147 §3's first clause.
+NOT_TRANSPORT_BEARING = frozenset(
+    {
+        "annotated_doc",
+        "annotated_types",
+        "attrs",
+        "certifi",
+        "cffi",
+        "charset_normalizer",
+        "click",
+        "cryptography",
+        "distro",
+        "docstring_parser",
+        "filelock",
+        "flatbuffers",
+        "griffelib",
+        "h11",
+        "icalendar",
+        "idna",
+        "jaraco_classes",
+        "jaraco_context",
+        "jaraco_functools",
+        "jeepney",
+        "jiter",
+        "jsonschema",
+        "jsonschema_specifications",
+        "keyring",
+        "logfire_api",
+        "loguru",
+        "markdown_it_py",
+        "mdurl",
+        "mmh3",
+        "more_itertools",
+        "numpy",
+        "onnxruntime",
+        "opentelemetry_api",
+        "packaging",
+        "pillow",
+        "protobuf",
+        "py_rust_stemmers",
+        "pycparser",
+        "pydantic",
+        "pydantic_core",
+        "pydantic_graph",
+        "pydantic_settings",
+        "pygments",
+        "python_dateutil",
+        "python_dotenv",
+        "pywin32_ctypes",
+        "pyyaml",
+        "referencing",
+        "regex",
+        "rich",
+        "rpds_py",
+        "secretstorage",
+        "shellingham",
+        "six",
+        "sniffio",
+        "sqlite_vec",
+        "structlog",
+        "tqdm",
+        "truststore",
+        "typer",
+        "typing_extensions",
+        "typing_inspection",
+        "tzdata",
+    }
 )
 
 
@@ -143,26 +260,28 @@ def _reached_names(source: str) -> set[str]:
     """Every dotted name ``source`` reaches for, at any depth and any scope.
 
     Imports at any nesting, ``from x import y`` as both ``x`` and ``x.y``, and
-    attribute access on whatever local name ``os`` is bound to — so ``import os as
-    _os`` followed by ``_os.system(…)`` reads as ``os.system``. It sees names, so
-    ``getattr`` and a local wrapper are outside it.
+    attribute access on whatever local name a `WATCHED_ROOTS` package is bound to — so
+    ``import os as _os`` followed by ``_os.system(…)`` reads as ``os.system``. It sees
+    names, so ``getattr`` and a local wrapper are outside it.
 
     Args:
         source: The module's text.
 
     Returns:
-        Dotted names, as written.
+        Dotted names, as written, with an attribute on a watched root normalised back
+        to that root's real name.
     """
     tree = ast.parse(source)
     found: set[str] = set()
-    os_bindings: set[str] = set()
+    bindings: dict[str, str] = {}
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 found.add(alias.name)
-                if alias.name == "os" or alias.name.startswith("os."):
-                    os_bindings.add(alias.asname or alias.name.split(".")[0])
+                root = alias.name.split(".")[0]
+                if root in WATCHED_ROOTS:
+                    bindings[alias.asname or root] = root
         elif isinstance(node, ast.ImportFrom) and node.module is not None and node.level == 0:
             found.update({node.module} | {f"{node.module}.{alias.name}" for alias in node.names})
 
@@ -170,11 +289,57 @@ def _reached_names(source: str) -> set[str]:
         if (
             isinstance(node, ast.Attribute)
             and isinstance(node.value, ast.Name)
-            and node.value.id in os_bindings
+            and node.value.id in bindings
         ):
-            found.add(f"os.{node.attr}")
+            found.add(f"{bindings[node.value.id]}.{node.attr}")
 
     return found
+
+
+def _runtime_closure() -> set[str]:
+    """Every distribution this project's runtime dependencies pull in, transitively.
+
+    Runtime rather than the whole lock: dev tooling is not in a deployed install, so a
+    `tools/` module could not import it there however transport-bearing it is.
+
+    Returns:
+        Normalised distribution names, this project's own excluded.
+    """
+    declared = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))["project"]["dependencies"]
+    installed = {
+        _normalise(dist.metadata["Name"]): dist
+        for dist in importlib.metadata.distributions()
+        if dist.metadata["Name"]
+    }
+
+    seen: set[str] = set()
+    pending = [Requirement(text) for text in declared]
+    while pending:
+        requirement = pending.pop()
+        name = _normalise(requirement.name)
+        if name in seen:
+            continue
+        seen.add(name)
+        for text in installed[name].requires or [] if name in installed else []:
+            dependency = Requirement(text)
+            if dependency.marker is None or any(
+                dependency.marker.evaluate({"extra": extra})
+                for extra in {"", *(requirement.extras or set())}
+            ):
+                pending.append(dependency)
+    return seen
+
+
+def _normalise(name: str) -> str:
+    """A distribution name in the one spelling this module compares by.
+
+    Args:
+        name: A distribution name as declared or as installed.
+
+    Returns:
+        Lower case, with separators folded to underscores.
+    """
+    return name.lower().replace("-", "_").replace(".", "_")
 
 
 def _containing_packages(name: str) -> set[str]:
@@ -273,6 +438,38 @@ def test_the_contract_forbids_the_transports_the_adr_enumerates() -> None:
     assert "httpx" in forbidden, "the realistic accident is a client library, not a socket"
 
 
+def test_every_runtime_dependency_is_classified() -> None:
+    """ADR-0147 §3's extension clause, as a check rather than as a hope.
+
+    "The lane that adds any further transport-bearing dependency adds it to that
+    enumeration in the same change" is a rule binding a lane, and a lane that never
+    looks at the enumeration does not know it is bound. This is what makes it look:
+    a dependency nobody classified fails here, and classifying it either extends the
+    contract or records in `NOT_TRANSPORT_BEARING` why it need not.
+
+    Subset rather than equality, because the closure is platform-dependent —
+    `secretstorage` and `jeepney` are Linux-only and `pywin32_ctypes` is not.
+    """
+    unclassified = _runtime_closure() - TRANSPORT_BEARING - NOT_TRANSPORT_BEARING
+
+    assert not unclassified, (
+        f"{sorted(unclassified)} entered the runtime dependency closure without being "
+        f"classified. Add each to TRANSPORT_BEARING — and to the contract's "
+        f"forbidden_modules — or to NOT_TRANSPORT_BEARING with the reason."
+    )
+
+
+def test_the_contract_forbids_every_transport_bearing_dependency() -> None:
+    """The classification above, joined to the contract it is supposed to drive."""
+    forbidden = set(_contract()["forbidden_modules"])
+    expected = {IMPORT_NAME.get(name, name) for name in TRANSPORT_BEARING & _runtime_closure()}
+
+    assert expected <= forbidden, (
+        f"the contract does not forbid {sorted(expected - forbidden)}, which this file "
+        f"classifies as transport-bearing runtime dependencies"
+    )
+
+
 def test_every_forbidden_name_is_a_module_that_exists() -> None:
     """A misspelt entry is a silently inert one, which is the list's failure mode.
 
@@ -309,3 +506,47 @@ def test_no_other_tools_module_names_a_transport(module: str) -> None:
             f"than {SEAM} opens a network connection or launches a subprocess, by any "
             f"route — and that seam is undesignated and transmits nothing."
         )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("import socket", "socket"),
+        ("import urllib.request", "urllib"),
+        ("from http import client", "http"),
+        ("import os\nos.system('x')", "os.system"),
+        ("import os as _os\n_os.execvpe('x', [], {})", "os.execvpe"),
+        ("import os.path\nos.spawnve('x', [], {})", "os.spawnve"),
+        ("from os import spawnlpe", "os.spawnlpe"),
+        ("import asyncio\nasyncio.create_subprocess_exec('x')", "asyncio.create_subprocess_exec"),
+        ("from asyncio import create_subprocess_shell", "asyncio.create_subprocess_shell"),
+        ("from asyncio import subprocess", "asyncio.subprocess"),
+        ("def f():\n    import socket\n    return socket", "socket"),
+    ],
+    ids=lambda value: value if value.count("\n") == 0 and value.islower() else None,
+)
+def test_the_scanner_catches_each_form_a_launch_is_written_in(source: str, expected: str) -> None:
+    """The net's own regression cases, one per shape the second round turned up.
+
+    Standard-library names only: a third-party transport is the *contract's* to catch,
+    including a lazy import inside a function body, which the graph records.
+    """
+    reached = {name for raw in _reached_names(source) for name in _containing_packages(raw)}
+
+    assert expected in reached & FORBIDDEN_NAMES
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import os\nos.path.join('a', 'b')",
+        "import asyncio\nasyncio.timeout(1)",
+        "import asyncio\nawait asyncio.sleep(1)",
+        "from datetime import UTC",
+    ],
+)
+def test_the_scanner_leaves_the_legitimate_neighbours_alone(source: str) -> None:
+    """`os` and `asyncio` are not forbidden roots, and the timeout is ADR-0029 §4's."""
+    reached = {name for raw in _reached_names(source) for name in _containing_packages(raw)}
+
+    assert not reached & FORBIDDEN_NAMES

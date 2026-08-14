@@ -1293,6 +1293,7 @@ forbidden_modules = [
     "aiohttp",
     "anyio",
     "fsspec",
+    "genai_prices",
     "hf_xet",
     "httpcore",
     "httpcore2",
