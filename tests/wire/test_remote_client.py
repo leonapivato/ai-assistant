@@ -28,6 +28,7 @@ from ai_assistant.core.types import SecretScope
 from ai_assistant.testing import FakeSecretStore
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.address import RemoteDestination
+from ai_assistant.wire.client import HubEngineClient
 from ai_assistant.wire.codec import CONNECT_PAYLOAD_BYTES, encode_projection
 from ai_assistant.wire.credential import mint_credential
 from ai_assistant.wire.enrolment import enrolment_name, store_enrolment
@@ -497,3 +498,85 @@ async def test_a_destination_that_never_answers_is_reported_rather_than_waited_o
     assert "100.64.1.7:50084" in str(raised.value)
     assert "did not answer" in str(raised.value)
     assert "never falls back" in str(raised.value)
+
+
+# --- ADR-0151 §13: the connection operations are not carried here ------------
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(
+            lambda client: client.connect_account(
+                identity="ada", credential=SecretStr("hunter2-correct-horse")
+            ),
+            id="connect_account",
+        ),
+        pytest.param(
+            lambda client: client.reprovision_account(
+                "ref-1", identity="ada", credential=SecretStr("hunter2-correct-horse")
+            ),
+            id="reprovision_account",
+        ),
+        pytest.param(lambda client: client.disconnect_account("ref-1"), id="disconnect_account"),
+        pytest.param(lambda client: client.connected_accounts(), id="connected_accounts"),
+        pytest.param(lambda client: client.recent_connection_acts(), id="recent_connection_acts"),
+    ],
+)
+async def test_no_connection_operation_is_carried_on_this_transport(
+    hub: RecordingHub, call: Callable[[RemoteHubEngineClient], Any]
+) -> None:
+    """ADR-0151 §13: not over ADR-0124's remote listener, until the hop is ruled.
+
+    **All five, not only the two that carry a credential.** §13's prohibition is
+    stated over the operations rather than over the argument, and the two listings
+    disclose an account identity — Tier 1 data (ADR-0149 §3) — which ADR-0124 §3's
+    enumerated-disclosure list does not cover either.
+
+    Asserted with a hub **running and recording**, so the case distinguishes "the
+    client refused" from "the call failed for some unrelated transport reason":
+    nothing reaches the socket at all, which is the property that matters, since
+    the two provisioning calls would otherwise put a Tier 0 credential onto an
+    overlay network.
+    """
+    await hub.start()
+    store, _credential = await enrolled()
+    client = client_of(hub.port, store, FakeOverlayAgent(HUB))
+
+    with pytest.raises(ProtocolError) as caught:
+        await call(client)
+
+    assert "ADR-0151 §13" in str(caught.value)
+    assert hub.connects == []
+
+
+async def test_the_refusal_happens_before_the_credential_is_even_validated(
+    hub: RecordingHub,
+) -> None:
+    """ADR-0151 §13 before ADR-0125 §3: the transport check is the **first** statement.
+
+    A blank secret is what ``secret_value`` refuses, so a client that revalidated
+    before checking its transport would raise ``ValueError`` here. It raises
+    ``ProtocolError`` instead, which is the evidence that nothing derived from the
+    secret — not a validation, not an unwrap — happens on a transport that may not
+    carry it at all.
+    """
+    await hub.start()
+    store, _credential = await enrolled()
+    client = client_of(hub.port, store, FakeOverlayAgent(HUB))
+
+    with pytest.raises(ProtocolError):
+        await client.connect_account(identity="ada", credential=SecretStr("   "))
+
+    assert hub.connects == []
+
+
+def test_the_loopback_client_is_the_one_that_carries_them() -> None:
+    """The flag both halves read, asserted on both classes rather than inferred.
+
+    ``carries_connection_operations`` is a one-line override, which is exactly the
+    kind of thing a later refactor silently drops. Pinning both values makes the
+    prohibition and its exception one fact a reader can check in one place.
+    """
+    assert RemoteHubEngineClient.carries_connection_operations is False
+    assert HubEngineClient.carries_connection_operations is True

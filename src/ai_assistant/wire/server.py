@@ -533,6 +533,29 @@ def _check_live(admission: Admission | None) -> None:
         raise DeviceExpelledError(msg)
 
 
+#: The five operations ADR-0151 §13 keeps off every transport but ADR-0084 §1's
+#: loopback socket, until a ratified decision rules the credential's hop from an
+#: enrolled device to the hub (ADR-0124 §3's accepted-disclosure list does not
+#: include a Tier 0 credential, and every disclosure argument this surface rests on
+#: is the ``0600`` socket's).
+#:
+#: **Enumerated rather than derived**, which is the one place this module departs
+#: from ``wire/surface.py``'s reflection and does so deliberately: what makes a
+#: method a *connection* operation is ADR-0151 §1's decision, not a property of its
+#: signature, so there is nothing on the Protocol to read it off. A sixth operation
+#: added by a later ADR belongs here the same day, and the test below pins the set
+#: against ``METHODS`` so a rename cannot leave a stale name silently permitting one.
+CONNECTION_METHODS: Final[frozenset[str]] = frozenset(
+    {
+        "connect_account",
+        "reprovision_account",
+        "disconnect_account",
+        "connected_accounts",
+        "recent_connection_acts",
+    }
+)
+
+
 async def _serve_requests(  # noqa: PLR0913 — the engine, the two stream halves, and one keyword per policy the connection carries
     engine: AssistantEngine,
     reader: asyncio.StreamReader,
@@ -612,6 +635,28 @@ async def _serve_requests(  # noqa: PLR0913 — the engine, the two stream halve
         if polling and not is_delivery:
             _claim_delivery(delivery, admission, claimed)
             is_delivery = True
+        if admission is not None and frame.method in CONNECTION_METHODS:
+            # **ADR-0151 §13, held on the hub's side.** A client that simply lacks
+            # the method is not a check — ``wire/client.py`` puts these five on the
+            # loopback client for that reason, and this is the half that binds a
+            # peer which does not use it. ``admission`` is exactly the
+            # discriminator: it is the remote listener's two-fact rule and is
+            # ``None`` on the loopback listener (:func:`serve_connection`).
+            #
+            # **Closed rather than answered with an error frame**, for
+            # :func:`_dispatch`'s own reason: ADR-0085 §10a fixes the wire's error
+            # vocabulary as "exactly the ``AssistantError`` subtree", so there is
+            # no ratified code for "not on this transport" and inventing one would
+            # be this lane authoring contract surface it may not author. It is the
+            # same answer a peer gets for a method this build does not declare,
+            # which is what a method not carried on this listener *is*.
+            msg = (
+                f"a {frame.method!r} arrived on the remote listener; ADR-0151 §13 keeps "
+                f"the connection operations on ADR-0084 §1's loopback socket until a "
+                f"ratified decision rules the credential's hop from an enrolled device, "
+                f"so this connection carries no such method and closes"
+            )
+            raise ProtocolError(msg)
 
         watcher = asyncio.ensure_future(_read_request(reader, limits=limits, idle=None))
         if polling:

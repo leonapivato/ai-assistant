@@ -47,7 +47,7 @@ engine surface, and reaches no log, audit record or error message (ADR-0124 §6)
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.client import DEFAULT_CLIENT_NAME, HubClient, Opened, hang_up
@@ -65,10 +65,29 @@ if TYPE_CHECKING:
 class RemoteHubEngineClient(HubClient):
     """A hub reached across a device boundary, admitted by two independent facts.
 
+    **It carries no connection operation** (ADR-0151 §13). Every disclosure
+    argument that surface rests on is ADR-0084 §1's ``0600`` socket — ADR-0102 §6
+    admits reading the user's own configuration back to them because it "discloses
+    it to nobody" — and a Tier 0 credential crossing an overlay network is a
+    different posture entirely: ADR-0124 §3 accepts a *specific, enumerated*
+    disclosure to a coordination service, and a credential is not on that list. So
+    the five refuse here, locally and before the credential is even revalidated,
+    until a ratified decision rules that hop. ``wire/server.py`` refuses the same
+    five on any connection this listener admitted, because a client that declines
+    to send is not a check on a peer that does not.
+
     Attributes:
         destination: The overlay address and port, from configuration alone
             (ADR-0124 §1).
     """
+
+    #: ADR-0151 §13's prohibition, as the one fact the five methods on
+    #: :class:`~ai_assistant.wire.client.HubClient` read. Overridden here rather
+    #: than the methods being removed, because removing them would stop this class
+    #: satisfying ``AssistantEngine`` — which ADR-0084 §5's substitutability and
+    #: ``interfaces/cli.py``'s one client-shaped return both rest on, and which is
+    #: a contract change owing its own ADR rather than a lane's to make.
+    carries_connection_operations: ClassVar[bool] = False
 
     def __init__(
         self,

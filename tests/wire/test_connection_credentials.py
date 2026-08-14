@@ -59,7 +59,8 @@ from ai_assistant.testing import Disclosure, FakeAssistantEngine, SecretMethod
 from ai_assistant.wire import ENVELOPE_RESERVE_BYTES, HubEngineClient, serve_connection
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.framing import read_frame, write_frame
-from ai_assistant.wire.server import ConnectionLimits
+from ai_assistant.wire.server import CONNECTION_METHODS, ConnectionLimits
+from ai_assistant.wire.surface import METHODS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, MutableMapping
@@ -488,3 +489,30 @@ async def test_a_maximal_credential_does_not_fit_the_floor_frame(tmp_path: Path)
             await client.connect_account(identity="ada", credential=_credential("s" * 1000))
 
     assert backing.connections.entries == []
+
+
+# --- ADR-0151 §13: the set the two refusals are stated over -------------------
+
+
+def test_the_guarded_set_is_exactly_the_connection_surface() -> None:
+    """``CONNECTION_METHODS`` names five methods the Protocol really declares.
+
+    The one place ``wire/`` departs from ``wire/surface.py``'s reflection, and it
+    departs deliberately: what makes a method a *connection* operation is ADR-0151
+    §1's decision rather than a property of its signature, so there is nothing on
+    the Protocol to read it off. What reflection can still do is catch the failure
+    mode an enumeration has — a rename or a removal leaving a stale name that
+    silently guards nothing, which is how a prohibition quietly stops applying.
+
+    The count is pinned too, because a sixth operation added by a later ADR must
+    be a deliberate edit here rather than an omission nobody notices: ADR-0151 §13
+    binds "these operations", and a new one arrives inside that phrase.
+    """
+    assert CONNECTION_METHODS <= METHODS
+    assert {
+        "connect_account",
+        "reprovision_account",
+        "disconnect_account",
+        "connected_accounts",
+        "recent_connection_acts",
+    } == CONNECTION_METHODS
