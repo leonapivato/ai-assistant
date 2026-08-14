@@ -236,6 +236,15 @@ def test_a_declaration_whose_arguments_are_not_a_sequence_is_refused() -> None:
         DestinationDeclaration(tool_id="send_email", arguments=None)  # type: ignore[arg-type]
 
 
+def test_selecting_against_something_that_is_not_a_declaration_is_refused() -> None:
+    """Round 13's sweep: the two parameters this function reads, checked."""
+    with pytest.raises(DestinationSelectionError, match="a destination declaration"):
+        select_destinations(None, {"to": ("a@b.com",)})  # type: ignore[arg-type]
+
+    with pytest.raises(DestinationSelectionError, match="are a mapping"):
+        select_destinations(_DECLARATION, None)  # type: ignore[arg-type]
+
+
 def test_a_declaration_naming_no_tool_is_refused_without_rendering_it() -> None:
     """Every other refusal opens with the tool id, so it is checked before it is."""
     needle = "the secret is swordfish"

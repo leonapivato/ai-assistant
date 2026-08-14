@@ -328,9 +328,10 @@ def canonicalise(protocol: DestinationProtocol, supplied: str) -> Destination:
 
     Raises:
         DestinationCanonicalisationError: If the protocol has no canonicaliser at
-            this seam, or the supplied form is one it will not assert a canonical
-            form for. ADR-0148 §1's third clause refuses the whole request rather
-            than sending it for a ruling in an incomplete form.
+            this seam, the supplied form is not text, or it is one this seam will
+            not assert a canonical form for. ADR-0148 §1's third clause refuses
+            the whole request rather than sending it for a ruling in an
+            incomplete form.
     """
     # Checked **before** it is used as a key: an unhashable value raises from
     # `Mapping.get` itself, ahead of any branch this function could refuse in
@@ -341,10 +342,18 @@ def canonicalise(protocol: DestinationProtocol, supplied: str) -> Destination:
     given: object = protocol
     if not isinstance(given, DestinationProtocol):
         raise _refuse("no canonicaliser at this seam for the protocol given")
+    form: object = supplied
+    if not isinstance(form, str):
+        # A destination that is not text has no canonical form and no supplied
+        # form to preserve, and every check below is a string operation — so it
+        # is refused here rather than raising an `AttributeError` from inside a
+        # guard (adversarial round 13). `select_destinations` already refuses a
+        # non-string entry, so this closes the direct-call path.
+        raise _refuse("a destination that is not text has no canonical form")
     canonicaliser = _CANONICALISERS.get(given)
     if canonicaliser is None:
         raise _refuse(f"no canonicaliser at this seam for protocol {given.value!r}")
-    return Destination(protocol=given, supplied=supplied, canonical=canonicaliser(supplied))
+    return Destination(protocol=given, supplied=form, canonical=canonicaliser(form))
 
 
 def canonical_destination_set(destinations: tuple[Destination, ...]) -> tuple[str, ...]:
@@ -363,8 +372,20 @@ def canonical_destination_set(destinations: tuple[Destination, ...]) -> tuple[st
 
     Returns:
         The distinct canonical forms, sorted.
+
+    Raises:
+        DestinationCanonicalisationError: If a member is not a
+            :class:`Destination` — the set is what a ruling is taken over
+            (ADR-0148 §4), so a member with no canonical form is refused rather
+            than skipped.
     """
-    return tuple(sorted({destination.canonical for destination in destinations}))
+    canonical: set[str] = set()
+    for entry in destinations:
+        member: object = entry
+        if not isinstance(member, Destination):
+            raise _refuse("a destination set holds canonicalised destinations")
+        canonical.add(member.canonical)
+    return tuple(sorted(canonical))
 
 
 __all__ = [
