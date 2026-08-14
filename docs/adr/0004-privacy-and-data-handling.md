@@ -151,9 +151,9 @@
   **And a prohibition this clause never carried is added beside it.** ADR-0155 §3
   forbids any component placing into an egress payload a value it obtained from the
   assistant's own store, or the output of an operation any component supplied such a
-  value to in the course of preparing that call's arguments, and no authorisation
-  cures it — not a per-call user decision, not a standing policy, not a configuration
-  or a connected account. Its second clause disposes of everything the first does not
+  value to at or after the moment that call's plan step was persisted to the plan
+  store, and no authorisation cures it — not a per-call user decision, not a standing
+  policy, not a configuration or a connected account. Its second clause disposes of everything the first does not
   reach: §2's conditions govern it, as a residue accepted because the relation a wider
   clause would be stated over is the one ADR-0098 §5 holds unrecoverable and §12
   forbids stating a bound over. That closes the hole adversarial review of PR #72

@@ -28,11 +28,12 @@
   span, not *where it came from*, and the two questions come apart exactly on this
   line.
 - **§3's first clause is stated over what a component obtained, what it supplied and
-  when — the moment fixed by the existence of the plan step naming the call, never
-  over derivation and never over purpose.** Everything it does not reach is disposed
-  of by its second clause, which carries no antecedent of its own: §2's conditions
-  govern, as an accepted residue with a revisit trigger. Earlier drafts reached the
-  case by derivation and then by a carve-out with its own antecedent; both were
+  when — the moment fixed by the recorded persistence of the plan step naming the
+  call, never over derivation and never over purpose.** Everything it does not reach
+  is disposed of by its second clause, which carries no antecedent of its own: §2's
+  conditions govern, as an accepted residue with a revisit trigger. Earlier drafts
+  reached the case by derivation and then by a carve-out with its own antecedent;
+  both were
   defeated in review, and §3 records how rather than quietly repairing it, because
   ADR-0098, ADR-0146 and ADR-0154 each made and corrected the first of them.
 - **Adds no `core` surface.** No Protocol, no type, no field, no enum member. The
@@ -390,14 +391,18 @@ checkable direction and the one a reviewer can test a change against.
 > **Normative.** No component places into a span it prepares for transmission
 > through the designated `tools/` egress seam a value it obtained from the
 > assistant's own store (§1), nor the output of an operation to which **any**
-> component of this system supplied such a value **at or after the moment the plan
-> step naming that egress call came into existence** — a copy, an excerpt, a
-> re-encoding, a rendering, or a summary or translation computed or commissioned from
-> that moment on. The prohibition is stated over what a component obtained, what it
-> supplied, and when it supplied it, that moment being fixed by the existence of a
-> recorded artifact and never by a judgement about purpose. It is not stated over what
-> a span contains, and no lane reads it as requiring or licensing an inspection of
-> content.
+> component of this system supplied such a value **at or after the moment that
+> egress call's plan step was successfully persisted to the plan store** — a copy,
+> an excerpt, a re-encoding, a rendering, or a summary or translation computed or
+> commissioned from that moment on. That moment is the successful return of
+> `PlanStore.save_plan` (`core/protocols.py`) for the plan holding that step. A
+> supply made before it — including one made while a plan was being constructed in
+> memory, replanned or abandoned — is outside this clause, and a span reaching the
+> seam by that route is disposed of by the clause below. The prohibition is stated
+> over what a component obtained, what it supplied, and when it supplied it, that
+> moment being a recorded persistence and never a construction, an intention or a
+> purpose. It is not stated over what a span contains, and no lane reads it as
+> requiring or licensing an inspection of content.
 
 > **Normative.** A span the clause above does not reach is **permitted or refused by
 > §2's conditions alone**: this ADR adds no bar to it and no licence for it. That
@@ -443,8 +448,9 @@ it is recorded rather than quietly repaired.
 act — "a tool could persistently write assistant-derived *memory* into a calendar and
 claim compliance" — and that is decidable at the component and is forbidden
 absolutely, including the evasion of routing the record through a summariser first,
-because the store value was supplied to an operation in the course of preparing the
-call's arguments. What the first clause cannot reach is a model that saw store
+because the store value was supplied to an operation at or after the moment that
+call's plan step was persisted — a tool runs during a step of a plan the store
+already holds. What the first clause cannot reach is a model that saw store
 content in its turn context in an earlier stage and later wrote an argument. §3's
 second clause disposes of that on ADR-0146 §7's discipline: state the bound the
 system can actually hold, and name what it does not.
@@ -466,24 +472,43 @@ system can actually hold, and name what it does not.
   record and commissions "draft an email summarising this", component B places the
   output. A prepared no span and B supplied no store value, so neither was reached.
   The supply now binds whichever component performs it.
-- **When, fixed by a recorded artifact.** This is what keeps the clause from
-  swallowing the product, and it took two attempts to state objectively. The moment
-  is the existence of the **plan step naming the egress call** — a durable record in
-  the plan store (ADR-0014), the same artifact ADR-0148 §9 hangs the attempt
-  identifier and the four outcomes on. Before it exists there is no egress call to
-  prepare for: `orchestration` renders retrieved records into a planner prompt while
-  no plan exists at all (ADR-0098 §12 records that payload), so recalling the meeting
-  time in order to email Bob about the meeting stays permitted. From that moment on,
-  any component reading the store and routing the value toward a span of that call is
-  inside the clause — including through an earlier step of the same plan, since the
-  send step already exists when that step runs.
+- **When, fixed by a recorded persistence.** This is what keeps the clause from
+  swallowing the product, and it took three attempts to state objectively. The
+  moment is the **successful persistence of the plan step naming the egress call**
+  to the plan store (ADR-0014) — the return of `PlanStore.save_plan` for the plan
+  holding it, that step being the same durable artifact ADR-0148 §9 hangs the attempt
+  identifier and the four outcomes on. Before that return there is no recorded egress
+  call to prepare for: `orchestration` renders retrieved records into a planner
+  prompt while nothing is persisted (ADR-0098 §12 records that payload), so recalling
+  the meeting time in order to email Bob about it stays permitted — and so does
+  a plan replanned or abandoned before it is ever saved. From that moment on, any
+  component reading the store and routing the value toward a span of that call is
+  inside the clause — including through an earlier step of the same plan, since
+  `orchestration` persists the plan whole before it starts execution, so the send
+  step is already in the store when any step of that plan runs.
 
   An earlier draft said "in the course of preparing that egress call's arguments",
   and adversarial review found on round 7 that the phrase has no determinate
   boundary: the planner run that emits the step *literally* produces that call's
   arguments, so two lanes could classify the same path oppositely. ADR-0089 §3 puts
   the condition inside the clause, and a condition a reader cannot evaluate is not one.
-  The repair is the review's own direction — an objective recorded event.
+  The repair was the review's own direction — an objective recorded event.
+
+  It was then stated as the step's **coming into existence**, and adversarial review
+  found on round 8 that this is satisfiable before anything is recorded:
+  `ModelBackedPlanner._step_payload` in `ai_assistant.planning.planner` constructs a
+  `PlanStep`, and `Engine._converse` in `ai_assistant.orchestration.engine` calls
+  `PlanStore.save_plan` only afterwards, so a read landing between the two was
+  forbidden under "came into existence" and permitted under the unmarked gloss this
+  bullet then carried, "a durable record in the plan store". Under ADR-0089 §3 an
+  unmarked gloss settles nothing, so the two readings stood level and
+  the clause decided nothing about that window. Persistence is named in the clause
+  itself now, and the window before it is classified there too rather than left to
+  the prose. **The moment is deliberately the later of the two**: construction is the
+  conservative boundary but is not observable, which was the whole defect, while the
+  window persistence opens is one in which no component but the planner is running —
+  and what the planner does there, rendering retrieved records into its own prompt,
+  is the case §3's second clause already disposes of by design.
 
 **The second clause is the complement of the first and carries no antecedent of its
 own, which is deliberate.** Architecture review on round 3 required the model-context
@@ -620,17 +645,19 @@ not confuse them.** `recall_memory` is registered today and returns matching rec
 to the turn as JSON.
 
 - **A turn that recalls and then sends.** The record reaches the planner's prompt
-  before any plan exists, and the plan that comes back carries an egress step. No
-  component supplied a store value at or after that step existed. §3's first clause
-  does not reach it, so its second clause governs: **permitted or refused by §2's
-  conditions alone**, and a lane may not add a bar §3 does not impose.
-- **A component that reads the store once the egress step exists** — during that
-  step, or during an earlier step of the same plan — and places the value, or the
+  before any plan is persisted, and the plan that comes back carries an egress step.
+  No component supplied a store value at or after that step was persisted. §3's first
+  clause does not reach it, so its second clause governs: **permitted or refused by
+  §2's conditions alone**, and a lane may not add a bar §3 does not impose.
+- **A component that reads the store once the egress step has been persisted** —
+  during that step, or during an earlier step of the same plan, since `Engine`
+  persists the plan whole before it starts execution — and places the value, or the
   output of something it commissioned on it, into a span. §3's first clause,
   forbidden absolutely, and **no code checks it**. That is the gap #1154 carries.
 
-The two differ only in **when** the store was read relative to a durable record that
-already exists, and they are opposite in disposition — which is why the enforcement
+The two differ only in **when** the store was read relative to a durable record the
+plan store already holds, and they are opposite in disposition — which is why the
+enforcement
 point is worth its own issue rather than a note. Nothing in the payload path records
 the fact: `EgressBindingSeam._spans_of` derives spans from arguments and knows
 nothing about how those arguments came to hold what they hold, and no store read is
