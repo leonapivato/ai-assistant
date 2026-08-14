@@ -7,7 +7,7 @@
   ADR-0149's merge met. `AssistantEngine` gains **five** methods —
   `connect_account`, `reprovision_account`, `disconnect_account`,
   `connected_accounts` and `recent_connection_acts` — `core/types.py` gains
-  **three** types and one constant, and `core/errors.py` gains **four** classes.
+  **three** types and one constant, and `core/errors.py` gains **six** classes.
   It also decides the shape of the Protocol ADR-0149 §10 flags, by which
   `orchestration` reaches the provisioner in `tools/`. No code ships with it.
 - **Flagged as a breaking change under golden rule 5.** The implementing lane
@@ -314,19 +314,24 @@ anyone to". They are declared here rather than left to the lane, with
 >
 > | Method | Declares |
 > | --- | --- |
-> | `connect_account` | `ValueError`, `UnusableIdentityError`, `ConnectionStoreError`, `SecretStoreError` |
-> | `reprovision_account` | `ValueError`, `UnusableIdentityError`, `UnknownConnectionError`, `DisplacedProvisioningError`, `ConnectionStoreError`, `SecretStoreError` |
-> | `disconnect_account` | `ValueError`, `ConnectionStoreError`, `SecretStoreError` |
+> | `connect_account` | `ValueError`, `UnusableIdentityError`, `IncompleteProvisioningError`, `ConnectionStoreError` |
+> | `reprovision_account` | `ValueError`, `UnusableIdentityError`, `UnknownConnectionError`, `DisplacedProvisioningError`, `IncompleteProvisioningError`, `ResidualCredentialError`, `ConnectionStoreError` |
+> | `disconnect_account` | `ValueError`, `ResidualCredentialError`, `ConnectionStoreError` |
 > | `connected_accounts` | `ConnectionStoreError` |
 > | `recent_connection_acts` | `ValueError`, `ConnectionStoreError` |
 
-> **Normative.** `core/errors.py` gains four classes: `ConnectionStoreError`, a
+> **Normative.** `core/errors.py` gains six classes. `ConnectionStoreError` is a
 > direct subclass of `AssistantError`, raised when the connection store could not
-> be read or written; `UnknownConnectionError` and `DisplacedProvisioningError`,
-> each a direct subclass of `ConnectionStoreError`; and `UnusableIdentityError`, a
-> direct subclass of `AssistantError`. None of them defines an `__init__`, none
-> carries structured state, and none names the supplied identity, the supplied
-> credential, any part or derivation of either, or a filesystem path.
+> be read or written; `UnknownConnectionError` and `DisplacedProvisioningError` are
+> each a direct subclass of it; and `UnusableIdentityError`,
+> `IncompleteProvisioningError` and `ResidualCredentialError` are each a direct
+> subclass of `AssistantError`.
+
+> **Normative.** `IncompleteProvisioningError` and `ResidualCredentialError` each
+> carry exactly one member of structured state, `reference: DurableIdentifier`,
+> and no other. Every other class here defines no `__init__` and carries none. No
+> class on this surface names the supplied identity, the supplied credential, any
+> part or derivation of either, or a filesystem path.
 
 > **Normative.** A refusal raised by any operation on this surface **names the
 > reference where the call carries one**, and **never** names the identity or the
@@ -356,15 +361,39 @@ something this store does not hold". It reaches `reprovision_account` only:
 `connect_account` names nothing.
 
 **`DisplacedProvisioningError` is the typed refusal ADR-0102 §5's "the store is
-the arbiter" requires.** ADR-0148 §6 makes an act's ownership a compare-and-swap
-and rules that an act whose compare-and-swap fails "never held it and writes
-nothing", and that an activation "lands only if the record still holds that state,
-writing nothing otherwise". Both are lost races, both leave the caller's act
-unperformed, and both have one recourse: read `connected_accounts` and decide
-whether to run the act again. One class covers them for ADR-0097 §10's reason —
-"the caller's recourse is identical" — and no operation performs a liveness
-pre-check to narrow the window, because a pre-check narrows and does not close it
-while inviting a reader to believe it had.
+the arbiter" requires.** ADR-0148 §6 gives an act three points at which another
+act can take the record from it — the taking compare-and-swap, the re-read before
+the credential write, and the activation's own compare-and-swap — and all three
+end the same way for the caller: this act's record is not the reference's live
+one, and the recourse is to read `connected_accounts` and decide whether to run
+the act again. One class covers them for ADR-0097 §10's reason, "the caller's
+recourse is identical". §7 is careful about what the class does **not** say, since
+the three points differ in how much the displaced act had already written. No
+operation performs a liveness pre-check to narrow the window, because a pre-check
+narrows and does not close it while inviting a reader to believe it had.
+
+**`IncompleteProvisioningError` and `ResidualCredentialError` are the two outcomes
+in which the act partly landed, and they carry a reference for a reason the mint
+creates.** A provisioning act that leaves a pending record has left durable state
+the user must act on, and after `connect_account` the caller has no other way to
+name it: the reference was minted inside the act (§3) and no result was returned.
+Matching by identity is not a substitute — two references may carry the same
+identity, which is a state ADR-0148 §6 permits and §3 above does nothing to
+prevent. So the reference travels in the error. A reference is exactly the value
+§2a's clause above says a refusal *should* name: non-secret, chosen by code, and
+loggable (ADR-0149 §3).
+
+**Structured state on an error is a ratified shape rather than a new one, and its
+one failure mode is legible.** `wire/errors.py` derives an error's `details` from
+its constructor's parameters, so a member named `reference` crosses without a
+registry entry, and `UnresolvedEvidenceError` is the existing precedent for a
+class that carries some. Where an error payload would exceed the frame, ADR-0085
+§10a's reduction sets `details` to null and marks the delivery `reduced`, which
+surfaces as `details_elided` — so a client that loses the reference is *told* it
+lost it rather than shown an empty one. A `DurableIdentifier` and a short message
+are orders of magnitude below any admissible frame, so the reduction is not
+reachable here; it is described because a clause that carries state owes an
+account of what happens when the state cannot be delivered.
 
 **`UnusableIdentityError` is one class for four refusals, on the same test.**
 ADR-0149 §4 refuses an act whose identity equals the credential's plaintext, one
@@ -400,12 +429,29 @@ its length (ADR-0125 §6). The others are a blank or unwritable `reference` and 
 > **Normative.** `recent_connection_acts` refuses a `limit` that is not strictly
 > positive, locally and before any I/O, in every implementation.
 
-**`SecretStoreError` is declared and is not converted.** ADR-0125 §7 rules that a
-keyring which is unreachable, locked or backendless is one visible error state,
-and ADR-0149 §6's second clause forbids any lane treating it as an absent
-credential. §7 below is where its two occurrences on this surface acquire their
-meaning; declaring it here is what stops an implementation wrapping it into a
-`ConnectionStoreError` and losing the distinction.
+> **Normative.** No operation on this surface declares or propagates
+> `SecretStoreError`. A keyring failure is **converted**, at each of the three
+> points ADR-0148 §6 and ADR-0149 §5 let one arise, into the class that states what
+> the act did: a failed credential write or activation becomes
+> `IncompleteProvisioningError`, a failed predecessor-slot deletion or
+> disconnection deletion pass becomes `ResidualCredentialError`, and the underlying
+> `SecretStoreError` is chained as the cause. No implementation converts one into
+> `ConnectionStoreError`, suppresses one, or treats one as an absent credential
+> (ADR-0125 §7, ADR-0149 §6).
+
+**Converting is the opposite of what this ADR does everywhere else, and the reason
+is that the raw class answers the wrong question.** `SecretStoreError` says the
+keyring failed; it says nothing about which of ADR-0148 §6's three writes had
+landed, and the two answers are opposite — one leaves a reference unusable and the
+other leaves a working connection with a stale credential beside it. An earlier
+draft let the raw error escape and derived the answer from the fixed write order.
+Adversarial review found the derivation wrong at the third point: ADR-0148 §6's
+predecessor-slot deletion happens **after** the activation, so a keyring failure
+there arrives with all three writes landed and the record active, and a client
+following that draft would have reported a live connection as pending and rotated
+a credential that was working. The conversion is what makes each outcome
+answerable from its class rather than from a rule about ordering that had a case
+outside it.
 
 ### 3. The reference is minted hub-side, and no caller ever authors one
 
@@ -669,21 +715,43 @@ that performs the act". §17 records that no sentence of ADR-0124 §6 becomes fa
 > that act took. An implementation that returns after the first or second write,
 > or that returns a `PENDING` record from either operation, does not conform.
 
-> **Normative.** A `SecretStoreError` raised by `connect_account` or
-> `reprovision_account` means the record write landed and the credential write did
-> not, so the reference is **pending and not connectable**. This is derivable
-> rather than declared by fiat: ADR-0148 §6 fixes the record as the first write and
-> the credential as the second, and the record write reaches no keyring. A client
-> reports the reference as left pending and the remedy as running the act again;
-> no client reports it as unchanged.
+> **Normative.** An `IncompleteProvisioningError` means the reference it carries
+> **exists**, its live record is this act's, and that record is **pending** — so
+> the reference is not connectable and no call transmits under it (ADR-0148 §6).
+> It says nothing about whether a credential reached the slot, because ADR-0148 §6
+> refuses a pending record either way and the remedy is the same. A client reports
+> the reference as left pending, names it, and offers exactly two next acts:
+> `reprovision_account` on that reference, or `disconnect_account` on it. No client
+> reports the call as having changed nothing.
 
-> **Normative.** A `DisplacedProvisioningError` means the act wrote **nothing** —
-> neither the record, nor the credential, nor the activation — because ADR-0148
-> §6 rules that an act whose compare-and-swap fails "never held it and writes
-> nothing" and that an activation writing nothing leaves the successor's record
-> untouched. A client reports the act as not performed and the reference's state
-> as unread, and resolves it by calling `connected_accounts` rather than by
-> retrying blind.
+> **Normative.** A `ResidualCredentialError` means the act it was raised by
+> **completed**: after `reprovision_account` the reference is connected at the new
+> revision, and after `disconnect_account` the reference has no live record. What
+> failed is a deletion of a credential the act was to remove — the predecessor's
+> slot (ADR-0148 §6) or the disconnection's pass (ADR-0149 §5) — so an
+> unreferenced credential remains, named by the store, read by no call, and
+> reachable by a re-run of `disconnect_account` and by ADR-0149 §8's purge. **No
+> client reports it as a failed connection or a failed disconnection.**
+
+> **Normative.** A `DisplacedProvisioningError` means **no record this act wrote
+> is the reference's live record**: another act took it, at one of ADR-0148 §6's
+> three points. It does **not** mean the act wrote nothing. Depending on which
+> point it was displaced at, the store may hold that act's own pending entry at its
+> own revision, and the keyring may hold a credential in that act's own slot —
+> ADR-0148 §6 rules a displaced act's in-flight write "neither stopped nor waited
+> for" and lands it in that act's own slot, and ADR-0149 §3's append-only store
+> keeps the entry. Neither is read by any call, both are named by the store, and
+> both are deleted by a disconnection of that reference and by ADR-0149 §8's purge.
+
+> **Normative.** No client presents a `DisplacedProvisioningError` as having left
+> the store unchanged, as having rolled anything back, or as a reason to retry the
+> same act blind. It reports the act as not performed, the reference's state as
+> unread, and resolves it by calling `connected_accounts`.
+
+> **Normative.** No lane makes any operation on this surface delete, compact or
+> reconcile a displaced act's entry or its slot. ADR-0149 §5's deletion pass and
+> ADR-0149 §8's purge are the only things that remove either, and a surface that
+> tidied one would be removing the name that makes the other reachable.
 
 > **Normative.** No implementation retries a displaced act, reorders ADR-0148 §6's
 > three writes, splits them across calls, or rolls back a write that landed
@@ -698,14 +766,27 @@ that performs the act". §17 records that no sentence of ADR-0124 §6 becomes fa
 > `connected_accounts`. A cancelled client starts no new call in order to report,
 > and the `CancelledError` still propagates (ADR-0139 §4, ADR-0060).
 
-**The two "the act already landed" failures are the reason this section exists.**
-A surface that reported every exception as "it did not work" would be wrong in
-both directions on the two exceptions that matter most: a `SecretStoreError` on a
-provisioning act leaves durable state a user has to act on, and a
-`DisplacedProvisioningError` leaves none but leaves the reference in a state
-somebody else just changed. Both are derived from ADR-0148 §6's fixed write order
-rather than added to it, which is what makes them stateable at all — §17 records
-that neither adds an obligation to §6.
+**A provisioning act has four outcomes, not two, and a surface that offered two
+would be wrong on half of them.** The act either completed, or left the reference
+pending, or completed while failing to clean up behind itself, or was taken over
+by somebody else — and a client owes the user a different sentence and a different
+next step in each. `ConnectionStoreError` is the fifth and simplest: the store
+itself failed, so nothing about the reference can be asserted at all.
+
+**Each outcome is read off ADR-0148 §6's own ordering rather than added to it**,
+which is what makes it stateable here rather than in a supersession, and §17
+records that none of them adds an obligation to §6. What §6 supplies is the fixed
+order and the ownership rule; what this section supplies is the mapping from a
+class a caller catches to the state the store is then in.
+
+**An earlier draft had two outcomes and got both of its derivations wrong**, which
+is why the mapping is now written per class rather than reasoned from the order at
+each call site. It said a keyring failure always meant a pending record, missing
+that ADR-0148 §6's predecessor deletion runs *after* the activation; and it said a
+displacement meant nothing was written, missing that §6's re-read and activation
+clauses displace an act which has already appended its pending entry and may
+already have written its credential — the very interleaving ADR-0149 §14 requires
+a test for, and the entry ADR-0149 §5's deletion pass depends on existing.
 
 **Reporting an unknown outcome as unknown is ADR-0139 §4's rule, transposed one
 act over.** Its subject was an amendment composed of two ratified operations;
@@ -728,14 +809,12 @@ credential.
 > statement that the reference does not exist. It says one thing: no live record
 > was removed by this call.
 
-> **Normative.** A `SecretStoreError` raised by `disconnect_account` means the
-> removal entry **landed** and at least one credential deletion did not, so the
-> reference is disconnected, the residual slots stay named by the store, and the
-> remedy is to run `disconnect_account` again — which is idempotent and re-runnable
-> (ADR-0149 §5). This is derivable rather than declared: §5 fixes the removal entry
-> as the first step and the deletions as the second, and the removal entry reaches
-> no keyring. A client reports the reference as disconnected **and** the credential
-> deletion as incomplete, and never as a failed disconnection.
+> **Normative.** A `ResidualCredentialError` raised by `disconnect_account` means
+> the removal entry **landed** and at least one credential deletion did not, so
+> the reference is disconnected, the residual credentials stay named by the store,
+> and the remedy is to run `disconnect_account` again — which is idempotent and
+> re-runnable (ADR-0149 §5). A client reports the reference as disconnected **and**
+> the credential deletion as incomplete, and never as a failed disconnection.
 
 > **Normative.** No client presents a disconnection as having stopped a
 > transmission already in flight, as having cancelled a provisioning act, or as a
@@ -1136,7 +1215,7 @@ repeating it would be doing exactly that by silence one document later.
 > **Normative.** This decision cannot be implemented without contract surface
 > `core` does not have, all of it flagged here under golden rule 5 and **none of it
 > added by this ADR**: five methods on `AssistantEngine`; one new Protocol (§10);
-> three types and one constant in `core/types.py` (§4, §5); and four classes in
+> three types and one constant in `core/types.py` (§4, §5); and six classes in
 > `core/errors.py` (§2a).
 
 > **Normative.** All of it lands in **one lane and one PR**: the `AssistantEngine`
@@ -1187,7 +1266,7 @@ anything this ADR adds.
 1. The five methods on `AssistantEngine` with §2a's declared failures in their
    docstrings; `ConnectionProvisioner` in `core/protocols.py` with §10's five
    signatures; `ProvisioningState`, `ConnectedAccount`, `ConnectionAct` and
-   `ACCOUNT_IDENTITY_MAX_BYTES` in `core/types.py`; and the four classes in
+   `ACCOUNT_IDENTITY_MAX_BYTES` in `core/types.py`; and the six classes in
    `core/errors.py`.
 2. **The `AssistantEngine` conformance suite gains a clause per ruling above that a
    store cannot exhibit**, which is the whole of §2a's local refusals, §5, §7, §8
@@ -1209,16 +1288,35 @@ anything this ADR adds.
    > `(reference, revision)` with `account=None` exactly for a removal; and
    > `recent_connection_acts` refuses a non-positive `limit` before any I/O.
 
-   > **Normative.** The suite pins the two cases that distinguish a stated outcome
-   > from a guessed one: a `disconnect_account` whose credential deletion fails
-   > raises `SecretStoreError` **and** leaves the reference with no live record, so
-   > a following `connected_accounts` omits it; and a `reprovision_account`
-   > displaced by a concurrent act raises `DisplacedProvisioningError` and leaves
-   > the store holding exactly what the displacing act wrote, with no entry from
-   > the displaced one.
+   > **Normative.** The suite pins §7's four provisioning outcomes separately, one
+   > case each, because an implementation that collapses any two of them passes
+   > every clause above. A `connect_account` whose credential write raises a
+   > keyring failure raises `IncompleteProvisioningError`, whose `reference` names
+   > a record a following `connected_accounts` returns with `state=PENDING`. A
+   > `reprovision_account` whose **predecessor-slot** deletion raises one raises
+   > `ResidualCredentialError`, and a following `connected_accounts` returns that
+   > reference `ACTIVE` at the **new** revision — the case that distinguishes a
+   > mapping from a rule about ordering. A `disconnect_account` whose deletion pass
+   > raises one raises `ResidualCredentialError`, and a following
+   > `connected_accounts` omits that reference. And a `reprovision_account`
+   > displaced at each of ADR-0148 §6's three points — the taking
+   > compare-and-swap, the re-read before the credential write, and the activation
+   > — raises `DisplacedProvisioningError` at all three, with the displacing act's
+   > record live in every case.
+
+   > **Normative.** The suite pins what a displacement leaves behind, against the
+   > two later points: after a displacement at the re-read or at the activation,
+   > `recent_connection_acts` still returns the displaced act's own row, at its own
+   > revision, with `state=PENDING`. A suite that asserts the store holds nothing
+   > from the displaced act contradicts ADR-0149 §3's append-only store and removes
+   > the entry ADR-0149 §5's deletion pass and §8's purge each reach the displaced
+   > act's slot through.
 
    Each is written as a required case rather than left to the prose for ADR-0102
-   §12's reason: a clause a test cannot reach is worse than no test.
+   §12's reason: a clause a test cannot reach is worse than no test. The last two
+   are here because an earlier draft of §7 stated two outcomes where there are four
+   and a "wrote nothing" that ADR-0148 §6 does not support, and both would have
+   been ratified by a suite that tested only a quiescent reference.
 3. **`ConnectionProvisioner`'s triad in full** — the Protocol, a shared
    `ConnectionProvisionerContract` encoding §7's and §8's ownership and ordering
    rulings, and a canonical fake in `ai_assistant.testing` with the concrete
@@ -1380,6 +1478,19 @@ clause are untouched, and §13 above adds a precondition that keeps this surface
 away from the remote listener rather than putting anything new on it. What is
 *taken* from §7 is its shape for the one authorised unwrap (§6), which is use as
 precedent and not amendment.
+
+**ADR-0125 §7 and ADR-0149 §6 against §2a's conversion — not owed, and this one is
+worth the showing.** ADR-0125 §7 governs what the **keyring seam** raises: absent,
+locked and headless are one visible error state rather than three, and the seam
+does not disguise one as another. §2a converts that error at a **consumer**, one
+call frame up, into a class that says what the provisioning act did — chaining the
+original as the cause, so nothing is discarded and the seam's own classification is
+not re-made. ADR-0149 §6's clause is narrower still: it forbids converting a
+keyring failure "into the case above", which is an **absent credential**, and every
+clause of §7 does the opposite — it reports the act as incomplete or a credential
+as residual, and never as absent. A reader holding only ADR-0125 §7 raises exactly
+what they raised before; a reader holding only ADR-0149 §6 still refuses the call
+and still never treats the failure as an absence.
 
 **ADR-0125 §3, §8 and §12, and ADR-0126 §6 — not owed.** `SecretValue` is used as
 ratified, including its own `ValueError` refusals, and no lane is given a second
@@ -1544,6 +1655,20 @@ re-deferring it.
   between the two cases and a folded method tells a caller nothing about which
   apply — and because splitting them makes "I meant to replace and created a
   second" unreachable rather than merely visible.
+- **Letting the raw `SecretStoreError` escape and deriving the state from
+  ADR-0148 §6's write order.** The first draft's answer, and it is cheaper: no
+  conversion, no new class, one rule instead of a mapping. Refused in §2a because
+  adversarial review found the rule had a case outside it — ADR-0148 §6's
+  predecessor-slot deletion runs *after* the activation, so a keyring failure there
+  arrives with a working connection and the rule reported it as pending. A
+  derivation with an exception is worse than a mapping, because the exception is
+  exactly where a client acts on a false state.
+- **One class for every partial provisioning outcome, discriminated by a field.**
+  Two classes instead of four. Refused in §2a: `IncompleteProvisioningError` and
+  `ResidualCredentialError` mean opposite things about whether the reference is
+  usable, and a client that catches the class and forgets the field gets the
+  opposite answer half the time. The distinction a caller must not miss belongs in
+  the type they catch.
 - **A `Disconnection` result type carrying a `credentials_deleted` boolean.** One
   more promoted type, and the shape an author writes first. Refused in §8 because
   ADR-0149 §5 requires the failure to be "reported and never suppressed", and a
