@@ -618,6 +618,13 @@ never well-formed in one place and malformed in another. Every invariant in this
 section is still checked before any ruling is taken, because ADR-0148 §1 has the
 request carry the binding and §2's validator runs on the request.
 
+> **Normative.** `EgressSpan.argument` is carried as the span's **locator** and
+> asserts nothing about what the span contains. No lane reads an argument name as a
+> payload value, infers a tier or a provenance from it, matches a destination against
+> it, or treats it as authored by the tool rather than supplied by the caller — a
+> schema that does not describe a key still admits it (ADR-0145 §9, §11). What a span
+> says about its content is §5's `provenance` and §6's `tier`, and nothing else.
+
 > **Normative.** A builder holding two values of **differing provenance** inside one
 > undecomposable span — inside a JSON object, or inside a nested array — cannot
 > describe them and **refuses** rather than choosing one, which is ADR-0148 §1's
@@ -1121,6 +1128,15 @@ Scoping something out is a decision, so each carries its reason (ADR-0029 §7's 
 > ADR-0146 §2 and PR #1120's ninth observation impose on a component that runs
 > **before** ADR-0145 has refused anything outside the schema.
 
+> **Normative.** (b)'s ADR also owes the **live failure-path test** for §13's
+> undescribed-key residue: a call whose `parameters` carry a key the bound tool's
+> schema never described — the `X-Secret` shape — built against a seam that supplies a
+> binding, asserting what the recorded decision then holds. It is a test rather than a
+> refusal here because refusing needs the keyword vocabulary §6 leaves to that same
+> ADR, and the two land together or the refusal is a bound with no mechanism behind
+> it. Issue #1127 carries the fail-closed alternative. No lane closes this by adding a
+> key check to `core` ahead of that ADR.
+
 > **Normative.** This ADR designates nothing, attests no ADR-0017 §3 condition, and
 > discharges none. It supplies the `core` value conditions 8 and 10 need and no lane
 > cites it further.
@@ -1357,15 +1373,45 @@ destinations rather than content". Every field this ADR adds is inside that sent
   related the two forms.
 - `BoundAccount.identity` and `.reference`, `transport_endpoint` — named verbatim.
 - `EgressSpan.provenance`, `.tier`, `.extent` — "extent, provenance, tiers" verbatim.
-- `EgressSpan.argument` and `.index` — an argument **name** is part of
-  `parameters_schema` and is therefore already stored verbatim in every decision
-  (ADR-0021 §1's `tool` clause); an index is a position. Neither is an argument value,
-  and §1's sentence declines to store *values*.
+- `EgressSpan.argument` and `.index` — the **locator** of a span, constitutive of the
+  description the note already names rather than an addition to it. The note has the
+  binding "transcribed verbatim into the recorded decision" and lists "a payload
+  *description*" among what is transcribed; a description whose spans cannot be
+  located describes nothing, and §4 exists to make each one locatable by
+  `(argument, index)`. An index is a position. Neither is an argument **value**:
+  `parameters_digest` is untouched and "still binds the arguments while storing none
+  of them", which is the note's own "What does not change" paragraph.
 
 So no field of this surface stores an argument value the note does not already name,
 and ADR-0082 §1's rule that a record is written "in the ADR that makes it, and nowhere
 else" means a second note recording the same substance would be the book-keeping the
 section forbids.
+
+**The residue in that last bullet, stated rather than smoothed over.** An argument
+**name** is not always something the tool's author wrote. ADR-0145 §11 records that a
+schema omitting `additionalProperties` "permits keys it never described, and those keys
+travel in an authorised payload", and ADR-0145 §9 admits an empty schema over "a
+parameter mapping with keys". So a caller — or a model composing the call — can put
+content of its own choosing into a **key**, and §4's coverage invariant then requires a
+span for it, whose `argument` reaches the durable decision. The `X-Secret` shape
+ADR-0145's own message tests are written against is the worst case, and nothing in this
+surface detects it: `core` cannot tell an author's key from a caller's.
+
+**Why that is the record carrying what a description must carry, and not a widening of
+what it stores.** The alternative is a record whose spans name nothing, which is not a
+smaller disclosure but an unusable trail — ADR-0017 §3's tenth condition is the same
+argument one field over. The bound is that the name is a *locator* and asserts nothing:
+what a span says **about** its content stays governed by ADR-0146's provenance
+classification (§5) and by §6's `tier`, and neither is read off a key. `parameters` may
+still not carry a Tier 0 value (ADR-0021 §1, restated by ADR-0148 §6), and that
+exclusion reaches a Tier 0 value written into a key exactly as it reaches one written
+into a value — so the shape this residue leaves open is a caller writing sensitive
+content into a key **in breach of that exclusion**, which is a detection gap, not a
+permission. It is not closed here because closing it means refusing keys a schema does
+not describe, and *which* keys a schema describes is the keyword-vocabulary question §6
+routes to (b)'s ADR in terms. §11 gives (b) the live test; issue #1127 tracks the
+fail-closed alternative and records why it must ride with (b)'s ADR or an amendment
+to §6 rather than arriving as a validator.
 
 **ADR-0021 §3, §4 and §5 — no record owed.** §3's rule that a policy returns a
 `PermissionRuling` and never a `PermissionDecision` is relied on unchanged: the binding
