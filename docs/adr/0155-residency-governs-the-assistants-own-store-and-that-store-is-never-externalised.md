@@ -191,7 +191,8 @@ unmarked text supplies none.
 > this system keeps on the owner's behalf, under the data directory
 > `Settings.data_dir` resolves. That store lives on the owner's machine, under that
 > one directory, and no component of this system places any part of it in a service
-> another party operates.
+> another party operates — save to the extent an ADR reserved by §3's third clause
+> permits, which is the only exception to this clause and to §3's first.
 
 > **Normative.** Whether a value belongs to the assistant's own store is decided by
 > **where this system persists it**, never by what it contains and never by how
@@ -221,6 +222,18 @@ Memory records, beliefs, episodes, user-model facts, evaluation traces, audit
 records, plans, conversation records, deferrals, source grants and connection
 records are all inside it today; that sentence is an illustration and obligates
 nothing.
+
+**The first clause carries the export exception inside itself, and it had to.** An
+earlier draft stated the prohibition unconditionally here and reserved the exception
+in §3's third clause alone. Adversarial review found on round 1 that the pair left
+the reserved ADR with no lawful outcome: an export it permitted would satisfy §3 and
+still breach §1, so the route §3 offers would have been unreachable without
+superseding a clause that never mentioned it. That is ADR-0089 §3's requirement
+arriving on this document — "A marked clause states its own scope, its conditions
+and its exceptions" — and the repair is to name the one exception in both clauses
+rather than to widen either. Nothing else moves: the exception is still available
+only to an ADR that decides the export in its own text and decides ADR-0004 §6's
+reach for it.
 
 **The third clause is what the flat reading loses, and it is worth being exact
 about what it costs.** Under a flat reading the owner would have an absolute
@@ -378,9 +391,9 @@ checkable direction and the one a reviewer can test a change against.
 
 > **Normative.** The one exception available is an ADR deciding in its own text that
 > the owner may export the accumulated model into a service the owner names, which
-> may permit what the first clause forbids only to the extent it decides, and which
-> decides the reach of ADR-0004 §6's export right for that act rather than
-> inheriting one.
+> may permit what the first clause above and §1's first clause forbid, only to the
+> extent it decides, and which decides the reach of ADR-0004 §6's export right for
+> that act rather than inheriting one.
 
 > **Normative.** No lane reads this ADR, ADR-0004 §6, ADR-0073 §10's deferred
 > `export` command, ADR-0007's `MemoryStore.export`, or ADR-0123's backup artifact
