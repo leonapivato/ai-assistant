@@ -1139,13 +1139,22 @@ Scoping something out is a decision, so each carries its reason (ADR-0029 §7's 
 
 > **Normative.** (b)'s ADR **owes a refusal**, not only a test, for §13's
 > undescribed-key residue: the seam **refuses to produce a binding** for a call
-> carrying a top-level key its declaration vocabulary cannot attribute to the tool's
-> own declaration, rather than producing one whose locator is caller-authored text.
-> This is stated here and discharged there because the seam is where the vocabulary
-> §6 defers is read, so it is the first component with the mechanism — an obligation
-> on the lane that can carry it, which is why it is a refusal rather than a bound with
-> nothing behind it. No lane implements (b) without it, and no lane closes it early by
-> adding a key check to `core`, which cannot tell an author's key from a caller's.
+> carrying a top-level key the bound tool's declaration does not **statically name**.
+> A key admitted only by an open-ended form — `additionalProperties`, a pattern, or
+> any other construct matching keys it does not enumerate — is **not** statically
+> named, however validly the call type-checks against it. The test is **authorship,
+> not validity**: a locator is persisted into the recorded decision, so it must be
+> text the tool's author wrote and not text a caller chose, and a schema that permits
+> a key is not thereby a schema that named it.
+
+> **Normative.** That refusal is stated here and discharged there because the seam
+> reads the declaration vocabulary §6 defers, so it is the first component with the
+> mechanism — an obligation on the lane that can carry it rather than a bound with
+> nothing behind it. Naming the authorship test does **not** decide that vocabulary:
+> which keywords express a static name is still (b)'s, and this clause fixes only what
+> its answer must satisfy. No lane implements (b) without the refusal, and no lane
+> closes it early by adding a key check to `core`, which cannot tell an author's key
+> from a caller's.
 
 > **Normative.** (b)'s ADR also owes the **live failure-path test** for that shape: a
 > call whose `parameters` carry a key the bound tool's schema never described — the
