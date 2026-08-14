@@ -25,6 +25,7 @@ test-only; production code importing ``ai_assistant.testing`` fails
 from __future__ import annotations
 
 import json
+import string
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
@@ -94,15 +95,30 @@ def _refuse(message: str) -> EgressBindingError:
     return EgressBindingError(message)
 
 
+#: RFC 5322 §3.2.3 ``atext``, which RFC 5321 §4.1.2's ``Atom`` is built from, and
+#: RFC 5321 §4.1.2's ``Ldh-str``, the interior of a domain label. Spelled here
+#: rather than imported: ``ai_assistant.testing`` may not import ``tools``, which
+#: is what makes this a second *implementation* rather than a second copy of one.
+_ATEXT: Final = frozenset(string.ascii_letters + string.digits + "!#$%&'*+-/=?^_`{|}~")
+_LDH: Final = frozenset(string.ascii_letters + string.digits + "-")
+
+
 def _canonical_smtp(supplied: str) -> str:
     """This implementation's SMTP canonicaliser: lower the domain, keep the local part.
 
     RFC 5321 §2.4 makes mailbox domains case-insensitive and leaves the local
     part's semantics to the receiving host, so one transformation and no other.
-    Deliberately narrower than the seam's own canonicaliser rather than a copy of
-    it — what the conformance suite pins is that *some* canonical form is computed
-    here and accepted from nobody, not that two implementations spell RFC 5321
-    identically.
+
+    **Its accept/refuse boundary is the conformance suite's, not this module's.**
+    ``EgressBinderContract`` states a corpus of forms every implementation must
+    canonicalise identically and a corpus every implementation must refuse, and
+    both subjects run it — so a divergence between this and the production
+    canonicaliser fails a test rather than a review round. What is *not* done here
+    is porting :mod:`ai_assistant.tools.destinations`' rules across: ADR-0148 §2's
+    one-canonicaliser clause exists to keep that rule in **one** place, and a copy
+    of it here — across an import boundary ``lint-imports`` forbids — would be the
+    second copy the clause is against. The suite is where two independent
+    implementations are told what to agree on.
 
     Raises:
         ValueError: If the supplied form is not one this implementation will
@@ -118,10 +134,50 @@ def _canonical_smtp(supplied: str) -> str:
         msg = "an email address is one local part, one '@' and one domain (RFC 5321 §4.1.2)"
         raise ValueError(msg)
     local_part, domain = supplied.split("@")
-    if not local_part or not domain or domain.startswith(("[", ".")) or domain.endswith("."):
-        msg = "an email address has a non-empty local part and a bare domain (RFC 5321 §4.1.2)"
-        raise ValueError(msg)
+    _check_local_part(local_part)
+    _check_domain(domain)
     return f"{local_part}@{domain.lower()}"
+
+
+def _check_local_part(local_part: str) -> None:
+    """Require an RFC 5321 ``Dot-string``, refusing every other lawful spelling.
+
+    Raises:
+        ValueError: If it is empty, quoted, or not dot-separated atoms.
+    """
+    if not local_part:
+        msg = "an email address has a non-empty local part (RFC 5321 §4.1.2)"
+        raise ValueError(msg)
+    if '"' in local_part or "\\" in local_part:
+        msg = "a quoted local part's equivalence to any other form is not established"
+        raise ValueError(msg)
+    if local_part.startswith(".") or local_part.endswith(".") or ".." in local_part:
+        msg = "a local part is dot-separated atoms (RFC 5321 §4.1.2)"
+        raise ValueError(msg)
+    if any(character not in _ATEXT for character in local_part.replace(".", "")):
+        msg = "a local part outside RFC 5322 §3.2.3's atext is refused"
+        raise ValueError(msg)
+
+
+def _check_domain(domain: str) -> None:
+    """Require an RFC 5321 ``Domain``: dot-separated let-dig-hyphen labels.
+
+    Raises:
+        ValueError: If it is empty, an address literal, or not conforming labels.
+    """
+    if not domain:
+        msg = "an email address has a non-empty domain (RFC 5321 §4.1.2)"
+        raise ValueError(msg)
+    if domain.startswith("["):
+        msg = "an address literal's equivalence class belongs to the IP stack"
+        raise ValueError(msg)
+    for label in domain.split("."):
+        if not label or not (label[0].isalnum() and label[-1].isalnum()):
+            msg = "a domain is non-empty labels beginning and ending alphanumeric"
+            raise ValueError(msg)
+        if any(character not in _LDH for character in label):
+            msg = "a domain label holds only letters, digits and hyphens (RFC 5321 §4.1.2)"
+            raise ValueError(msg)
 
 
 _CANONICALISERS: Final[Mapping[DestinationProtocol, Callable[[str], str]]] = {

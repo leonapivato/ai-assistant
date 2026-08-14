@@ -119,6 +119,60 @@ SEND_EMAIL: Final = tool_declaring(
 NOT_EGRESS: Final = tool_declaring({"query": {"type": "string"}}, tool_id="recall_memory")
 
 
+#: Supplied forms **every** implementation must canonicalise, and to what.
+#:
+#: ADR-0148 §2's one-canonicaliser clause is stated over *integrations at the
+#: seam*, and its point is that the rule lives in **one** place. A canonical fake
+#: cannot share the production canonicaliser — ``lint-imports`` forbids
+#: ``testing`` importing ``tools`` — so the triad's two implementations are
+#: independent by design, and **this** is the artifact that states what they must
+#: agree on. Porting the production rules into ``testing/`` would create the second
+#: copy that clause exists to prevent; a corpus both subjects run makes a future
+#: divergence fail a test instead.
+#:
+#: The single transformation is RFC 5321 §2.4's: the domain is case-insensitive
+#: and is lowered, the local part's semantics belong to the receiving host and it
+#: is copied byte for byte.
+CANONICALISES: Final = (
+    ("bob@x.io", "bob@x.io"),
+    ("Alice@Example.COM", "Alice@example.com"),
+    ("a.b@sub.example.com", "a.b@sub.example.com"),
+    ("first+tag@EXAMPLE.org", "first+tag@example.org"),
+    ("UPPER@lower.EXAMPLE.com", "UPPER@lower.example.com"),
+)
+
+#: Supplied forms **every** implementation must refuse, so none is described by a
+#: binding one implementation would build and another would not.
+#:
+#: The first five are the divergence adversarial review found between the two
+#: implementations of this Protocol — each accepted by the canonical fake and
+#: refused by production — which is a fake certifying a weaker seam than the one it
+#: stands in for. The rest are the boundary those five sit on: RFC 5321 §2.4
+#: assigns the local part to the receiving host and RFC 5321 §4.1.3 assigns an
+#: address literal's equivalence class to the IP stack, so neither is a form this
+#: seam may assert an equivalence for (ADR-0148 §1's third clause, ADR-0148 §2).
+REFUSES: Final = (
+    "a..b@example.com",
+    ".a@example.com",
+    'q"x"@example.com',
+    "a@exa_mple.com",
+    "a@b..c.com",
+    "a.@example.com",
+    "a@[192.0.2.1]",
+    "a@example.com.",
+    "a@-lead.com",
+    "a@trail-.com",
+    "a b@example.com",
+    "two@at@example.com",
+    "no-at-sign",
+    "caf\u00e9@example.com",
+    "@example.com",
+    "a@",
+    "",
+    "not an address",
+)
+
+
 def _no_provenance() -> CarriedProvenance:
     """A carrier over an empty mapping, passed deliberately (ADR-0152 §1)."""
     return CarriedProvenance(spans={})
@@ -370,6 +424,53 @@ class EgressBinderContract(ABC):
             await binder.bind(
                 SEND_EMAIL,
                 parameters={"to": {"address": "alice@example.com"}, "subject": "s", "body": "b"},
+                provenance=_no_provenance(),
+            )
+
+    # --- ADR-0148 §2: what two implementations must agree on ----------------
+
+    @pytest.mark.parametrize(("supplied", "canonical"), CANONICALISES)
+    async def test_every_implementation_canonicalises_the_corpus_identically(
+        self, binder: EgressBinder, supplied: str, canonical: str
+    ) -> None:
+        """ADR-0148 §2: one canonical form per supplied form, whoever computes it.
+
+        Both forms survive — ADR-0148 §2's fourth clause requires the supplied one
+        in the description and the audit record, and ADR-0148 §14 names
+        reconstructing it from the canonical one as a failure in terms — so the
+        supplied form is asserted unaltered beside the computed one.
+        """
+        self.register_egress(binder, SEND_EMAIL)
+
+        bound = await binder.bind(
+            SEND_EMAIL,
+            parameters={"to": [supplied], "subject": "s", "body": "b"},
+            provenance=_no_provenance(),
+        )
+
+        assert bound is not None
+        occurrence = bound.binding.spans[-1].destination
+        assert occurrence is not None
+        assert occurrence.supplied == supplied
+        assert occurrence.canonical == canonical
+
+    @pytest.mark.parametrize("supplied", REFUSES)
+    async def test_every_implementation_refuses_the_same_forms(
+        self, binder: EgressBinder, supplied: str
+    ) -> None:
+        """ADR-0148 §1, §2: a form with no canonical form is refused, never passed through.
+
+        The case that makes this corpus worth having is an implementation that
+        *accepts* here: a canonical fake admitting a form production refuses lets a
+        consumer's test park and approve a call production would never make, which
+        is a double certifying a weaker seam than the one it stands in for.
+        """
+        self.register_egress(binder, SEND_EMAIL)
+
+        with pytest.raises(EgressBindingError):
+            await binder.bind(
+                SEND_EMAIL,
+                parameters={"to": [supplied], "subject": "s", "body": "b"},
                 provenance=_no_provenance(),
             )
 
