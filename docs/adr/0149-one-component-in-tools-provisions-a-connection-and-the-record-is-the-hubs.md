@@ -402,11 +402,27 @@ hub writes the store.
 > credential for one.
 
 > **Normative.** The **account identity** ADR-0148 §6 binds is supplied by the
-> user in the same act that supplies the credential, and is recorded verbatim. No
-> component infers it from a credential, a slot, a reference, an endpoint, a
-> `Settings` value or a remote lookup — the first four are ADR-0148 §6's own
-> prohibition and the last is an egress call this system is not entitled to make
-> (ADR-0148 §5).
+> user in the same act that supplies the credential, and is recorded verbatim —
+> nothing strips, case-folds or otherwise normalises it, at the surface, in the
+> provisioner or in the store. No component infers it from a credential, a slot, a
+> reference, an endpoint, a `Settings` value or a remote lookup — the first four
+> are ADR-0148 §6's own prohibition and the last is an egress call this system is
+> not entitled to make (ADR-0148 §5).
+
+> **Normative.** The act **refuses**, writing nothing, when the supplied identity
+> is equal to the supplied credential's plaintext. The comparison is exact, is
+> made before the first write, and its diagnostic names neither value.
+
+> **Normative.** An identity is **bounded, single-line printable text**: no
+> control character, no line break, and a length bound the implementing lane sets
+> and the store enforces. A violation refuses the act and writes nothing. The
+> identity is not a `SecretValue`, is not stored through `SecretStore`, and is
+> never the source of a `SecretName`'s `key` (ADR-0125 §2's prohibition, which
+> binds this direction too).
+
+> **Normative.** The surface renders the identity back to the user as part of the
+> act and in every listing (§9), so a value the user typed into the field is a
+> value the user sees. No surface accepts an identity it does not display.
 
 > **Normative.** A connection record is **not** a `SourceGrant` (ADR-0097 §1),
 > is not written to the grant store, and is not read by `SourceGrants.live`. No
@@ -418,6 +434,32 @@ hub writes the store.
 > `ActionPolicy` under ADR-0021. No surface may present connecting an account as
 > permission to act with it, and no ruling may rest on the existence of a
 > connection.
+
+**The identity is the one value here a user types and the system keeps, so what
+stops it being a secret is stated rather than assumed.** §3 forbids a credential
+value or a derivative in any field of the record, including the identity, and
+ADR-0148 §6 forbids it independently — but a user who pastes a bearer token into
+a field labelled "account" satisfies every type and defeats both, putting a Tier
+0 value into a Tier 1 store that survives into a backup. Three things answer it,
+and none of them pretends to be a detector. The equality refusal catches the one
+case that is both plausible and exactly checkable — the same string submitted
+twice, which is what a paste into the wrong field produces. The shape bound and
+the non-normalisation keep the value a legible name rather than an opaque blob.
+And the display clause removes the ingredient the failure needs, which is that
+the value be *unseen*: an identity is user-recognisable by ADR-0148 §6's own
+definition and appears in every listing, so a token there is visible to the
+person who typed it at the moment they type it, which is not true of a
+credential.
+
+**What none of that closes is stated in ADR-0148 §6's own posture.** A user
+determined to put a secret in the identity field can, and no mechanism in this
+system detects it in general — the same line ADR-0148 §6 draws about the party
+who writes another account's credential into a slot directly: "That party is the
+operator or the user, which is ADR-0021 §1's line exactly — 'a caller falsifying
+its own audit trail, not a policy subverting a gate, and no producer can prevent
+it'". What the system still owes such a value is the treatment §3 gives every
+identity: it reaches no log, no error and no diagnostic (ADR-0004 §5), and it is
+destroyed with the store by ADR-0004 §6's delete (§8).
 
 **"Configuration is not consent" binds connecting, and this is where it is most
 tempting to break.** ADR-0097 §8 forbids minting a grant "from a `Settings`
@@ -459,10 +501,19 @@ from configuration — and, from ADR-0097 §4, the append-only store that record
 
 ### 5. Disconnection is a user act, it is prospective, and it never resets a revision
 
-> **Normative.** Disconnecting a reference is **two writes in a fixed order**: a
+> **Normative.** Disconnecting a reference is **two steps in a fixed order**: a
 > **removal entry** is appended to the connection store **first**, after which the
-> reference has no live record; the credential slot the removed record named is
-> deleted **second**. No other order is permitted.
+> reference has no live record; **every distinct credential slot the store names
+> for that reference** — the removed record's, and every superseded, pending or
+> earlier removed entry's — is deleted **second**. No other order is permitted,
+> and deleting only the live record's slot does not satisfy this clause.
+
+> **Normative.** A disconnection is **idempotent and re-runnable**. Disconnecting
+> a reference that has no live record appends no second removal entry and deletes
+> whatever slots the store still names for it, which is the remedy for a slot a
+> displaced act wrote after an earlier disconnection (below) or for one whose
+> deletion failed. `delete` returns whether an entry was there and raises nothing
+> for an absent one (ADR-0125 §4), so a repeat costs nothing and asserts nothing.
 
 > **Normative.** A removal entry carries the reference, the incremented revision
 > and the fact that the connection was removed. It carries **no** credential
@@ -481,8 +532,23 @@ from configuration — and, from ADR-0097 §4, the append-only store that record
 > **Normative.** A slot deletion that fails leaves an **unreferenced slot** rather
 > than a live credential no record describes; the failure is reported and never
 > suppressed, the reference stays disconnected, and the slot stays nameable from
-> the removed entry so §8's purge still reaches it. This is ADR-0148 §6's rule for
-> a predecessor slot, applied to the deletion that ends a connection.
+> the entry that recorded it — the store is append-only (§3) — so a re-run and
+> §8's purge both still reach it. This is ADR-0148 §6's rule for a predecessor
+> slot, applied to the deletion that ends a connection.
+
+> **Normative.** What a disconnection guarantees is that **no live record names
+> any slot for that reference**, so no call reads one and none is connectable
+> (ADR-0148 §6). It does **not** guarantee that the keyring holds nothing for that
+> reference at the instant it returns: a provisioning act displaced by the removal
+> may have a `Secrets.set` already in flight, which ADR-0148 §6 rules is "neither
+> stopped nor waited for" and which lands in that act's own slot afterwards. No
+> surface states the stronger guarantee.
+
+> **Normative.** Such a slot is **named by the store** — the displaced act's
+> pending entry recorded it before the write, and §3 keeps that entry — so it is
+> reachable by a re-run of the disconnection and by §8's purge, and it is
+> reachable by nothing else. No lane holds a lock across a keyring write to
+> prevent this, and no lane leaves the slot unnamed.
 
 > **Normative.** A disconnection is **prospective**. It does not wait for, cancel
 > or report a transmission already in flight, and **no surface may present it as
@@ -510,6 +576,25 @@ three sees the same identity and the same revision it started with. That is the
 defect §6 spent round 4 closing, arriving through the one act §6 did not
 enumerate. §3's append-only store closes it by construction rather than by a
 counter an implementation has to remember to keep.
+
+**Disconnecting is a third party to ADR-0148 §6's interleavings, and an earlier
+draft deleted one slot where three could exist.** Adversarial review found the
+sequence: a re-provisioning appends its pending entry naming a fresh slot,
+passes its pre-write re-read, and pauses; a disconnection appends the removal and
+deletes "the slot the removed record named" — the pending one, still empty, so
+the deletion succeeds trivially; the displaced act's `set` then lands. The user
+is told the connection is gone while the keyring holds a credential — and the
+*previous* act's slot, which the displaced act would have deleted after its own
+activation, was never deleted either, because the draft's disconnection looked at
+one entry. Both halves are repaired by the same move: a disconnection deletes
+every distinct slot the store names for the reference, and the store names all of
+them because it is append-only. **The write that lands afterwards cannot be
+prevented from here** — ADR-0148 §6 rules a displaced act's in-flight write
+neither stopped nor waited for, and the lock that would serialise it is the one
+ADR-0097 §5a examined and refused — so what is bought instead is that the slot is
+*named*, which makes the remedy an idempotent re-run and makes §8's purge
+complete. Claiming the stronger guarantee is the overclaim ADR-0102 §9 forbids a
+client from making, which is why the clause above states the weaker, true form.
 
 ### 6. An active record over an empty slot is refused, and nothing repairs it automatically
 
@@ -617,6 +702,22 @@ subject is a secret.
 > unreachable and present, which is the state ADR-0004 §6's "purges Tier 0 and
 > Tier 1 together" exists to prevent, and which no later act could repair.
 
+> **Normative.** Ordering alone does not discharge that: **the store's entries are
+> removed only once every distinct slot it names has been confirmed deleted or
+> confirmed absent.** A slot whose deletion raises (ADR-0125 §7 — a keyring that is
+> unreachable, locked or backendless) leaves every entry in place, the failure
+> reported and never suppressed, and no part of the purge proceeding past it. A
+> partial purge is a failed purge, and it is never reported as a completed one.
+
+> **Normative.** The purge is **idempotent**: it deduplicates the slot names the
+> store yields, treats an absent entry as deleted (`delete` raises nothing for one
+> — ADR-0125 §4), and re-running it after a failure deletes what remains. Nothing
+> in it may be made to depend on a slot being present.
+
+> **Normative.** No component discharging the owner's delete right destroys the
+> connection store while any slot the store names is unconfirmed. A delete path
+> that would destroy it regardless is one the precondition below keeps unreached.
+
 > **Normative.** The purge is scope-confined by construction: the provisioner's
 > `SecretStore` instance is bound to `INTEGRATION` and to one installation
 > (ADR-0125 §2), so the purge cannot reach a `PROVIDER` or `ENROLMENT` entry or
@@ -641,6 +742,18 @@ subject is a secret.
 > is what keeps ADR-0126 §6's last clause honoured rather than merely cited: until
 > it lands, an installation that ran the offline delete would keep credentials the
 > owner asked to destroy.
+
+**An earlier draft fixed the ordering and stopped there, which left the failure
+path open.** Adversarial review found that "slots before the store" is satisfied
+by a purge that attempts every slot, has one deletion raise, and destroys the
+store anyway — leaving a credential with no remaining durable name, which is
+precisely the unreachable-and-present state the ordering clause exists to
+prevent, reached through a conforming implementation. The repair is the
+completeness clause, and it is the same instrument ADR-0126 §1 uses for its own
+act: check first, refuse whole, destroy nothing while anything is unconfirmed.
+Idempotence is what makes refusing whole cheap — the owner re-runs it once the
+keyring is reachable, and every already-deleted slot costs one `delete` that
+raises nothing.
 
 **What ADR-0126 §6 asked for was a decision, and this is the half of it that is
 this lane's.** That clause said the question "is a contract question and not a
@@ -1004,10 +1117,26 @@ form).
 > reference disconnected, reports the failure, and leaves the slot reachable by
 > §8's purge (§5).
 
+> **Normative.** That lane also ships the **disconnect interleaving** §5 exists
+> for: a re-provisioning that has appended its pending entry and paused, a
+> disconnection that lands between that entry and the displaced act's
+> `Secrets.set`, and the `set` landing afterwards. The disconnection deletes every
+> slot the store then names for the reference — the pending one and the previously
+> active one — the reference is left with no live record, and the slot the
+> displaced write created is deleted by a re-run of the disconnection and by §8's
+> purge. A test that disconnects only a quiescent reference satisfies none of this.
+
 > **Normative.** That lane also ships §8's purge with a test that it deletes the
-> slot of a superseded and of a removed record as well as of a live one, and a
+> slot of a superseded, a pending and a removed record as well as of a live one; a
+> test that a deletion that raises leaves every store entry in place and the
+> failure reported; a test that re-running it after that failure completes; and a
 > test that it reaches no entry outside the `INTEGRATION` scope or outside its
 > installation (ADR-0125 §2).
+
+> **Normative.** That lane also ships the identity refusals §4 adds: an act whose
+> supplied identity equals the supplied credential is refused with nothing
+> written, and so is one whose identity carries a control character or a line
+> break.
 
 > **Normative.** That lane also ships the import-linter or equivalent mechanical
 > confinement that the provisioner's module is the only module under `tools/`
@@ -1041,9 +1170,13 @@ form).
   "purges the record and the credential slot it names together" without a path by
   which any delete surface could reach the slot — the bound-with-nothing-behind-it
   defect ADR-0098 §3 records itself making twice, and ADR-0126 §6's forward clause
-  had been written to catch exactly it. Findings raised after the flip were folded
-  the same way. Nothing implements against this ADR until it has merged (ADR-0015
-  §5).
+  had been written to catch exactly it. Adversarial review's round then produced
+  §4's identity refusals, §5's every-slot and idempotence clauses with the honest
+  guarantee beside them, and §8's completeness clause — three defects of one
+  family, in which a rule was stated over the ordinary case and a conforming
+  implementation could satisfy it while leaving a credential in the keyring.
+  Findings raised after the flip were folded the same way. Nothing implements
+  against this ADR until it has merged (ADR-0015 §5).
 
 ## Consequences
 
@@ -1121,6 +1254,14 @@ form).
   and ADR-0126 §6 is explicit that the deciding lane should not answer in a
   package that may not answer it. The precondition is the instrument that leaves
   that ruling where it belongs while refusing to ship an unpurgeable credential.
+- **Serialising a disconnection against an in-flight provisioning write**, so
+  that a disconnection could promise the keyring holds nothing for the reference.
+  Refused in §5: it needs a lock held across a keyring write, which is the
+  mechanism ADR-0097 §5a examined and refused — "a permission withdrawal waiting
+  on the thing it is withdrawing" — and which ADR-0148 §6 forecloses by ruling a
+  displaced act's write neither stopped nor waited for. Naming the slot and making
+  the remedy idempotent buys the property that matters, which is that no such
+  entry is unreachable.
 - **Deciding the engine operations here**, so that one ADR unblocks the
   implementation entirely. Refused in §9 on ADR-0084 §5's split and ADR-0073 §4's
   producer test: `AssistantEngine` is a closed graph with a wire encoding, and the
