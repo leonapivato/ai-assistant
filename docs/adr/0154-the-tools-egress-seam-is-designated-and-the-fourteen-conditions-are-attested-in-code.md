@@ -797,15 +797,37 @@ sits on a `SYSTEM_SELECTED` span, and the `USER_AUTHORED` case collects `provena
 and never asserts `tier`. `grep -rn "ADR-0146"` across `src/` and `tests/` returns
 twenty-seven hits and **none cites §9**.
 
-This is recorded as debt rather than as a failure of condition 13, and the ground is
-stated rather than assumed: **the property §9 asks a test for holds, and was verified
-here directly.** The free-text spans carry no tier (the schema omits `x-egress-tier`
-on `subject` and `body`), and §5's fifth clause holds *structurally* rather than by
-policy — `grep -rn "\.tier"` across `src/ai_assistant/permissions/` and
+This is recorded as debt rather than as a failure of condition 13, on three
+independent grounds, each stated rather than assumed.
+
+**It is a different lane's obligation, and §9 says whose in its own list.** The
+marked clause's subject is "a lane that implements §5 **for a payload description**"
+— the binder lanes that built the description (#1120, #1131, #1135). §9's prose then
+enumerates what each lane owes, and the entry for **this** lane names three things
+and does not name the test: "**The lane that designates the `tools/` seam** owes §6
+in full, owes §4's third and fourth clauses their enforcement point in the per-call
+authorisation, and owes the choice between a caller-stamped and a producer-declared
+provenance marker an argument against ADR-0094 §5's rule that a producer may not
+declare its own standing." All three are discharged below.
+
+**Reading it as a fifteenth designation condition is forbidden by ADR-0146 itself.**
+§8's first marked clause: "No lane reads this ADR as **adding a condition to
+ADR-0017 §3's list**, as relaxing one, or as attesting that any of them is
+satisfied." ADR-0017 §2 fixes the criteria exhaustively — "every condition in §3
+holds in code **and** a later ADR names the seam module, attests each condition is
+satisfied and how, and records the transition" — and §3's list is fourteen. An
+unmet obligation elsewhere in the corpus is debt against the lane that owed it, not
+a bar on this one.
+
+**The property the clause asks a test for holds, and was verified here directly.**
+The free-text spans carry no tier (the schema omits `x-egress-tier` on `subject` and
+`body`), and §5's fifth clause holds *structurally* rather than by policy —
+`grep -rn "\.tier"` across `src/ai_assistant/permissions/` and
 `src/ai_assistant/orchestration/` returns **nothing**, and `.spans` is read nowhere
-outside `core/types.py`, `tools/egress*` and `testing/egress.py`. **No gate in the tree
-reads a span's tier at all**, so no span — tiered or untiered — can clear one. What
-#1150 asks for is the artifact, not the behaviour.
+outside `core/types.py`, `tools/egress*` and `testing/egress.py`. **No gate in the
+tree reads a span's tier at all**, so no span — tiered or untiered — can clear one.
+What #1150 asks for is the artifact, not the behaviour, and adding it would be a
+change under `tests/` that this lane's fence excludes.
 
 **(b) No `USER_AUTHORED` span is reachable on the live path.**
 `AttemptRunner._bound` in `ai_assistant.orchestration.runner` passes
@@ -872,6 +894,75 @@ exist across `tests/tools/egress_binder_contract.py`,
 `tests/tools/test_connection_provisioner.py` — the displacement, re-read,
 interrupted-act and never-reads-a-credential cases among them — and none is claimed
 here as an ADR-0017 §3 discharge.
+
+#### ADR-0146 §9's three obligations on *this* lane, discharged
+
+§9's list names exactly three things "the lane that designates the `tools/` seam"
+owes. They are not ADR-0017 §3 conditions, and they are discharged here because §9
+assigns them to this lane by name.
+
+**(i) §6 in full.** Its first clause obliges this lane to record each span's
+discloser provenance with the payload it binds before transmission and to carry it
+into the audit record, "so that a later reader can tell user-disclosed content from
+system-selected content in a transmitted payload without re-reading the content".
+Discharged by the shape ADR-0150 §5 chose rather than by anything this ADR adds:
+provenance **is** a field of `EgressSpan`, the spans are the binding, the binding is
+fixed in the `ActionRequest` before `ActionPolicy.decide`, and
+`PermissionDecision.from_request` transcribes it by deep copy into the recorded
+decision, which `ai_assistant.permissions.audit` persists and `_revalidated`
+round-trips. No separate carriage and no join were needed — which is exactly what §6
+left open and ADR-0150 §5 closed, and it is why the audit record can answer the
+question without holding content. §6's second clause ("that obligation binds no
+boundary that transmits today, and `models/` acquires no precondition") is honoured
+by §2 above, which forbids citing this ADR toward `models/`.
+
+**(ii) §4's third and fourth clauses, their enforcement point.** The third clause:
+"No clause of this ADR excuses a transmission from the `tools/` seam from the
+recipient authorisation ADR-0017 §3 conditions that seam on — whatever determined
+the recipient, and a configured endpoint, a destination that first appeared in the
+user's own words, and a destination the arguments select alike." The fourth:
+"User-authored provenance is **not transitive** to a recipient determined from
+content this system selected. At the `tools/` seam the recipient is the semantic
+recipient the arguments select, so a user-authored span forwarded there is disclosed
+by this system in respect of that recipient."
+
+Their enforcement point in the per-call authorisation is **condition 3's ground, and
+it is unconditional on provenance**: `_DISCLOSURE_FLOOR` in
+`ai_assistant.permissions.policy` reads `ToolDefinition.discloses` and nothing else,
+so every egress call is `CONFIRM`; and `PermissionDecision.authorises` compares the
+whole binding, whose `canonical_destination_set` is derived from the occurrences the
+arguments selected. **No branch anywhere in the path consults a span's provenance to
+decide a recipient's authorisation** — the same search that established (a) shows
+`.tier` and `.spans` are read by no gate, and `provenance` likewise reaches no
+policy. So §4's conduit cannot open at this seam by construction rather than by a
+rule someone has to remember: there is no code path in which a span being
+`USER_AUTHORED` weakens, skips or shortens the recipient authorisation, and a
+user-authored body sent to a recipient the arguments select is authorised exactly as
+a system-selected one is.
+
+**(iii) The marker is caller-stamped, and that is the argument ADR-0094 §5 asks
+for.** ADR-0094 §5's rule is that "a spoke may not decide, claim, or influence the
+band of what it submits, and a claim carried in a submission is not evidence of the
+standing it claims" — a producer may not declare its own standing. The marker
+ADR-0150 §5 fixed is **caller-stamped**, and the shape is what makes it comply: the
+provenance arrives as `CarriedProvenance`, an argument to
+`EgressBinder.bind` supplied by the **caller** (`AttemptRunner._bound` in
+`ai_assistant.orchestration.runner`), and `EgressBindingSeam._spans_of` writes
+`DiscloserProvenance.SYSTEM_SELECTED` for every span the carrier does not name. The
+**tool** — the producer of the payload — has no field, keyword or argument through
+which to claim `USER_AUTHORED` for its own span: `x-egress-tier` and
+`x-egress-destination` are the only two declaration keywords, and neither carries
+provenance. A producer-declared marker would have been ADR-0094 §5's failure exactly
+— a claim carried in the submission, taken as evidence of the standing it claims.
+
+Two further properties make the compliance more than nominal. The seam **refuses** a
+carrier entry naming a span the call does not carry rather than dropping it
+(`_refuse_unlocated_provenance`), so a caller and the derivation cannot disagree
+silently. And the default runs in the **conservative** direction: an unnamed span
+becomes `SYSTEM_SELECTED`, which is the answer that makes *this system* the discloser
+and therefore keeps the recipient-authorisation obligation on us — ADR-0146 §2's
+fail-closed rule discharged by a component writing the value, never by a field
+default, which is why `EgressSpan.provenance` has no default at all.
 
 ### 5. The transition, recorded
 
